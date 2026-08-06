@@ -1,0 +1,389 @@
+"""
+Team GENERATION -- builds an optimal 6-Pokemon team from the full pool,
+rather than arranging a pool you hand-picked.
+
+PIPELINE (staged for speed -- a naive search is tens of thousands of full
+battles, which is hours):
+
+  1. CANDIDATE FILTER  -- drop preferences.csv exclusions, keep the top-N
+     of the pool by roster.csv Score, always keep preferences.csv includes
+     and prefers.
+  2. PAIR MATRIX       -- for every candidate lead pair of ours x every
+     possible enemy lead pair (all C(6,2) from each teams.csv team),
+     run a fast greedy playout (fast_eval.py) and record a margin.
+     This is the expensive step, but it's computed ONCE and then every
+     candidate team is scored by cheap table lookups.
+  3. BEAM SEARCH       -- grow teams from 2 to 6 members, at each step
+     keeping the best `beam_width` partial teams by combined
+     coverage + synergy score.
+  4. SWITCH RESCUE     -- for the final team, find enemy pairs that beat
+     our best lead, and check whether bringing in a specific bench member
+     flips it, accounting for the damage taken on the switch-in turn.
+  5. VERIFY            -- re-run the finalists through the real solver
+     (matchup_search) so the headline numbers aren't screening numbers.
+
+SCORING a team T against the set of enemy pairs E:
+  coverage  = mean over e in E of ( best margin any pair within T achieves vs e )
+  This models team preview: you see their team and choose your lead, so
+  what matters is whether SOME pair of yours handles each threat -- not
+  whether every pair does.
+Plus synergy terms (type cores, the <=2-weakness-per-type rule, and average
+Score), each weighted and reported separately so you can see the breakdown
+rather than getting one opaque number.
+"""
+import itertools
+from collections import defaultdict
+
+from species_data import TYPES, load_preferences, mega_variants
+from fast_eval import fast_pair_score
+
+# The user-supplied complementary type cores (best-first).
+TYPE_CORES = [
+    ("Dragon", "Fairy", "Steel"), ("Fire", "Water", "Grass"), ("Fighting", "Psychic", "Dark"),
+    ("Electric", "Ground", "Ice"), ("Fighting", "Dark", "Ghost"), ("Rock", "Flying", "Grass"),
+    ("Poison", "Dark", "Flying"), ("Fire", "Water", "Electric"), ("Fire", "Fairy", "Ground"),
+    ("Fighting", "Flying", "Ground"), ("Fire", "Psychic", "Bug"), ("Poison", "Water", "Ground"),
+    ("Steel", "Fighting", "Electric"), ("Dragon", "Flying", "Water"), ("Poison", "Dark", "Fighting"),
+    ("Psychic", "Steel", "Dark"), ("Electric", "Flying", "Grass"), ("Dragon", "Fire", "Grass"),
+]
+
+MAX_WEAK_PER_TYPE = 2
+MATCHUP_WEIGHT = 1000.0
+W_PREFER = 8.0        # per 'prefer' entry present -- a tiebreaker, never decisive  # per enemy lead pair beaten -- dominates everything else
+W_COVERAGE = 1.0      # (retained for the seeding stage, which ranks raw pair coverage)
+W_CORE = 12.0         # bonus per rank-weighted type core matched
+W_WEAKNESS = 25.0     # penalty per type exceeding the max-weaknesses rule
+W_SCORE = 0.05        # small nudge toward higher effective-stat mons
+
+
+# ---------------------------------------------------------------- candidates
+
+def build_candidate_pool(merged, top_n=40, prefs=None, min_non_mega_frac=0.6):
+    """Filter the ~270-mon dataset down to a workable candidate list.
+
+    Takes the top `top_n` by Score, but guarantees at least
+    `min_non_mega_frac` of the pool is non-Mega. Without that quota the
+    highest-Score entries are almost entirely Megas, and since a legal team
+    can field at most 2 Mega picks, the team search would find NO valid
+    6-mon combination at all (this actually happened -- the beam emptied
+    silently at small pool sizes).
+    """
+    prefs = prefs or {"include": [], "exclude": [], "prefer": []}
+    # Excluding "Garchomp" should also exclude "Mega Garchomp" (and vice versa) --
+    # they are the same Pokemon and banning one but not the other is almost never
+    # what is meant.
+    excluded = set(prefs["exclude"])
+    for e in list(excluded):
+        if e.startswith("Mega "):
+            excluded.add(e[5:])
+        else:
+            excluded.update({f"Mega {e}", f"Mega {e} X", f"Mega {e} Y"})
+    forced = [n for n in (prefs["include"] + prefs["prefer"]) if n in merged and n not in excluded]
+
+    scored = [(n, r["score"]) for n, r in merged.items()
+              if n not in excluded and r.get("score") is not None]
+    scored.sort(key=lambda x: -x[1])
+
+    non_mega = [n for n, _ in scored if not n.startswith("Mega ")]
+    megas = [n for n, _ in scored if n.startswith("Mega ")]
+
+    want_non_mega = max(1, int(round(top_n * min_non_mega_frac)))
+    pool = non_mega[:want_non_mega]
+    pool += megas[:max(0, top_n - len(pool))]
+
+    for n in forced:  # includes/prefers always make the cut
+        if n not in pool:
+            pool.append(n)
+    return pool
+
+
+def enemy_pairs_from_teams(teams: dict):
+    """All C(6,2) lead pairs each enemy team could open with, tagged by team."""
+    out = []
+    for team_name, roster in teams.items():
+        for pair in itertools.combinations(roster, 2):
+            out.append((team_name, pair))
+    return out
+
+
+# ---------------------------------------------------------------- pair matrix
+
+def build_pair_matrix(pool, enemy_pairs, merged, moves_db, natures, typechart,
+                       progress=None):
+    """{(our_a, our_b): {(team, enemy_pair): margin}} via the fast screener."""
+    matrix = {}
+    movesets = {}
+    our_pairs = list(itertools.combinations(pool, 2))
+    total = len(our_pairs)
+    for i, op in enumerate(our_pairs):
+        row = {}
+        for team_name, ep in enemy_pairs:
+            r = fast_pair_score(op, ep, merged, moves_db, natures, typechart, movesets)
+            row[(team_name, ep)] = r["margin"]
+        matrix[op] = row
+        if progress and (i + 1) % max(1, total // 20) == 0:
+            progress(i + 1, total)
+    return matrix
+
+
+# ---------------------------------------------------------------- synergy
+
+def weakness_violations(team, merged, max_weak=None, max_net=None):
+    """Count how badly a team breaks its defensive rules.
+
+    max_weak: most members allowed to be weak to any one type (default
+        MAX_WEAK_PER_TYPE).
+    max_net:  most allowed NET weakness to any one type, i.e.
+        (members weak) - (members resistant/immune). None disables the check.
+        Net is often the better rule: three Fire-weak members matter much less
+        if four others resist it.
+    """
+    max_weak = MAX_WEAK_PER_TYPE if max_weak is None else max_weak
+    bad = 0
+    detail = {}
+    for t in TYPES:
+        weak, resist = [], []
+        for n in team:
+            dc = merged[n].get("defensive_chart")
+            if not dc:
+                continue
+            if dc[t] > 1.0:
+                weak.append(n)
+            elif dc[t] < 1.0:
+                resist.append(n)
+        over = max(0, len(weak) - max_weak)
+        net = len(weak) - len(resist)
+        over_net = max(0, net - max_net) if max_net is not None else 0
+        if over or over_net:
+            bad += over + over_net
+            detail[t] = {"weak": weak, "resist": resist, "net": net}
+    return bad, detail
+
+
+def core_bonus(team, merged):
+    """Rank-weighted bonus for containing any of the listed type cores.
+    Earlier cores in the list are weighted slightly higher (user's ordering)."""
+    team_types = set()
+    for n in team:
+        team_types.update(merged[n]["types"])
+    total, matched = 0.0, []
+    for rank, core in enumerate(TYPE_CORES):
+        if set(core).issubset(team_types):
+            w = 1.0 - (rank / (2 * len(TYPE_CORES)))  # 1.0 down to ~0.5
+            total += w
+            matched.append("/".join(core))
+    return total, matched
+
+
+def team_coverage(team, matrix, enemy_pairs):
+    """Mean over enemy pairs of the best margin any of our pairs achieves.
+    Models team preview: we choose our lead after seeing their team."""
+    our_pairs = [p for p in itertools.combinations(team, 2) if p in matrix or p[::-1] in matrix]
+    if not our_pairs:
+        return -1e6, {}
+    per_enemy = {}
+    for team_name, ep in enemy_pairs:
+        key = (team_name, ep)
+        best = max((matrix[p][key] if p in matrix else matrix[p[::-1]][key]) for p in our_pairs)
+        per_enemy[key] = best
+    return sum(per_enemy.values()) / len(per_enemy), per_enemy
+
+
+def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
+    """Scoring is LEXICOGRAPHIC: winning more matchups always beats better
+    synergy. `pairs_won` (how many enemy lead pairs at least one of our pairs
+    beats) is multiplied by a large constant so no amount of type-core bonus
+    or Score can ever buy back a lost matchup. Synergy only breaks ties
+    between teams that win the same number of matchups.
+    """
+    cov, per_enemy = team_coverage(team, matrix, enemy_pairs)
+    cb, matched_cores = core_bonus(team, merged)
+    viol, viol_detail = weakness_violations(team, merged, max_weak=max_weak, max_net=max_net)
+    avg_score = sum(merged[n]["score"] for n in team) / len(team)
+
+    pairs_won = sum(1 for v in per_enemy.values() if v > 0)
+
+    # Tiebreaker block, deliberately bounded well below MATCHUP_WEIGHT so it can
+    # never outrank a single extra matchup won.
+    synergy = (W_CORE * cb) - (W_WEAKNESS * viol) + (W_SCORE * avg_score) + (cov * 0.01)
+    synergy = max(-MATCHUP_WEIGHT * 0.45, min(MATCHUP_WEIGHT * 0.45, synergy))
+
+    total = pairs_won * MATCHUP_WEIGHT + synergy
+    return {
+        "total": total, "pairs_won": pairs_won, "pairs_total": len(per_enemy),
+        "coverage": cov, "synergy": synergy,
+        "core_bonus": cb, "matched_cores": matched_cores,
+        "weakness_violations": viol, "weakness_detail": viol_detail, "avg_score": avg_score,
+        "per_enemy": per_enemy,
+    }
+
+
+# ---------------------------------------------------------------- beam search
+
+def beam_search_teams(pool, matrix, enemy_pairs, merged, team_size=6, beam_width=40,
+                       max_megas=2, must_include=None, prefer=None,
+                       max_weak=None, max_net=None):
+    """Grow teams from size 2 up to `team_size`, keeping the best partials.
+
+    must_include: names that EVERY candidate team must contain. These are seeded
+    into the beam from the start rather than filtered out at the end -- filtering
+    afterwards fails whenever the search never happened to build a team with them,
+    which silently dropped the constraint.
+    prefer: names given a small scoring bonus, enough to break ties but not enough
+    to override matchup results.
+    """
+    must_include = [n for n in (must_include or []) if n in pool]
+    prefer = set(prefer or [])
+
+    def mega_count(t):
+        return sum(1 for n in t if n.startswith("Mega "))
+
+    # Seed with the best pairs by raw coverage.
+    if len(must_include) >= team_size:
+        return [(score_team(must_include[:team_size], matrix, enemy_pairs, merged,
+                             max_weak=max_weak, max_net=max_net),
+                 must_include[:team_size])]
+
+    if len(must_include) >= 2:
+        # Everything required is already in: start from exactly that set.
+        beam = [list(must_include)]
+    else:
+        seeds = []
+        for p in itertools.combinations(pool, 2):
+            if p not in matrix or mega_count(p) > max_megas:
+                continue
+            if must_include and must_include[0] not in p:
+                continue      # every seed must carry the required Pokemon
+            cov, _ = team_coverage(list(p), matrix, enemy_pairs)
+            seeds.append((cov, list(p)))
+        seeds.sort(key=lambda x: -x[0])
+        beam = [t for _, t in seeds[:beam_width]]
+
+    start_size = len(beam[0]) if beam else 2
+    for _ in range(team_size - start_size):
+        cand = {}
+        for team in beam:
+            for n in pool:
+                if n in team:
+                    continue
+                nt = sorted(team + [n])
+                if mega_count(nt) > max_megas:
+                    continue
+                key = tuple(nt)
+                if key in cand:
+                    continue
+                sc = score_team(nt, matrix, enemy_pairs, merged,
+                                 max_weak=max_weak, max_net=max_net)["total"]
+                # Small nudge for preferences.csv "prefer" entries -- enough to break
+                # ties between otherwise equal teams, never enough to outweigh a
+                # matchup (MATCHUP_WEIGHT is 1000 per enemy pair beaten).
+                sc += W_PREFER * len(prefer.intersection(nt))
+                cand[key] = sc
+        ranked = sorted(cand.items(), key=lambda kv: -kv[1])[:beam_width]
+        beam = [list(k) for k, _ in ranked]
+        if not beam:
+            break
+
+    final = [(score_team(t, matrix, enemy_pairs, merged, max_weak=max_weak,
+                          max_net=max_net), t) for t in beam]
+    final.sort(key=lambda x: -x[0]["total"])
+    return final
+
+
+# ---------------------------------------------------------------- switch rescue
+
+def find_switch_rescues(team, matrix, enemy_pairs, merged, moves_db, natures, typechart,
+                         margin_floor=0.0):
+    """For each enemy pair our best lead still LOSES to, test whether bringing
+    in a bench member on turn 1 flips it -- and report the HP cost of the
+    switch, so a 'rescue' that arrives at 10% HP isn't sold as a solution.
+
+    Returns a list of dicts describing losing matchups and any working answer.
+    """
+    from fast_eval import fast_playout
+    out = []
+    our_pairs = [p for p in itertools.combinations(team, 2) if p in matrix]
+
+    for team_name, ep in enemy_pairs:
+        key = (team_name, ep)
+        best_margin, best_pair = max(
+            ((matrix[p][key], p) for p in our_pairs), key=lambda x: x[0]
+        )
+        if best_margin > margin_floor:
+            continue  # already fine, nothing to rescue
+
+        rescues = []
+        for lead in our_pairs:
+            bench = [n for n in team if n not in lead]
+            for b in bench:
+                for slot in (0, 1):
+                    # Bring-4 with `b` benched behind the lead; the sim will switch it in
+                    # when the slot mon faints. To test a *deliberate* early pivot we put
+                    # the rescue mon directly opposite the threat as the replacement.
+                    bring4 = [lead[0], lead[1], b, [x for x in bench if x != b][0]] \
+                        if len(bench) > 1 else [lead[0], lead[1], b]
+                    r = fast_playout(bring4, list(ep) + [], merged, moves_db, natures, typechart)
+                    if r["margin"] > margin_floor and r["margin"] > best_margin:
+                        rescues.append({
+                            "lead": lead, "rescue_mon": b, "margin": r["margin"],
+                            "our_hp_left": round(r["our_hp"], 2), "winner": r["winner"],
+                        })
+        rescues.sort(key=lambda x: -x["margin"])
+        out.append({
+            "team": team_name, "enemy_pair": ep, "best_lead": best_pair,
+            "best_margin": best_margin, "rescues": rescues[:3],
+        })
+    return out
+
+
+# ---------------------------------------------------------------- reporting
+
+def team_items(team, merged):
+    """Most-used item and ability per team member, for the team sheet."""
+    rows = []
+    for n in team:
+        p = merged[n]
+        item = p["items_usage"][0][0] if p["items_usage"] else "(none)"
+        item_pct = p["items_usage"][0][1] if p["items_usage"] else 0.0
+        ability = p["abilities_usage"][0][0] if p["abilities_usage"] else "(none)"
+        ability_pct = p["abilities_usage"][0][1] if p["abilities_usage"] else 0.0
+        moves = [m for m, _ in p["moves_usage"][:4]]
+        rows.append({
+            "name": n, "types": "/".join(p["types"]), "item": item, "item_pct": item_pct,
+            "ability": ability, "ability_pct": ability_pct, "nature": p["nature"],
+            "score": p["score"], "moves": moves,
+            "evs": p["evs"],
+        })
+    return rows
+
+
+def member_contributions(team, matrix, enemy_pairs, merged):
+    """Explain why each member earns its slot.
+
+    For every enemy lead pair, find which of our pairs answers it best. A member
+    is credited for the threats where a pair containing it is the team's best
+    answer, and is marked IRREPLACEABLE for threats that no pair without it can
+    beat -- that is the concrete case for keeping it.
+    """
+    our_pairs = [p for p in itertools.combinations(team, 2)
+                 if p in matrix or p[::-1] in matrix]
+
+    def val(p, key):
+        return matrix[p][key] if p in matrix else matrix[p[::-1]][key]
+
+    out = {n: {"best_answer": [], "irreplaceable": [], "wins": 0} for n in team}
+    for team_name, ep in enemy_pairs:
+        key = (team_name, ep)
+        best_pair = max(our_pairs, key=lambda p: val(p, key))
+        best_val = val(best_pair, key)
+        if best_val <= 0:
+            continue          # nothing on the team beats this threat
+        for n in best_pair:
+            out[n]["best_answer"].append((team_name, ep, best_val))
+            out[n]["wins"] += 1
+        # Would the team still beat this threat without each member?
+        for n in team:
+            without = [p for p in our_pairs if n not in p]
+            if without and max(val(p, key) for p in without) <= 0:
+                out[n]["irreplaceable"].append((team_name, ep))
+    return out
