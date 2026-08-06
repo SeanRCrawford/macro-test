@@ -1,0 +1,671 @@
+"""
+Multi-turn playout + enemy-lead-pair sweep.
+
+Implements the first half of the user's proposed team-search approach:
+"run all possible enemy pairs, find which of my pairs has the best record
+against them" -- as a real simulated result, not a static heuristic. Each
+matchup is played out turn-by-turn using the actual solver (depth=1 greedy
+lookahead) for our side against the greedy opponent model, until someone's
+pair is fully KO'd or a turn cap is hit.
+
+NOTE on scope: this evaluates PURE 2v2 pair-vs-pair outcomes (no bench
+reinforcements coming in on either side mid-fight). That's deliberate --
+it answers "does this lead pairing of mine beat that lead pairing of
+theirs," which is the building block the user described. Extending to
+full 4-brought-6 games (switching in reserves, accounting for switch
+damage taken, and needing your bench to beat their bench) is the next
+increment once this base case is validated -- flagged, not silently
+skipped.
+"""
+import itertools
+import copy
+
+import species_data
+from species_data import build_merged_dataset
+from stats import compute_stats
+from damage import Combatant
+from battle import Battle
+from solver import build_moveset, solve_best_action, TOP_K_MOVES
+
+MAX_TURNS = 8
+
+
+def make_combatant(name, merged, natures):
+    """Delegates to the shared, Mega-aware factory in combatants.py."""
+    from combatants import make_combatant as _make
+    return _make(name, merged, natures)
+
+
+def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
+                         max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
+                         return_choice=False, enemy_script=None):
+    """Minimax over BOTH sides' Mega Evolution choices.
+
+    Either side may bring two Mega-capable Pokemon, but only one can actually
+    transform per battle -- and that is a per-battle decision, not a fixed
+    property of the team. So:
+      * WE pick whichever of our Megas gives us the best result in THIS matchup
+        (you know their team at preview, so you choose accordingly).
+      * THEY are assumed to pick whichever of theirs is worst for us.
+    A team can therefore Mega Gyarados into one matchup and Mega Charizard Y
+    into another, bringing the other in base form.
+
+    Returns (winner, turns, battle), or with return_choice=True also the
+    chosen (our_mega, enemy_mega) pair so the recommendation can report it.
+    """
+    from species_data import mega_variants
+    our_variants = mega_variants(list(our_names))
+    enemy_variants = mega_variants(list(enemy_names))
+
+    best = None  # best-for-us across our choices
+    for ov in our_variants:
+        worst = None  # worst-for-us across their responses
+        for ev in enemy_variants:
+            winner, turns, battle = play_out_pair(
+                our_names, enemy_names, merged, moves_db, natures, typechart, max_turns,
+                our_mega_transforms=ov, enemy_mega_transforms=ev,
+                our_sets=our_sets, enemy_sets=enemy_sets, enemy_script=enemy_script)
+            # Rank by how BAD the outcome is for us (higher = worse), so the enemy
+            # branch maximises and ours minimises.
+            #   we lose            -> worst; the faster we lose, the worse
+            #   we win             -> the LONGER it takes us, the worse for us
+            #   draw/timeout       -> between the two
+            # The `p1` term previously used -turns, which ranked a FASTER win for us
+            # as worse -- i.e. the opponent was picking the Mega that helped us most.
+            if winner == "p2":
+                rank = (2, -turns)
+            elif winner == "p1":
+                rank = (0, turns)
+            else:
+                rank = (1, 0)
+            if worst is None or rank > worst[0]:
+                worst = (rank, (winner, turns, battle), ev)
+        if best is None or worst[0] < best[0]:
+            best = (worst[0], worst[1], ov, worst[2])
+
+    if return_choice:
+        return best[1] + (best[2], best[3])
+    return best[1]
+
+
+def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
+                   max_turns=MAX_TURNS, our_mega_transforms=None, enemy_mega_transforms=None,
+                   our_sets=None, enemy_sets=None, rng_seed=None, tie_bias=None,
+                   enemy_script=None):
+    """our_names / enemy_names: lists of Pokemon names, length 2 (pure lead
+    duel) or 4 (lead pair + back pair, roster[0:2] leads / roster[2:] bench).
+    Multiple Mega-named picks per side are allowed (resolved via make_team;
+    by default the first one in list order actually transforms -- pass
+    *_mega_transforms=<name> to force a specific one instead, e.g. to
+    search over which Mega a team actually evolves).
+    Returns (winner 'p1'|'p2'|'draw'|'timeout', turn_count, battle)."""
+    from combatants import make_team
+    our_combatants = make_team(our_names, merged, natures, mega_transforms=our_mega_transforms,
+                                sets=our_sets)
+    enemy_combatants = make_team(enemy_names, merged, natures, mega_transforms=enemy_mega_transforms,
+                                  sets=enemy_sets)
+
+    movesets = {}
+    for c in our_combatants + enemy_combatants:
+        spec = (our_sets or {}).get(c.name) or (enemy_sets or {}).get(c.name) or {}
+        movesets[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
+                                          only_moves=spec.get("moves"))
+
+    battle = Battle(our_combatants, enemy_combatants, typechart, moves_db, rng_seed=rng_seed,
+                     tie_bias=tie_bias)
+
+    from solver import greedy_opponent_joint_action
+    for _ in range(max_turns):
+        if battle.is_over():
+            break
+        # Plan deterministically, then RESOLVE on the real battle (which carries the
+        # RNG). Previously the planning copy was adopted as the new state, so the
+        # chosen line and the reported outcome were the same sample -- damage rolls,
+        # flinch chances and speed ties all resolved in our favour by construction.
+        best_action, _, sim = solve_best_action(battle, "p1", movesets, depth=1)
+        if not best_action and sim is None:
+            break
+        opp_actions = None
+        if enemy_script is not None:
+            # Scripted teams execute a rehearsed opening a greedy AI would never
+            # find (double Protect, Perish Song, spending a turn on Shell Smash).
+            try:
+                opp_actions = enemy_script(battle, battle.p2, battle.p1, battle.turn_num + 1)
+            except Exception:
+                opp_actions = None
+        if not opp_actions:
+            opp_actions = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets,
+                                                        battle.turn_num + 1)
+        try:
+            battle.run_turn(list(best_action or []), opp_actions)
+        except ValueError:
+            break
+
+    if battle.is_over():
+        return battle.winner(), battle.turn_num, battle
+    return "timeout", battle.turn_num, battle
+
+
+def sweep_enemy_leads_fixed_back(our_bring4, enemy_roster, merged, moves_db, natures, typechart,
+                                  max_turns=MAX_TURNS):
+    """our_bring4: our fixed [lead1, lead2, back1, back2].
+    enemy_roster: their full 6-mon teams.csv list. For each possible enemy
+    lead-pair (all C(6,2) combos), the enemy's back-2 is deterministically
+    the next 2 remaining members in teams.csv order (an approximation --
+    NOT an exhaustive search of their back choice, flagged as such) so this
+    stays computationally tractable while still testing real switching.
+    Returns list of (enemy_lead_pair, winner, turns)."""
+    results = []
+    for enemy_lead in itertools.combinations(enemy_roster, 2):
+        remaining = [m for m in enemy_roster if m not in enemy_lead]
+        enemy_bring4 = list(enemy_lead) + remaining[:2]
+        winner, turns, battle = play_out_pair(our_bring4, enemy_bring4, merged, moves_db,
+                                               natures, typechart, max_turns)
+        results.append((enemy_lead, winner, turns))
+    return results
+
+
+def sweep_enemy_pairs(our_pair, enemy_roster, merged, moves_db, natures, typechart,
+                       max_turns=MAX_TURNS):
+    """Try our fixed lead pair against every possible 2-mon lead combo drawn
+    from enemy_roster (their full brought roster, e.g. all 6 from teams.csv).
+    Returns list of (enemy_pair, winner, turns)."""
+    results = []
+    for enemy_pair in itertools.combinations(enemy_roster, 2):
+        winner, turns, battle = play_out_pair(list(our_pair), list(enemy_pair),
+                                               merged, moves_db, natures, typechart, max_turns)
+        results.append((enemy_pair, winner, turns))
+    return results
+
+
+def search_best_composition(our_pool6, enemy_bring4, merged, moves_db, natures, typechart,
+                             max_turns=MAX_TURNS, our_sets=None, enemy_script=None):
+    """Search all (bring-4-of-6) x (lead-2-of-that-4) combos from our_pool6
+    against one fixed enemy bring4 (lead = enemy_bring4[:2], back = [2:]).
+    Returns results sorted best-first: (our_bring4, winner, turns)."""
+    results = []
+    seen = set()
+    for bring4 in itertools.combinations(our_pool6, 4):
+        for lead2 in itertools.combinations(bring4, 2):
+            back2 = tuple(m for m in bring4 if m not in lead2)
+            our_bring4 = list(lead2) + list(back2)
+            key = tuple(our_bring4)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                winner, turns, battle = play_out_worst_case(our_bring4, enemy_bring4, merged, moves_db,
+                                                              natures, typechart, max_turns,
+                                                              our_sets=our_sets,
+                                                              enemy_script=enemy_script)
+            except ValueError:
+                continue  # illegal combo (2+ Megas in this bring-4) -- skip, don't crash the search
+            results.append((our_bring4, winner, turns))
+    # Best first: wins sorted by fastest decisive win, then draws, then losses by slowest loss.
+    def sort_key(r):
+        _, w, t = r
+        if w == "p1":
+            return (0, t)
+        if w in ("draw", "timeout"):
+            return (1, -t)
+        return (2, -t)
+    results.sort(key=sort_key)
+    return results
+
+
+if __name__ == "__main__":
+    merged, _, moves, natures, typechart = build_merged_dataset()
+
+    import pandas as pd
+    teams_df = pd.read_csv(species_data.DATA_DIR / "teams.csv")
+    teams = {}
+    for _, row in teams_df.iterrows():
+        teams[row["Team"]] = [row[c] for c in ["1", "2", "3", "4", "5", "6"] if pd.notna(row[c])]
+
+    our_pool6 = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon", "Mega Skarmory", "Gholdengo"]
+
+    # Representative "hardest case" enemy lead per team, taken from the earlier fixed-back
+    # sweep's losing list (fastest loss = most dangerous). This keeps the search tractable
+    # (90 of our combos x 1 enemy config x 5 teams = 450 games) rather than the full
+    # 90 x 15 x 5 cross product -- flagged as a scoping choice, not silently assumed.
+    toughest_enemy_lead = {
+        "Rain": ("Pelipper", "Mega Swampert"),
+        "Sun Rain": ("Mega Floette", "Mega Charizard Y"),
+        "Big 6": ("Mega Charizard Y", "Mega Floette"),
+        "NAIC": ("Mega Charizard Y", "Garchomp"),
+        "King": ("Mega Blastoise", "Maushold"),
+    }
+
+    for team_name, roster in teams.items():
+        lead = toughest_enemy_lead[team_name]
+        remaining = [m for m in roster if m not in lead]
+        enemy_bring4 = list(lead) + remaining[:2]
+        print(f"=== {team_name}: searching our best answer to {lead} "
+              f"(their back: {remaining[:2]}) ===")
+        results = search_best_composition(our_pool6, enemy_bring4, merged, moves, natures, typechart,
+                                           max_turns=12)
+        best = results[0]
+        wins = sum(1 for _, w, _ in results if w == "p1")
+        print(f"  Best answer: lead {best[0][:2]}, back {best[0][2:]} "
+              f"-> {best[1]} in {best[2]} turns")
+        print(f"  ({wins}/{len(results)} of our bring4/lead2 combos beat this enemy lead)")
+        print()
+
+
+# --------------------------------------------------------------- risk analysis
+
+def evaluate_risk(our_names, enemy_names, merged, moves_db, natures, typechart,
+                   max_turns=MAX_TURNS, our_sets=None, n_random=24, seed=0, tie_bias="p2"):
+    """How robust is a line, rather than just 'does the average roll win'?
+
+    The default engine uses the average damage roll, which reports a result as
+    if it were certain. Damage actually varies over a 0.85x-1.00x 16-step
+    range, and speed ties are coin flips, so a line that wins on the average
+    roll may still lose a real game. This runs:
+        * the AVERAGE roll (the headline result)
+        * a MIN-roll run (we roll low, effectively worst case for our damage)
+        * a MAX-roll run
+        * `n_random` randomised-roll runs
+    and reports the win rate plus any speed ties encountered.
+
+    Returns a dict; `win_rate` is the fraction of randomised runs won.
+    """
+    base = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
+                                max_turns, our_sets=our_sets)
+    avg_winner, avg_turns, avg_battle = base
+
+    # IMPORTANT: speed ties are forced to the OPPONENT here (tie_bias="p2").
+    # Leaving them random does not measure risk -- the solver plans against the
+    # same RNG stream it is being scored on, so it simply selects the branch
+    # where the shuffle happened to favour us and reports ~100%. Forcing ties
+    # against us gives an honest worst case; use evaluate_tie_branches() to see
+    # both sides of the flip explicitly.
+    outcomes = []
+    for i in range(n_random):
+        w, t, b = play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
+                                 max_turns, our_sets=our_sets, rng_seed=seed + i,
+                                 tie_bias=tie_bias)
+        outcomes.append(w)
+
+    wins = sum(1 for w in outcomes if w == "p1")
+    losses = sum(1 for w in outcomes if w == "p2")
+    return {
+        "avg_result": avg_winner, "avg_turns": avg_turns,
+        "win_rate": wins / len(outcomes) if outcomes else 0.0,
+        "wins": wins, "losses": losses, "other": len(outcomes) - wins - losses,
+        "speed_ties": avg_battle.speed_ties,
+        "battle": avg_battle,
+    }
+
+
+def evaluate_tie_branches(our_names, enemy_names, merged, moves_db, natures, typechart,
+                           max_turns=MAX_TURNS, our_sets=None, n_random=30, seed=0):
+    """Run a matchup with speed ties forced BOTH ways.
+
+    A line that only wins when you win the coin flip is not a plan. This
+    reports the outcome with ties given to us and to them, plus a randomised
+    win rate, so you can see whether the matchup actually depends on the flip.
+    """
+    out = {}
+    for who, label in (("p1", "we_win_ties"), ("p2", "they_win_ties")):
+        best = None
+        from species_data import mega_variants
+        for ev in mega_variants(list(enemy_names)):
+            for ov in mega_variants(list(our_names)):
+                w, t, b = play_out_pair(our_names, enemy_names, merged, moves_db, natures,
+                                         typechart, max_turns, our_mega_transforms=ov,
+                                         enemy_mega_transforms=ev, our_sets=our_sets,
+                                         tie_bias=who)
+                rank = (2, -t) if w == "p2" else ((0, t) if w == "p1" else (1, 0))
+                if best is None or rank > best[0]:
+                    best = (rank, (w, t, b))
+        out[label] = {"winner": best[1][0], "turns": best[1][1], "battle": best[1][2],
+                      "ties": best[1][2].speed_ties}
+    rng = evaluate_risk(our_names, enemy_names, merged, moves_db, natures, typechart,
+                         max_turns, our_sets=our_sets, n_random=n_random, seed=seed)
+    out["random_win_rate"] = rng["win_rate"]
+    out["random_detail"] = f"{rng['wins']}W-{rng['losses']}L-{rng['other']}o"
+    return out
+
+
+def play_out_stochastic(our_names, enemy_names, merged, moves_db, natures, typechart,
+                         max_turns=MAX_TURNS, our_sets=None, our_mega=None, enemy_mega=None,
+                         rng_seed=0, tie_bias=None):
+    """A single battle with REAL randomness: 16-step damage rolls, secondary
+    effects (Rock Slide flinch, etc.) and, unless pinned, random speed ties.
+
+    The key detail is that the solver plans on a DETERMINISTIC clone (average
+    roll, no RNG) and its chosen actions are then executed against the
+    stochastic battle. Earlier the solver searched the same RNG stream it was
+    scored on, so it silently picked whichever branch the dice happened to
+    favour and reported near-100% win rates. Planning must not see the dice.
+    """
+    import copy as _copy
+    from combatants import make_team
+    from solver import build_moveset, solve_best_action, greedy_opponent_joint_action, TOP_K_MOVES
+    from engine import Action
+
+    oc = make_team(our_names, merged, natures, mega_transforms=our_mega, sets=our_sets)
+    ec = make_team(enemy_names, merged, natures, mega_transforms=enemy_mega)
+    movesets = {}
+    for c in oc + ec:
+        spec = (our_sets or {}).get(c.name) or {}
+        movesets[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
+                                          only_moves=spec.get("moves"))
+
+    battle = Battle(oc, ec, typechart, moves_db, rng_seed=rng_seed, tie_bias=tie_bias)
+
+    for _ in range(max_turns):
+        if battle.is_over():
+            break
+
+        # 1. Plan on a deterministic view of the current state.
+        planner = _copy.deepcopy(battle)
+        planner.rng = None
+        planner.tie_bias = None
+        chosen, _score, _sim = solve_best_action(planner, "p1", movesets, depth=1)
+        if chosen is None:
+            break
+
+        # 2. Map the planned actions back onto the real (stochastic) battle.
+        fwd = {}
+        for a, b in zip(planner.p1.roster, battle.p1.roster):
+            fwd[id(a)] = b
+        for a, b in zip(planner.p2.roster, battle.p2.roster):
+            fwd[id(a)] = b
+        p1_actions = [Action(fwd.get(id(a.combatant), a.combatant), a.side, a.kind, a.move,
+                              [fwd.get(id(t), t) for t in a.targets]) for a in chosen]
+
+        # 3. Opponent chooses on the real state (its model is greedy, not RNG-aware).
+        p2_actions = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets,
+                                                   battle.turn_num + 1)
+        try:
+            battle.run_turn(p1_actions, p2_actions)
+        except ValueError:
+            break
+
+    return (battle.winner() or "timeout"), battle.turn_num, battle
+
+
+def win_probability(our_names, enemy_names, merged, moves_db, natures, typechart,
+                     max_turns=MAX_TURNS, our_sets=None, n=200, seed=0, tie_bias=None):
+    """Monte-Carlo win probability over damage rolls, secondary effects and
+    (unless pinned) speed ties. The opponent picks whichever Mega is worst for us.
+
+    Returns {p_win, p_loss, p_other, n}.
+    """
+    from species_data import mega_variants
+    worst = None
+    for ev in mega_variants(list(enemy_names)):
+        wins = losses = other = 0
+        for i in range(n):
+            w, _t, _b = play_out_stochastic(our_names, enemy_names, merged, moves_db, natures,
+                                             typechart, max_turns, our_sets=our_sets,
+                                             enemy_mega=ev, rng_seed=seed + i, tie_bias=tie_bias)
+            if w == "p1":
+                wins += 1
+            elif w == "p2":
+                losses += 1
+            else:
+                other += 1
+        res = {"p_win": wins / n, "p_loss": losses / n, "p_other": other / n, "n": n,
+               "enemy_mega": ev}
+        if worst is None or res["p_win"] < worst["p_win"]:
+            worst = res
+    return worst
+
+
+# ------------------------------------------------- exhaustive enemy brings
+
+def enemy_configs(roster, fixed_lead=None):
+    """Every bring-4 the opponent could field: all C(6,2) lead pairs x C(4,2)
+    back pairs = 90 configurations for a 6-Pokemon team.
+
+    Everything before this assumed their back-2 was "whichever two are listed
+    next in teams.csv", which is one arbitrary sample out of six. That let a
+    recommendation look safe while losing to a back pair that was never tried
+    -- and it also produced nonsense brings like leading Mega Charizard Y with
+    Mega Floette in the back, where only one can ever transform.
+    """
+    out = []
+    leads = ([tuple(fixed_lead)] if fixed_lead
+             else list(itertools.combinations(roster, 2)))
+    for lead in leads:
+        rest = [x for x in roster if x not in lead]
+        for back in itertools.combinations(rest, 2):
+            out.append((list(lead), list(back)))
+    return out
+
+
+def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures, typechart,
+                               max_turns=MAX_TURNS, our_sets=None, verify_top=3, progress=None,
+                               fixed_lead=None, enemy_script=None, script_team=None):
+    """Find the bring-4/lead-2 of ours with the best WORST CASE against every
+    enemy configuration, rather than against one arbitrary back pair.
+
+    Two stages, because 90 x 90 = 8,100 matchups per opponent is far too many
+    for the full solver:
+      1. fast screener over every (our config) x (their config) pair
+      2. full solver verification of the `verify_top` survivors, against the
+         enemy configs the screener found hardest for them
+
+    Returns a list of dicts sorted best-first.
+    """
+    from fast_eval import fast_pair_score
+    configs = enemy_configs(enemy_roster, fixed_lead=fixed_lead)
+
+    our_configs = []
+    seen = set()
+    for bring4 in itertools.combinations(our_pool6, 4):
+        for lead2 in itertools.combinations(bring4, 2):
+            back2 = tuple(x for x in bring4 if x not in lead2)
+            key = tuple(list(lead2) + list(back2))
+            if key in seen:
+                continue
+            seen.add(key)
+            our_configs.append(list(key))
+
+    movesets_cache = {}
+    scored = []
+    for i, oc in enumerate(our_configs):
+        worst, worst_cfg, wins = None, None, 0
+        for lead, back in configs:
+            r = fast_pair_score(tuple(oc[:2]), tuple(lead), merged, moves_db, natures,
+                                 typechart, movesets_cache)
+            margin = r["margin"]
+            if margin > 0:
+                wins += 1
+            if worst is None or margin < worst:
+                worst, worst_cfg = margin, (lead, back)
+        scored.append({"our_bring4": oc, "worst_margin": worst, "worst_enemy": worst_cfg,
+                        "screen_wins": wins, "screen_total": len(configs)})
+        if progress and (i + 1) % max(1, len(our_configs) // 10) == 0:
+            progress(i + 1, len(our_configs))
+
+    scored.sort(key=lambda d: -d["worst_margin"])
+
+    # Verify the survivors properly against EVERY enemy config.
+    verified = []
+    for cand in scored[:verify_top]:
+        losses, worst_seen = [], None
+        for lead, back in configs:
+            eb4 = list(lead) + list(back)
+            if script_team:
+                w, t, _, _v = play_scripted_worst_case(cand["our_bring4"], eb4, merged, moves_db,
+                                                        natures, typechart, script_team,
+                                                        max_turns, our_sets=our_sets)
+            else:
+                w, t, _ = play_out_worst_case(cand["our_bring4"], eb4, merged, moves_db, natures,
+                                               typechart, max_turns, our_sets=our_sets,
+                                               enemy_script=enemy_script)
+            if w != "p1":
+                losses.append((tuple(lead), tuple(back), w, t))
+            rank = (0 if w == "p1" else (1 if w != "p2" else 2), t)
+            if worst_seen is None or rank > worst_seen[0]:
+                worst_seen = (rank, (lead, back, w, t))
+        verified.append({**cand, "solver_losses": losses,
+                          "solver_wins": len(configs) - len(losses),
+                          "solver_total": len(configs),
+                          "worst_case": worst_seen[1] if worst_seen else None})
+    verified.sort(key=lambda d: (-d["solver_wins"], -d["worst_margin"]))
+    return verified
+
+
+def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
+                              team_name, max_turns=MAX_TURNS, our_sets=None):
+    """Play a scripted opponent, trying EVERY opening variant and returning the
+    worst outcome for us.
+
+    A forced-lead team has a tiny decision space -- mainly which of our two slots
+    to Fake Out -- so it should be searched exhaustively rather than assuming it
+    always targets slot 1. A line that only survives one targeting choice is not
+    a plan.
+
+    Returns (winner, turns, battle, variant_index) for the worst variant.
+    """
+    from scripted_openings import all_scripts
+    # The unscripted greedy opponent is ALWAYS one of the variants. A scripted team
+    # is not obliged to run its script -- it can simply attack with both slots, or
+    # Protect the setup threat and attack with the other. A composition that only
+    # beats the rehearsed line but loses the plain 2v2 is not a real answer, so the
+    # conventional game is evaluated alongside every scripted opening.
+    variants = all_scripts(team_name) + [(None, None)]
+    if not variants:
+        w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
+                                       typechart, max_turns, our_sets=our_sets)
+        return w, t, b, None
+
+    worst = None
+    for idx, script in variants:
+        w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
+                                       typechart, max_turns, our_sets=our_sets,
+                                       enemy_script=script)   # script=None -> greedy 2v2
+        rank = (2, -t) if w == "p2" else ((0, t) if w == "p1" else (1, 0))
+        if worst is None or rank > worst[0]:
+            worst = (rank, (w, t, b, idx))
+    return worst[1]
+
+
+def find_committed_plan(our_names, enemy_names, merged, moves_db, natures, typechart,
+                         team_name, max_turns=MAX_TURNS, our_sets=None, commit_turns=1):
+    """Find a SINGLE turn-1 action that wins against EVERY opponent variant.
+
+    Why this exists: the solver chooses our move after computing what the
+    opponent does that turn, so evaluating each variant separately lets us use a
+    different answer for each. That is not a plan -- at team preview you commit
+    to a lead and, on turn 1, to a move, without knowing whether they will run
+    their script, Fake Out the other slot, or simply attack with both.
+
+    This enumerates our candidate turn-1 joint actions, FIXES each one, and plays
+    it out against every opponent variant (all script openings plus the plain
+    greedy 2v2). Only an action that wins them all is a real answer. Later turns
+    may use the solver, since by then their line is observed.
+
+    Returns (best_action_description, results_per_variant, wins_all: bool).
+    """
+    from scripted_openings import all_scripts
+    from solver import (build_moveset, our_candidate_joint_actions,
+                         greedy_opponent_joint_action, TOP_K_MOVES)
+    from combatants import make_team
+
+    variants = all_scripts(team_name) + [(None, None)]
+
+    # Build one battle just to enumerate our legal turn-1 joint actions.
+    probe = _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart,
+                           our_sets)
+    movesets = _movesets_for(probe, merged, moves_db, our_sets)
+    options = our_candidate_joint_actions(probe, probe.p1, probe.p2, movesets, 1)
+
+    best = None
+    for opt in options:
+        desc = tuple((a.combatant.name, a.kind,
+                       a.move.name if a.move else (a.targets[0].name if a.targets else "-"),
+                       tuple(t.name for t in a.targets) if a.kind != "switch" else ())
+                      for a in opt)
+        per_variant, all_win = {}, True
+        for idx, script in variants:
+            b = _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart,
+                               our_sets)
+            ms = _movesets_for(b, merged, moves_db, our_sets)
+            # Re-express our fixed choice against THIS battle's objects.
+            fixed = _rebind_actions(desc, b)
+            if fixed is None:
+                all_win = False
+                break
+            opp = None
+            if script is not None:
+                try:
+                    opp = script(b, b.p2, b.p1, 1)
+                except Exception:
+                    opp = None
+            if not opp:
+                opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, 1)
+            try:
+                b.run_turn(fixed, opp)
+            except ValueError:
+                all_win = False
+                break
+            # Turn 1 is committed; from turn 2 the solver may adapt.
+            w, t, b2 = _finish_with_solver(b, ms, max_turns)
+            per_variant[idx] = (w, t)
+            if w != "p1":
+                all_win = False
+        if all_win and per_variant:
+            return desc, per_variant, True
+        if best is None or sum(1 for v in per_variant.values() if v[0] == "p1") > \
+                sum(1 for v in best[1].values() if v[0] == "p1"):
+            best = (desc, per_variant, False)
+    return best if best else (None, {}, False)
+
+
+def _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets):
+    from combatants import make_team
+    oc = make_team(our_names, merged, natures, sets=our_sets)
+    ec = make_team(enemy_names, merged, natures)
+    return Battle(oc, ec, typechart, moves_db)
+
+
+def _movesets_for(battle, merged, moves_db, our_sets):
+    from solver import build_moveset, TOP_K_MOVES
+    ms = {}
+    for c in battle.p1.roster + battle.p2.roster:
+        spec = (our_sets or {}).get(c.name) or {}
+        ms[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
+                                    only_moves=spec.get("moves"))
+    return ms
+
+
+def _rebind_actions(desc, battle):
+    """Recreate a saved turn-1 joint action against a fresh battle."""
+    from engine import Action
+    out = []
+    for name, kind, move_or_target, tgt_names in desc:
+        actor = next((c for c in battle.p1.active if c is not None and c.name == name), None)
+        if actor is None:
+            return None
+        if kind == "switch":
+            inc = next((c for c in battle.p1.bench if c.name == move_or_target), None)
+            if inc is None:
+                return None
+            out.append(Action(actor, "p1", "switch", None, [inc]))
+        else:
+            key = move_or_target.lower().replace(" ", "").replace("-", "").replace("'", "")
+            if key not in battle.moves_db:
+                return None
+            mv = battle.make_move(key)
+            tgts = [c for c in battle.p1.active + battle.p2.active
+                    if c is not None and c.name in tgt_names] or [actor]
+            out.append(Action(actor, "p1", kind, mv, tgts))
+    return out
+
+
+def _finish_with_solver(battle, movesets, max_turns):
+    from solver import solve_best_action, greedy_opponent_joint_action
+    for _ in range(max_turns - battle.turn_num):
+        if battle.is_over():
+            break
+        act, _, sim = solve_best_action(battle, "p1", movesets, depth=1)
+        if sim is None:
+            break
+        battle = sim
+    return (battle.winner() or "timeout"), battle.turn_num, battle
