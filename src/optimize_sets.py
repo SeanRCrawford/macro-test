@@ -45,6 +45,16 @@ SPEED_DROP_MOVES = {
     "Mud Shot": 0.35, "Low Sweep": 0.30, "Icy Wind ": 0.55,
 }
 
+# Known-good hand-specified movesets to compare against the usage-derived pick
+# for a specific species -- kept only if they actually score better, same as
+# best_item trying multiple items. e.g. enemy Kingambit sets (Kowtow Cleave /
+# Sucker Punch / Iron Head / Low Kick) commonly get edged out of the
+# usage-derived top-4 by the forced Protect slot even though all four moves
+# are individually high-usage; this lets that exact set be checked directly.
+FORCED_MOVE_CANDIDATES = {
+    "Kingambit": [["Kowtow Cleave", "Sucker Punch", "Iron Head", "Low Kick"]],
+}
+
 UTILITY_VALUE = {
     # Fake Out denies a turn outright -- worth far more than its 40 BP suggests.
     "Fake Out": 0.45,
@@ -172,10 +182,16 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
 
 
 def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=None,
-                  slots=4, force_protect=True):
+                  slots=4, force_protect=True, forced_candidates=None):
     """Pick the `slots` moves maximising summed best-value coverage over the
     enemy list: for each enemy, only the single best move against it counts,
-    so redundant same-type attacks don't stack."""
+    so redundant same-type attacks don't stack.
+
+    forced_candidates: optional list of hand-specified `slots`-length move-name
+    lists to score alongside the searched pick, keeping whichever scores
+    higher (same "try it, keep it if it wins" pattern as best_item trying
+    multiple items). Defaults to FORCED_MOVE_CANDIDATES[name] if not given.
+    """
     table = move_value_table(name, merged, moves_db, natures, typechart, enemy_names, item=item)
     names = list(table.keys())
     # A Choice item locks you into the first move used, so Protect/Detect is a dead
@@ -184,26 +200,38 @@ def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=N
     if item and item.startswith("Choice"):
         names = [n for n in names if n not in PROTECT_MOVES_OPT and n not in SIDE_GUARDS] or names
     if len(names) <= slots:
-        return names, _score_moveset(names, table, enemy_names)
+        best, best_score = names, _score_moveset(names, table, enemy_names)
+    else:
+        # A non-Choice-locked Pokemon in doubles should essentially always carry a
+        # protect-type move: it blocks spread damage, stalls Trick Room / Tailwind
+        # turns, and scouts. Reserve a slot for it when one is available and legal.
+        # Choice items make Protect a dead slot (you'd be locked into it), so skip.
+        forced = []
+        if force_protect and item not in CHOICE_ITEMS_SET:
+            have = [p for p in PROTECT_NAMES if p in names]
+            if have:
+                forced = [have[0]]
 
-    # A non-Choice-locked Pokemon in doubles should essentially always carry a
-    # protect-type move: it blocks spread damage, stalls Trick Room / Tailwind
-    # turns, and scouts. Reserve a slot for it when one is available and legal.
-    # Choice items make Protect a dead slot (you'd be locked into it), so skip.
-    forced = []
-    if force_protect and item not in CHOICE_ITEMS_SET:
-        have = [p for p in PROTECT_NAMES if p in names]
-        if have:
-            forced = [have[0]]
+        remaining_slots = slots - len(forced)
+        pickable = [n for n in names if n not in forced]
+        best, best_score = None, -1.0
+        for combo in itertools.combinations(pickable, remaining_slots):
+            full = forced + list(combo)
+            sc = _score_moveset(full, table, enemy_names)
+            if sc > best_score:
+                best, best_score = full, sc
 
-    remaining_slots = slots - len(forced)
-    pickable = [n for n in names if n not in forced]
-    best, best_score = None, -1.0
-    for combo in itertools.combinations(pickable, remaining_slots):
-        full = forced + list(combo)
-        sc = _score_moveset(full, table, enemy_names)
+    # Compare against any hand-specified candidate set(s) -- keep whichever
+    # scores higher. A candidate is only scorable if every one of its moves
+    # is actually in this Pokemon's usage-derived candidate table.
+    for cand in (forced_candidates if forced_candidates is not None
+                 else FORCED_MOVE_CANDIDATES.get(name, [])):
+        if not all(m in table for m in cand):
+            continue
+        sc = _score_moveset(cand, table, enemy_names)
         if sc > best_score:
-            best, best_score = full, sc
+            best, best_score = list(cand), sc
+
     return best, best_score
 
 

@@ -91,8 +91,14 @@ def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_st
             if foe is not None:
                 apply_intimidate(foe)
     if entering.ability in WEATHER_SETTERS:
-        field_state.weather = WEATHER_SETTERS[entering.ability]
-        field_state.weather_turns_left = 5  # 8 with the matching weather rock/seed item, simplified here
+        new_weather = WEATHER_SETTERS[entering.ability]
+        # A same-weather setter switching in does NOT refresh the duration --
+        # only a genuinely new weather (or restarting from none) resets the
+        # 5-turn count. Otherwise weather could be kept up indefinitely by
+        # rotating same-weather setters in and out.
+        if field_state.weather != new_weather:
+            field_state.weather = new_weather
+            field_state.weather_turns_left = 5  # 8 with the matching weather rock/seed item, simplified here
 
 
 def effective_speed(c: Combatant, field_state: FieldState, side: str) -> float:

@@ -42,6 +42,18 @@ def load_team(path):
     return pool, sets
 
 
+def load_sets_override(path):
+    """Load a standalone sets override file: either {"sets": {name: {...}}}
+    (same shape team.json uses) or a bare {name: {...}} dict. Used for
+    enemy-set overrides (e.g. pin a specific enemy Kingambit's exact
+    moveset), which have no 'pool' of their own since they only override
+    a subset of whatever roster the enemy team already brings."""
+    data = json.loads(Path(path).read_text())
+    if "sets" in data and isinstance(data["sets"], dict):
+        return data["sets"]
+    return data
+
+
 def describe_sets(pool, sets, merged=None):
     """Human-readable summary lines for a loaded team sheet."""
     lines = []

@@ -13,9 +13,13 @@ Scope (deliberately not full Showdown parity -- see README notes at bottom):
     sample variance instead.
 
 NOT modeled yet (flagged for later, not needed for the format's core lines):
-  sleep/freeze/confusion turn mechanics, Follow Me/Rage Powder redirection,
-  abilities beyond the set already wired in engine.py/damage.py, secondary
-  effect triggers (e.g. Rock Slide flinch chance) beyond a togglable flag.
+  sleep/freeze/confusion turn mechanics, abilities beyond the set already
+  wired in engine.py/damage.py, secondary effect triggers (e.g. Rock Slide
+  flinch chance) beyond a togglable flag.
+
+Follow Me/Rage Powder redirection and Wide Guard/Quick Guard ARE modeled --
+see Side.follow_me_target / _resolve_move's redirection block, and
+Side.wide_guard/quick_guard / _blocked_by_guard.
 """
 import copy
 from dataclasses import dataclass, field
@@ -231,8 +235,12 @@ class Battle:
         mega_evolve(c)
         side.mega_used = True
         if c.ability in WEATHER_SETTERS:
-            self.field.weather = WEATHER_SETTERS[c.ability]
-            self.field.weather_turns_left = 5
+            new_weather = WEATHER_SETTERS[c.ability]
+            # Same-weather setters don't refresh the duration -- only a genuinely
+            # new weather resets the 5-turn count (see engine.on_switch_in).
+            if self.field.weather != new_weather:
+                self.field.weather = new_weather
+                self.field.weather_turns_left = 5
         if c.ability == "Intimidate" and before != "Intimidate":
             opp = self.p2 if side is self.p1 else self.p1
             for foe in opp.active:
@@ -265,9 +273,12 @@ class Battle:
                 mega_evolve(c)
                 side.mega_used = True
                 # A Mega's ability activates on transform -- weather setters included.
+                # Same-weather setters don't refresh the duration (see engine.on_switch_in).
                 if c.ability in WEATHER_SETTERS:
-                    self.field.weather = WEATHER_SETTERS[c.ability]
-                    self.field.weather_turns_left = 5
+                    new_weather = WEATHER_SETTERS[c.ability]
+                    if self.field.weather != new_weather:
+                        self.field.weather = new_weather
+                        self.field.weather_turns_left = 5
                 if c.ability == "Intimidate" and before_ability != "Intimidate":
                     opp = self.p2 if side is self.p1 else self.p1
                     for foe in opp.active:
