@@ -119,13 +119,20 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
             # worst-case rolls. Beating their brings with a solver that adapts to each
             # variant separately is not the same thing -- you cannot pick your move
             # after seeing theirs.
+            #
+            # This must NOT be checked against one arbitrary enemy back-pair
+            # ([x for x in roster if x not in fl][:2], the old behaviour): at turn 1
+            # you have only seen their lead, so a plan that happens to work against
+            # one specific back-pair but not another is not something you could
+            # actually commit to on sight of the lead. find_plan_unknown_backs
+            # requires the SAME turn-1 action to win against every back-pair the
+            # lead could be hiding.
             from scripted_openings import SCRIPTS
             if team_name in SCRIPTS:
                 meta_all = getattr(load_teams, "meta", {}) or {}
                 fl = (meta_all.get(team_name) or {}).get("lead")
                 if fl:
-                    from committed_plan import find_plan
-                    eb4 = list(fl) + [x for x in roster if x not in fl][:2]
+                    from committed_plan import find_plan_unknown_backs
                     # Search a committed plan for EVERY bring-4/lead-2 of ours, not just
                     # the screener's pick -- passing the full 6 silently tested whatever
                     # happened to be listed first.
@@ -141,9 +148,10 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
                             if key in seen:
                                 continue
                             seen.add(key)
-                            d, pr, good = find_plan(cand, eb4, merged, moves, natures,
-                                                     typechart, team_name, max_turns,
-                                                     our_sets=our_sets, roll="min")
+                            d, pr, good = find_plan_unknown_backs(cand, roster, fl, merged, moves,
+                                                                   natures, typechart, team_name,
+                                                                   max_turns, our_sets=our_sets,
+                                                                   roll="min")
                             if good:
                                 desc, per, ok = d, pr, True
                                 rec["plan_bring4"] = cand
@@ -167,6 +175,43 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
                 "mode": "sampled", "enemy_lead": toughest, "our_bring4": b[0],
                 "winner": b[1], "turns": b[2]}
     return results
+
+
+def leaderboard_summary(results):
+    """Roll verify_with_solver's per-opponent-team results up into the two
+    columns the user wants to filter/sort a team leaderboard by:
+
+    - "perfect vs conventional": beats every one of the unscripted 90
+      bring-4s for every opponent team (rec['wins'] == rec['total']).
+    - "satisfying the specials": every SCRIPTED opponent (the ones that get
+      a committed-plan check -- see the 'plan_ok' rec above) actually has a
+      committed plan; opponents with no scripted opening don't count against
+      this (there's nothing to satisfy).
+
+    Only meaningful for results produced with all_backs=True (mode=='all_backs'
+    recs) -- a 'sampled' mode result has no wins/total to roll up and is
+    skipped, same as a None (no result) entry.
+
+    Returns {"conventional_wins": int, "conventional_total": int,
+             "perfect_conventional": bool, "specials_ok": bool,
+             "specials_checked": int, "specials_passed": int}.
+    """
+    conv_wins = conv_total = specials_checked = specials_passed = 0
+    for rec in results.values():
+        if not rec or rec.get("mode") != "all_backs":
+            continue
+        conv_wins += rec["wins"]
+        conv_total += rec["total"]
+        if "plan_ok" in rec:
+            specials_checked += 1
+            if rec["plan_ok"]:
+                specials_passed += 1
+    return {
+        "conventional_wins": conv_wins, "conventional_total": conv_total,
+        "perfect_conventional": conv_total > 0 and conv_wins == conv_total,
+        "specials_ok": specials_checked == 0 or specials_passed == specials_checked,
+        "specials_checked": specials_checked, "specials_passed": specials_passed,
+    }
 
 
 def main():

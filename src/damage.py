@@ -324,11 +324,18 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
                  attacker: Combatant, defender: Combatant, move: MoveInfo,
                  typechart: dict, weather: str | None = None, auras=None,
                  num_targets_hit: int = 1, is_crit: bool = False,
-                 screens: bool = False, tera_type: str | None = None):
+                 screens: bool = False, tera_type: str | None = None,
+                 roll_index: int | None = None):
     """
     Returns (min_dmg, max_dmg, avg_dmg, type_eff_mult) as raw HP damage
     (16-step roll, 0.85x-1.00x), following the standard formula:
         dmg = ((2*Level/5 + 2) * Power * A/D / 50 + 2) * modifiers
+
+    roll_index: if given (0-15), the THIRD element of the return tuple is
+    that specific discrete roll (e.g. 0 = worst-case 0.85x, 15 = best-case
+    1.00x, 5 = the "5/16" roll callers sometimes want to inspect a specific
+    path) instead of the true average. min/max/type_eff are unaffected, so
+    this is a drop-in for any caller that only reads the avg slot.
     """
     if power == 0 or move.category == "Status":
         return 0, 0, 0, 1.0
@@ -423,7 +430,8 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
         modifier *= 1.2
 
     rolls = [base * modifier * (0.85 + 0.01 * i) for i in range(16)]
-    return min(rolls), max(rolls), sum(rolls) / len(rolls), type_eff
+    avg_or_indexed = rolls[roll_index] if roll_index is not None else sum(rolls) / len(rolls)
+    return min(rolls), max(rolls), avg_or_indexed, type_eff
 
 
 if __name__ == "__main__":

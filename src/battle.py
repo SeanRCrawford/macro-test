@@ -113,6 +113,13 @@ class Battle:
         # force_roll lets a caller demand worst-case ('min') or best-case ('max')
         # damage instead of the average, so a plan can be checked for being
         # GUARANTEED rather than merely winning on an average roll.
+        #
+        # force_roll_index (set separately, see self.force_roll_index and its use
+        # in _resolve_move's damage_roll call) demands one SPECIFIC discrete roll
+        # (0-15) instead -- e.g. index 5 for "the 5/16 roll" -- for inspecting a
+        # named path rather than just min/max/avg. avg_v already IS that discrete
+        # value when force_roll_index was set, so no extra branch is needed here;
+        # just don't set force_roll at the same time (force_roll takes priority).
         forced = getattr(self, "force_roll", None)
         if forced == "min":
             return min_v
@@ -676,6 +683,7 @@ class Battle:
             mn, mx, avg, eff = damage_roll(
                 50, move_power, atk_stat, def_stat, attacker, target, move, self.typechart,
                 auras=self._active_auras(), weather=self.field.weather, num_targets_hit=num_hit, screens=screens_active,
+                roll_index=getattr(self, "force_roll_index", None),
             )
             # Multi-hit moves (Bullet Seed, Population Bomb, ...): aggregate total
             # damage as hits * single-hit damage rather than simulating each hit.

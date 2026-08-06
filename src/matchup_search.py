@@ -38,7 +38,7 @@ def make_combatant(name, merged, natures):
 
 def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
                          max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
-                         return_choice=False, enemy_script=None):
+                         return_choice=False, enemy_script=None, roll_index=None, tie_bias=None):
     """Minimax over BOTH sides' Mega Evolution choices.
 
     Either side may bring two Mega-capable Pokemon, but only one can actually
@@ -64,7 +64,8 @@ def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typec
             winner, turns, battle = play_out_pair(
                 our_names, enemy_names, merged, moves_db, natures, typechart, max_turns,
                 our_mega_transforms=ov, enemy_mega_transforms=ev,
-                our_sets=our_sets, enemy_sets=enemy_sets, enemy_script=enemy_script)
+                our_sets=our_sets, enemy_sets=enemy_sets, enemy_script=enemy_script,
+                roll_index=roll_index, tie_bias=tie_bias)
             # Rank by how BAD the outcome is for us (higher = worse), so the enemy
             # branch maximises and ours minimises.
             #   we lose            -> worst; the faster we lose, the worse
@@ -91,7 +92,7 @@ def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typec
 def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
                    max_turns=MAX_TURNS, our_mega_transforms=None, enemy_mega_transforms=None,
                    our_sets=None, enemy_sets=None, rng_seed=None, tie_bias=None,
-                   enemy_script=None):
+                   enemy_script=None, roll_index=None):
     """our_names / enemy_names: lists of Pokemon names, length 2 (pure lead
     duel) or 4 (lead pair + back pair, roster[0:2] leads / roster[2:] bench).
     Multiple Mega-named picks per side are allowed (resolved via make_team;
@@ -113,6 +114,7 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
 
     battle = Battle(our_combatants, enemy_combatants, typechart, moves_db, rng_seed=rng_seed,
                      tie_bias=tie_bias)
+    battle.force_roll_index = roll_index
 
     from solver import greedy_opponent_joint_action
     for _ in range(max_turns):
@@ -328,6 +330,44 @@ def evaluate_tie_branches(our_names, enemy_names, merged, moves_db, natures, typ
     return out
 
 
+ROLL_PATH_LABELS = {None: "avg", 0: "min (0/16, 0.85x)", 5: "5/16 (0.90x)", 15: "max (15/16, 1.00x)"}
+
+
+def robust_win_paths(our_names, enemy_names, merged, moves_db, natures, typechart,
+                      max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
+                      roll_indices=(0, 5, 15, None)):
+    """Cross {lose every speed tie, win every speed tie} x a set of named
+    discrete damage-roll paths (worst-case 0/16, the 5/16 roll, best-case
+    15/16, and the plain average), and report the outcome of each cell.
+
+    This is the tool a losing (or fragile-looking) matchup needs: rather than
+    a single win/loss or a win RATE, it shows exactly which combination of
+    "bad luck" assumptions the result depends on -- e.g. "we win as long as
+    we don't lose the speed tie AND roll at least 5/16" is a very different
+    situation from "we lose the instant either goes against us."
+
+    `robust_win` is True only if we still win in the single worst cell (lose
+    every tie, roll minimum damage) -- the bar the user asked for: a win has
+    to hold up even against the worst rolls and losing every tie, not merely
+    win on average.
+
+    Returns {"paths": {(tie_label, roll_label): (winner, turns)}, "robust_win": bool,
+             "worst_cell": (tie_label, roll_label)}.
+    """
+    tie_options = [("we_win_ties", "p1"), ("they_win_ties", "p2")]
+    paths = {}
+    for tie_label, tie_bias in tie_options:
+        for roll_index in roll_indices:
+            roll_label = ROLL_PATH_LABELS.get(roll_index, str(roll_index))
+            w, t, _ = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
+                                           typechart, max_turns, our_sets=our_sets,
+                                           enemy_sets=enemy_sets, roll_index=roll_index,
+                                           tie_bias=tie_bias)
+            paths[(tie_label, roll_label)] = (w, t)
+
+    worst_cell = ("they_win_ties", ROLL_PATH_LABELS.get(0, "0"))
+    robust_win = paths.get(worst_cell, ("timeout", 0))[0] == "p1"
+    return {"paths": paths, "robust_win": robust_win, "worst_cell": worst_cell}
 def play_out_stochastic(our_names, enemy_names, merged, moves_db, natures, typechart,
                          max_turns=MAX_TURNS, our_sets=None, our_mega=None, enemy_mega=None,
                          rng_seed=0, tie_bias=None):

@@ -252,9 +252,45 @@ def find_unpunishable_plan(our_names, enemy_names, merged, moves_db, natures, ty
     return best if best else (None, {}, False)
 
 
+def _quick_turn1_outcome(desc, our_bring4, enemy_names, merged, moves_db, natures, typechart,
+                          script, our_sets, roll):
+    """Cheap stand-in for play_committed: resolve ONLY turn 1 (no multi-turn
+    solver loop), and return a rough score for ranking candidate turn-1
+    actions -- our total remaining HP minus theirs, with an outright turn-1
+    KO of either side given a dominant score. This is what makes the
+    screening pass in find_plan_unknown_backs cheap: the expensive part of
+    play_committed is the up-to-13-turn solve_best_action loop after turn 1,
+    which this skips entirely.
+    """
+    b = _mk(our_bring4, enemy_names, merged, moves_db, natures, typechart, our_sets, roll)
+    ms = _movesets(b, merged, moves_db, our_sets)
+    fixed = rebind(desc, b)
+    if fixed is None:
+        return -1e9
+    opp = None
+    if script is not None:
+        try:
+            opp = script(b, b.p2, b.p1, 1)
+        except Exception:
+            opp = None
+    if not opp:
+        opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, 1)
+    try:
+        b.run_turn(fixed, opp)
+    except ValueError:
+        return -1e9
+    if b.is_over():
+        w = b.winner()
+        if w == "p1":
+            return 1e6
+        if w == "p2":
+            return -1e6
+    return sum(c.current_hp for c in b.p1.roster) - sum(c.current_hp for c in b.p2.roster)
+
+
 def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_db, natures,
                              typechart, team_name=None, max_turns=14, our_sets=None,
-                             roll="min"):
+                             roll="min", screen_top=6):
     """Find a turn-1 action that works WITHOUT knowing the opponent's backs.
 
     At turn 1 you have seen their lead and nothing else. A plan chosen against one
@@ -265,6 +301,17 @@ def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_
     This requires ONE turn-1 action to beat every back pair the lead could be
     hiding (all C(4,2) of them) crossed with every scripted opening variant. Only
     then is it a plan you can commit to on sight of the lead alone.
+
+    Cost control: the full check (play_committed's up-to-max_turns solve per
+    back-pair x variant) is too expensive to run for every candidate turn-1
+    action -- README previously flagged this as untested/likely to time out.
+    Two-stage, same screen-then-verify pattern used elsewhere (e.g.
+    search_robust_composition): first rank every candidate turn-1 action by a
+    CHEAP turn-1-only outcome summed across all back-pairs x variants, then
+    only run the expensive full verification on the top `screen_top`
+    candidates. A real turn-1 answer to a fixed lead is usually also strong
+    on the immediate exchange, so this rarely discards the true winner while
+    cutting the expensive pass by roughly options/screen_top.
 
     Returns (desc, results, ok) where results maps (back_pair, variant) -> outcome.
     """
@@ -277,9 +324,20 @@ def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_
     ms = _movesets(probe, merged, moves_db, our_sets)
     options = our_candidate_joint_actions(probe, probe.p1, probe.p2, ms, 1)
 
-    best = None
+    screened = []
     for opt in options:
         desc = describe(opt)
+        total = 0.0
+        for bp in back_pairs:
+            enemy = list(enemy_lead) + list(bp)
+            for idx, script in variants:
+                total += _quick_turn1_outcome(desc, our_bring4, enemy, merged, moves_db, natures,
+                                               typechart, script, our_sets, roll)
+        screened.append((total, desc))
+    screened.sort(key=lambda x: -x[0])
+
+    best = None
+    for _, desc in screened[:screen_top]:
         res, ok = {}, True
         for bp in back_pairs:
             enemy = list(enemy_lead) + list(bp)
@@ -298,3 +356,53 @@ def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_
         if best is None or score > best[2]:
             best = (desc, res, score)
     return (best[0], best[1], False) if best else (None, {}, False)
+
+
+def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart, team_name,
+                     desc=None, our_sets=None, roll="avg"):
+    """Per-opening-variant turn-1 breakdown for a scripted/fixed-lead team,
+    instead of collapsing to only the worst-case result (play_scripted_worst_case
+    / worst_response report ONLY the worst variant). Each of the team's opening
+    variants (e.g. King's 4, differing mainly in which of our slots it Fake
+    Outs -- see scripted_openings.VARIANTS) is played out individually, so a
+    lead that looks clean against one targeting choice but collapses against
+    another is visible rather than hidden behind the aggregate worst case.
+
+    desc: a fixed turn-1 action (e.g. from find_plan/find_plan_unknown_backs)
+    to pin for every variant, or None to let the solver pick our best turn-1
+    response independently per variant instead.
+
+    Returns {variant_idx: {"our_action", "enemy_action", "hp_after", "log"}}.
+    """
+    variants = all_scripts(team_name)
+    out = {}
+    for idx, script in variants:
+        b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll)
+        ms = _movesets(b, merged, moves_db, our_sets)
+        if desc is not None:
+            fixed = rebind(desc, b)
+            if fixed is None:
+                continue
+        else:
+            fixed, _, _ = solve_best_action(b, "p1", ms, depth=1)
+            if not fixed:
+                continue
+        opp = None
+        try:
+            opp = script(b, b.p2, b.p1, 1)
+        except Exception:
+            opp = None
+        if not opp:
+            opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, 1)
+        try:
+            b.run_turn(list(fixed), opp)
+        except ValueError:
+            continue
+        out[idx] = {
+            "our_action": describe(fixed),
+            "enemy_action": [(a.combatant.name, a.kind, a.move.name if a.move else "-")
+                              for a in opp],
+            "hp_after": {c.name: (c.current_hp, c.max_hp()) for c in b.p1.roster + b.p2.roster},
+            "log": b.log.dump(),
+        }
+    return out

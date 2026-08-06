@@ -20,40 +20,51 @@ _TEMPLATE_CACHE = {}
 
 def make_combatant(name: str, merged: dict, natures: dict, pokedex: dict | None = None,
                     ability: str | None = None, item: str | None = None,
-                    force_base_form: bool = False):
+                    force_base_form: bool = False, evs: dict | None = None,
+                    nature: str | None = None):
     """Returns a fresh Combatant. Internally caches an immutable template per
     (name, force_base_form) and deep-copies it -- building one from scratch
     involves stat math and (for Megas) a pokedex lookup, and the team search
-    constructs these tens of thousands of times."""
-    if ability is None and item is None:
+    constructs these tens of thousands of times.
+
+    evs/nature: optional per-instance overrides of mbsmogon.xlsx's usage-default
+    spread (e.g. a bulk EV spread being compared against the default for the
+    same species -- see optimize_sets.bulk_spread_for). Bypasses the template
+    cache, same as a custom ability/item does, since the result is no longer
+    the shared default template.
+    """
+    if ability is None and item is None and evs is None and nature is None:
         key = (name, force_base_form)
         tpl = _TEMPLATE_CACHE.get(key)
         if tpl is None:
             tpl = _build_combatant(name, merged, natures, pokedex, ability, item, force_base_form)
             _TEMPLATE_CACHE[key] = tpl
         return copy.deepcopy(tpl)
-    return _build_combatant(name, merged, natures, pokedex, ability, item, force_base_form)
+    return _build_combatant(name, merged, natures, pokedex, ability, item, force_base_form,
+                             evs, nature)
 
 
 def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | None = None,
                       ability: str | None = None, item: str | None = None,
-                      force_base_form: bool = False):
+                      force_base_form: bool = False, evs: dict | None = None,
+                      nature: str | None = None):
     p = merged[name]
-    nat = natures[p["nature"].lower()]
+    nat = natures[(nature or p["nature"]).lower()]
+    ev_points = evs if evs is not None else p["evs"]
     ab = ability or (p["abilities_usage"][0][0] if p["abilities_usage"] else "")
     it = item or (p["items_usage"][0][0] if p["items_usage"] else "")
 
     base_name = base_form_name(name)
     if base_name is None:
         # Regular (non-Mega) Pokemon -- single form for the whole battle.
-        stats = compute_stats(p["base_stats"], nat, p["evs"])
+        stats = compute_stats(p["base_stats"], nat, ev_points)
         return Combatant(name=name, stats=stats, types=p["types"], ability=ab, item=it)
 
     # Mega pick: compute BOTH forms up front. Base form is what it starts
     # battle as; mega form is applied by engine.mega_evolve() on switch-in
     # -- UNLESS force_base_form is set (this team already has a different
     # Mega actually transforming, so this pick runs in base form all game).
-    mega_stats = compute_stats(p["base_stats"], nat, p["evs"])
+    mega_stats = compute_stats(p["base_stats"], nat, ev_points)
     mega_types = p["types"]
     mega_ability = ab  # the mega-exclusive ability (e.g. Drought), already correct from mbsmogon.xlsx
 
@@ -78,7 +89,7 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
             base_types = sdata["types"]
             base_ability = list(sdata.get("abilities", {}).values())[0] if sdata.get("abilities") else mega_ability
 
-    base_stats = compute_stats(base_stats_table, nat, p["evs"])
+    base_stats = compute_stats(base_stats_table, nat, ev_points)
 
     # ITEM RULE: a Mega that actually has a stone in the usage data must hold it and
     # cannot hold anything else, so item optimisation can never hand it a Life Orb.
@@ -118,5 +129,6 @@ def make_team(names: list[str], merged: dict, natures: dict, pokedex: dict | Non
         spec = sets.get(n) or {}
         out.append(make_combatant(n, merged, natures, pokedex=pokedex,
                                    item=spec.get("item"),
-                                   force_base_form=(n in forced_base)))
+                                   force_base_form=(n in forced_base),
+                                   evs=spec.get("evs"), nature=spec.get("nature")))
     return out
