@@ -387,3 +387,35 @@ def member_contributions(team, matrix, enemy_pairs, merged):
             if without and max(val(p, key) for p in without) <= 0:
                 out[n]["irreplaceable"].append((team_name, ep))
     return out
+
+
+def compute_team_analysis(team, merged, moves_db, natures, typechart, teams_csv):
+    """Build the 'team detail' snapshot -- which threats/pairs each member
+    contributes to most, and what the team was tested against -- so it can
+    be persisted into team.json and shown after a plain load, not only right
+    after a live generation run (see team_sheet.save_team's analysis param
+    and app.py's Team Builder tab).
+
+    Cheap to compute for any single 6-mon team: build_pair_matrix only needs
+    the 15 in-team pairs here (pool=team), not the full candidate-pool
+    matrix a generation run builds. Uses the same fast screener as
+    generation (fast_pair_score/usage-default sets, not our_sets overrides)
+    -- an approximation, same caveat as every other screener-based number
+    in this tool, not the real-engine verified result.
+    """
+    enemy_pairs = enemy_pairs_from_teams(teams_csv)
+    matrix = build_pair_matrix(list(team), enemy_pairs, merged, moves_db, natures, typechart)
+    contrib = member_contributions(list(team), matrix, enemy_pairs, merged)
+
+    members = {}
+    for n in team:
+        c = contrib[n]
+        top_threats = sorted(c["best_answer"], key=lambda x: -x[2])[:5]
+        members[n] = {
+            "wins": c["wins"],
+            "top_threats": [{"team": tn, "enemy_pair": list(ep), "margin": round(v, 2)}
+                             for tn, ep, v in top_threats],
+            "irreplaceable": [{"team": tn, "enemy_pair": list(ep)}
+                               for tn, ep in c["irreplaceable"][:5]],
+        }
+    return {"tested_against": list(teams_csv.keys()), "members": members}

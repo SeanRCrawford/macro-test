@@ -124,13 +124,14 @@ with tab_build:
     c1, c2 = st.columns([3, 1])
     with c2:
         st.markdown("**Load / save**")
-        from team_sheet import load_team, save_team
+        from team_sheet import load_team, save_team, load_analysis
         saved = sorted(p.name for p in ROOT.glob("*.json"))
         pick = st.selectbox("Saved teams", saved or ["(none)"], key="load_pick")
         if st.button("Load", width='stretch', disabled=not saved):
             pool, sets = load_team(ROOT / pick)
             st.session_state["team"] = pool
             st.session_state["sets"] = sets
+            st.session_state["team_analysis"] = load_analysis(ROOT / pick)
             st.success(f"Loaded {len(pool)} Pokemon from {pick}")
         up = st.file_uploader("...or upload a team .json", type="json", key="up_team")
         if up is not None:
@@ -138,11 +139,14 @@ with tab_build:
             data = _json.loads(up.read())
             st.session_state["team"] = data.get("pool", data if isinstance(data, list) else [])
             st.session_state["sets"] = data.get("sets", {}) if isinstance(data, dict) else {}
+            st.session_state["team_analysis"] = (data.get("analysis")
+                                                  if isinstance(data, dict) else None)
             st.success(f"Loaded {len(st.session_state['team'])} Pokemon from upload")
         if st.button("Use default 6", width='stretch'):
             st.session_state["team"] = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
                                          "Mega Skarmory", "Gholdengo"]
             st.session_state["sets"] = {}
+            st.session_state["team_analysis"] = None
         only_top = st.checkbox("Only show top-100 by Score", value=True)
 
     pool_options = all_names
@@ -179,14 +183,20 @@ with tab_build:
             fname = st.text_input("Save as", value="team.json", key="save_name")
             if st.button("Save", width='stretch'):
                 from team_sheet import save_team
+                from team_search import compute_team_analysis
                 if not fname.endswith(".json"):
                     fname += ".json"
-                save_team(ROOT / fname, team, st.session_state.get("sets", {}))
-                st.success(f"Saved to {ROOT/fname}")
+                with st.spinner("Computing team-detail analysis..."):
+                    analysis = compute_team_analysis(team, merged, moves, natures, typechart, teams)
+                st.session_state["team_analysis"] = analysis
+                save_team(ROOT / fname, team, st.session_state.get("sets", {}), analysis=analysis)
+                st.success(f"Saved to {ROOT/fname} (with team-detail analysis)")
             import json as _json
             st.download_button(
                 "Download team .json",
-                _json.dumps({"pool": team, "sets": st.session_state.get("sets", {})}, indent=2),
+                _json.dumps({"pool": team, "sets": st.session_state.get("sets", {}),
+                             **({"analysis": st.session_state["team_analysis"]}
+                                if st.session_state.get("team_analysis") else {})}, indent=2),
                 file_name=(fname if fname.endswith(".json") else fname + ".json"),
                 mime="application/json", width='stretch')
 
@@ -216,6 +226,42 @@ with tab_build:
                         for slot, alts in sug.items():
                             st.warning(f"{n}: '{slot}' contributes nothing — consider "
                                         f"{', '.join(alts)}")
+
+        with st.expander("Team detail — member/threat contributions",
+                          expanded=bool(st.session_state.get("team_analysis"))):
+            st.caption("Which enemy lead pairs each member is the team's best answer to, and "
+                       "which of those NO other pair on the team can beat (irreplaceable). "
+                       "Persisted into team.json on Save, so it's available right after loading "
+                       "one -- not only right after a live Generate Team run.")
+            ta = st.session_state.get("team_analysis")
+            refresh = st.button("Compute / refresh analysis", key="ta_refresh")
+            if refresh:
+                from team_search import compute_team_analysis
+                with st.spinner("Computing..."):
+                    ta = compute_team_analysis(team, merged, moves, natures, typechart, teams)
+                st.session_state["team_analysis"] = ta
+            if ta:
+                st.caption("Tested against: " + ", ".join(ta.get("tested_against", [])))
+                rows = []
+                for n in team:
+                    m = ta.get("members", {}).get(n)
+                    if not m:
+                        continue
+                    top = m["top_threats"][:3]
+                    irr = m["irreplaceable"][:3]
+                    rows.append({
+                        "Pokemon": n,
+                        "Best answer to (n)": m["wins"],
+                        "Top threats it answers": "; ".join(
+                            f"{t['team']} {t['enemy_pair'][0]}/{t['enemy_pair'][1]}" for t in top) or "-",
+                        "Irreplaceable for (n)": len(m["irreplaceable"]),
+                        "Example irreplaceable": "; ".join(
+                            f"{t['team']} {t['enemy_pair'][0]}/{t['enemy_pair'][1]}" for t in irr) or "-",
+                    })
+                st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+            else:
+                st.caption("No analysis yet — click above, or Save the team to compute and "
+                           "persist it into the .json.")
 
         st.markdown("**Defensive coverage** (rule: no more than 2 members weak to any one type)")
         wt = weakness_table(team)
@@ -378,12 +424,16 @@ with tab_gen:
                                 })
                         tot_w = sum(r["wins"] for r in v.values() if r and r.get("mode") == "all_backs")
                         tot_n = sum(r["total"] for r in v.values() if r and r.get("mode") == "all_backs")
+                        from generate_team import leaderboard_summary
+                        lbs = leaderboard_summary(v)
                         st.session_state.setdefault("verified_teams", {})
                         st.session_state["verified_teams"][tuple(t)] = {
                             "team": list(t), "sets": sets, "wins": tot_w, "total": tot_n,
                             "per_opponent": {k: (r["wins"], r["total"]) for k, r in v.items()
                                               if r and r.get("mode") == "all_backs"},
                             "clean": tot_n > 0 and tot_w == tot_n,
+                            "specials_ok": lbs["specials_ok"],
+                            "specials_checked": lbs["specials_checked"],
                         }
                         st.markdown("**Solver verification** (trustworthy, unlike the screener)")
                         st.dataframe(pd.DataFrame(vr), width='stretch', hide_index=True)
@@ -396,26 +446,39 @@ with tab_gen:
         st.divider()
         st.subheader("Verified teams — ranked")
         st.caption("Every team solver-verified this session, ranked by enemy bring-4s "
-                   "beaten across ALL opponents. A perfect team beats all 90 brings of "
-                   "every opponent.")
-        ranked = sorted(vt.values(), key=lambda d: (-d["wins"], -int(d["clean"])))
+                   "beaten across ALL opponents. 'Perfect' = beats every unscripted bring-4 "
+                   "('conventional'). 'Specials OK' = every SCRIPTED opponent (fixed-lead, "
+                   "e.g. Hard Trick Room) has a committed plan, not just a solver-adaptive win.")
+        fc1, fc2 = st.columns(2)
+        only_perfect = fc1.checkbox("Perfect conventional only", value=False, key="lb_only_perfect")
+        only_specials = fc2.checkbox("Specials satisfied only", value=False, key="lb_only_specials")
+        ranked_all = sorted(vt.values(), key=lambda d: (-d["wins"], -int(d["clean"])))
+        ranked = [d for d in ranked_all
+                  if (not only_perfect or d["clean"])
+                  and (not only_specials or d.get("specials_ok", True))]
         for i, d in enumerate(ranked, 1):
             d["rank"] = i
 
         rows = []
         for d in ranked:
             row = {"#": d["rank"], "Perfect": "YES" if d["clean"] else "",
+                    "Specials OK": ("YES" if d.get("specials_ok", True) else "NO")
+                                   if d.get("specials_checked") else "-",
                     "Total": f"{d['wins']}/{d['total']}",
                     "Team": ", ".join(d["team"])}
             for opp, (w, n) in d["per_opponent"].items():
                 row[opp] = f"{w}/{n}"
             rows.append(row)
         st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        if not ranked and (only_perfect or only_specials):
+            st.info("No verified team matches the current filters.")
 
         # --- bulk export -------------------------------------------------------
         st.markdown("**Export**")
         labels = {f"#{d['rank']} — {', '.join(d['team'])}"
-                  f"{'  (PERFECT)' if d['clean'] else ''}": d for d in ranked}
+                  f"{'  (PERFECT)' if d['clean'] else ''}"
+                  f"{'  (SPECIALS OK)' if d.get('specials_checked') and d.get('specials_ok') else ''}":
+                  d for d in ranked}
         picked = st.multiselect("Teams to export", list(labels),
                                  default=[k for k in labels if "(PERFECT)" in k])
         e1, e2 = st.columns(2)
@@ -451,6 +514,10 @@ with tab_gen:
         if pick:
             d = labels[pick]
             st.dataframe(team_sheet_df(d["team"], d["sets"]), width='stretch', hide_index=True)
+            # Prefer the cheap in-session pool matrix (from this generation run) when it's
+            # available -- reuses work already done. Otherwise fall back to recomputing just
+            # the 15 in-team pairs (compute_team_analysis), which is cheap enough to always
+            # work, not just right after a live generation.
             mtx = st.session_state.get("gen_matrix")
             eps_saved = st.session_state.get("gen_eps")
             if mtx and eps_saved:
@@ -468,12 +535,25 @@ with tab_gen:
                             f"{t} {e[0]}/{e[1]}" for t, e in ex) or "-",
                     })
                 st.dataframe(pd.DataFrame(crows), width='stretch', hide_index=True)
-                st.caption("'Best answer to' counts enemy lead pairs where a pair "
-                           "containing this Pokemon is the team's strongest response. "
-                           "'Only answer to' counts threats that NO pair without it "
-                           "beats -- that is the concrete case for its slot.")
+            elif st.button("Compute contribution analysis", key="lb_ta_compute"):
+                from team_search import compute_team_analysis
+                with st.spinner("Computing..."):
+                    ta = compute_team_analysis(d["team"], merged, moves, natures, typechart, teams)
+                crows = [{
+                    "Pokemon": n, "Best answer to": f"{m['wins']} threats",
+                    "Only answer to": len(m["irreplaceable"]),
+                    "Example threat only it beats": "; ".join(
+                        f"{t['team']} {t['enemy_pair'][0]}/{t['enemy_pair'][1]}"
+                        for t in m["irreplaceable"][:2]) or "-",
+                } for n, m in ta.get("members", {}).items()]
+                st.dataframe(pd.DataFrame(crows), width='stretch', hide_index=True)
             else:
-                st.caption("Run a generation to populate the contribution analysis.")
+                st.caption("Click above to compute (cheap -- only this team's 15 pairs), "
+                           "or it's reused instantly from this session's generation run.")
+            st.caption("'Best answer to' counts enemy lead pairs where a pair "
+                       "containing this Pokemon is the team's strongest response. "
+                       "'Only answer to' counts threats that NO pair without it "
+                       "beats -- that is the concrete case for its slot.")
             if st.button("Load into Team Builder", key="lb_load"):
                 st.session_state["team"] = d["team"]
                 st.session_state["sets"] = d["sets"]
@@ -511,11 +591,36 @@ with tab_search:
                  "effects like Rock Slide flinches, and coin-flip speed ties, reporting a "
                  "win probability. A deterministic WIN can still be an 80% matchup.")
 
+        with st.expander("Enemy set overrides (optional)"):
+            st.caption("Pin a specific enemy Pokemon's exact item/moves instead of its "
+                       "usage-derived default -- e.g. data/enemy_overrides.json ships a "
+                       "Kingambit set (Kowtow Cleave/Sucker Punch/Iron Head/Low Kick). "
+                       "Same JSON shape as a team.json's 'sets' block, or a bare "
+                       "{name: {item, moves}} dict.")
+            default_ov = ROOT / "data" / "enemy_overrides.json"
+            use_default = st.checkbox(f"Use {default_ov.name}", value=default_ov.exists(),
+                                       disabled=not default_ov.exists(), key="use_default_esets")
+            up_es = st.file_uploader("...or upload enemy-set overrides .json", type="json",
+                                      key="up_esets")
+            enemy_sets_override = {}
+            if up_es is not None:
+                import json as _json
+                enemy_sets_override = _json.loads(up_es.read())
+                if "sets" in enemy_sets_override:
+                    enemy_sets_override = enemy_sets_override["sets"]
+            elif use_default and default_ov.exists():
+                from team_sheet import load_sets_override
+                enemy_sets_override = load_sets_override(default_ov)
+            if enemy_sets_override:
+                st.caption(f"Active overrides: {list(enemy_sets_override.keys())}")
+            st.session_state["enemy_sets_override"] = enemy_sets_override
+
         if st.button("Run search", type="primary") and chosen:
             from matchup_search import (search_robust_composition, search_best_composition,
                                          play_out_worst_case, enemy_configs)
             from run_search import find_toughest_lead
             sets = st.session_state.get("sets", {})
+            esets = st.session_state.get("enemy_sets_override") or {}
             all_backs = mode.startswith("all")
             results = {}
             prog = st.progress(0.0)
@@ -530,7 +635,7 @@ with tab_search:
                                                      fixed_lead=_fl,
                                                      enemy_script=_so.script_for(tname),
                                                      script_team=tname if tname in _so.SCRIPTS
-                                                     else None)
+                                                     else None, enemy_sets=esets)
                     results[tname] = {"mode": "all", "robust": rob[0] if rob else None,
                                        "roster": roster}
                 else:
@@ -539,7 +644,8 @@ with tab_search:
                     rem = [x for x in roster if x not in lead]
                     eb4 = list(lead) + rem[:2]
                     combos = search_best_composition(team, eb4, merged, moves, natures,
-                                                      typechart, max_turns, our_sets=sets)
+                                                      typechart, max_turns, our_sets=sets,
+                                                      enemy_sets=esets)
                     results[tname] = {"mode": "one", "lead": lead, "eb4": eb4,
                                        "combos": combos, "roster": roster}
                 prog.progress((i + 1) / len(chosen), f"{tname} done")
@@ -603,6 +709,34 @@ with tab_search:
                 st.download_button("Download summary CSV", pd.DataFrame(rows).to_csv(index=False),
                                     "search_summary.csv", "text/csv")
 
+            # Per-opening-variant turn-1 breakdown, for fixed-lead/scripted opponents.
+            import scripted_openings as _so2
+            scripted_chosen = [tn for tn in res if tn in _so2.SCRIPTS and res[tn].get("robust")]
+            if scripted_chosen:
+                st.markdown("### Turn-1 breakdown by opening variant")
+                st.caption("Fixed-lead opponents run a scripted opening with several variants "
+                           "(e.g. which of your slots it targets). Rather than only the worst "
+                           "case, this shows each variant's turn-1 outcome side by side -- a "
+                           "lead that looks clean against one targeting choice can collapse "
+                           "against another.")
+                t1_tname = st.selectbox("Opponent", scripted_chosen, key="t1bd_tname")
+                if st.button("Show breakdown", key="t1bd_go"):
+                    from committed_plan import turn1_breakdown
+                    b4 = res[t1_tname]["robust"]["our_bring4"]
+                    er = teams[t1_tname]
+                    with st.spinner("Playing out every opening variant..."):
+                        bd = turn1_breakdown(b4, er, merged, moves, natures, typechart, t1_tname,
+                                              our_sets=sets)
+                    for idx, d in bd.items():
+                        with st.expander(f"Variant {idx}"):
+                            st.write("Our turn-1 action:",
+                                     [(a[0], a[2], list(a[3])) for a in d["our_action"]])
+                            st.write("Their turn-1 action:", d["enemy_action"])
+                            hprows = [{"Pokemon": n, "HP": f"{hp}/{mx}"}
+                                      for n, (hp, mx) in d["hp_after"].items()]
+                            st.dataframe(pd.DataFrame(hprows), width='stretch', hide_index=True)
+                            st.code(d["log"])
+
             # Branching detail: opponent -> enemy bring -> turn-by-turn gameplan.
             st.markdown("### Individual matchups")
             st.caption("There are up to 90 enemy brings per opponent, so they are grouped: "
@@ -644,7 +778,8 @@ with tab_search:
                             w, t, btl, om, tm = play_out_worst_case(
                                 b4, list(lead) + list(back), merged, moves, natures, typechart,
                                 st.session_state.get("search_maxturns", 12),
-                                our_sets=sets, return_choice=True)
+                                our_sets=sets, enemy_sets=st.session_state.get("enemy_sets_override"),
+                                return_choice=True)
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric("Avg-roll result",
                                       {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()))
@@ -747,3 +882,53 @@ with tab_battle:
                             f"deterministic result above does not tell the whole story.")
 
         st.code(btl.log.dump())
+
+        st.session_state["bv_last_matchup"] = (our4, their4, turns)
+
+    # --- Path explorer: tie x roll scenario matrix -----------------------------
+    st.divider()
+    st.markdown("**Path explorer** — does this hold up against the worst rolls AND losing "
+                "every speed tie, or only on average?")
+    st.caption("Crosses {we win every tie, they win every tie} x {min roll, 5/16 roll, max "
+               "roll, average} and reports the outcome of each. 'Robust win' means still a "
+               "win in the single worst cell (lose every tie, roll minimum damage) -- the bar "
+               "for a plan you can actually rely on, not just one that wins on average.")
+    last = st.session_state.get("bv_last_matchup")
+    if st.button("Explore paths", disabled=not last):
+        from matchup_search import robust_win_paths
+        lo4, lt4, lturns = last
+        with st.spinner("Playing out every tie x roll path..."):
+            paths = robust_win_paths(lo4, lt4, merged, moves, natures, typechart, lturns,
+                                      our_sets=st.session_state.get("sets", {}))
+        st.metric("Robust win?", "YES" if paths["robust_win"] else "no",
+                  help=f"Worst cell checked: {paths['worst_cell'][0]} / {paths['worst_cell'][1]}")
+        prows = [{"Ties": tie, "Roll": roll, "Result": {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()),
+                  "Turns": t} for (tie, roll), (w, t) in paths["paths"].items()]
+        st.dataframe(pd.DataFrame(prows), width='stretch', hide_index=True)
+    elif not last:
+        st.caption("Run Simulate above first.")
+
+    # --- Salvage a losing matchup -----------------------------------------------
+    st.divider()
+    st.markdown("**Salvage a losing matchup** — try single changes (EV spread, item/resist "
+                "berry, one support or setup move) and see if any flips it.")
+    st.caption("Each trial is scored with the real battle engine (does it actually win more), "
+               "not the offense-only coverage heuristic used elsewhere in this tool.")
+    if st.button("Try to salvage", disabled=not last):
+        from salvage import salvage_losing_matchup
+        lo4, lt4, lturns = last
+        with st.spinner("Trying EV/item/move swaps..."):
+            res = salvage_losing_matchup(lo4, lt4, merged, moves, natures, typechart, lturns,
+                                          our_sets=st.session_state.get("sets", {}))
+        bw, bt = res["baseline"]
+        bw_label = {"p1": "WIN", "p2": "LOSS"}.get(bw, bw.upper())
+        st.caption(f"Baseline: {bw_label} in {bt} turns")
+        if res["fixes"]:
+            frows = [{"Pokemon": f["mon"], "Change type": f["kind"], "Change": f["change"],
+                      "New result": {"p1": "WIN", "p2": "LOSS"}.get(f["winner"], f["winner"].upper()),
+                      "Turns": f["turns"]} for f in res["fixes"]]
+            st.dataframe(pd.DataFrame(frows), width='stretch', hide_index=True)
+        else:
+            st.info("No single EV/item/move swap tried here flipped the result.")
+    elif not last:
+        st.caption("Run Simulate above first.")

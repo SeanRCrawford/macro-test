@@ -13,19 +13,31 @@ Format:
   "pool": ["Incineroar", "Mega Charizard Y", ...],
   "sets": {
      "Incineroar": {"item": "Sitrus Berry",
-                     "moves": ["Fake Out", "Parting Shot", "Flare Blitz", "Darkest Lariat"]},
+                     "moves": ["Fake Out", "Parting Shot", "Flare Blitz", "Darkest Lariat"],
+                     "evs": {"hp":32, "atk":0, ...}, "nature": "Careful"},   # both optional
      ...
+  },
+  "analysis": {   # optional -- a "team detail" snapshot, see
+                  # team_search.compute_team_analysis. Lets the Team Builder
+                  # tab show member/threat contributions right after a plain
+                  # load, not only after a live generation run.
+     "tested_against": ["Rain", "Sun Rain", ...],
+     "members": {"Incineroar": {"wins": 12, "top_threats": [...], "irreplaceable": [...]}, ...}
   }
 }
 It's plain JSON -- edit it by hand freely (swap an item, change a move) and
-re-run run_search to see the effect.
+re-run run_search to see the effect. "analysis" is a snapshot computed at
+save time -- if you hand-edit "sets" afterwards it can go stale; re-run the
+analysis (Team Builder tab) to refresh it.
 """
 import json
 from pathlib import Path
 
 
-def save_team(path, pool, sets=None):
+def save_team(path, pool, sets=None, analysis=None):
     data = {"pool": list(pool), "sets": sets or {}}
+    if analysis is not None:
+        data["analysis"] = analysis
     Path(path).write_text(json.dumps(data, indent=2))
     return path
 
@@ -40,6 +52,14 @@ def load_team(path):
     if not pool:
         raise ValueError(f"{path}: no 'pool' list found in team file")
     return pool, sets
+
+
+def load_analysis(path):
+    """The persisted 'analysis' (team-detail/contribution) snapshot from a
+    team.json, or None if absent -- an older file, a hand-built one, or one
+    saved without it."""
+    data = json.loads(Path(path).read_text())
+    return data.get("analysis") if isinstance(data, dict) else None
 
 
 def load_sets_override(path):
