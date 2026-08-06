@@ -292,6 +292,34 @@ def aura_multiplier(move_type, auras):
     return 0.75 if "Aura Break" in auras else 5461 / 4096   # ~1.333
 
 
+# Multi-hit moves: (min_hits, max_hits, planning_hits). `planning_hits` is
+# what this tool uses for its single-aggregate-damage model (avg 3.17 for
+# standard 2-5 hit moves is the usual competitive convention: 3/8 chance each
+# of 2/3, 1/8 chance each of 4/5). Population Bomb is handled separately by
+# hit_count_for() -- it only ever counts as reliable with Wide Lens.
+MULTI_HIT = {
+    "Bullet Seed": (2, 5, 3.17), "Icicle Spear": (2, 5, 3.17), "Rock Blast": (2, 5, 3.17),
+    "Pin Missile": (2, 5, 3.17), "Bone Rush": (2, 5, 3.17), "Tail Slap": (2, 5, 3.17),
+    "Scale Shot": (2, 5, 3.17), "Arm Thrust": (2, 5, 3.17), "Barrage": (2, 5, 3.17),
+    "Double Hit": (2, 2, 2.0), "Dual Wingbeat": (2, 2, 2.0), "Double Kick": (2, 2, 2.0),
+    "Twineedle": (2, 2, 2.0), "Gear Grind": (2, 2, 2.0), "Dragon Darts": (2, 2, 2.0),
+    "Population Bomb": (1, 10, 1.0),
+}
+
+
+def hit_count_for(move_name: str, attacker: "Combatant") -> float:
+    """How many times this move hits, for this tool's aggregate-damage model
+    (total damage = hits * single-hit damage). Population Bomb is a flat 10
+    hits with Wide Lens (Skill Link-style guaranteed count), otherwise it's
+    too unreliable to plan around and is treated as a single hit -- matching
+    it being excluded from candidate movesets without Wide Lens in the first
+    place (optimize_sets.candidate_moves)."""
+    if move_name == "Population Bomb":
+        return 10 if attacker.item == "Wide Lens" else 1
+    entry = MULTI_HIT.get(move_name)
+    return entry[2] if entry else 1
+
+
 def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
                  attacker: Combatant, defender: Combatant, move: MoveInfo,
                  typechart: dict, weather: str | None = None, auras=None,

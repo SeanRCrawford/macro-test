@@ -70,9 +70,10 @@ def mega_evolve(combatant: Combatant):
     combatant.mega_evolved = True
 
 
-def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_state: FieldState):
-    """Trigger switch-in abilities (Intimidate, weather setters) for a Pokemon
-    entering the field.
+def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_state: FieldState,
+                  ally: Combatant | None = None, log=None):
+    """Trigger switch-in abilities (Intimidate, weather setters, Hospitality)
+    for a Pokemon entering the field.
 
     NOTE: Mega Evolution is deliberately NOT done here. It is resolved by
     Battle._resolve_mega_evolutions() after ALL switches on both sides have
@@ -90,6 +91,13 @@ def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_st
         for foe in opposing_active:
             if foe is not None:
                 apply_intimidate(foe)
+    if entering.ability == "Hospitality" and ally is not None and not ally.fainted:
+        heal = int(round(entering.max_hp() * 0.25))
+        before = ally.current_hp
+        ally.current_hp = min(ally.max_hp(), ally.current_hp + heal)
+        healed = ally.current_hp - before
+        if healed and log is not None:
+            log.add(f"{entering.name}'s Hospitality restored {healed} HP to {ally.name}!")
     if entering.ability in WEATHER_SETTERS:
         new_weather = WEATHER_SETTERS[entering.ability]
         # A same-weather setter switching in does NOT refresh the duration --
@@ -229,7 +237,10 @@ def resolve_damage_action(action: Action, field_state: FieldState, typechart: di
 
         def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
 
-        side_screens = field_state.screens_p2 if attacker in () else None  # set by caller normally
+        # NOTE: this standalone demo function doesn't track which side is which
+        # (no Battle/Side objects here), so screens are not modeled -- the real,
+        # live screens implementation is battle.Battle (Side.screens_reflect/
+        # screens_lightscreen/screens_auroraveil + Battle._set_screen).
         mn, mx, avg, eff = damage_roll(
             50, action.move.power, atk_stat, def_stat, attacker, target, action.move,
             typechart, weather=field_state.weather, num_targets_hit=num_hit,

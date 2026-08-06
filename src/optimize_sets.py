@@ -19,7 +19,7 @@ Treat it as set selection, then let the real solver judge the team.
 """
 import itertools
 
-from damage import MoveInfo, effective_stat, damage_roll
+from damage import MoveInfo, effective_stat, damage_roll, hit_count_for
 from combatants import make_combatant
 
 # NOTE: there is deliberately no hardcoded catalogue of "good items" here.
@@ -65,7 +65,14 @@ UTILITY_VALUE = {
     "Follow Me": 0.75, "Rage Powder": 0.75,
     "Helping Hand": 0.35, "Parting Shot": 0.45, "Will-O-Wisp": 0.40,
     "Thunder Wave": 0.45, "Taunt": 0.35, "Encore": 0.35,
+    # Reflect/Light Screen halve one damage category doubles-adjusted (2732/4096,
+    # see damage.damage_roll); Aurora Veil does both at once but needs snow.
+    # Boosted further below when the holder carries Light Clay (8 turns vs 5) --
+    # this is what makes a Grimmsnarl screens-then-Parting-Shot line score
+    # correctly instead of reading as "rarely attacks" filler.
+    "Reflect": 0.55, "Light Screen": 0.55, "Aurora Veil": 0.75,
 }
+LIGHT_CLAY_SCREEN_MULT = 1.4  # 8 turns vs 5
 
 
 def legal_items(name, merged, min_usage=MIN_ITEM_USAGE):
@@ -115,7 +122,7 @@ def _accuracy_ok(move_raw, name, merged, team_weather=None):
     return False
 
 
-def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None):
+def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None, item=None):
     """All reasonably-used moves for this Pokemon, as (MoveInfo, usage%)."""
     out = []
     for mv, pct in merged[name]["moves_usage"]:
@@ -125,6 +132,11 @@ def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None
         if k not in moves_db:
             continue
         if not _accuracy_ok(moves_db[k], name, merged, team_weather):
+            continue
+        # Population Bomb's hit count (and therefore its whole value) depends on
+        # Wide Lens -- without it, treat it as too unreliable to plan around
+        # (use Super Fang or similar instead), same rule as the <80%-accuracy filter.
+        if mv == "Population Bomb" and item != "Wide Lens":
             continue
         out.append((_mk_move(moves_db[k]), pct))
     return out[:max_candidates]
@@ -140,7 +152,7 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
     """
     attacker = make_combatant(name, merged, natures, item=item)
     table = {}
-    for move, pct in candidate_moves(name, merged, moves_db):
+    for move, pct in candidate_moves(name, merged, moves_db, item=item):
         row = {}
         for en in enemy_names:
             defender = make_combatant(en, merged, natures)
@@ -148,7 +160,10 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
                 # Utility value if we know this move matters in doubles, else a small
                 # usage-weighted default. NOT scaled down by usage for the known ones --
                 # Protect being "only" 34% used doesn't make it a bad move.
-                row[en] = UTILITY_VALUE.get(move.name, 0.22 * (pct / 100.0))
+                val = UTILITY_VALUE.get(move.name, 0.22 * (pct / 100.0))
+                if move.name in ("Reflect", "Light Screen", "Aurora Veil") and item == "Light Clay":
+                    val *= LIGHT_CLAY_SCREEN_MULT
+                row[en] = val
                 continue
             atk_key = "atk" if move.category == "Physical" else "spa"
             def_key = "def" if move.category == "Physical" else "spd"
@@ -159,6 +174,7 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
                 a *= 1.5
             d = effective_stat(defender.stats[def_key], 0)
             _, _, avg, eff = damage_roll(50, move.power, a, d, attacker, defender, move, typechart)
+            avg *= hit_count_for(move.name, attacker)
             frac = avg / defender.stats["hp"] if defender.stats["hp"] else 0.0
             if frac >= 1.0:
                 frac = 1.0 + 0.5  # OHKO bonus
