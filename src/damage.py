@@ -129,6 +129,12 @@ class MoveInfo:
     volatile_status: str | None = None  # e.g. 'followme', 'ragepowder', 'protect'
     flags: dict | None = None           # showdown move flags (slicing, punch, contact, bite, ...)
     has_crash: bool = False            # High Jump Kick style crash damage on miss (not modeled)
+    self_switch: bool | str | None = None  # raw showdown 'selfSwitch': True (U-turn, Volt Switch,
+                                            # Parting Shot, Flip Turn, Chilly Reception), or a string
+                                            # for a variant effect ('copyvolatile' = Baton Pass passes
+                                            # stat stages/volatiles, 'shedtail' = Shed Tail leaves a
+                                            # Substitute) -- only the switch itself is modeled here,
+                                            # not those extra pass-along effects.
 
 
 def is_spread_move(move_target: str) -> bool:
