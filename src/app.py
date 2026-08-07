@@ -1102,18 +1102,63 @@ with tab_battle:
         with st.spinner("Trying EV/item/move swaps..."):
             res = salvage_losing_matchup(lo4, lt4, merged, moves, natures, typechart, lturns,
                                           our_sets=st.session_state.get("sets", {}))
-        bw, bt = res["baseline"]
-        bw_label = {"p1": "WIN", "p2": "LOSS"}.get(bw, bw.upper())
-        st.caption(f"Baseline: {bw_label} in {bt} turns")
-        if res["fixes"]:
-            frows = [{"Pokemon": f["mon"], "Change type": f["kind"], "Change": f["change"],
-                      "New result": {"p1": "WIN", "p2": "LOSS"}.get(f["winner"], f["winner"].upper()),
-                      "Turns": f["turns"]} for f in res["fixes"]]
-            st.dataframe(pd.DataFrame(frows), width='stretch', hide_index=True)
-        else:
-            st.info("No single EV/item/move swap tried here flipped the result.")
+        st.session_state["salvage_result"] = res
+        st.session_state["salvage_matchup"] = last
     elif not last:
         st.caption("Run Simulate above first.")
+
+    sres = st.session_state.get("salvage_result")
+    if sres and st.session_state.get("salvage_matchup") == last:
+        bw, bt = sres["baseline"]
+        bw_label = {"p1": "WIN", "p2": "LOSS"}.get(bw, bw.upper())
+        st.caption(f"Baseline: {bw_label} in {bt} turns")
+        if not sres["fixes"]:
+            st.info("No single EV/item/move swap tried here flipped the result.")
+        else:
+            FIELD_FOR_KIND = {"evs": "evs", "item": "item", "support": "moves", "setup": "moves"}
+
+            def _apply_fixes(fix_list):
+                cur = dict(st.session_state.get("sets", {}))
+                for f in fix_list:
+                    field = FIELD_FOR_KIND[f["kind"]]
+                    mon_spec = dict(cur.get(f["mon"]) or {})
+                    mon_spec[field] = f["new_spec"][field]
+                    cur[f["mon"]] = mon_spec
+                st.session_state["sets"] = cur
+
+            st.caption("Apply a fix to try it live -- it updates the sets used everywhere else "
+                       "in the app (Team Builder, searches, ...) for this session. 'Save' on top "
+                       "of that writes it to a team file, so it survives a restart.")
+            for i, f in enumerate(sres["fixes"]):
+                fc1, fc2 = st.columns([5, 1])
+                result_label = {"p1": "WIN", "p2": "LOSS"}.get(f["winner"], f["winner"].upper())
+                fc1.write(f"**{f['mon']}** ({f['kind']}): {f['change']} → "
+                          f"{result_label} (turn {f['turns']})")
+                if fc2.button("Apply", key=f"sv_apply_{i}", width='stretch'):
+                    _apply_fixes([f])
+                    st.rerun()
+            if st.button("Apply ALL fixes", key="sv_apply_all"):
+                _apply_fixes(sres["fixes"])
+                st.rerun()
+
+            cur_sets = st.session_state.get("sets", {})
+            lo4, lt4, lturns = last
+            from matchup_search import play_out_worst_case as _pow
+            w2, t2, btl2 = _pow(lo4, lt4, merged, moves, natures, typechart, lturns,
+                                 our_sets=cur_sets)
+            w2_label = {"p1": "WIN", "p2": "LOSS"}.get(w2, w2.upper())
+            st.metric("This matchup with your CURRENT session sets", f"{w2_label} (turn {t2})",
+                      help="Reflects whatever's currently applied, including any fixes clicked "
+                           "above -- re-check this after each Apply.")
+
+            st.markdown("**Save current sets permanently (overwrites a team file)**")
+            sv_fname = st.text_input("Save as", value=st.session_state.get("save_name", "team.json"),
+                                      key="salvage_save_name")
+            if st.button("Save", key="salvage_save_btn"):
+                from team_sheet import save_team
+                fn = sv_fname if sv_fname.endswith(".json") else sv_fname + ".json"
+                save_team(ROOT / fn, get_state_team(), cur_sets)
+                st.success(f"Saved to {ROOT / fn}")
 
 
 # ------------------------------------------------------------------ vs team
