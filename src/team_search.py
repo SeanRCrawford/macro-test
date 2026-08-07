@@ -359,7 +359,8 @@ def team_items(team, merged):
         p = merged[n]
         item = p["items_usage"][0][0] if p["items_usage"] else "(none)"
         item_pct = p["items_usage"][0][1] if p["items_usage"] else 0.0
-        ability = p["abilities_usage"][0][0] if p["abilities_usage"] else "(none)"
+        from combatants import _default_ability
+        ability = _default_ability(p["abilities_usage"]) if p["abilities_usage"] else "(none)"
         ability_pct = p["abilities_usage"][0][1] if p["abilities_usage"] else 0.0
         moves = [m for m, _ in p["moves_usage"][:4]]
         rows.append({

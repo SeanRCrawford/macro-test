@@ -53,7 +53,8 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
                               self_effect=m.get("self"), boosts=m.get("boosts"),
                               recoil=m.get("recoil"), drain=m.get("drain"),
                               has_crash=bool(m.get("hasCrashDamage")),
-                              volatile_status=m.get("volatileStatus"), flags=m.get("flags")), pct))
+                              volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
+                              self_switch=m.get("selfSwitch")), pct))
     if only_moves:
         # Explicit set supplied (e.g. an optimised team sheet) -- use exactly these,
         # preserving the given order, ignoring usage ranking and top_k.

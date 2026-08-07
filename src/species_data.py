@@ -161,13 +161,24 @@ def load_roster():
     return out
 
 
-def load_teams(with_meta=False):
-    """Rosters from teams.csv.
+def load_teams(with_meta=False, merged=None):
+    """Rosters from teams.csv, plus any custom teams dropped into data/teams/*.txt
+    as raw Showdown-export pastes (pokepast.es "Export" text) -- a reusable way
+    to add a specific known enemy team (exact sets and all) alongside the
+    usage-derived teams.csv entries, without editing teams.csv by hand.
 
-    with_meta=True also returns {team: {"lead": [a, b] or None, "note": str}}.
-    A team may declare a FIXED LEAD (e.g. "Incineroar+Farigiraf") when its whole
-    plan depends on one specific opening -- searching all 15 lead pairs for such
-    a team wastes time on brings it would never make.
+    with_meta=True also returns {team: {"lead": [a, b] or None, "note": str,
+    "sets": {name: {...}} or None}}. A team may declare a FIXED LEAD (e.g.
+    "Incineroar+Farigiraf") when its whole plan depends on one specific
+    opening -- searching all 15 lead pairs for such a team wastes time on
+    brings it would never make. "sets" carries exact item/ability/nature/EVs/
+    moves overrides for a custom pasted team (None for ordinary teams.csv rows,
+    which use usage-derived defaults).
+
+    merged: pass species_data.build_merged_dataset()'s `merged` dict to enable
+    parsing data/teams/*.txt (needed to resolve "Species + Stone item" into
+    this codebase's "Mega Species" roster names). Without it, custom team
+    files are skipped -- only teams.csv is loaded.
     """
     df = pd.read_csv(DATA_DIR / "teams.csv")
     teams, meta = {}, {}
@@ -182,8 +193,100 @@ def load_teams(with_meta=False):
             if len(parts) == 2 and all(p in members for p in parts):
                 lead = parts
         note = row.get("Note") if "Note" in df.columns else ""
-        meta[name] = {"lead": lead, "note": note if isinstance(note, str) else ""}
+        meta[name] = {"lead": lead, "note": note if isinstance(note, str) else "", "sets": None}
+
+    teams_dir = DATA_DIR / "teams"
+    if merged is not None and teams_dir.is_dir():
+        for f in sorted(teams_dir.glob("*.txt")):
+            text = f.read_text()
+            if not text.strip():
+                continue
+            names, sets = custom_team_from_export(text, merged)
+            if not names:
+                continue
+            team_name = f.stem.replace("_", " ").replace("-", " ").title()
+            teams[team_name] = names
+            meta[team_name] = {"lead": None, "note": f"Custom team ({f.name})", "sets": sets}
+
     return (teams, meta) if with_meta else teams
+
+
+def parse_showdown_export(text: str) -> list[dict]:
+    """Parse Showdown export-format text (pokepast.es "Export" / "Paste" view)
+    into a list of per-mon dicts: {"species", "item", "ability", "nature",
+    "evs": {hp,atk,def,spa,spd,spe} or None, "moves": [...]}. Blank lines
+    separate mons; unrecognised lines (Level/Shiny/Tera Type/IVs/...) are
+    ignored since this tool doesn't model them."""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", text.strip()) if b.strip()]
+    stat_keys = {"hp": "hp", "atk": "atk", "def": "def", "spa": "spa", "spd": "spd", "spe": "spe"}
+    mons = []
+    for block in blocks:
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if not lines:
+            continue
+        mon = {"species": None, "item": None, "ability": None, "nature": None,
+               "evs": None, "moves": []}
+        m = re.match(r"^(.*?)\s*@\s*(.+)$", lines[0])
+        species_part = m.group(1).strip() if m else lines[0].strip()
+        if m:
+            mon["item"] = m.group(2).strip()
+        gm = re.match(r"^(.*?)\s*\([MF]\)$", species_part)
+        if gm:
+            species_part = gm.group(1).strip()
+        # "Nickname (Species)" form -- keep only the parenthesised real species.
+        nm = re.match(r"^.+\(([^()]+)\)$", species_part)
+        if nm:
+            species_part = nm.group(1).strip()
+        mon["species"] = species_part
+        for line in lines[1:]:
+            if line.startswith("Ability:"):
+                mon["ability"] = line.split(":", 1)[1].strip()
+            elif line.startswith("EVs:"):
+                evs = {"hp": 0, "atk": 0, "def": 0, "spa": 0, "spd": 0, "spe": 0}
+                for part in line.split(":", 1)[1].split("/"):
+                    pm = re.match(r"^\s*(\d+)\s+(\w+)\s*$", part)
+                    if pm and pm.group(2).lower() in stat_keys:
+                        evs[stat_keys[pm.group(2).lower()]] = int(pm.group(1))
+                mon["evs"] = evs
+            elif line.endswith("Nature"):
+                mon["nature"] = line.split()[0].strip()
+            elif line.startswith("- "):
+                mon["moves"].append(line[2:].strip())
+        if mon["species"]:
+            mons.append(mon)
+    return mons
+
+
+def custom_team_from_export(text: str, merged: dict) -> tuple[list, dict]:
+    """Turn parsed Showdown-export mons into (roster_names, sets) in this
+    codebase's convention: a base species holding its Mega Stone becomes the
+    "Mega X" roster name (matching how teams.csv/mbsmogon.xlsx name Megas),
+    and per-mon sets carry only the fields the paste actually specified so
+    everything else still falls back to usage-derived defaults."""
+    mons = parse_showdown_export(text)
+    names, sets = [], {}
+    for mon in mons:
+        species, item = mon["species"], mon["item"]
+        name = species
+        if item:
+            for cand in (f"Mega {species}", f"Mega {species} X", f"Mega {species} Y"):
+                if cand in merged and find_mega_stone(cand, merged) == item:
+                    name = cand
+                    break
+        spec = {}
+        if mon["item"]:
+            spec["item"] = mon["item"]
+        if mon["ability"]:
+            spec["ability"] = mon["ability"]
+        if mon["nature"]:
+            spec["nature"] = mon["nature"]
+        if mon["evs"]:
+            spec["evs"] = mon["evs"]
+        if mon["moves"]:
+            spec["moves"] = mon["moves"]
+        names.append(name)
+        sets[name] = spec
+    return names, sets
 
 
 def fixed_lead(team_name, meta):

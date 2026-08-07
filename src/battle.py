@@ -107,7 +107,8 @@ class Battle:
                          self_effect=m.get("self"), boosts=m.get("boosts"),
                          recoil=m.get("recoil"), drain=m.get("drain"),
                          has_crash=bool(m.get("hasCrashDamage")),
-                         volatile_status=m.get("volatileStatus"), flags=m.get("flags"))
+                         volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
+                         self_switch=m.get("selfSwitch"))
 
     def _roll(self, min_v, max_v, avg_v):
         # force_roll lets a caller demand worst-case ('min') or best-case ('max')
@@ -796,6 +797,13 @@ class Battle:
                        target_hp_after=attacker.current_hp, target_max_hp=attacker.max_hp(),
                        fainted=attacker.fainted)
 
+        # Self-switch damaging moves (U-turn, Volt Switch, Flip Turn): pivot out
+        # after the hit lands, same repositioning value as Parting Shot -- see
+        # _voluntary_switch_out. The Status self-switch moves are handled in
+        # _resolve_status_move.
+        if move.self_switch and not attacker.fainted:
+            self._voluntary_switch_out(attacker, action.side)
+
     @staticmethod
     def _fmt_boosts(changed: dict) -> str:
         names = {"atk": "Attack", "def": "Defense", "spa": "Sp. Atk", "spd": "Sp. Def", "spe": "Speed"}
@@ -852,8 +860,7 @@ class Battle:
             for foe in opp_side.active:
                 if foe and not foe.fainted:
                     apply_intimidate(foe)  # -1 Atk (or Defiant/Competitive interaction), same as Intimidate math
-            self.log.add(f"{attacker.name} used Parting Shot, rattling the foe's stats "
-                          f"(switch-out not modeled -- attacker stays in)")
+            self.log.add(f"{attacker.name} used Parting Shot, rattling the foe's stats!")
             self._emit(event="parting_shot", side=action.side, actor=attacker.name)
         elif move.name == "Helping Hand":
             ally = next((c for c in side.active if c is not None and c is not attacker
@@ -898,6 +905,50 @@ class Battle:
         else:
             self.log.add(f"{attacker.name} uses {move.name} (effect not modeled yet)")
             self._emit(event="status_move_unmodeled", side=action.side, actor=attacker.name, move=move.name)
+
+        # Self-switch (U-turn/Volt Switch handle their own copy in _resolve_move,
+        # since they're damaging; this covers the Status ones -- Parting Shot,
+        # Baton Pass, Chilly Reception, Shed Tail. Only the switch itself is
+        # modeled for the latter three, not their extra pass-along effects.
+        if move.self_switch and not attacker.fainted:
+            self._voluntary_switch_out(attacker, action.side)
+
+    def _voluntary_switch_out(self, outgoing: Combatant, action_side: str):
+        """A self-switch move (U-turn, Volt Switch, Parting Shot, Flip Turn,
+        Chilly Reception, Baton Pass, Shed Tail -- see MoveInfo.self_switch)
+        just resolved; bring in the best bench replacement for `outgoing`,
+        MID-TURN rather than at the end like a faint-replacement.
+
+        This is what gives these moves their real repositioning value: unlike
+        a forced end-of-turn replacement (which is safe until next turn), a
+        mid-turn switch-in is exposed to the rest of THIS turn's still-to-act
+        moves -- e.g. a partner's spread move, or a faster attacker later in
+        turn order can still hit whatever just came in. Escaping a bad
+        matchup or bringing in a check still costs the tempo of the move
+        itself, but doesn't buy the safety a KO-forced replacement does.
+        """
+        side = self.side_of(outgoing)
+        opp = self.p2 if side is self.p1 else self.p1
+        if outgoing not in side.active:
+            return
+        slot = side.active.index(outgoing)
+        alive_bench = [b for b in side.bench if not b.fainted]
+        if not alive_bench:
+            return
+        incoming = self._best_replacement(alive_bench, opp.active)
+        side.bench[:] = [b for b in side.bench if b is not incoming]
+        if not outgoing.fainted:
+            side.bench.append(outgoing)
+        side.active[slot] = incoming
+        # Same bookkeeping as a voluntary pre-turn switch: later actions this turn
+        # aimed at `outgoing` should follow the SLOT and hit `incoming` instead.
+        self._departed_slots[id(outgoing)] = (side.name, slot)
+        ally = side.active[1 - slot] if len(side.active) == 2 else None
+        on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
+        incoming.choice_locked_move = None
+        self.log.add(f"{self.tag(outgoing)} pivots out -> {self.tag(incoming)}")
+        self._emit(event="switch", side=action_side, out=outgoing.name, incoming=incoming.name,
+                   ability_after=incoming.ability, weather_after=self.field.weather)
 
     def _best_replacement(self, alive_bench, opposing_actives):
         """Which bench member is the best strategic answer to what's currently

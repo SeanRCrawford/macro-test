@@ -190,7 +190,8 @@ def _mk_move(m):
                      priority=m.get("priority", 0), secondary=m.get("secondary"),
                      self_effect=m.get("self"), boosts=m.get("boosts"),
                      recoil=m.get("recoil"), drain=m.get("drain"),
-                     volatile_status=m.get("volatileStatus"), flags=m.get("flags"))
+                     volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
+                     self_switch=m.get("selfSwitch"))
 
 
 NEVER_MISS_ABILITIES = {"No Guard"}
@@ -207,8 +208,8 @@ def _accuracy_ok(move_raw, name, merged, team_weather=None):
     acc = move_raw.get("accuracy", True)
     if acc is True or acc >= 80:
         return True
-    ability = (merged[name]["abilities_usage"][0][0]
-               if merged[name]["abilities_usage"] else "")
+    from combatants import _default_ability
+    ability = _default_ability(merged[name]["abilities_usage"])
     if ability in NEVER_MISS_ABILITIES:
         return True
     need = WEATHER_PERFECT_ACCURACY.get(move_raw.get("name"))

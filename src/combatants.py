@@ -44,6 +44,23 @@ def make_combatant(name: str, merged: dict, natures: dict, pokedex: dict | None 
                              evs, nature)
 
 
+def _default_ability(abilities_usage: list) -> str:
+    """Most-used ability, skipping 'No Ability' -- a data artifact on several
+    of mbsmogon.xlsx's custom Mega rows (Mega Raichu X/Y, Mega Staraptor, ...)
+    where the sheet apparently didn't log a real Mega-exclusive ability for
+    every set. A Mega Evolution always has exactly one ability in the actual
+    games, so treating this placeholder as if it were real ability data would
+    silently drop the mon's genuine (if less-used) recorded ability -- e.g.
+    Mega Raichu Y's No Guard (19% usage), which is what makes its Zap Cannon
+    (normally 50% accurate) a fully reliable guaranteed-paralysis attack.
+    Falls back to 'No Ability' itself only if nothing else is on record.
+    """
+    for name, _pct in abilities_usage:
+        if name != "No Ability":
+            return name
+    return abilities_usage[0][0] if abilities_usage else ""
+
+
 def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | None = None,
                       ability: str | None = None, item: str | None = None,
                       force_base_form: bool = False, evs: dict | None = None,
@@ -51,14 +68,14 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
     p = merged[name]
     nat = natures[(nature or p["nature"]).lower()]
     ev_points = evs if evs is not None else p["evs"]
-    ab = ability or (p["abilities_usage"][0][0] if p["abilities_usage"] else "")
+    usage_ability = _default_ability(p["abilities_usage"])
     it = item or (p["items_usage"][0][0] if p["items_usage"] else "")
 
     base_name = base_form_name(name)
     if base_name is None:
         # Regular (non-Mega) Pokemon -- single form for the whole battle.
         stats = compute_stats(p["base_stats"], nat, ev_points)
-        return Combatant(name=name, stats=stats, types=p["types"], ability=ab, item=it)
+        return Combatant(name=name, stats=stats, types=p["types"], ability=ability or usage_ability, item=it)
 
     # Mega pick: compute BOTH forms up front. Base form is what it starts
     # battle as; mega form is applied by engine.mega_evolve() on switch-in
@@ -66,13 +83,21 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
     # Mega actually transforming, so this pick runs in base form all game).
     mega_stats = compute_stats(p["base_stats"], nat, ev_points)
     mega_types = p["types"]
-    mega_ability = ab  # the mega-exclusive ability (e.g. Drought), already correct from mbsmogon.xlsx
+    # The mega-exclusive ability (e.g. Drought) always comes from mbsmogon.xlsx's
+    # "Mega X" row, never from an `ability` override: a Showdown-export paste's
+    # "Ability:" line for a Mega-stone holder is always its BASE-forme ability
+    # (that's what it starts battle with -- Showdown doesn't expose a
+    # mega-exclusive ability choice at team-build time), so `ability` overrides
+    # base_ability below instead.
+    mega_ability = usage_ability
 
     if base_name in merged:
         base_rec = merged[base_name]
         base_stats_table = base_rec["base_stats"]
         base_types = base_rec["types"]
-        base_ability = base_rec["abilities_usage"][0][0] if base_rec["abilities_usage"] else mega_ability
+        base_usage_default = (_default_ability(base_rec["abilities_usage"])
+                               if base_rec["abilities_usage"] else mega_ability)
+        base_ability = ability or base_usage_default
     else:
         # Base species isn't in mbsmogon.xlsx (not played un-mega'd) -- fall back
         # to Showdown's pokedex for its base stats/types/ability directly.
@@ -83,11 +108,14 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
         if sdata is None:
             print(f"WARNING: could not resolve base form '{base_name}' for '{name}' -- "
                   f"treating as already Mega-evolved from turn 1 (inaccurate).")
-            base_stats_table, base_types, base_ability = p["base_stats"], p["types"], mega_ability
+            base_stats_table, base_types = p["base_stats"], p["types"]
+            base_ability = ability or mega_ability
         else:
             base_stats_table = sdata["baseStats"]
             base_types = sdata["types"]
-            base_ability = list(sdata.get("abilities", {}).values())[0] if sdata.get("abilities") else mega_ability
+            base_usage_default = (list(sdata.get("abilities", {}).values())[0]
+                                   if sdata.get("abilities") else mega_ability)
+            base_ability = ability or base_usage_default
 
     base_stats = compute_stats(base_stats_table, nat, ev_points)
 
@@ -128,7 +156,7 @@ def make_team(names: list[str], merged: dict, natures: dict, pokedex: dict | Non
     for n in names:
         spec = sets.get(n) or {}
         out.append(make_combatant(n, merged, natures, pokedex=pokedex,
-                                   item=spec.get("item"),
+                                   item=spec.get("item"), ability=spec.get("ability"),
                                    force_base_form=(n in forced_base),
                                    evs=spec.get("evs"), nature=spec.get("nature")))
     return out

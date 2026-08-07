@@ -57,14 +57,14 @@ def load_all(fingerprint):
 
 
 @st.cache_data
-def load_teams_csv(fingerprint=None):
+def load_teams_csv(fingerprint=None, _merged=None):
     from species_data import load_teams as _lt
-    t, meta = _lt(with_meta=True)
+    t, meta = _lt(with_meta=True, merged=_merged)
     return t, meta
 
 
 merged, unresolved, moves, natures, typechart, dups = load_all(_data_fingerprint())
-teams, team_meta = load_teams_csv(_data_fingerprint())
+teams, team_meta = load_teams_csv(_data_fingerprint(), _merged=merged)
 prefs = load_preferences()
 all_names = sorted(merged.keys())
 
@@ -121,9 +121,10 @@ def team_sheet_df(team, sets=None):
         item = spec.get("item") or (p["items_usage"][0][0] if p["items_usage"] else "-")
         mvs = spec.get("moves") or [m for m, _ in p["moves_usage"][:4]]
         ev = p["evs"]
+        from combatants import _default_ability
         rows.append({
             "Pokemon": n, "Types": "/".join(p["types"]), "Item": item,
-            "Ability": p["abilities_usage"][0][0] if p["abilities_usage"] else "-",
+            "Ability": _default_ability(p["abilities_usage"]) if p["abilities_usage"] else "-",
             "Nature": p["nature"],
             "EVs": "/".join(str(ev[k]) for k in ["hp", "atk", "def", "spa", "spd", "spe"]),
             "Moves": ", ".join(mvs), "Score": round(p["score"], 1) if p["score"] else None,
@@ -676,6 +677,7 @@ with tab_search:
             prog = st.progress(0.0)
             for i, tname in enumerate(chosen):
                 roster = teams[tname]
+                team_esets = {**esets, **(team_meta.get(tname, {}).get("sets") or {})}
                 if all_backs:
                     import scripted_openings as _so
                     _fl = team_meta.get(tname, {}).get('lead')
@@ -685,7 +687,7 @@ with tab_search:
                                                      fixed_lead=_fl,
                                                      enemy_script=_so.script_for(tname),
                                                      script_team=tname if tname in _so.SCRIPTS
-                                                     else None, enemy_sets=esets)
+                                                     else None, enemy_sets=team_esets)
                     results[tname] = {"mode": "all", "robust": rob[0] if rob else None,
                                        "roster": roster}
                 else:
@@ -695,7 +697,7 @@ with tab_search:
                     eb4 = list(lead) + rem[:2]
                     combos = search_best_composition(team, eb4, merged, moves, natures,
                                                       typechart, max_turns, our_sets=sets,
-                                                      enemy_sets=esets)
+                                                      enemy_sets=team_esets)
                     results[tname] = {"mode": "one", "lead": lead, "eb4": eb4,
                                        "combos": combos, "roster": roster}
                 prog.progress((i + 1) / len(chosen), f"{tname} done")
@@ -765,10 +767,13 @@ with tab_search:
             if scripted_chosen:
                 st.markdown("### Turn-1 breakdown by opening variant")
                 st.caption("Fixed-lead opponents run a scripted opening with several variants "
-                           "(e.g. which of your slots it targets). Rather than only the worst "
-                           "case, this shows each variant's turn-1 outcome side by side -- a "
-                           "lead that looks clean against one targeting choice can collapse "
-                           "against another.")
+                           "(which of your slots it targets), plus two practical T1 lines "
+                           "they could take INSTEAD of the script: their best unscripted "
+                           "attack+attack ('greedy'), and either of their two Pokemon "
+                           "Protecting while the other attacks ('protect'). Rather than only "
+                           "the worst case, this shows every option's turn-1 outcome side by "
+                           "side -- a lead that looks clean against one can collapse against "
+                           "another.")
                 t1_tname = st.selectbox("Opponent", scripted_chosen, key="t1bd_tname")
                 if st.button("Show breakdown", key="t1bd_go"):
                     from committed_plan import turn1_breakdown
@@ -777,8 +782,12 @@ with tab_search:
                     with st.spinner("Playing out every opening variant..."):
                         bd = turn1_breakdown(b4, er, merged, moves, natures, typechart, t1_tname,
                                               our_sets=sets)
-                    for idx, d in bd.items():
-                        with st.expander(f"Variant {idx}"):
+                    labels = {"greedy": "Unscripted: their best attack+attack",
+                              "protect_0": "Unscripted: one Protects, the other attacks (choice A)",
+                              "protect_1": "Unscripted: one Protects, the other attacks (choice B)"}
+                    for key, d in bd.items():
+                        title = labels.get(key, f"Scripted variant {key}")
+                        with st.expander(title):
                             st.write("Our turn-1 action:",
                                      [(a[0], a[2], list(a[3])) for a in d["our_action"]])
                             st.write("Their turn-1 action:", d["enemy_action"])
@@ -825,10 +834,12 @@ with tab_search:
                         label = (f"{'LOSS' if lost else 'win '} — vs lead "
                                  f"{lead[0]}/{lead[1]} + back {back[0]}/{back[1]}")
                         with st.expander(label):
+                            _repl_esets = {**(st.session_state.get("enemy_sets_override") or {}),
+                                            **(team_meta.get(tname, {}).get("sets") or {})}
                             w, t, btl, om, tm = play_out_worst_case(
                                 b4, list(lead) + list(back), merged, moves, natures, typechart,
                                 st.session_state.get("search_maxturns", 12),
-                                our_sets=sets, enemy_sets=st.session_state.get("enemy_sets_override"),
+                                our_sets=sets, enemy_sets=_repl_esets,
                                 return_choice=True)
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric("Avg-roll result",
