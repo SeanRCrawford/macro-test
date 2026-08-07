@@ -68,8 +68,38 @@ teams, team_meta = load_teams_csv(_data_fingerprint())
 prefs = load_preferences()
 all_names = sorted(merged.keys())
 
+
+@st.cache_data
+def load_generation_map(fingerprint=None):
+    from species_data import build_generation_map, load_showdown_static
+    pokedex, _, _, _ = load_showdown_static()
+    return build_generation_map(merged.keys(), pokedex)
+
+
+generation_map = load_generation_map(_data_fingerprint())
+
+
+def _build_version_string():
+    """Git commit + commit time, so it's obvious in the deployed app whether
+    you're looking at the latest code -- Streamlit Cloud (and any host) can
+    silently keep serving a stale build if it hasn't redeployed yet."""
+    import subprocess, os
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True,
+            stderr=subprocess.DEVNULL).strip()
+        env = {**os.environ, "TZ": "UTC"}
+        when = subprocess.check_output(
+            ["git", "log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M UTC"],
+            cwd=ROOT, text=True, stderr=subprocess.DEVNULL, env=env).strip()
+        return f"`{sha}` — {when}"
+    except Exception:
+        return "unknown (not a git checkout)"
+
+
 hdr1, hdr2 = st.columns([4, 1])
 hdr1.title("VGC Champions M-B Solver")
+hdr1.caption(f"Build: {_build_version_string()}")
 if hdr2.button("Reload data", help="Re-read mbsmogon.xlsx / roster.csv / teams.csv from disk. "
                                      "Data is normally reloaded automatically when a file changes."):
     st.cache_resource.clear(); st.cache_data.clear(); st.rerun()
@@ -148,12 +178,20 @@ with tab_build:
             st.session_state["sets"] = {}
             st.session_state["team_analysis"] = None
         only_top = st.checkbox("Only show top-100 by Score", value=True)
+        gen_filter = st.multiselect(
+            "Restrict to generation(s)", list(range(1, 10)), default=[], key="tb_gen_filter",
+            help="A form (Mega, regional, ...) counts as its BASE species' generation -- "
+                 "Mega Lucario is gen 4, Arcanine-Hisui is gen 1. Empty = no restriction.")
 
     pool_options = all_names
     if only_top:
         ranked = sorted([n for n in all_names if merged[n].get("score")],
                         key=lambda n: -merged[n]["score"])[:100]
         pool_options = sorted(set(ranked) | set(get_state_team()))
+    if gen_filter:
+        allowed = set(gen_filter)
+        pool_options = sorted(set(n for n in pool_options if generation_map.get(n) in allowed)
+                               | set(get_state_team()))
 
     with c1:
         team = st.multiselect("Your team (choose 6)", pool_options,
@@ -313,6 +351,13 @@ with tab_gen:
     if not use_net:
         max_net = None
 
+    gen_options = list(range(1, 10))
+    allowed_gens = st.multiselect(
+        "Restrict to generation(s)", gen_options, default=[],
+        help="e.g. pick just 3 for gen-3-only, or 1-5 for gen 1 through 5. Empty = no "
+             "restriction (all generations). A form (Mega, regional, ...) counts as its "
+             "BASE species' generation -- Mega Lucario is gen 4, Arcanine-Hisui is gen 1.")
+
     vc1, vc2 = st.columns([2, 1])
     verify_n = vc1.slider("Verify top N with the real solver (slower, trustworthy)", 0, 25, 1,
                            help="Each verified team is re-run through the full engine against "
@@ -327,7 +372,12 @@ with tab_gen:
         from team_search import (build_candidate_pool, enemy_pairs_from_teams, build_pair_matrix,
                                   beam_search_teams)
         prog = st.progress(0.0, "Screening pair matchups...")
-        pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
+        if allowed_gens:
+            pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs,
+                                         allowed_generations=set(allowed_gens),
+                                         generation_map=generation_map)
+        else:
+            pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
         eps = enemy_pairs_from_teams(teams)
         t0 = time.time()
         matrix = build_pair_matrix(pool, eps, merged, moves, natures, typechart,
