@@ -135,6 +135,11 @@ class MoveInfo:
                                             # stat stages/volatiles, 'shedtail' = Shed Tail leaves a
                                             # Substitute) -- only the switch itself is modeled here,
                                             # not those extra pass-along effects.
+    accuracy: bool | int = True            # raw showdown 'accuracy': True = never misses, else 1-100.
+                                            # Battle resolution doesn't roll a miss chance (moves
+                                            # always hit) -- this exists purely so the greedy/candidate
+                                            # move-choice scoring can prefer a more reliable move when
+                                            # two options are otherwise equally good.
 
 
 def is_spread_move(move_target: str) -> bool:
@@ -312,6 +317,11 @@ MULTI_HIT = {
     "Population Bomb": (1, 10, 1.0),
 }
 
+# Two-turn (charge) moves that resolve in a single turn under the right weather
+# instead of spending a turn charging first (see battle.py's charge handling and
+# solver.py/fast_eval.py's move-choice filtering, which both key off this).
+CHARGE_WEATHER_SKIP = {"Solar Beam": "sun", "Solar Blade": "sun", "Electro Shot": "rain"}
+
 
 def hit_count_for(move_name: str, attacker: "Combatant") -> float:
     """How many times this move hits, for this tool's aggregate-damage model
@@ -389,6 +399,19 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     if attacker.ability in ATE and move.move_type == "Normal":
         move = MoveInfo(**{**move.__dict__, "move_type": ATE[attacker.ability]})
         modifier *= 1.2
+
+    # Knock Off: 1.5x if the target holds a removable item. Not a Mega Stone it needs
+    # this battle (Showdown's real exemption list also covers Z-crystals/plates/primal
+    # orbs, not modeled here since this dataset doesn't use them); Sticky Hold still
+    # takes the 1.5x (only the removal, done in battle.py, is blocked). The item is
+    # actually removed in battle.py's move resolution -- this function only computes
+    # the damage multiplier, it doesn't mutate state.
+    if move.name == "Knock Off" and defender.item:
+        low = defender.item.lower()
+        is_stone = (low.endswith("ite") or low.endswith("ite x") or low.endswith("ite y")
+                    or low.endswith("itex") or low.endswith("itey"))
+        if not is_stone:
+            modifier *= 1.5
 
     # Weather Ball: becomes the weather's type at 100 BP.
     if move.name == "Weather Ball" and weather:

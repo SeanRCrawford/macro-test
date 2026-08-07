@@ -178,7 +178,10 @@ with tab_build:
                                          "Mega Skarmory", "Gholdengo"]
             st.session_state["sets"] = {}
             st.session_state["team_analysis"] = None
-        only_top = st.checkbox("Only show top-100 by Score", value=True)
+        only_top = st.checkbox("Only show top-100 by Score", value=False,
+                                help="Off by default -- this is the hand-picking tab, so every "
+                                     "Pokemon should be selectable. Turn on to shorten the list "
+                                     "to the top 100 by roster.csv Score if it's unwieldy.")
         gen_filter = st.multiselect(
             "Restrict to generation(s)", list(range(1, 10)), default=[], key="tb_gen_filter",
             help="A form (Mega, regional, ...) counts as its BASE species' generation -- "
@@ -352,6 +355,21 @@ with tab_gen:
     if not use_net:
         max_net = None
 
+    with st.expander("Must include / exclude / prefer (overrides preferences.csv for this run)"):
+        st.caption("A quick per-run knob instead of editing preferences.csv: 'must include' and "
+                   "'must exclude' are hard constraints (an include is always kept in the "
+                   "candidate pool and every generated team; an exclude never appears at all), "
+                   "'prefer' is a soft tiebreaker. Narrowing the pool this way also cuts search "
+                   "time -- fewer legal combinations to screen.")
+        ic1, ic2, ic3 = st.columns(3)
+        include_sel = ic1.multiselect("Must include", all_names,
+                                       default=[n for n in prefs["include"] if n in all_names])
+        exclude_sel = ic2.multiselect("Must exclude", all_names,
+                                       default=[n for n in prefs["exclude"] if n in all_names])
+        prefer_sel = ic3.multiselect("Prefer (soft)", all_names,
+                                      default=[n for n in prefs["prefer"] if n in all_names])
+        run_prefs = {"include": include_sel, "exclude": exclude_sel, "prefer": prefer_sel}
+
     gen_options = list(range(1, 10))
     allowed_gens = st.multiselect(
         "Restrict to generation(s)", gen_options, default=[],
@@ -401,11 +419,11 @@ with tab_gen:
         from team_search import (build_candidate_pool, enemy_pairs_from_teams, build_pair_matrix,
                                   beam_search_teams)
         if allowed_gens:
-            pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs,
+            pool = build_candidate_pool(merged, top_n=pool_size, prefs=run_prefs,
                                          allowed_generations=set(allowed_gens),
                                          generation_map=generation_map)
         else:
-            pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
+            pool = build_candidate_pool(merged, top_n=pool_size, prefs=run_prefs)
         eps = enemy_pairs_from_teams(teams)
 
         matrix = None
@@ -423,7 +441,7 @@ with tab_gen:
             prog.empty()
 
         finals = beam_search_teams(pool, matrix, eps, merged, beam_width=beam,
-                                    must_include=prefs["include"], prefer=prefs["prefer"])
+                                    must_include=run_prefs["include"], prefer=run_prefs["prefer"])
 
         if not finals:
             st.error("No valid teams found -- try a larger pool size.")
@@ -865,16 +883,33 @@ with tab_search:
                         with st.expander(label):
                             _repl_esets = {**(st.session_state.get("enemy_sets_override") or {}),
                                             **(team_meta.get(tname, {}).get("sets") or {})}
-                            w, t, btl, om, tm = play_out_worst_case(
+                            # play_scripted_worst_case tries every opening variant this
+                            # opponent has (its rehearsed script(s), the generic Protect/
+                            # attack alternative, and the plain greedy 2v2 -- see
+                            # scripted_openings.all_scripts) and returns whichever was
+                            # worst for us, so a fixed-lead team's replay actually shows
+                            # its real scripted line playing out turn by turn, not an
+                            # unscripted approximation. Degrades to plain greedy for any
+                            # opponent with no script.
+                            from matchup_search import play_scripted_worst_case
+                            w, t, btl, variant_idx = play_scripted_worst_case(
                                 b4, list(lead) + list(back), merged, moves, natures, typechart,
-                                st.session_state.get("search_maxturns", 12),
-                                our_sets=sets, enemy_sets=_repl_esets,
-                                return_choice=True)
+                                tname, st.session_state.get("search_maxturns", 12),
+                                our_sets=sets, enemy_sets=_repl_esets)
+                            om = next((c.name for c in btl.p1.roster
+                                       if c.is_mega_pick and c.mega_evolved), None)
+                            tm = next((c.name for c in btl.p2.roster
+                                       if c.is_mega_pick and c.mega_evolved), None)
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric("Avg-roll result",
                                       {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()))
                             c2.metric("Turns", t)
                             c3.metric("Megas", f"{om or '-'} / {tm or '-'}")
+                            if variant_idx is not None:
+                                vlabel = {"protect0": "generic Protect+attack (A)",
+                                          "protect1": "generic Protect+attack (B)"}.get(
+                                              variant_idx, f"scripted opening #{variant_idx}")
+                                st.caption(f"Worst-case opening: {vlabel}")
                             if btl.speed_ties:
                                 c4.metric("Speed ties", len(btl.speed_ties),
                                           help=", ".join(f"{a} vs {bb} (T{tt})"
@@ -932,14 +967,25 @@ with tab_battle:
                              "rolls and can hide a matchup that is actually a coin toss.")
 
     if st.button("Simulate", type="primary") and len(our4) == 4 and len(their4) == 4:
-        from matchup_search import play_out_worst_case
-        w, t, btl, ourm, theirm = play_out_worst_case(
-            our4, their4, merged, moves, natures, typechart, turns,
-            our_sets=st.session_state.get("sets", {}), return_choice=True)
+        # play_scripted_worst_case tries every opening variant the opponent team has
+        # (rehearsed script(s), generic Protect/attack alternative, plain greedy) and
+        # keeps whichever is worst for us -- degrades to plain greedy for a team with
+        # no script, so this is safe to call unconditionally.
+        from matchup_search import play_scripted_worst_case
+        w, t, btl, variant_idx = play_scripted_worst_case(
+            our4, their4, merged, moves, natures, typechart, opp, turns,
+            our_sets=st.session_state.get("sets", {}))
+        ourm = next((c.name for c in btl.p1.roster if c.is_mega_pick and c.mega_evolved), None)
+        theirm = next((c.name for c in btl.p2.roster if c.is_mega_pick and c.mega_evolved), None)
         r1, r2, r3 = st.columns(3)
         r1.metric("Result", {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()))
         r2.metric("Turns", t)
         r3.metric("Mega choice", f"{ourm or '-'} vs {theirm or '-'}")
+        if variant_idx is not None:
+            vlabel = {"protect0": "generic Protect+attack (A)",
+                      "protect1": "generic Protect+attack (B)"}.get(
+                          variant_idx, f"scripted opening #{variant_idx}")
+            st.caption(f"Worst-case opening: {vlabel}")
 
         if n_roll:
             from matchup_search import evaluate_risk, evaluate_tie_branches

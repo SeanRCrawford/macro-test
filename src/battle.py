@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 import random
 
 from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
-                     apply_boosts, effective_stat, hit_count_for)
+                     apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS)
 
@@ -108,7 +108,7 @@ class Battle:
                          recoil=m.get("recoil"), drain=m.get("drain"),
                          has_crash=bool(m.get("hasCrashDamage")),
                          volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                         self_switch=m.get("selfSwitch"))
+                         self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True))
 
     def _roll(self, min_v, max_v, avg_v):
         # force_roll lets a caller demand worst-case ('min') or best-case ('max')
@@ -596,8 +596,6 @@ class Battle:
                 out.append(pick)
         return out
 
-    CHARGE_WEATHER_SKIP = {"Solar Beam": "sun", "Solar Blade": "sun", "Electro Shot": "rain"}
-
     def _resolve_move(self, action: Action):
         attacker = action.combatant
         move = action.move
@@ -618,7 +616,7 @@ class Battle:
                     self.log.add(f"{self.tag(attacker)}'s {self._fmt_boosts(changed)}")
                     self._emit(event="stat_change", side=action.side, actor=attacker.name,
                                detail=self._fmt_boosts(changed), source=f"{move.name} (self)")
-            skip_weather = self.CHARGE_WEATHER_SKIP.get(move.name)
+            skip_weather = CHARGE_WEATHER_SKIP.get(move.name)
             if not (skip_weather and self.field.weather == skip_weather):
                 attacker.volatile["charging_move"] = move.name
                 attacker.volatile["charging_target_names"] = [t.name for t in action.targets]
@@ -722,6 +720,22 @@ class Battle:
                            target_max_hp=target.max_hp())
             self._check_berry(target)   # pinch berries trigger right after the hit lands
             self._check_berry(target)   # after the damage line, so the log reads in order
+
+            # Knock Off strips a removable item on hit (the matching 1.5x power boost
+            # is in damage_roll) -- not a Mega Stone the target needs this battle, and
+            # Sticky Hold blocks the removal outright (the 1.5x power still applies).
+            if move.name == "Knock Off" and target.item and target.ability != "Sticky Hold" \
+                    and dmg_applied > 0 and not target.fainted:
+                low = target.item.lower()
+                is_stone = (low.endswith("ite") or low.endswith("ite x") or low.endswith("ite y")
+                            or low.endswith("itex") or low.endswith("itey"))
+                if not is_stone:
+                    knocked = target.item
+                    target.item = ""
+                    self.log.add(f"{self.tag(target)} lost its {knocked} to Knock Off!")
+                    self._emit(event="knock_off", side=self.side_of(target).name,
+                               actor=target.name, item=knocked)
+
             self._emit(event="move_damage", side=action.side, actor=attacker.name, move=move.name,
                        target=target.name, target_side=self.side_of(target).name, damage=round(dmg),
                        type_eff=eff, target_hp_after=target.current_hp, target_max_hp=target.max_hp(),
