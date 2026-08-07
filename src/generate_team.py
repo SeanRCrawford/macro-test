@@ -115,51 +115,16 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
                 "mode": "all_backs", "total": r["solver_total"], "wins": r["solver_wins"],
                 "losses": r["solver_losses"], "our_bring4": r["our_bring4"],
             }
-            # Scripted teams (fixed lead + rehearsed opening) additionally require a
-            # COMMITTED plan: one turn-1 action that beats every opening variant at
-            # worst-case rolls. Beating their brings with a solver that adapts to each
-            # variant separately is not the same thing -- you cannot pick your move
-            # after seeing theirs.
-            #
-            # This must NOT be checked against one arbitrary enemy back-pair
-            # ([x for x in roster if x not in fl][:2], the old behaviour): at turn 1
-            # you have only seen their lead, so a plan that happens to work against
-            # one specific back-pair but not another is not something you could
-            # actually commit to on sight of the lead. find_plan_unknown_backs
-            # requires the SAME turn-1 action to win against every back-pair the
-            # lead could be hiding.
-            from scripted_openings import SCRIPTS
-            if team_name in SCRIPTS:
-                meta_all = getattr(load_teams, "meta", {}) or {}
-                fl = (meta_all.get(team_name) or {}).get("lead")
-                if fl:
-                    from committed_plan import find_plan_unknown_backs
-                    # Search a committed plan for EVERY bring-4/lead-2 of ours, not just
-                    # the screener's pick -- passing the full 6 silently tested whatever
-                    # happened to be listed first.
-                    import itertools as _it
-                    desc = per = None
-                    ok = False
-                    seen = set()
-                    for b4 in _it.combinations(team, 4):
-                        for l2 in _it.combinations(b4, 2):
-                            bk = tuple(x for x in b4 if x not in l2)
-                            cand = list(l2) + list(bk)
-                            key = tuple(cand)
-                            if key in seen:
-                                continue
-                            seen.add(key)
-                            d, pr, good = find_plan_unknown_backs(cand, roster, fl, merged, moves,
-                                                                   natures, typechart, team_name,
-                                                                   max_turns, our_sets=our_sets,
-                                                                   roll="min")
-                            if good:
-                                desc, per, ok = d, pr, True
-                                rec["plan_bring4"] = cand
-                                break
-                        if ok:
-                            break
-                    rec.update({"committed_plan": desc, "plan_ok": ok, "plan_detail": per})
+            # Scripted teams (fixed lead + rehearsed opening) are checked the SAME way as
+            # any other opponent: search_robust_composition above already plays their
+            # script (and the generic Protect/attack alternatives -- see
+            # scripted_openings.all_scripts) against every one of our bring-4/lead-2
+            # combos, letting OUR side adapt each turn via the real solver. Only the
+            # opponent is scripted -- you genuinely do see their move before choosing
+            # yours on every turn after the first, so there's no need for a separate,
+            # stricter "one turn-1 action must work blind" requirement on top: solver_wins
+            # == solver_total already means the team survives every scripted line as well
+            # as the conventional 90.
             results[team_name] = rec
         else:
             our_pairs = [p for p in itertools.combinations(team, 2) if p in matrix]
@@ -182,39 +147,34 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
 
 
 def leaderboard_summary(results):
-    """Roll verify_with_solver's per-opponent-team results up into the two
-    columns the user wants to filter/sort a team leaderboard by:
-
-    - "perfect vs conventional": beats every one of the unscripted 90
-      bring-4s for every opponent team (rec['wins'] == rec['total']).
-    - "satisfying the specials": every SCRIPTED opponent (the ones that get
-      a committed-plan check -- see the 'plan_ok' rec above) actually has a
-      committed plan; opponents with no scripted opening don't count against
-      this (there's nothing to satisfy).
+    """Roll verify_with_solver's per-opponent-team results up into the column
+    the user filters/sorts a team leaderboard by: "perfect vs every opponent"
+    -- beats every one of the 90 bring-4s for every opponent team
+    (rec['wins'] == rec['total']), scripted opponents included on equal
+    footing. A scripted opponent's own 'wins'/'total' already came from
+    playing its rehearsed script -- plus the generic Protect/attack
+    alternatives, see scripted_openings.all_scripts -- against every one of
+    our bring-4/lead-2 combos, with our side adapting each turn via the real
+    solver (only the opponent is scripted; you do see their move before
+    choosing yours on every turn after the first), so there's no separate
+    "specials" check needed on top.
 
     Only meaningful for results produced with all_backs=True (mode=='all_backs'
     recs) -- a 'sampled' mode result has no wins/total to roll up and is
     skipped, same as a None (no result) entry.
 
     Returns {"conventional_wins": int, "conventional_total": int,
-             "perfect_conventional": bool, "specials_ok": bool,
-             "specials_checked": int, "specials_passed": int}.
+             "perfect_conventional": bool}.
     """
-    conv_wins = conv_total = specials_checked = specials_passed = 0
+    conv_wins = conv_total = 0
     for rec in results.values():
         if not rec or rec.get("mode") != "all_backs":
             continue
         conv_wins += rec["wins"]
         conv_total += rec["total"]
-        if "plan_ok" in rec:
-            specials_checked += 1
-            if rec["plan_ok"]:
-                specials_passed += 1
     return {
         "conventional_wins": conv_wins, "conventional_total": conv_total,
         "perfect_conventional": conv_total > 0 and conv_wins == conv_total,
-        "specials_ok": specials_checked == 0 or specials_passed == specials_checked,
-        "specials_checked": specials_checked, "specials_passed": specials_passed,
     }
 
 
@@ -247,6 +207,15 @@ def main():
                           "'1-5' or '1,3,5'. A form (Mega, regional, ...) counts as its base "
                           "species' generation -- Mega Lucario is gen 4, Arcanine-Hisui is "
                           "gen 1. Default: no restriction (all generations).")
+    ap.add_argument("--matrix-cache", type=str, default=None,
+                     help="Path to save/load the pair matrix (e.g. data/matrix_cache.pkl). "
+                          "Building it is the expensive step -- if the file exists and "
+                          "matches this run's candidate pool and enemy teams, it's loaded "
+                          "instead of rebuilt, so you can re-run beam search (different "
+                          "--beam-width, --top, preferences.csv edits, ...) against a large "
+                          "pool many times without re-paying that cost. Rebuilt and "
+                          "overwritten automatically the moment the pool or enemy teams "
+                          "change.")
     args = ap.parse_args()
 
     print("Loading data...")
@@ -284,11 +253,31 @@ def main():
     print(f"Enemy threats: {len(enemy_pairs)} possible lead pairs across {len(teams)} teams")
     print(f"Screening {our_pair_count * len(enemy_pairs):,} pair matchups...")
 
-    t0 = time.time()
-    matrix = build_pair_matrix(
-        pool, enemy_pairs, merged, moves, natures, typechart,
-        progress=lambda i, t: print(f"  {i}/{t} pairs ({time.time()-t0:.0f}s)", flush=True))
-    print(f"Pair matrix built in {time.time()-t0:.0f}s\n")
+    matrix = None
+    cache_path = Path(args.matrix_cache) if args.matrix_cache else None
+    if cache_path and cache_path.exists():
+        import pickle
+        with open(cache_path, "rb") as f:
+            cached = pickle.load(f)
+        if cached.get("pool") == pool and cached.get("enemy_pairs") == enemy_pairs:
+            matrix = cached["matrix"]
+            print(f"Loaded cached pair matrix from {cache_path} ({len(matrix)} of our pairs)\n")
+        else:
+            print(f"Cached matrix at {cache_path} doesn't match this pool/enemy-team set "
+                  f"-- rebuilding.")
+
+    if matrix is None:
+        t0 = time.time()
+        matrix = build_pair_matrix(
+            pool, enemy_pairs, merged, moves, natures, typechart,
+            progress=lambda i, t: print(f"  {i}/{t} pairs ({time.time()-t0:.0f}s)", flush=True))
+        print(f"Pair matrix built in {time.time()-t0:.0f}s\n")
+        if cache_path:
+            import pickle
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                pickle.dump({"pool": pool, "enemy_pairs": enemy_pairs, "matrix": matrix}, f)
+            print(f"Saved pair matrix to {cache_path}\n")
 
     t0 = time.time()
     finals = beam_search_teams(pool, matrix, enemy_pairs, merged, beam_width=args.beam_width,
@@ -403,17 +392,7 @@ def main():
                     continue
                 if rec.get("mode") == "all_backs":
                     tag = "CLEAN" if not rec["losses"] else f"{len(rec['losses'])} losses"
-                    plan = ""
-                    if "plan_ok" in rec:
-                        plan = ("   PLAN OK" if rec["plan_ok"]
-                                else "   NO COMMITTED PLAN -- not viable vs this script")
-                    print(f"  {team_name:<10} {rec['wins']}/{rec['total']} enemy bring-4s beaten   {tag}{plan}")
-                    if rec.get("plan_ok") and rec.get("committed_plan"):
-                        pb = rec.get("plan_bring4")
-                        if pb:
-                            print(f"       plan lead {pb[0]}/{pb[1]}, back {pb[2]}/{pb[3]}")
-                        for d in rec["committed_plan"]:
-                            print(f"       T1: {d[0]} -> {d[2]} {list(d[3])}")
+                    print(f"  {team_name:<10} {rec['wins']}/{rec['total']} enemy bring-4s beaten   {tag}")
                     for lead, back, w, t in rec["losses"][:4]:
                         print(f"       loses to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} ({w} T{t})")
                 else:

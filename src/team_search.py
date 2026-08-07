@@ -49,11 +49,19 @@ TYPE_CORES = [
 
 MAX_WEAK_PER_TYPE = 2
 MATCHUP_WEIGHT = 1000.0
-W_PREFER = 8.0        # per 'prefer' entry present -- a tiebreaker, never decisive  # per enemy lead pair beaten -- dominates everything else
-W_COVERAGE = 1.0      # (retained for the seeding stage, which ranks raw pair coverage)
-W_CORE = 12.0         # bonus per rank-weighted type core matched
-W_WEAKNESS = 25.0     # penalty per type exceeding the max-weaknesses rule
-W_SCORE = 0.05        # small nudge toward higher effective-stat mons
+W_PREFER = 8.0         # per 'prefer' entry present -- a tiebreaker, never decisive
+# MARGIN_WEIGHT scales `cov` (the mean fast_pair_score margin -- how convincingly the
+# team's best-available pair handles each enemy lead pair, not just win/loss) into the
+# main tiebreaker BETWEEN teams that already tie on pairs_won. This matters a lot in
+# practice: many candidate teams beat every enemy pair at least narrowly, and without
+# this term the ranking fell through to synergy (type cores / weakness rules), which
+# says nothing about how those teams actually perform in the simulated matchups. cov
+# typically spans roughly -240..+240 across real teams; weighting it this heavily makes
+# a real performance gap of even a few points outrank the whole synergy block below.
+MARGIN_WEIGHT = 3.0
+W_CORE = 12.0          # bonus per rank-weighted type core matched
+W_WEAKNESS = 25.0      # penalty per type exceeding the max-weaknesses rule
+W_SCORE = 0.05         # small nudge toward higher effective-stat mons
 
 
 # ---------------------------------------------------------------- candidates
@@ -204,11 +212,18 @@ def team_coverage(team, matrix, enemy_pairs):
 
 
 def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
-    """Scoring is LEXICOGRAPHIC: winning more matchups always beats better
-    synergy. `pairs_won` (how many enemy lead pairs at least one of our pairs
-    beats) is multiplied by a large constant so no amount of type-core bonus
-    or Score can ever buy back a lost matchup. Synergy only breaks ties
-    between teams that win the same number of matchups.
+    """Scoring is LEXICOGRAPHIC in three tiers:
+      1. `pairs_won` (how many enemy lead pairs at least one of our pairs beats)
+         -- multiplied by a large constant so no amount of margin or synergy can
+         ever buy back a lost matchup.
+      2. `cov` (mean simulated margin -- see team_coverage) -- how CONVINCINGLY
+         the team's best-available pair handles each threat, not just whether it
+         nominally wins. This is the real prescreen signal: a great many
+         candidate teams tie on pairs_won (often winning every enemy pair at
+         least narrowly), and margin is what actually distinguishes "beats them
+         comfortably" from "barely scrapes by" among those ties.
+      3. `synergy` (type cores / weakness rule / avg Score) -- a small nudge
+         that only matters once pairs_won AND margin are both tied.
     """
     cov, per_enemy = team_coverage(team, matrix, enemy_pairs)
     cb, matched_cores = core_bonus(team, merged)
@@ -217,12 +232,12 @@ def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
 
     pairs_won = sum(1 for v in per_enemy.values() if v > 0)
 
-    # Tiebreaker block, deliberately bounded well below MATCHUP_WEIGHT so it can
-    # never outrank a single extra matchup won.
-    synergy = (W_CORE * cb) - (W_WEAKNESS * viol) + (W_SCORE * avg_score) + (cov * 0.01)
-    synergy = max(-MATCHUP_WEIGHT * 0.45, min(MATCHUP_WEIGHT * 0.45, synergy))
+    # Bounded well below MATCHUP_WEIGHT so it can never outrank a single extra
+    # matchup won, but well above the synergy block so it dominates that tier.
+    synergy = (W_CORE * cb) - (W_WEAKNESS * viol) + (W_SCORE * avg_score)
+    synergy = max(-MATCHUP_WEIGHT * 0.2, min(MATCHUP_WEIGHT * 0.2, synergy))
 
-    total = pairs_won * MATCHUP_WEIGHT + synergy
+    total = pairs_won * MATCHUP_WEIGHT + MARGIN_WEIGHT * cov + synergy
     return {
         "total": total, "pairs_won": pairs_won, "pairs_total": len(per_enemy),
         "coverage": cov, "synergy": synergy,

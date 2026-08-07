@@ -369,10 +369,37 @@ with tab_gen:
                               "C(4,2) backs = 90 configurations per opponent -- instead of "
                               "one sampled back pair. Slower but the only trustworthy check.")
 
+    with st.expander("Pair matrix cache (skip the expensive rebuild)"):
+        st.caption("Building the pair matrix (every candidate lead pair of ours x every "
+                   "enemy lead pair) is the slow step, especially with a big pool size. "
+                   "Once built it's kept for this session and reused automatically as long "
+                   "as pool size / generation filter / preferences.csv haven't changed since. "
+                   "Download it to reuse across separate app sessions -- upload it back here "
+                   "before clicking 'Run generation'.")
+        cached_matrix = st.session_state.get("gen_matrix")
+        if cached_matrix is not None:
+            st.caption(f"In-session cache: {len(cached_matrix)} of our pairs x "
+                       f"{len(st.session_state.get('gen_eps') or [])} enemy pairs.")
+            import pickle as _pickle
+            st.download_button(
+                "Download matrix cache", _pickle.dumps({
+                    "pool": st.session_state.get("gen_pool"),
+                    "enemy_pairs": st.session_state.get("gen_eps"),
+                    "matrix": cached_matrix,
+                }), file_name="matrix_cache.pkl", mime="application/octet-stream")
+        up_matrix = st.file_uploader("...or upload a saved matrix cache (.pkl)", type="pkl",
+                                      key="up_matrix_cache")
+        if up_matrix is not None:
+            import pickle as _pickle
+            loaded = _pickle.loads(up_matrix.read())
+            st.session_state["gen_matrix"] = loaded["matrix"]
+            st.session_state["gen_pool"] = loaded["pool"]
+            st.session_state["gen_eps"] = loaded["enemy_pairs"]
+            st.success(f"Loaded matrix cache: {len(loaded['matrix'])} of our pairs.")
+
     if st.button("Run generation", type="primary"):
         from team_search import (build_candidate_pool, enemy_pairs_from_teams, build_pair_matrix,
                                   beam_search_teams)
-        prog = st.progress(0.0, "Screening pair matchups...")
         if allowed_gens:
             pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs,
                                          allowed_generations=set(allowed_gens),
@@ -380,19 +407,30 @@ with tab_gen:
         else:
             pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
         eps = enemy_pairs_from_teams(teams)
-        t0 = time.time()
-        matrix = build_pair_matrix(pool, eps, merged, moves, natures, typechart,
-                                    progress=lambda i, t: prog.progress(i / t, f"{i}/{t} pairs"))
-        prog.progress(1.0, f"Matrix built in {time.time()-t0:.0f}s -- searching teams...")
+
+        matrix = None
+        if (st.session_state.get("gen_pool") == pool and st.session_state.get("gen_eps") == eps
+                and st.session_state.get("gen_matrix") is not None):
+            matrix = st.session_state["gen_matrix"]
+            st.info(f"Reusing cached pair matrix ({len(matrix)} of our pairs) -- pool and "
+                    f"enemy teams match the cache.")
+        else:
+            prog = st.progress(0.0, "Screening pair matchups...")
+            t0 = time.time()
+            matrix = build_pair_matrix(pool, eps, merged, moves, natures, typechart,
+                                        progress=lambda i, t: prog.progress(i / t, f"{i}/{t} pairs"))
+            prog.progress(1.0, f"Matrix built in {time.time()-t0:.0f}s -- searching teams...")
+            prog.empty()
+
         finals = beam_search_teams(pool, matrix, eps, merged, beam_width=beam,
                                     must_include=prefs["include"], prefer=prefs["prefer"])
-        prog.empty()
 
         if not finals:
             st.error("No valid teams found -- try a larger pool size.")
         else:
             st.session_state["gen_finals"] = [(sc, t) for sc, t in finals[:top_n]]
             st.session_state["gen_matrix"] = matrix
+            st.session_state["gen_pool"] = pool
             st.session_state["gen_eps"] = eps
             for rank, (sc, t) in enumerate(finals[:top_n], 1):
                 with st.expander(f"Team #{rank} — beats {sc['pairs_won']}/{sc['pairs_total']} "
@@ -475,16 +513,12 @@ with tab_gen:
                                 })
                         tot_w = sum(r["wins"] for r in v.values() if r and r.get("mode") == "all_backs")
                         tot_n = sum(r["total"] for r in v.values() if r and r.get("mode") == "all_backs")
-                        from generate_team import leaderboard_summary
-                        lbs = leaderboard_summary(v)
                         st.session_state.setdefault("verified_teams", {})
                         st.session_state["verified_teams"][tuple(t)] = {
                             "team": list(t), "sets": sets, "wins": tot_w, "total": tot_n,
                             "per_opponent": {k: (r["wins"], r["total"]) for k, r in v.items()
                                               if r and r.get("mode") == "all_backs"},
                             "clean": tot_n > 0 and tot_w == tot_n,
-                            "specials_ok": lbs["specials_ok"],
-                            "specials_checked": lbs["specials_checked"],
                         }
                         st.markdown("**Solver verification** (trustworthy, unlike the screener)")
                         st.dataframe(pd.DataFrame(vr), width='stretch', hide_index=True)
@@ -497,38 +531,33 @@ with tab_gen:
         st.divider()
         st.subheader("Verified teams — ranked")
         st.caption("Every team solver-verified this session, ranked by enemy bring-4s "
-                   "beaten across ALL opponents. 'Perfect' = beats every unscripted bring-4 "
-                   "('conventional'). 'Specials OK' = every SCRIPTED opponent (fixed-lead, "
-                   "e.g. Hard Trick Room) has a committed plan, not just a solver-adaptive win.")
-        fc1, fc2 = st.columns(2)
-        only_perfect = fc1.checkbox("Perfect conventional only", value=False, key="lb_only_perfect")
-        only_specials = fc2.checkbox("Specials satisfied only", value=False, key="lb_only_specials")
+                   "beaten across ALL opponents, including scripted ones (fixed-lead teams "
+                   "like Hard Trick Room / Perish Trap play their rehearsed script -- and the "
+                   "generic Protect/attack alternatives -- against every one of your bring-4s, "
+                   "with your side adapting each turn via the real solver). 'Perfect' = beats "
+                   "every one of the 90 bring-4s for every opponent.")
+        only_perfect = st.checkbox("Perfect only", value=False, key="lb_only_perfect")
         ranked_all = sorted(vt.values(), key=lambda d: (-d["wins"], -int(d["clean"])))
-        ranked = [d for d in ranked_all
-                  if (not only_perfect or d["clean"])
-                  and (not only_specials or d.get("specials_ok", True))]
+        ranked = [d for d in ranked_all if not only_perfect or d["clean"]]
         for i, d in enumerate(ranked, 1):
             d["rank"] = i
 
         rows = []
         for d in ranked:
             row = {"#": d["rank"], "Perfect": "YES" if d["clean"] else "",
-                    "Specials OK": ("YES" if d.get("specials_ok", True) else "NO")
-                                   if d.get("specials_checked") else "-",
                     "Total": f"{d['wins']}/{d['total']}",
                     "Team": ", ".join(d["team"])}
             for opp, (w, n) in d["per_opponent"].items():
                 row[opp] = f"{w}/{n}"
             rows.append(row)
         st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
-        if not ranked and (only_perfect or only_specials):
+        if not ranked and only_perfect:
             st.info("No verified team matches the current filters.")
 
         # --- bulk export -------------------------------------------------------
         st.markdown("**Export**")
         labels = {f"#{d['rank']} — {', '.join(d['team'])}"
-                  f"{'  (PERFECT)' if d['clean'] else ''}"
-                  f"{'  (SPECIALS OK)' if d.get('specials_checked') and d.get('specials_ok') else ''}":
+                  f"{'  (PERFECT)' if d['clean'] else ''}":
                   d for d in ranked}
         picked = st.multiselect("Teams to export", list(labels),
                                  default=[k for k in labels if "(PERFECT)" in k])
@@ -783,8 +812,8 @@ with tab_search:
                         bd = turn1_breakdown(b4, er, merged, moves, natures, typechart, t1_tname,
                                               our_sets=sets)
                     labels = {"greedy": "Unscripted: their best attack+attack",
-                              "protect_0": "Unscripted: one Protects, the other attacks (choice A)",
-                              "protect_1": "Unscripted: one Protects, the other attacks (choice B)"}
+                              "protect0": "Unscripted: one Protects, the other attacks (choice A)",
+                              "protect1": "Unscripted: one Protects, the other attacks (choice B)"}
                     for key, d in bd.items():
                         title = labels.get(key, f"Scripted variant {key}")
                         with st.expander(title):

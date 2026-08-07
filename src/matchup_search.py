@@ -115,6 +115,10 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
     battle = Battle(our_combatants, enemy_combatants, typechart, moves_db, rng_seed=rng_seed,
                      tie_bias=tie_bias)
     battle.force_roll_index = roll_index
+    # Scripted openings (scripted_openings.py) may need the real movesets to pick a
+    # damaging move for a generic (non-scripted) alternative line -- see
+    # _best_damaging_action, which reads this back.
+    battle._movesets = movesets
 
     from solver import greedy_opponent_joint_action
     for _ in range(max_turns):
@@ -629,6 +633,7 @@ def find_committed_plan(our_names, enemy_names, merged, moves_db, natures, typec
             b = _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart,
                                our_sets, enemy_sets)
             ms = _movesets_for(b, merged, moves_db, our_sets, enemy_sets)
+            b._movesets = ms  # scripted_openings.py's generic alternatives need real moves
             # Re-express our fixed choice against THIS battle's objects.
             fixed = _rebind_actions(desc, b)
             if fixed is None:

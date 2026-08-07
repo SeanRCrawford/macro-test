@@ -17,9 +17,8 @@ import itertools
 
 from battle import Battle
 from engine import Action
-from damage import MoveInfo
 from combatants import make_team
-from solver import (build_moveset, our_candidate_joint_actions, quick_damage_estimate,
+from solver import (build_moveset, our_candidate_joint_actions,
                      greedy_opponent_joint_action, solve_best_action, TOP_K_MOVES)
 from scripted_openings import all_scripts
 
@@ -82,6 +81,7 @@ def play_committed(desc, our_names, enemy_names, merged, moves_db, natures, type
     """Pin turn 1 to `desc`, then let the solver finish. Returns (winner, turns, battle)."""
     b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll)
     ms = _movesets(b, merged, moves_db, our_sets)
+    b._movesets = ms  # scripted_openings.py's generic alternatives need real moves
     fixed = rebind(desc, b)
     if fixed is None:
         return "illegal", 0, b
@@ -265,6 +265,7 @@ def _quick_turn1_outcome(desc, our_bring4, enemy_names, merged, moves_db, nature
     """
     b = _mk(our_bring4, enemy_names, merged, moves_db, natures, typechart, our_sets, roll)
     ms = _movesets(b, merged, moves_db, our_sets)
+    b._movesets = ms  # scripted_openings.py's generic alternatives need real moves
     fixed = rebind(desc, b)
     if fixed is None:
         return -1e9
@@ -359,80 +360,37 @@ def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_
     return (best[0], best[1], False) if best else (None, {}, False)
 
 
-def _attack_and_protect_actions(b, ms, protector_idx):
-    """A generic (non-scripted) alternative turn-1 line for the ENEMY lead:
-    one of their two actives Protects, the other attacks with whichever of
-    its known candidate moves does the most damage to whichever of our
-    actives it hits hardest. `protector_idx` (0 or 1) selects which of their
-    two actives is the protector -- the two values cover both "which one do
-    they treat as the threat worth guarding against" choices.
-
-    This exists because neither the scripted line NOR the greedy model covers
-    it: the greedy opponent model never Protects at all (see
-    greedy_opponent_joint_action's action_value, which scores 'protect' as
-    -1), so this is a real, plausible T1 response that was otherwise entirely
-    invisible to the breakdown.
-    """
-    actives = [c for c in b.p2.active if c is not None and not c.fainted]
-    if len(actives) != 2:
-        return None
-    protector = actives[protector_idx % 2]
-    attacker = actives[(protector_idx + 1) % 2]
-    our_live = [c for c in b.p1.active if c is not None and not c.fainted]
-    if not our_live:
-        return None
-    best = None
-    for move, _pct in ms.get(attacker.name, []):
-        if move.category == "Status" or move.power == 0:
-            continue
-        for tgt in our_live:
-            dmg = quick_damage_estimate(attacker, tgt, move, b.typechart, b.field)
-            if best is None or dmg > best[0]:
-                best = (dmg, move, tgt)
-    protect_move = MoveInfo("Protect", 0, "Normal", "Status", "self", priority=4)
-    acts = [Action(protector, "p2", "protect", protect_move, [protector])]
-    if best:
-        _, move, tgt = best
-        acts.append(Action(attacker, "p2", "move", move, [tgt]))
-    else:
-        acts.append(Action(attacker, "p2", "protect", protect_move, [attacker]))
-    return acts
-
-
 def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart, team_name,
                      desc=None, our_sets=None, roll="avg", include_generic=True):
     """Per-opening-variant turn-1 breakdown for a scripted/fixed-lead team,
     instead of collapsing to only the worst-case result (play_scripted_worst_case
-    / worst_response report ONLY the worst variant). Each of the team's opening
-    variants (e.g. King's 4, differing mainly in which of our slots it Fake
-    Outs -- see scripted_openings.VARIANTS) is played out individually, so a
-    lead that looks clean against one targeting choice but collapses against
-    another is visible rather than hidden behind the aggregate worst case.
+    / worst_response report ONLY the worst variant). Each opening variant is
+    played out individually, so a lead that looks clean against one targeting
+    choice but collapses against another is visible rather than hidden behind
+    the aggregate worst case.
 
     desc: a fixed turn-1 action (e.g. from find_plan/find_plan_unknown_backs)
     to pin for every variant, or None to let the solver pick our best turn-1
     response independently per variant instead.
 
-    include_generic: also include the practical T1 lines a fixed lead could
-    take INSTEAD of its rehearsed script, so the full realistic option space
-    is visible, not just the one scripted line:
-      - "greedy": their single best attack+attack line (both actives attack,
-        matching solve_best_action's own opponent model) -- the 2-attacker
-        case collapses to just this one best line rather than enumerating
-        every target combination, since only the best one is a real risk.
-      - "protect_0"/"protect_1": one active Protects (guarding whichever of
-        our two Pokemon looks like the bigger threat) while the other
-        attacks its best available target -- covers both choices of which
-        active is the protector.
+    include_generic: also include the plain greedy 2v2 fallback (both actives
+    attack, no Protect) as a "greedy" entry, alongside every variant
+    all_scripts() returns -- the rehearsed script (per targeting choice) AND
+    the generic "one Protects, the other attacks" alternative (see
+    scripted_openings._protect_and_attack_script) -- so the full realistic
+    option space is visible, not just the one scripted line.
 
     Returns {variant_key: {"our_action", "enemy_action", "hp_after", "log"}}
-    -- variant_key is an int for scripted variants, a string for generic ones.
+    -- variant_key is an int for scripted variants, a string for the rest.
     """
     variants = all_scripts(team_name)
+    if include_generic:
+        variants = variants + [("greedy", None)]
     out = {}
     for idx, script in variants:
         b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll)
         ms = _movesets(b, merged, moves_db, our_sets)
+        b._movesets = ms  # scripted_openings.py's generic alternatives need real moves
         if desc is not None:
             fixed = rebind(desc, b)
             if fixed is None:
@@ -442,10 +400,11 @@ def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart
             if not fixed:
                 continue
         opp = None
-        try:
-            opp = script(b, b.p2, b.p1, 1)
-        except Exception:
-            opp = None
+        if script is not None:
+            try:
+                opp = script(b, b.p2, b.p1, 1)
+            except Exception:
+                opp = None
         if not opp:
             opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, 1)
         try:
@@ -459,35 +418,4 @@ def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart
             "hp_after": {c.name: (c.current_hp, c.max_hp()) for c in b.p1.roster + b.p2.roster},
             "log": b.log.dump(),
         }
-
-    if include_generic:
-        generic = [("greedy", None), ("protect_0", 0), ("protect_1", 1)]
-        for label, protector_idx in generic:
-            b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll)
-            ms = _movesets(b, merged, moves_db, our_sets)
-            if desc is not None:
-                fixed = rebind(desc, b)
-                if fixed is None:
-                    continue
-            else:
-                fixed, _, _ = solve_best_action(b, "p1", ms, depth=1)
-                if not fixed:
-                    continue
-            if protector_idx is None:
-                opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, 1)
-            else:
-                opp = _attack_and_protect_actions(b, ms, protector_idx)
-            if not opp:
-                continue
-            try:
-                b.run_turn(list(fixed), opp)
-            except ValueError:
-                continue
-            out[label] = {
-                "our_action": describe(fixed),
-                "enemy_action": [(a.combatant.name, a.kind, a.move.name if a.move else "-")
-                                  for a in opp],
-                "hp_after": {c.name: (c.current_hp, c.max_hp()) for c in b.p1.roster + b.p2.roster},
-                "log": b.log.dump(),
-            }
     return out

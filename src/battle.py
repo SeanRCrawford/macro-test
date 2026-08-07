@@ -935,7 +935,17 @@ class Battle:
         alive_bench = [b for b in side.bench if not b.fainted]
         if not alive_bench:
             return
-        incoming = self._best_replacement(alive_bench, opp.active)
+        # A scripted opening (see scripted_openings.py) can pin exactly who comes
+        # back for a specific rehearsed line -- e.g. Perish Trap's Incineroar
+        # Parting Shot is scripted to bring Mega Gengar back specifically, to
+        # keep Shadow Tag continuously on the field, not just "whoever the
+        # generic matchup heuristic likes best" this turn.
+        forced = getattr(self, "_forced_switch_in", None)
+        forced_mon = forced.get(id(outgoing)) if forced else None
+        if forced_mon is not None and forced_mon in alive_bench:
+            incoming = forced_mon
+        else:
+            incoming = self._best_replacement(alive_bench, opp.active)
         side.bench[:] = [b for b in side.bench if b is not incoming]
         if not outgoing.fainted:
             side.bench.append(outgoing)
