@@ -57,14 +57,14 @@ def load_all(fingerprint):
 
 
 @st.cache_data
-def load_teams_csv(fingerprint=None):
+def load_teams_csv(fingerprint=None, _merged=None):
     from species_data import load_teams as _lt
-    t, meta = _lt(with_meta=True)
+    t, meta = _lt(with_meta=True, merged=_merged)
     return t, meta
 
 
 merged, unresolved, moves, natures, typechart, dups = load_all(_data_fingerprint())
-teams, team_meta = load_teams_csv(_data_fingerprint())
+teams, team_meta = load_teams_csv(_data_fingerprint(), _merged=merged)
 prefs = load_preferences()
 all_names = sorted(merged.keys())
 
@@ -677,6 +677,7 @@ with tab_search:
             prog = st.progress(0.0)
             for i, tname in enumerate(chosen):
                 roster = teams[tname]
+                team_esets = {**esets, **(team_meta.get(tname, {}).get("sets") or {})}
                 if all_backs:
                     import scripted_openings as _so
                     _fl = team_meta.get(tname, {}).get('lead')
@@ -686,7 +687,7 @@ with tab_search:
                                                      fixed_lead=_fl,
                                                      enemy_script=_so.script_for(tname),
                                                      script_team=tname if tname in _so.SCRIPTS
-                                                     else None, enemy_sets=esets)
+                                                     else None, enemy_sets=team_esets)
                     results[tname] = {"mode": "all", "robust": rob[0] if rob else None,
                                        "roster": roster}
                 else:
@@ -696,7 +697,7 @@ with tab_search:
                     eb4 = list(lead) + rem[:2]
                     combos = search_best_composition(team, eb4, merged, moves, natures,
                                                       typechart, max_turns, our_sets=sets,
-                                                      enemy_sets=esets)
+                                                      enemy_sets=team_esets)
                     results[tname] = {"mode": "one", "lead": lead, "eb4": eb4,
                                        "combos": combos, "roster": roster}
                 prog.progress((i + 1) / len(chosen), f"{tname} done")
@@ -833,10 +834,12 @@ with tab_search:
                         label = (f"{'LOSS' if lost else 'win '} — vs lead "
                                  f"{lead[0]}/{lead[1]} + back {back[0]}/{back[1]}")
                         with st.expander(label):
+                            _repl_esets = {**(st.session_state.get("enemy_sets_override") or {}),
+                                            **(team_meta.get(tname, {}).get("sets") or {})}
                             w, t, btl, om, tm = play_out_worst_case(
                                 b4, list(lead) + list(back), merged, moves, natures, typechart,
                                 st.session_state.get("search_maxturns", 12),
-                                our_sets=sets, enemy_sets=st.session_state.get("enemy_sets_override"),
+                                our_sets=sets, enemy_sets=_repl_esets,
                                 return_choice=True)
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric("Avg-roll result",

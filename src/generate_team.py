@@ -49,9 +49,9 @@ from team_search import (build_candidate_pool, enemy_pairs_from_teams, build_pai
                           TYPE_CORES, MAX_WEAK_PER_TYPE)
 
 
-def load_teams():
+def load_teams(merged=None):
     from species_data import load_teams as _lt
-    teams, meta = _lt(with_meta=True)
+    teams, meta = _lt(with_meta=True, merged=merged)
     load_teams.meta = meta
     return teams
 
@@ -93,6 +93,7 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
             from matchup_search import search_robust_composition
             meta_all = getattr(load_teams, "meta", {}) or {}
             fl = (meta_all.get(team_name) or {}).get("lead")
+            team_enemy_sets = (meta_all.get(team_name) or {}).get("sets") or None
             from scripted_openings import SCRIPTS, script_for
             # Two fixes for a real discrepancy: generation used to verify WITHOUT the
             # opponent's script and WITHOUT its fixed lead, so e.g. King scored 90/90
@@ -105,7 +106,7 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
                                                 enemy_script=script_for(team_name)
                                                 if team_name in SCRIPTS else None,
                                                 script_team=team_name if team_name in SCRIPTS
-                                                else None)
+                                                else None, enemy_sets=team_enemy_sets)
             if not robust:
                 results[team_name] = None
                 continue
@@ -168,8 +169,11 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
                 continue
             toughest = min(threats, key=lambda k: max(matrix[p][k] for p in our_pairs))[1]
             rem = [x for x in roster if x not in toughest]
+            meta_all = getattr(load_teams, "meta", {}) or {}
+            team_enemy_sets = (meta_all.get(team_name) or {}).get("sets") or None
             combos = search_best_composition(team, list(toughest) + rem[:2], merged, moves,
-                                              natures, typechart, max_turns, our_sets=our_sets)
+                                              natures, typechart, max_turns, our_sets=our_sets,
+                                              enemy_sets=team_enemy_sets)
             b = combos[0] if combos else None
             results[team_name] = None if not b else {
                 "mode": "sampled", "enemy_lead": toughest, "our_bring4": b[0],
@@ -248,7 +252,7 @@ def main():
     print("Loading data...")
     merged, unresolved, moves, natures, typechart = build_merged_dataset()
     prefs = load_preferences()
-    teams = load_teams()
+    teams = load_teams(merged=merged)
 
     dups = getattr(build_merged_dataset, "last_duplicates", {}) or {}
     if dups:

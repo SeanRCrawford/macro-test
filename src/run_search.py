@@ -45,9 +45,9 @@ DEFAULT_POOL = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon", "Mega Skarmor
 OUTPUT_DIR = Path(__file__).resolve().parent.parent
 
 
-def load_teams():
+def load_teams(merged=None):
     from species_data import load_teams as _lt
-    teams, meta = _lt(with_meta=True)
+    teams, meta = _lt(with_meta=True, merged=merged)
     load_teams.meta = meta
     return teams
 
@@ -282,7 +282,7 @@ def main():
             print(f"ERROR: '{name}' not found in mbsmogon.xlsx. Check spelling (case-sensitive).")
             sys.exit(1)
 
-    teams = load_teams()
+    teams = load_teams(merged=merged)
     if args.team:
         if args.team not in teams:
             print(f"ERROR: team '{args.team}' not found. Available: {list(teams.keys())}")
@@ -303,12 +303,13 @@ def main():
                   + (f" (FIXED LEAD {fl[0]}/{fl[1]})" if fl else "") + " ===")
             if meta.get("note"):
                 print(f"    note: {meta['note']}")
+            team_enemy_sets = {**enemy_sets, **(meta.get("sets") or {})}
             t0 = time.time()
             res = search_robust_composition(our_pool6, roster, merged, moves, natures, typechart,
                                              args.max_turns, our_sets=our_sets, verify_top=3,
                                              fixed_lead=fl,
                                              enemy_script=script_for(team_name),
-                                             script_team=team_name, enemy_sets=enemy_sets)
+                                             script_team=team_name, enemy_sets=team_enemy_sets)
             if all_scripts(team_name):
                 print(f"    (scripted opponent: {len(all_scripts(team_name))} opening "
                       f"variants tested, worst case reported)")
@@ -327,13 +328,15 @@ def main():
         t0 = time.time()
         print(f"=== {team_name} ===")
         try:
+            team_meta_here = (getattr(load_teams, "meta", {}) or {}).get(team_name, {})
+            team_enemy_sets = {**enemy_sets, **(team_meta_here.get("sets") or {})}
             if mode == "comprehensive":
                 rep = run_comprehensive(team_name, roster, our_pool6, merged, moves, natures,
                                          typechart, args.max_turns, args.show_top, our_sets,
-                                         enemy_sets)
+                                         team_enemy_sets)
             else:
                 rep = run_quick(team_name, roster, our_pool6, merged, moves, natures, typechart,
-                                 args.max_turns, args.show_top, our_sets, enemy_sets)
+                                 args.max_turns, args.show_top, our_sets, team_enemy_sets)
             team_reports[team_name] = rep
         except Exception as e:
             print(f"  ERROR while processing {team_name}: {e}")
