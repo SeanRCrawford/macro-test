@@ -211,6 +211,12 @@ def main():
                      help="Exhaustive: test every enemy bring-4 (all C(6,2) leads x C(4,2) backs "
                           "= 90 configurations per team), not just one arbitrary back pair. "
                           "Reports the composition with the best WORST case.")
+    ap.add_argument("--stats", action="store_true",
+                     help="With --all-backs: also report per-Pokemon usage stats (move-usage "
+                          "counts, damage dealt as %% of target max HP, KOs secured) aggregated "
+                          "across every enemy bring-4 for the top recommendation, for both sides. "
+                          "Re-plays that team's games once more, so it adds roughly the same time "
+                          "as the search itself for that opponent.")
     ap.add_argument("--mode", choices=["quick", "comprehensive"], default="quick",
                      help="quick = test only each team's single toughest lead pair (fast). "
                           "comprehensive = test all 15 possible enemy lead pairs per team (slow, thorough).")
@@ -319,7 +325,24 @@ def main():
                       f"{r['solver_wins']}/{r['solver_total']} enemy brings beaten")
                 for lead, back, w, t in r["solver_losses"][:5]:
                     print(f"      LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} ({w} T{t})")
-            print(f"  [{time.time()-t0:.0f}s]\n")
+            print(f"  [{time.time()-t0:.0f}s]")
+            if args.stats and res:
+                from matchup_search import aggregate_battle_stats
+                top = res[0]["our_bring4"]
+                t1 = time.time()
+                stats = aggregate_battle_stats(top, roster, merged, moves, natures, typechart,
+                                                args.max_turns, our_sets=our_sets,
+                                                enemy_sets=team_enemy_sets, fixed_lead=fl,
+                                                script_team=team_name if all_scripts(team_name)
+                                                else None)
+                print(f"    --- usage stats for {top}, aggregated across {n_cfg} games "
+                      f"[{time.time()-t1:.0f}s] ---")
+                for (side, name), s in sorted(stats.items(), key=lambda kv: (kv[0][0], -kv[1]["kos"])):
+                    top_moves = sorted(s["moves"].items(), key=lambda x: -x[1])[:5]
+                    mv_str = ", ".join(f"{m} x{c}" for m, c in top_moves)
+                    print(f"    {'us ' if side == 'p1' else 'them'} {name:<18} "
+                          f"KOs={s['kos']:<3} dmg%={s['damage_pct']:>7.0f}  {mv_str}")
+            print()
         return
 
     team_reports = {}

@@ -87,6 +87,16 @@ class Battle:
         self.p1 = Side("p1", p1_roster, [p1_roster[0], p1_roster[1]], p1_roster[2:])
         self.p2 = Side("p2", p2_roster, [p2_roster[0], p2_roster[1]], p2_roster[2:])
 
+        # Per-Pokemon usage stats for this battle: how often each move was clicked
+        # (selected for the turn, regardless of whether it then whiffed/was
+        # blocked/flinched away), total damage dealt as %-of-target-max-HP summed
+        # across every hit landed, and KOs directly secured. Keyed by (side, name)
+        # so a mirrored species on both sides never merges its stats. See
+        # _track_move_use (usage) and _resolve_move (damage/KOs).
+        self.stats = {(side, c.name): {"moves": {}, "damage_pct": 0.0, "kos": 0}
+                       for side, roster in (("p1", p1_roster), ("p2", p2_roster))
+                       for c in roster}
+
         for c in p1_roster + p2_roster:
             c.current_hp = c.max_hp()
 
@@ -174,6 +184,8 @@ class Battle:
         new.log = BattleLog(list(self.log.lines))
         new.events = list(self.events)
         new.speed_ties = list(self.speed_ties)
+        new.stats = {k: {"moves": dict(v["moves"]), "damage_pct": v["damage_pct"], "kos": v["kos"]}
+                     for k, v in self.stats.items()}
         new.force_roll = getattr(self, 'force_roll', None)
         new._departed_slots = {}
         new.tie_bias = self.tie_bias
@@ -368,6 +380,15 @@ class Battle:
                         a.targets = live
         for a in move_actions:
             self._enforce_choice_lock(a)
+        # Usage stats: count the move as "clicked" for whoever selected it this turn,
+        # regardless of whether it goes on to whiff/get blocked/flinched away -- that
+        # matches how usage is normally reported (e.g. "used Protect" even if it
+        # failed the consecutive-use check).
+        for a in move_actions:
+            if a.move is not None and not a.combatant.fainted:
+                st = self.stats.get((a.side, a.combatant.name))
+                if st is not None:
+                    st["moves"][a.move.name] = st["moves"].get(a.move.name, 0) + 1
         # With an RNG active, pre-shuffle so that equal sort keys (true speed ties)
         # resolve randomly -- Python's sort is stable, so without this a coin flip
         # would always fall the same way and risk analysis couldn't see it.
@@ -698,7 +719,15 @@ class Battle:
                 sashed = True
             dmg_applied = min(dmg, target.current_hp)  # recoil/drain scale off damage actually dealt
             total_damage_dealt += dmg_applied
+            was_fainted_before = target.fainted
             target.apply_damage(dmg)
+            # Usage stats: damage dealt as %-of-target-max-HP, and a KO credited to
+            # whoever's hit actually caused it.
+            atk_st = self.stats.get((action.side, attacker.name))
+            if atk_st is not None and target.max_hp():
+                atk_st["damage_pct"] += 100.0 * dmg_applied / target.max_hp()
+                if target.fainted and not was_fainted_before:
+                    atk_st["kos"] += 1
             if target.ability == "Stamina" and dmg_applied > 0 and not target.fainted:
                 changed = apply_boosts(target, {"def": 1}, from_foe=False)
                 if changed:

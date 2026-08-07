@@ -107,8 +107,8 @@ if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
 
-tab_build, tab_gen, tab_search, tab_battle = st.tabs(
-    ["Team Builder", "Generate Team", "Lead / Back Search", "Battle Viewer"])
+tab_build, tab_gen, tab_search, tab_battle, tab_vs = st.tabs(
+    ["Team Builder", "Generate Team", "Lead / Back Search", "Battle Viewer", "Vs Team"])
 
 
 # ------------------------------------------------------------------ helpers
@@ -808,36 +808,82 @@ with tab_search:
                 st.download_button("Download summary CSV", pd.DataFrame(rows).to_csv(index=False),
                                     "search_summary.csv", "text/csv")
 
+            # --- Usage stats: move usage, damage %, KOs, aggregated across every ---
+            # enemy bring-4 for the recommended composition against one opponent.
+            all_backs_teams = [tn for tn, d in res.items() if d["mode"] == "all" and d.get("robust")]
+            if all_backs_teams:
+                st.markdown("### Usage stats")
+                st.caption("Move-usage counts, total damage dealt (as %% of the target's max HP, "
+                           "summed over every hit landed), and KOs secured, aggregated across "
+                           "EVERY enemy bring-4 configuration for the recommended composition -- "
+                           "both sides. Re-plays that opponent's games, so it costs about as much "
+                           "as the search itself for that opponent.")
+                us_tname = st.selectbox("Opponent", all_backs_teams, key="us_tname")
+                if st.button("Compute usage stats", key="us_go"):
+                    from matchup_search import aggregate_battle_stats
+                    import scripted_openings as _so3
+                    b4 = res[us_tname]["robust"]["our_bring4"]
+                    fl = team_meta.get(us_tname, {}).get("lead")
+                    us_esets = {**(st.session_state.get("enemy_sets_override") or {}),
+                                **(team_meta.get(us_tname, {}).get("sets") or {})}
+                    with st.spinner("Replaying every enemy bring-4..."):
+                        stats = aggregate_battle_stats(
+                            b4, teams[us_tname], merged, moves, natures, typechart,
+                            st.session_state.get("search_maxturns", 12), our_sets=sets,
+                            enemy_sets=us_esets, fixed_lead=fl,
+                            script_team=us_tname if _so3.all_scripts(us_tname) else None)
+                    srows = []
+                    for (side, name), s in stats.items():
+                        top_moves = sorted(s["moves"].items(), key=lambda x: -x[1])
+                        srows.append({
+                            "Side": "Us" if side == "p1" else "Them", "Pokemon": name,
+                            "KOs": s["kos"], "Damage %": round(s["damage_pct"], 0),
+                            "Moves used": ", ".join(f"{m} x{c}" for m, c in top_moves),
+                        })
+                    srows.sort(key=lambda r: (r["Side"], -r["KOs"]))
+                    st.dataframe(pd.DataFrame(srows), width='stretch', hide_index=True)
+                    import json as _json
+                    json_stats = {f"{side}:{name}": s for (side, name), s in stats.items()}
+                    st.download_button("Download stats .json", _json.dumps(json_stats, indent=2),
+                                        file_name=f"usage_stats_{us_tname}.json",
+                                        mime="application/json", key="us_dl")
+
             # Per-opening-variant turn-1 breakdown, for fixed-lead/scripted opponents.
             import scripted_openings as _so2
             scripted_chosen = [tn for tn in res if tn in _so2.SCRIPTS and res[tn].get("robust")]
             if scripted_chosen:
-                st.markdown("### Turn-1 breakdown by opening variant")
+                st.markdown("### Full match breakdown by opening variant")
                 st.caption("Fixed-lead opponents run a scripted opening with several variants "
                            "(which of your slots it targets), plus two practical T1 lines "
                            "they could take INSTEAD of the script: their best unscripted "
                            "attack+attack ('greedy'), and either of their two Pokemon "
-                           "Protecting while the other attacks ('protect'). Rather than only "
-                           "the worst case, this shows every option's turn-1 outcome side by "
-                           "side -- a lead that looks clean against one can collapse against "
-                           "another.")
+                           "Protecting while the other attacks ('protect'). Each variant is "
+                           "played to completion -- the opponent keeps running its script on "
+                           "every turn it still has one for (e.g. Perish Trap's turns 2-4), "
+                           "falling back to greedy once it's spent -- so you see the whole "
+                           "match, not just the opening, for every option side by side.")
                 t1_tname = st.selectbox("Opponent", scripted_chosen, key="t1bd_tname")
                 if st.button("Show breakdown", key="t1bd_go"):
                     from committed_plan import turn1_breakdown
                     b4 = res[t1_tname]["robust"]["our_bring4"]
                     er = teams[t1_tname]
-                    with st.spinner("Playing out every opening variant..."):
+                    t1_esets = {**(st.session_state.get("enemy_sets_override") or {}),
+                                **(team_meta.get(t1_tname, {}).get("sets") or {})}
+                    with st.spinner("Playing out every opening variant to completion..."):
                         bd = turn1_breakdown(b4, er, merged, moves, natures, typechart, t1_tname,
-                                              our_sets=sets)
+                                              our_sets=sets, enemy_sets=t1_esets,
+                                              max_turns=st.session_state.get("search_maxturns", 12))
                     labels = {"greedy": "Unscripted: their best attack+attack",
                               "protect0": "Unscripted: one Protects, the other attacks (choice A)",
                               "protect1": "Unscripted: one Protects, the other attacks (choice B)"}
                     for key, d in bd.items():
                         title = labels.get(key, f"Scripted variant {key}")
-                        with st.expander(title):
+                        result = {"p1": "WIN", "p2": "LOSS"}.get(d["winner"], d["winner"].upper())
+                        with st.expander(f"{title} — {result} (turn {d['turns']})"):
                             st.write("Our turn-1 action:",
-                                     [(a[0], a[2], list(a[3])) for a in d["our_action"]])
-                            st.write("Their turn-1 action:", d["enemy_action"])
+                                     [(a[0], a[2], list(a[3])) for a in d["our_t1_action"]])
+                            st.write("Their turn-1 action:", d["enemy_t1_action"])
+                            st.caption("HP shown is the FINAL state at the end of the match.")
                             hprows = [{"Pokemon": n, "HP": f"{hp}/{mx}"}
                                       for n, (hp, mx) in d["hp_after"].items()]
                             st.dataframe(pd.DataFrame(hprows), width='stretch', hide_index=True)
@@ -1056,15 +1102,183 @@ with tab_battle:
         with st.spinner("Trying EV/item/move swaps..."):
             res = salvage_losing_matchup(lo4, lt4, merged, moves, natures, typechart, lturns,
                                           our_sets=st.session_state.get("sets", {}))
-        bw, bt = res["baseline"]
-        bw_label = {"p1": "WIN", "p2": "LOSS"}.get(bw, bw.upper())
-        st.caption(f"Baseline: {bw_label} in {bt} turns")
-        if res["fixes"]:
-            frows = [{"Pokemon": f["mon"], "Change type": f["kind"], "Change": f["change"],
-                      "New result": {"p1": "WIN", "p2": "LOSS"}.get(f["winner"], f["winner"].upper()),
-                      "Turns": f["turns"]} for f in res["fixes"]]
-            st.dataframe(pd.DataFrame(frows), width='stretch', hide_index=True)
-        else:
-            st.info("No single EV/item/move swap tried here flipped the result.")
+        st.session_state["salvage_result"] = res
+        st.session_state["salvage_matchup"] = last
     elif not last:
         st.caption("Run Simulate above first.")
+
+    sres = st.session_state.get("salvage_result")
+    if sres and st.session_state.get("salvage_matchup") == last:
+        bw, bt = sres["baseline"]
+        bw_label = {"p1": "WIN", "p2": "LOSS"}.get(bw, bw.upper())
+        st.caption(f"Baseline: {bw_label} in {bt} turns")
+        if not sres["fixes"]:
+            st.info("No single EV/item/move swap tried here flipped the result.")
+        else:
+            FIELD_FOR_KIND = {"evs": "evs", "item": "item", "support": "moves", "setup": "moves"}
+
+            def _apply_fixes(fix_list):
+                cur = dict(st.session_state.get("sets", {}))
+                for f in fix_list:
+                    field = FIELD_FOR_KIND[f["kind"]]
+                    mon_spec = dict(cur.get(f["mon"]) or {})
+                    mon_spec[field] = f["new_spec"][field]
+                    cur[f["mon"]] = mon_spec
+                st.session_state["sets"] = cur
+
+            st.caption("Apply a fix to try it live -- it updates the sets used everywhere else "
+                       "in the app (Team Builder, searches, ...) for this session. 'Save' on top "
+                       "of that writes it to a team file, so it survives a restart.")
+            for i, f in enumerate(sres["fixes"]):
+                fc1, fc2 = st.columns([5, 1])
+                result_label = {"p1": "WIN", "p2": "LOSS"}.get(f["winner"], f["winner"].upper())
+                fc1.write(f"**{f['mon']}** ({f['kind']}): {f['change']} → "
+                          f"{result_label} (turn {f['turns']})")
+                if fc2.button("Apply", key=f"sv_apply_{i}", width='stretch'):
+                    _apply_fixes([f])
+                    st.rerun()
+            if st.button("Apply ALL fixes", key="sv_apply_all"):
+                _apply_fixes(sres["fixes"])
+                st.rerun()
+
+            cur_sets = st.session_state.get("sets", {})
+            lo4, lt4, lturns = last
+            from matchup_search import play_out_worst_case as _pow
+            w2, t2, btl2 = _pow(lo4, lt4, merged, moves, natures, typechart, lturns,
+                                 our_sets=cur_sets)
+            w2_label = {"p1": "WIN", "p2": "LOSS"}.get(w2, w2.upper())
+            st.metric("This matchup with your CURRENT session sets", f"{w2_label} (turn {t2})",
+                      help="Reflects whatever's currently applied, including any fixes clicked "
+                           "above -- re-check this after each Apply.")
+
+            st.markdown("**Save current sets permanently (overwrites a team file)**")
+            sv_fname = st.text_input("Save as", value=st.session_state.get("save_name", "team.json"),
+                                      key="salvage_save_name")
+            if st.button("Save", key="salvage_save_btn"):
+                from team_sheet import save_team
+                fn = sv_fname if sv_fname.endswith(".json") else sv_fname + ".json"
+                save_team(ROOT / fn, get_state_team(), cur_sets)
+                st.success(f"Saved to {ROOT / fn}")
+
+
+# ------------------------------------------------------------------ vs team
+with tab_vs:
+    st.subheader("Vs a specific team")
+    st.caption("Check the currently loaded team (Team Builder tab) against any enemy team you "
+               "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
+               "(pokepast.es 'Paste'/'Export' view) -- without saving it to data/teams/ first. "
+               "See data/teams/ if you want this enemy team to stick around permanently instead.")
+    vs_team = get_state_team()
+    if len(vs_team) != 6:
+        st.warning("Pick 6 Pokemon in the Team Builder tab first.")
+    else:
+        vs_mode = st.radio("Enemy team input", ["Pick 6 Pokemon", "Paste a pokepaste"],
+                            horizontal=True, key="vs_mode")
+        enemy_roster, enemy_sets_vs = [], {}
+        if vs_mode == "Pick 6 Pokemon":
+            enemy_roster = st.multiselect("Enemy team (choose 6)", all_names, max_selections=6,
+                                           key="vs_manual")
+        else:
+            paste_text = st.text_area("Paste Showdown export text here (blank line between "
+                                       "each Pokemon)", height=220, key="vs_paste")
+            if paste_text.strip():
+                from species_data import custom_team_from_export
+                enemy_roster, enemy_sets_vs = custom_team_from_export(paste_text, merged)
+                unresolved_vs = [n for n in enemy_roster if n not in merged]
+                if unresolved_vs:
+                    st.error(f"Unrecognised species (check spelling against mbsmogon.xlsx): "
+                              f"{unresolved_vs}")
+                    enemy_roster = []
+                elif len(enemy_roster) != 6:
+                    st.error(f"Parsed {len(enemy_roster)} Pokemon, need exactly 6.")
+                else:
+                    st.success(f"Parsed: {', '.join(enemy_roster)}")
+                    with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
+                        st.json(enemy_sets_vs)
+
+        if len(enemy_roster) == 6:
+            vc1, vc2 = st.columns(2)
+            deep_vs = vc1.checkbox("All enemy brings (90, slower, trustworthy)", value=False,
+                                    key="vs_deep")
+            max_turns_vs = vc2.slider("Turn cap", 6, 24, 12, key="vs_turns")
+            if st.button("Find best response", type="primary", key="vs_go"):
+                from matchup_search import search_robust_composition, search_best_composition
+                from run_search import find_toughest_lead
+                vs_sets = st.session_state.get("sets", {})
+                with st.spinner("Searching..."):
+                    if deep_vs:
+                        rob = search_robust_composition(
+                            vs_team, enemy_roster, merged, moves, natures, typechart, max_turns_vs,
+                            our_sets=vs_sets, verify_top=1, enemy_sets=enemy_sets_vs)
+                        r = rob[0] if rob else None
+                        eb4_tested = None
+                    else:
+                        lead = find_toughest_lead(vs_team, enemy_roster, merged, moves, natures,
+                                                   typechart, max_turns_vs, our_sets=vs_sets)
+                        rem = [x for x in enemy_roster if x not in lead]
+                        eb4_tested = list(lead) + rem[:2]
+                        combos = search_best_composition(
+                            vs_team, eb4_tested, merged, moves, natures, typechart, max_turns_vs,
+                            our_sets=vs_sets, enemy_sets=enemy_sets_vs)
+                        r = None
+                        if combos:
+                            b4, w, t = combos[0]
+                            r = {"our_bring4": b4, "solver_wins": int(w == "p1"), "solver_total": 1,
+                                 "solver_losses": [] if w == "p1"
+                                 else [(tuple(lead), tuple(rem[:2]), w, t)]}
+                if r is None:
+                    st.error("No legal composition found (check your team and the enemy roster).")
+                else:
+                    st.session_state["vs_result"] = {
+                        "r": r, "enemy_roster": enemy_roster, "enemy_sets": enemy_sets_vs,
+                        "deep": deep_vs, "max_turns": max_turns_vs, "eb4_tested": eb4_tested,
+                    }
+
+        vres = st.session_state.get("vs_result")
+        if vres:
+            r = vres["r"]
+            b4 = r["our_bring4"]
+            m1, m2 = st.columns(2)
+            m1.metric("Best response", f"{b4[0]}/{b4[1]} + {b4[2]}/{b4[3]}")
+            if vres["deep"]:
+                m2.metric("Enemy brings beaten", f"{r['solver_wins']}/{r['solver_total']}")
+            else:
+                m2.metric("Vs their toughest lead", "WIN" if r["solver_wins"] else "LOSS")
+            for lead, back, w, t in r.get("solver_losses", [])[:5]:
+                st.write(f"LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} "
+                         f"({w} T{t})")
+
+            vb1, vb2 = st.columns(2)
+            if vb1.button("Show full battle log (worst case)", key="vs_log"):
+                from matchup_search import play_out_worst_case
+                if vres["deep"]:
+                    wc = r.get("worst_case")
+                    eb4 = (list(wc[0]) + list(wc[1])) if wc else None
+                else:
+                    eb4 = vres["eb4_tested"]
+                if eb4 is None:
+                    st.info("No configuration to replay.")
+                else:
+                    w, t, btl = play_out_worst_case(
+                        b4, eb4, merged, moves, natures, typechart, vres["max_turns"],
+                        our_sets=st.session_state.get("sets", {}), enemy_sets=vres["enemy_sets"])
+                    st.caption(f"vs enemy {eb4[0]}/{eb4[1]} + {eb4[2]}/{eb4[3]}")
+                    st.code(btl.log.dump())
+
+            if vb2.button("Compute usage stats (all their brings)", key="vs_stats"):
+                from matchup_search import aggregate_battle_stats
+                with st.spinner("Replaying every enemy bring-4..."):
+                    vstats = aggregate_battle_stats(
+                        b4, vres["enemy_roster"], merged, moves, natures, typechart,
+                        vres["max_turns"], our_sets=st.session_state.get("sets", {}),
+                        enemy_sets=vres["enemy_sets"])
+                vsrows = []
+                for (side, name), s in vstats.items():
+                    top_moves = sorted(s["moves"].items(), key=lambda x: -x[1])
+                    vsrows.append({
+                        "Side": "Us" if side == "p1" else "Them", "Pokemon": name,
+                        "KOs": s["kos"], "Damage %": round(s["damage_pct"], 0),
+                        "Moves used": ", ".join(f"{m} x{c}" for m, c in top_moves),
+                    })
+                vsrows.sort(key=lambda row: (row["Side"], -row["KOs"]))
+                st.dataframe(pd.DataFrame(vsrows), width='stretch', hide_index=True)

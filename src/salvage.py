@@ -109,7 +109,12 @@ def salvage_losing_matchup(our_names, enemy_names, merged, moves_db, natures, ty
         w, t, _ = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
                                        typechart, max_turns, our_sets=new_sets)
         if _rank(w, t) > base_rank:
-            fixes.append({"mon": mon, "kind": kind, "change": change, "winner": w, "turns": t})
+            # new_spec: just this mon's updated set fragment (one field changed --
+            # evs/item/moves depending on `kind`), so a caller can apply the fix by
+            # merging that one field onto the mon's current spec, rather than
+            # needing to re-parse the human-readable `change` string.
+            fixes.append({"mon": mon, "kind": kind, "change": change, "winner": w, "turns": t,
+                          "new_spec": new_sets[mon]})
 
     fixes.sort(key=lambda f: -_rank(f["winner"], f["turns"])[0])
     return {"baseline": (base_w, base_t), "fixes": fixes}

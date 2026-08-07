@@ -481,6 +481,46 @@ def enemy_configs(roster, fixed_lead=None):
     return out
 
 
+def aggregate_battle_stats(our_names, enemy_roster, merged, moves_db, natures, typechart,
+                            max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
+                            fixed_lead=None, script_team=None):
+    """Sum per-Pokemon usage stats (move-usage counts, damage dealt as %-of-target-
+    max-HP, KOs secured -- see Battle.stats) across EVERY enemy bring-4 configuration
+    for one fixed bring-4 of ours, i.e. "how did this team actually perform, in
+    aggregate, across all the games it could be made to play against this opponent."
+
+    Re-plays each config (the same games search_robust_composition's verify stage
+    already played, since that function doesn't retain battle objects) -- one full
+    pass over the opponent's configs (90, or 6 for a fixed lead), not the whole
+    search, so this is meant to be called once for a team's FINAL chosen bring-4,
+    not per candidate.
+
+    Returns {(side, name): {"moves": {move_name: count}, "damage_pct": float,
+    "kos": int}}.
+    """
+    from scripted_openings import script_for
+    enemy_script = script_for(script_team) if script_team else None
+    configs = enemy_configs(enemy_roster, fixed_lead=fixed_lead)
+    total = {}
+    for lead, back in configs:
+        eb4 = list(lead) + list(back)
+        if script_team:
+            _, _, battle, _ = play_scripted_worst_case(
+                our_names, eb4, merged, moves_db, natures, typechart, script_team,
+                max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
+        else:
+            _, _, battle = play_out_worst_case(
+                our_names, eb4, merged, moves_db, natures, typechart, max_turns,
+                our_sets=our_sets, enemy_sets=enemy_sets, enemy_script=enemy_script)
+        for key, st in battle.stats.items():
+            acc = total.setdefault(key, {"moves": {}, "damage_pct": 0.0, "kos": 0})
+            for mv, cnt in st["moves"].items():
+                acc["moves"][mv] = acc["moves"].get(mv, 0) + cnt
+            acc["damage_pct"] += st["damage_pct"]
+            acc["kos"] += st["kos"]
+    return total
+
+
 def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures, typechart,
                                max_turns=MAX_TURNS, our_sets=None, verify_top=3, progress=None,
                                fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None):
