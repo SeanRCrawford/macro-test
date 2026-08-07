@@ -107,8 +107,8 @@ if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
 
-tab_build, tab_gen, tab_search, tab_battle = st.tabs(
-    ["Team Builder", "Generate Team", "Lead / Back Search", "Battle Viewer"])
+tab_build, tab_gen, tab_search, tab_battle, tab_vs = st.tabs(
+    ["Team Builder", "Generate Team", "Lead / Back Search", "Battle Viewer", "Vs Team"])
 
 
 # ------------------------------------------------------------------ helpers
@@ -1114,3 +1114,126 @@ with tab_battle:
             st.info("No single EV/item/move swap tried here flipped the result.")
     elif not last:
         st.caption("Run Simulate above first.")
+
+
+# ------------------------------------------------------------------ vs team
+with tab_vs:
+    st.subheader("Vs a specific team")
+    st.caption("Check the currently loaded team (Team Builder tab) against any enemy team you "
+               "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
+               "(pokepast.es 'Paste'/'Export' view) -- without saving it to data/teams/ first. "
+               "See data/teams/ if you want this enemy team to stick around permanently instead.")
+    vs_team = get_state_team()
+    if len(vs_team) != 6:
+        st.warning("Pick 6 Pokemon in the Team Builder tab first.")
+    else:
+        vs_mode = st.radio("Enemy team input", ["Pick 6 Pokemon", "Paste a pokepaste"],
+                            horizontal=True, key="vs_mode")
+        enemy_roster, enemy_sets_vs = [], {}
+        if vs_mode == "Pick 6 Pokemon":
+            enemy_roster = st.multiselect("Enemy team (choose 6)", all_names, max_selections=6,
+                                           key="vs_manual")
+        else:
+            paste_text = st.text_area("Paste Showdown export text here (blank line between "
+                                       "each Pokemon)", height=220, key="vs_paste")
+            if paste_text.strip():
+                from species_data import custom_team_from_export
+                enemy_roster, enemy_sets_vs = custom_team_from_export(paste_text, merged)
+                unresolved_vs = [n for n in enemy_roster if n not in merged]
+                if unresolved_vs:
+                    st.error(f"Unrecognised species (check spelling against mbsmogon.xlsx): "
+                              f"{unresolved_vs}")
+                    enemy_roster = []
+                elif len(enemy_roster) != 6:
+                    st.error(f"Parsed {len(enemy_roster)} Pokemon, need exactly 6.")
+                else:
+                    st.success(f"Parsed: {', '.join(enemy_roster)}")
+                    with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
+                        st.json(enemy_sets_vs)
+
+        if len(enemy_roster) == 6:
+            vc1, vc2 = st.columns(2)
+            deep_vs = vc1.checkbox("All enemy brings (90, slower, trustworthy)", value=False,
+                                    key="vs_deep")
+            max_turns_vs = vc2.slider("Turn cap", 6, 24, 12, key="vs_turns")
+            if st.button("Find best response", type="primary", key="vs_go"):
+                from matchup_search import search_robust_composition, search_best_composition
+                from run_search import find_toughest_lead
+                vs_sets = st.session_state.get("sets", {})
+                with st.spinner("Searching..."):
+                    if deep_vs:
+                        rob = search_robust_composition(
+                            vs_team, enemy_roster, merged, moves, natures, typechart, max_turns_vs,
+                            our_sets=vs_sets, verify_top=1, enemy_sets=enemy_sets_vs)
+                        r = rob[0] if rob else None
+                        eb4_tested = None
+                    else:
+                        lead = find_toughest_lead(vs_team, enemy_roster, merged, moves, natures,
+                                                   typechart, max_turns_vs, our_sets=vs_sets)
+                        rem = [x for x in enemy_roster if x not in lead]
+                        eb4_tested = list(lead) + rem[:2]
+                        combos = search_best_composition(
+                            vs_team, eb4_tested, merged, moves, natures, typechart, max_turns_vs,
+                            our_sets=vs_sets, enemy_sets=enemy_sets_vs)
+                        r = None
+                        if combos:
+                            b4, w, t = combos[0]
+                            r = {"our_bring4": b4, "solver_wins": int(w == "p1"), "solver_total": 1,
+                                 "solver_losses": [] if w == "p1"
+                                 else [(tuple(lead), tuple(rem[:2]), w, t)]}
+                if r is None:
+                    st.error("No legal composition found (check your team and the enemy roster).")
+                else:
+                    st.session_state["vs_result"] = {
+                        "r": r, "enemy_roster": enemy_roster, "enemy_sets": enemy_sets_vs,
+                        "deep": deep_vs, "max_turns": max_turns_vs, "eb4_tested": eb4_tested,
+                    }
+
+        vres = st.session_state.get("vs_result")
+        if vres:
+            r = vres["r"]
+            b4 = r["our_bring4"]
+            m1, m2 = st.columns(2)
+            m1.metric("Best response", f"{b4[0]}/{b4[1]} + {b4[2]}/{b4[3]}")
+            if vres["deep"]:
+                m2.metric("Enemy brings beaten", f"{r['solver_wins']}/{r['solver_total']}")
+            else:
+                m2.metric("Vs their toughest lead", "WIN" if r["solver_wins"] else "LOSS")
+            for lead, back, w, t in r.get("solver_losses", [])[:5]:
+                st.write(f"LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} "
+                         f"({w} T{t})")
+
+            vb1, vb2 = st.columns(2)
+            if vb1.button("Show full battle log (worst case)", key="vs_log"):
+                from matchup_search import play_out_worst_case
+                if vres["deep"]:
+                    wc = r.get("worst_case")
+                    eb4 = (list(wc[0]) + list(wc[1])) if wc else None
+                else:
+                    eb4 = vres["eb4_tested"]
+                if eb4 is None:
+                    st.info("No configuration to replay.")
+                else:
+                    w, t, btl = play_out_worst_case(
+                        b4, eb4, merged, moves, natures, typechart, vres["max_turns"],
+                        our_sets=st.session_state.get("sets", {}), enemy_sets=vres["enemy_sets"])
+                    st.caption(f"vs enemy {eb4[0]}/{eb4[1]} + {eb4[2]}/{eb4[3]}")
+                    st.code(btl.log.dump())
+
+            if vb2.button("Compute usage stats (all their brings)", key="vs_stats"):
+                from matchup_search import aggregate_battle_stats
+                with st.spinner("Replaying every enemy bring-4..."):
+                    vstats = aggregate_battle_stats(
+                        b4, vres["enemy_roster"], merged, moves, natures, typechart,
+                        vres["max_turns"], our_sets=st.session_state.get("sets", {}),
+                        enemy_sets=vres["enemy_sets"])
+                vsrows = []
+                for (side, name), s in vstats.items():
+                    top_moves = sorted(s["moves"].items(), key=lambda x: -x[1])
+                    vsrows.append({
+                        "Side": "Us" if side == "p1" else "Them", "Pokemon": name,
+                        "KOs": s["kos"], "Damage %": round(s["damage_pct"], 0),
+                        "Moves used": ", ".join(f"{m} x{c}" for m, c in top_moves),
+                    })
+                vsrows.sort(key=lambda row: (row["Side"], -row["KOs"]))
+                st.dataframe(pd.DataFrame(vsrows), width='stretch', hide_index=True)
