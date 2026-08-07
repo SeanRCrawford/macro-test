@@ -509,13 +509,23 @@ response of theirs blows it up. `find_unpunishable_plan(...)` combines both
 tests -- beats every scripted opening AND survives every response -- and is the
 strongest (and slowest) guarantee here.
 
-### Team generation now checks the special cases
+### Team generation checks the special (scripted) cases the same way as everything else
 
-Verification of a scripted team no longer stops at "beat its 90 brings". It
-also requires a COMMITTED PLAN at worst-case rolls, and reports
-`NO COMMITTED PLAN -- not viable vs this script` when none exists. A team that
-cannot commit to a turn-1 answer against a fixed-lead script is not viable
-regardless of how it scores elsewhere.
+A scripted team (King / Hard Trick Room / Perish Trap) is verified on equal
+footing with every other opponent: `search_robust_composition` plays its
+rehearsed script -- AND the generic "one Protects, the other attacks"
+alternative any fixed-lead team could run instead (both choices of which
+active protects), plus the plain unscripted 2v2 -- against every one of our
+bring-4/lead-2 combos, with OUR side adapting each turn via the real solver
+(only the opponent is scripted; you genuinely do see their move before
+choosing yours on every turn after the first). `wins == total` already means
+the team survives every scripted line as well as the conventional 90 -- there
+is no separate stricter "one blind turn-1 action must work" requirement on
+top of that (see `committed_plan.find_plan_unknown_backs` below, which is
+still available as a standalone, stronger analysis but is no longer part of
+generate_team.py's default pass/fail check, per user request: it's a much
+stricter bar than the game actually demands, since you're never really
+choosing turn 1 blind past the opponent's lead reveal).
 
 ### Unknown backs (partially complete -- read before trusting)
 
@@ -687,13 +697,23 @@ response of theirs blows it up. `find_unpunishable_plan(...)` combines both
 tests -- beats every scripted opening AND survives every response -- and is the
 strongest (and slowest) guarantee here.
 
-### Team generation now checks the special cases
+### Team generation checks the special (scripted) cases the same way as everything else
 
-Verification of a scripted team no longer stops at "beat its 90 brings". It
-also requires a COMMITTED PLAN at worst-case rolls, and reports
-`NO COMMITTED PLAN -- not viable vs this script` when none exists. A team that
-cannot commit to a turn-1 answer against a fixed-lead script is not viable
-regardless of how it scores elsewhere.
+A scripted team (King / Hard Trick Room / Perish Trap) is verified on equal
+footing with every other opponent: `search_robust_composition` plays its
+rehearsed script -- AND the generic "one Protects, the other attacks"
+alternative any fixed-lead team could run instead (both choices of which
+active protects), plus the plain unscripted 2v2 -- against every one of our
+bring-4/lead-2 combos, with OUR side adapting each turn via the real solver
+(only the opponent is scripted; you genuinely do see their move before
+choosing yours on every turn after the first). `wins == total` already means
+the team survives every scripted line as well as the conventional 90 -- there
+is no separate stricter "one blind turn-1 action must work" requirement on
+top of that (see `committed_plan.find_plan_unknown_backs` below, which is
+still available as a standalone, stronger analysis but is no longer part of
+generate_team.py's default pass/fail check, per user request: it's a much
+stricter bar than the game actually demands, since you're never really
+choosing turn 1 blind past the opponent's lead reveal).
 
 ### Unknown backs (partially complete -- read before trusting)
 
