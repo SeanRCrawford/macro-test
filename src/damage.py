@@ -264,6 +264,8 @@ def _offensive_ability_mult(attacker: "Combatant", move: "MoveInfo", type_eff: f
         mult *= 1.5
     if ab == "Tough Claws" and (move.flags or {}).get("contact"):
         mult *= 1.3
+    if ab == "Mega Launcher" and (move.flags or {}).get("pulse"):
+        mult *= 1.5
     return mult
 
 
