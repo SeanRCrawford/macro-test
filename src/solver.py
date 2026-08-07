@@ -218,6 +218,10 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
     return joint
 
 
+KO_WEIGHT = 180.0  # see heuristic_eval: a secured KO must dominate the HP-differential
+                    # noise a forced enemy replacement introduces
+
+
 def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     my = battle.p1 if my_side_name == "p1" else battle.p2
     opp = battle.p2 if my_side_name == "p1" else battle.p1
@@ -234,7 +238,19 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     seen = [c for c in opp.roster
             if c in opp.active or c.fainted or getattr(c, "revealed", False)]
     opp_hp = sum(c.current_hp_frac for c in seen if not c.fainted)
-    score = (my_hp - opp_hp) * 100
+
+    # KOing a Pokemon forces a replacement, which is immediately "seen" and enters
+    # at full HP -- so opp_hp can go UP the instant we secure a kill (we removed 0.x
+    # HP of a fainted mon but revealed a fresh 1.0). Pure HP differential then scores
+    # taking a free KO as neutral-or-negative, which is backwards: permanently
+    # removing a Pokemon is real, irreversible progress toward winning regardless of
+    # how healthy its replacement is. An explicit alive-count term, weighted well
+    # above a turn's normal HP swing, makes sure a clean KO is never worth passing up
+    # just to avoid revealing what replaces it.
+    my_alive = sum(1 for c in my.roster if not c.fainted)
+    opp_alive = sum(1 for c in opp.roster if not c.fainted)
+    score = (my_alive - opp_alive) * KO_WEIGHT
+    score += (my_hp - opp_hp) * 100
 
     # Positional terms. Without these the evaluation is pure HP differential, so a
     # switch -- which costs a turn and usually takes a hit -- can never look good at
