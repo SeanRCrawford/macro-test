@@ -19,7 +19,7 @@ Treat it as set selection, then let the real solver judge the team.
 """
 import itertools
 
-from damage import MoveInfo, effective_stat, damage_roll
+from damage import MoveInfo, effective_stat, damage_roll, hit_count_for
 from combatants import make_combatant
 
 # NOTE: there is deliberately no hardcoded catalogue of "good items" here.
@@ -45,6 +45,16 @@ SPEED_DROP_MOVES = {
     "Mud Shot": 0.35, "Low Sweep": 0.30, "Icy Wind ": 0.55,
 }
 
+# Known-good hand-specified movesets to compare against the usage-derived pick
+# for a specific species -- kept only if they actually score better, same as
+# best_item trying multiple items. e.g. enemy Kingambit sets (Kowtow Cleave /
+# Sucker Punch / Iron Head / Low Kick) commonly get edged out of the
+# usage-derived top-4 by the forced Protect slot even though all four moves
+# are individually high-usage; this lets that exact set be checked directly.
+FORCED_MOVE_CANDIDATES = {
+    "Kingambit": [["Kowtow Cleave", "Sucker Punch", "Iron Head", "Low Kick"]],
+}
+
 UTILITY_VALUE = {
     # Fake Out denies a turn outright -- worth far more than its 40 BP suggests.
     "Fake Out": 0.45,
@@ -55,14 +65,113 @@ UTILITY_VALUE = {
     "Follow Me": 0.75, "Rage Powder": 0.75,
     "Helping Hand": 0.35, "Parting Shot": 0.45, "Will-O-Wisp": 0.40,
     "Thunder Wave": 0.45, "Taunt": 0.35, "Encore": 0.35,
+    # Reflect/Light Screen halve one damage category doubles-adjusted (2732/4096,
+    # see damage.damage_roll); Aurora Veil does both at once but needs snow.
+    # Boosted further below when the holder carries Light Clay (8 turns vs 5) --
+    # this is what makes a Grimmsnarl screens-then-Parting-Shot line score
+    # correctly instead of reading as "rarely attacks" filler.
+    "Reflect": 0.55, "Light Screen": 0.55, "Aurora Veil": 0.75,
+}
+LIGHT_CLAY_SCREEN_MULT = 1.4  # 8 turns vs 5
+
+
+# EVs in this dataset (mbsmogon.xlsx) are a flat, small-budget "Champions M-B"
+# house rule -- NOT standard EVs (see stats.calc_stat) -- observed as a fixed
+# ~66-point total and a 32-point per-stat cap across the sheet.
+EV_CAP_PER_STAT = 32
+
+
+def bulk_spread_for(name, merged):
+    """An alternative max-bulk EV spread for `name`: reallocate EVs OUT of
+    Def/SpDef and the LESS-used offensive stat (the "dead" attack the mon
+    isn't built around) INTO HP, keeping the mon's total EV budget and the
+    32-per-stat cap. Speed and the primary attacking stat (whichever of
+    Atk/SpA is higher in its base stats) are left untouched, so it keeps
+    functioning offensively/speed-wise -- only bulk is being added, not a
+    different mon. Returns a fresh evs dict; does not mutate `merged`.
+    """
+    p = merged[name]
+    evs = dict(p["evs"])
+    base = p["base_stats"]
+    primary = "atk" if base.get("atk", 0) >= base.get("spa", 0) else "spa"
+    secondary = "spa" if primary == "atk" else "atk"
+
+    new_evs = dict(evs)
+    reclaimed = 0
+    for stat in (secondary, "def", "spd"):
+        reclaimed += new_evs.get(stat, 0)
+        new_evs[stat] = 0
+
+    # A lean glass-cannon spread (e.g. Garchomp's usage-default 2/32/0/0/0/32)
+    # has nothing in Def/SpDef/secondary-offense to reclaim -- Speed is the
+    # only lever left to actually buy bulk with, so give up HALF of it rather
+    # than returning a no-op "bulk" spread identical to the default.
+    if reclaimed == 0:
+        spe = new_evs.get("spe", 0)
+        give_up = spe // 2
+        new_evs["spe"] = spe - give_up
+        reclaimed += give_up
+
+    hp_room = max(0, EV_CAP_PER_STAT - new_evs.get("hp", 0))
+    add_to_hp = min(reclaimed, hp_room)
+    new_evs["hp"] = new_evs.get("hp", 0) + add_to_hp
+    leftover = reclaimed - add_to_hp
+    # HP already capped -- park any leftover back in Def/SpDef/secondary
+    # offense (in that preference order) rather than dropping EV points.
+    for stat in ("def", "spd", secondary):
+        if leftover <= 0:
+            break
+        room = EV_CAP_PER_STAT - new_evs.get(stat, 0)
+        give = min(leftover, room)
+        new_evs[stat] = new_evs.get(stat, 0) + give
+        leftover -= give
+    return new_evs
+
+
+def best_spread(name, merged, moves_db, natures, typechart, enemy_names, item=None, slots=4):
+    """Try the usage-default EV spread against the bulk_spread_for alternative
+    for this matchup, keeping whichever scores higher -- same "try it, keep it
+    if it wins" pattern as best_item trying multiple items. Useful standalone
+    (does a bulkier spread perform better here?) and as a building block for
+    salvaging a losing matchup.
+
+    Returns (move_names, score, evs_used, used_bulk: bool).
+    """
+    default_mv, default_score = best_moveset(name, merged, moves_db, natures, typechart,
+                                              enemy_names, item=item, slots=slots)
+    bulk_evs = bulk_spread_for(name, merged)
+    if bulk_evs == merged[name]["evs"]:
+        return default_mv, default_score, merged[name]["evs"], False
+    bulk_mv, bulk_score = best_moveset(name, merged, moves_db, natures, typechart, enemy_names,
+                                        item=item, slots=slots, evs=bulk_evs)
+    if bulk_score > default_score:
+        return bulk_mv, bulk_score, bulk_evs, True
+    return default_mv, default_score, merged[name]["evs"], False
+
+
+# Type-resist berries: halve damage from a super-effective hit of that type
+# (consumed on use). Not usage-list items (nobody's logged usage stats show
+# them, they're situational), so they only enter the search deliberately --
+# see legal_items' extra_items and the salvage flow, which adds the specific
+# berry for a matchup's identified losing type, not every mon's candidates.
+TYPE_RESIST_BERRY = {
+    "Normal": "Chilan Berry", "Fire": "Occa Berry", "Water": "Passho Berry",
+    "Electric": "Wacan Berry", "Grass": "Rindo Berry", "Ice": "Yache Berry",
+    "Fighting": "Chople Berry", "Poison": "Kebia Berry", "Ground": "Shuca Berry",
+    "Flying": "Coba Berry", "Psychic": "Payapa Berry", "Bug": "Tanga Berry",
+    "Rock": "Charti Berry", "Ghost": "Kasib Berry", "Dragon": "Haban Berry",
+    "Dark": "Colbur Berry", "Steel": "Babiri Berry", "Fairy": "Roseli Berry",
 }
 
 
-def legal_items(name, merged, min_usage=MIN_ITEM_USAGE):
+def legal_items(name, merged, min_usage=MIN_ITEM_USAGE, extra_items=None):
     """Items this Pokemon is actually recorded using, most-used first.
 
     A Mega with a stone is locked to it. Everything else is limited to its own
-    usage list -- no cross-species item catalogue.
+    usage list -- no cross-species item catalogue -- PLUS any `extra_items`
+    explicitly passed in (e.g. a specific type-resist berry the salvage flow
+    wants tried for a matchup with an identified weakness), which are
+    otherwise never considered since nobody logs usage stats for them.
     """
     from species_data import find_mega_stone
     stone = find_mega_stone(name, merged)
@@ -70,6 +179,9 @@ def legal_items(name, merged, min_usage=MIN_ITEM_USAGE):
         return [stone]
     items = [i for i, pct in merged[name]["items_usage"]
              if pct >= min_usage and i.lower() != "other"]
+    for extra in (extra_items or []):
+        if extra not in items:
+            items.append(extra)
     return items or ["Leftovers"]
 
 
@@ -105,7 +217,7 @@ def _accuracy_ok(move_raw, name, merged, team_weather=None):
     return False
 
 
-def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None):
+def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None, item=None):
     """All reasonably-used moves for this Pokemon, as (MoveInfo, usage%)."""
     out = []
     for mv, pct in merged[name]["moves_usage"]:
@@ -116,21 +228,31 @@ def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None
             continue
         if not _accuracy_ok(moves_db[k], name, merged, team_weather):
             continue
+        # Population Bomb's hit count (and therefore its whole value) depends on
+        # Wide Lens -- without it, treat it as too unreliable to plan around
+        # (use Super Fang or similar instead), same rule as the <80%-accuracy filter.
+        if mv == "Population Bomb" and item != "Wide Lens":
+            continue
         out.append((_mk_move(moves_db[k]), pct))
     return out[:max_candidates]
 
 
-def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, item=None):
+def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, item=None,
+                      evs=None, nature=None):
     """{move_name: {enemy_name: value}} where value is roughly 'fraction of
     that enemy's HP this move removes', with a bonus for securing a KO.
 
     Status/utility moves get a flat utility score instead -- they don't do
     damage, but a moveset of four attacks with no Protect/Trick Room is
     usually worse than one with them, so they need a non-zero value.
+
+    evs/nature: optional EV-spread override (see bulk_spread_for) so a
+    non-default spread's actual offensive output gets scored, not the
+    usage-default spread's.
     """
-    attacker = make_combatant(name, merged, natures, item=item)
+    attacker = make_combatant(name, merged, natures, item=item, evs=evs, nature=nature)
     table = {}
-    for move, pct in candidate_moves(name, merged, moves_db):
+    for move, pct in candidate_moves(name, merged, moves_db, item=item):
         row = {}
         for en in enemy_names:
             defender = make_combatant(en, merged, natures)
@@ -138,7 +260,10 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
                 # Utility value if we know this move matters in doubles, else a small
                 # usage-weighted default. NOT scaled down by usage for the known ones --
                 # Protect being "only" 34% used doesn't make it a bad move.
-                row[en] = UTILITY_VALUE.get(move.name, 0.22 * (pct / 100.0))
+                val = UTILITY_VALUE.get(move.name, 0.22 * (pct / 100.0))
+                if move.name in ("Reflect", "Light Screen", "Aurora Veil") and item == "Light Clay":
+                    val *= LIGHT_CLAY_SCREEN_MULT
+                row[en] = val
                 continue
             atk_key = "atk" if move.category == "Physical" else "spa"
             def_key = "def" if move.category == "Physical" else "spd"
@@ -149,6 +274,7 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
                 a *= 1.5
             d = effective_stat(defender.stats[def_key], 0)
             _, _, avg, eff = damage_roll(50, move.power, a, d, attacker, defender, move, typechart)
+            avg *= hit_count_for(move.name, attacker)
             frac = avg / defender.stats["hp"] if defender.stats["hp"] else 0.0
             if frac >= 1.0:
                 frac = 1.0 + 0.5  # OHKO bonus
@@ -172,11 +298,20 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
 
 
 def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=None,
-                  slots=4, force_protect=True):
+                  slots=4, force_protect=True, forced_candidates=None, evs=None, nature=None):
     """Pick the `slots` moves maximising summed best-value coverage over the
     enemy list: for each enemy, only the single best move against it counts,
-    so redundant same-type attacks don't stack."""
-    table = move_value_table(name, merged, moves_db, natures, typechart, enemy_names, item=item)
+    so redundant same-type attacks don't stack.
+
+    forced_candidates: optional list of hand-specified `slots`-length move-name
+    lists to score alongside the searched pick, keeping whichever scores
+    higher (same "try it, keep it if it wins" pattern as best_item trying
+    multiple items). Defaults to FORCED_MOVE_CANDIDATES[name] if not given.
+
+    evs/nature: optional EV-spread override, see move_value_table.
+    """
+    table = move_value_table(name, merged, moves_db, natures, typechart, enemy_names, item=item,
+                              evs=evs, nature=nature)
     names = list(table.keys())
     # A Choice item locks you into the first move used, so Protect/Detect is a dead
     # slot -- drop them entirely rather than letting a zero-value move occupy one of
@@ -184,26 +319,38 @@ def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=N
     if item and item.startswith("Choice"):
         names = [n for n in names if n not in PROTECT_MOVES_OPT and n not in SIDE_GUARDS] or names
     if len(names) <= slots:
-        return names, _score_moveset(names, table, enemy_names)
+        best, best_score = names, _score_moveset(names, table, enemy_names)
+    else:
+        # A non-Choice-locked Pokemon in doubles should essentially always carry a
+        # protect-type move: it blocks spread damage, stalls Trick Room / Tailwind
+        # turns, and scouts. Reserve a slot for it when one is available and legal.
+        # Choice items make Protect a dead slot (you'd be locked into it), so skip.
+        forced = []
+        if force_protect and item not in CHOICE_ITEMS_SET:
+            have = [p for p in PROTECT_NAMES if p in names]
+            if have:
+                forced = [have[0]]
 
-    # A non-Choice-locked Pokemon in doubles should essentially always carry a
-    # protect-type move: it blocks spread damage, stalls Trick Room / Tailwind
-    # turns, and scouts. Reserve a slot for it when one is available and legal.
-    # Choice items make Protect a dead slot (you'd be locked into it), so skip.
-    forced = []
-    if force_protect and item not in CHOICE_ITEMS_SET:
-        have = [p for p in PROTECT_NAMES if p in names]
-        if have:
-            forced = [have[0]]
+        remaining_slots = slots - len(forced)
+        pickable = [n for n in names if n not in forced]
+        best, best_score = None, -1.0
+        for combo in itertools.combinations(pickable, remaining_slots):
+            full = forced + list(combo)
+            sc = _score_moveset(full, table, enemy_names)
+            if sc > best_score:
+                best, best_score = full, sc
 
-    remaining_slots = slots - len(forced)
-    pickable = [n for n in names if n not in forced]
-    best, best_score = None, -1.0
-    for combo in itertools.combinations(pickable, remaining_slots):
-        full = forced + list(combo)
-        sc = _score_moveset(full, table, enemy_names)
+    # Compare against any hand-specified candidate set(s) -- keep whichever
+    # scores higher. A candidate is only scorable if every one of its moves
+    # is actually in this Pokemon's usage-derived candidate table.
+    for cand in (forced_candidates if forced_candidates is not None
+                 else FORCED_MOVE_CANDIDATES.get(name, [])):
+        if not all(m in table for m in cand):
+            continue
+        sc = _score_moveset(cand, table, enemy_names)
         if sc > best_score:
-            best, best_score = full, sc
+            best, best_score = list(cand), sc
+
     return best, best_score
 
 

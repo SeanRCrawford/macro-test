@@ -38,7 +38,7 @@ def make_combatant(name, merged, natures):
 
 def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
                          max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
-                         return_choice=False, enemy_script=None):
+                         return_choice=False, enemy_script=None, roll_index=None, tie_bias=None):
     """Minimax over BOTH sides' Mega Evolution choices.
 
     Either side may bring two Mega-capable Pokemon, but only one can actually
@@ -64,7 +64,8 @@ def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typec
             winner, turns, battle = play_out_pair(
                 our_names, enemy_names, merged, moves_db, natures, typechart, max_turns,
                 our_mega_transforms=ov, enemy_mega_transforms=ev,
-                our_sets=our_sets, enemy_sets=enemy_sets, enemy_script=enemy_script)
+                our_sets=our_sets, enemy_sets=enemy_sets, enemy_script=enemy_script,
+                roll_index=roll_index, tie_bias=tie_bias)
             # Rank by how BAD the outcome is for us (higher = worse), so the enemy
             # branch maximises and ours minimises.
             #   we lose            -> worst; the faster we lose, the worse
@@ -91,7 +92,7 @@ def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typec
 def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
                    max_turns=MAX_TURNS, our_mega_transforms=None, enemy_mega_transforms=None,
                    our_sets=None, enemy_sets=None, rng_seed=None, tie_bias=None,
-                   enemy_script=None):
+                   enemy_script=None, roll_index=None):
     """our_names / enemy_names: lists of Pokemon names, length 2 (pure lead
     duel) or 4 (lead pair + back pair, roster[0:2] leads / roster[2:] bench).
     Multiple Mega-named picks per side are allowed (resolved via make_team;
@@ -113,6 +114,7 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
 
     battle = Battle(our_combatants, enemy_combatants, typechart, moves_db, rng_seed=rng_seed,
                      tie_bias=tie_bias)
+    battle.force_roll_index = roll_index
 
     from solver import greedy_opponent_joint_action
     for _ in range(max_turns):
@@ -179,7 +181,7 @@ def sweep_enemy_pairs(our_pair, enemy_roster, merged, moves_db, natures, typecha
 
 
 def search_best_composition(our_pool6, enemy_bring4, merged, moves_db, natures, typechart,
-                             max_turns=MAX_TURNS, our_sets=None, enemy_script=None):
+                             max_turns=MAX_TURNS, our_sets=None, enemy_script=None, enemy_sets=None):
     """Search all (bring-4-of-6) x (lead-2-of-that-4) combos from our_pool6
     against one fixed enemy bring4 (lead = enemy_bring4[:2], back = [2:]).
     Returns results sorted best-first: (our_bring4, winner, turns)."""
@@ -196,7 +198,7 @@ def search_best_composition(our_pool6, enemy_bring4, merged, moves_db, natures, 
             try:
                 winner, turns, battle = play_out_worst_case(our_bring4, enemy_bring4, merged, moves_db,
                                                               natures, typechart, max_turns,
-                                                              our_sets=our_sets,
+                                                              our_sets=our_sets, enemy_sets=enemy_sets,
                                                               enemy_script=enemy_script)
             except ValueError:
                 continue  # illegal combo (2+ Megas in this bring-4) -- skip, don't crash the search
@@ -328,6 +330,44 @@ def evaluate_tie_branches(our_names, enemy_names, merged, moves_db, natures, typ
     return out
 
 
+ROLL_PATH_LABELS = {None: "avg", 0: "min (0/16, 0.85x)", 5: "5/16 (0.90x)", 15: "max (15/16, 1.00x)"}
+
+
+def robust_win_paths(our_names, enemy_names, merged, moves_db, natures, typechart,
+                      max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
+                      roll_indices=(0, 5, 15, None)):
+    """Cross {lose every speed tie, win every speed tie} x a set of named
+    discrete damage-roll paths (worst-case 0/16, the 5/16 roll, best-case
+    15/16, and the plain average), and report the outcome of each cell.
+
+    This is the tool a losing (or fragile-looking) matchup needs: rather than
+    a single win/loss or a win RATE, it shows exactly which combination of
+    "bad luck" assumptions the result depends on -- e.g. "we win as long as
+    we don't lose the speed tie AND roll at least 5/16" is a very different
+    situation from "we lose the instant either goes against us."
+
+    `robust_win` is True only if we still win in the single worst cell (lose
+    every tie, roll minimum damage) -- the bar the user asked for: a win has
+    to hold up even against the worst rolls and losing every tie, not merely
+    win on average.
+
+    Returns {"paths": {(tie_label, roll_label): (winner, turns)}, "robust_win": bool,
+             "worst_cell": (tie_label, roll_label)}.
+    """
+    tie_options = [("we_win_ties", "p1"), ("they_win_ties", "p2")]
+    paths = {}
+    for tie_label, tie_bias in tie_options:
+        for roll_index in roll_indices:
+            roll_label = ROLL_PATH_LABELS.get(roll_index, str(roll_index))
+            w, t, _ = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
+                                           typechart, max_turns, our_sets=our_sets,
+                                           enemy_sets=enemy_sets, roll_index=roll_index,
+                                           tie_bias=tie_bias)
+            paths[(tie_label, roll_label)] = (w, t)
+
+    worst_cell = ("they_win_ties", ROLL_PATH_LABELS.get(0, "0"))
+    robust_win = paths.get(worst_cell, ("timeout", 0))[0] == "p1"
+    return {"paths": paths, "robust_win": robust_win, "worst_cell": worst_cell}
 def play_out_stochastic(our_names, enemy_names, merged, moves_db, natures, typechart,
                          max_turns=MAX_TURNS, our_sets=None, our_mega=None, enemy_mega=None,
                          rng_seed=0, tie_bias=None):
@@ -439,7 +479,7 @@ def enemy_configs(roster, fixed_lead=None):
 
 def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures, typechart,
                                max_turns=MAX_TURNS, our_sets=None, verify_top=3, progress=None,
-                               fixed_lead=None, enemy_script=None, script_team=None):
+                               fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -493,11 +533,12 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             if script_team:
                 w, t, _, _v = play_scripted_worst_case(cand["our_bring4"], eb4, merged, moves_db,
                                                         natures, typechart, script_team,
-                                                        max_turns, our_sets=our_sets)
+                                                        max_turns, our_sets=our_sets,
+                                                        enemy_sets=enemy_sets)
             else:
                 w, t, _ = play_out_worst_case(cand["our_bring4"], eb4, merged, moves_db, natures,
                                                typechart, max_turns, our_sets=our_sets,
-                                               enemy_script=enemy_script)
+                                               enemy_sets=enemy_sets, enemy_script=enemy_script)
             if w != "p1":
                 losses.append((tuple(lead), tuple(back), w, t))
             rank = (0 if w == "p1" else (1 if w != "p2" else 2), t)
@@ -512,7 +553,7 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
 
 
 def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
-                              team_name, max_turns=MAX_TURNS, our_sets=None):
+                              team_name, max_turns=MAX_TURNS, our_sets=None, enemy_sets=None):
     """Play a scripted opponent, trying EVERY opening variant and returning the
     worst outcome for us.
 
@@ -532,13 +573,13 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
     variants = all_scripts(team_name) + [(None, None)]
     if not variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
-                                       typechart, max_turns, our_sets=our_sets)
+                                       typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
         return w, t, b, None
 
     worst = None
     for idx, script in variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
-                                       typechart, max_turns, our_sets=our_sets,
+                                       typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
                                        enemy_script=script)   # script=None -> greedy 2v2
         rank = (2, -t) if w == "p2" else ((0, t) if w == "p1" else (1, 0))
         if worst is None or rank > worst[0]:
@@ -547,7 +588,8 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
 
 
 def find_committed_plan(our_names, enemy_names, merged, moves_db, natures, typechart,
-                         team_name, max_turns=MAX_TURNS, our_sets=None, commit_turns=1):
+                         team_name, max_turns=MAX_TURNS, our_sets=None, commit_turns=1,
+                         enemy_sets=None):
     """Find a SINGLE turn-1 action that wins against EVERY opponent variant.
 
     Why this exists: the solver chooses our move after computing what the
@@ -572,8 +614,8 @@ def find_committed_plan(our_names, enemy_names, merged, moves_db, natures, typec
 
     # Build one battle just to enumerate our legal turn-1 joint actions.
     probe = _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart,
-                           our_sets)
-    movesets = _movesets_for(probe, merged, moves_db, our_sets)
+                           our_sets, enemy_sets)
+    movesets = _movesets_for(probe, merged, moves_db, our_sets, enemy_sets)
     options = our_candidate_joint_actions(probe, probe.p1, probe.p2, movesets, 1)
 
     best = None
@@ -585,8 +627,8 @@ def find_committed_plan(our_names, enemy_names, merged, moves_db, natures, typec
         per_variant, all_win = {}, True
         for idx, script in variants:
             b = _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart,
-                               our_sets)
-            ms = _movesets_for(b, merged, moves_db, our_sets)
+                               our_sets, enemy_sets)
+            ms = _movesets_for(b, merged, moves_db, our_sets, enemy_sets)
             # Re-express our fixed choice against THIS battle's objects.
             fixed = _rebind_actions(desc, b)
             if fixed is None:
@@ -618,18 +660,19 @@ def find_committed_plan(our_names, enemy_names, merged, moves_db, natures, typec
     return best if best else (None, {}, False)
 
 
-def _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets):
+def _fresh_battle(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets,
+                   enemy_sets=None):
     from combatants import make_team
     oc = make_team(our_names, merged, natures, sets=our_sets)
-    ec = make_team(enemy_names, merged, natures)
+    ec = make_team(enemy_names, merged, natures, sets=enemy_sets)
     return Battle(oc, ec, typechart, moves_db)
 
 
-def _movesets_for(battle, merged, moves_db, our_sets):
+def _movesets_for(battle, merged, moves_db, our_sets, enemy_sets=None):
     from solver import build_moveset, TOP_K_MOVES
     ms = {}
     for c in battle.p1.roster + battle.p2.roster:
-        spec = (our_sets or {}).get(c.name) or {}
+        spec = (our_sets or {}).get(c.name) or (enemy_sets or {}).get(c.name) or {}
         ms[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
                                     only_moves=spec.get("moves"))
     return ms

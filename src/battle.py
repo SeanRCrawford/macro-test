@@ -13,16 +13,20 @@ Scope (deliberately not full Showdown parity -- see README notes at bottom):
     sample variance instead.
 
 NOT modeled yet (flagged for later, not needed for the format's core lines):
-  sleep/freeze/confusion turn mechanics, Follow Me/Rage Powder redirection,
-  abilities beyond the set already wired in engine.py/damage.py, secondary
-  effect triggers (e.g. Rock Slide flinch chance) beyond a togglable flag.
+  sleep/freeze/confusion turn mechanics, abilities beyond the set already
+  wired in engine.py/damage.py, secondary effect triggers (e.g. Rock Slide
+  flinch chance) beyond a togglable flag.
+
+Follow Me/Rage Powder redirection and Wide Guard/Quick Guard ARE modeled --
+see Side.follow_me_target / _resolve_move's redirection block, and
+Side.wide_guard/quick_guard / _blocked_by_guard.
 """
 import copy
 from dataclasses import dataclass, field
 import random
 
 from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
-                     apply_boosts, effective_stat)
+                     apply_boosts, effective_stat, hit_count_for)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS)
 
@@ -42,6 +46,7 @@ class Side:
     follow_me_target: object = None  # Combatant drawing single-target moves this turn
     screens_reflect: int = 0         # turns remaining
     screens_lightscreen: int = 0     # turns remaining
+    screens_auroraveil: int = 0      # turns remaining -- blocks BOTH categories, snow-only
 
     def alive_roster(self):
         return [c for c in self.roster if not c.fainted]
@@ -85,11 +90,11 @@ class Battle:
         for c in p1_roster + p2_roster:
             c.current_hp = c.max_hp()
 
-        # Opening switch-in triggers (Intimidate, weather setters), leads only.
-        on_switch_in(self.p1.active[0], self.p2.active, self.field)
-        on_switch_in(self.p1.active[1], self.p2.active, self.field)
-        on_switch_in(self.p2.active[0], self.p1.active, self.field)
-        on_switch_in(self.p2.active[1], self.p1.active, self.field)
+        # Opening switch-in triggers (Intimidate, weather setters, Hospitality), leads only.
+        on_switch_in(self.p1.active[0], self.p2.active, self.field, ally=self.p1.active[1], log=self.log)
+        on_switch_in(self.p1.active[1], self.p2.active, self.field, ally=self.p1.active[0], log=self.log)
+        on_switch_in(self.p2.active[0], self.p1.active, self.field, ally=self.p2.active[1], log=self.log)
+        on_switch_in(self.p2.active[1], self.p1.active, self.field, ally=self.p2.active[0], log=self.log)
         self.log.add(f"Leads: {self.p1.active[0].name}/{self.p1.active[1].name} "
                       f"vs {self.p2.active[0].name}/{self.p2.active[1].name}")
         self._emit(event="leads", p1=[c.name for c in self.p1.active],
@@ -108,6 +113,13 @@ class Battle:
         # force_roll lets a caller demand worst-case ('min') or best-case ('max')
         # damage instead of the average, so a plan can be checked for being
         # GUARANTEED rather than merely winning on an average roll.
+        #
+        # force_roll_index (set separately, see self.force_roll_index and its use
+        # in _resolve_move's damage_roll call) demands one SPECIFIC discrete roll
+        # (0-15) instead -- e.g. index 5 for "the 5/16 roll" -- for inspecting a
+        # named path rather than just min/max/avg. avg_v already IS that discrete
+        # value when force_roll_index was set, so no extra branch is needed here;
+        # just don't set force_roll at the same time (force_roll takes priority).
         forced = getattr(self, "force_roll", None)
         if forced == "min":
             return min_v
@@ -231,8 +243,12 @@ class Battle:
         mega_evolve(c)
         side.mega_used = True
         if c.ability in WEATHER_SETTERS:
-            self.field.weather = WEATHER_SETTERS[c.ability]
-            self.field.weather_turns_left = 5
+            new_weather = WEATHER_SETTERS[c.ability]
+            # Same-weather setters don't refresh the duration -- only a genuinely
+            # new weather resets the 5-turn count (see engine.on_switch_in).
+            if self.field.weather != new_weather:
+                self.field.weather = new_weather
+                self.field.weather_turns_left = 5
         if c.ability == "Intimidate" and before != "Intimidate":
             opp = self.p2 if side is self.p1 else self.p1
             for foe in opp.active:
@@ -265,9 +281,12 @@ class Battle:
                 mega_evolve(c)
                 side.mega_used = True
                 # A Mega's ability activates on transform -- weather setters included.
+                # Same-weather setters don't refresh the duration (see engine.on_switch_in).
                 if c.ability in WEATHER_SETTERS:
-                    self.field.weather = WEATHER_SETTERS[c.ability]
-                    self.field.weather_turns_left = 5
+                    new_weather = WEATHER_SETTERS[c.ability]
+                    if self.field.weather != new_weather:
+                        self.field.weather = new_weather
+                        self.field.weather_turns_left = 5
                 if c.ability == "Intimidate" and before_ability != "Intimidate":
                     opp = self.p2 if side is self.p1 else self.p1
                     for foe in opp.active:
@@ -319,7 +338,8 @@ class Battle:
             # Remember which SLOT the outgoing Pokemon occupied, so moves aimed at it
             # this turn hit whatever now stands in that slot -- not the other slot.
             self._departed_slots[id(a.combatant)] = (side.name, slot)
-            on_switch_in(incoming, opp.active, self.field)
+            ally = side.active[1 - slot] if len(side.active) == 2 else None
+            on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
             incoming.choice_locked_move = None
             self.log.add(f"{a.side} switches {self.tag(a.combatant)} -> {self.tag(incoming)}")
             self._emit(event="switch", side=a.side, out=a.combatant.name, incoming=incoming.name,
@@ -331,6 +351,20 @@ class Battle:
 
         # 2. Moves resolve in priority/speed order.
         move_actions = [a for a in all_actions if a.kind in ("move", "protect")]
+        # A Pokemon mid-charge on a two-turn move (Solar Beam/Blade, Electro Shot)
+        # MUST complete it this turn -- override whatever action was submitted for
+        # it, same as the real games not offering a choice on the release turn.
+        for a in move_actions:
+            charging = a.combatant.volatile.get("charging_move")
+            if charging and a.kind == "move":
+                key = charging.lower().replace(" ", "").replace("-", "").replace("'", "")
+                if key in self.moves_db:
+                    a.move = self.make_move(key)
+                    names = a.combatant.volatile.get("charging_target_names") or []
+                    live = [c for c in self.p1.active + self.p2.active
+                            if c is not None and c.name in names and not c.fainted]
+                    if live:
+                        a.targets = live
         for a in move_actions:
             self._enforce_choice_lock(a)
         # With an RNG active, pre-shuffle so that equal sort keys (true speed ties)
@@ -395,6 +429,8 @@ class Battle:
                 self.log.add(f"{a.combatant.name} became the center of attention!")
                 self._emit(event="redirect_set", side=a.side, actor=a.combatant.name,
                            move=a.move.name)
+            elif a.move and a.move.name in ("Reflect", "Light Screen", "Aurora Veil"):
+                self._set_screen(a)
 
         # Resolve moves one at a time, RE-SORTING the remainder after each. Speed can
         # change mid-turn -- Tailwind going up, an Intimidate, a Speed drop -- and from
@@ -411,6 +447,8 @@ class Battle:
                 continue  # already resolved above
             if a.move and a.move.volatile_status in ("followme", "ragepowder"):
                 continue  # redirection already registered above
+            if a.move and a.move.name in ("Reflect", "Light Screen", "Aurora Veil"):
+                continue  # screens already registered above
             if a.move and a.move.name == "Sucker Punch":
                 # Sucker Punch fails unless the target is using a DAMAGING move this
                 # turn (it whiffs into status, Protect, or a switch).
@@ -466,6 +504,27 @@ class Battle:
                     self.log.add(f"{self.tag(c)}'s {c.ability} blocked the priority move!")
                     return True
         return False
+
+    def _set_screen(self, a: Action):
+        """Reflect / Light Screen / Aurora Veil. Duration is 5 turns, 8 if the
+        setter holds Light Clay. Aurora Veil requires snow and blocks BOTH
+        damage categories in place of Reflect/Light Screen -- it fails outside
+        snow rather than silently doing nothing."""
+        side = self.side_of(a.combatant)
+        duration = 8 if a.combatant.item == "Light Clay" else 5
+        name = a.move.name
+        if name == "Aurora Veil" and self.field.weather != "snow":
+            self.log.add(f"{self.tag(a.combatant)}'s Aurora Veil failed! (snow required)")
+            self._emit(event="screen_failed", side=a.side, actor=a.combatant.name, move=name)
+            return
+        if name == "Reflect":
+            side.screens_reflect = duration
+        elif name == "Light Screen":
+            side.screens_lightscreen = duration
+        elif name == "Aurora Veil":
+            side.screens_auroraveil = duration
+        self.log.add(f"{self.tag(a.combatant)}'s side is protected by {name}! ({duration} turns)")
+        self._emit(event="screen_set", side=a.side, actor=a.combatant.name, move=name, turns=duration)
 
     def is_trapped(self, c) -> bool:
         """True if `c` cannot switch out. Shadow Tag traps everything except Ghost
@@ -536,6 +595,8 @@ class Battle:
                 out.append(pick)
         return out
 
+    CHARGE_WEATHER_SKIP = {"Solar Beam": "sun", "Solar Blade": "sun", "Electro Shot": "rain"}
+
     def _resolve_move(self, action: Action):
         attacker = action.combatant
         move = action.move
@@ -543,6 +604,30 @@ class Battle:
         if move.category == "Status":
             self._resolve_status_move(action)
             return
+
+        # Two-turn (charge) moves: Solar Beam/Solar Blade skip the charge turn
+        # in sun, Electro Shot skips it in rain -- both resolve immediately
+        # instead. Electro Shot's self +1 SpA applies either way, the turn
+        # it's used (charging or not).
+        already_charged = attacker.volatile.get("charging_move") == move.name
+        if move.flags and move.flags.get("charge") and not already_charged:
+            if move.name == "Electro Shot":
+                changed = apply_boosts(attacker, {"spa": 1}, from_foe=False)
+                if changed:
+                    self.log.add(f"{self.tag(attacker)}'s {self._fmt_boosts(changed)}")
+                    self._emit(event="stat_change", side=action.side, actor=attacker.name,
+                               detail=self._fmt_boosts(changed), source=f"{move.name} (self)")
+            skip_weather = self.CHARGE_WEATHER_SKIP.get(move.name)
+            if not (skip_weather and self.field.weather == skip_weather):
+                attacker.volatile["charging_move"] = move.name
+                attacker.volatile["charging_target_names"] = [t.name for t in action.targets]
+                self.log.add(f"{self.tag(attacker)} is charging power for {move.name}!")
+                self._emit(event="charge_start", side=action.side, actor=attacker.name, move=move.name)
+                return
+            self.log.add(f"{self.tag(attacker)}'s {move.name} strikes immediately! (weather)")
+        if already_charged:
+            attacker.volatile.pop("charging_move", None)
+            attacker.volatile.pop("charging_target_names", None)
 
         # Targets resolve through _retarget, which follows the SLOT the intended
         # target occupied. An earlier duplicate of this logic picked "the first live
@@ -575,6 +660,9 @@ class Battle:
             self.log.add(f"{self.tag(attacker)}'s {move.name} was blocked by {self.tag(t)}'s guard!")
         num_hit = len(hit_targets) if is_spread_move(move.target) else min(1, len(hit_targets))
         total_damage_dealt = 0  # summed across targets; drives recoil/drain amounts
+        # Helping Hand: a partner's Helping Hand this same turn boosts this move's
+        # power by 1.5x, once, regardless of how many targets it hits.
+        move_power = move.power * 1.5 if attacker.volatile.pop("helping_hand", False) else move.power
         for target in hit_targets:
             atk_key = "atk" if move.category == "Physical" else "spa"
             def_key = "def" if move.category == "Physical" else "spd"
@@ -588,13 +676,20 @@ class Battle:
             def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
 
             target_side = self.side_of(target)
-            screens_active = (target_side.screens_reflect > 0 if move.category == "Physical"
-                               else target_side.screens_lightscreen > 0)
+            screens_active = target_side.screens_auroraveil > 0 or (
+                target_side.screens_reflect > 0 if move.category == "Physical"
+                else target_side.screens_lightscreen > 0)
 
             mn, mx, avg, eff = damage_roll(
-                50, move.power, atk_stat, def_stat, attacker, target, move, self.typechart,
+                50, move_power, atk_stat, def_stat, attacker, target, move, self.typechart,
                 auras=self._active_auras(), weather=self.field.weather, num_targets_hit=num_hit, screens=screens_active,
+                roll_index=getattr(self, "force_roll_index", None),
             )
+            # Multi-hit moves (Bullet Seed, Population Bomb, ...): aggregate total
+            # damage as hits * single-hit damage rather than simulating each hit.
+            hits = hit_count_for(move.name, attacker)
+            if hits != 1:
+                mn, mx, avg = mn * hits, mx * hits, avg * hits
             dmg = self._roll(mn, mx, avg)
             # Focus Sash / Sturdy: survive a would-be KO at 1 HP, but only from FULL HP.
             sashed = False
@@ -605,6 +700,12 @@ class Battle:
             dmg_applied = min(dmg, target.current_hp)  # recoil/drain scale off damage actually dealt
             total_damage_dealt += dmg_applied
             target.apply_damage(dmg)
+            if target.ability == "Stamina" and dmg_applied > 0 and not target.fainted:
+                changed = apply_boosts(target, {"def": 1}, from_foe=False)
+                if changed:
+                    self.log.add(f"{self.tag(target)}'s {self._fmt_boosts(changed)} (Stamina)")
+                    self._emit(event="stat_change", side=self.side_of(target).name,
+                               actor=target.name, detail=self._fmt_boosts(changed), source="Stamina")
             self.log.add(f"{self.tag(attacker)} uses {move.name} on {self.tag(target)}: "
                           f"{dmg:.0f} dmg ({eff}x eff) -> {self.tag(target)} at "
                           f"{target.current_hp}/{target.max_hp()} HP"
@@ -754,15 +855,35 @@ class Battle:
             self.log.add(f"{attacker.name} used Parting Shot, rattling the foe's stats "
                           f"(switch-out not modeled -- attacker stays in)")
             self._emit(event="parting_shot", side=action.side, actor=attacker.name)
+        elif move.name == "Helping Hand":
+            ally = next((c for c in side.active if c is not None and c is not attacker
+                         and not c.fainted), None)
+            if ally is not None:
+                ally.volatile["helping_hand"] = True
+                self.log.add(f"{self.tag(attacker)} is ready to help {self.tag(ally)}!")
+                self._emit(event="helping_hand", side=action.side, actor=attacker.name,
+                           target=ally.name)
+            else:
+                self.log.add(f"{self.tag(attacker)} used Helping Hand, but there was no ally to help!")
         elif move.boosts:
             # Pure stat-changing status move (Swords Dance, Nasty Plot, Calm Mind, ...).
-            # Self-targeting moves boost the user; foe-targeting ones (Growl etc.) hit the foes.
+            # Self-targeting moves boost the user; ally-targeting ones (Coaching) boost the
+            # partner; foe-targeting ones (Growl etc.) hit the foes.
             if move.target in ("self", "allySide"):
                 changed = apply_boosts(attacker, move.boosts, from_foe=False)
                 if changed:
                     self.log.add(f"{self.tag(attacker)}'s {self._fmt_boosts(changed)}")
                     self._emit(event="stat_change", side=action.side, actor=attacker.name,
                                detail=self._fmt_boosts(changed), source=move.name)
+            elif move.target == "adjacentAlly":
+                ally = next((c for c in side.active if c is not None and c is not attacker
+                             and not c.fainted), None)
+                if ally is not None:
+                    changed = apply_boosts(ally, move.boosts, from_foe=False)
+                    if changed:
+                        self.log.add(f"{self.tag(ally)}'s {self._fmt_boosts(changed)} (from {attacker.name}'s {move.name})")
+                        self._emit(event="stat_change", side=action.side, actor=ally.name,
+                                   detail=self._fmt_boosts(changed), source=move.name)
             else:
                 opp_side = self.p2 if side.name == "p1" else self.p1
                 targets = [f for f in opp_side.active if f and not f.fainted]
@@ -795,7 +916,8 @@ class Battle:
                 incoming = max(alive_bench, key=lambda b: b.current_hp)
                 side.bench[:] = [b for b in side.bench if b is not incoming]
                 side.active[slot] = incoming
-                on_switch_in(incoming, opp.active, self.field)
+                ally = side.active[1 - slot] if len(side.active) == 2 else None
+                on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
                 self.log.add(f"{side.name} sends in {self.tag(incoming)} (replacing fainted {self.tag(c)})")
                 self._emit(event="replacement", side=side.name, out=c.name,
                            incoming=incoming.name, weather_after=self.field.weather)
@@ -806,11 +928,20 @@ class Battle:
         # got switched out doesn't come back still flagged.)
         for c in self.p1.roster + self.p2.roster:
             c.protected_last_turn = c.protecting
+            # An unused Helping Hand boost (ally protected, used a status move, or never
+            # got to act) does NOT carry over -- it must not silently buff a future turn.
+            c.volatile.pop("helping_hand", None)
 
         for c in self.p1.active + self.p2.active:
             if c is None or c.fainted:
                 continue
             c.active_turn_count += 1
+            if c.ability == "Speed Boost":
+                changed = apply_boosts(c, {"spe": 1}, from_foe=False)
+                if changed:
+                    self.log.add(f"{self.tag(c)}'s {self._fmt_boosts(changed)} (Speed Boost)")
+                    self._emit(event="stat_change", side=self.side_of(c).name, actor=c.name,
+                               detail=self._fmt_boosts(changed), source="Speed Boost")
         for c in self.p1.roster + self.p2.roster:
             if c.fainted:
                 continue
@@ -840,6 +971,12 @@ class Battle:
                 side.wide_guard = False
             if side.quick_guard:
                 side.quick_guard = False
+            if side.screens_reflect > 0:
+                side.screens_reflect -= 1
+            if side.screens_lightscreen > 0:
+                side.screens_lightscreen -= 1
+            if side.screens_auroraveil > 0:
+                side.screens_auroraveil -= 1
 
         if self.field.weather_turns_left > 0:
             self.field.weather_turns_left -= 1

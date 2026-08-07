@@ -83,7 +83,7 @@ def find_toughest_lead(our_pool6, enemy_roster, merged, moves_db, natures, typec
 
 
 def run_quick(team_name, roster, our_pool6, merged, moves_db, natures, typechart, max_turns,
-               show_top, our_sets=None):
+               show_top, our_sets=None, enemy_sets=None):
     print("  Finding their toughest lead pair (vs our best available answer)...")
     toughest = find_toughest_lead(our_pool6, roster, merged, moves_db, natures, typechart, max_turns,
                                     our_sets=our_sets)
@@ -92,12 +92,12 @@ def run_quick(team_name, roster, our_pool6, merged, moves_db, natures, typechart
     print(f"  Toughest lead identified: {toughest} (their assumed back: {remaining[:2]})")
 
     results = search_best_composition(our_pool6, enemy_bring4, merged, moves_db, natures, typechart,
-                                       max_turns, our_sets=our_sets)
+                                       max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
     _print_transparency(results, show_top)
 
     best = results[0]
     _, _, battle = play_out_worst_case(best[0], enemy_bring4, merged, moves_db, natures, typechart,
-                                        max_turns, our_sets=our_sets)
+                                        max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
     return {
         "toughest_lead": toughest, "enemy_back": remaining[:2],
         "all_combos": results, "gameplan_events": battle.events, "gameplan_log": battle.log.dump(),
@@ -105,14 +105,14 @@ def run_quick(team_name, roster, our_pool6, merged, moves_db, natures, typechart
 
 
 def run_comprehensive(team_name, roster, our_pool6, merged, moves_db, natures, typechart, max_turns,
-                       show_top, our_sets=None):
+                       show_top, our_sets=None, enemy_sets=None):
     print("  Testing all 15 possible enemy lead pairs (this takes a while)...")
     all_results_by_lead = {}
     for enemy_lead in itertools.combinations(roster, 2):
         remaining = [m for m in roster if m not in enemy_lead]
         enemy_bring4 = list(enemy_lead) + remaining[:2]
         results = search_best_composition(our_pool6, enemy_bring4, merged, moves_db, natures,
-                                           typechart, max_turns, our_sets=our_sets)
+                                           typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
         all_results_by_lead[enemy_lead] = results
         wins = sum(1 for _, w, _ in results if w == "p1")
         best = results[0]
@@ -152,7 +152,7 @@ def run_comprehensive(team_name, roster, our_pool6, merged, moves_db, natures, t
           f"back {list(best_overall)[2:]} (wins {combo_win_counts[best_overall]}/15 enemy leads)")
 
     _, _, battle = play_out_worst_case(list(best_overall), enemy_bring4, merged, moves_db, natures,
-                                  typechart, max_turns, our_sets=our_sets)
+                                  typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
 
     # Per-enemy-lead detail, so comprehensive mode can export a full breakdown
     # (every enemy lead, its best answer, and its own turn-by-turn gameplan)
@@ -165,7 +165,8 @@ def run_comprehensive(team_name, roster, our_pool6, merged, moves_db, natures, t
         eb4 = list(enemy_lead) + rem[:2]
         best_here = results[0]
         _, _, b_here = play_out_worst_case(best_here[0], eb4, merged, moves_db, natures,
-                                            typechart, max_turns, our_sets=our_sets)
+                                            typechart, max_turns, our_sets=our_sets,
+                                            enemy_sets=enemy_sets)
         per_lead[enemy_lead] = {
             "enemy_bring4": eb4,
             "all_combos": results,
@@ -200,6 +201,12 @@ def main():
     ap.add_argument("--team-file", type=str, default=None,
                      help="Load the team (names + items + movesets) from a team.json written by "
                           "generate_team.py. Overrides --pool and uses the optimised sets.")
+    ap.add_argument("--enemy-sets", type=str, default=None,
+                     help="Path to a JSON file of enemy set overrides (same {'sets': {name: "
+                          "{'item','moves'}}} shape as a team.json's 'sets' block, or a bare "
+                          "{name: {...}} dict), e.g. pin a specific enemy Kingambit's exact "
+                          "moveset instead of its usage-derived default. Defaults to "
+                          "data/enemy_overrides.json if that file exists, else none.")
     ap.add_argument("--all-backs", action="store_true",
                      help="Exhaustive: test every enemy bring-4 (all C(6,2) leads x C(4,2) backs "
                           "= 90 configurations per team), not just one arbitrary back pair. "
@@ -237,6 +244,16 @@ def main():
         print()
     else:
         our_pool6 = [x.strip() for x in args.pool.split(",")]
+
+    from team_sheet import load_sets_override
+    default_enemy_sets_path = OUTPUT_DIR / "data" / "enemy_overrides.json"
+    enemy_sets_path = args.enemy_sets or (str(default_enemy_sets_path)
+                                           if default_enemy_sets_path.exists() else None)
+    enemy_sets = {}
+    if enemy_sets_path:
+        enemy_sets = load_sets_override(enemy_sets_path)
+        print(f"Loaded enemy set overrides from {enemy_sets_path}: {list(enemy_sets.keys())}\n")
+
     if len(our_pool6) != 6:
         print(f"ERROR: --pool must have exactly 6 names, got {len(our_pool6)}: {our_pool6}")
         sys.exit(1)
@@ -291,7 +308,7 @@ def main():
                                              args.max_turns, our_sets=our_sets, verify_top=3,
                                              fixed_lead=fl,
                                              enemy_script=script_for(team_name),
-                                             script_team=team_name)
+                                             script_team=team_name, enemy_sets=enemy_sets)
             if all_scripts(team_name):
                 print(f"    (scripted opponent: {len(all_scripts(team_name))} opening "
                       f"variants tested, worst case reported)")
@@ -312,10 +329,11 @@ def main():
         try:
             if mode == "comprehensive":
                 rep = run_comprehensive(team_name, roster, our_pool6, merged, moves, natures,
-                                         typechart, args.max_turns, args.show_top, our_sets)
+                                         typechart, args.max_turns, args.show_top, our_sets,
+                                         enemy_sets)
             else:
                 rep = run_quick(team_name, roster, our_pool6, merged, moves, natures, typechart,
-                                 args.max_turns, args.show_top, our_sets)
+                                 args.max_turns, args.show_top, our_sets, enemy_sets)
             team_reports[team_name] = rep
         except Exception as e:
             print(f"  ERROR while processing {team_name}: {e}")
