@@ -1248,24 +1248,66 @@ with tab_vs:
                 st.write(f"LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} "
                          f"({w} T{t})")
 
-            vb1, vb2 = st.columns(2)
-            if vb1.button("Show full battle log (worst case)", key="vs_log"):
-                from matchup_search import play_out_worst_case
-                if vres["deep"]:
-                    wc = r.get("worst_case")
-                    eb4 = (list(wc[0]) + list(wc[1])) if wc else None
-                else:
+            if not vres["deep"]:
+                if st.button("Show full battle log", key="vs_log"):
+                    from matchup_search import play_out_worst_case
                     eb4 = vres["eb4_tested"]
-                if eb4 is None:
-                    st.info("No configuration to replay.")
-                else:
                     w, t, btl = play_out_worst_case(
                         b4, eb4, merged, moves, natures, typechart, vres["max_turns"],
                         our_sets=st.session_state.get("sets", {}), enemy_sets=vres["enemy_sets"])
                     st.caption(f"vs enemy {eb4[0]}/{eb4[1]} + {eb4[2]}/{eb4[3]}")
                     st.code(btl.log.dump())
+            else:
+                # --- Individual matchups: every one of the 90 enemy bring-4s, same ---
+                # format as the Lead/Back Search tab -- expand one to see that battle.
+                st.markdown("### Individual matchups")
+                st.caption("All 90 enemy bring-4s. Expand one to see that battle's full log.")
+                losses = {(tuple(l), tuple(bk)): (w, t) for l, bk, w, t in r.get("solver_losses", [])}
+                cfgs = enemy_configs(vres["enemy_roster"])
+                fc1, fc2 = st.columns([1, 2])
+                only_losses_vs = fc1.checkbox("Show only losses", value=bool(losses),
+                                               key="vs_only_losses")
+                page_size_vs = fc2.select_slider(
+                    "Battles shown per page", options=[10, 30, 45, 90], value=30, key="vs_page_size",
+                    help="All 90 enemy brings are available -- this only controls how many are "
+                         "rendered at once, since each is a full battle log.")
+                visible_vs = [(l, bk) for l, bk in cfgs
+                              if not (only_losses_vs and (tuple(l), tuple(bk)) not in losses)]
+                n_pages_vs = max(1, (len(visible_vs) + page_size_vs - 1) // page_size_vs)
+                page_vs = 1
+                if n_pages_vs > 1:
+                    page_vs = st.number_input(f"Page (1-{n_pages_vs}, {len(visible_vs)} battles)",
+                                               1, n_pages_vs, 1, key="vs_page")
+                lo_vs, hi_vs = (page_vs - 1) * page_size_vs, page_vs * page_size_vs
+                shown_vs = 0
+                for lead, back in visible_vs[lo_vs:hi_vs]:
+                    key_vs = (tuple(lead), tuple(back))
+                    lost_vs = key_vs in losses
+                    shown_vs += 1
+                    label_vs = (f"{'LOSS' if lost_vs else 'win '} — vs lead "
+                                f"{lead[0]}/{lead[1]} + back {back[0]}/{back[1]}")
+                    with st.expander(label_vs):
+                        from matchup_search import play_out_worst_case
+                        w_vs, t_vs, btl_vs = play_out_worst_case(
+                            b4, list(lead) + list(back), merged, moves, natures, typechart,
+                            vres["max_turns"], our_sets=st.session_state.get("sets", {}),
+                            enemy_sets=vres["enemy_sets"])
+                        om_vs = next((c.name for c in btl_vs.p1.roster
+                                      if c.is_mega_pick and c.mega_evolved), None)
+                        tm_vs = next((c.name for c in btl_vs.p2.roster
+                                      if c.is_mega_pick and c.mega_evolved), None)
+                        vc1_, vc2_, vc3_ = st.columns(3)
+                        vc1_.metric("Avg-roll result",
+                                    {"p1": "WIN", "p2": "LOSS"}.get(w_vs, w_vs.upper()))
+                        vc2_.metric("Turns", t_vs)
+                        vc3_.metric("Megas", f"{om_vs or '-'} / {tm_vs or '-'}")
+                        st.caption("The log below uses the average damage roll and no secondary "
+                                   "procs -- it is the planned line, not a guaranteed one.")
+                        st.code(btl_vs.log.dump())
+                if shown_vs == 0:
+                    st.success("No losses against any of the 90 enemy brings.")
 
-            if vb2.button("Compute usage stats (all their brings)", key="vs_stats"):
+            if st.button("Compute usage stats (all their brings)", key="vs_stats"):
                 from matchup_search import aggregate_battle_stats
                 with st.spinner("Replaying every enemy bring-4..."):
                     vstats = aggregate_battle_stats(
