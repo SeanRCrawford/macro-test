@@ -19,7 +19,7 @@ It is a SCREEN, not a verdict. The intended pipeline is:
 Never present a fast_eval number as a final answer on its own.
 """
 from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_boosts,
-                     effective_stat)
+                     effective_stat, CHARGE_WEATHER_SKIP)
 from engine import FieldState, Action, on_switch_in, turn_order
 from battle import Battle, PROTECT_MOVES
 from solver import build_moveset, quick_damage_estimate, FIRST_TURN_ONLY_MOVES, CHOICE_ITEMS
@@ -55,6 +55,16 @@ def _pick_greedy_action(battle: Battle, c: Combatant, side_key: str, foes: list,
 
     best_action, best_val = None, -1e9
     for move, pct in usable:
+        # Two-turn (charge) moves deal no damage this turn unless the right weather
+        # is already up to skip the charge -- see solver.candidate_actions for the
+        # matching filter and full rationale. Already-charging is forced to complete
+        # by battle.py's real turn resolution regardless of what's chosen here.
+        if move.flags and move.flags.get("charge"):
+            skip_weather = CHARGE_WEATHER_SKIP.get(move.name)
+            weather_ready = bool(skip_weather) and battle.field.weather == skip_weather
+            already_charging = c.volatile.get("charging_move") == move.name
+            if not weather_ready and not already_charging:
+                continue
         if move.name in PROTECT_MOVES:
             # Only worth it if legal (didn't protect last turn). Small fixed value so it
             # loses to any real damaging option but beats doing nothing.
@@ -90,12 +100,15 @@ def _pick_greedy_action(battle: Battle, c: Combatant, side_key: str, foes: list,
             pct = 100.0 * min(dmg, target.current_hp) / target.max_hp() if target.max_hp() else 0.0
             return pct, dmg
 
+        total_dealt = 0.0
         if is_spread_move(move.target):
             from damage import spread_targets
             targets = spread_targets(move.target, live_foes, allies or [], c)
             val = 0.0
             for f in targets:
                 pct, dmg = _pct(f, len(targets))
+                dealt = min(dmg, f.current_hp)
+                total_dealt += dealt
                 # allAdjacent moves hit our own partner too -- that is a cost.
                 if f in (allies or []) and f is not c:
                     val -= pct * 1.2 + (50.0 if dmg >= f.current_hp else 0.0)
@@ -106,6 +119,21 @@ def _pick_greedy_action(battle: Battle, c: Combatant, side_key: str, foes: list,
             (best_pct, best_dmg), tgt = max(scored, key=lambda x: x[0][0])
             val = best_pct + (40.0 if best_dmg >= tgt.current_hp else 0.0)
             targets = [tgt]
+            total_dealt = min(best_dmg, tgt.current_hp)
+
+        # Recoil moves (Flare Blitz, Head Smash, Light of Ruin, ...) cost the user HP
+        # for the same damage dealt -- a non-recoil move doing the same job (e.g. an
+        # equally-lethal hit) should win the tie. Rock Head / Magic Guard negate it.
+        if move.recoil and c.ability not in ("Rock Head", "Magic Guard") and c.max_hp():
+            num, den = move.recoil
+            val -= 100.0 * (total_dealt * num / den) / c.max_hp()
+
+        # Tiny tie-break, far below any real damage/KO difference: when two moves are
+        # otherwise equally good, prefer the more reliable one (see solver.py's
+        # action_value for the matching comment -- no miss chance is modeled here,
+        # this only ever decides genuine ties).
+        acc = 100.0 if move.accuracy is True else move.accuracy
+        val += acc * 0.001
 
         if val > best_val:
             best_val, best_action = val, Action(c, side_key, "move", move, targets)

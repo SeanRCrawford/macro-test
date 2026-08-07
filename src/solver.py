@@ -28,7 +28,7 @@ model, scored by a simple HP-differential heuristic at the leaf.
 import copy
 import itertools
 
-from damage import Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll
+from damage import Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll, CHARGE_WEATHER_SKIP
 from engine import FieldState, Action, on_switch_in, effective_speed
 from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS
 
@@ -54,7 +54,7 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
                               recoil=m.get("recoil"), drain=m.get("drain"),
                               has_crash=bool(m.get("hasCrashDamage")),
                               volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                              self_switch=m.get("selfSwitch")), pct))
+                              self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True)), pct))
     if only_moves:
         # Explicit set supplied (e.g. an optimised team sheet) -- use exactly these,
         # preserving the given order, ignoring usage ranking and top_k.
@@ -109,6 +109,19 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
         moveset = [m for m in moveset if m[0].name not in FIRST_TURN_ONLY_MOVES]
 
     for move, pct in moveset:
+        # Two-turn (charge) moves (Solar Beam/Blade, Electro Shot) spend this whole
+        # turn dealing NO damage unless the right weather is already up to skip the
+        # charge -- quick_damage_estimate has no notion of that, so without this
+        # filter the move looks like a guaranteed huge hit RIGHT NOW and gets chosen
+        # as if it were one-turn. Once already charging, the real turn resolution
+        # (battle.py) force-overrides whatever action is submitted anyway, so this
+        # filter only affects the voluntary choice to START charging.
+        if move.flags and move.flags.get("charge"):
+            skip_weather = CHARGE_WEATHER_SKIP.get(move.name)
+            weather_ready = bool(skip_weather) and field.weather == skip_weather
+            already_charging = combatant.volatile.get("charging_move") == move.name
+            if not weather_ready and not already_charging:
+                continue
         if move.name in PROTECT_MOVES:
             # Don't offer Protect if it would auto-fail (protected last turn) -- otherwise
             # the search wastes a branch on a guaranteed no-op and can look like it's
@@ -194,6 +207,7 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
             # the KO.
             total = 0.0
             own_side = battle.side_of(c)
+            total_dealt = 0.0
             for t in a.targets:
                 dmg = quick_damage_estimate(c, t, a.move, battle.typechart, battle.field,
                                              num_hit=len(a.targets) if is_spread_move(a.move.target) else 1)
@@ -206,12 +220,28 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                         total -= 50.0
                 else:
                     total += pct
+                    total_dealt += min(dmg, t.current_hp)
                     if dmg >= t.current_hp:
                         total += 40.0
                         # A KO secured with priority cannot be pre-empted, so it is
                         # strictly better than the same KO in the normal bracket.
                         if a.move.priority > 0:
                             total += 15.0 * a.move.priority
+            # Recoil moves (Flare Blitz, Head Smash, Light of Ruin, ...) cost the user
+            # HP for the same damage dealt -- a non-recoil move doing the same job
+            # (e.g. Light of Ruin vs Moonblast on an equally-lethal hit) should win the
+            # tie. Rock Head / Magic Guard negate real recoil, so they're exempt here too.
+            if a.move.recoil and c.ability not in ("Rock Head", "Magic Guard") and c.max_hp():
+                num, den = a.move.recoil
+                recoil_dmg = total_dealt * num / den
+                total -= 100.0 * recoil_dmg / c.max_hp()
+            # Tiny tie-break, far below any real damage/KO difference: when two moves
+            # are otherwise equally good (e.g. two ways to secure the same KO), prefer
+            # the more reliable one. No accuracy roll is modeled in battle resolution
+            # (moves always hit here), so this only ever matters as a tie-break, never
+            # as a real expected-value discount.
+            acc = 100.0 if a.move.accuracy is True else a.move.accuracy
+            total += acc * 0.001
             return total
         best = max(cands, key=action_value) if cands else None
         if best:

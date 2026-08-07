@@ -191,7 +191,7 @@ def _mk_move(m):
                      self_effect=m.get("self"), boosts=m.get("boosts"),
                      recoil=m.get("recoil"), drain=m.get("drain"),
                      volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                     self_switch=m.get("selfSwitch"))
+                     self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True))
 
 
 NEVER_MISS_ABILITIES = {"No Guard"}
