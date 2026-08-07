@@ -808,36 +808,82 @@ with tab_search:
                 st.download_button("Download summary CSV", pd.DataFrame(rows).to_csv(index=False),
                                     "search_summary.csv", "text/csv")
 
+            # --- Usage stats: move usage, damage %, KOs, aggregated across every ---
+            # enemy bring-4 for the recommended composition against one opponent.
+            all_backs_teams = [tn for tn, d in res.items() if d["mode"] == "all" and d.get("robust")]
+            if all_backs_teams:
+                st.markdown("### Usage stats")
+                st.caption("Move-usage counts, total damage dealt (as %% of the target's max HP, "
+                           "summed over every hit landed), and KOs secured, aggregated across "
+                           "EVERY enemy bring-4 configuration for the recommended composition -- "
+                           "both sides. Re-plays that opponent's games, so it costs about as much "
+                           "as the search itself for that opponent.")
+                us_tname = st.selectbox("Opponent", all_backs_teams, key="us_tname")
+                if st.button("Compute usage stats", key="us_go"):
+                    from matchup_search import aggregate_battle_stats
+                    import scripted_openings as _so3
+                    b4 = res[us_tname]["robust"]["our_bring4"]
+                    fl = team_meta.get(us_tname, {}).get("lead")
+                    us_esets = {**(st.session_state.get("enemy_sets_override") or {}),
+                                **(team_meta.get(us_tname, {}).get("sets") or {})}
+                    with st.spinner("Replaying every enemy bring-4..."):
+                        stats = aggregate_battle_stats(
+                            b4, teams[us_tname], merged, moves, natures, typechart,
+                            st.session_state.get("search_maxturns", 12), our_sets=sets,
+                            enemy_sets=us_esets, fixed_lead=fl,
+                            script_team=us_tname if _so3.all_scripts(us_tname) else None)
+                    srows = []
+                    for (side, name), s in stats.items():
+                        top_moves = sorted(s["moves"].items(), key=lambda x: -x[1])
+                        srows.append({
+                            "Side": "Us" if side == "p1" else "Them", "Pokemon": name,
+                            "KOs": s["kos"], "Damage %": round(s["damage_pct"], 0),
+                            "Moves used": ", ".join(f"{m} x{c}" for m, c in top_moves),
+                        })
+                    srows.sort(key=lambda r: (r["Side"], -r["KOs"]))
+                    st.dataframe(pd.DataFrame(srows), width='stretch', hide_index=True)
+                    import json as _json
+                    json_stats = {f"{side}:{name}": s for (side, name), s in stats.items()}
+                    st.download_button("Download stats .json", _json.dumps(json_stats, indent=2),
+                                        file_name=f"usage_stats_{us_tname}.json",
+                                        mime="application/json", key="us_dl")
+
             # Per-opening-variant turn-1 breakdown, for fixed-lead/scripted opponents.
             import scripted_openings as _so2
             scripted_chosen = [tn for tn in res if tn in _so2.SCRIPTS and res[tn].get("robust")]
             if scripted_chosen:
-                st.markdown("### Turn-1 breakdown by opening variant")
+                st.markdown("### Full match breakdown by opening variant")
                 st.caption("Fixed-lead opponents run a scripted opening with several variants "
                            "(which of your slots it targets), plus two practical T1 lines "
                            "they could take INSTEAD of the script: their best unscripted "
                            "attack+attack ('greedy'), and either of their two Pokemon "
-                           "Protecting while the other attacks ('protect'). Rather than only "
-                           "the worst case, this shows every option's turn-1 outcome side by "
-                           "side -- a lead that looks clean against one can collapse against "
-                           "another.")
+                           "Protecting while the other attacks ('protect'). Each variant is "
+                           "played to completion -- the opponent keeps running its script on "
+                           "every turn it still has one for (e.g. Perish Trap's turns 2-4), "
+                           "falling back to greedy once it's spent -- so you see the whole "
+                           "match, not just the opening, for every option side by side.")
                 t1_tname = st.selectbox("Opponent", scripted_chosen, key="t1bd_tname")
                 if st.button("Show breakdown", key="t1bd_go"):
                     from committed_plan import turn1_breakdown
                     b4 = res[t1_tname]["robust"]["our_bring4"]
                     er = teams[t1_tname]
-                    with st.spinner("Playing out every opening variant..."):
+                    t1_esets = {**(st.session_state.get("enemy_sets_override") or {}),
+                                **(team_meta.get(t1_tname, {}).get("sets") or {})}
+                    with st.spinner("Playing out every opening variant to completion..."):
                         bd = turn1_breakdown(b4, er, merged, moves, natures, typechart, t1_tname,
-                                              our_sets=sets)
+                                              our_sets=sets, enemy_sets=t1_esets,
+                                              max_turns=st.session_state.get("search_maxturns", 12))
                     labels = {"greedy": "Unscripted: their best attack+attack",
                               "protect0": "Unscripted: one Protects, the other attacks (choice A)",
                               "protect1": "Unscripted: one Protects, the other attacks (choice B)"}
                     for key, d in bd.items():
                         title = labels.get(key, f"Scripted variant {key}")
-                        with st.expander(title):
+                        result = {"p1": "WIN", "p2": "LOSS"}.get(d["winner"], d["winner"].upper())
+                        with st.expander(f"{title} — {result} (turn {d['turns']})"):
                             st.write("Our turn-1 action:",
-                                     [(a[0], a[2], list(a[3])) for a in d["our_action"]])
-                            st.write("Their turn-1 action:", d["enemy_action"])
+                                     [(a[0], a[2], list(a[3])) for a in d["our_t1_action"]])
+                            st.write("Their turn-1 action:", d["enemy_t1_action"])
+                            st.caption("HP shown is the FINAL state at the end of the match.")
                             hprows = [{"Pokemon": n, "HP": f"{hp}/{mx}"}
                                       for n, (hp, mx) in d["hp_after"].items()]
                             st.dataframe(pd.DataFrame(hprows), width='stretch', hide_index=True)

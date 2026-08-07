@@ -23,18 +23,19 @@ from solver import (build_moveset, our_candidate_joint_actions,
 from scripted_openings import all_scripts
 
 
-def _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll):
+def _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll,
+        enemy_sets=None):
     oc = make_team(our_names, merged, natures, sets=our_sets)
-    ec = make_team(enemy_names, merged, natures)
+    ec = make_team(enemy_names, merged, natures, sets=enemy_sets)
     b = Battle(oc, ec, typechart, moves_db)
     b.force_roll = roll          # 'min' | 'avg' | 'max'
     return b
 
 
-def _movesets(battle, merged, moves_db, our_sets):
+def _movesets(battle, merged, moves_db, our_sets, enemy_sets=None):
     ms = {}
     for c in battle.p1.roster + battle.p2.roster:
-        spec = (our_sets or {}).get(c.name) or {}
+        spec = (our_sets or {}).get(c.name) or (enemy_sets or {}).get(c.name) or {}
         ms[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
                                     only_moves=spec.get("moves"))
     return ms
@@ -361,17 +362,27 @@ def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_
 
 
 def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart, team_name,
-                     desc=None, our_sets=None, roll="avg", include_generic=True):
-    """Per-opening-variant turn-1 breakdown for a scripted/fixed-lead team,
+                     desc=None, our_sets=None, enemy_sets=None, roll="avg",
+                     include_generic=True, max_turns=14):
+    """Per-opening-variant FULL GAME breakdown for a scripted/fixed-lead team,
     instead of collapsing to only the worst-case result (play_scripted_worst_case
     / worst_response report ONLY the worst variant). Each opening variant is
-    played out individually, so a lead that looks clean against one targeting
-    choice but collapses against another is visible rather than hidden behind
-    the aggregate worst case.
+    played out individually to completion -- not just turn 1 -- so a lead that
+    looks clean against one targeting choice but collapses against another is
+    visible rather than hidden behind the aggregate worst case, and "does this
+    actually win" is visible for the WHOLE match, not just the opening.
+
+    The opponent keeps running its script on every subsequent turn it still
+    has one for (e.g. Hard Trick Room's turn 2 Parting Shot, Perish Trap's
+    turns 2-4) -- see scripted_openings.py -- falling back to the greedy model
+    once the script is spent (returns None) or was never scripted to begin
+    with. Our side plays adaptively every turn via the real solver; only turn
+    1 is optionally pinned (see `desc`).
 
     desc: a fixed turn-1 action (e.g. from find_plan/find_plan_unknown_backs)
-    to pin for every variant, or None to let the solver pick our best turn-1
-    response independently per variant instead.
+    to pin for every variant's first turn, or None to let the solver pick our
+    best turn-1 response independently per variant instead. Turns after the
+    first always use the solver regardless.
 
     include_generic: also include the plain greedy 2v2 fallback (both actives
     attack, no Protect) as a "greedy" entry, alongside every variant
@@ -380,41 +391,54 @@ def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart
     scripted_openings._protect_and_attack_script) -- so the full realistic
     option space is visible, not just the one scripted line.
 
-    Returns {variant_key: {"our_action", "enemy_action", "hp_after", "log"}}
-    -- variant_key is an int for scripted variants, a string for the rest.
+    Returns {variant_key: {"winner", "turns", "our_t1_action", "enemy_t1_action",
+    "hp_after", "log"}} -- variant_key is an int for scripted variants, a
+    string for the rest. hp_after/log reflect the FINAL state of the match.
     """
     variants = all_scripts(team_name)
     if include_generic:
         variants = variants + [("greedy", None)]
     out = {}
     for idx, script in variants:
-        b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll)
-        ms = _movesets(b, merged, moves_db, our_sets)
+        b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll,
+                enemy_sets=enemy_sets)
+        ms = _movesets(b, merged, moves_db, our_sets, enemy_sets=enemy_sets)
         b._movesets = ms  # scripted_openings.py's generic alternatives need real moves
-        if desc is not None:
-            fixed = rebind(desc, b)
-            if fixed is None:
-                continue
-        else:
-            fixed, _, _ = solve_best_action(b, "p1", ms, depth=1)
-            if not fixed:
-                continue
-        opp = None
-        if script is not None:
+        our_t1_action = enemy_t1_action = None
+        for t in range(1, max_turns + 1):
+            if b.is_over():
+                break
+            if desc is not None and t == 1:
+                fixed = rebind(desc, b)
+                if fixed is None:
+                    break
+            else:
+                fixed, _, _ = solve_best_action(b, "p1", ms, depth=1)
+                if not fixed:
+                    break
+            opp = None
+            if script is not None:
+                try:
+                    opp = script(b, b.p2, b.p1, t)
+                except Exception:
+                    opp = None
+            if not opp:
+                opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, t)
+            if t == 1:
+                our_t1_action = describe(fixed)
+                enemy_t1_action = [(a.combatant.name, a.kind, a.move.name if a.move else "-")
+                                    for a in opp]
             try:
-                opp = script(b, b.p2, b.p1, 1)
-            except Exception:
-                opp = None
-        if not opp:
-            opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, 1)
-        try:
-            b.run_turn(list(fixed), opp)
-        except ValueError:
-            continue
+                b.run_turn(list(fixed), opp)
+            except ValueError:
+                break
+        if our_t1_action is None:
+            continue  # never got a legal turn 1 -- nothing to report for this variant
         out[idx] = {
-            "our_action": describe(fixed),
-            "enemy_action": [(a.combatant.name, a.kind, a.move.name if a.move else "-")
-                              for a in opp],
+            "winner": b.winner() or "timeout",
+            "turns": b.turn_num,
+            "our_t1_action": our_t1_action,
+            "enemy_t1_action": enemy_t1_action,
             "hp_after": {c.name: (c.current_hp, c.max_hp()) for c in b.p1.roster + b.p2.roster},
             "log": b.log.dump(),
         }
