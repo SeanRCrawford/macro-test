@@ -222,6 +222,20 @@ KO_WEIGHT = 180.0  # see heuristic_eval: a secured KO must dominate the HP-diffe
                     # noise a forced enemy replacement introduces
 
 
+def _ko_threat_value(c: Combatant) -> float:
+    """How much removing this Pokemon from play is worth, KO-credit-wise --
+    scaled by its own offensive potential. A KO on a low-output support/wall
+    piece ('does little damage against your pair, achieves nothing') is
+    worth noticeably less than a KO on a genuine attacking threat -- it
+    removes less danger, so it's less worth handing the opponent a free,
+    unpunished replacement for (see the adverse-selection note below).
+    Floored well above zero: removing ANY Pokemon is still real progress,
+    just not always worth forcing.
+    """
+    off = max(c.stats.get("atk", 0), c.stats.get("spa", 0))
+    return max(0.35, min(1.35, off / 130.0))  # ~130 is a typical Lv50 attacking stat
+
+
 def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     my = battle.p1 if my_side_name == "p1" else battle.p2
     opp = battle.p2 if my_side_name == "p1" else battle.p1
@@ -244,12 +258,28 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     # HP of a fainted mon but revealed a fresh 1.0). Pure HP differential then scores
     # taking a free KO as neutral-or-negative, which is backwards: permanently
     # removing a Pokemon is real, irreversible progress toward winning regardless of
-    # how healthy its replacement is. An explicit alive-count term, weighted well
+    # how healthy its replacement is. An explicit KO-credit term, weighted well
     # above a turn's normal HP swing, makes sure a clean KO is never worth passing up
     # just to avoid revealing what replaces it.
-    my_alive = sum(1 for c in my.roster if not c.fainted)
-    opp_alive = sum(1 for c in opp.roster if not c.fainted)
-    score = (my_alive - opp_alive) * KO_WEIGHT
+    #
+    # That credit is THREAT-SCALED (_ko_threat_value), not a flat count per KO:
+    # killing something that barely threatens our side isn't worth much, and
+    # forcing the opponent's free, unpunished replacement in exchange for it can
+    # be a bad trade -- adverse selection, they get to bring in their best answer
+    # at no cost. Our own roster is fully known (no leak), so it always uses real
+    # values. An opponent we've actually SEEN (active, fainted, or previously
+    # revealed -- once _best_replacement lets a real threat in, THIS is what
+    # scores it as one) also gets its real value; one still hidden on the bench
+    # gets a flat placeholder instead of its true stats, which would leak team
+    # composition the player hasn't met yet -- the same leak `seen` already
+    # guards opp_hp against.
+    opp_seen_ids = {id(c) for c in seen}
+    my_value = sum(_ko_threat_value(c) for c in my.roster if not c.fainted)
+    opp_value = sum(
+        (_ko_threat_value(c) if id(c) in opp_seen_ids else 1.0)
+        for c in opp.roster if not c.fainted
+    )
+    score = (my_value - opp_value) * KO_WEIGHT
     score += (my_hp - opp_hp) * 100
 
     # Positional terms. Without these the evaluation is pure HP differential, so a

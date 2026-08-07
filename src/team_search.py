@@ -58,7 +58,8 @@ W_SCORE = 0.05        # small nudge toward higher effective-stat mons
 
 # ---------------------------------------------------------------- candidates
 
-def build_candidate_pool(merged, top_n=40, prefs=None, min_non_mega_frac=0.6):
+def build_candidate_pool(merged, top_n=40, prefs=None, min_non_mega_frac=0.6,
+                          allowed_generations=None, generation_map=None):
     """Filter the ~270-mon dataset down to a workable candidate list.
 
     Takes the top `top_n` by Score, but guarantees at least
@@ -67,6 +68,16 @@ def build_candidate_pool(merged, top_n=40, prefs=None, min_non_mega_frac=0.6):
     can field at most 2 Mega picks, the team search would find NO valid
     6-mon combination at all (this actually happened -- the beam emptied
     silently at small pool sizes).
+
+    allowed_generations: optional set of generation numbers (1-9) to restrict
+    the pool to -- e.g. {3} for gen-3-only, {1,2,3,4,5} for gen 1-5. A form
+    (Mega, regional, ...) counts as its BASE species' generation (see
+    species_data.species_generation), matching how a player would actually
+    mean "gen 3 only." `generation_map` is the precomputed {name: gen} dict
+    (species_data.build_generation_map) -- required if allowed_generations is
+    set. Include/prefer entries outside the allowed generations are dropped,
+    same as an explicit exclude -- a generation restriction is a hard filter,
+    not a suggestion that a stray prefer overrides.
     """
     prefs = prefs or {"include": [], "exclude": [], "prefer": []}
     # Excluding "Garchomp" should also exclude "Mega Garchomp" (and vice versa) --
@@ -78,6 +89,9 @@ def build_candidate_pool(merged, top_n=40, prefs=None, min_non_mega_frac=0.6):
             excluded.add(e[5:])
         else:
             excluded.update({f"Mega {e}", f"Mega {e} X", f"Mega {e} Y"})
+    if allowed_generations:
+        gen_map = generation_map or {}
+        excluded |= {n for n in merged if gen_map.get(n) not in allowed_generations}
     forced = [n for n in (prefs["include"] + prefs["prefer"]) if n in merged and n not in excluded]
 
     scored = [(n, r["score"]) for n, r in merged.items()

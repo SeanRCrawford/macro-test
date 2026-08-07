@@ -255,6 +255,62 @@ def find_mega_stone(name: str, merged: dict) -> str | None:
     return None
 
 
+# National dex number ranges per generation (inclusive), standard and stable.
+GENERATION_DEX_RANGES = [
+    (1, 1, 151), (2, 152, 251), (3, 252, 386), (4, 387, 493),
+    (5, 494, 649), (6, 650, 721), (7, 722, 809), (8, 810, 905),
+    (9, 906, 1025),
+]
+
+
+def generation_for_dex_num(num: int) -> int | None:
+    for gen, lo, hi in GENERATION_DEX_RANGES:
+        if lo <= num <= hi:
+            return gen
+    return None
+
+
+def species_generation(name: str, pokedex: dict) -> int | None:
+    """Which generation this Pokemon's BASE species originally debuted in.
+
+    A Mega Evolution or regional/other form (Arcanine-Hisui, Galarian
+    Zigzagoon, ...) counts as its base species' generation, not the
+    generation the form itself was introduced in -- Mega Lucario is gen 4
+    (Lucario's generation), Arcanine-Hisui is gen 1 (Arcanine's) -- because
+    Showdown's pokedex gives every form of a species the SAME national dex
+    number as the base species, which this keys off directly.
+    """
+    _, sdata = resolve_species(name, pokedex)
+    if not sdata:
+        return None
+    return generation_for_dex_num(sdata.get("num", 0))
+
+
+def parse_generations(spec: str) -> set[int]:
+    """'3' -> {3}; '1-5' -> {1,2,3,4,5}; '1,3,5' -> {1,3,5}; '1-3,7' -> {1,2,3,7}."""
+    out = set()
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            lo, hi = chunk.split("-", 1)
+            out.update(range(int(lo), int(hi) + 1))
+        else:
+            out.add(int(chunk))
+    return out
+
+
+def build_generation_map(names, pokedex) -> dict:
+    """{name: generation} for every name in `names` that resolves."""
+    out = {}
+    for n in names:
+        gen = species_generation(n, pokedex)
+        if gen is not None:
+            out[n] = gen
+    return out
+
+
 def base_form_name(name: str) -> str | None:
     """'Mega Charizard Y' -> 'Charizard', 'Mega Skarmory' -> 'Skarmory'.
     Returns None if `name` isn't a Mega pick."""

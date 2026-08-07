@@ -238,6 +238,11 @@ def main():
     ap.add_argument("--deep", action="store_true",
                      help="Verify finalists against EVERY enemy lead with full bring-4 "
                           "(leads AND backs), not just each opponent's toughest lead.")
+    ap.add_argument("--generations", type=str, default=None,
+                     help="Restrict the candidate pool to these generations, e.g. '3' or "
+                          "'1-5' or '1,3,5'. A form (Mega, regional, ...) counts as its base "
+                          "species' generation -- Mega Lucario is gen 4, Arcanine-Hisui is "
+                          "gen 1. Default: no restriction (all generations).")
     args = ap.parse_args()
 
     print("Loading data...")
@@ -258,7 +263,17 @@ def main():
     if prefs["prefer"]:
         print(f"  Preferred (preferences.csv, always kept in candidate pool): {prefs['prefer']}")
 
-    pool = build_candidate_pool(merged, top_n=args.pool_size, prefs=prefs)
+    allowed_gens = None
+    if args.generations:
+        from species_data import parse_generations, build_generation_map, load_showdown_static
+        allowed_gens = parse_generations(args.generations)
+        pokedex, _, _, _ = load_showdown_static()
+        gen_map = build_generation_map(merged.keys(), pokedex)
+        print(f"  Restricting to generation(s): {sorted(allowed_gens)}")
+        pool = build_candidate_pool(merged, top_n=args.pool_size, prefs=prefs,
+                                     allowed_generations=allowed_gens, generation_map=gen_map)
+    else:
+        pool = build_candidate_pool(merged, top_n=args.pool_size, prefs=prefs)
     enemy_pairs = enemy_pairs_from_teams(teams)
     our_pair_count = len(list(itertools.combinations(pool, 2)))
     print(f"\nCandidate pool: {len(pool)} Pokemon -> {our_pair_count} of our lead pairs")

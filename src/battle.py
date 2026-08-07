@@ -899,6 +899,44 @@ class Battle:
             self.log.add(f"{attacker.name} uses {move.name} (effect not modeled yet)")
             self._emit(event="status_move_unmodeled", side=action.side, actor=attacker.name, move=move.name)
 
+    def _best_replacement(self, alive_bench, opposing_actives):
+        """Which bench member is the best strategic answer to what's currently
+        opposing this slot -- NOT just whoever has the most HP.
+
+        A player picking a replacement (forced by a KO, or the opponent AI
+        choosing how to respond) brings in their best answer to the board,
+        weighing type matchup and raw offensive threat alongside health, not
+        purely whoever happens to be healthiest. Choosing on HP alone
+        previously meant the opposing side never modeled bringing in a
+        genuine answer to punish a bad board state -- which in turn meant the
+        planner never had to account for that risk, systematically
+        undervaluing how dangerous forcing a free replacement can be.
+        """
+        from damage import type_multiplier
+        live_foes = [f for f in opposing_actives if f is not None and not f.fainted]
+
+        def score(b):
+            s = b.current_hp_frac * 40.0
+            s += max(b.stats.get("atk", 0), b.stats.get("spa", 0)) * 0.25
+            for f in live_foes:
+                danger_to_b = max((type_multiplier(t, b.types, self.typechart) for t in f.types),
+                                   default=1.0)
+                if danger_to_b >= 4.0:
+                    s -= 45.0
+                elif danger_to_b >= 2.0:
+                    s -= 22.0
+                elif danger_to_b <= 0.25:
+                    s += 22.0
+                elif danger_to_b <= 0.5:
+                    s += 12.0
+                # How much b itself threatens the foe (STAB proxy: does b resist/hit into it).
+                b_into_f = max((type_multiplier(t, f.types, self.typechart) for t in b.types),
+                                default=1.0)
+                if b_into_f >= 2.0:
+                    s += 15.0
+            return s
+        return max(alive_bench, key=score)
+
     def _replace_fainted(self):
         """Send in replacements for fainted actives at the END of the turn, so
         they are on the field ready to act on the NEXT turn (they do not get an
@@ -913,7 +951,7 @@ class Battle:
                 alive_bench = [b for b in side.bench if not b.fainted]
                 if not alive_bench:
                     continue
-                incoming = max(alive_bench, key=lambda b: b.current_hp)
+                incoming = self._best_replacement(alive_bench, opp.active)
                 side.bench[:] = [b for b in side.bench if b is not incoming]
                 side.active[slot] = incoming
                 ally = side.active[1 - slot] if len(side.active) == 2 else None
