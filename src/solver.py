@@ -395,34 +395,44 @@ def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, move
     return [c for c in combos if valid(c)]
 
 
-def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: int = 1):
+def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: int = 1,
+                       enemy_script=None):
     """
     Returns (best_joint_action, expected_score, sim_log) for `my_side_name`
     this turn, searching `depth` turns ahead (depth=1 means "just this turn,
     then heuristic-evaluate the result").
+
+    enemy_script: when set (a scripted opponent -- see scripted_openings.py),
+    planning ASSUMES THE OPPONENT ACTUALLY RUNS ITS SCRIPT this turn, instead
+    of the generic greedy model. We have real, documented knowledge of what a
+    team like Hard Trick Room or Perish Trap does on a given turn (e.g. that
+    its Mega Gengar Perish Songs rather than attacks) -- planning as if it
+    might attack instead throws that knowledge away and produces nonsense like
+    Sucker Punching a Pokemon that was never going to attack.
+
+    Committing blindly to "beat the script" is dangerous if the opponent
+    doesn't actually run it, though, so every candidate is ALSO checked
+    against the plain greedy (unscripted) response as a stand-in for "they
+    deviated". A candidate that would cost us a Pokemon fainting THIS TURN
+    against that deviation is excluded, unless every candidate shares that
+    flaw (then the search has no safe option and falls back to ranking on the
+    assume-script score alone). Among what's left, the one that scores best
+    assuming the script wins -- the foremost goal is to beat the script,
+    without being blown up the instant it doesn't happen.
     """
     my_side = battle.p1 if my_side_name == "p1" else battle.p2
     opp_side = battle.p2 if my_side_name == "p1" else battle.p1
 
     joint_options = our_candidate_joint_actions(battle, my_side, opp_side, movesets, battle.turn_num + 1)
+    my_alive_before = sum(1 for c in my_side.roster if not c.fainted)
 
-    best_score = -float("inf")
-    best_action = None
-    best_sim = None
-
-    for my_joint in joint_options:
+    def _play_branch(my_joint, opp_action_fn):
         sim = copy.deepcopy(battle)
         # Plan DETERMINISTICALLY. If the search explores branches using the same
         # RNG stream the real battle is scored on, it just picks whichever branch
         # the dice happened to favour -- reporting coin flips and 30% flinches as
         # certainties. Planning uses average rolls and no secondary procs; the
         # chosen action is then executed on the real battle, where RNG applies.
-        sim.rng = None
-        # PLANNING IS DETERMINISTIC. If the search ran with the live RNG it would be
-        # planning against the very rolls/flinches/ties it is then scored on, and would
-        # simply pick the branch where luck fell its way -- reporting a coin flip or a
-        # 30% flinch as a certainty. Plan on the average roll; let the real battle resolve
-        # the luck.
         sim.rng = None
         sim.tie_bias = battle.tie_bias
         sim_my_side = sim.p1 if my_side_name == "p1" else sim.p2
@@ -442,26 +452,76 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
                           [full_map.get(id(t), t) for t in a.targets])
 
         my_joint_r = [remap(a) for a in my_joint]
-        opp_joint = greedy_opponent_joint_action(sim, sim_opp_side, sim_my_side, movesets,
-                                                  sim.turn_num + 1)
+        opp_joint = opp_action_fn(sim, sim_opp_side, sim_my_side)
 
         p1_actions = my_joint_r if my_side_name == "p1" else opp_joint
         p2_actions = opp_joint if my_side_name == "p1" else my_joint_r
-
         sim.run_turn(p1_actions, p2_actions)
+        return sim, sim_my_side
+
+    script_used_flags = []  # observed True/False per candidate: did the script actually
+                              # fire this turn, or has it run out (e.g. King past turn 2)?
+
+    def _script_or_greedy(sim, sim_opp_side, sim_my_side):
+        opp = None
+        if enemy_script is not None:
+            try:
+                opp = enemy_script(sim, sim_opp_side, sim_my_side, sim.turn_num + 1)
+            except Exception:
+                opp = None
+        script_used_flags.append(bool(opp))
+        if not opp:
+            opp = greedy_opponent_joint_action(sim, sim_opp_side, sim_my_side, movesets,
+                                                sim.turn_num + 1)
+        return opp
+
+    def _greedy(sim, sim_opp_side, sim_my_side):
+        return greedy_opponent_joint_action(sim, sim_opp_side, sim_my_side, movesets,
+                                             sim.turn_num + 1)
+
+    scored = []  # (my_joint, score, sim)
+    for my_joint in joint_options:
+        sim, sim_my_side = _play_branch(my_joint, _script_or_greedy)
 
         if depth > 1 and not sim.is_over():
-            _, future_score, _ = solve_best_action(sim, my_side_name, movesets, depth - 1)
+            _, future_score, _ = solve_best_action(sim, my_side_name, movesets, depth - 1,
+                                                     enemy_script=enemy_script)
             score = future_score
         else:
             score = heuristic_eval(sim, my_side_name)
 
-        if score > best_score:
-            best_score = score
-            best_action = my_joint
-            best_sim = sim
+        scored.append((my_joint, score, sim))
 
-    return best_action, best_score, best_sim
+    if not scored:
+        return None, -float("inf"), None
+
+    # Once the script has nothing left to say this turn (e.g. King's script only
+    # covers turns 1-2 -- every candidate already fell back to greedy above), the
+    # assume-script and assume-greedy branches are IDENTICAL, so a deviation
+    # check would find nothing new. Skipping it here matters a lot in practice:
+    # most of a scripted team's game is actually unscripted play after the
+    # opening, and this keeps that majority at the same cost as any other match.
+    if enemy_script is None or not any(script_used_flags):
+        best = max(scored, key=lambda c: c[1])
+        return best[0], best[1], best[2]
+
+    # Deviation-safety check: only for scripted opponents, and only against the
+    # top candidates by assume-script score, not the whole candidate space --
+    # doubling the cost of every single candidate compounds badly with a large
+    # per-mon moveset (this genuinely timed out King's 90-config search before
+    # this cap was added). Check in descending script-score order and take the
+    # first one that isn't punished; if every one of those is, fall back to the
+    # single best script score (no safe option was found in the checked pool).
+    CHECK_TOP_K = 6
+    scored.sort(key=lambda c: -c[1])
+    for my_joint, score, sim in scored[:CHECK_TOP_K]:
+        sim_dev, sim_dev_my_side = _play_branch(my_joint, _greedy)
+        my_alive_after_dev = sum(1 for c in sim_dev_my_side.roster if not c.fainted)
+        if my_alive_after_dev >= my_alive_before:
+            return my_joint, score, sim
+
+    best = scored[0]
+    return best[0], best[1], best[2]
 
 
 def punish_check(battle: Battle, my_side_name: str, our_action: list, movesets: dict, cap: int = 40):

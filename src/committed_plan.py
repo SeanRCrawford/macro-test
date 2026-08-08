@@ -413,7 +413,7 @@ def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart
                 if fixed is None:
                     break
             else:
-                fixed, _, _ = solve_best_action(b, "p1", ms, depth=1)
+                fixed, _, _ = solve_best_action(b, "p1", ms, depth=1, enemy_script=script)
                 if not fixed:
                     break
             opp = None

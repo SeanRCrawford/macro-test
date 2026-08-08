@@ -149,6 +149,132 @@ def get_state_team():
     return st.session_state.get("team", [])
 
 
+def render_path_explorer(key_prefix, matchup, our_sets):
+    """Shared 'does this hold up against the worst rolls AND losing every speed
+    tie' panel -- used by both Battle Viewer and Vs Team. `matchup` is
+    (our_bring4, enemy_bring4, max_turns) or None."""
+    st.markdown("**Path explorer** — does this hold up against the worst rolls AND losing "
+               "every speed tie, or only on average?")
+    st.caption("Crosses {we win every tie, they win every tie} x {min roll, 5/16 roll, max "
+               "roll, average} and reports the outcome of each. 'Robust win' means still a "
+               "win in the single worst cell (lose every tie, roll minimum damage) -- the bar "
+               "for a plan you can actually rely on, not just one that wins on average.")
+    if st.button("Explore paths", disabled=not matchup, key=f"{key_prefix}_paths_go"):
+        from matchup_search import robust_win_paths
+        mo4, mt4, mturns = matchup
+        with st.spinner("Playing out every tie x roll path..."):
+            paths = robust_win_paths(mo4, mt4, merged, moves, natures, typechart, mturns,
+                                      our_sets=our_sets)
+        st.metric("Robust win?", "YES" if paths["robust_win"] else "no",
+                  help=f"Worst cell checked: {paths['worst_cell'][0]} / {paths['worst_cell'][1]}")
+        prows = [{"Ties": tie, "Roll": roll, "Result": {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()),
+                  "Turns": t} for (tie, roll), (w, t) in paths["paths"].items()]
+        st.dataframe(pd.DataFrame(prows), width='stretch', hide_index=True)
+    elif not matchup:
+        st.caption("Run a search/simulation above first.")
+
+
+def render_salvage(key_prefix, matchup, our_sets):
+    """Shared 'try single changes and see if any flips a loss' panel with live
+    apply/save -- used by both Battle Viewer and Vs Team."""
+    res_key, matchup_key = f"{key_prefix}_salvage_result", f"{key_prefix}_salvage_matchup"
+    st.markdown("**Salvage a losing matchup** — try single changes (EV spread, item/resist "
+               "berry, one support or setup move) and see if any flips it.")
+    st.caption("Each trial is scored with the real battle engine (does it actually win more), "
+               "not the offense-only coverage heuristic used elsewhere in this tool.")
+    if st.button("Try to salvage", disabled=not matchup, key=f"{key_prefix}_salvage_go"):
+        from salvage import salvage_losing_matchup
+        mo4, mt4, mturns = matchup
+        with st.spinner("Trying EV/item/move swaps..."):
+            res = salvage_losing_matchup(mo4, mt4, merged, moves, natures, typechart, mturns,
+                                          our_sets=our_sets)
+        st.session_state[res_key] = res
+        st.session_state[matchup_key] = matchup
+    elif not matchup:
+        st.caption("Run a search/simulation above first.")
+
+    sres = st.session_state.get(res_key)
+    if sres and st.session_state.get(matchup_key) == matchup:
+        bw, bt = sres["baseline"]
+        bw_label = {"p1": "WIN", "p2": "LOSS"}.get(bw, bw.upper())
+        st.caption(f"Baseline: {bw_label} in {bt} turns")
+        if not sres["fixes"]:
+            st.info("No single EV/item/move swap tried here flipped the result.")
+        else:
+            FIELD_FOR_KIND = {"evs": "evs", "item": "item", "support": "moves", "setup": "moves"}
+
+            def _apply_fixes(fix_list):
+                cur = dict(st.session_state.get("sets", {}))
+                for f in fix_list:
+                    field = FIELD_FOR_KIND[f["kind"]]
+                    mon_spec = dict(cur.get(f["mon"]) or {})
+                    mon_spec[field] = f["new_spec"][field]
+                    cur[f["mon"]] = mon_spec
+                st.session_state["sets"] = cur
+
+            st.caption("Apply a fix to try it live -- it updates the sets used everywhere else "
+                       "in the app (Team Builder, searches, ...) for this session. 'Save' on top "
+                       "of that writes it to a team file, so it survives a restart.")
+            for i, f in enumerate(sres["fixes"]):
+                fc1, fc2 = st.columns([5, 1])
+                result_label = {"p1": "WIN", "p2": "LOSS"}.get(f["winner"], f["winner"].upper())
+                fc1.write(f"**{f['mon']}** ({f['kind']}): {f['change']} → "
+                          f"{result_label} (turn {f['turns']})")
+                if fc2.button("Apply", key=f"{key_prefix}_sv_apply_{i}", width='stretch'):
+                    _apply_fixes([f])
+                    st.rerun()
+            if st.button("Apply ALL fixes", key=f"{key_prefix}_sv_apply_all"):
+                _apply_fixes(sres["fixes"])
+                st.rerun()
+
+            cur_sets = st.session_state.get("sets", {})
+            mo4, mt4, mturns = matchup
+            from matchup_search import play_out_worst_case as _pow
+            w2, t2, btl2 = _pow(mo4, mt4, merged, moves, natures, typechart, mturns,
+                                 our_sets=cur_sets)
+            w2_label = {"p1": "WIN", "p2": "LOSS"}.get(w2, w2.upper())
+            st.metric("This matchup with your CURRENT session sets", f"{w2_label} (turn {t2})",
+                      help="Reflects whatever's currently applied, including any fixes clicked "
+                           "above -- re-check this after each Apply.")
+
+            st.markdown("**Save current sets permanently (overwrites a team file)**")
+            sv_fname = st.text_input("Save as", value=st.session_state.get("save_name", "team.json"),
+                                      key=f"{key_prefix}_salvage_save_name")
+            if st.button("Save", key=f"{key_prefix}_salvage_save_btn"):
+                from team_sheet import save_team
+                fn = sv_fname if sv_fname.endswith(".json") else sv_fname + ".json"
+                save_team(ROOT / fn, get_state_team(), cur_sets)
+                st.success(f"Saved to {ROOT / fn}")
+
+
+def render_punish_audit(res):
+    """Shared renderer for matchup_search.full_game_punish_audit's result --
+    used by both Battle Viewer and Vs Team, so the two stay in sync."""
+    m1, m2 = st.columns(2)
+    m1.metric("Result", {"p1": "WIN", "p2": "LOSS"}.get(res["winner"], res["winner"].upper()))
+    m2.metric("Turns", res["turns"])
+    n_punish = sum(1 for e in res["audit"] if e["punished"])
+    if n_punish == 0:
+        st.success(f"No punishable turn across all {len(res['audit'])} turns checked -- every "
+                   "one of our plays holds up against every legal response tried.")
+    else:
+        st.warning(f"{n_punish} of {len(res['audit'])} turns had a legal response of theirs "
+                   "that punishes our planned play.")
+    for e in res["audit"]:
+        tag = "PUNISHABLE" if e["punished"] else "safe"
+        with st.expander(f"Turn {e['turn']}: {tag} — {e['our_action']}"):
+            if e["punished"]:
+                kind_label = ("KO'd this turn" if e["kind"] == "immediate" else
+                               "survives this turn, but even our best follow-up loses a "
+                               "Pokemon on their very next move regardless")
+                st.error(f"Punishable: {kind_label}.")
+                st.write(f"**Their punishing response:** {e['their_punishing_action']}")
+            else:
+                st.success("No legal response tried punishes this play.")
+    with st.expander("Full battle log"):
+        st.code(res["log"])
+
+
 # ------------------------------------------------------------------ builder
 with tab_build:
     st.subheader("Pick your 6")
@@ -386,6 +512,14 @@ with tab_gen:
                          help="Verify against every enemy bring-4 -- all C(6,2) leads x "
                               "C(4,2) backs = 90 configurations per opponent -- instead of "
                               "one sampled back pair. Slower but the only trustworthy check.")
+    script_screen = st.checkbox(
+        "Early-disqualify finalists that always lose a scripted opening", value=False,
+        help="Before ranking/reporting, cheaply check EVERY beam-search finalist (not just "
+             "the ones you'd otherwise verify) against scripted opponents (King / Hard Trick "
+             "Room / Perish Trap) with the real solver -- one sampled enemy config each, so "
+             "it's much cheaper than 'All enemy brings' verification. A team with genuinely "
+             "no plan against a script (loses ALL of them, not just one) is dropped before it "
+             "can take a report slot.")
 
     with st.expander("Pair matrix cache (skip the expensive rebuild)"):
         st.caption("Building the pair matrix (every candidate lead pair of ours x every "
@@ -442,6 +576,23 @@ with tab_gen:
 
         finals = beam_search_teams(pool, matrix, eps, merged, beam_width=beam,
                                     must_include=run_prefs["include"], prefer=run_prefs["prefer"])
+
+        if script_screen and finals:
+            from generate_team import quick_script_screen
+            with st.spinner("Screening finalists against scripted openings..."):
+                screened = quick_script_screen(finals, teams, matrix, merged, moves, natures,
+                                                typechart, max_turns=12)
+            survivors = [(sc, t) for sc, t, dq, _d in screened if not dq]
+            dropped = [(t, d) for _sc, t, dq, d in screened if dq]
+            if dropped:
+                st.warning(f"Dropped {len(dropped)}/{len(finals)} finalists that lose EVERY "
+                           f"scripted opening tested (King / Hard Trick Room / Perish Trap, "
+                           f"whichever are in teams.csv).")
+            if survivors:
+                finals = survivors
+            elif dropped:
+                st.warning("Every finalist always loses a scripted opening -- keeping the "
+                           "original list rather than showing nothing.")
 
         if not finals:
             st.error("No valid teams found -- try a larger pool size.")
@@ -763,10 +914,14 @@ with tab_search:
                     if not r:
                         continue
                     b = r["our_bring4"]
-                    rows.append({"Opponent": tname, "Our lead": f"{b[0]}/{b[1]}",
-                                  "Our back": f"{b[2]}/{b[3]}",
-                                  "Enemy brings beaten": f"{r['solver_wins']}/{r['solver_total']}",
-                                  "Clean": "yes" if not r["solver_losses"] else "no"})
+                    row = {"Opponent": tname, "Our lead": f"{b[0]}/{b[1]}",
+                           "Our back": f"{b[2]}/{b[3]}",
+                           "Enemy brings beaten": f"{r['solver_wins']}/{r['solver_total']}",
+                           "Clean": "yes" if not r["solver_losses"] else "no"}
+                    if "script_wins" in r:
+                        row["Vs script"] = f"{r['script_wins']}/{r['script_total']}"
+                        row["Vs conventional"] = f"{r['conventional_wins']}/{r['conventional_total']}"
+                    rows.append(row)
                 else:
                     b = d["combos"][0] if d["combos"] else None
                     if not b:
@@ -901,6 +1056,15 @@ with tab_search:
                 losses = {(tuple(l), tuple(bk)): (w, t) for l, bk, w, t in r["solver_losses"]}
                 with st.expander(f"{tname} — our lead {b4[0]}/{b4[1]}, back {b4[2]}/{b4[3]} "
                                   f"({r['solver_wins']}/{r['solver_total']} beaten)"):
+                    if "script_wins" in r:
+                        sc1, sc2 = st.columns(2)
+                        sc1.metric("Vs script", f"{r['script_wins']}/{r['script_total']}")
+                        sc2.metric("Vs conventional (normal 6/6)",
+                                   f"{r['conventional_wins']}/{r['conventional_total']}")
+                        st.caption("'Vs script' is every game where the opponent ran its scripted "
+                                   "opening (or a generic near-script deviation) at least once; "
+                                   "'vs conventional' is the plain unscripted greedy 2v2 -- the "
+                                   "overall count above blends both together.")
                     cfgs = enemy_configs(d["roster"],
                                           fixed_lead=team_meta.get(tname, {}).get('lead'))
                     fc1, fc2 = st.columns([1, 2])
@@ -912,14 +1076,18 @@ with tab_search:
                         help="All 90 enemy brings are available -- this only controls how "
                              "many are rendered at once, since each is a full battle log.")
                     ff1, ff2 = st.columns(2)
-                    filt_lead = ff1.multiselect("Filter to enemy LEAD containing", d["roster"],
-                                                 key=f"fl_{tname}")
-                    filt_back = ff2.multiselect("...and BACK containing (optional)", d["roster"],
-                                                 key=f"fb_{tname}")
+                    filt_lead = ff1.multiselect("Filter to EXACTLY this enemy lead (2)", d["roster"],
+                                                 max_selections=2, key=f"fl_{tname}",
+                                                 help="Must consist of only these two Pokemon, "
+                                                      "not just contain one of them.")
+                    filt_back = ff2.multiselect("...and EXACTLY this back (2, optional)", d["roster"],
+                                                 max_selections=2, key=f"fb_{tname}",
+                                                 help="Must consist of only these two Pokemon, "
+                                                      "not just contain one of them.")
                     visible = [(l, bk) for l, bk in cfgs
                                if not (only_losses and (tuple(l), tuple(bk)) not in losses)
-                               and (not filt_lead or any(p in l for p in filt_lead))
-                               and (not filt_back or any(p in bk for p in filt_back))]
+                               and (len(filt_lead) != 2 or set(l) == set(filt_lead))
+                               and (len(filt_back) != 2 or set(bk) == set(filt_back))]
                     n_pages = max(1, (len(visible) + page_size - 1) // page_size)
                     page = 1
                     if n_pages > 1:
@@ -1096,142 +1264,33 @@ with tab_battle:
 
         st.session_state["bv_last_matchup"] = (our4, their4, turns)
 
-    # --- Punish check: is our turn-1 play safe against EVERY legal response? ---
+    # --- Punish check: is EVERY turn of our plan safe against EVERY legal response? ---
     st.divider()
-    st.markdown("**Punish check** — given our best turn-1 play, is there a legal response "
-                "(including a switch) that really punishes it?")
+    st.markdown("**Punish check** — across the WHOLE match, is there a legal response "
+                "(including a switch) that really punishes our planned play, turn by turn?")
     st.caption("E.g. we target their Garchomp with a Dragon move assuming it stays in, but "
                "they switch to a Fairy-type immune to Dragon and we eat a hit instead; or we "
                "split our attacks assuming they Protect one slot, but they Protect the other. "
-               "Tries EVERY legal response of theirs (not just their greedy pick or worst-roll "
-               "assumption) and reports the worst one -- does it KO one of ours outright this "
-               "turn, or does even our best follow-up still lose one of ours next turn.")
+               "At every turn, tries EVERY legal response of theirs (not just their greedy pick) "
+               "and reports the worst one -- does it KO one of ours outright that turn, or does "
+               "even our best follow-up still lose one of ours the turn after.")
     last_pc = st.session_state.get("bv_last_matchup")
     if st.button("Check for a punish", disabled=not last_pc, key="punish_go"):
-        from combatants import make_team
-        from battle import Battle
-        from solver import build_moveset, TOP_K_MOVES, solve_best_action, punish_check
+        from matchup_search import full_game_punish_audit
         lo4, lt4, lturns = last_pc
-        pc_sets = st.session_state.get("sets", {})
-        oc = make_team(lo4, merged, natures, sets=pc_sets)
-        ec = make_team(lt4, merged, natures)
-        pb = Battle(oc, ec, typechart, moves)
-        pms = {}
-        for c in oc + ec:
-            spec = pc_sets.get(c.name) or {}
-            pms[c.name] = build_moveset(merged[c.name], moves, top_k=TOP_K_MOVES,
-                                          only_moves=spec.get("moves"))
-        with st.spinner("Finding our best turn-1 play, then trying every legal response..."):
-            our_t1_action, _, _ = solve_best_action(pb, "p1", pms, depth=1)
-            pc_result = punish_check(pb, "p1", our_t1_action, pms, cap=60) if our_t1_action else None
-        if not our_t1_action:
-            st.info("No legal turn-1 action found.")
-        else:
-            st.write("Our planned turn-1 action:",
-                      [(a.combatant.name, a.kind, a.move.name if a.move else "-",
-                        [t.name for t in a.targets]) for a in our_t1_action])
-            if not pc_result["punished"]:
-                st.success("No punish found across every legal response tried -- this play "
-                           "holds up.")
-            else:
-                kind_label = ("KO'd THIS TURN" if pc_result["kind"] == "immediate"
-                               else "survives this turn, but loses a Pokemon on our best "
-                                    "follow-up NEXT turn regardless")
-                st.error(f"Punishable: {kind_label}")
-                st.write("Their punishing response:", pc_result["their_action"])
+        with st.spinner("Playing the match, checking every turn against every legal response..."):
+            pc_res = full_game_punish_audit(lo4, lt4, merged, moves, natures, typechart, lturns,
+                                             our_sets=st.session_state.get("sets", {}))
+        render_punish_audit(pc_res)
 
     # --- Path explorer: tie x roll scenario matrix -----------------------------
     st.divider()
-    st.markdown("**Path explorer** — does this hold up against the worst rolls AND losing "
-                "every speed tie, or only on average?")
-    st.caption("Crosses {we win every tie, they win every tie} x {min roll, 5/16 roll, max "
-               "roll, average} and reports the outcome of each. 'Robust win' means still a "
-               "win in the single worst cell (lose every tie, roll minimum damage) -- the bar "
-               "for a plan you can actually rely on, not just one that wins on average.")
     last = st.session_state.get("bv_last_matchup")
-    if st.button("Explore paths", disabled=not last):
-        from matchup_search import robust_win_paths
-        lo4, lt4, lturns = last
-        with st.spinner("Playing out every tie x roll path..."):
-            paths = robust_win_paths(lo4, lt4, merged, moves, natures, typechart, lturns,
-                                      our_sets=st.session_state.get("sets", {}))
-        st.metric("Robust win?", "YES" if paths["robust_win"] else "no",
-                  help=f"Worst cell checked: {paths['worst_cell'][0]} / {paths['worst_cell'][1]}")
-        prows = [{"Ties": tie, "Roll": roll, "Result": {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()),
-                  "Turns": t} for (tie, roll), (w, t) in paths["paths"].items()]
-        st.dataframe(pd.DataFrame(prows), width='stretch', hide_index=True)
-    elif not last:
-        st.caption("Run Simulate above first.")
+    render_path_explorer("bv", last, st.session_state.get("sets", {}))
 
     # --- Salvage a losing matchup -----------------------------------------------
     st.divider()
-    st.markdown("**Salvage a losing matchup** — try single changes (EV spread, item/resist "
-                "berry, one support or setup move) and see if any flips it.")
-    st.caption("Each trial is scored with the real battle engine (does it actually win more), "
-               "not the offense-only coverage heuristic used elsewhere in this tool.")
-    if st.button("Try to salvage", disabled=not last):
-        from salvage import salvage_losing_matchup
-        lo4, lt4, lturns = last
-        with st.spinner("Trying EV/item/move swaps..."):
-            res = salvage_losing_matchup(lo4, lt4, merged, moves, natures, typechart, lturns,
-                                          our_sets=st.session_state.get("sets", {}))
-        st.session_state["salvage_result"] = res
-        st.session_state["salvage_matchup"] = last
-    elif not last:
-        st.caption("Run Simulate above first.")
-
-    sres = st.session_state.get("salvage_result")
-    if sres and st.session_state.get("salvage_matchup") == last:
-        bw, bt = sres["baseline"]
-        bw_label = {"p1": "WIN", "p2": "LOSS"}.get(bw, bw.upper())
-        st.caption(f"Baseline: {bw_label} in {bt} turns")
-        if not sres["fixes"]:
-            st.info("No single EV/item/move swap tried here flipped the result.")
-        else:
-            FIELD_FOR_KIND = {"evs": "evs", "item": "item", "support": "moves", "setup": "moves"}
-
-            def _apply_fixes(fix_list):
-                cur = dict(st.session_state.get("sets", {}))
-                for f in fix_list:
-                    field = FIELD_FOR_KIND[f["kind"]]
-                    mon_spec = dict(cur.get(f["mon"]) or {})
-                    mon_spec[field] = f["new_spec"][field]
-                    cur[f["mon"]] = mon_spec
-                st.session_state["sets"] = cur
-
-            st.caption("Apply a fix to try it live -- it updates the sets used everywhere else "
-                       "in the app (Team Builder, searches, ...) for this session. 'Save' on top "
-                       "of that writes it to a team file, so it survives a restart.")
-            for i, f in enumerate(sres["fixes"]):
-                fc1, fc2 = st.columns([5, 1])
-                result_label = {"p1": "WIN", "p2": "LOSS"}.get(f["winner"], f["winner"].upper())
-                fc1.write(f"**{f['mon']}** ({f['kind']}): {f['change']} → "
-                          f"{result_label} (turn {f['turns']})")
-                if fc2.button("Apply", key=f"sv_apply_{i}", width='stretch'):
-                    _apply_fixes([f])
-                    st.rerun()
-            if st.button("Apply ALL fixes", key="sv_apply_all"):
-                _apply_fixes(sres["fixes"])
-                st.rerun()
-
-            cur_sets = st.session_state.get("sets", {})
-            lo4, lt4, lturns = last
-            from matchup_search import play_out_worst_case as _pow
-            w2, t2, btl2 = _pow(lo4, lt4, merged, moves, natures, typechart, lturns,
-                                 our_sets=cur_sets)
-            w2_label = {"p1": "WIN", "p2": "LOSS"}.get(w2, w2.upper())
-            st.metric("This matchup with your CURRENT session sets", f"{w2_label} (turn {t2})",
-                      help="Reflects whatever's currently applied, including any fixes clicked "
-                           "above -- re-check this after each Apply.")
-
-            st.markdown("**Save current sets permanently (overwrites a team file)**")
-            sv_fname = st.text_input("Save as", value=st.session_state.get("save_name", "team.json"),
-                                      key="salvage_save_name")
-            if st.button("Save", key="salvage_save_btn"):
-                from team_sheet import save_team
-                fn = sv_fname if sv_fname.endswith(".json") else sv_fname + ".json"
-                save_team(ROOT / fn, get_state_team(), cur_sets)
-                st.success(f"Saved to {ROOT / fn}")
+    render_salvage("bv", last, st.session_state.get("sets", {}))
 
 
 # ------------------------------------------------------------------ vs team
@@ -1270,58 +1329,105 @@ with tab_vs:
                         st.json(enemy_sets_vs)
 
         if len(enemy_roster) == 6:
-            vc1, vc2 = st.columns(2)
-            deep_vs = vc1.checkbox("All enemy brings (90, slower, trustworthy)", value=False,
-                                    key="vs_deep")
-            max_turns_vs = vc2.slider("Turn cap", 6, 24, 12, key="vs_turns")
+            vs_search_mode = st.radio(
+                "Search mode",
+                ["Quick (sampled toughest lead)", "All enemy brings (90, slower, trustworthy)",
+                 "Assume a guaranteed enemy lead (6 configs)"],
+                key="vs_search_mode",
+                help="'Guaranteed lead' solves the easier problem of finding your best bring "
+                     "GIVEN you already know their lead -- e.g. from a scouted team or a real "
+                     "read -- testing only the 6 back-pair configs behind that lead instead of "
+                     "all 90.")
+            fixed_lead_vs = None
+            if vs_search_mode == "Assume a guaranteed enemy lead (6 configs)":
+                fixed_lead_vs = st.multiselect("Guaranteed enemy lead (exactly 2)", enemy_roster,
+                                                max_selections=2, key="vs_fixed_lead")
+            max_turns_vs = st.slider("Turn cap", 6, 24, 12, key="vs_turns")
+            import scripted_openings as _so_vs
+            script_team_vs = st.selectbox(
+                "This enemy team runs a known scripted opening", ["None"] + list(_so_vs.SCRIPTS),
+                key="vs_script_team",
+                help="Only pick this if the enemy roster you entered above IS that fixed-lead "
+                     "archetype (same key Pokemon/names) -- lets results be split into 'vs "
+                     "script' and 'vs conventional (normal 6/6)' below, instead of one blended "
+                     "number.")
+            script_team_vs = None if script_team_vs == "None" else script_team_vs
             if st.button("Find best response", type="primary", key="vs_go"):
                 from matchup_search import search_robust_composition, search_best_composition
                 from run_search import find_toughest_lead
                 vs_sets = st.session_state.get("sets", {})
-                with st.spinner("Searching..."):
-                    if deep_vs:
-                        rob = search_robust_composition(
-                            vs_team, enemy_roster, merged, moves, natures, typechart, max_turns_vs,
-                            our_sets=vs_sets, verify_top=1, enemy_sets=enemy_sets_vs)
-                        r = rob[0] if rob else None
-                        eb4_tested = None
-                    else:
-                        lead = find_toughest_lead(vs_team, enemy_roster, merged, moves, natures,
-                                                   typechart, max_turns_vs, our_sets=vs_sets)
-                        rem = [x for x in enemy_roster if x not in lead]
-                        eb4_tested = list(lead) + rem[:2]
-                        combos = search_best_composition(
-                            vs_team, eb4_tested, merged, moves, natures, typechart, max_turns_vs,
-                            our_sets=vs_sets, enemy_sets=enemy_sets_vs)
-                        r = None
-                        if combos:
-                            b4, w, t = combos[0]
-                            r = {"our_bring4": b4, "solver_wins": int(w == "p1"), "solver_total": 1,
-                                 "solver_losses": [] if w == "p1"
-                                 else [(tuple(lead), tuple(rem[:2]), w, t)]}
-                if r is None:
-                    st.error("No legal composition found (check your team and the enemy roster).")
+                if (vs_search_mode == "Assume a guaranteed enemy lead (6 configs)"
+                        and len(fixed_lead_vs or []) != 2):
+                    st.error("Pick exactly 2 Pokemon for the guaranteed enemy lead.")
                 else:
-                    st.session_state["vs_result"] = {
-                        "r": r, "enemy_roster": enemy_roster, "enemy_sets": enemy_sets_vs,
-                        "deep": deep_vs, "max_turns": max_turns_vs, "eb4_tested": eb4_tested,
-                    }
+                    with st.spinner("Searching..."):
+                        if vs_search_mode == "Quick (sampled toughest lead)":
+                            lead = find_toughest_lead(vs_team, enemy_roster, merged, moves, natures,
+                                                       typechart, max_turns_vs, our_sets=vs_sets)
+                            rem = [x for x in enemy_roster if x not in lead]
+                            eb4_tested = list(lead) + rem[:2]
+                            combos = search_best_composition(
+                                vs_team, eb4_tested, merged, moves, natures, typechart, max_turns_vs,
+                                our_sets=vs_sets, enemy_sets=enemy_sets_vs)
+                            r = None
+                            if combos:
+                                b4, w, t = combos[0]
+                                r = {"our_bring4": b4, "solver_wins": int(w == "p1"), "solver_total": 1,
+                                     "solver_losses": [] if w == "p1"
+                                     else [(tuple(lead), tuple(rem[:2]), w, t)]}
+                        else:
+                            fl = (fixed_lead_vs if vs_search_mode ==
+                                  "Assume a guaranteed enemy lead (6 configs)" else None)
+                            rob = search_robust_composition(
+                                vs_team, enemy_roster, merged, moves, natures, typechart, max_turns_vs,
+                                our_sets=vs_sets, verify_top=1, enemy_sets=enemy_sets_vs,
+                                fixed_lead=fl,
+                                enemy_script=_so_vs.script_for(script_team_vs) if script_team_vs
+                                else None,
+                                script_team=script_team_vs)
+                            r = rob[0] if rob else None
+                            eb4_tested = None
+                    if r is None:
+                        st.error("No legal composition found (check your team and the enemy roster).")
+                    else:
+                        st.session_state["vs_result"] = {
+                            "r": r, "enemy_roster": enemy_roster, "enemy_sets": enemy_sets_vs,
+                            "mode": vs_search_mode, "max_turns": max_turns_vs,
+                            "eb4_tested": eb4_tested if vs_search_mode == "Quick (sampled toughest lead)"
+                            else None,
+                            "fixed_lead": fixed_lead_vs
+                            if vs_search_mode == "Assume a guaranteed enemy lead (6 configs)" else None,
+                        }
 
         vres = st.session_state.get("vs_result")
+        vs_matchup = None
         if vres:
             r = vres["r"]
             b4 = r["our_bring4"]
+            is_quick = vres["mode"] == "Quick (sampled toughest lead)"
+            n_cfg = 6 if vres.get("fixed_lead") else 90
             m1, m2 = st.columns(2)
             m1.metric("Best response", f"{b4[0]}/{b4[1]} + {b4[2]}/{b4[3]}")
-            if vres["deep"]:
-                m2.metric("Enemy brings beaten", f"{r['solver_wins']}/{r['solver_total']}")
-            else:
+            if is_quick:
                 m2.metric("Vs their toughest lead", "WIN" if r["solver_wins"] else "LOSS")
+            else:
+                m2.metric(f"Enemy brings beaten ({n_cfg} configs)",
+                          f"{r['solver_wins']}/{r['solver_total']}")
+            if "script_wins" in r:
+                sc1_vs, sc2_vs = st.columns(2)
+                sc1_vs.metric("Vs script", f"{r['script_wins']}/{r['script_total']}")
+                sc2_vs.metric("Vs conventional (normal 6/6)",
+                              f"{r['conventional_wins']}/{r['conventional_total']}")
+                st.caption("'Vs script' is every game where the opponent ran its scripted "
+                           "opening (or a generic near-script deviation) at least once; "
+                           "'vs conventional' is the plain unscripted greedy 2v2 -- the "
+                           "overall count above blends both together.")
             for lead, back, w, t in r.get("solver_losses", [])[:5]:
                 st.write(f"LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} "
                          f"({w} T{t})")
 
-            if not vres["deep"]:
+            if is_quick:
+                vs_matchup = (b4, vres["eb4_tested"], vres["max_turns"]) if vres["eb4_tested"] else None
                 if st.button("Show full battle log", key="vs_log"):
                     from matchup_search import play_out_worst_case
                     eb4 = vres["eb4_tested"]
@@ -1331,28 +1437,32 @@ with tab_vs:
                     st.caption(f"vs enemy {eb4[0]}/{eb4[1]} + {eb4[2]}/{eb4[3]}")
                     st.code(btl.log.dump())
             else:
-                # --- Individual matchups: every one of the 90 enemy bring-4s, same ---
-                # format as the Lead/Back Search tab -- expand one to see that battle.
+                # --- Individual matchups: every enemy bring-4 (90, or 6 for a ---
+                # guaranteed lead), same format as the Lead/Back Search tab.
                 st.markdown("### Individual matchups")
-                st.caption("All 90 enemy bring-4s. Expand one to see that battle's full log.")
+                st.caption(f"All {n_cfg} enemy bring-4s. Expand one to see that battle's full log.")
                 losses = {(tuple(l), tuple(bk)): (w, t) for l, bk, w, t in r.get("solver_losses", [])}
-                cfgs = enemy_configs(vres["enemy_roster"])
+                cfgs = enemy_configs(vres["enemy_roster"], fixed_lead=vres.get("fixed_lead"))
                 fc1, fc2 = st.columns([1, 2])
                 only_losses_vs = fc1.checkbox("Show only losses", value=bool(losses),
                                                key="vs_only_losses")
                 page_size_vs = fc2.select_slider(
-                    "Battles shown per page", options=[10, 30, 45, 90], value=30, key="vs_page_size",
-                    help="All 90 enemy brings are available -- this only controls how many are "
-                         "rendered at once, since each is a full battle log.")
+                    "Battles shown per page", options=[6, 10, 30, 45, 90], value=30, key="vs_page_size",
+                    help="This only controls how many are rendered at once, since each is a "
+                         "full battle log.")
                 ff1_vs, ff2_vs = st.columns(2)
-                filt_lead_vs = ff1_vs.multiselect("Filter to enemy LEAD containing",
-                                                   vres["enemy_roster"], key="vs_filt_lead")
-                filt_back_vs = ff2_vs.multiselect("...and BACK containing (optional)",
-                                                   vres["enemy_roster"], key="vs_filt_back")
+                filt_lead_vs = ff1_vs.multiselect(
+                    "Filter to EXACTLY this enemy lead (2)", vres["enemy_roster"],
+                    max_selections=2, key="vs_filt_lead",
+                    help="Must consist of only these two Pokemon, not just contain one of them.")
+                filt_back_vs = ff2_vs.multiselect(
+                    "...and EXACTLY this back (2, optional)", vres["enemy_roster"],
+                    max_selections=2, key="vs_filt_back",
+                    help="Must consist of only these two Pokemon, not just contain one of them.")
                 visible_vs = [(l, bk) for l, bk in cfgs
                               if not (only_losses_vs and (tuple(l), tuple(bk)) not in losses)
-                              and (not filt_lead_vs or any(p in l for p in filt_lead_vs))
-                              and (not filt_back_vs or any(p in bk for p in filt_back_vs))]
+                              and (len(filt_lead_vs) != 2 or set(l) == set(filt_lead_vs))
+                              and (len(filt_back_vs) != 2 or set(bk) == set(filt_back_vs))]
                 n_pages_vs = max(1, (len(visible_vs) + page_size_vs - 1) // page_size_vs)
                 page_vs = 1
                 if n_pages_vs > 1:
@@ -1384,8 +1494,13 @@ with tab_vs:
                         st.caption("The log below uses the average damage roll and no secondary "
                                    "procs -- it is the planned line, not a guaranteed one.")
                         st.code(btl_vs.log.dump())
+                        if st.button("Use this matchup below (punish/paths/salvage)",
+                                     key=f"vs_use_{key_vs}"):
+                            st.session_state["vs_last_matchup"] = (b4, list(lead) + list(back),
+                                                                    vres["max_turns"])
+                            st.success("Set as the active matchup for the sections below.")
                 if shown_vs == 0:
-                    st.success("No losses against any of the 90 enemy brings.")
+                    st.success(f"No losses against any of the {n_cfg} enemy brings.")
 
             if st.button("Compute usage stats (all their brings)", key="vs_stats"):
                 from matchup_search import aggregate_battle_stats
@@ -1393,7 +1508,7 @@ with tab_vs:
                     vstats = aggregate_battle_stats(
                         b4, vres["enemy_roster"], merged, moves, natures, typechart,
                         vres["max_turns"], our_sets=st.session_state.get("sets", {}),
-                        enemy_sets=vres["enemy_sets"])
+                        enemy_sets=vres["enemy_sets"], fixed_lead=vres.get("fixed_lead"))
                 vsrows = []
                 for (side, name), s in vstats.items():
                     top_moves = sorted(s["moves"].items(), key=lambda x: -x[1])
@@ -1404,3 +1519,30 @@ with tab_vs:
                     })
                 vsrows.sort(key=lambda row: (row["Side"], -row["KOs"]))
                 st.dataframe(pd.DataFrame(vsrows), width='stretch', hide_index=True)
+
+            # --- Punish check / Path explorer / Salvage, same as Battle Viewer ---
+            vs_active_matchup = vs_matchup or st.session_state.get("vs_last_matchup")
+            st.divider()
+            st.markdown("**Punish check** — across the WHOLE match, is there a legal response "
+                       "(including a switch) that really punishes our planned play, turn by turn?")
+            st.caption("For the recommended composition's lead/back matchup (or one you picked "
+                       "'Use this matchup' on above). Tries EVERY legal response of theirs at "
+                       "EVERY turn, not just their greedy pick, and reports the worst one per turn.")
+            if st.button("Check for a punish", disabled=not vs_active_matchup, key="vs_punish_go"):
+                from matchup_search import full_game_punish_audit
+                pmo4, pmt4, pmturns = vs_active_matchup
+                with st.spinner("Playing the match, checking every turn against every legal "
+                                "response..."):
+                    pc_res = full_game_punish_audit(
+                        pmo4, pmt4, merged, moves, natures, typechart, pmturns,
+                        our_sets=st.session_state.get("sets", {}), enemy_sets=vres["enemy_sets"])
+                render_punish_audit(pc_res)
+            elif not vs_active_matchup:
+                st.caption("Run a search above, or click 'Use this matchup' on a specific "
+                           "individual matchup, first.")
+
+            st.divider()
+            render_path_explorer("vs", vs_active_matchup, st.session_state.get("sets", {}))
+
+            st.divider()
+            render_salvage("vs", vs_active_matchup, st.session_state.get("sets", {}))

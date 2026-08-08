@@ -128,7 +128,8 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
         # RNG). Previously the planning copy was adopted as the new state, so the
         # chosen line and the reported outcome were the same sample -- damage rolls,
         # flinch chances and speed ties all resolved in our favour by construction.
-        best_action, _, sim = solve_best_action(battle, "p1", movesets, depth=1)
+        best_action, _, sim = solve_best_action(battle, "p1", movesets, depth=1,
+                                                 enemy_script=enemy_script)
         if not best_action and sim is None:
             break
         opp_actions = None
@@ -150,6 +151,97 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
     if battle.is_over():
         return battle.winner(), battle.turn_num, battle
     return "timeout", battle.turn_num, battle
+
+
+def full_game_punish_audit(our_names, enemy_names, merged, moves_db, natures, typechart,
+                            max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
+                            enemy_script=None, cap=40):
+    """Play the whole match, and at EVERY turn check whether our (script-aware,
+    see solver.solve_best_action) chosen play could be punished -- KO'd outright
+    this turn, or losing a Pokemon on our own best follow-up next turn -- by some
+    legal response the opponent didn't actually make (see solver.punish_check).
+
+    This is the real answer to "is my team just walking into it" across a whole
+    game, not only the opening: every turn's decision gets its own verdict, so a
+    plan that's safe on turn 1 but starts taking unforced risks by turn 4 is
+    visible instead of hidden behind the final win/loss.
+
+    Returns {"winner", "turns", "log", "audit": [{"turn", "our_action", "punished",
+    "kind", "their_punishing_action"}, ...]}. `our_action`/`their_punishing_action`
+    are human-readable strings, not raw Action objects.
+    """
+    from combatants import make_team
+    from solver import punish_check, greedy_opponent_joint_action
+    our_combatants = make_team(our_names, merged, natures, sets=our_sets)
+    enemy_combatants = make_team(enemy_names, merged, natures, sets=enemy_sets)
+
+    movesets = {}
+    for c in our_combatants + enemy_combatants:
+        spec = (our_sets or {}).get(c.name) or (enemy_sets or {}).get(c.name) or {}
+        movesets[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
+                                          only_moves=spec.get("moves"))
+
+    battle = Battle(our_combatants, enemy_combatants, typechart, moves_db)
+    battle._movesets = movesets
+
+    def _fmt_action(joint):
+        parts = []
+        for a in joint:
+            if a.kind == "switch":
+                parts.append(f"{a.combatant.name} switches to {a.targets[0].name}")
+            elif a.move and a.move.name == "Protect":
+                parts.append(f"{a.combatant.name} Protects")
+            else:
+                tgt = ", ".join(t.name for t in a.targets)
+                parts.append(f"{a.combatant.name} uses {a.move.name if a.move else '?'} on {tgt}")
+        return "; ".join(parts)
+
+    def _fmt_tuple_action(desc):
+        """Same formatting as _fmt_action, but for punish_check's plain-tuple
+        (name, kind, move_name, target_names) response instead of real Actions."""
+        parts = []
+        for name, kind, move_name, targets in desc:
+            if kind == "switch":
+                parts.append(f"{name} switches to {targets[0] if targets else '?'}")
+            elif move_name == "Protect":
+                parts.append(f"{name} Protects")
+            else:
+                parts.append(f"{name} uses {move_name} on {', '.join(targets)}")
+        return "; ".join(parts)
+
+    audit = []
+    for _ in range(max_turns):
+        if battle.is_over():
+            break
+        our_action, _, _ = solve_best_action(battle, "p1", movesets, depth=1,
+                                              enemy_script=enemy_script)
+        if not our_action:
+            break
+        result = punish_check(battle, "p1", our_action, movesets, cap=cap)
+        audit.append({
+            "turn": battle.turn_num + 1,
+            "our_action": _fmt_action(our_action),
+            "punished": result["punished"],
+            "kind": result["kind"],
+            "their_punishing_action": (_fmt_tuple_action(result["their_action"])
+                                        if result["their_action"] else None),
+        })
+        opp_actions = None
+        if enemy_script is not None:
+            try:
+                opp_actions = enemy_script(battle, battle.p2, battle.p1, battle.turn_num + 1)
+            except Exception:
+                opp_actions = None
+        if not opp_actions:
+            opp_actions = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets,
+                                                         battle.turn_num + 1)
+        try:
+            battle.run_turn(list(our_action), opp_actions)
+        except ValueError:
+            break
+
+    return {"winner": battle.winner() or "timeout", "turns": battle.turn_num,
+            "log": battle.log.dump(), "audit": audit}
 
 
 def sweep_enemy_leads_fixed_back(our_bring4, enemy_roster, merged, moves_db, natures, typechart,
@@ -572,13 +664,25 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
     verified = []
     for cand in scored[:verify_top]:
         losses, worst_seen = [], None
+        script_losses, conv_losses = [], []  # only populated when script_team is set
         for lead, back in configs:
             eb4 = list(lead) + list(back)
             if script_team:
-                w, t, _, _v = play_scripted_worst_case(cand["our_bring4"], eb4, merged, moves_db,
-                                                        natures, typechart, script_team,
-                                                        max_turns, our_sets=our_sets,
-                                                        enemy_sets=enemy_sets)
+                w, t, _, _v, all_res = play_scripted_worst_case(
+                    cand["our_bring4"], eb4, merged, moves_db, natures, typechart, script_team,
+                    max_turns, our_sets=our_sets, enemy_sets=enemy_sets, return_all=True)
+                # Split the SAME already-played games (no extra simulation) into
+                # "beats their script (+ generic near-script deviations)" vs "beats
+                # plain conventional play" -- idx=None is specifically the plain
+                # unscripted greedy 2v2, everything else is script-related. See
+                # play_scripted_worst_case's return_all docstring.
+                for idx, (rw, rt, _) in all_res.items():
+                    if rw == "p1":
+                        continue
+                    if idx is None:
+                        conv_losses.append((tuple(lead), tuple(back), rw, rt))
+                    else:
+                        script_losses.append((tuple(lead), tuple(back), rw, rt))
             else:
                 w, t, _ = play_out_worst_case(cand["our_bring4"], eb4, merged, moves_db, natures,
                                                typechart, max_turns, our_sets=our_sets,
@@ -588,16 +692,30 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             rank = (0 if w == "p1" else (1 if w != "p2" else 2), t)
             if worst_seen is None or rank > worst_seen[0]:
                 worst_seen = (rank, (lead, back, w, t))
-        verified.append({**cand, "solver_losses": losses,
-                          "solver_wins": len(configs) - len(losses),
-                          "solver_total": len(configs),
-                          "worst_case": worst_seen[1] if worst_seen else None})
+        rec = {**cand, "solver_losses": losses,
+               "solver_wins": len(configs) - len(losses),
+               "solver_total": len(configs),
+               "worst_case": worst_seen[1] if worst_seen else None}
+        if script_team:
+            # Per-config "did it lose to ANY script/deviation variant" and "did it
+            # lose to plain conventional" -- deduplicate by config since a config can
+            # appear in script_losses more than once (one entry per losing variant).
+            script_loss_cfgs = {(l, b) for l, b, _, _ in script_losses}
+            conv_loss_cfgs = {(l, b) for l, b, _, _ in conv_losses}
+            rec["script_wins"] = len(configs) - len(script_loss_cfgs)
+            rec["script_total"] = len(configs)
+            rec["script_losses"] = script_losses
+            rec["conventional_wins"] = len(configs) - len(conv_loss_cfgs)
+            rec["conventional_total"] = len(configs)
+            rec["conventional_losses"] = conv_losses
+        verified.append(rec)
     verified.sort(key=lambda d: (-d["solver_wins"], -d["worst_margin"]))
     return verified
 
 
 def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
-                              team_name, max_turns=MAX_TURNS, our_sets=None, enemy_sets=None):
+                              team_name, max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
+                              return_all=False):
     """Play a scripted opponent, trying EVERY opening variant and returning the
     worst outcome for us.
 
@@ -606,7 +724,13 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
     always targets slot 1. A line that only survives one targeting choice is not
     a plan.
 
-    Returns (winner, turns, battle, variant_index) for the worst variant.
+    Returns (winner, turns, battle, variant_index) for the worst variant. With
+    return_all=True, ALSO returns {variant_idx: (winner, turns, battle)} for
+    every variant tried (idx=None is the plain unscripted greedy 2v2, everything
+    else is either the real script or a generic near-script deviation -- see
+    scripted_openings.all_scripts) -- lets a caller split "beats the script" from
+    "beats plain conventional play" without re-simulating anything, since these
+    are the same games that were already going to be played to find the worst.
     """
     from scripted_openings import all_scripts
     # The unscripted greedy opponent is ALWAYS one of the variants. A scripted team
@@ -618,17 +742,19 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
     if not variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
                                        typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
-        return w, t, b, None
+        return (w, t, b, None, {None: (w, t, b)}) if return_all else (w, t, b, None)
 
     worst = None
+    all_results = {}
     for idx, script in variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
                                        typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
                                        enemy_script=script)   # script=None -> greedy 2v2
+        all_results[idx] = (w, t, b)
         rank = (2, -t) if w == "p2" else ((0, t) if w == "p1" else (1, 0))
         if worst is None or rank > worst[0]:
             worst = (rank, (w, t, b, idx))
-    return worst[1]
+    return (*worst[1], all_results) if return_all else worst[1]
 
 
 def find_committed_plan(our_names, enemy_names, merged, moves_db, natures, typechart,

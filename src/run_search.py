@@ -323,6 +323,9 @@ def main():
                 b = r["our_bring4"]
                 print(f"  lead {b[0]}/{b[1]}, back {b[2]}/{b[3]}: "
                       f"{r['solver_wins']}/{r['solver_total']} enemy brings beaten")
+                if "script_wins" in r:
+                    print(f"      vs script:       {r['script_wins']}/{r['script_total']}")
+                    print(f"      vs conventional: {r['conventional_wins']}/{r['conventional_total']}")
                 for lead, back, w, t in r["solver_losses"][:5]:
                     print(f"      LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} ({w} T{t})")
             print(f"  [{time.time()-t0:.0f}s]")
