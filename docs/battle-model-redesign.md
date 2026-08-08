@@ -863,8 +863,14 @@ and why removing their check to *our* win condition is worth more than its HP.
 
 > Retitled. This section used to be headed *"1 HP is infinitely more than 0
 > HP"*, on the assumption that the vgcguide article of that name was about
-> damage rolls. It is not — see §8b.1. The roll-bucketing argument below stands
-> on its own engine-fidelity merits; the article's actual content is §4d.
+> damage rolls. It is not — see §8b.1; that article's actual content is §4d.
+>
+> **The VGC foundation for this section is real, it is just in a different
+> article** (§8e). *approaching-best-of-1-vs-best-of-3* costs a real play as
+> `50% speed tie × 90% accuracy × 62.5% OHKO`, and **62.5% = 10/16 is a damage
+> roll fraction**. The corpus never says "roll" — it states roll distributions
+> as a *chance to secure the KO*, exactly as a damage calculator reports them,
+> which is why searching for the mechanism by its engine name found nothing.
 
 Average-roll determinism is the wrong abstraction for exactly the situations
 that decide games. But 16 rolls per damage event is a combinatorial explosion.
@@ -881,9 +887,9 @@ preserves the only distinction that matters: **did it die**.
 > (`×0.925`, `×0.85`, `×1.0`) — i.e. **exactly the min/max/avg scheme this
 > section proposes to replace**, with the instruction generator calling
 > `DamageRolls::Max`. There is no bucketing anywhere in it. So this idea has
-> no external prior art behind it in the sources we have; it stands or falls
-> on the engine-fidelity argument below, which is checkable against our own
-> `damage.py`.
+> no *external engine* prior art behind it in the sources we have — though it
+> does have a VGC foundation (§8e), and the engine-fidelity argument below is
+> checkable against our own `damage.py` regardless.
 
 Concretely: replace the `min/max/avg` roll mode with an outcome-bucketed
 distribution, and make the leaf value an expectation over buckets. This makes
@@ -1157,11 +1163,14 @@ computable conditions on whether a damaged mon is worth preserving:
   Room/Tailwind clock.
 
 So this article belongs in **Phase A**, as a shape change to the HP term plus
-a floor for functional value, not in Phase C. Phase C (roll bucketing) is
-still worth doing, but its justification is now entirely engine-fidelity —
-Sash/Sturdy/Multiscale, survival thresholds, the FoulPlay prior art — and it
-has **no support in the VGC principles corpus**. That materially lowers its
-priority; see §10.
+a floor for functional value, not in Phase C.
+
+> **Correction (see §8e).** This section originally continued: *"Phase C has no
+> support in the VGC principles corpus."* **That was wrong** — it generalised
+> from one article's title to the whole corpus. Roll-distribution reasoning is
+> present, in a different article, and §8e sets out the evidence. What stands is
+> the narrower claim this section actually establishes: the article *titled*
+> "1 HP is infinitely more than 0 HP" is about HP non-linearity, not rolls.
 
 **2. "Pressure" is the threat matrix, not the opponent's security level.**
 
@@ -1390,6 +1399,58 @@ factorised-only.
 - **§7** — add three near-free outputs: opponent-decision-difficulty (8c.4),
   most-important-turn (8c.7), match-up-vs-play diagnosis (8c.7).
 
+### 8e. Correction: Phase C *does* have VGC foundations
+
+An earlier draft of §8b.1 concluded that roll bucketing had **no support in the
+VGC principles corpus**. That was an over-generalisation from one article's
+title to the whole corpus, and re-checking all eleven articles refutes it.
+
+**Why the first pass missed it.** The word "roll" appears in **0 of 11**
+articles; so do "Focus Sash" and "Sturdy". Searching for the mechanism by its
+engine name finds nothing. The corpus expresses roll distributions the way a
+*damage calculator* does — as a percentage chance to secure a KO.
+
+**The direct evidence.** *approaching-best-of-1-vs-best-of-3*, Aaron Zheng
+breaking down a real Top-8 game:
+
+> he needs to 1) win a speed tie between our Charizards (50%) 2) connect on
+> Blast Burn (90%) 3) **pick up the OHKO onto Indeedee with it (62.5%)**
+
+`62.5% = 10/16`. That is a damage-roll fraction, and "does this kill?" is
+exactly the quantity outcome-bucketing computes. A player is here reasoning
+about a play as a product of three independent probabilities, one of which is
+the roll distribution — and the model as it stands can represent none of the
+three.
+
+**Supporting material across the corpus:**
+
+| Source | Passage | Bears on |
+|---|---|---|
+| *how-to-analyze* | "look at any turn that involves luck/RNG & ask yourself **how that turn would have played out if you remove that luck/RNG**" | This *is* §4c's roll-sensitivity output: the deterministic result set against the distribution |
+| *how-to-analyze* (Wolfe) | "**luck is a skill**, so getting bad luck normally means you made a mistake in teambuilding or playing" | The thesis of Phase C: outcomes blamed on luck are usually a failure to price the distribution in advance |
+| *how-to-analyze* | "If you missed a crucial attack and lost as a result, ask whether you could have used **more accurate attacks**" | Accuracy belongs in the leaf value, not just damage |
+| *switching* | "a crit, a burn, or even a freeze. This event is **importantly linked to the fact that you get luckier when you have more chances to attack**" | Variance accumulates with the number of attacking opportunities — a property of a line, not of one turn |
+| *bo1-vs-bo3* | "slow paced teams that are **more vulnerable to critical hits/secondary effects**" | Variance exposure is a team property worth measuring |
+| *protect-in-battle* | "the odds of consecutive Protects are only ⅓" | Already noted in §8b.3; the same outcome-probability reasoning |
+
+**What this changes.** Phase C's justification is restored, and it is more
+specific than the generic engine-fidelity argument: the corpus reasons in
+**outcome probabilities** ("62.5% to OHKO"), not in the 16-way roll
+distribution. That is an endorsement of §4c's actual design — bucket by
+*outcome* ({kills, doesn't kill}) rather than enumerate 16 rolls — rather than
+of roll awareness in general.
+
+**And it reclassifies C.** Phase A's two evaluation terms measured at 49% and
+51%; Phase B, which changed what the solver could *represent*, measured 60%.
+Roll bucketing is not an evaluation term — it changes the leaf value from a
+point estimate into a distribution, which is a **representational** change, in
+B's category rather than A's. That is a materially better prior than "another
+eval tweak", and it is the argument for building C rather than skipping to E.
+
+The FoulPlay prior-art refutation in §9 is unaffected: `poke-engine` really does
+use min/max/avg, and really is not evidence for bucketing. C simply never
+needed it.
+
 ---
 
 ## 9. Prior art
@@ -1435,8 +1496,9 @@ checked, **[unverified]** means it is still a search-summary lead.
   The PokéAgent Challenge win remains unverified (pokeagent.github.io is
   egress-blocked), but it no longer matters: it was only ever load-bearing as
   authority for the roll-grouping claim, and that claim is now refuted on its
-  own terms. §4c has been rewritten to stand on the engine-fidelity argument,
-  which is checkable against our own `damage.py` and needs no citation. **The
+  own terms. §4c now rests on the VGC foundation in §8e plus the
+  engine-fidelity argument, which is checkable against our own `damage.py` and
+  needs no citation. **The
   phase ordering in §10 is unaffected** — if anything this reinforces C's
   demotion, since we now know of no engine that does it.
 - **Metamon** — *Human-Level Competitive Pokémon via Scalable Offline RL with
@@ -1598,15 +1660,32 @@ second.
 
 **C moves behind D and stays there.** Its justification changed rather than
 weakened. The "1 HP is infinitely more than 0 HP" support was a misreading
-(§8b.1) and that work has moved into A; what remains for C is engine fidelity
-— Sash, Sturdy, Multiscale, bulk-EV thresholds — argued from FoulPlay's prior
-art, with no support anywhere in the VGC corpus. There is one countervailing
-pull worth recording: §8b.4's game-state-conditional variance preference
-cannot be expressed at all while every leaf is a point estimate, and C is what
-makes leaf values distributions. But variance preference wants **win
-probability over full-game rollouts**, not a per-damage-event roll bucket —
-different machinery, and reachable from A + B without C. So the coupling is
-real but does not reorder anything.
+(§8b.1) and that work has moved into A.
+
+> **Revised again (§8e), after the ordering above was written.** This paragraph
+> used to continue: *"...with no support anywhere in the VGC corpus."* **That
+> was wrong**, and the correction strengthens C rather than merely restoring it:
+>
+> - The corpus *does* reason about roll distributions — as a **chance to secure
+>   a KO** (`62.5% = 10/16`), never using the word "roll" (§8e). It endorses
+>   §4c's specific design, outcome bucketing, rather than roll awareness in
+>   general.
+> - More importantly, **C is a representational change, not an evaluative one.**
+>   It turns the leaf value from a point estimate into a distribution. Phase A's
+>   two *evaluation* terms measured 49% and 51%; Phase B, which changed what the
+>   solver could represent, measured 60%. C belongs in B's category.
+>
+> The ordering is unchanged — C still comes after D, because it is still the
+> most speculative of the four and D was already built. But C is no longer the
+> weakly-motivated phase this paragraph described, and skipping to E over it
+> would now be the wrong call.
+
+There is one countervailing pull worth recording: §8b.4's game-state-conditional
+variance preference cannot be expressed at all while every leaf is a point
+estimate, and C is what makes leaf values distributions. But variance preference
+wants **win probability over full-game rollouts**, not a per-damage-event roll
+bucket — different machinery, and reachable from A + B without C. So the
+coupling is real but does not reorder anything.
 
 **E stays last and stays conditional**, though it has picked up two concrete
 requirements it did not have: a usage-weighted pessimistic prior rather than a
