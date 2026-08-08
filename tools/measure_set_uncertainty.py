@@ -98,6 +98,20 @@ def play(our4, enemy4, world, assumed, actual):
     return 1 if ours_hp - theirs_hp > 0.05 else (-1 if ours_hp - theirs_hp < -0.05 else 0)
 
 
+def our_brings(world, our_variants):
+    """Fours for OUR side, so the sample can exceed the 15-combination cap."""
+    out = [list(OUR_TEAM)]
+    if our_variants <= 1:
+        return out
+    for team_name in world["teams"]:
+        roster = list(world["teams"][team_name])
+        if len(roster) >= 4:
+            out.append(roster[:4])
+        if len(out) >= our_variants:
+            break
+    return out
+
+
 def matchups(world, bring_variants):
     """(team, enemy four) pairs -- several fours per team, for sample size."""
     out = []
@@ -123,14 +137,20 @@ def main():
                     help="use the equilibrium solver rather than greedy")
     ap.add_argument("--brings", type=int, default=8,
                     help="enemy bring variants per team (sample size)")
+    ap.add_argument("--ours", type=int, default=1,
+                    help="variants for OUR four. brings alone caps at 15 (the "
+                         "distinct four-of-six combinations), so this is the "
+                         "only way past ~240 games.")
     args = ap.parse_args()
 
     world = load_world()
     tally = {"matched": [0, 0, 0], "surprised": [0, 0, 0]}
 
     with solver.solver_mode(nash=args.nash, depth=1):
-        for team_name, enemy4 in matchups(world, args.brings):
-            names = list(OUR_TEAM) + list(enemy4)
+        jobs = [(t, e, o) for (t, e) in matchups(world, args.brings)
+                for o in our_brings(world, args.ours)]
+        for team_name, enemy4, our4 in jobs:
+            names = list(our4) + list(enemy4)
             standard = movesets_for(names, world)
             surprise = dict(standard)
             surprise.update(movesets_for(enemy4, world, ranks=SURPRISE_RANKS))
@@ -138,7 +158,7 @@ def main():
             # Same position twice: once where our assumption is right, once
             # where they run something else. Only their set differs.
             for label, actual in (("matched", standard), ("surprised", surprise)):
-                r = play(OUR_TEAM, enemy4, world, standard, actual)
+                r = play(our4, enemy4, world, standard, actual)
                 tally[label][0 if r == 1 else (1 if r == -1 else 2)] += 1
             print(f"  done {team_name} {'/'.join(x[:8] for x in enemy4)}", flush=True)
 

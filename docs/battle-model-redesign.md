@@ -885,10 +885,24 @@ Re-running with `--nash` changes the conclusion, and this is the more
 interesting result:
 
 ```
-              matched   surprised   drop
-greedy          65%        48%      +16 points   CI [+4, +29]   significant
-Nash (depth 1)  31%        28%       +3 points   CI [-19, +25]  not significant
+                        matched  surprised   drop
+greedy      n=240         65%       48%     +16 points  CI [+4, +29]   significant
+Nash d1     n=64          31%       28%      +3 points  CI [-19, +25]  not significant
+Nash d1     n=240         32%       25%      +8 points  CI [-4,  +19]  not significant
 ```
+
+The n=64 Nash figure was itself noise — the point estimate moved from 3 to 8
+once the sample matched greedy's. That is the third time in this project a
+reading at n<100 has failed to survive a larger sample (after Phase A4 and Phase
+C), and it is now a standing rule rather than a lesson: **nothing under ~200
+games gets quoted.**
+
+> **Cost correction.** An earlier draft of this section called the n=240 Nash
+> re-run "a few hours of compute". Measured: **4 min 26 s** — wrong by roughly
+> 40×. The reason is specific and worth remembering when budgeting the next one:
+> in *this* harness only our side runs the solver (the opponent is the cheap
+> greedy heuristic), unlike `measure_headtohead` where both sides do. Per-game
+> cost is ~1.2 s, not ~7 s.
 
 Two things need explaining, and both matter.
 
@@ -915,15 +929,22 @@ The gate in §10 asks whether A–D justify E. The honest reading:
 
 - The 16-point figure is real but **measured on a solver we are not shipping**,
   and it is substantially a measure of that solver's own brittleness.
-- On top of the equilibrium solver, the measured headroom is **~3 points and
-  not significant** (n=64, interval spanning zero). That is not a mandate; it
-  is not even a signal yet.
+- On top of the equilibrium solver, the measured headroom is **+8 points,
+  CI [-4, +19]** at n=240 — about half greedy's, and still not distinguishable
+  from zero.
 - So E stays unbuilt, on the same standard every other phase was held to.
 
-What would change the verdict: re-run the Nash arm at the sample size the greedy
-arm got (n=240 rather than 64) — the current interval is far too wide to
-distinguish "Nash absorbs set uncertainty" from "not enough data". That is a
-few hours of compute and the single highest-value measurement left.
+The interval is the whole story here. `[-4, +19]` is compatible with "modelling
+their set is worth nothing" and with "it is worth as much as the Nash solver
+itself", which means the honest answer is **still not known** — not that the
+answer is no. Resolving an 8-point effect needs ~300 games per arm; a run at
+~720 games is in progress and will settle it either way for about 15 minutes of
+compute.
+
+That is the difference between this phase and the others: A's eval terms and C
+were measured to be *small*, whereas E is measured to be *uncertain*. Those
+warrant different responses — the first is a reason to stop, the second is a
+reason to measure again, which is cheap here.
 
 ### A caveat this exposes about every earlier measurement
 
