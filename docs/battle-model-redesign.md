@@ -727,6 +727,78 @@ captured a decision function once or restored the global mid-playout.
 
 ---
 
+## 2k. Phase C (built): rolls as a safety question, not an average
+
+`src/rolls.py` plus roll-scenario evaluation in `turn_game`. The design changed
+before it was written, because the framing in §4c was wrong — see the
+correction there. The short version:
+
+> An **expectation** over roll buckets averages away the thing that decides
+> whether a play is sound. What matters is whether a bad roll leaves you
+> *punished*: their survivor now threatens Sucker Punch, or outspeeds and KOs in
+> the endgame. **A safe play does not rely on rolls.**
+
+So rolls go where the opponent's choice already is — inside the safety analysis
+— but aggregated differently, because they are stochastic rather than
+adversarial: `min` over their columns, a tunable quantile (`ROLL_RISK`) over the
+roll distribution. Fully roll-averse would be as wrong as risk-neutral: every
+attack would be assumed to low-roll and nothing would read as a KO.
+
+### What is implemented
+
+- **Exact KO probabilities**, free. The engine's 16 rolls are
+  `base × mod × (0.85 + 0.01·i)` — linear in the index — so all 16 reconstruct
+  exactly from the extremes the threat matrix already stores. `Threat.ohko_prob`
+  is now the true `k/16`, which is precisely the corpus's own unit
+  (§8e: "pick up the OHKO with it (62.5%)" = 10/16).
+- **Roll scenarios** at indices 0 / 8 / 15, weighted 5/16, 7/16, 4/16 — three
+  simulations bracketing the distribution rather than sixteen.
+- **Risk aggregation** reusing `preview.cvar`, so "read the bad tail" has one
+  definition in the codebase rather than two.
+- **Roll sensitivity** per cell (best-minus-worst), which is the reportable form
+  of "does this play depend on the dice?"
+
+### Two silent-failure traps, both caught by tests
+
+1. **`force_roll_index` was not carried by `Battle.__deepcopy__`** (only
+   `force_roll` was). Since every candidate is evaluated on a copy, the forced
+   roll was being dropped — which presents as *"roll scenarios make no
+   difference"* rather than as a bug. This is the third instance of the same
+   deepcopy-drop pattern in this project, after `movesets` (§2e).
+2. The engine floors damage to an integer, so reconstructed roll values are
+   pre-floor. The difference is at most 1 HP and only matters exactly on a
+   bucket boundary; recorded rather than silently assumed away.
+
+### Status
+
+`ROLL_SCENARIOS = False`. Costs ~3× per cell, on top of the Nash solver's 16×.
+
+### Measurement so far
+
+Both sides running the equilibrium solver, varying only whether cells are
+evaluated across roll scenarios (`ROLL_RISK = 0.5`):
+
+```
+null control (identical configs)   64 W / 64 L        50%   instrument clean
+ROLL_SCENARIOS on vs off, n=128    67 W / 59 L / 2 D  53%   CI [44%, 62%]
+```
+
+**Not significant.** 53% is the right side of 50% but the interval straddles it,
+and Phase A4 is the cautionary precedent here: a 55% reading at n=80 fell to 51%
+when the sample tripled. A larger run is in progress; until it lands the honest
+status is *"promising, unproven"*, and the default stays off.
+
+Worth noting what would make this measurement hard to win even if the idea is
+right. The harness scores whole games, and roll variance affects **both** sides
+symmetrically — the roll-aware player avoids relying on rolls, but still eats
+the opponent's high rolls. The effect being measured is therefore a
+second-order one (better *decisions* under variance), on top of a first-order
+noise source the metric cannot remove. Head-to-head may simply be an
+underpowered instrument for this particular change, in a way it was not for the
+Nash solver.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum
@@ -892,9 +964,41 @@ preserves the only distinction that matters: **did it die**.
 > checkable against our own `damage.py` regardless.
 
 Concretely: replace the `min/max/avg` roll mode with an outcome-bucketed
-distribution, and make the leaf value an expectation over buckets. This makes
-"survives on 15/16 rolls" and "survives on 1/16" different numbers, which
-Focus Sash, Sturdy, Multiscale, and every bulk-EV decision depend on.
+distribution. This makes "survives on 15/16 rolls" and "survives on 1/16"
+different numbers, which Focus Sash, Sturdy, Multiscale, and every bulk-EV
+decision depend on.
+
+> **Correction — "an expectation over buckets" was wrong.** This section
+> previously said to make the leaf value the *expectation* over the buckets.
+> That averages away the thing that decides whether a play is sound. The right
+> framing, and the one implemented:
+>
+> **A safe play does not rely on rolls.** If a low roll leaves you badly
+> punished — their survivor now threatens Sucker Punch, or outspeeds and KOs in
+> the endgame — the play was not safe, however good its average looked. A low
+> roll whose consequences you have already covered is fine.
+>
+> So rolls belong in the **safety analysis**, not in an average. §3 already
+> makes *"succeeds regardless of what your opponent goes for"* the objective via
+> maximin; this extends it to *"regardless of how the rolls fall"*.
+>
+> The two uncertainties are not aggregated the same way, and that distinction is
+> the whole design:
+>
+> | | nature | aggregation |
+> |---|---|---|
+> | their action | **adversarial** — they pick the worst for us | `min` over columns |
+> | damage roll | **stochastic** — a known distribution | risk-adjusted aggregate, tunable between mean and worst |
+>
+> A pure worst case over rolls would be useless in the other direction — every
+> attack would be assumed to low-roll and nothing would ever read as a KO — so
+> the aggregation is a tunable quantile (`ROLL_RISK`), not a min. See
+> `src/rolls.py`.
+>
+> Note this also explains why rolls **shape future game states** rather than
+> just this turn's damage: a high roll for them changes which threats exist next
+> turn, which is a threat-matrix (§4a) and depth-2 (§10) interaction, not a
+> per-cell number.
 
 ### 4d. Functional value ("1 HP is infinitely more than 0 HP")
 

@@ -12,17 +12,21 @@ import copy
 from engine import Action
 
 
-def step(battle, our_actions, their_actions, deterministic=True):
+def step(battle, our_actions, their_actions, deterministic=True, roll_index=None):
     """Run one turn on a copy of `battle`. Returns the copy, or None on failure.
 
-    `deterministic` clears the RNG so damage takes the average roll, matching
-    what the rest of the solver does. Section 4c is where that assumption is
-    revisited; until then every consumer wants the same one.
+    `deterministic` clears the RNG so damage takes the average roll.
+
+    `roll_index` pins damage to one of the 16 discrete rolls (0 = worst,
+    15 = best) instead, which is how Phase C evaluates a play across the roll
+    distribution rather than at its midpoint. Set on the COPY, so the caller's
+    battle is untouched and successive scenarios do not contaminate each other.
     """
     sim = copy.deepcopy(battle)
     if deterministic:
         sim.rng = None
     sim.tie_bias = battle.tie_bias
+    sim.force_roll_index = roll_index
 
     forward = {}
     for old, new in zip(battle.p1.roster, sim.p1.roster):

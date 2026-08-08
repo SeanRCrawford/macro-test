@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from damage import damage_roll, effective_stat
 from engine import effective_speed
 from matching import max_weight_matching
+from rolls import kill_probability
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,12 @@ class Threat:
     ohko: bool              # kills even on the worst roll -- guaranteed
     ohko_possible: bool     # kills on the best roll -- a real risk, not a plan
     nhko: int               # hits needed at the average roll (99 if it cannot)
+    # Fraction of the 16 rolls that secure the KO. This is the quantity the VGC
+    # corpus actually states -- "pick up the OHKO with it (62.5%)" is 10/16 --
+    # and the distinction between a 15/16 kill and a 1/16 kill that an average
+    # roll erases entirely. Exact, and free: computed from lo/hi, no extra
+    # damage calculation.
+    ohko_prob: float = 0.0
 
     @property
     def threatens(self) -> bool:
@@ -55,7 +62,8 @@ class Threat:
 
 
 NO_THREAT = Threat(move=None, dmg_avg=0.0, dmg_min=0.0, dmg_max=0.0, priority=0,
-                   outspeeds=False, ohko=False, ohko_possible=False, nhko=99)
+                   outspeeds=False, ohko=False, ohko_possible=False, nhko=99,
+                   ohko_prob=0.0)
 
 
 # Damage results, keyed by everything damage_roll actually reads. Bounded so a
@@ -184,6 +192,7 @@ def threat_between(attacker, defender, movesets, typechart, field, battle,
         ohko=(lo >= cur_hp),
         ohko_possible=(hi >= cur_hp),
         nhko=(math.ceil(cur_hp / avg) if avg > 0 else 99),
+        ohko_prob=kill_probability(lo, hi, cur_hp),
     )
 
 

@@ -53,8 +53,12 @@ class Config:
         self.settings = settings
 
     def apply(self):
+        import turn_game
         for key, value in self.settings.items():
-            setattr(solver, key, value)
+            # Settings live in solver or turn_game depending on which layer they
+            # belong to; route by where the name actually exists.
+            target = turn_game if hasattr(turn_game, key) else solver
+            setattr(target, key, value)
 
 
 def pick(battle, side, movesets, config):
@@ -157,13 +161,18 @@ def main():
                     help="enemy bring variants per team (sample size multiplier)")
     ap.add_argument("--ours", type=int, default=1,
                     help="variants for OUR four (widens the matchup pool)")
+    ap.add_argument("--nash", action="store_true",
+                    help="run BOTH sides with the equilibrium solver. Required "
+                         "for turn_game settings such as ROLL_SCENARIOS, which "
+                         "have no effect on the greedy path.")
     args = ap.parse_args()
 
     world = load_world()
+    shared = {"NASH_SOLVER": True} if args.nash else {}
     baseline = Config(f"{args.setting}={args.baseline}",
-                      **{args.setting: args.baseline})
+                      **{args.setting: args.baseline}, **shared)
     candidate = Config(f"{args.setting}={args.weight}",
-                       **{args.setting: args.weight})
+                       **{args.setting: args.weight}, **shared)
     pairs = matchups(world, args.brings)
     ours_list = our_brings(world, args.ours)
     jobs = [(t, e, o) for (t, e) in pairs for o in ours_list]
@@ -171,8 +180,11 @@ def main():
           f"{len(ours_list)} of our brings, each played both ways)\n")
 
     wins = losses = draws = 0
-    original = {k: getattr(solver, k)
-                for k in set(baseline.settings) | set(candidate.settings)}
+    import turn_game
+    original = {}
+    for k in set(baseline.settings) | set(candidate.settings):
+        target = turn_game if hasattr(turn_game, k) else solver
+        original[k] = (target, getattr(target, k))
     try:
         for team_name, enemy4, our4 in jobs:
             # Paired play: the SAME matchup with the candidate on each side.
@@ -188,8 +200,8 @@ def main():
                 losses += r == -1
                 draws += r == 0
     finally:
-        for k, v in original.items():
-            setattr(solver, k, v)
+        for k, (target, v) in original.items():
+            setattr(target, k, v)
 
     total = wins + losses + draws
     decisive = wins + losses

@@ -30,6 +30,8 @@ the very bias this module exists to remove.
 from dataclasses import dataclass, field
 
 from matrix_game import double_oracle, solve_matrix
+from rolls import (risk_aggregate, roll_sensitivity,
+                   scenarios as roll_scenarios)
 from solver import (leaf_value, our_candidate_joint_actions,
                     greedy_opponent_joint_action)
 
@@ -49,6 +51,21 @@ INNER_SOLVE_ITERS = 400
 
 LOSS = -1e4  # a joint action that fails to simulate
 
+# Phase C. When True, every payoff cell is simulated at several damage rolls
+# rather than once at the average, and the results are collapsed by ROLL_RISK.
+#
+# ROLL_RISK is the fraction of the roll distribution the value reads, worst
+# first: 1.0 is the plain mean (risk-neutral, and identical in spirit to the
+# average roll used today), lower values penalise a play whose value COLLAPSES
+# when the roll goes against it. That is the point -- "a safe play does not rely
+# on rolls" -- and it is why the aggregation is not an expectation. See
+# src/rolls.py.
+#
+# Off by default: it costs ~3x per cell and, like every other candidate in this
+# project, has to win a head-to-head before it ships.
+ROLL_SCENARIOS = False
+ROLL_RISK = 0.5
+
 
 @dataclass
 class TurnSolution:
@@ -63,6 +80,7 @@ class TurnSolution:
     n_sims: int = 0
     converged: bool = True
     _matrix: dict = field(default_factory=dict, repr=False)
+    _spread: dict = field(default_factory=dict, repr=False)
 
     @property
     def best_action(self):
@@ -236,20 +254,35 @@ def solve_turn(battle, side_name, movesets, depth=1, step=None, inner=False,
 
     counter = {"n": 0}
     matrix = {}
+    spread = {}   # (i, j) -> best-minus-worst across rolls, when scenarios are on
 
-    def payoff(i, j):
+    def one_outcome(i, j, roll_index):
         counter["n"] += 1
-        nxt = step(battle, ours[i], theirs[j])
+        nxt = step(battle, ours[i], theirs[j], roll_index=roll_index)
         if nxt is None:
-            value = LOSS
-        elif depth > 1 and not nxt.is_over():
+            return LOSS
+        if depth > 1 and not nxt.is_over():
             # EQUILIBRIUM-valued, not a greedy playout: see the module docstring.
             sub = solve_turn(nxt, side_name, movesets, depth - 1, step=step,
                              inner=True)
-            value = sub.value
             counter["n"] += sub.n_sims
+            return sub.value
+        return leaf_value(nxt, side_name)
+
+    def payoff(i, j):
+        if not ROLL_SCENARIOS:
+            value = one_outcome(i, j, None)
         else:
-            value = leaf_value(nxt, side_name)
+            # Rolls are STOCHASTIC, so they are aggregated over their
+            # distribution -- unlike the opponent's columns, which are
+            # adversarial and get a min. ROLL_RISK decides how much of the bad
+            # tail the value reads; it is deliberately not a plain expectation.
+            outcomes, weights = [], []
+            for roll_index, weight in roll_scenarios(True):
+                outcomes.append(one_outcome(i, j, roll_index))
+                weights.append(weight)
+            value = risk_aggregate(outcomes, weights, risk=ROLL_RISK)
+            spread[(i, j)] = roll_sensitivity(outcomes)
         matrix[(i, j)] = value
         return value
 
@@ -318,4 +351,4 @@ def solve_turn(battle, side_name, movesets, depth=1, step=None, inner=False,
     return TurnSolution(our_actions=ours, their_actions=theirs, p=p, q=q,
                         value=value, maximin_value=maximin_value,
                         maximin_index=maximin_index, n_sims=counter["n"],
-                        converged=converged, _matrix=matrix)
+                        converged=converged, _matrix=matrix, _spread=spread)
