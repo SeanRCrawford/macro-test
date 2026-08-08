@@ -42,10 +42,17 @@ SEVERE = 60.0
 @dataclass
 class TurnRobustness:
     turn: int
-    exploitability: float      # what a best-responding opponent gains
+    exploitability: float      # what a PERFECTLY READING opponent gains
     regret: float              # how far short of the safest available play
     equilibrium: float         # value of the turn played out properly
     worst_case: float          # value of our play against their best reply
+    # What a strong opponent actually takes when it CANNOT see our move: the
+    # equilibrium value minus our play's value against their equilibrium
+    # mixture. Exploitability is the worst case and assumes they guess right
+    # every time; this is the realistic one, because their punish has to be a
+    # sound play for them too, chosen without knowing ours. Near zero means the
+    # play only loses ground to a read they cannot reliably make.
+    expected_loss: float = 0.0
     punisher: object = None    # their joint action that does it
     our_action: object = None
     # Their EQUILIBRIUM reply -- the action a strong player picks without
@@ -97,6 +104,15 @@ class LineReport:
         return max(self.turns, key=lambda t: t.exploitability) if self.turns else None
 
     @property
+    def mean_expected_loss(self):
+        """Ground conceded per turn to an opponent who cannot read us.
+
+        The honest cost of a line. mean_exploitability is its worst case.
+        """
+        return (sum(t.expected_loss for t in self.turns) / len(self.turns)
+                if self.turns else 0.0)
+
+    @property
     def severe_count(self):
         return sum(1 for t in self.turns if t.severe)
 
@@ -145,10 +161,17 @@ def turn_robustness(battle, movesets, our_action, side_name="p1"):
     # reproducible -- the golden baseline and the parallel path both depend on
     # the same inputs giving the same walk.
     eq_j = max(range(len(theirs)), key=lambda j: q[j]) if q else worst_j
+    # Our play's value against their whole equilibrium mixture, not against
+    # the single reply that hurts most.
+    if q and len(q) == len(theirs):
+        against_mixture = sum(q[j] * A[idx][j] for j in range(len(theirs)))
+    else:
+        against_mixture = A[idx][eq_j]
 
     return TurnRobustness(
         turn=battle.turn_num + 1,
         exploitability=equilibrium - worst_per_row[idx],
+        expected_loss=equilibrium - against_mixture,
         regret=maximin - worst_per_row[idx],
         equilibrium=equilibrium,
         worst_case=worst_per_row[idx],

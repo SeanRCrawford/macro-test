@@ -80,7 +80,12 @@ class BringRating:
             per line:  0                        if the line did not win
                        1 - mean / KO_WEIGHT     if it did, floored at 0
 
-        where `mean` is the average exploitability across the line's turns, so
+        where `mean` is the average EXPECTED LOSS across the line's turns --
+        ground conceded to an opponent playing its equilibrium mixture, not to
+        one that reads us perfectly. A punish that requires a call they cannot
+        reliably make is not a cost we pay every game, and charging the line
+        for it double-counts the same pessimism the trajectory fix removed.
+        So
         a win that gives away a whole Pokemon per turn on average is discounted
         to nothing and an unpunishable win keeps its full weight. Averaged over
         their plausible leads, weighted by lead plausibility.
@@ -104,7 +109,7 @@ class BringRating:
         for _lead, p, rep in self.per_lead:
             if not rep.won:
                 continue
-            penalty = max(0.0, rep.mean_exploitability) / KO_WEIGHT
+            penalty = max(0.0, rep.mean_expected_loss) / KO_WEIGHT
             acc += p * max(0.0, 1.0 - penalty)
         return acc / total
 

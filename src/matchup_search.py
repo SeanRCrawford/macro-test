@@ -643,7 +643,8 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None,
                                preview_tau=None, preview_alpha=None,
                                rate_robustness=False, robustness_leads=3,
-                               robustness_turns=5, prescreen_top=None):
+                               robustness_turns=5, prescreen_top=None,
+                               audit_all_configs=False):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -794,13 +795,13 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
         verified = _rate_and_rerank(verified, enemy_roster, merged, moves_db,
                                      natures, typechart, configs, our_sets,
                                      enemy_sets, preview_tau, robustness_leads,
-                                     robustness_turns)
+                                     robustness_turns, audit_all_configs)
     return verified
 
 
 def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechart,
                       configs, our_sets, enemy_sets, preview_tau,
-                      leads_per_candidate, turns):
+                      leads_per_candidate, turns, audit_all_configs=False):
     """Attach an exploitability rating to each survivor and sort by it.
 
     Piloted with the least-exploitable solver configuration available: rating a
@@ -830,12 +831,29 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             continue
         ranked = ranked_brings([by_lead[k] for k in lead_keys],
                                [" / ".join(k) for k in lead_keys], tau=preview_tau)
-        chosen = [(lead_keys[row["index"]], row["probability"])
-                  for row in ranked[:leads_per_candidate]]
+        if audit_all_configs:
+            # Every one of their bring-4s, leads AND backs. The lead's
+            # plausibility is carried onto each of its six back pairs, which
+            # are not separately ranked -- the screen only reads the lead pair,
+            # so pretending to rank backs would imply a precision it lacks.
+            lead_prob = {lead_keys[row["index"]]: row["probability"]
+                         for row in ranked}
+            chosen = [(tuple(list(lead) + list(back)),
+                       lead_prob.get(tuple(lead), 0.0))
+                      for lead, back in configs]
+        else:
+            chosen = [(lead_keys[row["index"]], row["probability"])
+                      for row in ranked[:leads_per_candidate]]
 
-        def build(our_names, enemy_lead):
-            rest = [x for x in enemy_roster if x not in enemy_lead]
-            enemy4 = list(enemy_lead) + rest[:2]
+        def build(our_names, enemy_spec):
+            # `enemy_spec` is either a lead PAIR (backs inferred, the cheap
+            # tiers) or a full bring-4 (exhaustive, which audits their backs
+            # too -- a lead pair says nothing about what comes in behind it).
+            if len(enemy_spec) >= 4:
+                enemy4 = list(enemy_spec)[:4]
+            else:
+                rest = [x for x in enemy_roster if x not in enemy_spec]
+                enemy4 = list(enemy_spec) + rest[:2]
             oc = make_team(list(our_names), merged, natures, sets=our_sets)
             ec = make_team(enemy4, merged, natures, sets=enemy_sets)
             ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)
@@ -857,7 +875,8 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
         rec["reliable_wins"] = rating.reliable_wins
         rec["outcomes"] = rating.outcomes
         rec["audit"] = [{
-            "lead": list(lead),
+            "lead": list(lead)[:2],
+            "enemy_bring": list(lead),
             "probability": probability,
             "mean_exploitability": report.mean_exploitability,
             "severe_turns": report.severe_count,

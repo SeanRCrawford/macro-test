@@ -55,7 +55,21 @@ def _beam_finalists(args, world):
     import pickle
 
     prefs = load_preferences()
-    pool = build_candidate_pool(world["merged"], args.pool_size, prefs)
+    merged = world["merged"]
+    if args.generations:
+        # Same mechanism generate_team.py uses, so the two agree on what a
+        # generation means (a form counts as its base species').
+        from species_data import (build_generation_map, load_showdown_static,
+                                  parse_generations)
+        allowed = parse_generations(args.generations)
+        pokedex, _, _, _ = load_showdown_static()
+        gen_map = build_generation_map(merged.keys(), pokedex)
+        print(f"gens     : restricted to {sorted(allowed)}")
+        pool = build_candidate_pool(merged, top_n=args.pool_size, prefs=prefs,
+                                    allowed_generations=allowed,
+                                    generation_map=gen_map)
+    else:
+        pool = build_candidate_pool(merged, top_n=args.pool_size, prefs=prefs)
     enemy_pairs = enemy_pairs_from_teams(world["teams"])
     print(f"pool     : {len(pool)} Pokemon   enemy lead pairs: {len(enemy_pairs)}")
 
@@ -89,7 +103,15 @@ def main():
     ap.add_argument("--candidates", type=int, default=20,
                     help="how many beam finalists to RATE. The whole point of "
                          "this tool: rate many, not three.")
-    ap.add_argument("--pool-size", type=int, default=34)
+    ap.add_argument("--pool-size", type=int, default=34,
+                    help="how many of the top-Score Pokemon are eligible for "
+                         "the beam search. THIS is the size of the search "
+                         "space; --candidates only says how many of the beam's "
+                         "finalists get rated. Cost grows ~quadratically.")
+    ap.add_argument("--generations", default=None,
+                    help="restrict the pool to these generations, e.g. '3' or "
+                         "'1-5' or '1,3,5'. A form counts as its base species' "
+                         "generation (Mega Lucario is gen 4).")
     ap.add_argument("--beam-width", type=int, default=30)
     ap.add_argument("--effort", choices=TIER_ORDER, default="standard")
     ap.add_argument("--turns", type=int, default=10)
@@ -132,6 +154,10 @@ def main():
                 jobs=args.jobs)
             scores = [r["exploitability"] for r in verdict.values()
                       if r and r.get("exploitability") is not None]
+            adj = [r["adjusted_win_rate"] for r in verdict.values()
+                   if r and r.get("adjusted_win_rate") is not None]
+            rob = [r["robust_win_rate"] for r in verdict.values()
+                   if r and r.get("robust_win_rate") is not None]
             wins = sum((r.get("wins") or 0) for r in verdict.values() if r)
             total = sum((r.get("total") or 0) for r in verdict.values() if r)
             worst = max((r for r in verdict.values()
@@ -141,6 +167,8 @@ def main():
                 "team": list(team),
                 "beam_score": beam_score,
                 "exploitability": (sum(scores) / len(scores)) if scores else None,
+                "adjusted_win_rate": (sum(adj) / len(adj)) if adj else None,
+                "robust_win_rate": (sum(rob) / len(rob)) if rob else None,
                 "severe_turns": sum((r.get("severe_turns") or 0)
                                     for r in verdict.values() if r),
                 "wins": wins, "total": total,
@@ -158,12 +186,17 @@ def main():
         rated.append(record)
         elapsed = time.time() - started
         print(f"  [{i}/{len(finals)}] "
-              f"exploitability {record['exploitability'] or float('nan'):7.1f}   "
+              f"adj {record.get('adjusted_win_rate') or 0:.2f}   "
+              f"punish {record['exploitability'] or float('nan'):6.1f}   "
               f"{record['wins']}/{record['total']} won   "
               f"~{elapsed / i * (len(finals) - i) / 60:.0f} min left", flush=True)
 
+    # Rank by wins that hold up. Ranking on exploitability alone puts a team
+    # that loses everything first, because a lost position has nothing left to
+    # punish -- observed live before this was changed.
     ranked = sorted([r for r in rated if r.get("exploitability") is not None],
-                    key=lambda r: r["exploitability"])
+                    key=lambda r: (-(r.get("adjusted_win_rate") or 0.0),
+                                   r["exploitability"]))
     if not ranked:
         print("\nNo ratings produced (quick tier does not compute them).")
         return
@@ -175,7 +208,8 @@ def main():
         share = f"{r['wins']}/{r['total']}"
         flag = ("   <-- loses most games: a lost position rates as unpunishable"
                 if r["total"] and r["wins"] / r["total"] < 0.5 else "")
-        print(f"{i:2}. {r['exploitability']:7.1f}  {r['severe_turns']:>3} severe  "
+        print(f"{i:2}. adj {r.get('adjusted_win_rate') or 0:.2f}  "
+              f"punish {r['exploitability']:6.1f}  {r['severe_turns']:>3} severe  "
               f"{share:>9} won{flag}")
         print(f"    {', '.join(r['team'])}")
         if r.get("worst_opponent"):

@@ -23,9 +23,12 @@ from solver import KO_WEIGHT  # noqa: E402
 from team_rating import BringRating  # noqa: E402
 
 
-def _turn(exploitability):
-    return TurnRobustness(turn=1, exploitability=exploitability, regret=0.0,
-                          equilibrium=0.0, worst_case=-exploitability)
+def _turn(exploitability, expected_loss=None):
+    """expected_loss defaults to exploitability so the simple cases read plainly."""
+    return TurnRobustness(
+        turn=1, exploitability=exploitability, regret=0.0, equilibrium=0.0,
+        worst_case=-exploitability,
+        expected_loss=exploitability if expected_loss is None else expected_loss)
 
 
 def _line(outcome, exploitabilities):
@@ -104,6 +107,21 @@ class TestAdjustedWins(unittest.TestCase):
         shaky = _rating(("win", 1.0, [120.0]))
         self.assertEqual(clean.robust_win_rate, shaky.robust_win_rate)
         self.assertGreater(clean.adjusted_win_rate, shaky.adjusted_win_rate)
+
+    def test_the_discount_reads_expected_loss_not_worst_case(self):
+        """A punish they cannot reliably find must not be charged in full.
+
+        The turn below is catastrophic IF they read us (exploitability 4x a
+        Pokemon) but costs almost nothing against their actual equilibrium
+        mixture. The line should keep nearly all its weight.
+        """
+        rep = LineReport(turns=[_turn(4 * KO_WEIGHT, expected_loss=1.0)])
+        rep.outcome, rep.length = "win", 1
+        r = BringRating(our_bring=["A"])
+        r.per_lead.append(((("X", "Y")), 1.0, rep))
+        self.assertAlmostEqual(r.adjusted_win_rate, 1.0 - 1.0 / KO_WEIGHT)
+        # The worst case is still reported, undiscounted, for the audit trail.
+        self.assertAlmostEqual(rep.mean_exploitability, 4 * KO_WEIGHT)
 
     def test_negative_exploitability_noise_cannot_inflate_a_score(self):
         """Convergence noise gives small negative values; they must not pay."""

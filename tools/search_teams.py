@@ -35,7 +35,7 @@ DEFAULT_CACHE = "search_cache.json"
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 3   # adjusted wins + line outcomes
+SCHEMA = 4   # expected-loss discount + full-config audit
 
 
 _WORLD = None       # per-process dataset, loaded once (13-14s) and reused
@@ -89,7 +89,8 @@ def _run_pairing(job):
         rate_robustness=settings["robustness"],
         robustness_leads=settings["leads"] or 1,
         robustness_turns=settings["turns"] or 1,
-        prescreen_top=prescreen)
+        prescreen_top=prescreen,
+        audit_all_configs=settings.get('all_configs', False))
     top = results[0] if results else None
     return {
         "ours": ours, "theirs": theirs,
