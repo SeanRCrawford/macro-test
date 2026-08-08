@@ -122,26 +122,49 @@ At 24 genuine decision points across 4 opponent teams, the real payoff matrix
 | `maximin` | `max_i min_j A[i][j]` — what the safest *pure* play guarantees |
 | `nash` | equilibrium value, allowing mixing (regret matching) |
 
-```
-decision points measured             : 24
-mean self-delusion (assumed - actual):  232.3
-mean regret vs maximin               :   48.4
-turns where maximin != greedy pick   : 14/24  (58%)
-turns where Nash is MIXED            : 14/24  (58%)
+**Re-measured after fixing the evaluation.** §2c.4 found the original matrix
+was not antisymmetric, so it was not really zero-sum and "the opponent
+minimises our heuristic" was a wrong model of their objective.
+`heuristic_eval` has since been made antisymmetric **at source** (Phase A1,
+§2d) — verified at 0.0 asymmetry across 8905 states — and the baseline
+re-measured on it.
 
+| | original (one-sided eval) | **corrected** | change |
+|---|---|---|---|
+| decision points | 24 | 24 | |
+| mean self-delusion (assumed − actual) | 232.3 | **174.4** | **−57.9 (−25%)** |
+| mean regret vs maximin | 48.4 | **40.9** | −7.5 |
+| turns where maximin ≠ greedy pick | 14/24 (58%) | **13/24 (54%)** | −1 |
+| turns where Nash is MIXED | 14/24 (58%) | **20/24 (83%)** | **+6 (+25pp)** |
+
+```
 units: heuristic_eval points, KO_WEIGHT = 180, so ~180 points ≈ one Pokemon
 ```
 
-Read plainly:
+**The case for the project survives, and its two halves move in opposite
+directions.** The exploitability claim is **25% smaller** than originally
+reported — a quarter of the headline number was an artifact of the broken
+evaluation, not a real finding. It is still ~0.97 Pokémon per turn, which is
+large. The mixed-strategy claim gets substantially **stronger**: from 58% to
+**83%** of turns, because the old asymmetry was masking genuine equilibrium
+mixing.
 
-- **The current solver overestimates its own position by ~1.3 Pokémon per
+That matters for phase ordering. The strongest measured argument for Phase B is
+now *"the current architecture cannot represent the right answer on 83% of
+turns"* rather than *"it overestimates itself by 1.3 Pokémon"* — a
+representational argument, not an accuracy one, and one that no amount of
+evaluation tuning can address.
+
+Read plainly, on the corrected numbers:
+
+- **The current solver overestimates its own position by ~0.97 Pokémon per
   turn.** That is the cost of scoring against a policy we authored. Every win
   count in every tab inherits this bias.
-- **On 58% of turns it plays a different move than the maximin play**, and
-  gives up ~48 points (~0.27 of a Pokémon) per turn in the worst case by doing so.
-- **On 58% of turns no pure strategy is optimal at all** — the equilibrium has
+- **On 54% of turns it plays a different move than the maximin play**, and
+  gives up ~41 points (~0.23 of a Pokémon) per turn in the worst case by doing so.
+- **On 83% of turns no pure strategy is optimal at all** — the equilibrium has
   support ≥ 2. The current architecture *cannot represent* the right answer on
-  the majority of turns, regardless of how good its evaluation gets.
+  the large majority of turns, regardless of how good its evaluation gets.
 - **Mixing is worth 50–86 points** on the turns where it matters (`nash` minus
   pure `maximin`; e.g. Rain T3 130.2 vs 43.9). Pure maximin is a floor, not the
   target — which is the argument for solving for Nash rather than just taking
@@ -149,11 +172,12 @@ Read plainly:
 
 Two honesty caveats on these numbers:
 
-1. `A` is built from `heuristic_eval` and treated as zero-sum. `heuristic_eval`
-   is not perfectly antisymmetric (the `seen` filter treats the two sides
-   differently), so "the opponent minimises our heuristic" is a proxy for their
-   true objective, not identical to it. The *direction* and rough magnitude are
-   robust; the exact point values are not.
+1. ~~`A` is built from `heuristic_eval` and treated as zero-sum...~~
+   **Addressed.** The asymmetry was measured (§2c.4, 277.7 points mean), traced
+   to the `seen` filter at `solver.py:290-298`, and fixed: `solver.leaf_value`
+   now scores `(eval(s,"p1") − eval(s,"p2")) / 2`, antisymmetric by
+   construction and covered by `tests/test_leaf_value.py`. The symmetric column
+   above is computed on that. This caveat is retired.
 2. One measured point is already-lost terminal state (`-10000`), which
    contributes 0 to both means and therefore makes both figures slightly
    conservative.
@@ -270,6 +294,57 @@ baseline that justified the project. The cheap fix — score
 `(eval(s,"p1") − eval(s,"p2")) / 2` — is antisymmetric by construction and adds
 one `heuristic_eval` call per cell (0.11 ms against a 0.42 ms `run_turn`, so
 roughly +20% per cell, not +100%).
+
+---
+
+## 2d. Phase A1 (done): the evaluation is now genuinely zero-sum
+
+`heuristic_eval` is antisymmetric **at source** — measured at exactly 0.0 across
+8905 states, 8905/8905 perfect, and symmetrising now changes the maximin pick on
+**0/24** turns (it changed 65% before). Two fixes, and the first attempt at each
+was wrong in an instructive way.
+
+**Fix 1 — HP.** The `seen` filter was applied only to the opponent: `my_hp`
+summed the full roster, `opp_hp` only revealed mons. Removed entirely for this
+term, because it was guarding a disclosure that cannot occur: **a Pokémon that
+has never been on the field is necessarily at full HP**, and the number of live
+Pokémon each side has left is public. Counting hidden mons at their (always 1.0)
+HP fraction leaks nothing.
+
+**Fix 2 — KO-threat value.** This term reads Attack/Sp.Atk, so hidden opponents
+were placeholdered at a flat 1.0 while our own bench used real values. Now both
+rosters use the real value always. That relaxes the old no-leak guard, and it is
+sound *here* because the evaluation is always conditioned on a **hypothesised**
+enemy bring — `search_robust_composition` sweeps over brings rather than peeking
+at one — so within a hypothesis the species are known, and `_ko_threat_value` is
+a coarse clamp on attacking stats that discloses nothing about moves, items or
+EV spreads, which are what actually stay hidden.
+
+### The trap: averaging is not a fix
+
+The obvious implementation — score `(eval(s,"p1") − eval(s,"p2")) / 2`, as this
+document previously recommended — **is antisymmetric and still wrong.** Over a
+one-sided heuristic it converts a *side* asymmetry into a **reveal incentive**:
+
+```
+(eval_p1 − eval_p2)/2 = ½[(p1_all + p1_seen) − (p2_all + p2_seen)] × 100
+```
+
+so a hidden mon is weighted 0.5× and a revealed one 1.0×. Switching a healthy
+Pokémon in therefore manufactured exactly **+50 points** (0.5 × 100) out of an
+information update rather than any real progress, and the solver started
+preferring switches almost everywhere. The same trap appeared a second time, one
+term over: placeholdering the KO-threat value *by reveal state* made flipping
+`revealed` worth up to **+63 points** (0.35 × `KO_WEIGHT`).
+
+Both were caught immediately by `tools/golden_baseline.py` and are now pinned by
+regression tests in `tests/test_leaf_value.py`. The general lesson is worth
+carrying into Phases B–D: **a value function must not change when information
+changes unless the underlying position changed.** Antisymmetry is necessary and
+not sufficient.
+
+`solver.leaf_value()` is now the single scoring entry point, so the pending
+points → P(win) change (open question 6) is one edit rather than a hunt.
 
 ---
 
@@ -1236,7 +1311,14 @@ on the strength of biased cells.
    probability, which we do not have and which would need fitting against
    played-out games. Possible middle path: keep points as the leaf value, and
    apply a risk transform whose curvature is set by the current estimated
-   position. Needs a decision before Phase B fixes the solver's objective.
+   position. ~~Needs a decision before Phase B fixes the solver's objective.~~
+   **Direction decided (2026-08-08): P(win) is the preferred target, but Phase
+   A keeps points, and this is revisited immediately after Phase A** — before
+   Phase B fixes the solver's objective, which is the real deadline. Phase A's
+   terms (§4b matching, §4d functional value) are all expressed in points and
+   port to a calibrated scale unchanged, so nothing built in A is wasted either
+   way. What A *should* do is leave the leaf value behind a single accessor
+   rather than scattering `heuristic_eval` calls, so the swap is one edit.
 7. ~~How much depth does Phase B need?~~ **Decided: depth 2 — this turn plus
    the state at the end of next turn** (§10, Phase B). Three independent
    motivating cases agree: the attack→switch, attack→Protect punish sequence;

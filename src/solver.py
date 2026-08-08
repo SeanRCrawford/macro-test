@@ -287,15 +287,29 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
         return -10_000
     if opp.has_lost():
         return 10_000
+    # COMMON KNOWLEDGE ONLY. Solving a turn as a two-player zero-sum matrix game
+    # requires both sides to agree on the value of a state -- our gain must be
+    # exactly their loss. That holds only if the evaluation is a function of what
+    # BOTH players know, so every term below is computed identically for the two
+    # rosters. `revealed` is set for any Pokemon that enters the field
+    # (engine.py), so it is genuinely symmetric information.
+    #
+    # Previously the `seen` filter was applied to the opponent only: `my_hp`
+    # summed the full roster while `opp_hp` summed revealed mons alone. That made
+    # eval(s,"p1") + eval(s,"p2") == 100 * (hidden HP on both sides), measured at
+    # 277.7 points mean -- larger than the mean |eval| itself, and varying per
+    # cell, so it did not cancel out of an argmax (it moved the maximin pick on
+    # 65% of turns). See tools/measure_antisymmetry.py.
+    def is_common_knowledge(c, side):
+        return c in side.active or c.fainted or getattr(c, "revealed", False)
+
+    # HP: a mon that has never been on the field is necessarily at FULL HP, and
+    # the number of live Pokemon each side has left is public. So counting hidden
+    # mons at their (always 1.0) HP fraction leaks nothing -- the old filter was
+    # guarding against a disclosure that cannot happen for this term, at the cost
+    # of the asymmetry above.
     my_hp = sum(c.current_hp_frac for c in my.roster if not c.fainted)
-    # Only count opponents we have actually SEEN -- those on the field now, plus any
-    # that have already been revealed (sent out at some point, including fainted
-    # ones). Summing their whole roster leaked knowledge of a bench we have not met
-    # yet, which let plans quietly assume information the player does not have at
-    # the point of choosing a move.
-    seen = [c for c in opp.roster
-            if c in opp.active or c.fainted or getattr(c, "revealed", False)]
-    opp_hp = sum(c.current_hp_frac for c in seen if not c.fainted)
+    opp_hp = sum(c.current_hp_frac for c in opp.roster if not c.fainted)
 
     # KOing a Pokemon forces a replacement, which is immediately "seen" and enters
     # at full HP -- so opp_hp can go UP the instant we secure a kill (we removed 0.x
@@ -310,19 +324,30 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     # killing something that barely threatens our side isn't worth much, and
     # forcing the opponent's free, unpunished replacement in exchange for it can
     # be a bad trade -- adverse selection, they get to bring in their best answer
-    # at no cost. Our own roster is fully known (no leak), so it always uses real
-    # values. An opponent we've actually SEEN (active, fainted, or previously
-    # revealed -- once _best_replacement lets a real threat in, THIS is what
-    # scores it as one) also gets its real value; one still hidden on the bench
-    # gets a flat placeholder instead of its true stats, which would leak team
-    # composition the player hasn't met yet -- the same leak `seen` already
-    # guards opp_hp against.
-    opp_seen_ids = {id(c) for c in seen}
+    # at no cost.
+    #
+    # This term reads Attack/Sp.Atk, so the old code placeholdered hidden
+    # OPPONENT mons at a flat 1.0 while scoring our own bench at its true value.
+    # Both halves of that were wrong for a zero-sum game:
+    #
+    #   - Side-dependent scoring breaks antisymmetry outright: the two players
+    #     price the same state differently, so "their loss is our gain" is false.
+    #   - Placeholdering by REVEAL STATE creates a reveal incentive. Flipping
+    #     `revealed` moved the score by |1.0 - _ko_threat_value| * KO_WEIGHT, up
+    #     to 63 points, so simply switching a strong mon in manufactured value
+    #     out of an information update rather than out of any real progress.
+    #     (Exactly the failure the HP fix above avoids, one term over. Both were
+    #     caught by tests/test_leaf_value.py and tools/golden_baseline.py.)
+    #
+    # So both rosters now use the real value, always. That is a deliberate
+    # relaxation of the old no-leak guard, and it is sound HERE because the
+    # evaluation is always conditioned on a HYPOTHESISED enemy bring -- callers
+    # like search_robust_composition sweep over the brings rather than peeking at
+    # one. Within a hypothesis the species are known, and _ko_threat_value is a
+    # coarse clamp on attacking stats that discloses nothing about the things
+    # that actually stay hidden: moves, items and EV spreads.
     my_value = sum(_ko_threat_value(c) for c in my.roster if not c.fainted)
-    opp_value = sum(
-        (_ko_threat_value(c) if id(c) in opp_seen_ids else 1.0)
-        for c in opp.roster if not c.fainted
-    )
+    opp_value = sum(_ko_threat_value(c) for c in opp.roster if not c.fainted)
     score = (my_value - opp_value) * KO_WEIGHT
     score += (my_hp - opp_hp) * 100
 
@@ -366,6 +391,51 @@ def _positional_score(side, foe_side, typechart) -> float:
             elif worst <= 0.5:
                 total += 5.0
     return total
+
+
+# ---------------------------------------------------------------------------
+# Leaf value
+# ---------------------------------------------------------------------------
+# Everything that scores a position should go through leaf_value() rather than
+# calling heuristic_eval() directly, so that the leaf value can change (points ->
+# calibrated win probability is expected next) in one edit rather than a hunt.
+#
+# On symmetry: heuristic_eval is now antisymmetric AT SOURCE -- every term is
+# computed from common knowledge, identically for both rosters -- so
+# symmetric_eval below is an exact no-op and is off by default.
+#
+# It is kept for two reasons: it is the cheap guarantee if a future term is
+# added that is accidentally one-sided, and flipping the flag makes the cost of
+# such a mistake measurable rather than invisible. `tests/test_leaf_value.py`
+# asserts the at-source property directly, so a regression fails the suite
+# instead of silently being papered over by this wrapper.
+#
+# Note that averaging is NOT a substitute for fixing the terms. The first
+# attempt at this used symmetric_eval over the old one-sided heuristic, and it
+# converted a side asymmetry into a REVEAL INCENTIVE: hidden mons ended up
+# weighted 0.5x and revealed ones 1.0x, so switching a healthy mon in
+# manufactured exactly +50 points (0.5 x 100) from nothing, and the solver
+# started preferring switches everywhere. Caught by tools/golden_baseline.py.
+
+SYMMETRIC_EVAL = False   # True forces the averaging wrapper (see above)
+
+
+def symmetric_eval(battle: Battle, my_side_name: str) -> float:
+    """Force antisymmetry by averaging our view against the negation of theirs.
+
+    Exact no-op while heuristic_eval is antisymmetric at source. Only meaningful
+    if a one-sided term is reintroduced -- and see the warning above about what
+    it does and does not fix.
+    """
+    other = "p2" if my_side_name == "p1" else "p1"
+    return (heuristic_eval(battle, my_side_name) - heuristic_eval(battle, other)) / 2.0
+
+
+def leaf_value(battle: Battle, my_side_name: str) -> float:
+    """The single scoring entry point for search. See the note above."""
+    if SYMMETRIC_EVAL:
+        return symmetric_eval(battle, my_side_name)
+    return heuristic_eval(battle, my_side_name)
 
 
 def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, movesets: dict,
@@ -488,7 +558,7 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
                                                      enemy_script=enemy_script)
             score = future_score
         else:
-            score = heuristic_eval(sim, my_side_name)
+            score = leaf_value(sim, my_side_name)
 
         scored.append((my_joint, score, sim))
 
