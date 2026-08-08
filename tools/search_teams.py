@@ -18,11 +18,12 @@ for the rest, and re-running the same command with --export after everything is
 cached just re-exports without recomputing anything.
 """
 import argparse
+import json
 import os
 import sys
 import time
 
-from _harness import load_world
+import _harness  # noqa: F401  (adds ../src to sys.path)
 
 sys.path.insert(0, "../src")
 from matchup_search import search_robust_composition  # noqa: E402
@@ -35,6 +36,73 @@ DEFAULT_CACHE = "search_cache.json"
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
 SCHEMA = 2
+
+
+_WORLD = None       # per-process dataset, loaded once (13-14s) and reused
+_EXTRA_ROSTERS = {}  # generated teams, merged into the library per process
+
+
+def _worker_init(extra=None):
+    """Load the dataset once per worker process rather than once per pairing.
+
+    `extra` carries generated rosters, which do not exist in teams.csv. They
+    are merged into the team library so a generated team is searchable by name
+    exactly like a real one -- that is what lets generation feed this tool.
+    """
+    global _WORLD, _EXTRA_ROSTERS
+    from _harness import load_world
+    _WORLD = load_world()
+    _EXTRA_ROSTERS = dict(extra or {})
+    _WORLD["teams"].update(_EXTRA_ROSTERS)
+
+
+def load_rosters(path):
+    """Read generated teams from JSON: {"name": ["Mon", ...], ...}.
+
+    Also accepts the list-of-records shape generate_overnight writes, so the
+    two tools chain without a conversion step.
+    """
+    with open(path, encoding="utf-8") as fh:
+        blob = json.load(fh)
+    if isinstance(blob, list):
+        return {r["name"]: list(r["team"]) for r in blob if r.get("team")}
+    if isinstance(blob, dict) and "teams" in blob:
+        blob = blob["teams"]
+    return {name: list(members) for name, members in blob.items()}
+
+
+def _run_pairing(job):
+    """One pairing, start to finish. Must be top-level and return only plain
+    types: on Windows the pool uses spawn, so both the function and its result
+    cross a pickle boundary.
+    """
+    ours, theirs, effort, turns, prescreen = job
+    global _WORLD
+    if _WORLD is None:                       # serial path, or a pool without init
+        _worker_init()
+    settings = tier(effort)
+    results = search_robust_composition(
+        list(_WORLD["teams"][ours]), list(_WORLD["teams"][theirs]),
+        _WORLD["merged"], _WORLD["moves"], _WORLD["natures"],
+        _WORLD["typechart"], max_turns=turns,
+        verify_top=settings["verify_top"],
+        rate_robustness=settings["robustness"],
+        robustness_leads=settings["leads"] or 1,
+        robustness_turns=settings["turns"] or 1,
+        prescreen_top=prescreen)
+    top = results[0] if results else None
+    return {
+        "ours": ours, "theirs": theirs,
+        "bring": top["our_bring4"] if top else None,
+        "exploitability": (top or {}).get("exploitability"),
+        "severe_turns": (top or {}).get("severe_turns"),
+        "solver_wins": (top or {}).get("solver_wins"),
+        "solver_total": (top or {}).get("solver_total"),
+        "downside": (top or {}).get("downside"),
+        "hardest_lead": (top or {}).get("hardest_lead"),
+        "worst_turn": (top or {}).get("worst_turn"),
+        "candidates": [_candidate_row(r) for r in results],
+    }
 
 
 def _candidate_row(rec):
@@ -78,6 +146,17 @@ def main():
     ap.add_argument("--vs", default="",
                     help="comma-separated team names to use as OPPONENTS "
                          "(default: all others)")
+    ap.add_argument("--rosters", default="", metavar="PATH",
+                    help="JSON of generated teams to add to the library, so "
+                         "teams that are not in teams.csv can be searched by "
+                         "name. This is how generate_overnight.py feeds this "
+                         "tool. Roster contents are part of the cache key.")
+    ap.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="run N pairings in parallel (0 = one per CPU core). "
+                         "Each worker loads the dataset once (~14s) and then "
+                         "reuses it, so this is close to a linear speedup on a "
+                         "long run. Memory is the limit, not CPU: budget "
+                         "roughly 1GB per worker.")
     ap.add_argument("--export", nargs="?", const="", default=None,
                     metavar="PATH",
                     help="also write an .xlsx report (default: the cache file "
@@ -86,7 +165,27 @@ def main():
     args = ap.parse_args()
 
     settings = tier(args.effort)
-    world = load_world()
+    if args.jobs == 0:
+        args.jobs = os.cpu_count() or 1
+    # The parent needs the team list; workers load their own copy. Reusing this
+    # one in the serial path avoids loading the dataset twice.
+    extra = load_rosters(args.rosters) if args.rosters else {}
+    _worker_init(extra)
+    world = _WORLD
+
+    # Validate roster members NOW. An unknown species otherwise surfaces as a
+    # KeyError three layers down in the damage engine, after the dataset load
+    # and partway into a pairing -- which in an overnight run means discovering
+    # the typo in the morning instead of at second five.
+    unknown = {name: [m for m in members if m not in world["merged"]]
+               for name, members in extra.items()}
+    unknown = {k: v for k, v in unknown.items() if v}
+    if unknown:
+        lines = [f"  {name}: {', '.join(bad)}" for name, bad in unknown.items()]
+        raise SystemExit("unknown Pokemon in --rosters "
+                         f"{args.rosters}:\n" + "\n".join(lines) +
+                         "\nNames must match the dataset exactly "
+                         "(case-sensitive, e.g. 'Mega Charizard Y').")
     cache = ResultCache(None if args.fresh else args.cache)
 
     names = list(world["teams"])
@@ -109,50 +208,57 @@ def main():
     print(f"effort   : {settings['label']} (~{relative_cost(args.effort):.0f}x quick)")
     print(f"           {settings['blurb']}")
     print(f"pairings : {len(jobs)}   batch {args.batch}   cache {args.cache}")
+    print(f"workers  : {args.jobs}"
+          f"{' (serial)' if args.jobs <= 1 else ''}   of {os.cpu_count()} cores")
     print(f"resuming : {len(cache)} already done\n")
 
-    done = 0
+    # The prescreen width is part of the key: a run that filtered candidates
+    # must not be served to a run that did not.
+    prescreen = args.prescreen or settings.get("prescreen")
+    # A generated roster is part of what determines the answer, so it belongs
+    # in the key: two teams sharing a name but not a roster must not collide.
+    keyed = [(ResultCache.key("bring", SCHEMA, a, b, args.effort, args.turns,
+                              prescreen, extra.get(a), extra.get(b)), a, b)
+             for a, b in jobs]
+    todo = [(k, a, b) for k, a, b in keyed if cache.get(k) is None]
+    skipped = len(keyed) - len(todo)
+    done, computed = skipped, 0
     started = time.time()
-    for batch in batches(jobs, args.batch):
-        for ours, theirs in batch:
-            # The prescreen width is part of the key: a run that filtered
-            # candidates must not be served to a run that did not.
-            key = ResultCache.key("bring", SCHEMA, ours, theirs, args.effort,
-                                  args.turns,
-                                  args.prescreen or settings.get("prescreen"))
-            if cache.get(key) is not None:
+
+    def _progress(ours, theirs):
+        nonlocal computed
+        computed += 1
+        rate = (time.time() - started) / computed
+        left = (len(keyed) - done) * rate / 60
+        print(f"  [{done}/{len(keyed)}] {ours} vs {theirs}"
+              f"   ~{left:.0f} min left", flush=True)
+
+    if args.jobs > 1 and todo:
+        # Pairings are independent, so the whole pairing is the parallel unit --
+        # coarse enough that the 14s dataset load per worker is amortised away
+        # and no shared state has to cross a process boundary.
+        import concurrent.futures as cf
+        for batch in batches(todo, max(args.batch, args.jobs)):
+            with cf.ProcessPoolExecutor(max_workers=args.jobs,
+                                        initializer=_worker_init,
+                                        initargs=(extra,)) as pool:
+                futures = {pool.submit(_run_pairing,
+                                       (a, b, args.effort, args.turns, prescreen)): (k, a, b)
+                           for k, a, b in batch}
+                for future in cf.as_completed(futures):
+                    k, a, b = futures[future]
+                    cache.put(k, future.result())
+                    done += 1
+                    _progress(a, b)
+            cache.save()   # save point: killing now costs at most this batch
+    else:
+        for batch in batches(todo, args.batch):
+            for k, ours, theirs in batch:
+                cache.put(k, _run_pairing((ours, theirs, args.effort,
+                                           args.turns, prescreen)))
                 done += 1
-                continue
-            results = search_robust_composition(
-                list(world["teams"][ours]), list(world["teams"][theirs]),
-                world["merged"], world["moves"], world["natures"],
-                world["typechart"], max_turns=args.turns,
-                verify_top=settings["verify_top"],
-                rate_robustness=settings["robustness"],
-                robustness_leads=settings["leads"] or 1,
-                robustness_turns=settings["turns"] or 1,
-                prescreen_top=args.prescreen or settings.get("prescreen"))
-            top = results[0] if results else None
-            cache.put(key, {
-                "ours": ours, "theirs": theirs,
-                "bring": top["our_bring4"] if top else None,
-                "exploitability": (top or {}).get("exploitability"),
-                "severe_turns": (top or {}).get("severe_turns"),
-                "solver_wins": (top or {}).get("solver_wins"),
-                "solver_total": (top or {}).get("solver_total"),
-                "downside": (top or {}).get("downside"),
-                "hardest_lead": (top or {}).get("hardest_lead"),
-                "worst_turn": (top or {}).get("worst_turn"),
-                # Every audited candidate, with its per-turn detail -- not just
-                # the winner. An overnight run is too expensive to repeat just
-                # to see why the runner-up lost, or which turn cost the winner.
-                "candidates": [_candidate_row(r) for r in results],
-            })
-            done += 1
-            rate = (time.time() - started) / max(done, 1)
-            print(f"  [{done}/{len(jobs)}] {ours} vs {theirs}"
-                  f"   ~{rate * (len(jobs) - done) / 60:.0f} min left", flush=True)
-        cache.save()   # save point: killing the run now costs at most this batch
+                _progress(ours, theirs)
+            cache.save()
 
     cache.save()
 

@@ -40,6 +40,7 @@ sides greedily with no lookahead. Stage 5 is the trustworthy one. If a team
 looks great in stage 3 but poor in stage 5, believe stage 5.
 """
 import argparse
+import os
 import itertools
 import sys
 import time
@@ -135,8 +136,37 @@ def quick_script_screen(finals, teams, matrix, merged, moves, natures, typechart
     return out
 
 
+_WORLD = None      # per-process dataset for the parallel verification path
+
+
+def _verify_worker_init():
+    global _WORLD
+    from species_data import build_merged_dataset, load_teams as _lt
+    merged, _usage, moves, natures, typechart = build_merged_dataset()
+    teams, meta = _lt(with_meta=True, merged=merged)
+    _WORLD = dict(merged=merged, moves=moves, natures=natures,
+                  typechart=typechart, teams=teams, meta=meta)
+
+
+def _verify_one_opponent(job):
+    """One (team, opponent) verification. Top-level and plain-typed, because on
+    Windows the pool uses spawn and both ends cross a pickle boundary.
+    """
+    team, team_name, max_turns, our_sets, effort = job
+    global _WORLD
+    if _WORLD is None:
+        _verify_worker_init()
+    load_teams.meta = _WORLD["meta"]        # verify_with_solver reads this
+    out = verify_with_solver(team, {team_name: _WORLD["teams"][team_name]},
+                             _WORLD["merged"], _WORLD["moves"], _WORLD["natures"],
+                             _WORLD["typechart"], {}, [], max_turns=max_turns,
+                             all_backs=True, our_sets=our_sets, effort=effort)
+    return team_name, out.get(team_name)
+
+
 def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, enemy_pairs,
-                        max_turns=12, all_backs=True, our_sets=None, effort=None):
+                        max_turns=12, all_backs=True, our_sets=None, effort=None,
+                        jobs=1):
     """Re-run this team through the REAL solver.
 
     all_backs=True (default): test EVERY enemy bring-4 -- all C(6,2) lead pairs
@@ -156,6 +186,22 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
     from search_effort import tier
     settings = tier(effort) if effort else None
     rate = bool(settings and settings["robustness"])
+
+    # Opponents are independent, so the (team x opponent) verification is the
+    # parallel unit. Guarded on all_backs because the sampled path is already
+    # cheap and shares the caller's pair matrix, which does not cross processes.
+    if jobs > 1 and all_backs and len(teams) > 1:
+        import concurrent.futures as cf
+        results = {}
+        with cf.ProcessPoolExecutor(max_workers=jobs,
+                                    initializer=_verify_worker_init) as pool:
+            futures = [pool.submit(_verify_one_opponent,
+                                   (list(team), name, max_turns, our_sets, effort))
+                       for name in teams]
+            for future in cf.as_completed(futures):
+                name, rec = future.result()
+                results[name] = rec
+        return results
     from matchup_search import search_best_composition, enemy_configs
     results = {}
     for team_name, roster in teams.items():
@@ -283,6 +329,10 @@ def main():
                      help="Optimise each team member's item and 4 moves against the specific "
                           "Pokemon in teams.csv, instead of using raw usage defaults")
     ap.add_argument("--max-turns", type=int, default=12, help="Turn cap in verification battles")
+    ap.add_argument("--jobs", type=int, default=1, metavar="N",
+                     help="verify N opponents in parallel (0 = one per CPU core). "
+                          "Each worker loads the dataset once (~14s) and reuses "
+                          "it. Budget roughly 1GB of RAM per worker.")
     ap.add_argument("--effort", default="quick",
                      help="Verification depth: quick / standard / thorough / exhaustive. "
                           "Anything above 'quick' also rates each generated team by "
@@ -316,6 +366,8 @@ def main():
                           "overwritten automatically the moment the pool or enemy teams "
                           "change.")
     args = ap.parse_args()
+    if args.jobs == 0:
+        args.jobs = os.cpu_count() or 1
 
     print("Loading data...")
     merged, unresolved, moves, natures, typechart = build_merged_dataset()
@@ -507,7 +559,7 @@ def main():
             v = verify_with_solver(team, teams, merged, moves, natures, typechart,
                                     matrix, enemy_pairs, args.max_turns,
                                     all_backs=not args.sample_backs,
-                                    effort=args.effort)
+                                    effort=args.effort, jobs=args.jobs)
             scores = [rec["exploitability"] for rec in v.values()
                       if rec and rec.get("exploitability") is not None]
             if scores:
