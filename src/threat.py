@@ -58,34 +58,112 @@ NO_THREAT = Threat(move=None, dmg_avg=0.0, dmg_min=0.0, dmg_max=0.0, priority=0,
                    outspeeds=False, ohko=False, ohko_possible=False, nhko=99)
 
 
-def _best_attack(attacker, defender, movesets, typechart, field, battle):
-    """The attacker's hardest-hitting known move against this defender."""
+# Damage results, keyed by everything damage_roll actually reads. Bounded so a
+# long sweep cannot grow it without limit.
+_DAMAGE_CACHE = {}
+_CACHE_LIMIT = 200_000
+_CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+def _damage_key(attacker, defender, context):
+    """Cache key. Every field below is one damage_roll genuinely depends on.
+
+    Getting this wrong is silent: the matrix would return stale numbers that
+    look plausible. Two entries are easy to miss and are called out --
+    `defender.item` (Knock Off reads it) and the full-HP flag (Multiscale halves
+    damage only at full HP, so damage is NOT independent of current HP).
+    """
+    return (
+        attacker.name, attacker.ability, attacker.item, attacker.status,
+        attacker.stats["atk"], attacker.stats["spa"],
+        attacker.stages["atk"], attacker.stages["spa"],
+        tuple(attacker.types), attacker.mega_evolved,
+        defender.name, defender.ability, defender.item,
+        defender.stats["def"], defender.stats["spd"],
+        defender.stages["def"], defender.stages["spd"],
+        tuple(defender.types), defender.mega_evolved,
+        defender.current_hp >= defender.max_hp(),   # Multiscale
+        context,
+    )
+
+
+def cache_info():
+    total = _CACHE_STATS["hits"] + _CACHE_STATS["misses"]
+    return dict(size=len(_DAMAGE_CACHE), hit_rate=(_CACHE_STATS["hits"] / total
+                                                   if total else 0.0),
+                **_CACHE_STATS)
+
+
+def clear_cache():
+    _DAMAGE_CACHE.clear()
+    _CACHE_STATS.update(hits=0, misses=0)
+
+
+def _best_attack(attacker, defender, movesets, typechart, context):
+    """The attacker's hardest-hitting known move against this defender.
+
+    `context` carries the field effects that change damage but belong to
+    neither Pokemon: weather, active auras, and whether the DEFENDER is behind
+    screens. The engine passes all three (battle.py `_resolve_move`); an earlier
+    version of this module passed only weather, which silently over-estimated
+    damage into screens and mis-handled Fairy/Dark Aura.
+    """
+    key = _damage_key(attacker, defender, context)
+    cached = _DAMAGE_CACHE.get(key)
+    if cached is not None:
+        _CACHE_STATS["hits"] += 1
+        return cached
+    _CACHE_STATS["misses"] += 1
+
+    weather, auras, reflect, lightscreen, auroraveil = context
+    aura_set = set(auras) or None
     best = None
     entries = movesets.get(attacker.name) or []
     for move, _usage in entries:
         if move.power == 0 or move.category == "Status":
             continue
-        atk_key = "atk" if move.category == "Physical" else "spa"
-        def_key = "def" if move.category == "Physical" else "spd"
+        physical = move.category == "Physical"
+        atk_key = "atk" if physical else "spa"
+        def_key = "def" if physical else "spd"
         atk_stat = effective_stat(attacker.stats[atk_key], attacker.stages[atk_key])
-        if attacker.item == "Choice Band" and atk_key == "atk":
+        if attacker.item == "Choice Band" and physical:
             atk_stat *= 1.5
-        if attacker.item == "Choice Specs" and atk_key == "spa":
+        if attacker.item == "Choice Specs" and not physical:
             atk_stat *= 1.5
         def_stat = effective_stat(defender.stats[def_key], defender.stages[def_key])
+        # Screens are per-category, matching battle.py: Aurora Veil covers both,
+        # Reflect only physical, Light Screen only special.
+        screens = auroraveil or (reflect if physical else lightscreen)
         lo, hi, avg, _eff = damage_roll(50, move.power, atk_stat, def_stat,
                                         attacker, defender, move, typechart,
-                                        weather=field.weather)
+                                        weather=weather, auras=aura_set,
+                                        screens=screens)
         if best is None or avg > best[3]:
             best = (move, lo, hi, avg)
+
+    if len(_DAMAGE_CACHE) < _CACHE_LIMIT:
+        _DAMAGE_CACHE[key] = best
     return best
 
 
-def threat_between(attacker, defender, movesets, typechart, field, battle):
+def _damage_context(battle, defender):
+    """Field effects that affect damage but belong to either side, not a mon."""
+    side = battle.side_of(defender)
+    return (battle.field.weather,
+            tuple(sorted(battle._active_auras())),
+            side.screens_reflect > 0,
+            side.screens_lightscreen > 0,
+            side.screens_auroraveil > 0)
+
+
+def threat_between(attacker, defender, movesets, typechart, field, battle,
+                   context=None):
     """One edge of the matrix. Cheap enough to call in a loop."""
     if attacker.fainted or defender.fainted:
         return NO_THREAT
-    best = _best_attack(attacker, defender, movesets, typechart, field, battle)
+    if context is None:
+        context = _damage_context(battle, defender)
+    best = _best_attack(attacker, defender, movesets, typechart, context)
     if best is None:
         return NO_THREAT
     move, lo, hi, avg = best
@@ -119,12 +197,16 @@ class ThreatMatrix:
         self._pair = {}
 
         field, typechart = battle.field, battle.typechart
+        # Context depends only on the DEFENDER's side, so it is computed twice
+        # rather than per edge.
+        ctx_theirs = _damage_context(battle, self.theirs[0]) if self.theirs else None
+        ctx_ours = _damage_context(battle, self.ours[0]) if self.ours else None
         for a in self.ours:
             for b in self.theirs:
                 self._pair[(id(a), id(b))] = threat_between(
-                    a, b, movesets, typechart, field, battle)
+                    a, b, movesets, typechart, field, battle, ctx_theirs)
                 self._pair[(id(b), id(a))] = threat_between(
-                    b, a, movesets, typechart, field, battle)
+                    b, a, movesets, typechart, field, battle, ctx_ours)
 
     def threat(self, attacker, defender) -> Threat:
         return self._pair.get((id(attacker), id(defender)), NO_THREAT)

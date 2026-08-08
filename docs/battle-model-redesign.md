@@ -373,9 +373,21 @@ not earn its cost yet.
 | benefit | head-to-head vs the same solver with the term off: **3 W / 5 L at weight 0.25, and again at 0.10** |
 
 n = 8 is far too small to claim the term is *worse* — 3–5 is well inside noise.
-But there is no evidence it is better, and 4.35× per cell is a lot to pay on a
-hope, particularly after §2c found the matrix-game solver already ~20× more
-expensive than this document assumed. Parked rather than deleted.
+But there is no evidence it is better. Parked rather than deleted.
+
+**Update after caching (§2f):** the cost objection has largely been answered —
+a matrix cell is now **1.83×**, not 4.35× — and the term was re-tested at a
+proper sample size. Over **40 games**: 16 W / 23 L / 1 D, a **41% win rate,
+95% CI [25%, 57%]**. Still not statistically distinguishable from baseline, but
+that is now three independent samples (38%, 38%, 41%) whose point estimates all
+sit *below* 50%. The verdict is unchanged and better supported:
+`COVERAGE_WEIGHT` stays 0.0.
+
+The leading hypothesis for why is recorded above and in
+`tests/test_coverage_term.py`: `coverage_differential`'s second half moves when
+our roster size changes, so the antisymmetric wrapper is a noisier signal than
+the coverage figure it is built from. Fixing *that* — rather than reweighting —
+is what a fourth attempt should try.
 
 Three things surfaced that are worth keeping regardless of the verdict.
 
@@ -407,6 +419,51 @@ Farigiraf (→ 74.7) barely moves it. The honest caveat is that
 requires — is a **weaker signal** than its own first half, because the second
 half moves when our roster size changes. Recorded in
 `tests/test_coverage_term.py` rather than smoothed over.
+
+---
+
+## 2f. Threat-matrix caching (done)
+
+The threat matrix was rebuilt from scratch at every leaf, which is what made it
+a 4.35× tax on the hottest path in the system. It is now cached, and the cache
+turns out to be close to ideal:
+
+```
+realistic workload: a full 23x23 payoff matrix = 529 DISTINCT leaf states
+  coverage off : 0.258 ms/cell
+  coverage on  : 0.473 ms/cell   (1.83x, was 4.35x)   cache hit rate 98%
+```
+
+Only **280 distinct damage computations** were needed across those 529 leaf
+states. The reason the hit rate is so high is worth stating, because it also
+says when the cache will *stop* working: damage depends on stats, stages,
+items, status and field, and those mostly do **not** differ between sibling
+leaves of one turn — only HP does, and HP enters damage through exactly one
+narrow path (Multiscale). A search that branches heavily on stat drops or item
+consumption would see a materially lower hit rate.
+
+### Two correctness traps, one of them a live bug
+
+**A stale cache does not crash — it returns plausible wrong numbers**, so the
+key has to cover everything `damage_roll` genuinely reads. Two entries are easy
+to miss, and `tests/test_threat_cache.py` pins both by mutating the field and
+asserting the answer moves:
+
+- **`defender.item`**, because Knock Off reads it.
+- **The full-HP flag.** `Multiscale` halves damage only at full HP
+  (`damage.py:281`), so **damage is not independent of current HP** — the most
+  natural assumption to make when designing this cache, and wrong.
+
+Separately, building the key surfaced a **pre-existing bug in the threat
+matrix**: it called `damage_roll` with `weather` only, while the engine
+(`battle.py` `_resolve_move`) also passes `auras` and `screens`. So every
+threat edge silently **over-estimated damage into a screened side** and
+mis-handled Fairy/Dark Aura. Now fixed, with screens applied per category
+(Aurora Veil both, Reflect physical, Light Screen special) to match the engine.
+
+This is the same lesson as §2d in a different guise: the failure mode of an
+optimisation here is not a crash but a plausible wrong number, so each
+dependency needs a test that deliberately breaks it.
 
 ---
 
