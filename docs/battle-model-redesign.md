@@ -836,6 +836,68 @@ display and for §4a, at no cost.
 
 ---
 
+## 2m. Phase E: measured its ceiling first — and it is the largest left
+
+§10 gates Phase E on "only if A–D justify it". Rather than answer that with an
+opinion, `tools/measure_set_uncertainty.py` measures the ceiling, the way §2b
+sized Phase B.
+
+### The assumption nobody was testing
+
+§5 splits hidden information in two. **Their bring** (which four of six) is
+handled structurally — the sweep enumerates it and Phase D weights it. **Their
+sets** are not handled at all, and the reason it never showed up is that the
+assumption is *self-fulfilling*:
+
+> Both sides' movesets are built with `top_k = TOP_K_MOVES` by usage. The solver
+> plans against the four most-used moves, and the simulated opponent then plays
+> exactly those four.
+
+That is structurally the same error as §1's "we compute a best response to a
+policy we authored" — one level down, an assumed **set** rather than an assumed
+**policy** — and invisible for the same reason: nothing in the harness ever
+contradicts it.
+
+### The measurement
+
+The opponent actually runs a different plausible set (usage ranks 0, 1, 4, 5 —
+keeping their signature moves, varying the coverage slots) while our solver
+keeps planning against the usage-standard four. Verified that the sets really
+differ before trusting the result: 4/4 mons changed, including Pelipper losing
+Tailwind, which is a substantial change for a Rain team.
+
+```
+                W    L    D    win rate
+matched        77   42    1        65%
+surprised      58   62    0        48%
+
+win rate lost to set uncertainty : +16 points   95% CI [+4, +29]   SIGNIFICANT
+```
+
+**16 points is larger than the Nash solver's 10-point gain** (§2h), and it is
+the largest measured headroom remaining in the project. An earlier run at n=8
+showed exactly 0 — a reminder that these small samples say nothing; the effect
+only became visible at n=240.
+
+Read carefully, this is a **ceiling**: it is what *perfect* knowledge of their
+set is worth. A belief state recovers some fraction of it, not all. But it is
+the first evidence-based justification for Phase E, and it satisfies §10's gate.
+
+### A caveat this exposes about every earlier measurement
+
+Every head-to-head in this document — including Phase B's 60% — was run with
+**both sides sharing the same correct set assumption**. None of them tested
+robustness to being wrong about the opponent's set, because the harness cannot
+be wrong about it. So the existing results are all conditional on a world where
+that assumption holds, and B's advantage under set uncertainty is a separate
+question from B's advantage under set certainty.
+
+That question is directly testable with the same tool (`--nash`), and should be
+answered before Phase E's design is fixed: if the equilibrium solver already
+degrades more gracefully, part of the 16 points is spoken for.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum
