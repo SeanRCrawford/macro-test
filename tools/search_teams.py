@@ -35,6 +35,18 @@ def main():
     ap.add_argument("--turns", type=int, default=10, help="battle turn cap")
     ap.add_argument("--fresh", action="store_true",
                     help="ignore any cached results and recompute")
+    ap.add_argument("--teams", default="",
+                    help="comma-separated team names to search as OUR side. "
+                         "Use this to spend the expensive tiers on the few "
+                         "candidates that survived a cheaper run.")
+    ap.add_argument("--prescreen", type=int, default=None,
+                    help="keep only the N best candidates by static threat "
+                         "coverage before simulating anything. OFF unless set: "
+                         "run tools/measure_prescreen.py first and use the "
+                         "narrowest width that still recalls ~100%.")
+    ap.add_argument("--vs", default="",
+                    help="comma-separated team names to use as OPPONENTS "
+                         "(default: all others)")
     args = ap.parse_args()
 
     settings = tier(args.effort)
@@ -42,7 +54,21 @@ def main():
     cache = ResultCache(None if args.fresh else args.cache)
 
     names = list(world["teams"])
-    jobs = [(ours, theirs) for ours in names for theirs in names if ours != theirs]
+
+    def _select(spec, label):
+        if not spec:
+            return names
+        wanted = [t.strip() for t in spec.split(",") if t.strip()]
+        unknown = [t for t in wanted if t not in names]
+        if unknown:
+            raise SystemExit(f"unknown {label}: {unknown}\navailable: {names}")
+        return wanted
+
+    ours_pool = _select(args.teams, "team")
+    theirs_pool = _select(args.vs, "opponent")
+    jobs = [(a, b) for a in ours_pool for b in theirs_pool if a != b]
+    if not jobs:
+        raise SystemExit("no pairings selected")
 
     print(f"effort   : {settings['label']} (~{relative_cost(args.effort):.0f}x quick)")
     print(f"           {settings['blurb']}")
@@ -53,7 +79,10 @@ def main():
     started = time.time()
     for batch in batches(jobs, args.batch):
         for ours, theirs in batch:
-            key = ResultCache.key("bring", ours, theirs, args.effort, args.turns)
+            # The prescreen width is part of the key: a run that filtered
+            # candidates must not be served to a run that did not.
+            key = ResultCache.key("bring", ours, theirs, args.effort, args.turns,
+                                  args.prescreen or settings.get("prescreen"))
             if cache.get(key) is not None:
                 done += 1
                 continue
@@ -64,7 +93,8 @@ def main():
                 verify_top=settings["verify_top"],
                 rate_robustness=settings["robustness"],
                 robustness_leads=settings["leads"] or 1,
-                robustness_turns=settings["turns"] or 1)
+                robustness_turns=settings["turns"] or 1,
+                prescreen_top=args.prescreen or settings.get("prescreen"))
             top = results[0] if results else None
             cache.put(key, {
                 "ours": ours, "theirs": theirs,

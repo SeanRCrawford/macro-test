@@ -22,6 +22,13 @@ order they cost it:
 solver, because rating a team while piloting it badly measures the pilot rather
 than the team. What varies is how much auditing happens, not how well it is
 done.
+
+`prescreen` is None on every tier by default, deliberately. A prescreen
+discards candidates before they are ever simulated, so if it is set too narrow
+the search becomes faster and SILENTLY WRONG -- the dropped candidate never
+appears in the output to be missed. The safe width is a measurement, not a
+guess: run tools/measure_prescreen.py, read the recall column, and pass the
+narrowest width that still recalls ~100% via --prescreen.
 """
 import hashlib
 import json
@@ -31,27 +38,27 @@ import tempfile
 TIERS = {
     "quick": dict(
         label="Quick",
-        verify_top=3, robustness=False, leads=0, turns=0,
+        verify_top=3, robustness=False, leads=0, turns=0, prescreen=None,
         blurb="Screen plus win-count verification. The original behaviour: "
               "fast, and ranked by games won against a fixed opponent model.",
     ),
     "standard": dict(
         label="Standard",
-        verify_top=3, robustness=True, leads=2, turns=4,
+        verify_top=3, robustness=True, leads=2, turns=4, prescreen=None,
         blurb="Adds an exploitability audit of the top few brings against their "
               "two most plausible leads. Ranks by how punishable a team is "
               "rather than by win count.",
     ),
     "thorough": dict(
         label="Thorough",
-        verify_top=6, robustness=True, leads=4, turns=6,
+        verify_top=6, robustness=True, leads=4, turns=6, prescreen=None,
         blurb="More survivors, more of their plausible leads, deeper lines. "
               "Minutes rather than seconds; the setting to trust before "
               "committing to a team.",
     ),
     "exhaustive": dict(
         label="Exhaustive",
-        verify_top=20, robustness=True, leads=6, turns=8,
+        verify_top=20, robustness=True, leads=6, turns=8, prescreen=None,
         blurb="Audits far more candidates deeply. Intended for finding a hidden "
               "team with great lines, expected to take a long time, and "
               "designed to be run in resumable batches.",

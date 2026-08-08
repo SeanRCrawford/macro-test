@@ -1310,16 +1310,24 @@ Two details that decide whether a cache helps or hurts:
   rather than one entry. A corrupt file is also survivable — it starts over
   rather than refusing to run.
 
-### What this does not solve
+### Prescreening (§2s)
 
-Better *prescreening* is the other half of the suggestion and is not built. The
-current screen is `fast_pair_score` over lead pairs, which is cheap but crude —
-it ignores the back two entirely (§2i). The pieces for something better exist:
-the threat matrix (§2e) can rank candidate brings by coverage before any battle
-is simulated, and §4b's matching is exactly a "does this team answer their
-threats" score. Using it as a pre-screen would cut the candidate set before the
-90-configuration sweep rather than after, which is where the leverage is for the
-exhaustive tier.
+Built: `src/prescreen.py` ranks candidate brings by static threat-matrix
+coverage — the §4b matching, at ~0.7 ms per candidate, with **no battle
+simulated**. At the Exhaustive tier a candidate costs roughly 161× the Quick
+tier, so eliminating one for a millisecond is worth minutes of avoided work.
+
+**It is off by default on every tier, and that is deliberate.** A prescreen
+discards candidates before they are ever simulated, so set too narrow the search
+becomes faster and *silently wrong* — the dropped candidate never appears in the
+output to be missed. The safe width is a measurement:
+`tools/measure_prescreen.py` reports recall (what share of the full sweep's top
+brings survive the filter) against the width, and the rule is to use the
+narrowest width that still recalls ~100%.
+
+Also selectable: `--teams` and `--vs` on `tools/search_teams.py`, so an
+expensive tier can be spent on the few candidates that survived a cheaper run
+rather than on all 56 pairings.
 
 ---
 

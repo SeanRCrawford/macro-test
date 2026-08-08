@@ -643,7 +643,7 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None,
                                preview_tau=None, preview_alpha=None,
                                rate_robustness=False, robustness_leads=3,
-                               robustness_turns=5):
+                               robustness_turns=5, prescreen_top=None):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -672,6 +672,17 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
     from preview import DEFAULT_ALPHA, DEFAULT_TAU, downside_score, ranked_brings
     preview_tau = DEFAULT_TAU if preview_tau is None else preview_tau
     preview_alpha = DEFAULT_ALPHA if preview_alpha is None else preview_alpha
+
+    # Optional cheap filter: cut candidates on static threat-matrix coverage
+    # before any battle is simulated (design doc 2s). Off by default -- a
+    # prescreen silently discards candidates, so it must be opted into, and
+    # tools/measure_prescreen.py is the measurement that says how narrow it can
+    # safely be set.
+    if prescreen_top:
+        from prescreen import keep_top
+        our_configs = keep_top(our_configs, enemy_roster, merged, moves_db,
+                               natures, typechart, prescreen_top,
+                               our_sets=our_sets, enemy_sets=enemy_sets)
 
     movesets_cache = {}
     scored = []
