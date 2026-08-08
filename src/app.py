@@ -889,10 +889,14 @@ with tab_search:
                     if not r:
                         continue
                     b = r["our_bring4"]
-                    rows.append({"Opponent": tname, "Our lead": f"{b[0]}/{b[1]}",
-                                  "Our back": f"{b[2]}/{b[3]}",
-                                  "Enemy brings beaten": f"{r['solver_wins']}/{r['solver_total']}",
-                                  "Clean": "yes" if not r["solver_losses"] else "no"})
+                    row = {"Opponent": tname, "Our lead": f"{b[0]}/{b[1]}",
+                           "Our back": f"{b[2]}/{b[3]}",
+                           "Enemy brings beaten": f"{r['solver_wins']}/{r['solver_total']}",
+                           "Clean": "yes" if not r["solver_losses"] else "no"}
+                    if "script_wins" in r:
+                        row["Vs script"] = f"{r['script_wins']}/{r['script_total']}"
+                        row["Vs conventional"] = f"{r['conventional_wins']}/{r['conventional_total']}"
+                    rows.append(row)
                 else:
                     b = d["combos"][0] if d["combos"] else None
                     if not b:
@@ -1027,6 +1031,15 @@ with tab_search:
                 losses = {(tuple(l), tuple(bk)): (w, t) for l, bk, w, t in r["solver_losses"]}
                 with st.expander(f"{tname} — our lead {b4[0]}/{b4[1]}, back {b4[2]}/{b4[3]} "
                                   f"({r['solver_wins']}/{r['solver_total']} beaten)"):
+                    if "script_wins" in r:
+                        sc1, sc2 = st.columns(2)
+                        sc1.metric("Vs script", f"{r['script_wins']}/{r['script_total']}")
+                        sc2.metric("Vs conventional (normal 6/6)",
+                                   f"{r['conventional_wins']}/{r['conventional_total']}")
+                        st.caption("'Vs script' is every game where the opponent ran its scripted "
+                                   "opening (or a generic near-script deviation) at least once; "
+                                   "'vs conventional' is the plain unscripted greedy 2v2 -- the "
+                                   "overall count above blends both together.")
                     cfgs = enemy_configs(d["roster"],
                                           fixed_lead=team_meta.get(tname, {}).get('lead'))
                     fc1, fc2 = st.columns([1, 2])
@@ -1305,6 +1318,15 @@ with tab_vs:
                 fixed_lead_vs = st.multiselect("Guaranteed enemy lead (exactly 2)", enemy_roster,
                                                 max_selections=2, key="vs_fixed_lead")
             max_turns_vs = st.slider("Turn cap", 6, 24, 12, key="vs_turns")
+            import scripted_openings as _so_vs
+            script_team_vs = st.selectbox(
+                "This enemy team runs a known scripted opening", ["None"] + list(_so_vs.SCRIPTS),
+                key="vs_script_team",
+                help="Only pick this if the enemy roster you entered above IS that fixed-lead "
+                     "archetype (same key Pokemon/names) -- lets results be split into 'vs "
+                     "script' and 'vs conventional (normal 6/6)' below, instead of one blended "
+                     "number.")
+            script_team_vs = None if script_team_vs == "None" else script_team_vs
             if st.button("Find best response", type="primary", key="vs_go"):
                 from matchup_search import search_robust_composition, search_best_composition
                 from run_search import find_toughest_lead
@@ -1334,7 +1356,10 @@ with tab_vs:
                             rob = search_robust_composition(
                                 vs_team, enemy_roster, merged, moves, natures, typechart, max_turns_vs,
                                 our_sets=vs_sets, verify_top=1, enemy_sets=enemy_sets_vs,
-                                fixed_lead=fl)
+                                fixed_lead=fl,
+                                enemy_script=_so_vs.script_for(script_team_vs) if script_team_vs
+                                else None,
+                                script_team=script_team_vs)
                             r = rob[0] if rob else None
                             eb4_tested = None
                     if r is None:
@@ -1363,6 +1388,15 @@ with tab_vs:
             else:
                 m2.metric(f"Enemy brings beaten ({n_cfg} configs)",
                           f"{r['solver_wins']}/{r['solver_total']}")
+            if "script_wins" in r:
+                sc1_vs, sc2_vs = st.columns(2)
+                sc1_vs.metric("Vs script", f"{r['script_wins']}/{r['script_total']}")
+                sc2_vs.metric("Vs conventional (normal 6/6)",
+                              f"{r['conventional_wins']}/{r['conventional_total']}")
+                st.caption("'Vs script' is every game where the opponent ran its scripted "
+                           "opening (or a generic near-script deviation) at least once; "
+                           "'vs conventional' is the plain unscripted greedy 2v2 -- the "
+                           "overall count above blends both together.")
             for lead, back, w, t in r.get("solver_losses", [])[:5]:
                 st.write(f"LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} "
                          f"({w} T{t})")
