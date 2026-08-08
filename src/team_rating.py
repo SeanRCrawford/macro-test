@@ -26,6 +26,21 @@ from dataclasses import dataclass, field
 from preview import DEFAULT_TAU, ranked_brings
 from robustness import line_report
 
+# How often a strong opponent actually finds the punish.
+#
+# The two ends are both wrong. Charging the full best-response gap assumes they
+# read us correctly EVERY turn, which is the clairvoyance that made audited
+# lines unwinnable. Charging only the equilibrium-mixture gap measures nothing:
+# we pilot with the equilibrium solver, so our play is near-equilibrium and that
+# gap is ~0 by construction -- it describes the pilot, not the team (observed:
+# the discount became inert, 0.92 vs 0.92).
+#
+# So the cost charged is expected_loss plus this fraction of the distance to the
+# worst case. It is an explicit ASSUMPTION about opponent strength, not a
+# measurement, and it is the only tuned constant in the rating -- raise it to
+# rate teams against a sharper field, lower it for a looser one.
+READ_RATE = 0.3
+
 
 @dataclass
 class BringRating:
@@ -80,12 +95,10 @@ class BringRating:
             per line:  0                        if the line did not win
                        1 - mean / KO_WEIGHT     if it did, floored at 0
 
-        where `mean` is the average EXPECTED LOSS across the line's turns --
-        ground conceded to an opponent playing its equilibrium mixture, not to
-        one that reads us perfectly. A punish that requires a call they cannot
-        reliably make is not a cost we pay every game, and charging the line
-        for it double-counts the same pessimism the trajectory fix removed.
-        So
+        where `mean` is the ground conceded per turn to an opponent who finds
+        the punish READ_RATE of the time -- between "never reads us" (which
+        measures the pilot, not the team) and "reads us every turn" (which is
+        the clairvoyance that made every line unwinnable). So
         a win that gives away a whole Pokemon per turn on average is discounted
         to nothing and an unpunishable win keeps its full weight. Averaged over
         their plausible leads, weighted by lead plausibility.
@@ -109,7 +122,10 @@ class BringRating:
         for _lead, p, rep in self.per_lead:
             if not rep.won:
                 continue
-            penalty = max(0.0, rep.mean_expected_loss) / KO_WEIGHT
+            realistic = (rep.mean_expected_loss
+                         + READ_RATE * (rep.mean_exploitability
+                                        - rep.mean_expected_loss))
+            penalty = max(0.0, realistic) / KO_WEIGHT
             acc += p * max(0.0, 1.0 - penalty)
         return acc / total
 

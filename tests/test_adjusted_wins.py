@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from robustness import SEVERE, LineReport, TurnRobustness  # noqa: E402
 from solver import KO_WEIGHT  # noqa: E402
-from team_rating import BringRating  # noqa: E402
+from team_rating import READ_RATE, BringRating  # noqa: E402
 
 
 def _turn(exploitability, expected_loss=None):
@@ -119,9 +119,25 @@ class TestAdjustedWins(unittest.TestCase):
         rep.outcome, rep.length = "win", 1
         r = BringRating(our_bring=["A"])
         r.per_lead.append(((("X", "Y")), 1.0, rep))
-        self.assertAlmostEqual(r.adjusted_win_rate, 1.0 - 1.0 / KO_WEIGHT)
+        # Charged the equilibrium cost plus READ_RATE of the way to the worst
+        # case -- not the full best-response price, and not nothing.
+        charged = 1.0 + READ_RATE * (4 * KO_WEIGHT - 1.0)
+        self.assertAlmostEqual(r.adjusted_win_rate,
+                               max(0.0, 1.0 - charged / KO_WEIGHT))
+        self.assertLess(r.adjusted_win_rate, 1.0 - 1.0 / KO_WEIGHT)
         # The worst case is still reported, undiscounted, for the audit trail.
         self.assertAlmostEqual(rep.mean_exploitability, 4 * KO_WEIGHT)
+
+    def test_read_rate_interpolates_between_the_two_extremes(self):
+        """Neither endpoint is usable; the charge must sit strictly between."""
+        rep = LineReport(turns=[_turn(100.0, expected_loss=0.0)])
+        rep.outcome, rep.length = "win", 1
+        r = BringRating(our_bring=["A"])
+        r.per_lead.append(((("X", "Y")), 1.0, rep))
+        charged = KO_WEIGHT * (1.0 - r.adjusted_win_rate)
+        self.assertGreater(charged, 0.0)      # not "they never read us"
+        self.assertLess(charged, 100.0)       # not "they read us every turn"
+        self.assertAlmostEqual(charged, READ_RATE * 100.0)
 
     def test_negative_exploitability_noise_cannot_inflate_a_score(self):
         """Convergence noise gives small negative values; they must not pay."""
