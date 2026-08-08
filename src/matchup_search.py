@@ -641,7 +641,9 @@ def aggregate_battle_stats(our_names, enemy_roster, merged, moves_db, natures, t
 def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures, typechart,
                                max_turns=MAX_TURNS, our_sets=None, verify_top=3, progress=None,
                                fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None,
-                               preview_tau=None, preview_alpha=None):
+                               preview_tau=None, preview_alpha=None,
+                               rate_robustness=False, robustness_leads=3,
+                               robustness_turns=5):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -758,7 +760,6 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                "solver_total": len(configs),
                "worst_case": worst_seen[1] if worst_seen else None,
                "plausible_brings": plausible[:10]}
-        rec.pop("screen_margins", None)
         if script_team:
             # Per-config "did it lose to ANY script/deviation variant" and "did it
             # lose to plain conventional" -- deduplicate by config since a config can
@@ -773,7 +774,86 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             rec["conventional_losses"] = conv_losses
         verified.append(rec)
     verified.sort(key=lambda d: (-d["solver_wins"], -d["worst_margin"]))
+
+    # Final stage: re-rank by how PUNISHABLE each survivor is, not by how many
+    # games it wins against our own bot (design doc 2q). Opt-in because it needs
+    # a full payoff matrix per turn -- the cheap screen above still does the
+    # shortlisting, this only refines what survived it.
+    if rate_robustness and verified:
+        verified = _rate_and_rerank(verified, enemy_roster, merged, moves_db,
+                                     natures, typechart, configs, our_sets,
+                                     enemy_sets, preview_tau, robustness_leads,
+                                     robustness_turns)
     return verified
+
+
+def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechart,
+                      configs, our_sets, enemy_sets, preview_tau,
+                      leads_per_candidate, turns):
+    """Attach an exploitability rating to each survivor and sort by it.
+
+    Piloted with the least-exploitable solver configuration available: rating a
+    team while playing it badly measures the pilot, not the team.
+    """
+    import solver as _solver
+    from combatants import make_team
+    from preview import ranked_brings
+    from team_rating import rate_bring
+
+    def choose(battle):
+        with _solver.solver_mode(nash=True, depth=1):
+            _solver.seed_nash_sampling(20260808)
+            action, _score, _sim = _solver.solve_best_action(
+                battle, "p1", battle.movesets)
+        return action
+
+    for rec in verified:
+        our4 = rec["our_bring4"]
+        margins = rec.get("screen_margins") or []
+        by_lead = {}
+        for (lead, _back), margin in zip(configs, margins):
+            by_lead.setdefault(tuple(lead), margin)
+        lead_keys = list(by_lead)
+        if not lead_keys:
+            continue
+        ranked = ranked_brings([by_lead[k] for k in lead_keys],
+                               [" / ".join(k) for k in lead_keys], tau=preview_tau)
+        chosen = [(lead_keys[row["index"]], row["probability"])
+                  for row in ranked[:leads_per_candidate]]
+
+        def build(our_names, enemy_lead):
+            rest = [x for x in enemy_roster if x not in enemy_lead]
+            enemy4 = list(enemy_lead) + rest[:2]
+            oc = make_team(list(our_names), merged, natures, sets=our_sets)
+            ec = make_team(enemy4, merged, natures, sets=enemy_sets)
+            ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)
+                  for c in oc + ec}
+            battle = Battle(oc, ec, typechart, moves_db)
+            _attach_movesets(battle, ms, ec, merged, moves_db, enemy_sets)
+            return battle, ms
+
+        rating = rate_bring(our4, chosen, build, choose, max_turns=turns)
+        rec["exploitability"] = rating.weighted_exploitability
+        rec["severe_turns"] = rating.severe_turns
+        rec["rated_turns"] = rating.total_turns
+        worst = rating.worst_lead
+        if worst:
+            lead, _p, report = worst
+            rec["hardest_lead"] = list(lead)
+            wt = report.worst_turn
+            if wt:
+                from robustness import describe_action
+                rec["worst_turn"] = {
+                    "turn": wt.turn,
+                    "exploitability": wt.exploitability,
+                    "our_play": describe_action(wt.our_action),
+                    "punished_by": describe_action(wt.punisher) if wt.punisher else None,
+                }
+
+    rated = [r for r in verified if "exploitability" in r]
+    unrated = [r for r in verified if "exploitability" not in r]
+    rated.sort(key=lambda d: d["exploitability"])
+    return rated + unrated
 
 
 def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,

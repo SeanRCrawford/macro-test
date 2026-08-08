@@ -1224,12 +1224,68 @@ the metric rather than from being looked for.
   verify stage for a handful of candidates. The cheap 90-configuration screen in
   `search_robust_composition` still does the shortlisting.
 
-### Still to do
+### Wired in (§2r)
 
-`search_robust_composition` itself is unchanged — it reports the new `downside`
-score (§2i) alongside its win counts, but its *ranking* is still win-based.
-Wiring this rating in as the final verify stage, and surfacing it in the Vs Team
-page, is the remaining step.
+`search_robust_composition` now takes `rate_robustness=True` and, when set, adds
+a final stage that audits each survivor and **re-ranks by exploitability rather
+than win count**. The Vs Team page shows the rating, the hardest plausible lead,
+and the specific punish. The cheap 90-configuration screen still does the
+shortlisting — only survivors get the expensive treatment.
+
+---
+
+## 2r. Search effort as a dial, and a search that survives being killed
+
+The robustness rating is orders of magnitude dearer than the screen it refines,
+which forces two things rather than one.
+
+### Effort is a tier, not a constant
+
+`src/search_effort.py` defines four tiers, exposed as a slider on the Vs Team
+page. They vary the things that actually cost time, in the order they cost it:
+how many survivors get audited, against how many of their plausible leads, to
+what depth.
+
+| tier | verify | leads | turns | ~cost | what it is for |
+|---|---|---|---|---|---|
+| Quick | 3 | — | — | 1× | The original behaviour. Ranked by win count. Nothing is lost at the cheap end. |
+| Standard | 3 | 2 | 4 | ~5× | Ranks by exploitability instead of win count. |
+| Thorough | 6 | 4 | 6 | ~25× | The setting to trust before committing to a team. |
+| Exhaustive | 20 | 6 | 8 | ~161× | For finding a hidden team with great lines. Expected to take a long time. |
+
+**`nash` is deliberately not a tier setting.** The audit is always piloted with
+the equilibrium solver, because rating a team while piloting it badly measures
+the pilot rather than the team. What varies is *how much* auditing happens, not
+how well it is done.
+
+### A long search has to be resumable, or it never finishes
+
+The exhaustive tier is only useful if it can be run across many sessions.
+`tools/search_teams.py` works in batches, writes the cache **between** batches,
+and skips completed work on re-run — kill it at any point and you lose at most
+one batch. Verified on a live cache mid-run: **15/56 pairings skipped on
+resume**.
+
+Two details that decide whether a cache helps or hurts:
+
+- **The key includes the effort tier and the turn cap.** A cache that silently
+  serves results computed under a cheaper tier is worse than no cache. Verified:
+  **0/56 reused** when the tier or turn cap changes.
+- **Writes are atomic** (temp file + `os.replace`). The entire point is
+  surviving being killed, and a half-written JSON file would lose the whole run
+  rather than one entry. A corrupt file is also survivable — it starts over
+  rather than refusing to run.
+
+### What this does not solve
+
+Better *prescreening* is the other half of the suggestion and is not built. The
+current screen is `fast_pair_score` over lead pairs, which is cheap but crude —
+it ignores the back two entirely (§2i). The pieces for something better exist:
+the threat matrix (§2e) can rank candidate brings by coverage before any battle
+is simulated, and §4b's matching is exactly a "does this team answer their
+threats" score. Using it as a pre-screen would cut the candidate set before the
+90-configuration sweep rather than after, which is where the leverage is for the
+exhaustive tier.
 
 ---
 

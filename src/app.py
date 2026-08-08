@@ -1514,6 +1514,18 @@ with tab_vs:
                      "script' and 'vs conventional (normal 6/6)' below, instead of one blended "
                      "number.")
             script_team_vs = None if script_team_vs == "None" else script_team_vs
+
+            from search_effort import TIER_ORDER, relative_cost, tier as _tier
+            effort_vs = st.select_slider(
+                "Search effort", options=TIER_ORDER, value="standard",
+                format_func=lambda k: _tier(k)["label"], key="vs_effort",
+                help="How much of the expensive analysis to run. The cheap end "
+                     "is the original behaviour; the dear end audits far more "
+                     "candidates against far more of their plausible leads.")
+            _st = _tier(effort_vs)
+            st.caption(f"{_st['blurb']}  (~{relative_cost(effort_vs):.0f}x the "
+                       f"quick setting)")
+
             vs_nash, vs_depth = solver_controls("vs")
             if vs_nash:
                 st.warning(
@@ -1551,7 +1563,12 @@ with tab_vs:
                                   "Assume a guaranteed enemy lead (6 configs)" else None)
                             rob = search_robust_composition(
                                 vs_team, enemy_roster, merged, moves, natures, typechart, max_turns_vs,
-                                our_sets=vs_sets, verify_top=1, enemy_sets=enemy_sets_vs,
+                                our_sets=vs_sets,
+                                verify_top=max(1, _st["verify_top"] // 3),
+                                rate_robustness=_st["robustness"],
+                                robustness_leads=_st["leads"] or 1,
+                                robustness_turns=_st["turns"] or 1,
+                                enemy_sets=enemy_sets_vs,
                                 fixed_lead=fl,
                                 enemy_script=_so_vs.script_for(script_team_vs) if script_team_vs
                                 else None,
@@ -1601,6 +1618,24 @@ with tab_vs:
             # pick, rather than uniformly over all 90 (which lets a bring no
             # rational opponent makes drag the number down) or by a win count
             # (which says nothing about how badly the losses go).
+            if r.get("exploitability") is not None:
+                e1, e2 = st.columns(2)
+                e1.metric("Exploitability", f"{r['exploitability']:.0f}",
+                          help="What a best-responding opponent gains per turn "
+                               "against this bring's best line, across the leads "
+                               "they would plausibly bring. Lower is better; "
+                               "~180 is one Pokemon. THIS is the robustness "
+                               "number -- the win count above is against a fixed "
+                               "opponent model.")
+                e2.metric("Severely punishable turns",
+                          f"{r.get('severe_turns', 0)}/{r.get('rated_turns', 0)}")
+                wt = r.get("worst_turn")
+                if wt and r.get("hardest_lead"):
+                    st.warning(
+                        f"**Hardest plausible lead: {' / '.join(r['hardest_lead'])}** "
+                        f"— on turn {wt['turn']} they gain {wt['exploitability']:.0f} "
+                        f"by answering `{wt['our_play']}` with `{wt['punished_by']}`.")
+
             if r.get("plausible_brings"):
                 with st.expander("Which of their leads are actually credible?"):
                     st.caption(
