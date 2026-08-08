@@ -8,6 +8,7 @@ USAGE:
     python generate_team.py --beam-width 60        # wider search (slower, better)
     python generate_team.py --top 5                # report the best 5 teams
     python generate_team.py --verify 3             # re-check the top 3 with the real solver
+    python generate_team.py --verify 3 --effort standard   # ...and rank them by exploitability
     python generate_team.py --no-verify            # skip solver verification (fastest)
 
 HOW IT WORKS -- and what the numbers mean:
@@ -28,6 +29,11 @@ HOW IT WORKS -- and what the numbers mean:
   Stage 5  verification: re-run the top teams through the REAL solver
            (the same engine run_search.py uses) so the headline result isn't
            a screening number.
+  Stage 6  (--effort standard or above) rate each finalist by EXPLOITABILITY --
+           how much a best-responding opponent gains against its best line --
+           and re-rank by it. Stages 1-5 all measure a team against opponents
+           this codebase wrote, which rewards beating our own bot; stage 6 is
+           the one that asks whether a good player can punish the team.
 
 IMPORTANT: Stage 2/3/4 numbers come from the fast screener, which plays both
 sides greedily with no lookahead. Stage 5 is the trustworthy one. If a team
@@ -130,7 +136,7 @@ def quick_script_screen(finals, teams, matrix, merged, moves, natures, typechart
 
 
 def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, enemy_pairs,
-                        max_turns=12, all_backs=True, our_sets=None):
+                        max_turns=12, all_backs=True, our_sets=None, effort=None):
     """Re-run this team through the REAL solver.
 
     all_backs=True (default): test EVERY enemy bring-4 -- all C(6,2) lead pairs
@@ -138,7 +144,18 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
     choose their own configuration, so a team only counts as beating an
     opponent if it beats all 90. Sampling one back pair (the old default) let
     compositions look clean while losing to backs never tried.
+
+    `effort` is a search_effort tier name. Anything above "quick" additionally
+    rates each opponent by EXPLOITABILITY -- how much a best-responding player
+    gains against our best line. Without it this function reports only wins
+    against our own scripted opponent, which is the measure the redesign
+    established as biased: a generated team can beat 90/90 configurations and
+    still be one a good player dismantles, because the simulated opponent never
+    tries the punish.
     """
+    from search_effort import tier
+    settings = tier(effort) if effort else None
+    rate = bool(settings and settings["robustness"])
     from matchup_search import search_best_composition, enemy_configs
     results = {}
     for team_name, roster in teams.items():
@@ -158,12 +175,18 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
             # fixed-lead team is also only tested on the lead it actually uses --
             # its other 84 brings are ones it never makes.
             robust = search_robust_composition(team, roster, merged, moves, natures, typechart,
-                                                max_turns, our_sets=our_sets, verify_top=1,
+                                                max_turns, our_sets=our_sets,
+                                                verify_top=settings["verify_top"] if rate else 1,
                                                 fixed_lead=fl,
                                                 enemy_script=script_for(team_name)
                                                 if team_name in SCRIPTS else None,
                                                 script_team=team_name if team_name in SCRIPTS
-                                                else None, enemy_sets=team_enemy_sets)
+                                                else None, enemy_sets=team_enemy_sets,
+                                                rate_robustness=rate,
+                                                robustness_leads=(settings["leads"] or 1)
+                                                if rate else 3,
+                                                robustness_turns=(settings["turns"] or 1)
+                                                if rate else 5)
             if not robust:
                 results[team_name] = None
                 continue
@@ -171,6 +194,10 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
             rec = {
                 "mode": "all_backs", "total": r["solver_total"], "wins": r["solver_wins"],
                 "losses": r["solver_losses"], "our_bring4": r["our_bring4"],
+                "exploitability": r.get("exploitability"),
+                "severe_turns": r.get("severe_turns"),
+                "hardest_lead": r.get("hardest_lead"),
+                "worst_turn": r.get("worst_turn"),
             }
             # Scripted teams (fixed lead + rehearsed opening) are checked the SAME way as
             # any other opponent: search_robust_composition above already plays their
@@ -256,6 +283,14 @@ def main():
                      help="Optimise each team member's item and 4 moves against the specific "
                           "Pokemon in teams.csv, instead of using raw usage defaults")
     ap.add_argument("--max-turns", type=int, default=12, help="Turn cap in verification battles")
+    ap.add_argument("--effort", default="quick",
+                     help="Verification depth: quick / standard / thorough / exhaustive. "
+                          "Anything above 'quick' also rates each generated team by "
+                          "EXPLOITABILITY -- how much a best-responding opponent gains "
+                          "against its best line -- and re-ranks the finalists by it. "
+                          "Win counts alone are a biased measure of team strength, so "
+                          "'quick' answers 'does it beat our bot' and the others answer "
+                          "'does it hold up against a good player'. Slower.")
     ap.add_argument("--deep", action="store_true",
                      help="Verify finalists against EVERY enemy lead with full bring-4 "
                           "(leads AND backs), not just each opponent's toughest lead.")
@@ -457,28 +492,67 @@ def main():
         print()
 
     if not args.no_verify and args.verify > 0:
+        from search_effort import relative_cost, tier
+        settings = tier(args.effort)
+        rating_on = settings["robustness"]
         print("=" * 94)
         print(f"SOLVER VERIFICATION (real engine, not the fast screener) -- top {args.verify} team(s)")
+        print(f"effort: {settings['label']} (~{relative_cost(args.effort):.0f}x quick) -- "
+              f"{'ranked by exploitability' if rating_on else 'win counts only'}")
         print("=" * 94)
+        rated_teams = []
         for rank, (sc, team) in enumerate(finals[:args.verify], start=1):
             print(f"\nTeam #{rank}: {team}")
             t0 = time.time()
             v = verify_with_solver(team, teams, merged, moves, natures, typechart,
                                     matrix, enemy_pairs, args.max_turns,
-                                    all_backs=not args.sample_backs)
+                                    all_backs=not args.sample_backs,
+                                    effort=args.effort)
+            scores = [rec["exploitability"] for rec in v.values()
+                      if rec and rec.get("exploitability") is not None]
+            if scores:
+                rated_teams.append((sum(scores) / len(scores), team, v))
             for team_name, rec in v.items():
                 if rec is None:
                     print(f"  {team_name:<10} -- no result")
                     continue
                 if rec.get("mode") == "all_backs":
                     tag = "CLEAN" if not rec["losses"] else f"{len(rec['losses'])} losses"
-                    print(f"  {team_name:<10} {rec['wins']}/{rec['total']} enemy bring-4s beaten   {tag}")
+                    exp = rec.get("exploitability")
+                    exp_tag = (f"   exploitability {exp:.0f}"
+                               f" ({rec.get('severe_turns') or 0} severe)") if exp is not None else ""
+                    print(f"  {team_name:<10} {rec['wins']}/{rec['total']} enemy bring-4s beaten   {tag}{exp_tag}")
                     for lead, back, w, t in rec["losses"][:4]:
                         print(f"       loses to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} ({w} T{t})")
+                    wt = rec.get("worst_turn")
+                    if wt:
+                        print(f"       worst turn T{wt['turn']}: they gain "
+                              f"{wt['exploitability']:.0f} -- {wt['our_play']}")
+                        print(f"         answered by {wt['punished_by']}")
                 else:
                     status = "WIN " if rec["winner"] == "p1" else ("LOSS" if rec["winner"] == "p2" else "DRAW")
                     print(f"  {team_name:<10} sampled lead {rec['enemy_lead'][0]}/{rec['enemy_lead'][1]:<16} -> {status} T{rec['turns']}")
             print(f"  [{time.time()-t0:.0f}s]")
+
+        # Re-rank the finalists by punishability. The beam search that produced
+        # them ranks on coverage and synergy heuristics, and the block above
+        # ranks on wins against our own opponent model -- neither answers "how
+        # much does a good player get for free against this team".
+        if rated_teams:
+            rated_teams.sort(key=lambda t: t[0])
+            print("\n" + "=" * 94)
+            print("GENERATED TEAMS RANKED BY HOW PUNISHABLE THEY ARE (lower is better)")
+            print("=" * 94)
+            for i, (mean, team, v) in enumerate(rated_teams, start=1):
+                severe = sum((rec.get("severe_turns") or 0) for rec in v.values() if rec)
+                worst = max((rec for rec in v.values()
+                             if rec and rec.get("exploitability") is not None),
+                            key=lambda r: r["exploitability"], default=None)
+                worst_name = next((n for n, rec in v.items() if rec is worst), None)
+                print(f"{i}. {mean:7.1f}   {severe:>2} severe   {', '.join(team)}")
+                if worst_name:
+                    print(f"          worst matchup: {worst_name} "
+                          f"({worst['exploitability']:.0f})")
 
     print("\nReminder: coverage/margin numbers above the verification block come from the fast")
     print("screener (greedy, no lookahead). The verification block is the trustworthy one.")
