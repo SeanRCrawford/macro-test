@@ -263,6 +263,51 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
 
 
 KO_WEIGHT = 180.0  # see heuristic_eval: a secured KO must dominate the HP-differential
+
+
+# ---------------------------------------------------------------------------
+# Functional value (design doc 4d, "1 HP is infinitely more than 0 HP")
+# ---------------------------------------------------------------------------
+# Wolfe Glick's article is written directly against a linear HP term: "All of
+# your Pokemon will function in EXACTLY the same way no matter how much health
+# they have left -- a Pokemon at low HP won't do less damage than if it was
+# fully healthy."
+#
+# Worth being precise about what this evaluation already does, because the
+# obvious reading ("add a step at zero") is a change it has largely made
+# already. Per ALIVE Pokemon the two terms contribute:
+#
+#     KO term   _ko_threat_value in [0.35, 1.35] * KO_WEIGHT  ->   63..243 points
+#     HP term   current_hp_frac                  * 100        ->     0..100 points
+#
+# so dying already costs far more than being chipped to 1 HP. The real open
+# question is not whether there is a step but whether the BALANCE between the
+# two is right -- and that is a single number, which can be swept and measured
+# rather than argued about.
+#
+# FUNCTIONAL_FLOOR is that number: the share of a Pokemon's HP-term value it
+# keeps merely by being alive.
+#
+#     0.0  purely linear in HP            (the behaviour before Phase A4)
+#     0.5  half of the HP term is "alive", half is remaining bulk
+#     1.0  HP is irrelevant; only the alive count matters
+#
+# Chip damage must keep costing something -- it moves a Pokemon toward dying,
+# and a pure step would make it free -- so the useful range is interior.
+FUNCTIONAL_FLOOR = 0.0
+
+
+def _functional_hp(c: Combatant) -> float:
+    """HP-term contribution of one living Pokemon.
+
+    Kept antisymmetric-safe: identical for both rosters, and a hidden Pokemon
+    (necessarily at full HP) evaluates to 1.0 at any floor, so revealing one
+    still cannot manufacture value. See the reveal-incentive note on
+    leaf_value.
+    """
+    if c.fainted:
+        return 0.0
+    return FUNCTIONAL_FLOOR + (1.0 - FUNCTIONAL_FLOOR) * c.current_hp_frac
                     # noise a forced enemy replacement introduces
 
 
@@ -308,8 +353,8 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     # mons at their (always 1.0) HP fraction leaks nothing -- the old filter was
     # guarding against a disclosure that cannot happen for this term, at the cost
     # of the asymmetry above.
-    my_hp = sum(c.current_hp_frac for c in my.roster if not c.fainted)
-    opp_hp = sum(c.current_hp_frac for c in opp.roster if not c.fainted)
+    my_hp = sum(_functional_hp(c) for c in my.roster if not c.fainted)
+    opp_hp = sum(_functional_hp(c) for c in opp.roster if not c.fainted)
 
     # KOing a Pokemon forces a replacement, which is immediately "seen" and enters
     # at full HP -- so opp_hp can go UP the instant we secure a kill (we removed 0.x

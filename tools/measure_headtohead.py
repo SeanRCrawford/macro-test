@@ -12,10 +12,23 @@ change is an IMPROVEMENT:
 
 Winning games is the thing we actually care about, so measure that: side p1
 picks with configuration A, side p2 with configuration B, same starting
-position, and see who is standing at the end. Sides are swapped for half the
-matchups so a first-player advantage cannot masquerade as an evaluation edge.
+position, and see who is standing at the end.
+
+EVERY MATCHUP IS PLAYED TWICE, once with the candidate on each side, and both
+results are counted. That is not a refinement -- it is what makes the harness
+mean anything. An earlier version swapped sides on ALTERNATE matchups instead,
+which sounds equivalent and is not: the two halves are then different matchups,
+so any per-matchup skew survives the swap. Running the null case through it
+(candidate configured identically to baseline, which must by definition score
+50%) returned 44%, enough bias to swamp the effects being measured. With paired
+play the two games of a pair cancel exactly when the configurations agree, so
+the null is 50% by construction -- verified by `--setting X --weight v
+--baseline v`.
+
+Always run that null before trusting a result from this tool.
 """
 import argparse
+import itertools
 import sys
 
 from _harness import enemy_bring, load_world, setup_battle, step
@@ -28,14 +41,20 @@ MAX_TURNS = 14
 
 
 class Config:
-    """One evaluation setup, applied by mutating the solver's module globals."""
+    """One evaluation setup, applied by mutating the solver's module globals.
 
-    def __init__(self, name, coverage_weight):
+    Any tunable in solver can be driven from here; the two currently swept are
+    COVERAGE_WEIGHT (answer preservation, section 4b) and FUNCTIONAL_FLOOR (the
+    HP shaping of section 4d).
+    """
+
+    def __init__(self, name, **settings):
         self.name = name
-        self.coverage_weight = coverage_weight
+        self.settings = settings
 
     def apply(self):
-        solver.COVERAGE_WEIGHT = self.coverage_weight
+        for key, value in self.settings.items():
+            setattr(solver, key, value)
 
 
 def pick(battle, side, movesets, config):
@@ -89,54 +108,64 @@ def matchups(world, bring_variants):
     for team_name in world["teams"]:
         roster = list(world["teams"][team_name])
         default = enemy_bring(team_name, world)
-        out.append((team_name, default))
+        chosen = [tuple(default)]
         seen = {tuple(sorted(default))}
-        for start in range(1, len(roster)):
-            four = (roster[start:] + roster[:start])[:4]
-            if len(four) < 4:
-                continue
+        # Genuine four-of-six combinations rather than rotations: a six-Pokemon
+        # roster has 15 of them, which is the difference between a sample that
+        # can resolve a five-point effect and one that cannot.
+        for four in itertools.combinations(roster, 4):
+            if len(chosen) >= bring_variants:
+                break
             sig = tuple(sorted(four))
             if sig in seen:
                 continue
             seen.add(sig)
-            out.append((team_name, four))
-            if len([x for x in out if x[0] == team_name]) >= bring_variants:
-                break
+            chosen.append(four)
+        out.extend((team_name, list(four)) for four in chosen)
     return out
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--setting", default="COVERAGE_WEIGHT",
+                    help="solver global to vary (e.g. FUNCTIONAL_FLOOR)")
     ap.add_argument("--weight", type=float, default=0.25,
-                    help="COVERAGE_WEIGHT for configuration B (A is always 0)")
+                    help="value of --setting for the candidate")
+    ap.add_argument("--baseline", type=float, default=0.0,
+                    help="value of --setting for the baseline")
     ap.add_argument("--brings", type=int, default=4,
                     help="enemy bring variants per team (sample size multiplier)")
     args = ap.parse_args()
 
     world = load_world()
-    baseline = Config("coverage-off", 0.0)
-    candidate = Config(f"coverage-{args.weight}", args.weight)
+    baseline = Config(f"{args.setting}={args.baseline}",
+                      **{args.setting: args.baseline})
+    candidate = Config(f"{args.setting}={args.weight}",
+                       **{args.setting: args.weight})
     pairs = matchups(world, args.brings)
     print(f"{len(pairs)} games ({len(world['teams'])} teams x up to "
           f"{args.brings} brings)\n")
 
     wins = losses = draws = 0
-    original = solver.COVERAGE_WEIGHT
+    original = {k: getattr(solver, k)
+                for k in set(baseline.settings) | set(candidate.settings)}
     try:
-        for i, (team_name, enemy4) in enumerate(pairs):
-            # Swap sides on alternate matchups so any first-player edge cancels.
-            if i % 2 == 0:
-                result = play(OUR_TEAM, enemy4, world, candidate, baseline)
-            else:
-                result = -play(OUR_TEAM, enemy4, world, baseline, candidate)
-            label = {1: "WIN ", -1: "LOSS", 0: "DRAW"}[result]
-            print(f"  {label}  {team_name:<18} vs {','.join(x[:9] for x in enemy4)}",
-                  flush=True)
-            wins += result == 1
-            losses += result == -1
-            draws += result == 0
+        for team_name, enemy4 in pairs:
+            # Paired play: the SAME matchup with the candidate on each side.
+            # When the configurations agree these two cancel exactly, which is
+            # what pins the null at 50%.
+            results = (play(OUR_TEAM, enemy4, world, candidate, baseline),
+                       -play(OUR_TEAM, enemy4, world, baseline, candidate))
+            labels = "".join({1: "W", -1: "L", 0: "D"}[r] for r in results)
+            print(f"  {labels}  {team_name:<18} vs "
+                  f"{','.join(x[:9] for x in enemy4)}", flush=True)
+            for r in results:
+                wins += r == 1
+                losses += r == -1
+                draws += r == 0
     finally:
-        solver.COVERAGE_WEIGHT = original
+        for k, v in original.items():
+            setattr(solver, k, v)
 
     total = wins + losses + draws
     decisive = wins + losses

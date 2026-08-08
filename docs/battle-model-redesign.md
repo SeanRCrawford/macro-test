@@ -376,18 +376,19 @@ n = 8 is far too small to claim the term is *worse* — 3–5 is well inside noi
 But there is no evidence it is better. Parked rather than deleted.
 
 **Update after caching (§2f):** the cost objection has largely been answered —
-a matrix cell is now **1.83×**, not 4.35× — and the term was re-tested at a
-proper sample size. Over **40 games**: 16 W / 23 L / 1 D, a **41% win rate,
-95% CI [25%, 57%]**. Still not statistically distinguishable from baseline, but
-that is now three independent samples (38%, 38%, 41%) whose point estimates all
-sit *below* 50%. The verdict is unchanged and better supported:
-`COVERAGE_WEIGHT` stays 0.0.
+a matrix cell is now **1.83×**, not 4.35×.
 
-The leading hypothesis for why is recorded above and in
-`tests/test_coverage_term.py`: `coverage_differential`'s second half moves when
-our roster size changes, so the antisymmetric wrapper is a noisier signal than
-the coverage figure it is built from. Fixing *that* — rather than reweighting —
-is what a fourth attempt should try.
+**Correction (§2g): the win-rate figures above were measured on a biased
+harness and should be disregarded.** The 38% / 38% / 41% readings, and the
+inference that three samples "all sit below 50%", were artifacts — that harness
+scored **44% on its own null case**. Re-measured on the fixed harness over
+**160 games**, the coverage term scores **49%, 95% CI [42%, 57%]**: neutral, not
+mildly harmful.
+
+`COVERAGE_WEIGHT` still stays 0.0, but for the correct reason — **no measurable
+benefit, at a 1.83× cost per cell** — rather than because it looked actively
+bad. The `coverage_differential` hypothesis recorded above and in
+`tests/test_coverage_term.py` remains the thing a fourth attempt should fix.
 
 Three things surfaced that are worth keeping regardless of the verdict.
 
@@ -464,6 +465,89 @@ mis-handled Fairy/Dark Aura. Now fixed, with screens applied per category
 This is the same lesson as §2d in a different guise: the failure mode of an
 optimisation here is not a crash but a plausible wrong number, so each
 dependency needs a test that deliberately breaks it.
+
+---
+
+## 2g. Phase A4, and a measurement instrument that was lying
+
+### The harness was biased, and it invalidated earlier conclusions
+
+`measure_headtohead.py` originally swapped sides on **alternate matchups**. That
+sounds equivalent to swapping properly and is not: the two halves are then
+*different matchups*, so any per-matchup skew survives the swap instead of
+cancelling.
+
+This was caught by finally running the control that should have come first —
+configure the candidate **identically** to the baseline, which must by
+definition score 50%. It scored **44%**. That is comfortably enough bias to
+swamp the effects being measured, and it means every head-to-head number
+reported before this point was unsound, including the coverage verdict in §2e.
+
+Fixed by **paired play**: every matchup is played twice, once with the
+candidate on each side, and both results counted. When the configurations agree
+the two games cancel exactly, so the null is 50% *by construction* — verified,
+39 W / 39 L / 2 D over 80 games. The tool's docstring now says to run the null
+before trusting any result from it.
+
+The lesson generalises past this harness, and is the third instance of the same
+shape in Phase A (after §2d's reveal incentive and §2f's stale-cache traps):
+**the failure mode of measurement code is a plausible wrong number, not a
+crash.** A null case is the cheapest possible defence and it was skipped.
+
+### A4 result: reshaping the HP term does nothing measurable
+
+§8b.1 established that "1 HP is infinitely more than 0 HP" is about **HP
+non-linearity**, not damage rolls. Implementing it turned out to need a smaller
+change than expected, because the evaluation already encodes most of the claim.
+Per **alive** Pokémon:
+
+```
+KO term   _ko_threat_value in [0.35, 1.35] x KO_WEIGHT  ->   63..243 points
+HP term   current_hp_frac                  x 100        ->     0..100 points
+```
+
+Dying already costs far more than being chipped to 1 HP. So the open question
+was never "is there a step" but **"is the balance between the two right"** —
+one number, `FUNCTIONAL_FLOOR`, the share of a Pokémon's HP-term value it keeps
+merely by being alive. `0.0` is the previous linear behaviour, `1.0` ignores HP
+entirely.
+
+Measured on the fixed harness:
+
+| `FUNCTIONAL_FLOOR` | games | win rate | 95% CI |
+|---|---|---|---|
+| 0.25 | 80 | 55% | [44%, 66%] |
+| 0.25 | **240** | **51%** | **[44%, 57%]** |
+| 0.50 | 80 | 48% | [37%, 58%] |
+| 0.75 | 80 | 43% | [32%, 54%] |
+
+The promising 55% at n=80 **did not survive** tripling the sample — it fell to
+51%, which is nothing. `FUNCTIONAL_FLOOR` stays `0.0`, with the knob and its
+tests kept so the question can be reopened cheaply.
+
+That n=80 → n=240 collapse is worth remembering on its own: at 80 games the
+95% interval is roughly ±11 points, so this harness simply cannot see effects
+smaller than about ten points, and reading a point estimate without its interval
+would have shipped a non-improvement.
+
+### What Phase A's negative results actually say
+
+Two evaluation terms with strong backing in the VGC literature — answer
+preservation and functional HP value — were implemented, tested, and measured
+at **49%** and **51%**. Neither is worth its cost.
+
+That is a real result rather than a failure, and it points somewhere specific.
+§2b (re-measured, §2d) found the current architecture cannot represent the
+right answer on **83% of turns**, because the equilibrium is mixed and the
+solver can only return a pure strategy. Phase A has now shown that *evaluation*
+changes of the kind the literature suggests do not move win rate detectably. The
+two findings agree: **the binding constraint is representational, not
+evaluative**, which is precisely the argument for Phase B and against further
+evaluation tuning.
+
+The threat matrix (§2e) is kept regardless — it is infrastructure for action
+pruning, double-oracle seeding and the answer map, none of which depend on the
+coverage term.
 
 ---
 
