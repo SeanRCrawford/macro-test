@@ -69,9 +69,21 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
 
 
 def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo,
-                           typechart: dict, field: FieldState, num_hit: int = 1) -> float:
+                           typechart: dict, field: FieldState, num_hit: int = 1,
+                           battle=None) -> float:
     if move.power == 0:
         return 0.0
+    power = move.power
+    # Last Respects' true power depends on the attacker's fainted-ally count, which
+    # needs the battle/side context this function doesn't otherwise take -- see the
+    # matching computation in battle.py's _resolve_move. Only estimated when a
+    # caller passes `battle` (move-choice comparisons that matter, e.g.
+    # action_value); target-selection pruning doesn't need it since a uniform power
+    # scale doesn't change which target looks best.
+    if move.name == "Last Respects" and battle is not None:
+        side = battle.side_of(attacker)
+        fainted_allies = sum(1 for c in side.roster if c is not attacker and c.fainted)
+        power = min(200, 50 + 50 * fainted_allies)
     atk_key = "atk" if move.category == "Physical" else "spa"
     def_key = "def" if move.category == "Physical" else "spd"
     atk_stat = effective_stat(attacker.stats[atk_key], attacker.stages[atk_key])
@@ -80,7 +92,7 @@ def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo
     if attacker.item == "Choice Specs" and atk_key == "spa":
         atk_stat *= 1.5
     def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
-    _, _, avg, _ = damage_roll(50, move.power, atk_stat, def_stat, attacker, target, move,
+    _, _, avg, _ = damage_roll(50, power, atk_stat, def_stat, attacker, target, move,
                                 typechart, weather=field.weather, num_targets_hit=num_hit)
     return avg
 
@@ -210,7 +222,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
             total_dealt = 0.0
             for t in a.targets:
                 dmg = quick_damage_estimate(c, t, a.move, battle.typechart, battle.field,
-                                             num_hit=len(a.targets) if is_spread_move(a.move.target) else 1)
+                                             num_hit=len(a.targets) if is_spread_move(a.move.target) else 1,
+                                             battle=battle)
                 pct = 100.0 * min(dmg, t.current_hp) / t.max_hp() if t.max_hp() else 0.0
                 # An allAdjacent move (Earthquake, Surf, Discharge) also hits our own
                 # partner -- that damage counts AGAINST the move, not for it.
@@ -449,6 +462,83 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
             best_sim = sim
 
     return best_action, best_score, best_sim
+
+
+def punish_check(battle: Battle, my_side_name: str, our_action: list, movesets: dict, cap: int = 40):
+    """Given a candidate joint action for `my_side_name` THIS turn, is there a
+    legal response of the opponent's that really punishes it -- an immediate KO
+    of one of ours this turn, or (if not KO'd immediately) a KO on their very
+    next follow-up that our best defensive play couldn't prevent?
+
+    This is the concrete worry behind "assumed they'd do X, they did Y instead":
+    e.g. we target their Garchomp with a Dragon move assuming it stays in, but
+    they switch it for a Fairy-type immune to Dragon and we eat a hit instead;
+    or we split our attacks assuming they Protect one specific slot, but they
+    Protect the other and the assumption costs us a Pokemon. Every one of their
+    LEGAL joint actions is tried (including switches), not just their greedy
+    pick or scripted line -- worst response wins.
+
+    Returns {"punished": bool, "kind": "immediate" | "next_turn" | None,
+             "their_action": [(name, kind, move_name, [targets]), ...] or None}.
+    "immediate": one of our currently-active Pokemon faints resolving THIS turn.
+    "next_turn": survives this turn, but even our own best response (solve_best_action)
+    loses one of ours on the very next turn -- i.e. this turn's choice didn't
+    actually buy safety, just delayed the loss by one turn.
+    """
+    my_side = battle.p1 if my_side_name == "p1" else battle.p2
+    opp_side = battle.p2 if my_side_name == "p1" else battle.p1
+    my_alive_before = sum(1 for c in my_side.roster if not c.fainted)
+
+    their_options = our_candidate_joint_actions(battle, opp_side, my_side, movesets,
+                                                  battle.turn_num + 1)[:cap]
+
+    worst = None  # (rank, kind, their_action_desc)
+    for their_joint in their_options:
+        sim = copy.deepcopy(battle)
+        sim.rng = None
+        sim.tie_bias = battle.tie_bias
+        sim_my_side = sim.p1 if my_side_name == "p1" else sim.p2
+        sim_opp_side = sim.p2 if my_side_name == "p1" else sim.p1
+
+        my_map = {id(o): n for o, n in zip(my_side.roster, sim_my_side.roster)}
+        opp_map = {id(o): n for o, n in zip(opp_side.roster, sim_opp_side.roster)}
+        full_map = {**my_map, **opp_map}
+
+        def remap(a: Action) -> Action:
+            return Action(full_map.get(id(a.combatant), a.combatant), a.side, a.kind, a.move,
+                          [full_map.get(id(t), t) for t in a.targets])
+
+        my_joint_r = [remap(a) for a in our_action]
+        their_joint_r = [remap(a) for a in their_joint]
+        p1_actions = my_joint_r if my_side_name == "p1" else their_joint_r
+        p2_actions = their_joint_r if my_side_name == "p1" else my_joint_r
+        try:
+            sim.run_turn(p1_actions, p2_actions)
+        except ValueError:
+            continue
+
+        my_alive_after = sum(1 for c in sim_my_side.roster if not c.fainted)
+        kind = None
+        if my_alive_after < my_alive_before:
+            kind = "immediate"
+        elif not sim.is_over():
+            _, _, sim2 = solve_best_action(sim, my_side_name, movesets, depth=1)
+            if sim2 is not None:
+                sim2_my_side = sim2.p1 if my_side_name == "p1" else sim2.p2
+                my_alive_next = sum(1 for c in sim2_my_side.roster if not c.fainted)
+                if my_alive_next < my_alive_after:
+                    kind = "next_turn"
+
+        if kind is not None:
+            rank = 2 if kind == "immediate" else 1
+            if worst is None or rank > worst[0]:
+                desc = [(a.combatant.name, a.kind, a.move.name if a.move else "-",
+                        [t.name for t in a.targets]) for a in their_joint]
+                worst = (rank, kind, desc)
+
+    if worst is None:
+        return {"punished": False, "kind": None, "their_action": None}
+    return {"punished": True, "kind": worst[1], "their_action": worst[2]}
 
 
 if __name__ == "__main__":

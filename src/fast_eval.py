@@ -96,7 +96,7 @@ def _pick_greedy_action(battle: Battle, c: Combatant, side_key: str, foes: list,
         # every attack outrank every status move regardless of board state.
         def _pct(target, nhit):
             dmg = quick_damage_estimate(c, target, move, battle.typechart, battle.field,
-                                         num_hit=nhit)
+                                         num_hit=nhit, battle=battle)
             pct = 100.0 * min(dmg, target.current_hp) / target.max_hp() if target.max_hp() else 0.0
             return pct, dmg
 
