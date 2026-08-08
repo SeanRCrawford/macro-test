@@ -220,6 +220,27 @@ with no LP dependency — a few hundred iterations of pure arithmetic over a
 cached payoff matrix. Worth considering to avoid adding `scipy.optimize.linprog`
 as a dependency, though scipy is likely already present.
 
+### What this is *not*: a note on CFR tractability
+
+Anyone arriving from poker solvers will raise the standard objection, and it
+was raised verbatim in the Smogon thread (§9): *vanilla CFR+ requires solving
+the entire game tree, and growing-tree CFR requires a value estimator that is
+tricky and expensive to train.* Both halves are true, and neither applies here,
+because **we are not running CFR over the game tree.**
+
+The object being solved is a **single turn's payoff matrix**, whose cells are
+one `run_turn` scored by a hand-written leaf evaluation (§4). There is no
+full-tree traversal, and no learned value function to train — the leaf value is
+`heuristic_eval`, which already exists. "Regret matching" above refers only to
+the *inner solver for one matrix*, used as an alternative to an LP; it is not
+CFR over an extensive-form game, and the resemblance in name is the only thing
+the two share.
+
+This is what makes the §2 cost numbers credible, and it is the reason this
+design is tractable in a way full-game CFR would not be. The corresponding
+weakness is the honest one: our equilibrium is only as good as the leaf value,
+which is exactly why Phase A comes first.
+
 ---
 
 ## 4. Evaluation function overhaul
@@ -272,11 +293,21 @@ and why removing their check to *our* win condition is worth more than its HP.
 Average-roll determinism is the wrong abstraction for exactly the situations
 that decide games. But 16 rolls per damage event is a combinatorial explosion.
 
-The prior art here is **Damage Roll Grouping** (used by *FoulPlay*, the winning
-entry in the PokéAgent Challenge): group the 16 rolls into equivalence classes
-by *outcome* — typically {kills, doesn't kill}, sometimes 3 buckets — and weight
-branches by class probability. Cost goes from ×16 to ×2, and it preserves the
-only distinction that matters: **did it die**.
+The technique is **outcome bucketing**: group the 16 rolls into equivalence
+classes by *outcome* — typically {kills, doesn't kill}, sometimes 3 buckets —
+and weight branches by class probability. Cost goes from ×16 to ×2, and it
+preserves the only distinction that matters: **did it die**.
+
+> **Correction (§9):** the previous draft attributed this to *FoulPlay* as
+> prior art. That attribution is **wrong, and backwards.** I read the source:
+> `poke-engine`, the engine FoulPlay searches with, defines
+> `pub enum DamageRolls { Average, Min, Max }` and applies a flat multiplier
+> (`×0.925`, `×0.85`, `×1.0`) — i.e. **exactly the min/max/avg scheme this
+> section proposes to replace**, with the instruction generator calling
+> `DamageRolls::Max`. There is no bucketing anywhere in it. So this idea has
+> no external prior art behind it in the sources we have; it stands or falls
+> on the engine-fidelity argument below, which is checkable against our own
+> `damage.py`.
 
 Concretely: replace the `min/max/avg` roll mode with an outcome-bucketed
 distribution, and make the leaf value an expectation over buckets. This makes
@@ -354,20 +385,92 @@ bring either. Team preview is a simultaneous game:
 B[our bring][their bring] = result of that 4v4
 ```
 
-Solving `B` for its Nash equilibrium instead of taking worst-case gives:
+The previous draft proposed solving `B` for its **Nash equilibrium** and taking
+the equilibrium *support* as the set of credible brings, with double oracle to
+materialise only that support. **That is now revised** — see below. The part
+that survives unchanged is the framing: preview is simultaneous, not worst-case,
+and today's uniform-over-90 is wrong.
 
-- **A mixed bring strategy** (correct: good players do vary brings)
-- **Which of their 90 brings are actually credible** — the equilibrium support.
-  Most of the 90 are strictly dominated and no rational opponent picks them.
-  Today we spend equal compute on all 90 and let a strawman bring drag a team's
-  score down.
-- **Double oracle applies here too**, and this is where it pays for itself: we
-  currently pay 90 × 6 variants × 3 candidates = 1620 games. Double oracle
-  would materialise the credible support only — plausibly 10–20× less work,
-  which is where the 121 s King run gets its real speedup.
+### 6a. Revised: bounded rationality, not equilibrium
 
-This directly serves the brief's "solve the easier 6/6 problem": a guaranteed
-lead is just conditioning `B` on a row.
+Equilibrium support is the wrong model of a real opponent's bring, for a reason
+that is easy to state and hard to get around: **real players bring somewhat
+unexpected leads, even though they won't bring their worst.** Nash support is a
+hard cutoff — a bring is either in the support or it has probability zero — and
+that cutoff is exactly what a real opponent violates. It is also fragile in a
+way that compounds with §10's argument: support membership is decided by cell
+values we have measured to be biased, so a hard cutoff turns a noisy number
+into a categorical claim.
+
+The better model is a **soft plausibility weight over all 90**, not a
+partition into credible and impossible:
+
+```
+P(their bring j) ∝ exp( value_to_them(j) / τ )
+```
+
+A logit / quantal-response weighting, with one tunable temperature `τ`. The
+useful property is that `τ` spans everything of interest, and both current
+proposals are its endpoints:
+
+| `τ` | Behaviour | Corresponds to |
+|---|---|---|
+| `τ → ∞` | uniform over all 90 | **today's `search_robust_composition`** |
+| `τ` mid | good brings likelier, bad brings rare but possible | the model we actually want |
+| `τ → 0` | all mass on their best response | Nash support / the previous draft |
+
+This is strictly more honest than either endpoint, and it is *far* cheaper to
+build than an equilibrium solve: it is a weighting over the 90 we already
+enumerate, with no LP, no double oracle, and no fixed-point iteration. `τ` can
+be fitted later against real games; until then it is one number to tune, and
+its effect is inspectable.
+
+### 6b. The objective: don't lose to a bad lead
+
+"How many of the 90 do we beat" is a count. Nash gives an expected value.
+Neither matches the actual goal, which is **not to lose on a bad lead
+match-up** — an asymmetric, downside-focused objective. Formally that is a
+tail measure over the plausibility-weighted distribution rather than a mean or
+a worst case:
+
+```
+score(our bring) = CVaR_α over j ~ P(j) of  B[our bring][j]
+```
+
+i.e. the average outcome across the worst `α` fraction of *plausible* brings.
+Two knobs, both meaningful: `τ` says how sharp the opponent is, `α` says how
+much we care about the tail. Setting `α = 1` recovers the mean; `α → 0` with
+`τ → ∞` recovers today's worst-case-over-90. The recommendation is a middle
+setting on both, and the deliverable is a metric that says "against the brings
+they would plausibly pick, your bad match-ups look like *this*" — which is the
+question actually being asked.
+
+This also disposes of the strawman-bring problem without pruning anything: an
+absurd bring gets a small weight rather than being deleted, so it can still
+show up in the tail if it is *catastrophic* for us, which is the one case where
+we do want to hear about it. Hard support-pruning would silently drop exactly
+that case.
+
+### 6c. What this costs, and what it gives up
+
+The runtime win shrinks, and that should be stated plainly. Double oracle
+promised 10–20× by never materialising most of the 90; a weighting over all 90
+materialises all of them and saves nothing by itself. Recovering runtime now
+means ordinary approximation rather than an exactness guarantee: evaluate all
+90 cheaply (Tier 0/1), then re-evaluate only the top and bottom slices at
+Tier 2 — the tail is what the objective reads, and the middle barely moves
+`CVaR`. That is a sampling argument, not a proof, and unlike double oracle it
+gives up the "no accuracy lost" guarantee. Given §10's finding that the cells
+are biased anyway, an exactness guarantee over biased cells was worth less than
+it appeared.
+
+What is genuinely lost: the **credible-bring list** as a crisp equilibrium
+support (§7 listed it as a user-facing output). It becomes a *ranked
+plausibility list* instead — arguably more useful to show, and certainly more
+honest, but it is a ranking, not a set.
+
+This still serves the brief's "solve the easier 6/6 problem": a guaranteed lead
+is just conditioning `B` on a row.
 
 ---
 
@@ -379,17 +482,27 @@ Keep the existing screen-then-verify shape; add tiers rather than replacing.
 |---|---|---|---|
 | 0 | `fast_eval` greedy-vs-greedy | ~1 ms | Pair matrix, beam search over thousands of teams |
 | 1 | Current expectimax vs greedy | 0.05 s/game | Broad sweeps where a rough verdict suffices |
-| 2 | **Double-oracle Nash per turn** (new) | ~0.04 s/game | Real verification, Vs Team, Battle Viewer, punish analysis |
-| 3 | **Preview-level double oracle** (new) | seconds | Bring selection, team rating, the headline number |
+| 2 | **Double-oracle Nash per turn** (new) | ~0.04 s/game at depth 1; **est. 0.2–0.5 s/game at the required depth 2** | Real verification, Vs Team, Battle Viewer, punish analysis |
+| 3 | **Plausibility-weighted preview** (new, revised — §6) | seconds | Bring selection, team rating, the headline number |
 
-Tier 2 replacing Tier 1 as the default is *cost-neutral* per the §2 numbers.
+~~Tier 2 replacing Tier 1 as the default is *cost-neutral* per the §2 numbers.~~
+**No longer true.** That claim rested on a depth-1 solve. Phase B requires
+depth 2 (§10), which is an estimated ~10× on top, or ~5× with selective
+deepening. Tier 2 is therefore *cheaper than a naive full matrix* but **not**
+free relative to Tier 1, and the replace-or-parallel decision (open question 3)
+can no longer be settled by appealing to cost-neutrality. Needs the depth-2
+measurement first.
 
 New user-facing outputs this unlocks, all of which the current model cannot
 express:
 
 - **Exploitability score** per team ("a perfect opponent gains X against you")
 - **Mixed-strategy recommendations** ("T1: Fake Out Gengar 70% / Protect 30%")
-- **Credible-bring list** from equilibrium support, instead of 90 rows
+- **Ranked plausibility list** of their brings (§6a), instead of 90 flat rows —
+  a ranking rather than the crisp equilibrium-support set the previous draft
+  promised
+- **Downside score** — "against the brings they'd plausibly pick, your worst
+  match-ups look like this" (§6b), replacing "beats N/90"
 - **Answer map** from the threat matrix — who on your team answers what
 - **Roll-sensitivity** — which wins are 15/16 and which are 8/16
 
@@ -427,7 +540,7 @@ the placeholder claimed.
 | Preserving an answer | Max-weight bipartite matching | §4b | "What Pokémon can you absolutely not afford to lose? **If you lose a Pokémon, what Pokémon on their team are freed from its pressure?**" (*team-preview*, Traylor). Independently in *bo1*: "Have answers against all 6 of your opponent's Pokémon" |
 | Speed as a component of threat | `outspeeds` in `T` | §4a | "Which Pokémon is moving first this turn? … Speed plays an important role in pressure" (*pressure*) |
 | Team preview is a game | Preview-level matrix game | §6 | Traylor states the fixed point in prose: "I imagine my opponent asking themselves **the same questions that I'm asking myself, but from their point of view**" |
-| Most brings are dominated | Equilibrium support | §6 | "Can you rule out any Pokémon on each side? … If you can eliminate some of their potential options, you can get a better idea of what Pokémon they will actually bring" (*team-preview*) |
+| Most brings are implausible | Low plausibility weight, §6a (*not* equilibrium support — see §6a for why the hard cutoff was dropped) | §6 | "Can you rule out any Pokémon on each side? … If you can eliminate some of their potential options, you can get a better idea of what Pokémon they will actually bring." Note the article immediately hedges: "**Be careful, though: opponents don't always act how you think they will**" — a soft weighting, not a partition |
 | Bring strategy must mix | Preview equilibrium is mixed, not pure | §6 | "Many teams have **more than one mode and will force you to choose to prepare for one of them**" (*team-preview*). You cannot cover all modes; therefore no pure bring is optimal — this is the direct argument against today's worst-case-over-90 |
 
 The §4b confirmation is the strongest result here. Traylor's formulation —
@@ -715,20 +828,72 @@ rather than a blocked one. The Metamon arXiv ID was spot-checked and is
 correct: 2504.04395 is Grigsby, Xie, Sasek, Zheng & Zhu, *Human-Level
 Competitive Pokémon via Scalable Offline Reinforcement Learning with
 Transformers* — note it is **Singles**, not VGC doubles, which limits how
-directly its results transfer. The Smogon thread is the highest-value unread
-item, since §8 has now independently arrived at much of what its title claims.
+directly its results transfer.
+
+Per-item verification status is marked below: **[verified]** means I read the
+source, **[partly verified]** means some claims held and others could not be
+checked, **[unverified]** means it is still a search-summary lead.
 
 - **Ihara et al. (2018)**, *Implementation and Evaluation of Information Set
   Monte Carlo Tree Search for Pokémon* (IEEE) — compares Cheating MCTS,
-  Determinized MCTS and ISMCTS on Pokémon; motivates ISMCTS via strategy fusion.
-- **FoulPlay** — winner, PokéAgent Challenge. Root-parallelised MCTS, custom
-  Rust engine, **Damage Roll Grouping** (§4c). Reported finding: specialised
-  search/RL still clearly beats generalist LLMs here.
+  Determinized MCTS and ISMCTS on Pokémon; motivates ISMCTS via strategy
+  fusion. **[unverified]** — ieeexplore is still egress-blocked (418). Since
+  §5 only cites this to motivate deferring ISMCTS to Phase E, nothing currently
+  rests on it.
+- **FoulPlay** — **[verified by source read; one claim refuted].**
+  `pmariglia/foul-play` is a Pokémon Showdown battle bot that "uses poke-engine
+  to search through battles". `pmariglia/poke-engine` is confirmed **Rust with
+  Python bindings**, implementing expectiminimax, iterative deepening and MCTS
+  (`src/mcts.rs`, `src/mcts_threaded.rs` — the latter supports the
+  root-parallelisation claim).
+
+  **The Damage Roll Grouping attribution is false.** `src/genx/damage_calc.rs`
+  defines `pub enum DamageRolls { Average, Min, Max }` — three flat multipliers
+  (`×0.925`, `×0.85`, `×1.0`) — and `src/genx/generate_instructions.rs` calls
+  `calculate_damage(..., DamageRolls::Max)`. There is no bucketing, no
+  outcome-equivalence-class grouping, and no per-class probability weighting
+  anywhere in the engine. The enum is even marked `#[allow(dead_code)]`. This
+  is **precisely the min/max/avg scheme §4c proposes to replace** — so the
+  previous draft cited, as prior art for the fix, an engine that has the bug.
+
+  The PokéAgent Challenge win remains unverified (pokeagent.github.io is
+  egress-blocked), but it no longer matters: it was only ever load-bearing as
+  authority for the roll-grouping claim, and that claim is now refuted on its
+  own terms. §4c has been rewritten to stand on the engine-fidelity argument,
+  which is checkable against our own `damage.py` and needs no citation. **The
+  phase ordering in §10 is unaffected** — if anything this reinforces C's
+  demotion, since we now know of no engine that does it.
 - **Metamon** — *Human-Level Competitive Pokémon via Scalable Offline RL with
-  Transformers* (arXiv 2504.04395).
-- **Smogon forum thread 3785316** — "VGC doubles as a poker problem": CFR+/ISMCTS
-  over the public game tree with a Bayesian belief model. Closest existing
-  discussion to this exact project; worth reading in full once unblocked.
+  Transformers* (arXiv 2504.04395). **[verified]** title, authors and subject;
+  paper body not read. **Singles, not doubles.**
+- **Smogon forum thread 3785316** — **[verified, and substantially downgraded].**
+  Read in full. It is not a body of discussion to learn from: it is a
+  three-week-old thread (started 15 Jul 2026) by a single university student,
+  "Jaiva", describing an **unreleased solo thesis project**, with exactly one
+  reply. The technical description in the previous draft was accurate as a
+  restatement of their self-report — "Deep multi-turn search (CFR+ / ISMCTS)
+  over the public game tree, with a Bayesian belief model tracking what the
+  opponent's team could be" — but that is a claim about their own private code,
+  not a published result. Their own stated caveats are severe: "Win rates
+  aren't calibrated yet", "Estimates are one-sided and conservative", and it
+  "needs more training, more search depth, and a lot more real games before
+  every verdict is worth trusting". It is also a **post-game replay analyzer**
+  (Lichess-style review of Showdown replays), not a play-time solver, which is
+  a different problem from ours. Open-sourcing is aspirational.
+
+  Two things are still worth taking from it. **(a)** Independent convergence:
+  someone coming from poker solvers landed on the same framing this document
+  did, which is mild evidence the framing is natural rather than idiosyncratic.
+  **(b)** The single reply, from `opencover`, raises the one substantive
+  technical objection in the thread, and it lands on **§3**: "vanilla CFR+
+  requires solving the entire game tree and *growing tree* CFR requires a value
+  estimator which is tricky and expensive to train." That is correct and is
+  precisely the trap §3 avoids — we do **not** run CFR over the game tree. We
+  solve a *per-turn* matrix game whose cells are one `run_turn` scored by a
+  hand-written leaf evaluation, so there is no full-tree traversal and no
+  learned value estimator to train. Worth stating explicitly in §3, because it
+  is the obvious objection a reader with poker-solver background will raise.
+  The thread's real value to us is a contact, not a source.
 - **McMahan, Gordon & Blum (2003)** — Double Oracle.
 - **Zinkevich et al. (2007)** — Counterfactual Regret Minimization.
 - **Lanctot et al.** — simultaneous-move MCTS / DUCT variants.
@@ -756,19 +921,55 @@ construction + LP (or regret matching) + double oracle behind a flag; A/B it
 against the current solver on known matchups. Retire `CHECK_TOP_K`. Deliver
 mixed-strategy output and exploitability in Battle Viewer.
 
-*Revised scope after §8:* B must be **depth-capable, not depth-1-only**. §8c.5
-(field-effect clocks, declining a KO) and §8c.6 (forcing Protect) are two
-named, common plays that a depth-1 solver gets wrong *even with a perfect
-equilibrium at each turn*, because their payoff arrives on turn *t+1*. Shipping
-B as depth-1-only would fix the exploitability problem while leaving both.
+*Revised scope:* **B is depth-2 by requirement, not depth-capable-in-principle.**
+The unit of evaluation is *this turn plus the state at the end of next turn* —
+not one turn, and not "depth 1 with a flag we might raise later".
+
+The motivating case is a two-turn punish where each turn looks acceptable in
+isolation and the pair loses: **I attack, they switch; I attack again, they
+Protect; I have gained nothing across two turns and am now the one out of
+position.** Note this is unrepresentable today for two *independent* reasons,
+and fixing only one leaves it broken:
+
+1. The payoff arrives on turn *t+1*, so depth 1 cannot see it — no leaf
+   evaluation at the end of turn *t* distinguishes this from a good attack.
+2. `greedy_opponent_joint_action` hard-codes `protect: return -1`, so the
+   second half of the sequence is not even in the opponent's action set.
+
+§8c.5 (burning a field-effect clock) and §8c.6 (forcing a Protect) are the same
+shape, arrived at from the articles rather than from play, which is decent
+converging evidence that depth 2 is the real floor.
+
+**The recursion has to be equilibrium-valued.** Each cell of the turn-*t*
+matrix must hold the *solved value of the turn-*t+1* matrix game*, not the
+result of a greedy or scripted playout of turn *t+1*. Using a greedy playout
+one level down reintroduces exactly the self-delusion §2b measured (232 points
+/ turn) at depth 2, having just removed it at depth 1 — the most likely way to
+build this and get a result that looks fine and is not.
+
+*Cost.* Nested double oracle at ~12 materialised cells per level is ~144
+`run_turn` evaluations per decision against ~12 at depth 1: roughly
+**0.4–0.5 s/game against 0.04 s**, i.e. ~10×, which breaks the "cost-neutral
+with Tier 1" claim in §2 and §7. Selective deepening is the obvious mitigation
+— solve depth 1, re-solve only the top few root actions at depth 2 (`k=4` gives
+~60 cells, ~0.2 s/game) — since the deep search only has to *rank the
+plausible actions correctly*, not evaluate all of them precisely. **These are
+estimates, not measurements**; §2's numbers are depth-1 only. Measuring a
+nested solve is the first thing Phase B should do, before its scope is fixed
+(open question 7).
+
 Also in scope: the opponent-decision-difficulty output (§8c.4) and
 most-important-turn (§8c.7), both nearly free once the matrix exists.
 
 **Phase C — roll bucketing.** Replace `min/max/avg` with outcome buckets;
 surface roll-sensitivity.
 
-**Phase D — preview-level matrix game.** Nash over the bring matrix, credible-
-bring support, double oracle for the sweep. This is where the runtime win lands.
+**Phase D — plausibility-weighted preview.** ~~Nash over the bring matrix,
+credible-bring support, double oracle for the sweep.~~ **Revised — see §6a/6b:**
+a logit plausibility weighting over their 90 brings plus a tail (CVaR)
+objective, replacing both today's uniform worst-case and the previously
+proposed equilibrium solve. No LP, no double oracle. Ships incrementally, since
+`τ → ∞` reproduces current behaviour exactly.
 
 **Phase E — belief state / ISMCTS.** Only if A–D justify it.
 
@@ -832,10 +1033,29 @@ Net: **A → B → D → C → E.** The change from the previous draft is D movi
 second to third. The runtime argument for doing D early is unchanged and
 genuine — the 121 s King run is real — but it is an argument for doing D
 *soon*, not for doing it *on top of numbers we have already measured to be
-wrong by 1.3 Pokémon per turn*. If the runtime pain needs relief before B
-lands, the cheap intermediate is a dominance filter over the 90 brings (drop
-brings beaten by another bring in every column), which cuts the sweep without
-committing to an equilibrium computed over biased cells.
+wrong by 1.3 Pokémon per turn*.
+
+**D has also got smaller.** §6 was revised from "Nash equilibrium + double
+oracle over the bring matrix" to a plausibility weighting plus a tail
+objective, because equilibrium support is the wrong model of an opponent who
+brings *somewhat* unexpected leads without bringing their worst. That removes
+the LP, the fixed-point iteration, and the double oracle from D entirely — it
+is now a weighting over the 90 we already enumerate. Two consequences for
+ordering:
+
+- D is **less** of a prize than the previous draft implied, which independently
+  supports not front-loading it. The headline runtime win from double oracle
+  was an artifact of a design we are no longer proposing.
+- The `τ → ∞` endpoint of §6a *is* today's behaviour, so §6 can ship
+  incrementally: introduce the weighting with `τ` large (a no-op), then lower
+  it. There is no flag-day, and no need to wait for B to get *some* of the
+  benefit — only the tail values will be biased until B lands, and biased
+  values do less damage under a soft weighting than under hard support-pruning,
+  which was the whole objection.
+
+That last point is the practical answer if runtime pain bites before B: lower
+`τ` and evaluate the tail slices at Tier 2 (§6c), rather than pruning brings
+on the strength of biased cells.
 
 ---
 
@@ -858,8 +1078,13 @@ committing to an equilibrium computed over biased cells.
    Still open for `linear_sum_assignment` in §4b — but max-weight matching on a
    ≤6×6 graph is small enough to hand-roll too (Hungarian, or brute-force
    permutations at 6! = 720).
-3. Should Tier 2 *replace* Tier 1, or stay parallel? §2 says cost-neutral, which
-   argues for replacement, but that invalidates cached/reported numbers.
+3. Should Tier 2 *replace* Tier 1, or stay parallel? ~~§2 says cost-neutral,
+   which argues for replacement~~ — **the cost-neutrality argument is
+   withdrawn.** It rested on a depth-1 solve, and Phase B now requires depth 2
+   (§10), estimated at ~10× (or ~5× with selective deepening). Replacement is
+   still plausible but must now be argued on value, not cost, and it still
+   invalidates cached/reported numbers. Blocked on the depth-2 measurement in
+   question 7.
 4. ~~How much does equilibrium play differ from current output in practice?~~
    **Resolved — see §2b.** Substantially: 58% of turns get a different play,
    58% of turns need a mixed strategy the current design cannot represent, and
@@ -878,12 +1103,18 @@ committing to an equilibrium computed over biased cells.
    played-out games. Possible middle path: keep points as the leaf value, and
    apply a risk transform whose curvature is set by the current estimated
    position. Needs a decision before Phase B fixes the solver's objective.
-7. *(New, raised by §8c.5 and §8c.6)* **How much depth does Phase B need?**
-   Both named depth-1 failures — burning a field-effect clock, and forcing a
-   Protect — resolve at depth 2. Trick Room's 4 effective turns would argue for
-   more. §2's numbers cover depth-1 matrix solves only; a depth-2 double-oracle
-   solve has not been measured and could be substantially worse than 2× if the
-   restricted action sets grow. Worth measuring before committing to B's scope.
+7. ~~How much depth does Phase B need?~~ **Decided: depth 2 — this turn plus
+   the state at the end of next turn** (§10, Phase B). Three independent
+   motivating cases agree: the attack→switch, attack→Protect punish sequence;
+   burning a field-effect clock (§8c.5); and forcing a Protect (§8c.6).
+   **What remains open is the cost**, which is the thing to measure first: the
+   0.4–0.5 s/game figure for a nested equilibrium-valued solve is an estimate
+   extrapolated from §2's depth-1 numbers, and it could be materially worse if
+   the restricted action sets grow at the second level. Sub-questions: does
+   selective deepening (top-`k` root actions only) preserve the ranking, and
+   what is the smallest `k` that does? Trick Room's 4 effective turns would
+   argue for depth > 2, which is almost certainly unaffordable — the fallback
+   is a field-clock term in the eval (§4d) standing in for depth we cannot buy.
 8. *(New, raised by §8b.3)* The engine's no-double-Protect rule
    (`battle.py:421`) is stricter than the real 1/3 mechanic. Once the matrix
    game can price the gamble, do we relax it to the true probability? The
