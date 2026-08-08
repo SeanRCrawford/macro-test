@@ -92,6 +92,64 @@ A 12-turn **double-oracle Nash** game is ~0.04 s.
 
 ---
 
+## 2b. Baseline: how exploitable is the current solver? (measured)
+
+Open question #4 from the first draft — "measure the current solver's
+exploitability before building anything, it quantifies the size of the prize."
+Answered. Harness: `tools/measure_exploitability.py`.
+
+At 24 genuine decision points across 4 opponent teams, the real payoff matrix
+`A[i][j]` was built and four values compared:
+
+| Quantity | Meaning |
+|---|---|
+| `assumed` | `A[i*][j_greedy]` — what the current solver thinks it gets |
+| `actual` | `min_j A[i*][j]` — what it gets against a best-responding opponent |
+| `maximin` | `max_i min_j A[i][j]` — what the safest *pure* play guarantees |
+| `nash` | equilibrium value, allowing mixing (regret matching) |
+
+```
+decision points measured             : 24
+mean self-delusion (assumed - actual):  232.3
+mean regret vs maximin               :   48.4
+turns where maximin != greedy pick   : 14/24  (58%)
+turns where Nash is MIXED            : 14/24  (58%)
+
+units: heuristic_eval points, KO_WEIGHT = 180, so ~180 points ≈ one Pokemon
+```
+
+Read plainly:
+
+- **The current solver overestimates its own position by ~1.3 Pokémon per
+  turn.** That is the cost of scoring against a policy we authored. Every win
+  count in every tab inherits this bias.
+- **On 58% of turns it plays a different move than the maximin play**, and
+  gives up ~48 points (~0.27 of a Pokémon) per turn in the worst case by doing so.
+- **On 58% of turns no pure strategy is optimal at all** — the equilibrium has
+  support ≥ 2. The current architecture *cannot represent* the right answer on
+  the majority of turns, regardless of how good its evaluation gets.
+- **Mixing is worth 50–86 points** on the turns where it matters (`nash` minus
+  pure `maximin`; e.g. Rain T3 130.2 vs 43.9). Pure maximin is a floor, not the
+  target — which is the argument for solving for Nash rather than just taking
+  the safest row.
+
+Two honesty caveats on these numbers:
+
+1. `A` is built from `heuristic_eval` and treated as zero-sum. `heuristic_eval`
+   is not perfectly antisymmetric (the `seen` filter treats the two sides
+   differently), so "the opponent minimises our heuristic" is a proxy for their
+   true objective, not identical to it. The *direction* and rough magnitude are
+   robust; the exact point values are not.
+2. One measured point is already-lost terminal state (`-10000`), which
+   contributes 0 to both means and therefore makes both figures slightly
+   conservative.
+
+**Conclusion: the prize is large and the overhaul is justified.** The dominant
+error is not evaluation quality — it is that we optimise against a fixed
+self-authored policy and cannot express mixed strategies.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum
@@ -387,11 +445,21 @@ runtime cost (1620 games) currently live.
 
 1. Does the vgcguide material change the eval terms in §4 — particularly
    "pressure" and the best-of-1 vs best-of-3 risk posture?
-2. Is `scipy` acceptable as a dependency (for `linprog` and
-   `linear_sum_assignment`), or should regret matching + a hand-rolled
-   assignment be used instead?
+2. ~~Is `scipy` acceptable as a dependency?~~ **Resolved: not needed for the
+   game solve.** scipy isn't installed in this venv, so the baseline harness
+   uses ~25 lines of hand-rolled regret matching, which converges fine at this
+   matrix size (23×28) in 3000 iterations, well inside the per-cell budget.
+   Still open for `linear_sum_assignment` in §4b — but max-weight matching on a
+   ≤6×6 graph is small enough to hand-roll too (Hungarian, or brute-force
+   permutations at 6! = 720).
 3. Should Tier 2 *replace* Tier 1, or stay parallel? §2 says cost-neutral, which
    argues for replacement, but that invalidates cached/reported numbers.
-4. How much does equilibrium play differ from current output in practice? Worth
-   measuring exploitability of the *current* solver as a baseline before
-   building anything — it quantifies the size of the prize.
+4. ~~How much does equilibrium play differ from current output in practice?~~
+   **Resolved — see §2b.** Substantially: 58% of turns get a different play,
+   58% of turns need a mixed strategy the current design cannot represent, and
+   the current solver overstates its position by ~1.3 Pokémon per turn.
+5. *(New, raised by §2b)* `heuristic_eval` is not antisymmetric, so the matrix
+   isn't strictly zero-sum. Either make the eval symmetric (compute it from
+   both perspectives and take the difference) or move to a general-sum solver.
+   Making it symmetric is much cheaper and probably correct — worth doing as
+   part of Phase A.
