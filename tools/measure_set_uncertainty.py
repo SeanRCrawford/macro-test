@@ -21,6 +21,18 @@ So: let the opponent actually run a different plausible set while our solver
 keeps planning against the usage-standard one, and measure what that costs. The
 gap is the ceiling on what any belief-state modelling could recover, and
 therefore the honest input to "is Phase E worth building".
+
+IMPORTANT -- read the absolute win rates with care. The opponent here is
+`greedy_opponent_joint_action`, the raw damage-maximising heuristic, NOT another
+`solve_best_action` as in measure_headtohead. The expectimax solver
+best-responds to exactly that function by construction, so against this opponent
+its model is perfectly correct and it plays near-optimally, while the
+equilibrium solver pays the usual price of assuming a competent adversary. That
+makes greedy look far stronger here than it is in a fair head-to-head.
+
+Only the WITHIN-solver comparison (matched vs surprised for one configuration)
+is meaningful; the between-solver absolute rates are not comparable, and the
+difference in DROP between the two is the number this tool exists to produce.
 """
 import argparse
 import itertools

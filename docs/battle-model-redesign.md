@@ -879,22 +879,58 @@ the largest measured headroom remaining in the project. An earlier run at n=8
 showed exactly 0 — a reminder that these small samples say nothing; the effect
 only became visible at n=240.
 
-Read carefully, this is a **ceiling**: it is what *perfect* knowledge of their
-set is worth. A belief state recovers some fraction of it, not all. But it is
-the first evidence-based justification for Phase E, and it satisfies §10's gate.
+### …but the 16 points does not transfer to the solver we would ship
+
+Re-running with `--nash` changes the conclusion, and this is the more
+interesting result:
+
+```
+              matched   surprised   drop
+greedy          65%        48%      +16 points   CI [+4, +29]   significant
+Nash (depth 1)  31%        28%       +3 points   CI [-19, +25]  not significant
+```
+
+Two things need explaining, and both matter.
+
+**Why Nash's absolute rate is only 31%.** This harness pits our solver against
+`greedy_opponent_joint_action` — the raw damage-maximising heuristic — not
+against another `solve_best_action`. The expectimax solver *best-responds to
+exactly that function by construction*; it is its opponent model. So against
+this specific opponent, greedy's model is **perfectly correct** and it plays
+near-optimally, while Nash pays the standard price of assuming a competent
+adversary. This is §1's argument running in reverse: best-responding to a fixed
+policy is optimal precisely when the opponent really runs that policy. It is an
+artifact of the harness's opponent, **not** evidence against the equilibrium
+solver — Phase B's 60% was measured against a real decision-maker and stands.
+
+**Why the drop is 16 for greedy and ~3 for Nash.** Most of the 16 points is not
+an irreducible cost of hidden information — it is *the greedy solver's own
+assumption breaking*. It models the opponent exactly, so when their set changes
+underneath it, its model is wrong twice over. Nash never relied on that model,
+so being surprised costs it much less.
+
+### Verdict: Phase E is NOT yet justified
+
+The gate in §10 asks whether A–D justify E. The honest reading:
+
+- The 16-point figure is real but **measured on a solver we are not shipping**,
+  and it is substantially a measure of that solver's own brittleness.
+- On top of the equilibrium solver, the measured headroom is **~3 points and
+  not significant** (n=64, interval spanning zero). That is not a mandate; it
+  is not even a signal yet.
+- So E stays unbuilt, on the same standard every other phase was held to.
+
+What would change the verdict: re-run the Nash arm at the sample size the greedy
+arm got (n=240 rather than 64) — the current interval is far too wide to
+distinguish "Nash absorbs set uncertainty" from "not enough data". That is a
+few hours of compute and the single highest-value measurement left.
 
 ### A caveat this exposes about every earlier measurement
 
-Every head-to-head in this document — including Phase B's 60% — was run with
-**both sides sharing the same correct set assumption**. None of them tested
-robustness to being wrong about the opponent's set, because the harness cannot
-be wrong about it. So the existing results are all conditional on a world where
-that assumption holds, and B's advantage under set uncertainty is a separate
-question from B's advantage under set certainty.
-
-That question is directly testable with the same tool (`--nash`), and should be
-answered before Phase E's design is fixed: if the equilibrium solver already
-degrades more gracefully, part of the 16 points is spoken for.
+Every head-to-head in this document — including Phase B's 60% — ran with **both
+sides sharing the same correct set assumption**, because the harness cannot be
+wrong about it. Those results are conditional on that world. This section is the
+first measurement in the project to relax it.
 
 ---
 
