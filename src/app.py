@@ -112,6 +112,39 @@ tab_build, tab_gen, tab_search, tab_battle, tab_vs = st.tabs(
 
 
 # ------------------------------------------------------------------ helpers
+def solver_controls(key_prefix: str):
+    """Solver picker shared by the battle pages. Returns (nash, depth).
+
+    Measured, so the cost/benefit can be stated rather than guessed at:
+    the equilibrium solver beats the greedy one 60% of games (95% CI
+    [55%, 65%], n=384) and costs about 19x more per decision.
+    """
+    engine = st.radio(
+        "Solver",
+        ["Greedy expectimax (fast)", "Nash equilibrium (stronger, slower)"],
+        horizontal=True, key=f"{key_prefix}_engine",
+        help="Greedy plays the best response to a fixed, self-authored opponent "
+             "model -- fast, but it overstates its own position by ~1 Pokemon "
+             "per turn and cannot express a mixed strategy, which is the correct "
+             "answer on 83% of turns. Nash solves the turn as a simultaneous-move "
+             "matrix game: it wins 60% head-to-head (n=384) at roughly 19x the cost.")
+    nash = engine.startswith("Nash")
+    depth = 1
+    if nash:
+        depth = st.select_slider(
+            "Search depth", options=[1, 2], value=1, key=f"{key_prefix}_depth",
+            help="1 = this turn only (~0.26 s per decision). "
+                 "2 = this turn plus the state at the end of next turn "
+                 "(~5.5 s per decision, ~21x). Depth 2 is what sees two-turn "
+                 "punishes -- attack into a switch, then into a Protect -- and "
+                 "field-effect clocks like stalling Trick Room. Expect a long "
+                 "wait on a full simulation.")
+        if depth == 2:
+            st.caption("Depth 2 is roughly 150 s for a 14-turn simulation. "
+                       "Best used on a short turn cap, or on the turn analysis below.")
+    return nash, depth
+
+
 def team_sheet_df(team, sets=None):
     sets = sets or {}
     rows = []
@@ -1202,6 +1235,7 @@ with tab_battle:
             "Their bring-4 -- pick a specific enemy lead, and optionally a specific back",
             teams[opp], "bv_their_lead", "bv_their_back")
     turns = st.slider("Turn cap", 4, 30, 12, key="bv_turns")
+    bv_nash, bv_depth = solver_controls("bv")
 
     n_roll = st.slider("Rolled games for probability", 0, 200, 60, step=20,
                         help="Re-runs the matchup with real damage rolls (0.85-1.00), "
@@ -1215,9 +1249,14 @@ with tab_battle:
         # keeps whichever is worst for us -- degrades to plain greedy for a team with
         # no script, so this is safe to call unconditionally.
         from matchup_search import play_scripted_worst_case
-        w, t, btl, variant_idx = play_scripted_worst_case(
-            our4, their4, merged, moves, natures, typechart, opp, turns,
-            our_sets=st.session_state.get("sets", {}))
+        from solver import solver_mode
+        # Scoped rather than set globally: Streamlit keeps module state alive
+        # across reruns, so assigning the solver globals directly would make the
+        # last-used mode silently sticky for every other tab.
+        with solver_mode(nash=bv_nash, depth=bv_depth):
+            w, t, btl, variant_idx = play_scripted_worst_case(
+                our4, their4, merged, moves, natures, typechart, opp, turns,
+                our_sets=st.session_state.get("sets", {}))
         ourm = next((c.name for c in btl.p1.roster if c.is_mega_pick and c.mega_evolved), None)
         theirm = next((c.name for c in btl.p2.roster if c.is_mega_pick and c.mega_evolved), None)
         r1, r2, r3 = st.columns(3)
@@ -1232,7 +1271,10 @@ with tab_battle:
 
         if n_roll:
             from matchup_search import evaluate_risk, evaluate_tie_branches
-            with st.spinner(f"Rolling {n_roll} games..."):
+            # Same solver as the deterministic run above, or the rolled
+            # probability would describe a different player.
+            with st.spinner(f"Rolling {n_roll} games..."), \
+                    solver_mode(nash=bv_nash, depth=bv_depth):
                 fair = evaluate_risk(our4, their4, merged, moves, natures, typechart, turns,
                                       our_sets=st.session_state.get("sets", {}),
                                       n_random=n_roll, tie_bias=None)
@@ -1263,6 +1305,64 @@ with tab_battle:
         st.code(btl.log.dump())
 
         st.session_state["bv_last_matchup"] = (our4, their4, turns)
+
+    # --- Turn-1 equilibrium analysis -------------------------------------
+    st.divider()
+    st.markdown("**Turn 1 equilibrium** — solve the opening turn as a "
+                "simultaneous-move matrix game and show what it actually says.")
+    st.caption("The greedy solver can only ever name one move. Solving the turn "
+               "gives the whole picture: how often each play should be made, how "
+               "much a best-responding opponent gains if you commit to one, and "
+               "how hard a decision they are facing.")
+    if st.button("Solve turn 1", key="bv_solve_turn",
+                 disabled=not (len(our4) == 4 and len(their4) == 4)):
+        from combatants import make_team
+        from battle import Battle
+        from solver import build_moveset
+        from turn_game import solve_turn
+        our_sets = st.session_state.get("sets", {})
+        oc = make_team(our4, merged, natures, sets=our_sets)
+        ec = make_team(their4, merged, natures)
+        ms = {c.name: build_moveset(merged[c.name], moves) for c in oc + ec}
+        btl2 = Battle(oc, ec, typechart, moves)
+        btl2.movesets = ms
+        with st.spinner(f"Solving (depth {bv_depth})..."):
+            sol = solve_turn(btl2, "p1", ms, depth=bv_depth)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Equilibrium value", f"{sol.value:+.0f}",
+                  help="In heuristic_eval points; ~180 is one Pokemon. Positive "
+                       "favours you.")
+        m2.metric("Mixed strategy?", "YES" if sol.is_mixed else "no",
+                  help=f"Mixing is worth {sol.mixing_gain:+.0f} points over the "
+                       f"best single play. A pure strategy is exploitable "
+                       f"wherever this says YES.")
+        m3.metric("Their decision difficulty", f"{sol.their_decision_difficulty:.0f}",
+                  help="Gap between the opponent's best and second-best replies. "
+                       "Small means they are guessing; large means they have an "
+                       "obvious out. 'Pokemon is in many ways a game about making "
+                       "your opponent make difficult decisions.'")
+
+        st.markdown("**How often to make each play**")
+        rows = []
+        for joint, prob in sol.support():
+            desc = " + ".join(
+                f"{a.combatant.name} {a.move.name if a.move else a.kind}"
+                + (f" -> {a.targets[0].name}"
+                   if a.targets and a.targets[0] is not a.combatant else "")
+                for a in joint)
+            rows.append({"Play": desc, "Frequency": f"{100 * prob:.0f}%"})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+        exploit = sol.exploitability_of(sol.maximin_index)
+        if exploit is not None:
+            st.caption(
+                f"Safest single play: **{' + '.join(a.combatant.name for a in sol.maximin_action)}** "
+                f"— guarantees {sol.maximin_value:+.0f} whatever they do. "
+                f"Committing to it costs {exploit:+.0f} against a best-responding "
+                f"opponent versus playing the mix.")
+        st.caption(f"Simulated {sol.n_sims} turns to solve this"
+                   + ("" if sol.converged else " (did not fully converge)"))
 
     # --- Punish check: is EVERY turn of our plan safe against EVERY legal response? ---
     st.divider()
@@ -1352,6 +1452,13 @@ with tab_vs:
                      "script' and 'vs conventional (normal 6/6)' below, instead of one blended "
                      "number.")
             script_team_vs = None if script_team_vs == "None" else script_team_vs
+            vs_nash, vs_depth = solver_controls("vs")
+            if vs_nash:
+                st.warning(
+                    "This page sweeps many brings, and the equilibrium solver costs "
+                    "~19x per decision at depth 1 (~500x at depth 2). Expect a long "
+                    "search — prefer the greedy solver here and use Nash in the "
+                    "Battle Viewer to verify a specific matchup.")
             if st.button("Find best response", type="primary", key="vs_go"):
                 from matchup_search import search_robust_composition, search_best_composition
                 from run_search import find_toughest_lead
@@ -1360,7 +1467,9 @@ with tab_vs:
                         and len(fixed_lead_vs or []) != 2):
                     st.error("Pick exactly 2 Pokemon for the guaranteed enemy lead.")
                 else:
-                    with st.spinner("Searching..."):
+                    from solver import solver_mode
+                    with st.spinner("Searching..."), \
+                            solver_mode(nash=vs_nash, depth=vs_depth):
                         if vs_search_mode == "Quick (sampled toughest lead)":
                             lead = find_toughest_lead(vs_team, enemy_roster, merged, moves, natures,
                                                        typechart, max_turns_vs, our_sets=vs_sets)

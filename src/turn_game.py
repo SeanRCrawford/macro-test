@@ -187,7 +187,31 @@ def _seed_indices(battle, side_name, movesets, ours, theirs):
     return seed_rows, seed_cols
 
 
-def solve_turn(battle, side_name, movesets, depth=1, step=None, inner=False):
+def _script_column(battle, side_name, movesets, theirs, enemy_script):
+    """Index of the scripted joint action among `theirs`, if it is in there."""
+    if not enemy_script:
+        return None
+    us, them = _mirror(battle, side_name)
+    try:
+        # Same calling convention as solver._script_or_greedy:
+        # (battle, scripted side, other side, turn number).
+        scripted = enemy_script(battle, them, us, battle.turn_num + 1)
+    except Exception:
+        return None
+    if not scripted:
+        return None
+    want = {(a.combatant.name, a.kind, a.move.name if a.move else None)
+            for a in scripted}
+    for idx, joint in enumerate(theirs):
+        got = {(a.combatant.name, a.kind, a.move.name if a.move else None)
+               for a in joint}
+        if got == want:
+            return idx
+    return None
+
+
+def solve_turn(battle, side_name, movesets, depth=1, step=None, inner=False,
+               enemy_script=None, script_confidence=0.7):
     """Equilibrium of the current turn for `side_name`.
 
     `step(battle, our_joint, their_joint) -> battle | None` advances a COPY of
@@ -256,6 +280,40 @@ def solve_turn(battle, side_name, movesets, depth=1, step=None, inner=False):
         worst[i] = min(worst.get(i, float("inf")), v)
     maximin_index = max(worst, key=lambda i: worst[i]) if worst else 0
     maximin_value = worst.get(maximin_index, value)
+
+    # A scripted opponent is not a different algorithm, it is a PRIOR on their
+    # columns (section 3d). Rather than assuming they follow the script -- which
+    # is what the old top-K deviation check had to defend against with an
+    # arbitrary cap -- shift their equilibrium strategy toward the scripted
+    # action and best-respond to the mixture. Deviation safety then falls out:
+    # the off-script columns keep their equilibrium weight, so a play that loses
+    # badly to a deviation is still priced for it.
+    script_index = _script_column(battle, side_name, movesets, theirs, enemy_script)
+    if script_index is not None and 0.0 < script_confidence <= 1.0:
+        lam = script_confidence
+        mixed_q = [(1.0 - lam) * qj for qj in q]
+        mixed_q[script_index] += lam
+        rows = sorted({i for (i, _j) in matrix})
+        best_i, best_v = None, float("-inf")
+        for i in rows:
+            expected, weight = 0.0, 0.0
+            for j, qj in enumerate(mixed_q):
+                if qj <= 0:
+                    continue
+                cell = matrix.get((i, j))
+                if cell is None:
+                    continue
+                expected += qj * cell
+                weight += qj
+            if weight > 0 and expected / weight > best_v:
+                best_i, best_v = i, expected / weight
+        if best_i is not None:
+            # Put the script-aware response at the front of the mix so
+            # best_action returns it, while leaving the equilibrium value and
+            # the rest of the distribution intact for reporting.
+            p = [0.0] * len(ours)
+            p[best_i] = 1.0
+            q = mixed_q
 
     return TurnSolution(our_actions=ours, their_actions=theirs, p=p, q=q,
                         value=value, maximin_value=maximin_value,

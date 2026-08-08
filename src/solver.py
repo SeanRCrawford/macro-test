@@ -26,6 +26,7 @@ two active mons, then extended `depth` turns using the same opponent
 model, scored by a simple HP-differential heuristic at the leaf.
 """
 import copy
+from contextlib import contextmanager
 import itertools
 
 from damage import Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll, CHARGE_WEATHER_SKIP
@@ -523,6 +524,30 @@ NASH_SOLVER = False
 NASH_DEPTH = 1
 
 
+@contextmanager
+def solver_mode(nash: bool | None = None, depth: int | None = None):
+    """Temporarily select the solver, restoring the previous setting after.
+
+    The UI needs to run one simulation under a user-chosen mode without leaking
+    that choice into everything else in the process -- Streamlit keeps module
+    state alive across reruns, so setting the globals directly would make the
+    last-used mode silently sticky for every other tab.
+
+        with solver_mode(nash=True, depth=2):
+            ...
+    """
+    global NASH_SOLVER, NASH_DEPTH
+    previous = (NASH_SOLVER, NASH_DEPTH)
+    if nash is not None:
+        NASH_SOLVER = nash
+    if depth is not None:
+        NASH_DEPTH = depth
+    try:
+        yield
+    finally:
+        NASH_SOLVER, NASH_DEPTH = previous
+
+
 def symmetric_eval(battle: Battle, my_side_name: str) -> float:
     """Force antisymmetry by averaging our view against the negation of theirs.
 
@@ -599,7 +624,13 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
     # from this module.
     if NASH_SOLVER:
         from turn_game import solve_turn
-        solution = solve_turn(battle, my_side_name, movesets, depth=NASH_DEPTH)
+        # enemy_script is passed through rather than ignored: a script is a
+        # PRIOR on their columns, not a separate algorithm (section 3d). This is
+        # what lets the matrix solve subsume the CHECK_TOP_K deviation check --
+        # off-script columns keep their equilibrium weight, so a play that loses
+        # to a deviation is priced for it without an arbitrary top-K cap.
+        solution = solve_turn(battle, my_side_name, movesets, depth=NASH_DEPTH,
+                              enemy_script=enemy_script)
         if solution.our_actions:
             return solution.best_action, solution.value, None
 
@@ -695,6 +726,19 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
     # this cap was added). Check in descending script-score order and take the
     # first one that isn't punished; if every one of those is, fall back to the
     # single best script score (no safe option was found in the checked pool).
+    #
+    # SUPERSEDED, not yet deleted. This whole block exists because planning
+    # ASSUMES the script and then has to defend against the assumption being
+    # wrong -- and the cap of 6 is arbitrary, chosen for runtime rather than for
+    # any property of the game. The matrix solver replaces it properly: a script
+    # is a PRIOR on the opponent's columns (turn_game.solve_turn's
+    # `enemy_script`/`script_confidence`), so off-script replies keep their
+    # equilibrium weight and a play that loses to a deviation is priced for it
+    # directly. No assumption to defend, and no cap.
+    #
+    # It is kept only because NASH_SOLVER is still off by default, so this is
+    # the live path. Delete it together with that default flip; until then
+    # removing it would change current behaviour for no measured benefit.
     CHECK_TOP_K = 6
     scored.sort(key=lambda c: -c[1])
     for my_joint, score, sim in scored[:CHECK_TOP_K]:
