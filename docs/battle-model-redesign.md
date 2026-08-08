@@ -1213,6 +1213,40 @@ plausibly bring. Worth noting that **Kingambit Sucker Punch** is precisely the
 punish pattern this project was asked to catch — it turned up on its own, from
 the metric rather than from being looked for.
 
+### Two runs, two rankings — and the difference is the point
+
+A full 56-pairing run through `tools/search_teams.py` (Standard tier) ranks
+differently from `tools/rate_teams.py`:
+
+```
+                 search_teams        rate_teams
+                 (search-chosen      (first four
+                  bring)              as the bring)
+Hard Trick Room        17.3               43.3
+Sun Rain               41.2               73.1
+NAIC                   44.7               29.9
+Big 6                  50.1               66.5
+Sand                   53.9               70.1
+Perish Trap            54.4               66.0
+Rain                   54.7              120.1
+King                   60.9              105.6
+```
+
+They agree at the extremes — **Hard Trick Room and NAIC are the top two in
+both, King is bottom two in both** — and disagree in the middle. The cause is
+identifiable rather than mysterious: `search_teams` audits **the bring the
+search chose**, while `rate_teams` audits **each team's first four**.
+
+So the gap between the two columns is a real property of a team: **how much it
+depends on getting team preview right.** Rain moves 120.1 → 54.7, the largest
+shift in the table — it is punishing with a default bring and mid-pack with a
+well-chosen one. Hard Trick Room and NAIC are near the top either way, which is
+a stronger claim than topping one list.
+
+Neither number should be read to one decimal place. Adjacent teams in the middle
+(Sand 53.9, Perish Trap 54.4, Rain 54.7) are not distinguishable at this tier;
+the top-two and bottom-two splits are.
+
 ### Reading it honestly
 
 - The audit is piloted with the least-exploitable configuration available
