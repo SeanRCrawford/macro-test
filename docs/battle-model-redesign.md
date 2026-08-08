@@ -75,21 +75,34 @@ branching factor, turn 1, real teams:
   cost per matrix cell                           0.27 ms
 ```
 
-Which yields the single most important number in this document:
+Which *appeared* to yield the single most important number in this document:
 
 ```
 FULL Nash matrix solve, one turn, brute force    0.17 s
 Same via double oracle (~12 cells materialised)  0.003 s
 ```
 
-Compare against what we pay today: a 12-turn greedy-expectimax game is 0.05 s.
-A 12-turn **double-oracle Nash** game is ~0.04 s.
+> ## ⚠ SUPERSEDED — these two numbers are wrong. See §2c.
+>
+> The double-oracle figure was an estimate, not a measurement, and it is out by
+> **~10× on cells and ~27× on time**. Measured with a real implementation
+> (`src/matrix_game.py`, `tools/measure_depth2_cost.py`): **118 cells and
+> 0.08 s**, not 12 cells and 0.003 s. The error came from assuming double
+> oracle only materialises its final restricted subgame; it does not, because
+> each best-response step must scan a full action set against the other side's
+> mixed strategy (§2c).
+>
+> The claim that followed — *"a game-theoretically correct solver costs roughly
+> the same as the greedy one we have"* — **is therefore false.** A 12-turn
+> double-oracle game is ~0.96 s against ~0.05 s for the greedy one: about 20×,
+> not parity. Everything in this document that leaned on cost-neutrality (§7's
+> tier table, open question 3) has been corrected.
 
-> **A game-theoretically correct solver costs roughly the same as the greedy
-> one we have.** The 121 s King run is not slow because the engine is slow —
-> it is 1620 games (90 configs × 6 variants × 3 candidates) at 0.075 s each.
-> The cost is in *how many configurations we brute-force*, not in per-game
-> speed. That is a search-structure problem, and §6 is the fix.
+What survives, and is still worth stating: the 121 s King run is **not** slow
+because the engine is slow — it is 1620 games (90 configs × 6 variants × 3
+candidates) at 0.075 s each. The cost is in *how many configurations we
+brute-force*, not in per-game speed. That is a search-structure problem, and §6
+is the fix. That argument never depended on the double-oracle figure.
 
 ---
 
@@ -148,6 +161,115 @@ Two honesty caveats on these numbers:
 **Conclusion: the prize is large and the overhaul is justified.** The dominant
 error is not evaluation quality — it is that we optimise against a fixed
 self-authored policy and cannot express mixed strategies.
+
+> Caveat 1 above turned out to be a much bigger deal than "a proxy, not
+> identical". It is now measured: §2c.
+
+---
+
+## 2c. Step 0: measurements taken before building (2026-08-08)
+
+Everything above this line was estimated. This section is measured, with a real
+double-oracle implementation (`src/matrix_game.py`, tested against textbook
+games in `tests/test_matrix_game.py`) and three harnesses in `tools/`. Three of
+the design's load-bearing assumptions did not survive.
+
+### 2c.1 Double oracle prunes far less than assumed
+
+`tools/measure_depth2_cost.py`, 8 decision points, mean matrix 20.5 × 24.0:
+
+| Solver | sims/decision | sec/decision | vs `do1` |
+|---|---|---|---|
+| `brute1` — full matrix, depth 1 | 496 | 0.34 | 4.2× |
+| `do1` — double oracle, depth 1 | **118** | **0.08** | 1.0× |
+| `do2` — double oracle, depth 2, equilibrium-valued | 6778 | 3.88 | **47.9×** |
+| `do2_sel` — depth 2 over the top-4 depth-1 rows | 2108 | 1.22 | 15.0× |
+| `do2_greedy` — depth 2 with a greedy inner playout | 1996 | 0.77 | 9.6× |
+
+Double oracle **is exact** — `|do1 − brute1|` is 0.05 points mean, 0.08 max,
+and it converged at 8/8 points, so §3's "no accuracy is given up" claim holds
+(also verified against 25 random matrices in the test suite). But it
+materialises **24% of the full matrix, not ~2%**. The reason is structural and
+worth writing down, because it caps how much pruning is ever available:
+
+> Double oracle's best-response step must evaluate **every** action of one
+> player against the *support* of the other's mixed strategy. That is
+> `|actions| × |support|` payoff evaluations per iteration, no matter how small
+> the final restricted subgame is. The restricted game really is small
+> (support 2–5, as §2b found); getting to it is not.
+
+A corollary worth having in hand for Phase B: **on small matrices double oracle
+is not worth using at all.** The inner 8×8 games below evaluated ~57 of 64
+cells — the best-response scan costs nearly the whole matrix, and brute force
+is simpler and about as fast. Use DO for the large outer game, brute force
+inside.
+
+### 2c.2 Depth 2 costs ~48×, not the estimated ~10×
+
+`do2` is 3.88 s per decision — a 12-turn game would be ~47 s. That is fine for
+a single interactive decision in Battle Viewer (~4 s) and **impossible inside
+any sweep**. This is already the optimistic figure: the inner game was capped
+at 8 actions per side (`INNER_CAP = 8`); uncapped it is worse.
+
+Selective deepening does cut it (15× rather than 48×), **but it changes the
+answer**: `|do2 − do2_sel|` is 58.8 points mean, 208.8 max — up to ~1.2
+Pokémon. So `k = 4` is not a safe approximation, and open question 7's
+sub-question ("what is the smallest `k` that preserves the ranking?") is now
+known to have an answer larger than 4.
+
+### 2c.3 The greedy-inner-playout trap is real, and costs ~1 Pokémon
+
+`|do2 − do2_greedy|` is **175.8 points mean, 255.9 max**. With
+`KO_WEIGHT = 180`, evaluating the turn-*t+1* subgame with a greedy playout
+instead of an equilibrium solve costs almost exactly one Pokémon per decision —
+and note how close that is to §2b's 232.3 self-delusion figure, which is the
+same error measured one level up. §10's insistence that the recursion be
+equilibrium-valued at both levels was correct, and the cheap-looking shortcut
+(9.6× instead of 47.9×) would have silently reintroduced the exact bias the
+redesign exists to remove.
+
+### 2c.4 `heuristic_eval` is far less antisymmetric than assumed
+
+`tools/measure_antisymmetry.py`, 9434 states across 23 decision points:
+
+```
+mean   |eval(p1) + eval(p2)|      277.7      (0 if perfectly antisymmetric)
+median                            301.8
+max                               627.8
+mean   |eval(p1)|  (for scale)    233.0
+perfectly antisymmetric states    1178/9434  (12%)
+
+maximin pick CHANGES if symmetrised  15/23  (65%)
+```
+
+**The asymmetry is larger than the signal** — 277.7 against a mean |eval| of
+233.0, and larger than the 232.3 self-delusion that motivated the whole
+redesign. The cause is exact and fixable: the `seen` filter is applied only to
+the opponent (`solver.py:290-298`). `my_hp` sums the full roster; `opp_hp` sums
+only revealed mons. So
+
+```
+eval(s,"p1") + eval(s,"p2")  =  100 × (hidden HP on BOTH sides)  + KO-term analogue
+```
+
+which is ≥ 0, shrinks as the battle reveals, and — critically — **is not a
+constant offset**, so it does not cancel out of an argmax. Different cells
+reveal different amounts (a KO forces a reveal), which is why the maximin pick
+moves on 65% of turns.
+
+Consequence for §2b: its matrix was built from `eval(·, "p1")` and solved as
+zero-sum. With an asymmetry this size, "the opponent minimises our heuristic"
+is a materially wrong model of their objective. **The direction of §2b's
+conclusion is unaffected** — the greedy solver is still measurably exploitable
+and cannot represent mixed strategies — but its specific magnitudes (232.3,
+48.4) should be treated as provisional until re-measured on a symmetrised eval.
+
+This promotes open question 5 from "worth doing as part of Phase A" to **a
+prerequisite for trusting any matrix-game number at all**, including the
+baseline that justified the project. The cheap fix — score
+`(eval(s,"p1") − eval(s,"p2")) / 2` — is antisymmetric by construction and adds
+one `heuristic_eval` call per cell (0.11 ms against a 0.42 ms `run_turn`, so
+roughly +20% per cell, not +100%).
 
 ---
 
@@ -482,16 +604,16 @@ Keep the existing screen-then-verify shape; add tiers rather than replacing.
 |---|---|---|---|
 | 0 | `fast_eval` greedy-vs-greedy | ~1 ms | Pair matrix, beam search over thousands of teams |
 | 1 | Current expectimax vs greedy | 0.05 s/game | Broad sweeps where a rough verdict suffices |
-| 2 | **Double-oracle Nash per turn** (new) | ~0.04 s/game at depth 1; **est. 0.2–0.5 s/game at the required depth 2** | Real verification, Vs Team, Battle Viewer, punish analysis |
+| 2 | **Double-oracle Nash per turn** (new) | **measured (§2c): 0.08 s/decision ≈ 0.96 s/game at depth 1; 3.88 s/decision ≈ 47 s/game at depth 2** | Depth 1: real verification, Vs Team. Depth 2: Battle Viewer and punish analysis only — too slow for sweeps |
 | 3 | **Plausibility-weighted preview** (new, revised — §6) | seconds | Bring selection, team rating, the headline number |
 
 ~~Tier 2 replacing Tier 1 as the default is *cost-neutral* per the §2 numbers.~~
-**No longer true.** That claim rested on a depth-1 solve. Phase B requires
-depth 2 (§10), which is an estimated ~10× on top, or ~5× with selective
-deepening. Tier 2 is therefore *cheaper than a naive full matrix* but **not**
-free relative to Tier 1, and the replace-or-parallel decision (open question 3)
-can no longer be settled by appealing to cost-neutrality. Needs the depth-2
-measurement first.
+**Definitively false, now measured (§2c).** Cost-neutrality was wrong even at
+depth 1: double oracle is 0.08 s/decision (~0.96 s/game) against ~0.05 s/game
+for the current greedy solver — about **20×**, not parity. At the depth 2 that
+Phase B requires it is ~47 s/game, roughly **1000×**. Tier 2 cannot replace
+Tier 1 as a blanket default; the tiers must coexist, with depth chosen per
+call site. Open question 3 is settled by this.
 
 New user-facing outputs this unlocks, all of which the current model cannot
 express:
@@ -947,16 +1069,23 @@ one level down reintroduces exactly the self-delusion §2b measured (232 points
 / turn) at depth 2, having just removed it at depth 1 — the most likely way to
 build this and get a result that looks fine and is not.
 
-*Cost.* Nested double oracle at ~12 materialised cells per level is ~144
-`run_turn` evaluations per decision against ~12 at depth 1: roughly
-**0.4–0.5 s/game against 0.04 s**, i.e. ~10×, which breaks the "cost-neutral
-with Tier 1" claim in §2 and §7. Selective deepening is the obvious mitigation
-— solve depth 1, re-solve only the top few root actions at depth 2 (`k=4` gives
-~60 cells, ~0.2 s/game) — since the deep search only has to *rank the
-plausible actions correctly*, not evaluate all of them precisely. **These are
-estimates, not measurements**; §2's numbers are depth-1 only. Measuring a
-nested solve is the first thing Phase B should do, before its scope is fixed
-(open question 7).
+*Cost — measured, see §2c.* ~~Estimated ~10×.~~ **Actually 47.9×**: 6778
+simulated turns and 3.88 s per decision, against 118 sims / 0.08 s at depth 1.
+A 12-turn depth-2 game is ~47 s. Selective deepening over the top-4 depth-1
+rows reaches 15× (1.22 s/decision) but **moves the answer by 58.8 points mean
+and 208.8 max**, so `k = 4` is not a safe approximation.
+
+This does not change the *requirement* — the two-turn punish is still invisible
+at depth 1 — but it forces Phase B to be explicit about scope:
+
+- **Depth 2 is for interactive, single-decision use** (Battle Viewer, punish
+  analysis, "explain this turn"), where ~4 s is acceptable.
+- **Sweeps stay at depth 1**, and accept that they cannot see two-turn punishes.
+  Anything that needs depth inside a sweep has to come from the *evaluation*
+  instead (§4d's field-clock term is the worked example), not from search.
+- **Use brute force for the inner game.** §2c.1: at 8×8 the double-oracle
+  best-response scan evaluates ~57 of 64 cells, so DO buys nothing and costs
+  complexity. DO belongs on the large outer matrix only.
 
 Also in scope: the opponent-decision-difficulty output (§8c.4) and
 most-important-turn (§8c.7), both nearly free once the matrix exists.
@@ -1080,20 +1209,25 @@ on the strength of biased cells.
    permutations at 6! = 720).
 3. Should Tier 2 *replace* Tier 1, or stay parallel? ~~§2 says cost-neutral,
    which argues for replacement~~ — **the cost-neutrality argument is
-   withdrawn.** It rested on a depth-1 solve, and Phase B now requires depth 2
-   (§10), estimated at ~10× (or ~5× with selective deepening). Replacement is
-   still plausible but must now be argued on value, not cost, and it still
-   invalidates cached/reported numbers. Blocked on the depth-2 measurement in
-   question 7.
+   withdrawn, and the question is now resolved by §2c: they must stay
+   parallel.** Cost-neutrality was false even at depth 1 — Tier 2 measures
+   0.08 s/decision (~0.96 s/game) against ~0.05 s/game for the current greedy
+   solver, about **20×** — and at the depth 2 Phase B requires it is ~47 s/game,
+   roughly **1000×**. Depth therefore becomes a per-call-site choice
+   (interactive: 2; sweeps: 1), not a global default, and Tier 1 stays.
 4. ~~How much does equilibrium play differ from current output in practice?~~
    **Resolved — see §2b.** Substantially: 58% of turns get a different play,
    58% of turns need a mixed strategy the current design cannot represent, and
    the current solver overstates its position by ~1.3 Pokémon per turn.
-5. *(New, raised by §2b)* `heuristic_eval` is not antisymmetric, so the matrix
-   isn't strictly zero-sum. Either make the eval symmetric (compute it from
-   both perspectives and take the difference) or move to a general-sum solver.
-   Making it symmetric is much cheaper and probably correct — worth doing as
-   part of Phase A.
+5. *(New, raised by §2b; **measured in §2c.4 — now a prerequisite, not a
+   nicety**)* `heuristic_eval` is not antisymmetric, so the matrix isn't
+   strictly zero-sum. Measured at **277.7 points mean asymmetry — larger than
+   the mean |eval| itself (233.0)** — and symmetrising **changes the maximin
+   pick on 65% of turns**. Cause identified: the `seen` filter is applied only
+   to the opponent (`solver.py:290-298`). Fix: score
+   `(eval(s,"p1") − eval(s,"p2")) / 2`, antisymmetric by construction, ~+20%
+   per cell. **Do this first in Phase A**, and re-measure §2b afterwards — its
+   magnitudes are provisional until then.
 6. *(New, raised by §8b.4)* **Is the objective expected points or P(win)?** The
    corpus says P(win), and says so in a way that has teeth: Zheng's rules for
    when to commit to a read are win-probability-threshold rules, and they are
@@ -1107,14 +1241,17 @@ on the strength of biased cells.
    the state at the end of next turn** (§10, Phase B). Three independent
    motivating cases agree: the attack→switch, attack→Protect punish sequence;
    burning a field-effect clock (§8c.5); and forcing a Protect (§8c.6).
-   **What remains open is the cost**, which is the thing to measure first: the
-   0.4–0.5 s/game figure for a nested equilibrium-valued solve is an estimate
-   extrapolated from §2's depth-1 numbers, and it could be materially worse if
-   the restricted action sets grow at the second level. Sub-questions: does
-   selective deepening (top-`k` root actions only) preserve the ranking, and
-   what is the smallest `k` that does? Trick Room's 4 effective turns would
-   argue for depth > 2, which is almost certainly unaffordable — the fallback
-   is a field-clock term in the eval (§4d) standing in for depth we cannot buy.
+   ~~What remains open is the cost.~~ **Measured — §2c.2, and much worse than
+   estimated: 47.9×, not ~10×** (3.88 s/decision, ~47 s for a 12-turn game).
+   Selective deepening at `k = 4` reaches 15× but moves the answer by 58.8
+   points mean / 208.8 max, so it is not safe at that width. **What is now open
+   is not the cost but the response to it:** depth 2 is affordable for a single
+   interactive decision (~4 s) and unaffordable inside any sweep, so Phase B
+   must say explicitly which tiers get depth 2 rather than making it a global
+   default. Surviving sub-question: what `k` *does* preserve the ranking — it
+   is larger than 4. Trick Room's 4 effective turns would argue for depth > 2,
+   now definitively unaffordable — the fallback is a field-clock term in the
+   eval (§4d) standing in for depth we cannot buy.
 8. *(New, raised by §8b.3)* The engine's no-double-Protect rule
    (`battle.py:421`) is stricter than the real 1/3 mechanic. Once the matrix
    game can price the gamble, do we relax it to the true probability? The

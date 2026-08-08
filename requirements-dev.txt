@@ -1,0 +1,4 @@
+# Development-only dependencies (measurement harnesses and tests in tools/, tests/).
+# The tests in tests/ also run standalone with plain `python tests/test_*.py`,
+# so pytest is a convenience rather than a requirement.
+pytest>=8.0
