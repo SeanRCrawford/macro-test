@@ -852,11 +852,18 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
         # throwing away the per-turn detail means the only way to answer "why is
         # this team rated badly" is to run it again. Plain JSON-able types so it
         # survives the result cache.
+        rec["adjusted_win_rate"] = rating.adjusted_win_rate
+        rec["robust_win_rate"] = rating.robust_win_rate
+        rec["reliable_wins"] = rating.reliable_wins
+        rec["outcomes"] = rating.outcomes
         rec["audit"] = [{
             "lead": list(lead),
             "probability": probability,
             "mean_exploitability": report.mean_exploitability,
             "severe_turns": report.severe_count,
+            "outcome": report.outcome,
+            "final_margin": report.final_margin,
+            "line_turns": report.length,
             "turns": [{
                 "turn": t.turn,
                 "exploitability": t.exploitability,
@@ -883,7 +890,14 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
 
     rated = [r for r in verified if "exploitability" in r]
     unrated = [r for r in verified if "exploitability" not in r]
-    rated.sort(key=lambda d: d["exploitability"])
+    # Rank by WINS THAT HOLD UP, not by punishability alone. Sorting on
+    # exploitability by itself puts a team that loses everything at the top,
+    # because a lost position has nothing left to punish; sorting on wins alone
+    # is the biased measure this whole redesign replaced. adjusted_win_rate is
+    # wins against a punishing opponent, discounted by how punishable the
+    # winning line was, so it needs both to be good. Exploitability breaks ties.
+    rated.sort(key=lambda d: (-(d.get("adjusted_win_rate") or 0.0),
+                              d["exploitability"]))
     return rated + unrated
 
 

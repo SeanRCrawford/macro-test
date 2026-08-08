@@ -75,7 +75,8 @@ def _mean(values):
 def _teams_sheet(wb, rows):
     ws = wb.active
     ws.title = "Teams"
-    ws.append(["Team", "Mean exploitability", "Games won", "Games played",
+    ws.append(["Team", "Adjusted wins", "Wins vs punisher", "Clean wins",
+               "Mean exploitability", "Games won", "Games played",
                "Worst matchup", "Worst value", "Severe turns",
                "Matchups rated", "Matchups searched", "Read with care"])
     _style_header(ws)
@@ -84,10 +85,15 @@ def _teams_sheet(wb, rows):
     for r in rows:
         by_team.setdefault(r["ours"], []).append(r)
 
-    ranked = sorted(by_team.items(),
-                    key=lambda kv: (_mean([x.get("exploitability") for x in kv[1]])
-                                    if _mean([x.get("exploitability") for x in kv[1]])
-                                    is not None else float("inf")))
+    def _rank_key(kv):
+        # Wins that hold up first, punishability as the tie-break. Ranking on
+        # exploitability alone puts a team that loses everything on top.
+        adjusted = _mean([x.get("adjusted_win_rate") for x in kv[1]])
+        exploit = _mean([x.get("exploitability") for x in kv[1]])
+        return (-(adjusted if adjusted is not None else -1.0),
+                exploit if exploit is not None else float("inf"))
+
+    ranked = sorted(by_team.items(), key=_rank_key)
     for name, rs in ranked:
         rated = [x for x in rs if x.get("exploitability") is not None]
         mean = _mean([x["exploitability"] for x in rated])
@@ -101,32 +107,49 @@ def _teams_sheet(wb, rows):
         caution = ("loses most games -- low rating here means the line was "
                    "played well, not that the team is good"
                    if played and wins / played < 0.5 else None)
+        adjusted = _mean([x.get("adjusted_win_rate") for x in rs])
+        robust = _mean([x.get("robust_win_rate") for x in rs])
+        clean = _mean([x.get("reliable_wins") for x in rs])
         ws.append([name,
+                   round(adjusted, 3) if adjusted is not None else None,
+                   round(robust, 3) if robust is not None else None,
+                   round(clean, 3) if clean is not None else None,
                    round(mean, 1) if mean is not None else None,
                    wins or None, played or None,
                    worst["theirs"] if worst else None,
                    round(worst["exploitability"], 1) if worst else None,
                    sum(x.get("severe_turns") or 0 for x in rs),
                    len(rated), len(rs), caution])
-        _shade(ws.cell(ws.max_row, 2), mean)
-        _shade(ws.cell(ws.max_row, 6), worst["exploitability"] if worst else None)
+        # Adjusted wins is a rate where HIGH is good, the opposite of every
+        # other shaded column, so it gets its own scale rather than _shade.
+        if adjusted is not None:
+            ws.cell(ws.max_row, 2).fill = (
+                GOOD_FILL if adjusted >= 0.6
+                else (WARN_FILL if adjusted >= 0.3 else BAD_FILL))
+        _shade(ws.cell(ws.max_row, 5), mean)
+        _shade(ws.cell(ws.max_row, 9), worst["exploitability"] if worst else None)
         if caution:
-            ws.cell(ws.max_row, 10).fill = BAD_FILL
+            ws.cell(ws.max_row, 13).fill = BAD_FILL
     _autosize(ws)
 
 
 def _matchups_sheet(wb, rows):
     ws = wb.create_sheet("Matchups")
-    ws.append(["Team", "Opponent", "Best bring (lead first)", "Exploitability",
+    ws.append(["Team", "Opponent", "Best bring (lead first)", "Adjusted wins",
+               "Wins vs punisher", "Exploitability",
                "Severe turns", "Their hardest lead", "Worst turn",
                "Our play", "Punished by", "Games won", "Games played"])
     _style_header(ws)
     for r in sorted(rows, key=lambda x: (x["ours"],
-                                         -(x.get("exploitability") or -1))):
+                                         -(x.get("adjusted_win_rate") or -1))):
         wt = r.get("worst_turn") or {}
         ws.append([
             r["ours"], r["theirs"],
             " / ".join(r["bring"]) if r.get("bring") else None,
+            round(r["adjusted_win_rate"], 3)
+            if r.get("adjusted_win_rate") is not None else None,
+            round(r["robust_win_rate"], 3)
+            if r.get("robust_win_rate") is not None else None,
             round(r["exploitability"], 1) if r.get("exploitability") is not None else None,
             r.get("severe_turns"),
             " / ".join(r.get("hardest_lead") or []) or None,
@@ -134,7 +157,7 @@ def _matchups_sheet(wb, rows):
             wt.get("our_play"), wt.get("punished_by"),
             r.get("solver_wins"), r.get("solver_total"),
         ])
-        _shade(ws.cell(ws.max_row, 4), r.get("exploitability"))
+        _shade(ws.cell(ws.max_row, 6), r.get("exploitability"))
     _autosize(ws)
 
 
@@ -166,12 +189,66 @@ def _candidates_sheet(wb, rows):
     _autosize(ws)
 
 
+def _best_lines_sheet(wb, rows):
+    """The deliverable: for each opponent, the plan to actually play.
+
+    Everything else in this workbook is diagnosis. This is the answer -- the
+    bring, the lead, and the turn-by-turn plays of the best line that WINS
+    against an opponent punishing every turn, chosen for the least punish
+    among the winning lines.
+    """
+    ws = wb.create_sheet("Best lines")
+    ws.append(["Opponent", "Team", "Bring (lead first)", "Their lead",
+               "Result", "Worst punish", "Turn", "Play this",
+               "If they answer with"])
+    _style_header(ws)
+    any_rows = False
+    for r in sorted(rows, key=lambda x: (x["ours"], x["theirs"])):
+        best = None
+        for cand in r.get("candidates") or []:
+            for lead in cand.get("audit") or []:
+                if lead.get("outcome") != "win":
+                    continue
+                worst = max((t.get("exploitability") or 0.0)
+                            for t in lead.get("turns") or [0]) \
+                    if lead.get("turns") else 0.0
+                if best is None or worst < best[0]:
+                    best = (worst, cand, lead)
+        if best is None:
+            ws.append([r["theirs"], r["ours"],
+                       " / ".join(r.get("bring") or []) or None, None,
+                       "NO WINNING LINE FOUND against a punishing opponent",
+                       None, None, None, None])
+            ws.cell(ws.max_row, 5).fill = BAD_FILL
+            continue
+        any_rows = True
+        worst, cand, lead = best
+        for i, t in enumerate(lead.get("turns") or []):
+            ws.append([
+                r["theirs"] if i == 0 else None,
+                r["ours"] if i == 0 else None,
+                " / ".join(cand.get("bring") or []) if i == 0 else None,
+                " / ".join(lead.get("lead") or []) if i == 0 else None,
+                "WIN" if i == 0 else None,
+                round(worst, 1) if i == 0 else None,
+                t.get("turn"), t.get("our_play"), t.get("punished_by"),
+            ])
+            if i == 0:
+                ws.cell(ws.max_row, 5).fill = GOOD_FILL
+                _shade(ws.cell(ws.max_row, 6), worst)
+    if not any_rows:
+        ws.append(["No winning lines in this cache "
+                   "(the quick tier does not audit lines)."])
+    _autosize(ws)
+
+
 def _turns_sheet(wb, rows):
     """Every audited turn. The evidence behind every number in the other sheets."""
     ws = wb.create_sheet("Turns")
     ws.append(["Team", "Opponent", "Bring (lead first)", "Their lead",
-               "Lead likelihood", "Turn", "Exploitability", "Regret",
-               "Equilibrium", "Our worst case", "Our play", "Their best answer"])
+               "Lead likelihood", "Line result", "Turn", "Exploitability",
+               "Regret", "Equilibrium", "Our worst case", "Our play",
+               "Their best answer"])
     _style_header(ws)
     any_rows = False
     for r in sorted(rows, key=lambda x: (x["ours"], x["theirs"])):
@@ -185,6 +262,7 @@ def _turns_sheet(wb, rows):
                         " / ".join(lead.get("lead") or []) or None,
                         round(lead["probability"], 3)
                         if lead.get("probability") is not None else None,
+                        (lead.get("outcome") or "").upper() or None,
                         t.get("turn"),
                         round(t["exploitability"], 1)
                         if t.get("exploitability") is not None else None,
@@ -195,7 +273,12 @@ def _turns_sheet(wb, rows):
                         if t.get("worst_case") is not None else None,
                         t.get("our_play"), t.get("punished_by"),
                     ])
-                    _shade(ws.cell(ws.max_row, 7), t.get("exploitability"))
+                    _shade(ws.cell(ws.max_row, 8), t.get("exploitability"))
+                    outcome = (lead.get("outcome") or "").lower()
+                    if outcome == "win":
+                        ws.cell(ws.max_row, 6).fill = GOOD_FILL
+                    elif outcome in ("loss", "unresolved"):
+                        ws.cell(ws.max_row, 6).fill = BAD_FILL
     if not any_rows:
         ws.append(["No per-turn detail in this cache "
                    "(the quick tier does not audit lines)."])
@@ -207,6 +290,26 @@ def _legend_sheet(wb):
     ws.append(["Column", "What it means"])
     _style_header(ws)
     for row in [
+        ("Adjusted wins",
+         "THE RANKING NUMBER. Share of their plausible leads where our line "
+         "WINS against an opponent who punishes correctly every turn, with "
+         "each win discounted by how punishable the winning line was: a win "
+         "whose worst turn hands back a whole Pokemon (180 points) counts as "
+         "zero, an unpunishable win counts fully. Higher is better. It needs "
+         "BOTH halves to be good, which is why it replaces ranking on "
+         "exploitability alone."),
+        ("Wins vs punisher",
+         "The same share WITHOUT the punishment discount -- did the line win, "
+         "yes or no, against an opponent answering optimally every turn. Not a "
+         "win count against our own bot. Hitting the turn cap with both sides "
+         "alive counts as NOT a win: a line that cannot close is not a win."),
+        ("Clean wins",
+         "Wins with no severe turn anywhere in the line. The strictest column: "
+         "these are the lines that win without ever handing a good player "
+         "more than a third of a Pokemon."),
+        ("Line result",
+         "On the Turns sheet: whether the line those turns belong to ended in "
+         "a WIN, LOSS, DRAW, or UNRESOLVED (turn cap reached)."),
         ("Exploitability",
          "Equilibrium value of the turn minus the worst case of the play we "
          "actually made. It is what a good player GAINS by answering us "
@@ -258,6 +361,7 @@ def build_workbook(cache_data, out_path):
     wb = Workbook()
     _teams_sheet(wb, rows)
     _matchups_sheet(wb, rows)
+    _best_lines_sheet(wb, rows)
     _candidates_sheet(wb, rows)
     _turns_sheet(wb, rows)
     _legend_sheet(wb)

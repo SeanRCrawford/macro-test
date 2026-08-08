@@ -47,6 +47,92 @@ class BringRating:
                    for _lead, p, rep in self.per_lead) / total
 
     @property
+    def robust_win_rate(self):
+        """P(win) against an opponent who punishes correctly EVERY turn.
+
+        The number the aim actually asks for. Not the win count against our own
+        bot, and not inferred from a points total: each audited line is played
+        out against the opponent's EQUILIBRIUM reply at every turn, and this is
+        the share of those lines we won, weighted by how plausible each of their
+        leads is (section 6a).
+
+        Their equilibrium reply, not the best response to our revealed move --
+        see robustness.line_report for why the clairvoyant version is useless.
+
+        Strict by construction: hitting the turn cap with both sides alive
+        counts as NOT a win, because a line that cannot close is not a win.
+        """
+        total = sum(p for _lead, p, _rep in self.per_lead)
+        if total <= 0:
+            return 0.0
+        return sum(p for _lead, p, rep in self.per_lead if rep.won) / total
+
+    @property
+    def adjusted_win_rate(self):
+        """Wins, discounted by how punishable the winning line was.
+
+        The headline number, and the one to rank on. A win on a line where a
+        good player can take a whole Pokemon off you on some turn is much
+        closer to a coin flip than a win on a line with nothing to answer, so
+        counting both as "1 win" throws away the distinction the whole engine
+        exists to measure.
+
+            per line:  0                        if the line did not win
+                       1 - mean / KO_WEIGHT     if it did, floored at 0
+
+        where `mean` is the average exploitability across the line's turns, so
+        a win that gives away a whole Pokemon per turn on average is discounted
+        to nothing and an unpunishable win keeps its full weight. Averaged over
+        their plausible leads, weighted by lead plausibility.
+
+        MEAN rather than the worst single turn, which was tried first and is
+        degenerate: worst turns routinely exceed 180 points, so every win
+        discounted to exactly zero and the column carried no information. The
+        mean is also the fairer question -- one unavoidable spike is not the
+        same as bleeding ground every turn.
+
+        The scale is an explicit assumption, not a measurement: KO_WEIGHT is
+        the engine's own price of a Pokemon, which makes the discount
+        interpretable ("how much of a Pokemon can they win back") rather than
+        a tuned constant. Compare teams with it; do not read it as P(win).
+        """
+        from solver import KO_WEIGHT
+        total = sum(p for _lead, p, _rep in self.per_lead)
+        if total <= 0:
+            return 0.0
+        acc = 0.0
+        for _lead, p, rep in self.per_lead:
+            if not rep.won:
+                continue
+            penalty = max(0.0, rep.mean_exploitability) / KO_WEIGHT
+            acc += p * max(0.0, 1.0 - penalty)
+        return acc / total
+
+    @property
+    def reliable_wins(self):
+        """Lines that win AND are hard to punish, as a share of plausible leads.
+
+        A win on a line a good player can swing by half a Pokemon per turn is
+        closer to a coin flip than a win. This counts only the wins whose worst
+        turn stays under the severe threshold.
+        """
+        from robustness import SEVERE
+        total = sum(p for _lead, p, _rep in self.per_lead)
+        if total <= 0:
+            return 0.0
+        good = sum(p for _lead, p, rep in self.per_lead
+                   if rep.won and rep.severe_count == 0)
+        return good / total
+
+    @property
+    def outcomes(self):
+        """{"win": w, "loss": l, "draw": d, "unresolved": u} over audited leads."""
+        counts = {"win": 0, "loss": 0, "draw": 0, "unresolved": 0}
+        for _lead, _p, rep in self.per_lead:
+            counts[rep.outcome] = counts.get(rep.outcome, 0) + 1
+        return counts
+
+    @property
     def worst_lead(self):
         """The plausible lead this bring handles worst -- what to fix first."""
         if not self.per_lead:

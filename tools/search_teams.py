@@ -35,7 +35,7 @@ DEFAULT_CACHE = "search_cache.json"
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 2
+SCHEMA = 3   # adjusted wins + line outcomes
 
 
 _WORLD = None       # per-process dataset, loaded once (13-14s) and reused
@@ -95,6 +95,10 @@ def _run_pairing(job):
         "ours": ours, "theirs": theirs,
         "bring": top["our_bring4"] if top else None,
         "exploitability": (top or {}).get("exploitability"),
+        "adjusted_win_rate": (top or {}).get("adjusted_win_rate"),
+        "robust_win_rate": (top or {}).get("robust_win_rate"),
+        "reliable_wins": (top or {}).get("reliable_wins"),
+        "outcomes": (top or {}).get("outcomes"),
         "severe_turns": (top or {}).get("severe_turns"),
         "solver_wins": (top or {}).get("solver_wins"),
         "solver_total": (top or {}).get("solver_total"),
@@ -110,6 +114,10 @@ def _candidate_row(rec):
     return {
         "bring": rec.get("our_bring4"),
         "exploitability": rec.get("exploitability"),
+        "adjusted_win_rate": rec.get("adjusted_win_rate"),
+        "robust_win_rate": rec.get("robust_win_rate"),
+        "reliable_wins": rec.get("reliable_wins"),
+        "outcomes": rec.get("outcomes"),
         "severe_turns": rec.get("severe_turns"),
         "rated_turns": rec.get("rated_turns"),
         "worst_margin": rec.get("worst_margin"),
@@ -279,10 +287,18 @@ def main():
         print("\nNo exploitability ratings (quick tier does not compute them).")
         return
 
-    print("\n===== teams ranked by how punishable they are =====")
-    print(f"{'team':<20}{'exploitability':>16}{'severe':>10}{'won':>12}{'matchups':>10}")
+    print("\n===== teams ranked by WINS THAT HOLD UP =====")
+    print(f"{'team':<20}{'adjusted':>10}{'vs punisher':>13}"
+          f"{'exploit':>10}{'severe':>8}{'won':>12}{'matchups':>10}")
+
+    def _adj(rs):
+        vals = [r.get("adjusted_win_rate") for r in rs
+                if r.get("adjusted_win_rate") is not None]
+        return sum(vals) / len(vals) if vals else 0.0
+
     ranked = sorted(by_team.items(),
-                    key=lambda kv: sum(r["exploitability"] for r in kv[1]) / len(kv[1]))
+                    key=lambda kv: (-_adj(kv[1]),
+                                    sum(r["exploitability"] for r in kv[1]) / len(kv[1])))
     flagged = []
     for name, rs in ranked:
         mean = sum(r["exploitability"] for r in rs) / len(rs)
@@ -290,7 +306,11 @@ def main():
         wins = sum(r.get("solver_wins") or 0 for r in rs)
         total = sum(r.get("solver_total") or 0 for r in rs)
         share = f"{wins}/{total}" if total else "-"
-        print(f"{name:<20}{mean:>16.1f}{severe:>10}{share:>12}{len(rs):>10}")
+        rob = [r.get("robust_win_rate") for r in rs
+               if r.get("robust_win_rate") is not None]
+        rob = sum(rob) / len(rob) if rob else 0.0
+        print(f"{name:<20}{_adj(rs):>10.2f}{rob:>13.2f}"
+              f"{mean:>10.1f}{severe:>8}{share:>12}{len(rs):>10}")
         # A LOST position has nothing left to punish, so it scores near zero.
         # Printing the win count beside the rating is what stops a team that
         # loses everything from topping a table titled "least punishable".
@@ -313,7 +333,14 @@ def main():
         print(f"  T{wt['turn']}: they gain {wt['exploitability']:.0f} by answering")
         print(f"    {wt['our_play']}")
         print(f"  with {wt['punished_by']}")
-    print("\nLower is better. Re-run with the same --effort to resume.")
+    print("\nadjusted    = wins against an opponent punishing every turn, each "
+          "discounted by\n              how punishable the winning line was. "
+          "HIGHER is better; it is the ranking.")
+    print("vs punisher = the same wins without the discount.")
+    print("exploit     = points a good player gains per turn. LOWER is better.")
+    print("won         = games against our own bot. Context only; it is the "
+          "biased measure.")
+    print("\nRe-run with the same --effort to resume.")
 
 
 if __name__ == "__main__":

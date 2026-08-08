@@ -29,8 +29,10 @@ def _candidate(bring, exploitability, turns=2):
         "solver_total": 90, "hardest_lead": bring[:2],
         "worst_turn": {"turn": 1, "exploitability": exploitability,
                        "our_play": "A move1", "punished_by": "B answer"},
+        "adjusted_win_rate": 0.5, "robust_win_rate": 0.5, "reliable_wins": 0.25,
         "audit": [{"lead": bring[:2], "probability": 0.4,
                    "mean_exploitability": exploitability, "severe_turns": 1,
+                   "outcome": "win", "final_margin": 42.0, "line_turns": turns,
                    "turns": [_turn(i + 1, exploitability) for i in range(turns)]}],
     }
 
@@ -40,6 +42,8 @@ def _rated_row(ours, theirs, exploitability):
              _candidate(["A", "B", "C", "E"], exploitability + 20)]
     return {"ours": ours, "theirs": theirs, "bring": cands[0]["bring"],
             "exploitability": exploitability, "severe_turns": 1,
+            "adjusted_win_rate": 0.5, "robust_win_rate": 0.5,
+            "reliable_wins": 0.25,
             "solver_wins": 80, "solver_total": 90,
             "hardest_lead": ["X", "Y"], "worst_turn": cands[0]["worst_turn"],
             "candidates": cands}
@@ -70,10 +74,10 @@ class TestExportSearch(unittest.TestCase):
         ws = wb["Teams"]
         names = [ws.cell(r, 1).value for r in range(2, ws.max_row + 1)]
         self.assertEqual(names, ["NAIC", "Sun"])
-        self.assertAlmostEqual(ws.cell(2, 2).value, 20.0)    # NAIC mean
-        self.assertAlmostEqual(ws.cell(3, 2).value, 100.0)   # Sun mean
+        self.assertAlmostEqual(ws.cell(2, 5).value, 20.0)    # NAIC mean
+        self.assertAlmostEqual(ws.cell(3, 5).value, 100.0)   # Sun mean
         # The worst matchup is named, since that is the one to go and fix.
-        self.assertEqual(ws.cell(2, 5).value, "Sand")
+        self.assertEqual(ws.cell(2, 8).value, "Sand")
 
     def test_every_audited_turn_reaches_the_turns_sheet(self):
         wb, _ = _build({"k": _rated_row("Sun", "Rain", 40.0)})
@@ -83,7 +87,7 @@ class TestExportSearch(unittest.TestCase):
         header = [c.value for c in ws[1]]
         self.assertIn("Their best answer", header)
         self.assertIn("Our play", header)
-        answers = {ws.cell(r, 12).value for r in range(2, ws.max_row + 1)}
+        answers = {ws.cell(r, 13).value for r in range(2, ws.max_row + 1)}
         self.assertEqual(answers, {"B answer"})
 
     def test_runner_up_candidates_are_kept_not_just_the_winner(self):
@@ -103,8 +107,8 @@ class TestExportSearch(unittest.TestCase):
         self.assertEqual(opponents, {"Rain", "Sand"})
         # The Teams sheet counts it as searched but not rated.
         teams = wb["Teams"]
-        self.assertEqual(teams.cell(2, 8).value, 1)   # rated
-        self.assertEqual(teams.cell(2, 9).value, 2)   # searched
+        self.assertEqual(teams.cell(2, 11).value, 1)   # rated
+        self.assertEqual(teams.cell(2, 12).value, 2)   # searched
 
     def test_cache_with_no_audit_anywhere_still_writes_a_workbook(self):
         wb, count = _build({"k": _quick_row("Sun", "Rain")})
@@ -140,7 +144,7 @@ class TestExportSearch(unittest.TestCase):
         healthy = _rated_row("Fine", "King", 45.0)     # 80/90 by default
         wb, _ = _build({"a": losing, "b": healthy})
         ws = wb["Teams"]
-        flags = {ws.cell(r, 1).value: ws.cell(r, 10).value
+        flags = {ws.cell(r, 1).value: ws.cell(r, 13).value
                  for r in range(2, ws.max_row + 1)}
         # It still SORTS first -- the rating is what it is -- but it cannot be
         # read without the warning and the win count sitting next to it.
@@ -148,14 +152,14 @@ class TestExportSearch(unittest.TestCase):
         self.assertIsNotNone(flags["Doomed"])
         self.assertIn("loses most games", flags["Doomed"])
         self.assertIsNone(flags["Fine"])
-        self.assertEqual(ws.cell(2, 3).value, None)   # 0 wins, shown as blank
-        self.assertEqual(ws.cell(2, 4).value, 6)
+        self.assertEqual(ws.cell(2, 6).value, None)   # 0 wins, shown as blank
+        self.assertEqual(ws.cell(2, 7).value, 6)
 
     def test_severity_shading_thresholds_bracket_the_severe_constant(self):
         wb, _ = _build({"a": _rated_row("Low", "X", MILD - 1),
                         "b": _rated_row("High", "X", SEVERE + 1)})
         ws = wb["Teams"]
-        fills = {ws.cell(r, 1).value: ws.cell(r, 2).fill.start_color.rgb
+        fills = {ws.cell(r, 1).value: ws.cell(r, 5).fill.start_color.rgb
                  for r in range(2, ws.max_row + 1)}
         self.assertNotEqual(fills["Low"], fills["High"])
 
