@@ -220,6 +220,27 @@ with no LP dependency — a few hundred iterations of pure arithmetic over a
 cached payoff matrix. Worth considering to avoid adding `scipy.optimize.linprog`
 as a dependency, though scipy is likely already present.
 
+### What this is *not*: a note on CFR tractability
+
+Anyone arriving from poker solvers will raise the standard objection, and it
+was raised verbatim in the Smogon thread (§9): *vanilla CFR+ requires solving
+the entire game tree, and growing-tree CFR requires a value estimator that is
+tricky and expensive to train.* Both halves are true, and neither applies here,
+because **we are not running CFR over the game tree.**
+
+The object being solved is a **single turn's payoff matrix**, whose cells are
+one `run_turn` scored by a hand-written leaf evaluation (§4). There is no
+full-tree traversal, and no learned value function to train — the leaf value is
+`heuristic_eval`, which already exists. "Regret matching" above refers only to
+the *inner solver for one matrix*, used as an alternative to an LP; it is not
+CFR over an extensive-form game, and the resemblance in name is the only thing
+the two share.
+
+This is what makes the §2 cost numbers credible, and it is the reason this
+design is tractable in a way full-game CFR would not be. The corresponding
+weakness is the honest one: our equilibrium is only as good as the leaf value,
+which is exactly why Phase A comes first.
+
 ---
 
 ## 4. Evaluation function overhaul
@@ -715,20 +736,69 @@ rather than a blocked one. The Metamon arXiv ID was spot-checked and is
 correct: 2504.04395 is Grigsby, Xie, Sasek, Zheng & Zhu, *Human-Level
 Competitive Pokémon via Scalable Offline Reinforcement Learning with
 Transformers* — note it is **Singles**, not VGC doubles, which limits how
-directly its results transfer. The Smogon thread is the highest-value unread
-item, since §8 has now independently arrived at much of what its title claims.
+directly its results transfer.
+
+Per-item verification status is marked below: **[verified]** means I read the
+source, **[partly verified]** means some claims held and others could not be
+checked, **[unverified]** means it is still a search-summary lead.
 
 - **Ihara et al. (2018)**, *Implementation and Evaluation of Information Set
   Monte Carlo Tree Search for Pokémon* (IEEE) — compares Cheating MCTS,
-  Determinized MCTS and ISMCTS on Pokémon; motivates ISMCTS via strategy fusion.
-- **FoulPlay** — winner, PokéAgent Challenge. Root-parallelised MCTS, custom
-  Rust engine, **Damage Roll Grouping** (§4c). Reported finding: specialised
-  search/RL still clearly beats generalist LLMs here.
+  Determinized MCTS and ISMCTS on Pokémon; motivates ISMCTS via strategy
+  fusion. **[unverified]** — ieeexplore is still egress-blocked (418). Since
+  §5 only cites this to motivate deferring ISMCTS to Phase E, nothing currently
+  rests on it.
+- **FoulPlay** — **[partly verified]**. Confirmed by reading the repos:
+  `pmariglia/foul-play` is a Pokémon Showdown battle bot that "uses
+  poke-engine to search through battles", and `pmariglia/poke-engine` is
+  **written in Rust with Python bindings** and implements expectiminimax,
+  iterative deepening, and **Monte Carlo Tree Search**. Not confirmed: the
+  root-parallelisation, the **Damage Roll Grouping** attribution, and the
+  PokéAgent Challenge win — none of these appear in either README, and
+  pokeagent.github.io is egress-blocked. poke-engine's documented damage API
+  returns "a list of 16 individual damage values"; how search consumes them is
+  undocumented at README level and would need a code read.
+  > **This matters more than the other entries**, because §8b.1 removed the VGC-
+  > principles justification for Phase C and left this prior art as its only
+  > support. Two things follow. First, do not cite "FoulPlay does it" in code
+  > comments or UI copy until someone reads the source. Second, and more
+  > usefully: **Phase C does not actually need this citation.** The
+  > engine-fidelity argument — Focus Sash, Sturdy, Multiscale, and bulk-EV
+  > survival thresholds are all step functions in damage that an average roll
+  > erases — is self-standing and checkable against our own damage code. §4c
+  > should rest on that, with FoulPlay demoted to "others have found the same
+  > trick worthwhile". The phase ordering in §10 is unaffected either way.
 - **Metamon** — *Human-Level Competitive Pokémon via Scalable Offline RL with
-  Transformers* (arXiv 2504.04395).
-- **Smogon forum thread 3785316** — "VGC doubles as a poker problem": CFR+/ISMCTS
-  over the public game tree with a Bayesian belief model. Closest existing
-  discussion to this exact project; worth reading in full once unblocked.
+  Transformers* (arXiv 2504.04395). **[verified]** title, authors and subject;
+  paper body not read. **Singles, not doubles.**
+- **Smogon forum thread 3785316** — **[verified, and substantially downgraded].**
+  Read in full. It is not a body of discussion to learn from: it is a
+  three-week-old thread (started 15 Jul 2026) by a single university student,
+  "Jaiva", describing an **unreleased solo thesis project**, with exactly one
+  reply. The technical description in the previous draft was accurate as a
+  restatement of their self-report — "Deep multi-turn search (CFR+ / ISMCTS)
+  over the public game tree, with a Bayesian belief model tracking what the
+  opponent's team could be" — but that is a claim about their own private code,
+  not a published result. Their own stated caveats are severe: "Win rates
+  aren't calibrated yet", "Estimates are one-sided and conservative", and it
+  "needs more training, more search depth, and a lot more real games before
+  every verdict is worth trusting". It is also a **post-game replay analyzer**
+  (Lichess-style review of Showdown replays), not a play-time solver, which is
+  a different problem from ours. Open-sourcing is aspirational.
+
+  Two things are still worth taking from it. **(a)** Independent convergence:
+  someone coming from poker solvers landed on the same framing this document
+  did, which is mild evidence the framing is natural rather than idiosyncratic.
+  **(b)** The single reply, from `opencover`, raises the one substantive
+  technical objection in the thread, and it lands on **§3**: "vanilla CFR+
+  requires solving the entire game tree and *growing tree* CFR requires a value
+  estimator which is tricky and expensive to train." That is correct and is
+  precisely the trap §3 avoids — we do **not** run CFR over the game tree. We
+  solve a *per-turn* matrix game whose cells are one `run_turn` scored by a
+  hand-written leaf evaluation, so there is no full-tree traversal and no
+  learned value estimator to train. Worth stating explicitly in §3, because it
+  is the obvious objection a reader with poker-solver background will raise.
+  The thread's real value to us is a contact, not a source.
 - **McMahan, Gordon & Blum (2003)** — Double Oracle.
 - **Zinkevich et al. (2007)** — Counterfactual Regret Minimization.
 - **Lanctot et al.** — simultaneous-move MCTS / DUCT variants.
