@@ -178,6 +178,7 @@ class Battle:
         # simulated states the search cares about -- a failure that looks like
         # "the term does nothing" rather than like a bug.
         new.movesets = getattr(self, "movesets", None)
+        new.wide_movesets = getattr(self, "wide_movesets", None)
 
         # Mutable state.
         new.field = copy.deepcopy(self.field, memo)

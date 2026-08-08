@@ -26,6 +26,7 @@ two active mons, then extended `depth` turns using the same opponent
 model, scored by a simple HP-differential heuristic at the leaf.
 """
 import copy
+import random
 from contextlib import contextmanager
 import itertools
 
@@ -67,6 +68,38 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
             return chosen
     out.sort(key=lambda x: -x[1])
     return out[:top_k]
+
+
+def build_wide_moveset(pokemon_record: dict, moves_db: dict,
+                        pool: int = 6, base_k: int = TOP_K_MOVES):
+    """The moves a Pokemon PLAUSIBLY has, not just the usage-standard four.
+
+    The solver plans against `top_k=TOP_K_MOVES` by usage, and the simulated
+    opponent then plays exactly those four, so the assumption is self-fulfilling
+    and nothing ever contradicts it. Measured cost of that being wrong: **10
+    points of win rate** even for the equilibrium solver, 95% CI [+3, +17] over
+    720 games (tools/measure_set_uncertainty.py).
+
+    A second measurement says the same thing from the other side: a play chosen
+    against the narrow set is exploitable by moves outside it, which is why
+    `nash-maximin` scores worse than greedy on exploitability -- it is maximin
+    with respect to an opponent action space that is too small
+    (tools/measure_robustness.py).
+
+    Widening the pool the OPPONENT is assumed to be able to play is the cheap
+    part of section 5's belief state: no inference, no sampling, no ISMCTS --
+    just stop pretending they cannot have their fifth and sixth most common
+    moves. Usage percentages ride along on each entry, so a later refinement can
+    weight the columns by likelihood rather than treating them as equally
+    available.
+    """
+    return build_moveset(pokemon_record, moves_db, top_k=max(pool, base_k))
+
+
+def build_wide_movesets(names, merged: dict, moves_db: dict, pool: int = 6):
+    """`build_wide_moveset` over a list of species names."""
+    return {n: build_wide_moveset(merged[n], moves_db, pool=pool)
+            for n in names if n in merged}
 
 
 def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo,
@@ -523,6 +556,50 @@ SYMMETRIC_EVAL = False   # True forces the averaging wrapper (see above)
 NASH_SOLVER = False
 NASH_DEPTH = 1
 
+# Play the equilibrium MIXTURE rather than its most-likely action.
+#
+# This matters more than it looks. A mixed strategy's support consists of
+# actions that are INDIVIDUALLY exploitable -- mixing them is the entire reason
+# the strategy is safe. Collapsing to the modal action therefore discards the
+# property that motivated solving the matrix at all. Measured
+# (tools/measure_robustness.py, exploitability in heuristic_eval points, lower
+# is better):
+#
+#     greedy                      65.1
+#     Nash, argmax of the mixture  75.5   <- worse than greedy
+#     Nash, the mixture itself     58.7   <- the actual prize
+#
+# So the deployed solver was landing on the wrong side of the greedy baseline on
+# the metric that matters, while winning 60% of games -- which is exactly why
+# win rate is the wrong gate for this project.
+#
+# Sampling makes the solver non-deterministic, so it is off by default and the
+# RNG is seedable: reproducibility is worth keeping for the sweeps and for the
+# golden baseline, and an opponent cannot exploit a distribution it cannot
+# observe across a single game anyway. Turn it on for real play.
+NASH_SAMPLE = True
+_NASH_RNG = random.Random(20260808)
+
+
+def seed_nash_sampling(seed):
+    """Reseed mixture sampling, so a run can be made reproducible."""
+    global _NASH_RNG
+    _NASH_RNG = random.Random(seed)
+
+
+def _pick_from_mixture(actions, probabilities):
+    """Draw an action from the equilibrium distribution."""
+    total = sum(probabilities)
+    if total <= 0:
+        return actions[0] if actions else None
+    threshold = _NASH_RNG.random() * total
+    cumulative = 0.0
+    for action, weight in zip(actions, probabilities):
+        cumulative += weight
+        if cumulative >= threshold:
+            return action
+    return actions[-1]
+
 
 @contextmanager
 def solver_mode(nash: bool | None = None, depth: int | None = None):
@@ -641,13 +718,21 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
             #
             # So play the chosen action against their most likely reply. One
             # extra run_turn, against a ~240-simulation solve.
+            # Play the MIXTURE, not its mode -- see NASH_SAMPLE above. The
+            # actions in an equilibrium's support are individually exploitable;
+            # mixing them is what makes the strategy safe, so collapsing to the
+            # argmax throws away the whole point.
+            if NASH_SAMPLE:
+                chosen = _pick_from_mixture(solution.our_actions, solution.p)
+            else:
+                chosen = solution.best_action
+
             sim = None
             if solution.their_actions:
                 from turn_step import step as _step
                 likely = max(range(len(solution.q)), key=lambda j: solution.q[j])
-                sim = _step(battle, solution.best_action,
-                            solution.their_actions[likely])
-            return solution.best_action, solution.value, sim
+                sim = _step(battle, chosen, solution.their_actions[likely])
+            return chosen, solution.value, sim
 
     my_side = battle.p1 if my_side_name == "p1" else battle.p2
     opp_side = battle.p2 if my_side_name == "p1" else battle.p1

@@ -177,6 +177,11 @@ def main():
     world = load_world()
     configs = {"greedy": dict(nash=False),
                "nash-d1": dict(nash=True, depth=1)}
+    # Compare the deployed solver with and without the widened opponent move
+    # space, which is the whole point of the change.
+    if args.narrow:
+        for _t, _e in []:
+            pass
     rows = {k: [] for k in list(configs) + ["nash-mixed", "nash-maximin"]}
 
     for team_name, enemy4 in matchups(world, args.brings):

@@ -154,10 +154,20 @@ def _mirror(battle, side_name):
 
 
 def _enumerate(battle, side_name, movesets, cap=None):
+    """Both sides' candidate joint actions.
+
+    THEIR action space may be built from a wider moveset than ours, when the
+    caller has attached `battle.wide_movesets`. We know our own four moves; we
+    do NOT know theirs, and assuming they hold only the usage-standard four is
+    a self-fulfilling assumption that measured at 10 points of win rate
+    (solver.build_wide_moveset). Widening only the opponent's side is the
+    asymmetry the information actually has.
+    """
     us, them = _mirror(battle, side_name)
+    theirs_movesets = getattr(battle, "wide_movesets", None) or movesets
     ours = our_candidate_joint_actions(battle, us, them, movesets,
                                        battle.turn_num + 1)
-    theirs = our_candidate_joint_actions(battle, them, us, movesets,
+    theirs = our_candidate_joint_actions(battle, them, us, theirs_movesets,
                                          battle.turn_num + 1)
     if cap:
         ours, theirs = ours[:cap], theirs[:cap]

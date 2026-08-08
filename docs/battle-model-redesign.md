@@ -1040,6 +1040,79 @@ widening the opponent's plausible move space, which is what Phase E is for.
 
 ---
 
+## 2o. Both fixes implemented, and both pay
+
+Measured on exploitability — the metric that matches the aim — rather than win
+rate. Lower is better; `severe` is the share of decisions where a
+best-responding opponent gains more than a third of a Pokémon.
+
+```
+                        opponent move space:  narrow (4)        WIDE (6)
+greedy                                          65.1  35%        65.1  35%
+Nash, argmax of the mixture                     75.5  33%        61.2  26%
+Nash, the mixture itself                        58.7  27%        43.0  21%
+Nash, maximin row                               70.8  29%        44.1  17%
+```
+
+**The shipped configuration is Nash + mixture + wide: 43.0 against greedy's
+65.1 — a 34% reduction in exploitability**, and severe punishments down from
+35% of decisions to 21%.
+
+Cost: **+26%** per decision (300.9 → 379.2 ms; their action space 23 → 40
+columns, 241 → 376 simulated turns). That is far better value than anything in
+Phase A — the coverage term wanted 4.35× for nothing, roll scenarios 3× for
+nothing.
+
+### 1. Play the mixture (`solver.NASH_SAMPLE`, on by default)
+
+`solve_best_action` returned the argmax of the equilibrium distribution, which
+is the single thing mixing exists to avoid. Now it samples from the
+distribution, with `seed_nash_sampling()` for reproducibility. Nash results are
+therefore **stochastic by design** — that is the correct behaviour for a mixed
+strategy, and the Battle Viewer's turn panel already shows the distribution
+being sampled from.
+
+Left off for greedy, so the golden baseline and the sweeps stay deterministic.
+
+### 2. Widen the opponent's move space (`battle.wide_movesets`)
+
+Their action space is now built from their **six** most-used moves rather than
+the four the solver plans with. Ours is unchanged: we know our own set, we do
+not know theirs, and that asymmetry is the actual information structure.
+
+This resolves the `nash-maximin` anomaly in §2n. It scored *worse* than greedy
+(70.8) because it was maximin with respect to too small an opponent space;
+widened, it drops to 44.1. A solver is only as robust as the opponent model it
+optimises against — the same lesson as §1's authored policy and §2m's assumed
+set, now fixed rather than just noted.
+
+Skipped for any Pokémon whose exact set the caller supplied: if the moves are
+known there is nothing to widen.
+
+### Why not ISMCTS (Ihara et al.)
+
+The problem it addresses is real and measured — set uncertainty costs the
+equilibrium solver 10 points (§2m). But ISMCTS targets **strategy fusion**, a
+pathology of *deep determinised sequential* search, and this search is a depth
+1–2 matrix game where there is little room for it to bite. The two changes
+above attack the measured problem directly, reuse existing machinery, and cost
+26% rather than a new search algorithm.
+
+Ihara's *diagnosis* stays relevant for later: if the opponent's **sets** are
+ever sampled and each sampled world searched independently, strategy fusion
+becomes live and determinisation stops being safe. That is the trigger to
+revisit the method — not now.
+
+### A fourth deepcopy-drop
+
+`wide_movesets` had to be added to `Battle.__deepcopy__`, after `movesets` (§2e)
+and `force_roll_index` (§2k). Three of the four bugs in this project's plumbing
+have been the same one. Anything attached to a `Battle` outside `__init__` needs
+a line there and a test, and it is worth treating that as a checklist item
+rather than rediscovering it a fifth time.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum

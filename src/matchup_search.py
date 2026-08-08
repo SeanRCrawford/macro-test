@@ -25,7 +25,8 @@ from species_data import build_merged_dataset
 from stats import compute_stats
 from damage import Combatant
 from battle import Battle
-from solver import build_moveset, solve_best_action, TOP_K_MOVES
+from solver import (build_moveset, build_wide_movesets, solve_best_action,
+                    TOP_K_MOVES)
 
 MAX_TURNS = 8
 
@@ -34,6 +35,28 @@ def make_combatant(name, merged, natures):
     """Delegates to the shared, Mega-aware factory in combatants.py."""
     from combatants import make_combatant as _make
     return _make(name, merged, natures)
+
+
+
+def _attach_movesets(battle, movesets, enemy_combatants, merged, moves_db, enemy_sets=None):
+    """Attach the move knowledge the turn-level solver needs.
+
+    `movesets` is what we plan with. `wide_movesets` is the OPPONENT's plausible
+    move space, which is deliberately wider: assuming they hold only the four
+    most-used moves is a self-fulfilling assumption, and it measured at 10 points
+    of win rate (solver.build_wide_moveset) and 14-27 points of exploitability
+    (tools/measure_robustness.py). Widening it costs ~26% per decision.
+
+    Skipped for any Pokemon whose exact set the caller supplied -- if the moves
+    are known there is nothing to widen.
+    """
+    battle.movesets = movesets
+    known = {n for n, spec in (enemy_sets or {}).items() if spec.get("moves")}
+    battle.wide_movesets = {
+        **movesets,
+        **build_wide_movesets([c.name for c in enemy_combatants if c.name not in known],
+                              merged, moves_db),
+    }
 
 
 def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
@@ -114,6 +137,7 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
 
     battle = Battle(our_combatants, enemy_combatants, typechart, moves_db, rng_seed=rng_seed,
                      tie_bias=tie_bias)
+    _attach_movesets(battle, movesets, enemy_combatants, merged, moves_db, enemy_sets)
     battle.force_roll_index = roll_index
     # Scripted openings (scripted_openings.py) may need the real movesets to pick a
     # damaging move for a generic (non-scripted) alternative line -- see
@@ -183,6 +207,7 @@ def full_game_punish_audit(our_names, enemy_names, merged, moves_db, natures, ty
 
     battle = Battle(our_combatants, enemy_combatants, typechart, moves_db)
     battle._movesets = movesets
+    _attach_movesets(battle, movesets, enemy_combatants, merged, moves_db, enemy_sets)
 
     def _fmt_action(joint):
         parts = []

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from species_data import build_merged_dataset, load_teams  # noqa: E402
 from combatants import make_team  # noqa: E402
 from battle import Battle  # noqa: E402
-from solver import build_moveset, heuristic_eval  # noqa: E402
+from solver import build_moveset, build_wide_movesets, heuristic_eval  # noqa: E402
 
 
 def load_world():
@@ -36,6 +36,16 @@ def setup_battle(our4, enemy4, world):
     # Combatant does not carry its moves. Attaching them here turns the term on
     # for every measurement tool at once.
     battle.movesets = movesets
+    # The opponent's plausible move space is wider than the four we assume;
+    # see solver.build_wide_moveset for the measurement behind this.
+    # Must cover BOTH rosters: solve_turn can be called from either seat, and
+    # "their" side is whichever one is not being solved for. Only the enemy
+    # entries are widened -- we know our own four moves.
+    battle.wide_movesets = {
+        **movesets,
+        **build_wide_movesets([c.name for c in theirs], world["merged"],
+                              world["moves"]),
+    }
     return battle, movesets
 
 
