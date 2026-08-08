@@ -72,6 +72,63 @@ def print_team_sheet(team, merged):
     print()
 
 
+def quick_script_screen(finals, teams, matrix, merged, moves, natures, typechart,
+                         max_turns=10, our_sets=None):
+    """Cheap early-disqualify pass against scripted openings (King / Hard Trick
+    Room / Perish Trap), meant to run on EVERY beam-search finalist before the
+    expensive full verify stage (Stage 5, which checks all 90 enemy bring-4s
+    per opponent and is far too slow to run on more than a handful of teams).
+
+    fast_eval's greedy-vs-greedy screen has no idea a scripted opponent's Mega
+    Gengar Perish Songs instead of attacking on a given turn -- it can only
+    tell you a team "loses to Kingambit's damage output", not "has no plan for
+    the actual script" -- so this uses the real solver via
+    play_scripted_worst_case, but keeps the cost down by trying only ONE
+    sampled enemy bring-4 per scripted opponent (that opponent's fixed lead +
+    its first two back members) instead of the full 90, and picks our bring-4
+    cheaply from the already-computed pair matrix (free lookup, no extra
+    simulation) rather than searching our own C(6,4) bring choices.
+
+    A team that loses EVERY scripted opponent this way (not just one -- a
+    single unlucky sampled config isn't proof) is flagged disqualified.
+
+    Returns [(score, team, disqualified, detail), ...], same order as
+    `finals`. detail is {team_name: beat_the_script(bool)} for opponents
+    tested (empty dict if no scripted opponent is in `teams`).
+    """
+    from scripted_openings import SCRIPTS
+    from matchup_search import play_scripted_worst_case
+    meta_all = getattr(load_teams, "meta", {}) or {}
+    scripted = [(tn, teams[tn]) for tn in teams if tn in SCRIPTS]
+
+    out = []
+    for sc, team in finals:
+        detail = {}
+        for tn, roster in scripted:
+            meta = meta_all.get(tn, {})
+            fl = meta.get("lead") or list(roster[:2])
+            remaining = [x for x in roster if x not in fl]
+            enemy_bring4 = list(fl) + remaining[:2]
+
+            fl_key = next((ep for ep in itertools.combinations(roster, 2)
+                           if set(ep) == set(fl)), None)
+            our_pairs = list(itertools.combinations(team, 2))
+            scored_pairs = [(matrix[p][(tn, fl_key)], p) for p in our_pairs
+                             if fl_key is not None and p in matrix and (tn, fl_key) in matrix[p]]
+            best_pair = max(scored_pairs, key=lambda x: x[0])[1] if scored_pairs else tuple(team[:2])
+            rest = [x for x in team if x not in best_pair]
+            our_bring4 = list(best_pair) + rest[:2]
+
+            enemy_sets = meta.get("sets") or None
+            w, _t, _b, _idx = play_scripted_worst_case(
+                our_bring4, enemy_bring4, merged, moves, natures, typechart, tn,
+                max_turns=max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
+            detail[tn] = (w == "p1")
+        disqualified = bool(detail) and not any(detail.values())
+        out.append((sc, team, disqualified, detail))
+    return out
+
+
 def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, enemy_pairs,
                         max_turns=12, all_backs=True, our_sets=None):
     """Re-run this team through the REAL solver.
@@ -202,6 +259,13 @@ def main():
     ap.add_argument("--deep", action="store_true",
                      help="Verify finalists against EVERY enemy lead with full bring-4 "
                           "(leads AND backs), not just each opponent's toughest lead.")
+    ap.add_argument("--script-screen", action="store_true",
+                     help="Before the expensive verify stage, cheaply check EVERY beam-search "
+                          "finalist against scripted opponents (King / Hard Trick Room / "
+                          "Perish Trap) with the real solver, one sampled enemy config each. "
+                          "Finalists that lose ALL of them are dropped, so a team with no plan "
+                          "against a scripted opening doesn't waste a --verify slot or make "
+                          "the final report.")
     ap.add_argument("--generations", type=str, default=None,
                      help="Restrict the candidate pool to these generations, e.g. '3' or "
                           "'1-5' or '1,3,5'. A form (Mega, regional, ...) counts as its base "
@@ -303,6 +367,22 @@ def main():
                   f"also excluded.")
         else:
             finals = ok
+
+    if args.script_screen:
+        t0 = time.time()
+        screened = quick_script_screen(finals, teams, matrix, merged, moves, natures, typechart,
+                                        max_turns=args.max_turns, our_sets=None)
+        survivors = [(sc, t) for sc, t, dq, _d in screened if not dq]
+        dropped = [(t, d) for _sc, t, dq, d in screened if dq]
+        print(f"Script screen: {len(dropped)}/{len(finals)} finalists always lose a scripted "
+              f"opening, dropped [{time.time()-t0:.0f}s]")
+        for t, d in dropped[:10]:
+            print(f"  DROPPED {list(t)}: loses {', '.join(k for k, v in d.items() if not v)}")
+        if survivors:
+            finals = survivors
+        else:
+            print("WARNING: every finalist always loses a scripted opening -- keeping the "
+                  "original list rather than reporting nothing.")
 
     best_sets = {}
     for rank, (sc, team) in enumerate(finals[:args.top], start=1):

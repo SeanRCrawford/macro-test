@@ -512,6 +512,14 @@ with tab_gen:
                          help="Verify against every enemy bring-4 -- all C(6,2) leads x "
                               "C(4,2) backs = 90 configurations per opponent -- instead of "
                               "one sampled back pair. Slower but the only trustworthy check.")
+    script_screen = st.checkbox(
+        "Early-disqualify finalists that always lose a scripted opening", value=False,
+        help="Before ranking/reporting, cheaply check EVERY beam-search finalist (not just "
+             "the ones you'd otherwise verify) against scripted opponents (King / Hard Trick "
+             "Room / Perish Trap) with the real solver -- one sampled enemy config each, so "
+             "it's much cheaper than 'All enemy brings' verification. A team with genuinely "
+             "no plan against a script (loses ALL of them, not just one) is dropped before it "
+             "can take a report slot.")
 
     with st.expander("Pair matrix cache (skip the expensive rebuild)"):
         st.caption("Building the pair matrix (every candidate lead pair of ours x every "
@@ -568,6 +576,23 @@ with tab_gen:
 
         finals = beam_search_teams(pool, matrix, eps, merged, beam_width=beam,
                                     must_include=run_prefs["include"], prefer=run_prefs["prefer"])
+
+        if script_screen and finals:
+            from generate_team import quick_script_screen
+            with st.spinner("Screening finalists against scripted openings..."):
+                screened = quick_script_screen(finals, teams, matrix, merged, moves, natures,
+                                                typechart, max_turns=12)
+            survivors = [(sc, t) for sc, t, dq, _d in screened if not dq]
+            dropped = [(t, d) for _sc, t, dq, d in screened if dq]
+            if dropped:
+                st.warning(f"Dropped {len(dropped)}/{len(finals)} finalists that lose EVERY "
+                           f"scripted opening tested (King / Hard Trick Room / Perish Trap, "
+                           f"whichever are in teams.csv).")
+            if survivors:
+                finals = survivors
+            elif dropped:
+                st.warning("Every finalist always loses a scripted opening -- keeping the "
+                           "original list rather than showing nothing.")
 
         if not finals:
             st.error("No valid teams found -- try a larger pool size.")
