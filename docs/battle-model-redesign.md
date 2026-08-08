@@ -1167,6 +1167,72 @@ few candidates, not on the 90-config screen.
 
 ---
 
+## 2q. Team rating by exploitability — the last place the old proxy lived
+
+`search_robust_composition` ranks by wins against `greedy_opponent_joint_action`,
+a policy this codebase wrote itself. A bring can beat 90/90 of their
+configurations and still be one a strong player dismantles, because the
+simulated opponent never tries the punish. `src/team_rating.py` +
+`tools/rate_teams.py` rate a team the way the aim implies instead:
+
+> against the leads they would **plausibly** bring (§6a, usage-weighted rather
+> than all 90 uniformly), play our best line and measure what a
+> **best-responding** opponent gains, turn by turn (§3c) — with their moves
+> drawn from the **wider** set they might actually be running (§2o).
+
+Run over the library (equilibrium solver, mixture sampling, wide opponent space;
+2 plausible leads per opposing team, 4 turns):
+
+```
+team                  exploitability   severe turns
+NAIC                            29.9         6/56
+Hard Trick Room                 43.3        11/56
+Perish Trap                     66.0        21/56
+Big 6                           66.5        19/56
+Sand                            70.1        19/56
+Sun Rain                        73.1        21/55
+King                           105.6        23/56
+Rain                           120.1        32/55
+```
+
+**A 4× spread**, and it is not the ordering a win count gives. Lower is better:
+this is what a good player gets for free.
+
+The output is diagnostic rather than just a score. The least robust team's
+worst plausible lead, and the exact punish:
+
+```
+Rain's hardest plausible lead: Torkoal / Kingambit
+  worst turn T1: they gain 583 by answering
+    Archaludon Dragon Pulse -> Torkoal + Grimmsnarl switch -> Pelipper
+  with Torkoal Eruption -> Archaludon + Kingambit Sucker Punch -> Archaludon
+```
+
+583 points is over three Pokémon, on turn one, against a lead they would
+plausibly bring. Worth noting that **Kingambit Sucker Punch** is precisely the
+punish pattern this project was asked to catch — it turned up on its own, from
+the metric rather than from being looked for.
+
+### Reading it honestly
+
+- The audit is piloted with the least-exploitable configuration available
+  (§2o). Rating a team while piloting it badly measures the pilot, not the team.
+- These settings are coarse: each team's first four as the bring, two plausible
+  leads per opponent, four turns. Good enough to rank; not a substitute for
+  auditing a specific matchup in the Battle Viewer.
+- Exploitability needs a full payoff matrix per turn, so this belongs on the
+  verify stage for a handful of candidates. The cheap 90-configuration screen in
+  `search_robust_composition` still does the shortlisting.
+
+### Still to do
+
+`search_robust_composition` itself is unchanged — it reports the new `downside`
+score (§2i) alongside its win counts, but its *ranking* is still win-based.
+Wiring this rating in as the final verify stage, and surfacing it in the Vs Team
+page, is the remaining step.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum
