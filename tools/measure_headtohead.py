@@ -95,6 +95,26 @@ def play(our4, enemy4, world, config_p1, config_p2):
     return 1 if diff > 0.05 else (-1 if diff < -0.05 else 0)
 
 
+def our_brings(world, our_variants):
+    """Fours for OUR side.
+
+    Everything before this only ever attacked with one fixed team, which caps
+    the sample and also risks measuring "helps this particular team" rather than
+    "is a better solver". Drawing our four from the library rosters as well
+    widens both.
+    """
+    out = [list(OUR_TEAM)]
+    if our_variants <= 1:
+        return out
+    for team_name in world["teams"]:
+        roster = list(world["teams"][team_name])
+        if len(roster) >= 4:
+            out.append(roster[:4])
+        if len(out) >= our_variants:
+            break
+    return out
+
+
 def matchups(world, bring_variants):
     """(team_name, enemy four) pairs.
 
@@ -135,6 +155,8 @@ def main():
                     help="value of --setting for the baseline")
     ap.add_argument("--brings", type=int, default=4,
                     help="enemy bring variants per team (sample size multiplier)")
+    ap.add_argument("--ours", type=int, default=1,
+                    help="variants for OUR four (widens the matchup pool)")
     args = ap.parse_args()
 
     world = load_world()
@@ -143,19 +165,21 @@ def main():
     candidate = Config(f"{args.setting}={args.weight}",
                        **{args.setting: args.weight})
     pairs = matchups(world, args.brings)
-    print(f"{len(pairs)} games ({len(world['teams'])} teams x up to "
-          f"{args.brings} brings)\n")
+    ours_list = our_brings(world, args.ours)
+    jobs = [(t, e, o) for (t, e) in pairs for o in ours_list]
+    print(f"{2 * len(jobs)} games ({len(pairs)} enemy matchups x "
+          f"{len(ours_list)} of our brings, each played both ways)\n")
 
     wins = losses = draws = 0
     original = {k: getattr(solver, k)
                 for k in set(baseline.settings) | set(candidate.settings)}
     try:
-        for team_name, enemy4 in pairs:
+        for team_name, enemy4, our4 in jobs:
             # Paired play: the SAME matchup with the candidate on each side.
             # When the configurations agree these two cancel exactly, which is
             # what pins the null at 50%.
-            results = (play(OUR_TEAM, enemy4, world, candidate, baseline),
-                       -play(OUR_TEAM, enemy4, world, baseline, candidate))
+            results = (play(our4, enemy4, world, candidate, baseline),
+                       -play(our4, enemy4, world, baseline, candidate))
             labels = "".join({1: "W", -1: "L", 0: "D"}[r] for r in results)
             print(f"  {labels}  {team_name:<18} vs "
                   f"{','.join(x[:9] for x in enemy4)}", flush=True)

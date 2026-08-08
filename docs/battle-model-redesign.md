@@ -551,6 +551,74 @@ coverage term.
 
 ---
 
+## 2h. Phase B (first milestone): the matrix game beats the greedy solver
+
+**The central thesis of this document is now measured and confirmed.**
+`src/turn_game.py` solves each turn as a two-player zero-sum matrix game and
+plays it against the existing greedy solver:
+
+```
+Nash (depth 1) vs greedy expectimax
+  384 games, 8 teams x 6 enemy brings x 4 of our brings, each played both ways
+  231 W / 151 L / 2 D
+  60% win rate, 95% CI [55%, 65%]     => SIGNIFICANTLY BETTER
+
+null control, same pool, identical configurations
+  192 W / 192 L / 0 D  =  50%          => instrument verified clean
+```
+
+This is the first statistically significant result in the project, and it
+arrives after two evaluation terms measured at 49% and 51%. Read together, the
+three say the same thing: **the binding constraint was representational, not
+evaluative.** §2b's finding that 83% of turns have a mixed equilibrium — an
+answer the old architecture could not express at all — is what the 60% is
+cashing in.
+
+It also needed the widened matchup pool to become visible. At the narrower
+pool the same configuration read 55% (n=80), 56% (n=192), 55% (n=238), all with
+intervals straddling 50%. Varying *our* four as well as theirs — rather than
+always attacking with one fixed team — both enlarged the sample and removed the
+risk of measuring "helps this one team".
+
+### Cost
+
+```
+greedy          13.3 ms / decision      ~0.4 s per 14-turn game
+Nash depth 1   258.5 ms / decision      ~7.2 s per game     (19x)
+Nash depth 2  5488   ms / decision    ~154   s per game    (412x)
+```
+
+Depth 1 at 19× is affordable for verification and interactive use and too slow
+for the large sweeps. Depth 2 is interactive-only, exactly as §2c predicted.
+
+### Two performance bugs, both found by measuring rather than reasoning
+
+Depth 2 first measured at **31.6 s per decision**, eight times worse than
+§2c's prediction. Neither cause was the algorithm:
+
+1. **The nested action cap never applied.** The condition read `depth < 1`,
+   which is never true for a call at depth 1 or 2, so every nested subgame ran
+   at full size — a complete ~23×28 game inside every cell of another one.
+2. **Iteration count, not simulation count, was the bottleneck.** Each nested
+   8×8 subgame ran 3000 regret-matching iterations, once per cell of the outer
+   game. Small games converge long before that; dropping nested solves to 400
+   took depth 2 from 17.6 s to 5.5 s.
+
+Worth recording because the instinct on seeing 31.6 s would have been to
+declare depth 2 unaffordable and design around it. It was a typo and a tuning
+constant.
+
+### Still to do in Phase B
+
+The flag `solver.NASH_SOLVER` is **off by default**. The measurement justifies
+turning it on, but that changes every reported number in every tab, and §7
+requires depth to be chosen per call site rather than globally — so enabling it
+is its own step, not a side effect of this one. Also outstanding: retiring
+`CHECK_TOP_K`, and surfacing the mixed-strategy advice, exploitability, and
+opponent-decision-difficulty that `TurnSolution` already computes.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum

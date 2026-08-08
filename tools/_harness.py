@@ -6,7 +6,6 @@ without disturbing the original. That last one is fiddly enough (actions hold
 references to Combatant objects, which deepcopy replaces) that having one
 correct implementation beats three.
 """
-import copy
 import os
 import sys
 
@@ -15,7 +14,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from species_data import build_merged_dataset, load_teams  # noqa: E402
 from combatants import make_team  # noqa: E402
 from battle import Battle  # noqa: E402
-from engine import Action  # noqa: E402
 from solver import build_moveset, heuristic_eval  # noqa: E402
 
 
@@ -48,34 +46,9 @@ def enemy_bring(team_name, world):
     return list(lead) + [x for x in roster if x not in lead][:2]
 
 
-def step(battle, our_actions, their_actions):
-    """Advance a DEEPCOPY of `battle` by one turn. Returns the copy, or None.
-
-    Actions reference Combatant objects belonging to `battle`, so they have to
-    be rebuilt against the copy's objects or the turn mutates the wrong state.
-    Deterministic: rng is cleared so damage takes the average roll, matching
-    what the current solver does.
-    """
-    sim = copy.deepcopy(battle)
-    sim.rng = None
-    sim.tie_bias = battle.tie_bias
-
-    forward = {}
-    for old, new in zip(battle.p1.roster, sim.p1.roster):
-        forward[id(old)] = new
-    for old, new in zip(battle.p2.roster, sim.p2.roster):
-        forward[id(old)] = new
-
-    def rebuild(a):
-        return Action(forward.get(id(a.combatant), a.combatant), a.side, a.kind,
-                      a.move, [forward.get(id(t), t) for t in a.targets])
-
-    try:
-        sim.run_turn([rebuild(a) for a in our_actions],
-                     [rebuild(a) for a in their_actions])
-    except Exception:
-        return None
-    return sim
+# Re-exported from src/turn_step.py, which the production turn solver also
+# uses. Kept importable from here so the existing harnesses do not change.
+from turn_step import step  # noqa: E402,F401
 
 
 def evaluate(battle, side="p1"):

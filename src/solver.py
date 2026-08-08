@@ -506,6 +506,23 @@ def _positional_score(side, foe_side, typechart) -> float:
 SYMMETRIC_EVAL = False   # True forces the averaging wrapper (see above)
 
 
+# ---------------------------------------------------------------------------
+# Phase B: turn-level matrix game
+# ---------------------------------------------------------------------------
+# When True, solve_best_action solves the turn as a two-player zero-sum matrix
+# game (src/turn_game.py) rather than best-responding to
+# greedy_opponent_joint_action -- a policy this codebase wrote itself, which is
+# the definition of an exploitable strategy.
+#
+# NASH_DEPTH must be chosen per call site rather than globally. Measured in
+# section 2c: depth 1 costs 0.08 s per decision, depth 2 costs 3.88 s (47.9x,
+# about 47 s for a twelve-turn game). Depth 2 is for interactive single
+# decisions -- Battle Viewer, punish analysis -- and is unaffordable inside any
+# sweep.
+NASH_SOLVER = False
+NASH_DEPTH = 1
+
+
 def symmetric_eval(battle: Battle, my_side_name: str) -> float:
     """Force antisymmetry by averaging our view against the negation of theirs.
 
@@ -576,6 +593,16 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
     assuming the script wins -- the foremost goal is to beat the script,
     without being blown up the instant it doesn't happen.
     """
+    # Phase B: solve the turn as a matrix game instead of best-responding to a
+    # policy we wrote ourselves. Off by default until measured (see
+    # tools/measure_headtohead.py). Imported lazily because turn_game imports
+    # from this module.
+    if NASH_SOLVER:
+        from turn_game import solve_turn
+        solution = solve_turn(battle, my_side_name, movesets, depth=NASH_DEPTH)
+        if solution.our_actions:
+            return solution.best_action, solution.value, None
+
     my_side = battle.p1 if my_side_name == "p1" else battle.p2
     opp_side = battle.p2 if my_side_name == "p1" else battle.p1
 
