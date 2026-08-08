@@ -26,6 +26,8 @@ two active mons, then extended `depth` turns using the same opponent
 model, scored by a simple HP-differential heuristic at the leaf.
 """
 import copy
+import random
+from contextlib import contextmanager
 import itertools
 
 from damage import Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll, CHARGE_WEATHER_SKIP
@@ -66,6 +68,38 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
             return chosen
     out.sort(key=lambda x: -x[1])
     return out[:top_k]
+
+
+def build_wide_moveset(pokemon_record: dict, moves_db: dict,
+                        pool: int = 6, base_k: int = TOP_K_MOVES):
+    """The moves a Pokemon PLAUSIBLY has, not just the usage-standard four.
+
+    The solver plans against `top_k=TOP_K_MOVES` by usage, and the simulated
+    opponent then plays exactly those four, so the assumption is self-fulfilling
+    and nothing ever contradicts it. Measured cost of that being wrong: **10
+    points of win rate** even for the equilibrium solver, 95% CI [+3, +17] over
+    720 games (tools/measure_set_uncertainty.py).
+
+    A second measurement says the same thing from the other side: a play chosen
+    against the narrow set is exploitable by moves outside it, which is why
+    `nash-maximin` scores worse than greedy on exploitability -- it is maximin
+    with respect to an opponent action space that is too small
+    (tools/measure_robustness.py).
+
+    Widening the pool the OPPONENT is assumed to be able to play is the cheap
+    part of section 5's belief state: no inference, no sampling, no ISMCTS --
+    just stop pretending they cannot have their fifth and sixth most common
+    moves. Usage percentages ride along on each entry, so a later refinement can
+    weight the columns by likelihood rather than treating them as equally
+    available.
+    """
+    return build_moveset(pokemon_record, moves_db, top_k=max(pool, base_k))
+
+
+def build_wide_movesets(names, merged: dict, moves_db: dict, pool: int = 6):
+    """`build_wide_moveset` over a list of species names."""
+    return {n: build_wide_moveset(merged[n], moves_db, pool=pool)
+            for n in names if n in merged}
 
 
 def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo,
@@ -263,6 +297,51 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
 
 
 KO_WEIGHT = 180.0  # see heuristic_eval: a secured KO must dominate the HP-differential
+
+
+# ---------------------------------------------------------------------------
+# Functional value (design doc 4d, "1 HP is infinitely more than 0 HP")
+# ---------------------------------------------------------------------------
+# Wolfe Glick's article is written directly against a linear HP term: "All of
+# your Pokemon will function in EXACTLY the same way no matter how much health
+# they have left -- a Pokemon at low HP won't do less damage than if it was
+# fully healthy."
+#
+# Worth being precise about what this evaluation already does, because the
+# obvious reading ("add a step at zero") is a change it has largely made
+# already. Per ALIVE Pokemon the two terms contribute:
+#
+#     KO term   _ko_threat_value in [0.35, 1.35] * KO_WEIGHT  ->   63..243 points
+#     HP term   current_hp_frac                  * 100        ->     0..100 points
+#
+# so dying already costs far more than being chipped to 1 HP. The real open
+# question is not whether there is a step but whether the BALANCE between the
+# two is right -- and that is a single number, which can be swept and measured
+# rather than argued about.
+#
+# FUNCTIONAL_FLOOR is that number: the share of a Pokemon's HP-term value it
+# keeps merely by being alive.
+#
+#     0.0  purely linear in HP            (the behaviour before Phase A4)
+#     0.5  half of the HP term is "alive", half is remaining bulk
+#     1.0  HP is irrelevant; only the alive count matters
+#
+# Chip damage must keep costing something -- it moves a Pokemon toward dying,
+# and a pure step would make it free -- so the useful range is interior.
+FUNCTIONAL_FLOOR = 0.0
+
+
+def _functional_hp(c: Combatant) -> float:
+    """HP-term contribution of one living Pokemon.
+
+    Kept antisymmetric-safe: identical for both rosters, and a hidden Pokemon
+    (necessarily at full HP) evaluates to 1.0 at any floor, so revealing one
+    still cannot manufacture value. See the reveal-incentive note on
+    leaf_value.
+    """
+    if c.fainted:
+        return 0.0
+    return FUNCTIONAL_FLOOR + (1.0 - FUNCTIONAL_FLOOR) * c.current_hp_frac
                     # noise a forced enemy replacement introduces
 
 
@@ -287,15 +366,29 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
         return -10_000
     if opp.has_lost():
         return 10_000
-    my_hp = sum(c.current_hp_frac for c in my.roster if not c.fainted)
-    # Only count opponents we have actually SEEN -- those on the field now, plus any
-    # that have already been revealed (sent out at some point, including fainted
-    # ones). Summing their whole roster leaked knowledge of a bench we have not met
-    # yet, which let plans quietly assume information the player does not have at
-    # the point of choosing a move.
-    seen = [c for c in opp.roster
-            if c in opp.active or c.fainted or getattr(c, "revealed", False)]
-    opp_hp = sum(c.current_hp_frac for c in seen if not c.fainted)
+    # COMMON KNOWLEDGE ONLY. Solving a turn as a two-player zero-sum matrix game
+    # requires both sides to agree on the value of a state -- our gain must be
+    # exactly their loss. That holds only if the evaluation is a function of what
+    # BOTH players know, so every term below is computed identically for the two
+    # rosters. `revealed` is set for any Pokemon that enters the field
+    # (engine.py), so it is genuinely symmetric information.
+    #
+    # Previously the `seen` filter was applied to the opponent only: `my_hp`
+    # summed the full roster while `opp_hp` summed revealed mons alone. That made
+    # eval(s,"p1") + eval(s,"p2") == 100 * (hidden HP on both sides), measured at
+    # 277.7 points mean -- larger than the mean |eval| itself, and varying per
+    # cell, so it did not cancel out of an argmax (it moved the maximin pick on
+    # 65% of turns). See tools/measure_antisymmetry.py.
+    def is_common_knowledge(c, side):
+        return c in side.active or c.fainted or getattr(c, "revealed", False)
+
+    # HP: a mon that has never been on the field is necessarily at FULL HP, and
+    # the number of live Pokemon each side has left is public. So counting hidden
+    # mons at their (always 1.0) HP fraction leaks nothing -- the old filter was
+    # guarding against a disclosure that cannot happen for this term, at the cost
+    # of the asymmetry above.
+    my_hp = sum(_functional_hp(c) for c in my.roster if not c.fainted)
+    opp_hp = sum(_functional_hp(c) for c in opp.roster if not c.fainted)
 
     # KOing a Pokemon forces a replacement, which is immediately "seen" and enters
     # at full HP -- so opp_hp can go UP the instant we secure a kill (we removed 0.x
@@ -310,19 +403,30 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     # killing something that barely threatens our side isn't worth much, and
     # forcing the opponent's free, unpunished replacement in exchange for it can
     # be a bad trade -- adverse selection, they get to bring in their best answer
-    # at no cost. Our own roster is fully known (no leak), so it always uses real
-    # values. An opponent we've actually SEEN (active, fainted, or previously
-    # revealed -- once _best_replacement lets a real threat in, THIS is what
-    # scores it as one) also gets its real value; one still hidden on the bench
-    # gets a flat placeholder instead of its true stats, which would leak team
-    # composition the player hasn't met yet -- the same leak `seen` already
-    # guards opp_hp against.
-    opp_seen_ids = {id(c) for c in seen}
+    # at no cost.
+    #
+    # This term reads Attack/Sp.Atk, so the old code placeholdered hidden
+    # OPPONENT mons at a flat 1.0 while scoring our own bench at its true value.
+    # Both halves of that were wrong for a zero-sum game:
+    #
+    #   - Side-dependent scoring breaks antisymmetry outright: the two players
+    #     price the same state differently, so "their loss is our gain" is false.
+    #   - Placeholdering by REVEAL STATE creates a reveal incentive. Flipping
+    #     `revealed` moved the score by |1.0 - _ko_threat_value| * KO_WEIGHT, up
+    #     to 63 points, so simply switching a strong mon in manufactured value
+    #     out of an information update rather than out of any real progress.
+    #     (Exactly the failure the HP fix above avoids, one term over. Both were
+    #     caught by tests/test_leaf_value.py and tools/golden_baseline.py.)
+    #
+    # So both rosters now use the real value, always. That is a deliberate
+    # relaxation of the old no-leak guard, and it is sound HERE because the
+    # evaluation is always conditioned on a HYPOTHESISED enemy bring -- callers
+    # like search_robust_composition sweep over the brings rather than peeking at
+    # one. Within a hypothesis the species are known, and _ko_threat_value is a
+    # coarse clamp on attacking stats that discloses nothing about the things
+    # that actually stay hidden: moves, items and EV spreads.
     my_value = sum(_ko_threat_value(c) for c in my.roster if not c.fainted)
-    opp_value = sum(
-        (_ko_threat_value(c) if id(c) in opp_seen_ids else 1.0)
-        for c in opp.roster if not c.fainted
-    )
+    opp_value = sum(_ko_threat_value(c) for c in opp.roster if not c.fainted)
     score = (my_value - opp_value) * KO_WEIGHT
     score += (my_hp - opp_hp) * 100
 
@@ -332,7 +436,48 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     # things a pivot actually buys.
     score += _positional_score(my, opp, battle.typechart)
     score -= _positional_score(opp, my, battle.typechart)
+
+    # Answer preservation (design doc 4b). Off unless the caller has attached
+    # movesets to the battle, because the threat matrix needs to know what each
+    # Pokemon can actually do and Combatant does not carry its moves. Callers
+    # that want the term set `battle.movesets`; everything else is unchanged.
+    if COVERAGE_WEIGHT:
+        score += COVERAGE_WEIGHT * _coverage_term(battle, my_side_name)
     return score
+
+
+# Scale for the answer-preservation term (design doc 4b).
+#
+# OFF BY DEFAULT: measured, and it does not currently earn its cost.
+#
+#   cost    heuristic_eval 0.028 ms -> 0.702 ms (25x), so a matrix CELL goes
+#           0.201 ms -> 0.876 ms (4.35x). The term rebuilds the whole threat
+#           matrix at every leaf.
+#   benefit head to head against the same solver with the term off, at weights
+#           0.10 and 0.25: 3 W / 5 L both times. n=8 is far too small to claim
+#           it is WORSE, but there is no evidence it is better, and 4.35x is a
+#           lot to pay on a hope -- especially after section 2c found the
+#           matrix-game solver already ~20x more expensive than assumed.
+#
+# The threat matrix itself (src/threat.py) is NOT in question and is used for
+# the answer map, focus-fire detection, and later for action pruning and
+# double-oracle seeding. It is only this evaluation term that is parked.
+#
+# To revisit, in order: (1) make the matrix incremental or cached so the cost
+# is not paid per leaf; (2) re-run tools/measure_headtohead.py over many more
+# games; (3) look at coverage_differential itself, whose second half moves when
+# our roster size changes and which therefore ranks keystone losses less
+# cleanly than our coverage alone (see tests/test_coverage_term.py).
+COVERAGE_WEIGHT = 0.0
+
+
+def _coverage_term(battle: Battle, my_side_name: str) -> float:
+    movesets = getattr(battle, "movesets", None)
+    if not movesets:
+        return 0.0
+    from threat import build_threat_matrix, coverage_differential
+    diff = coverage_differential(build_threat_matrix(battle, movesets))
+    return diff if my_side_name == "p1" else -diff
 
 
 # STAB threat proxy: how hard the opposing actives hit what we have out.
@@ -366,6 +511,136 @@ def _positional_score(side, foe_side, typechart) -> float:
             elif worst <= 0.5:
                 total += 5.0
     return total
+
+
+# ---------------------------------------------------------------------------
+# Leaf value
+# ---------------------------------------------------------------------------
+# Everything that scores a position should go through leaf_value() rather than
+# calling heuristic_eval() directly, so that the leaf value can change (points ->
+# calibrated win probability is expected next) in one edit rather than a hunt.
+#
+# On symmetry: heuristic_eval is now antisymmetric AT SOURCE -- every term is
+# computed from common knowledge, identically for both rosters -- so
+# symmetric_eval below is an exact no-op and is off by default.
+#
+# It is kept for two reasons: it is the cheap guarantee if a future term is
+# added that is accidentally one-sided, and flipping the flag makes the cost of
+# such a mistake measurable rather than invisible. `tests/test_leaf_value.py`
+# asserts the at-source property directly, so a regression fails the suite
+# instead of silently being papered over by this wrapper.
+#
+# Note that averaging is NOT a substitute for fixing the terms. The first
+# attempt at this used symmetric_eval over the old one-sided heuristic, and it
+# converted a side asymmetry into a REVEAL INCENTIVE: hidden mons ended up
+# weighted 0.5x and revealed ones 1.0x, so switching a healthy mon in
+# manufactured exactly +50 points (0.5 x 100) from nothing, and the solver
+# started preferring switches everywhere. Caught by tools/golden_baseline.py.
+
+SYMMETRIC_EVAL = False   # True forces the averaging wrapper (see above)
+
+
+# ---------------------------------------------------------------------------
+# Phase B: turn-level matrix game
+# ---------------------------------------------------------------------------
+# When True, solve_best_action solves the turn as a two-player zero-sum matrix
+# game (src/turn_game.py) rather than best-responding to
+# greedy_opponent_joint_action -- a policy this codebase wrote itself, which is
+# the definition of an exploitable strategy.
+#
+# NASH_DEPTH must be chosen per call site rather than globally. Measured in
+# section 2c: depth 1 costs 0.08 s per decision, depth 2 costs 3.88 s (47.9x,
+# about 47 s for a twelve-turn game). Depth 2 is for interactive single
+# decisions -- Battle Viewer, punish analysis -- and is unaffordable inside any
+# sweep.
+NASH_SOLVER = False
+NASH_DEPTH = 1
+
+# Play the equilibrium MIXTURE rather than its most-likely action.
+#
+# This matters more than it looks. A mixed strategy's support consists of
+# actions that are INDIVIDUALLY exploitable -- mixing them is the entire reason
+# the strategy is safe. Collapsing to the modal action therefore discards the
+# property that motivated solving the matrix at all. Measured
+# (tools/measure_robustness.py, exploitability in heuristic_eval points, lower
+# is better):
+#
+#     greedy                      65.1
+#     Nash, argmax of the mixture  75.5   <- worse than greedy
+#     Nash, the mixture itself     58.7   <- the actual prize
+#
+# So the deployed solver was landing on the wrong side of the greedy baseline on
+# the metric that matters, while winning 60% of games -- which is exactly why
+# win rate is the wrong gate for this project.
+#
+# Sampling makes the solver non-deterministic, so it is off by default and the
+# RNG is seedable: reproducibility is worth keeping for the sweeps and for the
+# golden baseline, and an opponent cannot exploit a distribution it cannot
+# observe across a single game anyway. Turn it on for real play.
+NASH_SAMPLE = True
+_NASH_RNG = random.Random(20260808)
+
+
+def seed_nash_sampling(seed):
+    """Reseed mixture sampling, so a run can be made reproducible."""
+    global _NASH_RNG
+    _NASH_RNG = random.Random(seed)
+
+
+def _pick_from_mixture(actions, probabilities):
+    """Draw an action from the equilibrium distribution."""
+    total = sum(probabilities)
+    if total <= 0:
+        return actions[0] if actions else None
+    threshold = _NASH_RNG.random() * total
+    cumulative = 0.0
+    for action, weight in zip(actions, probabilities):
+        cumulative += weight
+        if cumulative >= threshold:
+            return action
+    return actions[-1]
+
+
+@contextmanager
+def solver_mode(nash: bool | None = None, depth: int | None = None):
+    """Temporarily select the solver, restoring the previous setting after.
+
+    The UI needs to run one simulation under a user-chosen mode without leaking
+    that choice into everything else in the process -- Streamlit keeps module
+    state alive across reruns, so setting the globals directly would make the
+    last-used mode silently sticky for every other tab.
+
+        with solver_mode(nash=True, depth=2):
+            ...
+    """
+    global NASH_SOLVER, NASH_DEPTH
+    previous = (NASH_SOLVER, NASH_DEPTH)
+    if nash is not None:
+        NASH_SOLVER = nash
+    if depth is not None:
+        NASH_DEPTH = depth
+    try:
+        yield
+    finally:
+        NASH_SOLVER, NASH_DEPTH = previous
+
+
+def symmetric_eval(battle: Battle, my_side_name: str) -> float:
+    """Force antisymmetry by averaging our view against the negation of theirs.
+
+    Exact no-op while heuristic_eval is antisymmetric at source. Only meaningful
+    if a one-sided term is reintroduced -- and see the warning above about what
+    it does and does not fix.
+    """
+    other = "p2" if my_side_name == "p1" else "p1"
+    return (heuristic_eval(battle, my_side_name) - heuristic_eval(battle, other)) / 2.0
+
+
+def leaf_value(battle: Battle, my_side_name: str) -> float:
+    """The single scoring entry point for search. See the note above."""
+    if SYMMETRIC_EVAL:
+        return symmetric_eval(battle, my_side_name)
+    return heuristic_eval(battle, my_side_name)
 
 
 def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, movesets: dict,
@@ -420,6 +695,45 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
     assuming the script wins -- the foremost goal is to beat the script,
     without being blown up the instant it doesn't happen.
     """
+    # Phase B: solve the turn as a matrix game instead of best-responding to a
+    # policy we wrote ourselves. Off by default until measured (see
+    # tools/measure_headtohead.py). Imported lazily because turn_game imports
+    # from this module.
+    if NASH_SOLVER:
+        from turn_game import solve_turn
+        # enemy_script is passed through rather than ignored: a script is a
+        # PRIOR on their columns, not a separate algorithm (section 3d). This is
+        # what lets the matrix solve subsume the CHECK_TOP_K deviation check --
+        # off-script columns keep their equilibrium weight, so a play that loses
+        # to a deviation is priced for it without an arbitrary top-K cap.
+        solution = solve_turn(battle, my_side_name, movesets, depth=NASH_DEPTH,
+                              enemy_script=enemy_script)
+        if solution.our_actions:
+            # Callers use the third value as a liveness signal, not just as a
+            # convenience: committed_plan and matchup_search both treat
+            # `sim is None` as "the solver found nothing, stop here". Returning
+            # None unconditionally made every one of those paths bail on turn 1
+            # the moment the Nash solver was switched on -- silently, since
+            # bailing looks exactly like a legitimately dead position.
+            #
+            # So play the chosen action against their most likely reply. One
+            # extra run_turn, against a ~240-simulation solve.
+            # Play the MIXTURE, not its mode -- see NASH_SAMPLE above. The
+            # actions in an equilibrium's support are individually exploitable;
+            # mixing them is what makes the strategy safe, so collapsing to the
+            # argmax throws away the whole point.
+            if NASH_SAMPLE:
+                chosen = _pick_from_mixture(solution.our_actions, solution.p)
+            else:
+                chosen = solution.best_action
+
+            sim = None
+            if solution.their_actions:
+                from turn_step import step as _step
+                likely = max(range(len(solution.q)), key=lambda j: solution.q[j])
+                sim = _step(battle, chosen, solution.their_actions[likely])
+            return chosen, solution.value, sim
+
     my_side = battle.p1 if my_side_name == "p1" else battle.p2
     opp_side = battle.p2 if my_side_name == "p1" else battle.p1
 
@@ -488,7 +802,7 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
                                                      enemy_script=enemy_script)
             score = future_score
         else:
-            score = heuristic_eval(sim, my_side_name)
+            score = leaf_value(sim, my_side_name)
 
         scored.append((my_joint, score, sim))
 
@@ -512,6 +826,19 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
     # this cap was added). Check in descending script-score order and take the
     # first one that isn't punished; if every one of those is, fall back to the
     # single best script score (no safe option was found in the checked pool).
+    #
+    # SUPERSEDED, not yet deleted. This whole block exists because planning
+    # ASSUMES the script and then has to defend against the assumption being
+    # wrong -- and the cap of 6 is arbitrary, chosen for runtime rather than for
+    # any property of the game. The matrix solver replaces it properly: a script
+    # is a PRIOR on the opponent's columns (turn_game.solve_turn's
+    # `enemy_script`/`script_confidence`), so off-script replies keep their
+    # equilibrium weight and a play that loses to a deviation is priced for it
+    # directly. No assumption to defend, and no cap.
+    #
+    # It is kept only because NASH_SOLVER is still off by default, so this is
+    # the live path. Delete it together with that default flip; until then
+    # removing it would change current behaviour for no measured benefit.
     CHECK_TOP_K = 6
     scored.sort(key=lambda c: -c[1])
     for my_joint, score, sim in scored[:CHECK_TOP_K]:

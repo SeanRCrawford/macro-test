@@ -25,7 +25,8 @@ from species_data import build_merged_dataset
 from stats import compute_stats
 from damage import Combatant
 from battle import Battle
-from solver import build_moveset, solve_best_action, TOP_K_MOVES
+from solver import (build_moveset, build_wide_movesets, solve_best_action,
+                    TOP_K_MOVES)
 
 MAX_TURNS = 8
 
@@ -34,6 +35,28 @@ def make_combatant(name, merged, natures):
     """Delegates to the shared, Mega-aware factory in combatants.py."""
     from combatants import make_combatant as _make
     return _make(name, merged, natures)
+
+
+
+def _attach_movesets(battle, movesets, enemy_combatants, merged, moves_db, enemy_sets=None):
+    """Attach the move knowledge the turn-level solver needs.
+
+    `movesets` is what we plan with. `wide_movesets` is the OPPONENT's plausible
+    move space, which is deliberately wider: assuming they hold only the four
+    most-used moves is a self-fulfilling assumption, and it measured at 10 points
+    of win rate (solver.build_wide_moveset) and 14-27 points of exploitability
+    (tools/measure_robustness.py). Widening it costs ~26% per decision.
+
+    Skipped for any Pokemon whose exact set the caller supplied -- if the moves
+    are known there is nothing to widen.
+    """
+    battle.movesets = movesets
+    known = {n for n, spec in (enemy_sets or {}).items() if spec.get("moves")}
+    battle.wide_movesets = {
+        **movesets,
+        **build_wide_movesets([c.name for c in enemy_combatants if c.name not in known],
+                              merged, moves_db),
+    }
 
 
 def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
@@ -114,6 +137,7 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
 
     battle = Battle(our_combatants, enemy_combatants, typechart, moves_db, rng_seed=rng_seed,
                      tie_bias=tie_bias)
+    _attach_movesets(battle, movesets, enemy_combatants, merged, moves_db, enemy_sets)
     battle.force_roll_index = roll_index
     # Scripted openings (scripted_openings.py) may need the real movesets to pick a
     # damaging move for a generic (non-scripted) alternative line -- see
@@ -183,6 +207,7 @@ def full_game_punish_audit(our_names, enemy_names, merged, moves_db, natures, ty
 
     battle = Battle(our_combatants, enemy_combatants, typechart, moves_db)
     battle._movesets = movesets
+    _attach_movesets(battle, movesets, enemy_combatants, merged, moves_db, enemy_sets)
 
     def _fmt_action(joint):
         parts = []
@@ -615,7 +640,10 @@ def aggregate_battle_stats(our_names, enemy_roster, merged, moves_db, natures, t
 
 def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures, typechart,
                                max_turns=MAX_TURNS, our_sets=None, verify_top=3, progress=None,
-                               fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None):
+                               fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None,
+                               preview_tau=None, preview_alpha=None,
+                               rate_robustness=False, robustness_leads=3,
+                               robustness_turns=5, prescreen_top=None):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -641,20 +669,48 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             seen.add(key)
             our_configs.append(list(key))
 
+    from preview import DEFAULT_ALPHA, DEFAULT_TAU, downside_score, ranked_brings
+    preview_tau = DEFAULT_TAU if preview_tau is None else preview_tau
+    preview_alpha = DEFAULT_ALPHA if preview_alpha is None else preview_alpha
+
+    # Optional cheap filter: cut candidates on static threat-matrix coverage
+    # before any battle is simulated (design doc 2s). Off by default -- a
+    # prescreen silently discards candidates, so it must be opted into, and
+    # tools/measure_prescreen.py is the measurement that says how narrow it can
+    # safely be set.
+    if prescreen_top:
+        from prescreen import keep_top
+        our_configs = keep_top(our_configs, enemy_roster, merged, moves_db,
+                               natures, typechart, prescreen_top,
+                               our_sets=our_sets, enemy_sets=enemy_sets)
+
     movesets_cache = {}
     scored = []
     for i, oc in enumerate(our_configs):
         worst, worst_cfg, wins = None, None, 0
+        margins = []
         for lead, back in configs:
             r = fast_pair_score(tuple(oc[:2]), tuple(lead), merged, moves_db, natures,
                                  typechart, movesets_cache)
             margin = r["margin"]
+            margins.append(margin)
             if margin > 0:
                 wins += 1
             if worst is None or margin < worst:
                 worst, worst_cfg = margin, (lead, back)
+        # Design doc section 6a/6b: score against the brings they would
+        # PLAUSIBLY pick, not uniformly over all 90 (which lets a bring no
+        # rational opponent makes drag the number down) and not by a win count
+        # (which says nothing about how badly the losses go).
+        #
+        # Reported alongside worst_margin rather than replacing it: the existing
+        # ranking is unchanged by this commit, so the new number can be compared
+        # against the old one on real searches before anything depends on it.
         scored.append({"our_bring4": oc, "worst_margin": worst, "worst_enemy": worst_cfg,
-                        "screen_wins": wins, "screen_total": len(configs)})
+                        "screen_wins": wins, "screen_total": len(configs),
+                        "downside": downside_score(margins, tau=preview_tau,
+                                                   alpha=preview_alpha),
+                        "screen_margins": margins})
         if progress and (i + 1) % max(1, len(our_configs) // 10) == 0:
             progress(i + 1, len(our_configs))
 
@@ -692,10 +748,29 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             rank = (0 if w == "p1" else (1 if w != "p2" else 2), t)
             if worst_seen is None or rank > worst_seen[0]:
                 worst_seen = (rank, (lead, back, w, t))
+        # Which of their openings are actually worth worrying about (section
+        # 6a). A ranking rather than the crisp equilibrium-support SET the
+        # earlier draft promised -- more honest, since the underlying numbers
+        # are estimates, and more useful to show.
+        #
+        # Grouped by LEAD, because the screener (fast_pair_score) only looks at
+        # the lead pair: all six configs sharing a lead score identically, so a
+        # per-config list would repeat every entry six times and imply a
+        # precision the screen does not have. Their back two is resolved during
+        # the battle, not at preview, so lead plausibility is the honest unit.
+        margins = cand.get("screen_margins") or []
+        by_lead = {}
+        for (lead, _back), margin in zip(configs, margins):
+            by_lead.setdefault(tuple(lead), margin)
+        lead_keys = list(by_lead)
+        plausible = ranked_brings([by_lead[k] for k in lead_keys],
+                                  [" / ".join(k) for k in lead_keys],
+                                  tau=preview_tau)
         rec = {**cand, "solver_losses": losses,
                "solver_wins": len(configs) - len(losses),
                "solver_total": len(configs),
-               "worst_case": worst_seen[1] if worst_seen else None}
+               "worst_case": worst_seen[1] if worst_seen else None,
+               "plausible_brings": plausible[:10]}
         if script_team:
             # Per-config "did it lose to ANY script/deviation variant" and "did it
             # lose to plain conventional" -- deduplicate by config since a config can
@@ -710,7 +785,86 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             rec["conventional_losses"] = conv_losses
         verified.append(rec)
     verified.sort(key=lambda d: (-d["solver_wins"], -d["worst_margin"]))
+
+    # Final stage: re-rank by how PUNISHABLE each survivor is, not by how many
+    # games it wins against our own bot (design doc 2q). Opt-in because it needs
+    # a full payoff matrix per turn -- the cheap screen above still does the
+    # shortlisting, this only refines what survived it.
+    if rate_robustness and verified:
+        verified = _rate_and_rerank(verified, enemy_roster, merged, moves_db,
+                                     natures, typechart, configs, our_sets,
+                                     enemy_sets, preview_tau, robustness_leads,
+                                     robustness_turns)
     return verified
+
+
+def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechart,
+                      configs, our_sets, enemy_sets, preview_tau,
+                      leads_per_candidate, turns):
+    """Attach an exploitability rating to each survivor and sort by it.
+
+    Piloted with the least-exploitable solver configuration available: rating a
+    team while playing it badly measures the pilot, not the team.
+    """
+    import solver as _solver
+    from combatants import make_team
+    from preview import ranked_brings
+    from team_rating import rate_bring
+
+    def choose(battle):
+        with _solver.solver_mode(nash=True, depth=1):
+            _solver.seed_nash_sampling(20260808)
+            action, _score, _sim = _solver.solve_best_action(
+                battle, "p1", battle.movesets)
+        return action
+
+    for rec in verified:
+        our4 = rec["our_bring4"]
+        margins = rec.get("screen_margins") or []
+        by_lead = {}
+        for (lead, _back), margin in zip(configs, margins):
+            by_lead.setdefault(tuple(lead), margin)
+        lead_keys = list(by_lead)
+        if not lead_keys:
+            continue
+        ranked = ranked_brings([by_lead[k] for k in lead_keys],
+                               [" / ".join(k) for k in lead_keys], tau=preview_tau)
+        chosen = [(lead_keys[row["index"]], row["probability"])
+                  for row in ranked[:leads_per_candidate]]
+
+        def build(our_names, enemy_lead):
+            rest = [x for x in enemy_roster if x not in enemy_lead]
+            enemy4 = list(enemy_lead) + rest[:2]
+            oc = make_team(list(our_names), merged, natures, sets=our_sets)
+            ec = make_team(enemy4, merged, natures, sets=enemy_sets)
+            ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)
+                  for c in oc + ec}
+            battle = Battle(oc, ec, typechart, moves_db)
+            _attach_movesets(battle, ms, ec, merged, moves_db, enemy_sets)
+            return battle, ms
+
+        rating = rate_bring(our4, chosen, build, choose, max_turns=turns)
+        rec["exploitability"] = rating.weighted_exploitability
+        rec["severe_turns"] = rating.severe_turns
+        rec["rated_turns"] = rating.total_turns
+        worst = rating.worst_lead
+        if worst:
+            lead, _p, report = worst
+            rec["hardest_lead"] = list(lead)
+            wt = report.worst_turn
+            if wt:
+                from robustness import describe_action
+                rec["worst_turn"] = {
+                    "turn": wt.turn,
+                    "exploitability": wt.exploitability,
+                    "our_play": describe_action(wt.our_action),
+                    "punished_by": describe_action(wt.punisher) if wt.punisher else None,
+                }
+
+    rated = [r for r in verified if "exploitability" in r]
+    unrated = [r for r in verified if "exploitability" not in r]
+    rated.sort(key=lambda d: d["exploitability"])
+    return rated + unrated
 
 
 def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,

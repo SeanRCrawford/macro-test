@@ -172,6 +172,13 @@ class Battle:
         new.typechart = self.typechart
         new.moves_db = self.moves_db
         new.rng = self.rng
+        # Optional: per-species move lists, attached by callers that want the
+        # threat matrix / answer-preservation evaluation term. Must be carried
+        # across the copy or the term silently evaluates to zero in exactly the
+        # simulated states the search cares about -- a failure that looks like
+        # "the term does nothing" rather than like a bug.
+        new.movesets = getattr(self, "movesets", None)
+        new.wide_movesets = getattr(self, "wide_movesets", None)
 
         # Mutable state.
         new.field = copy.deepcopy(self.field, memo)
@@ -187,6 +194,12 @@ class Battle:
         new.stats = {k: {"moves": dict(v["moves"]), "damage_pct": v["damage_pct"], "kos": v["kos"]}
                      for k, v in self.stats.items()}
         new.force_roll = getattr(self, 'force_roll', None)
+        # force_roll_index pins damage to one of the 16 discrete rolls. It must
+        # survive the copy for the same reason force_roll does: the solver
+        # evaluates every candidate on a COPY, so dropping it here would silently
+        # revert those branches to the average roll -- which looks like "roll
+        # scenarios make no difference" rather than like a bug.
+        new.force_roll_index = getattr(self, 'force_roll_index', None)
         new._departed_slots = {}
         new.tie_bias = self.tie_bias
         return new

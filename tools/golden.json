@@ -1,0 +1,326 @@
+{
+  "Big 6": {
+    "enemy": [
+      "Basculegion",
+      "Mega Charizard Y",
+      "Mega Floette",
+      "Garchomp"
+    ],
+    "turns": [
+      {
+        "chosen": "Farigiraf:move:Psychic->Basculegion | Incineroar:move:Throat Chop->Basculegion",
+        "eval": 6.3846,
+        "eval_p2": -6.3846,
+        "n_our_actions": 23,
+        "score": 206.6134,
+        "turn": 1
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Basculegion | Incineroar:move:Throat Chop->Basculegion",
+        "eval": -34.0834,
+        "eval_p2": 34.0834,
+        "n_our_actions": 18,
+        "score": 217.856,
+        "turn": 2
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Basculegion | Hydreigon:move:Snarl->Basculegion",
+        "eval": -237.4779,
+        "eval_p2": 237.4779,
+        "n_our_actions": 19,
+        "score": -50.2442,
+        "turn": 3
+      },
+      {
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Hydreigon:move:Dark Pulse->Mega Charizard Y",
+        "eval": -145.2916,
+        "eval_p2": 145.2916,
+        "n_our_actions": 7,
+        "score": -439.4217,
+        "turn": 4
+      },
+      {
+        "chosen": "Gallade:move:Psycho Cut->Mega Floette",
+        "eval": -622.6036,
+        "eval_p2": 622.6036,
+        "n_our_actions": 4,
+        "score": -415.186,
+        "turn": 5
+      }
+    ]
+  },
+  "Hard Trick Room": {
+    "enemy": [
+      "Incineroar",
+      "Farigiraf",
+      "Torkoal",
+      "Mega Mawile"
+    ],
+    "turns": [
+      {
+        "chosen": "Farigiraf:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Farigiraf",
+        "eval": 78.9231,
+        "eval_p2": -78.9231,
+        "n_our_actions": 23,
+        "score": 135.0425,
+        "turn": 1
+      },
+      {
+        "chosen": "Farigiraf:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Farigiraf",
+        "eval": 44.3776,
+        "eval_p2": -44.3776,
+        "n_our_actions": 18,
+        "score": 100.497,
+        "turn": 2
+      },
+      {
+        "chosen": "Farigiraf:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Farigiraf",
+        "eval": 51.3758,
+        "eval_p2": -51.3758,
+        "n_our_actions": 18,
+        "score": 82.4952,
+        "turn": 3
+      },
+      {
+        "chosen": "Farigiraf:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Farigiraf",
+        "eval": 8.374,
+        "eval_p2": -8.374,
+        "n_our_actions": 18,
+        "score": 64.4934,
+        "turn": 4
+      },
+      {
+        "chosen": "Hydreigon:move:Snarl->Incineroar | Incineroar:move:Throat Chop->Farigiraf",
+        "eval": -142.446,
+        "eval_p2": 142.446,
+        "n_our_actions": 14,
+        "score": 37.7086,
+        "turn": 5
+      },
+      {
+        "chosen": "Hydreigon:move:Dark Pulse->Mega Mawile | Incineroar:move:Flare Blitz->Mega Mawile",
+        "eval": 12.8868,
+        "eval_p2": -12.8868,
+        "n_our_actions": 5,
+        "score": -253.5801,
+        "turn": 6
+      }
+    ]
+  },
+  "King": {
+    "enemy": [
+      "Mega Blastoise",
+      "Mega Delphox",
+      "Maushold",
+      "Sinistcha"
+    ],
+    "turns": [
+      {
+        "chosen": "Farigiraf:move:Psychic->Mega Blastoise | Incineroar:move:Fake Out->Mega Delphox",
+        "eval": 67.4615,
+        "eval_p2": -67.4615,
+        "n_our_actions": 23,
+        "score": -29.5456,
+        "turn": 1
+      },
+      {
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Throat Chop->Mega Delphox",
+        "eval": -65.443,
+        "eval_p2": 65.443,
+        "n_our_actions": 18,
+        "score": 28.014,
+        "turn": 2
+      },
+      {
+        "chosen": "Gallade:move:Leaf Blade->Mega Blastoise | Hydreigon:move:Snarl->Mega Blastoise",
+        "eval": -474.2807,
+        "eval_p2": 474.2807,
+        "n_our_actions": 16,
+        "score": -25.0651,
+        "turn": 3
+      },
+      {
+        "chosen": "Gallade:move:Sacred Sword->Mega Blastoise | Hydreigon:move:Dark Pulse->Sinistcha",
+        "eval": -320.2702,
+        "eval_p2": 320.2702,
+        "n_our_actions": 4,
+        "score": -10000,
+        "turn": 4
+      }
+    ]
+  },
+  "NAIC": {
+    "enemy": [
+      "Mega Aerodactyl",
+      "Mega Charizard Y",
+      "Farigiraf",
+      "Garchomp"
+    ],
+    "turns": [
+      {
+        "chosen": "Farigiraf:move:Psychic->Mega Aerodactyl | Incineroar:move:Fake Out->Mega Charizard Y",
+        "eval": 0.9231,
+        "eval_p2": -0.9231,
+        "n_our_actions": 23,
+        "score": 27.9516,
+        "turn": 1
+      },
+      {
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Throat Chop->Mega Aerodactyl",
+        "eval": -13.4497,
+        "eval_p2": 13.4497,
+        "n_our_actions": 18,
+        "score": -11.5105,
+        "turn": 2
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Mega Charizard Y | Incineroar:move:Throat Chop->Mega Aerodactyl",
+        "eval": -60.9233,
+        "eval_p2": 60.9233,
+        "n_our_actions": 18,
+        "score": -46.7517,
+        "turn": 3
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Mega Charizard Y | Incineroar:move:Throat Chop->Mega Aerodactyl",
+        "eval": -108.1493,
+        "eval_p2": 108.1493,
+        "n_our_actions": 18,
+        "score": -9.0882,
+        "turn": 4
+      },
+      {
+        "chosen": "Gallade:move:Sacred Sword->Mega Aerodactyl | Hydreigon:move:Draco Meteor->Mega Charizard Y",
+        "eval": -499.653,
+        "eval_p2": 499.653,
+        "n_our_actions": 16,
+        "score": -226.0397,
+        "turn": 5
+      },
+      {
+        "chosen": "Gallade:move:Sacred Sword->Garchomp | Hydreigon:move:Dark Pulse->Garchomp",
+        "eval": -244.5841,
+        "eval_p2": 244.5841,
+        "n_our_actions": 4,
+        "score": -506.4175,
+        "turn": 6
+      }
+    ]
+  },
+  "Rain": {
+    "enemy": [
+      "Archaludon",
+      "Grimmsnarl",
+      "Mega Metagross",
+      "Pelipper"
+    ],
+    "turns": [
+      {
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Fake Out->Grimmsnarl",
+        "eval": -26.2308,
+        "eval_p2": 26.2308,
+        "n_our_actions": 23,
+        "score": -14.8446,
+        "turn": 1
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Archaludon | Incineroar:move:Flare Blitz->Grimmsnarl",
+        "eval": -52.1174,
+        "eval_p2": 52.1174,
+        "n_our_actions": 18,
+        "score": -44.2824,
+        "turn": 2
+      },
+      {
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Flare Blitz->Grimmsnarl",
+        "eval": -57.0336,
+        "eval_p2": 57.0336,
+        "n_our_actions": 18,
+        "score": 156.5452,
+        "turn": 3
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Pelipper | Incineroar:move:Throat Chop->Pelipper",
+        "eval": 119.2725,
+        "eval_p2": -119.2725,
+        "n_our_actions": 18,
+        "score": 283.8599,
+        "turn": 4
+      },
+      {
+        "chosen": "Gallade:move:Psycho Cut->Pelipper | Incineroar:move:Throat Chop->Pelipper",
+        "eval": -40.3436,
+        "eval_p2": 40.3436,
+        "n_our_actions": 14,
+        "score": 239.8542,
+        "turn": 5
+      },
+      {
+        "chosen": "Hydreigon:move:Dark Pulse->Pelipper | Incineroar:move:Throat Chop->Pelipper",
+        "eval": -341.2684,
+        "eval_p2": 341.2684,
+        "n_our_actions": 8,
+        "score": -669.5465,
+        "turn": 6
+      }
+    ]
+  },
+  "Sun Rain": {
+    "enemy": [
+      "Archaludon",
+      "Grimmsnarl",
+      "Mega Floette",
+      "Pelipper"
+    ],
+    "turns": [
+      {
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Fake Out->Grimmsnarl",
+        "eval": 40.9231,
+        "eval_p2": -40.9231,
+        "n_our_actions": 23,
+        "score": 52.3092,
+        "turn": 1
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Archaludon | Incineroar:move:Flare Blitz->Grimmsnarl",
+        "eval": 15.0365,
+        "eval_p2": -15.0365,
+        "n_our_actions": 18,
+        "score": 22.8715,
+        "turn": 2
+      },
+      {
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Flare Blitz->Grimmsnarl",
+        "eval": 10.1202,
+        "eval_p2": -10.1202,
+        "n_our_actions": 18,
+        "score": 223.699,
+        "turn": 3
+      },
+      {
+        "chosen": "Farigiraf:move:Psychic->Pelipper | Incineroar:move:Throat Chop->Pelipper",
+        "eval": 186.4263,
+        "eval_p2": -186.4263,
+        "n_our_actions": 18,
+        "score": 324.0137,
+        "turn": 4
+      },
+      {
+        "chosen": "Gallade:move:Psycho Cut->Pelipper | Incineroar:move:Throat Chop->Pelipper",
+        "eval": 26.8103,
+        "eval_p2": -26.8103,
+        "n_our_actions": 14,
+        "score": 280.0081,
+        "turn": 5
+      },
+      {
+        "chosen": "Hydreigon:move:Dark Pulse->Pelipper | Incineroar:move:Throat Chop->Pelipper",
+        "eval": -274.1146,
+        "eval_p2": 274.1146,
+        "n_our_actions": 8,
+        "score": -602.3927,
+        "turn": 6
+      }
+    ]
+  }
+}

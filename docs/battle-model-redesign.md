@@ -75,21 +75,34 @@ branching factor, turn 1, real teams:
   cost per matrix cell                           0.27 ms
 ```
 
-Which yields the single most important number in this document:
+Which *appeared* to yield the single most important number in this document:
 
 ```
 FULL Nash matrix solve, one turn, brute force    0.17 s
 Same via double oracle (~12 cells materialised)  0.003 s
 ```
 
-Compare against what we pay today: a 12-turn greedy-expectimax game is 0.05 s.
-A 12-turn **double-oracle Nash** game is ~0.04 s.
+> ## ⚠ SUPERSEDED — these two numbers are wrong. See §2c.
+>
+> The double-oracle figure was an estimate, not a measurement, and it is out by
+> **~10× on cells and ~27× on time**. Measured with a real implementation
+> (`src/matrix_game.py`, `tools/measure_depth2_cost.py`): **118 cells and
+> 0.08 s**, not 12 cells and 0.003 s. The error came from assuming double
+> oracle only materialises its final restricted subgame; it does not, because
+> each best-response step must scan a full action set against the other side's
+> mixed strategy (§2c).
+>
+> The claim that followed — *"a game-theoretically correct solver costs roughly
+> the same as the greedy one we have"* — **is therefore false.** A 12-turn
+> double-oracle game is ~0.96 s against ~0.05 s for the greedy one: about 20×,
+> not parity. Everything in this document that leaned on cost-neutrality (§7's
+> tier table, open question 3) has been corrected.
 
-> **A game-theoretically correct solver costs roughly the same as the greedy
-> one we have.** The 121 s King run is not slow because the engine is slow —
-> it is 1620 games (90 configs × 6 variants × 3 candidates) at 0.075 s each.
-> The cost is in *how many configurations we brute-force*, not in per-game
-> speed. That is a search-structure problem, and §6 is the fix.
+What survives, and is still worth stating: the 121 s King run is **not** slow
+because the engine is slow — it is 1620 games (90 configs × 6 variants × 3
+candidates) at 0.075 s each. The cost is in *how many configurations we
+brute-force*, not in per-game speed. That is a search-structure problem, and §6
+is the fix. That argument never depended on the double-oracle figure.
 
 ---
 
@@ -109,26 +122,49 @@ At 24 genuine decision points across 4 opponent teams, the real payoff matrix
 | `maximin` | `max_i min_j A[i][j]` — what the safest *pure* play guarantees |
 | `nash` | equilibrium value, allowing mixing (regret matching) |
 
-```
-decision points measured             : 24
-mean self-delusion (assumed - actual):  232.3
-mean regret vs maximin               :   48.4
-turns where maximin != greedy pick   : 14/24  (58%)
-turns where Nash is MIXED            : 14/24  (58%)
+**Re-measured after fixing the evaluation.** §2c.4 found the original matrix
+was not antisymmetric, so it was not really zero-sum and "the opponent
+minimises our heuristic" was a wrong model of their objective.
+`heuristic_eval` has since been made antisymmetric **at source** (Phase A1,
+§2d) — verified at 0.0 asymmetry across 8905 states — and the baseline
+re-measured on it.
 
+| | original (one-sided eval) | **corrected** | change |
+|---|---|---|---|
+| decision points | 24 | 24 | |
+| mean self-delusion (assumed − actual) | 232.3 | **174.4** | **−57.9 (−25%)** |
+| mean regret vs maximin | 48.4 | **40.9** | −7.5 |
+| turns where maximin ≠ greedy pick | 14/24 (58%) | **13/24 (54%)** | −1 |
+| turns where Nash is MIXED | 14/24 (58%) | **20/24 (83%)** | **+6 (+25pp)** |
+
+```
 units: heuristic_eval points, KO_WEIGHT = 180, so ~180 points ≈ one Pokemon
 ```
 
-Read plainly:
+**The case for the project survives, and its two halves move in opposite
+directions.** The exploitability claim is **25% smaller** than originally
+reported — a quarter of the headline number was an artifact of the broken
+evaluation, not a real finding. It is still ~0.97 Pokémon per turn, which is
+large. The mixed-strategy claim gets substantially **stronger**: from 58% to
+**83%** of turns, because the old asymmetry was masking genuine equilibrium
+mixing.
 
-- **The current solver overestimates its own position by ~1.3 Pokémon per
+That matters for phase ordering. The strongest measured argument for Phase B is
+now *"the current architecture cannot represent the right answer on 83% of
+turns"* rather than *"it overestimates itself by 1.3 Pokémon"* — a
+representational argument, not an accuracy one, and one that no amount of
+evaluation tuning can address.
+
+Read plainly, on the corrected numbers:
+
+- **The current solver overestimates its own position by ~0.97 Pokémon per
   turn.** That is the cost of scoring against a policy we authored. Every win
   count in every tab inherits this bias.
-- **On 58% of turns it plays a different move than the maximin play**, and
-  gives up ~48 points (~0.27 of a Pokémon) per turn in the worst case by doing so.
-- **On 58% of turns no pure strategy is optimal at all** — the equilibrium has
+- **On 54% of turns it plays a different move than the maximin play**, and
+  gives up ~41 points (~0.23 of a Pokémon) per turn in the worst case by doing so.
+- **On 83% of turns no pure strategy is optimal at all** — the equilibrium has
   support ≥ 2. The current architecture *cannot represent* the right answer on
-  the majority of turns, regardless of how good its evaluation gets.
+  the large majority of turns, regardless of how good its evaluation gets.
 - **Mixing is worth 50–86 points** on the turns where it matters (`nash` minus
   pure `maximin`; e.g. Rain T3 130.2 vs 43.9). Pure maximin is a floor, not the
   target — which is the argument for solving for Nash rather than just taking
@@ -136,11 +172,12 @@ Read plainly:
 
 Two honesty caveats on these numbers:
 
-1. `A` is built from `heuristic_eval` and treated as zero-sum. `heuristic_eval`
-   is not perfectly antisymmetric (the `seen` filter treats the two sides
-   differently), so "the opponent minimises our heuristic" is a proxy for their
-   true objective, not identical to it. The *direction* and rough magnitude are
-   robust; the exact point values are not.
+1. ~~`A` is built from `heuristic_eval` and treated as zero-sum...~~
+   **Addressed.** The asymmetry was measured (§2c.4, 277.7 points mean), traced
+   to the `seen` filter at `solver.py:290-298`, and fixed: `solver.leaf_value`
+   now scores `(eval(s,"p1") − eval(s,"p2")) / 2`, antisymmetric by
+   construction and covered by `tests/test_leaf_value.py`. The symmetric column
+   above is computed on that. This caveat is retired.
 2. One measured point is already-lost terminal state (`-10000`), which
    contributes 0 to both means and therefore makes both figures slightly
    conservative.
@@ -148,6 +185,1149 @@ Two honesty caveats on these numbers:
 **Conclusion: the prize is large and the overhaul is justified.** The dominant
 error is not evaluation quality — it is that we optimise against a fixed
 self-authored policy and cannot express mixed strategies.
+
+> Caveat 1 above turned out to be a much bigger deal than "a proxy, not
+> identical". It is now measured: §2c.
+
+---
+
+## 2c. Step 0: measurements taken before building (2026-08-08)
+
+Everything above this line was estimated. This section is measured, with a real
+double-oracle implementation (`src/matrix_game.py`, tested against textbook
+games in `tests/test_matrix_game.py`) and three harnesses in `tools/`. Three of
+the design's load-bearing assumptions did not survive.
+
+### 2c.1 Double oracle prunes far less than assumed
+
+`tools/measure_depth2_cost.py`, 8 decision points, mean matrix 20.5 × 24.0:
+
+| Solver | sims/decision | sec/decision | vs `do1` |
+|---|---|---|---|
+| `brute1` — full matrix, depth 1 | 496 | 0.34 | 4.2× |
+| `do1` — double oracle, depth 1 | **118** | **0.08** | 1.0× |
+| `do2` — double oracle, depth 2, equilibrium-valued | 6778 | 3.88 | **47.9×** |
+| `do2_sel` — depth 2 over the top-4 depth-1 rows | 2108 | 1.22 | 15.0× |
+| `do2_greedy` — depth 2 with a greedy inner playout | 1996 | 0.77 | 9.6× |
+
+Double oracle **is exact** — `|do1 − brute1|` is 0.05 points mean, 0.08 max,
+and it converged at 8/8 points, so §3's "no accuracy is given up" claim holds
+(also verified against 25 random matrices in the test suite). But it
+materialises **24% of the full matrix, not ~2%**. The reason is structural and
+worth writing down, because it caps how much pruning is ever available:
+
+> Double oracle's best-response step must evaluate **every** action of one
+> player against the *support* of the other's mixed strategy. That is
+> `|actions| × |support|` payoff evaluations per iteration, no matter how small
+> the final restricted subgame is. The restricted game really is small
+> (support 2–5, as §2b found); getting to it is not.
+
+A corollary worth having in hand for Phase B: **on small matrices double oracle
+is not worth using at all.** The inner 8×8 games below evaluated ~57 of 64
+cells — the best-response scan costs nearly the whole matrix, and brute force
+is simpler and about as fast. Use DO for the large outer game, brute force
+inside.
+
+### 2c.2 Depth 2 costs ~48×, not the estimated ~10×
+
+`do2` is 3.88 s per decision — a 12-turn game would be ~47 s. That is fine for
+a single interactive decision in Battle Viewer (~4 s) and **impossible inside
+any sweep**. This is already the optimistic figure: the inner game was capped
+at 8 actions per side (`INNER_CAP = 8`); uncapped it is worse.
+
+Selective deepening does cut it (15× rather than 48×), **but it changes the
+answer**: `|do2 − do2_sel|` is 58.8 points mean, 208.8 max — up to ~1.2
+Pokémon. So `k = 4` is not a safe approximation, and open question 7's
+sub-question ("what is the smallest `k` that preserves the ranking?") is now
+known to have an answer larger than 4.
+
+### 2c.3 The greedy-inner-playout trap is real, and costs ~1 Pokémon
+
+`|do2 − do2_greedy|` is **175.8 points mean, 255.9 max**. With
+`KO_WEIGHT = 180`, evaluating the turn-*t+1* subgame with a greedy playout
+instead of an equilibrium solve costs almost exactly one Pokémon per decision —
+and note how close that is to §2b's 232.3 self-delusion figure, which is the
+same error measured one level up. §10's insistence that the recursion be
+equilibrium-valued at both levels was correct, and the cheap-looking shortcut
+(9.6× instead of 47.9×) would have silently reintroduced the exact bias the
+redesign exists to remove.
+
+### 2c.4 `heuristic_eval` is far less antisymmetric than assumed
+
+`tools/measure_antisymmetry.py`, 9434 states across 23 decision points:
+
+```
+mean   |eval(p1) + eval(p2)|      277.7      (0 if perfectly antisymmetric)
+median                            301.8
+max                               627.8
+mean   |eval(p1)|  (for scale)    233.0
+perfectly antisymmetric states    1178/9434  (12%)
+
+maximin pick CHANGES if symmetrised  15/23  (65%)
+```
+
+**The asymmetry is larger than the signal** — 277.7 against a mean |eval| of
+233.0, and larger than the 232.3 self-delusion that motivated the whole
+redesign. The cause is exact and fixable: the `seen` filter is applied only to
+the opponent (`solver.py:290-298`). `my_hp` sums the full roster; `opp_hp` sums
+only revealed mons. So
+
+```
+eval(s,"p1") + eval(s,"p2")  =  100 × (hidden HP on BOTH sides)  + KO-term analogue
+```
+
+which is ≥ 0, shrinks as the battle reveals, and — critically — **is not a
+constant offset**, so it does not cancel out of an argmax. Different cells
+reveal different amounts (a KO forces a reveal), which is why the maximin pick
+moves on 65% of turns.
+
+Consequence for §2b: its matrix was built from `eval(·, "p1")` and solved as
+zero-sum. With an asymmetry this size, "the opponent minimises our heuristic"
+is a materially wrong model of their objective. **The direction of §2b's
+conclusion is unaffected** — the greedy solver is still measurably exploitable
+and cannot represent mixed strategies — but its specific magnitudes (232.3,
+48.4) should be treated as provisional until re-measured on a symmetrised eval.
+
+This promotes open question 5 from "worth doing as part of Phase A" to **a
+prerequisite for trusting any matrix-game number at all**, including the
+baseline that justified the project. The cheap fix — score
+`(eval(s,"p1") − eval(s,"p2")) / 2` — is antisymmetric by construction and adds
+one `heuristic_eval` call per cell (0.11 ms against a 0.42 ms `run_turn`, so
+roughly +20% per cell, not +100%).
+
+---
+
+## 2d. Phase A1 (done): the evaluation is now genuinely zero-sum
+
+`heuristic_eval` is antisymmetric **at source** — measured at exactly 0.0 across
+8905 states, 8905/8905 perfect, and symmetrising now changes the maximin pick on
+**0/24** turns (it changed 65% before). Two fixes, and the first attempt at each
+was wrong in an instructive way.
+
+**Fix 1 — HP.** The `seen` filter was applied only to the opponent: `my_hp`
+summed the full roster, `opp_hp` only revealed mons. Removed entirely for this
+term, because it was guarding a disclosure that cannot occur: **a Pokémon that
+has never been on the field is necessarily at full HP**, and the number of live
+Pokémon each side has left is public. Counting hidden mons at their (always 1.0)
+HP fraction leaks nothing.
+
+**Fix 2 — KO-threat value.** This term reads Attack/Sp.Atk, so hidden opponents
+were placeholdered at a flat 1.0 while our own bench used real values. Now both
+rosters use the real value always. That relaxes the old no-leak guard, and it is
+sound *here* because the evaluation is always conditioned on a **hypothesised**
+enemy bring — `search_robust_composition` sweeps over brings rather than peeking
+at one — so within a hypothesis the species are known, and `_ko_threat_value` is
+a coarse clamp on attacking stats that discloses nothing about moves, items or
+EV spreads, which are what actually stay hidden.
+
+### The trap: averaging is not a fix
+
+The obvious implementation — score `(eval(s,"p1") − eval(s,"p2")) / 2`, as this
+document previously recommended — **is antisymmetric and still wrong.** Over a
+one-sided heuristic it converts a *side* asymmetry into a **reveal incentive**:
+
+```
+(eval_p1 − eval_p2)/2 = ½[(p1_all + p1_seen) − (p2_all + p2_seen)] × 100
+```
+
+so a hidden mon is weighted 0.5× and a revealed one 1.0×. Switching a healthy
+Pokémon in therefore manufactured exactly **+50 points** (0.5 × 100) out of an
+information update rather than any real progress, and the solver started
+preferring switches almost everywhere. The same trap appeared a second time, one
+term over: placeholdering the KO-threat value *by reveal state* made flipping
+`revealed` worth up to **+63 points** (0.35 × `KO_WEIGHT`).
+
+Both were caught immediately by `tools/golden_baseline.py` and are now pinned by
+regression tests in `tests/test_leaf_value.py`. The general lesson is worth
+carrying into Phases B–D: **a value function must not change when information
+changes unless the underlying position changed.** Antisymmetry is necessary and
+not sufficient.
+
+`solver.leaf_value()` is now the single scoring entry point, so the pending
+points → P(win) change (open question 6) is one edit rather than a hunt.
+
+---
+
+## 2e. Phase A2/A3 (done): threat matrix shipped, coverage term parked
+
+**The threat matrix is built, tested and useful** (`src/threat.py`,
+12 tests). It computes both directed edges for every pair, costs **0.7 ms** for
+a 4×4 (32 edges) — the same order as one `run_turn`, as §4a predicted — and its
+output is inspectable via `tools/show_threat_matrix.py`. Spot-checking one
+matchup: Farigiraf reads 0% into Grimmsnarl (Psychic into Dark), Gallade 111%
+into Archaludon, Hydreigon OHKOs and outspeeds both Metagross and Pelipper.
+
+§8c.3's joint dimension paid off immediately: in that single matchup it found
+**7 focus-fire pairs** — two of ours that together KO one of theirs where
+neither OHKOs alone — which a purely pairwise matrix structurally cannot
+represent.
+
+### The coverage evaluation term is measured, and parked
+
+`COVERAGE_WEIGHT = 0.0`. The term works and is covered by tests; it simply does
+not earn its cost yet.
+
+| | |
+|---|---|
+| cost | `heuristic_eval` 0.028 ms → **0.702 ms (25×)**; one matrix **cell** 0.201 ms → 0.876 ms (**4.35×**) |
+| benefit | head-to-head vs the same solver with the term off: **3 W / 5 L at weight 0.25, and again at 0.10** |
+
+n = 8 is far too small to claim the term is *worse* — 3–5 is well inside noise.
+But there is no evidence it is better. Parked rather than deleted.
+
+**Update after caching (§2f):** the cost objection has largely been answered —
+a matrix cell is now **1.83×**, not 4.35×.
+
+**Correction (§2g): the win-rate figures above were measured on a biased
+harness and should be disregarded.** The 38% / 38% / 41% readings, and the
+inference that three samples "all sit below 50%", were artifacts — that harness
+scored **44% on its own null case**. Re-measured on the fixed harness over
+**160 games**, the coverage term scores **49%, 95% CI [42%, 57%]**: neutral, not
+mildly harmful.
+
+`COVERAGE_WEIGHT` still stays 0.0, but for the correct reason — **no measurable
+benefit, at a 1.83× cost per cell** — rather than because it looked actively
+bad. The `coverage_differential` hypothesis recorded above and in
+`tests/test_coverage_term.py` remains the thing a fourth attempt should fix.
+
+Three things surfaced that are worth keeping regardless of the verdict.
+
+**1. The measurement gap this exposed.** Neither existing harness can validate
+an *evaluation* change. `measure_exploitability` scores how exploitable the
+greedy solver is — that number moved from 174.4 to 585.8 when coverage was
+switched on, but it moves for two indistinguishable reasons (the evaluation got
+better, or merely noisier across columns). `golden_baseline` detects change by
+design and says nothing about direction. So `tools/measure_headtohead.py` was
+added: two configurations play the same positions, sides swapped on alternate
+matchups. **Every future evaluation change should go through it**, and its
+sample size wants to be much larger than 8.
+
+**2. Matching must penalise unanswered threats.** A matching pairs at most
+`min(threats, answerers)`, so when a Pokémon is lost the matching can simply
+*drop the threat it handled worst* and report **higher** coverage than before —
+losing a piece looking like an improvement. Fixed with an explicit
+`NO_ANSWER_PENALTY` worse than any real answer.
+
+**3. Coverage must be a mean, not a sum.** The sum scales with the number of
+threats, so subtracting one side's from the other's confounds "our answers got
+worse" with "there are fewer Pokémon left to answer". Losing a Pokémon is
+already priced by the KO and HP terms; this term measures answer *structure*.
+
+Normalised and penalised, **our** coverage behaves exactly as §4b claims:
+losing Hydreigon (113.1 → 31.3) or Gallade (→ 34.6) collapses it, while losing
+Farigiraf (→ 74.7) barely moves it. The honest caveat is that
+`coverage_differential` — the antisymmetric wrapper the zero-sum leaf value
+requires — is a **weaker signal** than its own first half, because the second
+half moves when our roster size changes. Recorded in
+`tests/test_coverage_term.py` rather than smoothed over.
+
+---
+
+## 2f. Threat-matrix caching (done)
+
+The threat matrix was rebuilt from scratch at every leaf, which is what made it
+a 4.35× tax on the hottest path in the system. It is now cached, and the cache
+turns out to be close to ideal:
+
+```
+realistic workload: a full 23x23 payoff matrix = 529 DISTINCT leaf states
+  coverage off : 0.258 ms/cell
+  coverage on  : 0.473 ms/cell   (1.83x, was 4.35x)   cache hit rate 98%
+```
+
+Only **280 distinct damage computations** were needed across those 529 leaf
+states. The reason the hit rate is so high is worth stating, because it also
+says when the cache will *stop* working: damage depends on stats, stages,
+items, status and field, and those mostly do **not** differ between sibling
+leaves of one turn — only HP does, and HP enters damage through exactly one
+narrow path (Multiscale). A search that branches heavily on stat drops or item
+consumption would see a materially lower hit rate.
+
+### Two correctness traps, one of them a live bug
+
+**A stale cache does not crash — it returns plausible wrong numbers**, so the
+key has to cover everything `damage_roll` genuinely reads. Two entries are easy
+to miss, and `tests/test_threat_cache.py` pins both by mutating the field and
+asserting the answer moves:
+
+- **`defender.item`**, because Knock Off reads it.
+- **The full-HP flag.** `Multiscale` halves damage only at full HP
+  (`damage.py:281`), so **damage is not independent of current HP** — the most
+  natural assumption to make when designing this cache, and wrong.
+
+Separately, building the key surfaced a **pre-existing bug in the threat
+matrix**: it called `damage_roll` with `weather` only, while the engine
+(`battle.py` `_resolve_move`) also passes `auras` and `screens`. So every
+threat edge silently **over-estimated damage into a screened side** and
+mis-handled Fairy/Dark Aura. Now fixed, with screens applied per category
+(Aurora Veil both, Reflect physical, Light Screen special) to match the engine.
+
+This is the same lesson as §2d in a different guise: the failure mode of an
+optimisation here is not a crash but a plausible wrong number, so each
+dependency needs a test that deliberately breaks it.
+
+---
+
+## 2g. Phase A4, and a measurement instrument that was lying
+
+### The harness was biased, and it invalidated earlier conclusions
+
+`measure_headtohead.py` originally swapped sides on **alternate matchups**. That
+sounds equivalent to swapping properly and is not: the two halves are then
+*different matchups*, so any per-matchup skew survives the swap instead of
+cancelling.
+
+This was caught by finally running the control that should have come first —
+configure the candidate **identically** to the baseline, which must by
+definition score 50%. It scored **44%**. That is comfortably enough bias to
+swamp the effects being measured, and it means every head-to-head number
+reported before this point was unsound, including the coverage verdict in §2e.
+
+Fixed by **paired play**: every matchup is played twice, once with the
+candidate on each side, and both results counted. When the configurations agree
+the two games cancel exactly, so the null is 50% *by construction* — verified,
+39 W / 39 L / 2 D over 80 games. The tool's docstring now says to run the null
+before trusting any result from it.
+
+The lesson generalises past this harness, and is the third instance of the same
+shape in Phase A (after §2d's reveal incentive and §2f's stale-cache traps):
+**the failure mode of measurement code is a plausible wrong number, not a
+crash.** A null case is the cheapest possible defence and it was skipped.
+
+### A4 result: reshaping the HP term does nothing measurable
+
+§8b.1 established that "1 HP is infinitely more than 0 HP" is about **HP
+non-linearity**, not damage rolls. Implementing it turned out to need a smaller
+change than expected, because the evaluation already encodes most of the claim.
+Per **alive** Pokémon:
+
+```
+KO term   _ko_threat_value in [0.35, 1.35] x KO_WEIGHT  ->   63..243 points
+HP term   current_hp_frac                  x 100        ->     0..100 points
+```
+
+Dying already costs far more than being chipped to 1 HP. So the open question
+was never "is there a step" but **"is the balance between the two right"** —
+one number, `FUNCTIONAL_FLOOR`, the share of a Pokémon's HP-term value it keeps
+merely by being alive. `0.0` is the previous linear behaviour, `1.0` ignores HP
+entirely.
+
+Measured on the fixed harness:
+
+| `FUNCTIONAL_FLOOR` | games | win rate | 95% CI |
+|---|---|---|---|
+| 0.25 | 80 | 55% | [44%, 66%] |
+| 0.25 | **240** | **51%** | **[44%, 57%]** |
+| 0.50 | 80 | 48% | [37%, 58%] |
+| 0.75 | 80 | 43% | [32%, 54%] |
+
+The promising 55% at n=80 **did not survive** tripling the sample — it fell to
+51%, which is nothing. `FUNCTIONAL_FLOOR` stays `0.0`, with the knob and its
+tests kept so the question can be reopened cheaply.
+
+That n=80 → n=240 collapse is worth remembering on its own: at 80 games the
+95% interval is roughly ±11 points, so this harness simply cannot see effects
+smaller than about ten points, and reading a point estimate without its interval
+would have shipped a non-improvement.
+
+### What Phase A's negative results actually say
+
+Two evaluation terms with strong backing in the VGC literature — answer
+preservation and functional HP value — were implemented, tested, and measured
+at **49%** and **51%**. Neither is worth its cost.
+
+That is a real result rather than a failure, and it points somewhere specific.
+§2b (re-measured, §2d) found the current architecture cannot represent the
+right answer on **83% of turns**, because the equilibrium is mixed and the
+solver can only return a pure strategy. Phase A has now shown that *evaluation*
+changes of the kind the literature suggests do not move win rate detectably. The
+two findings agree: **the binding constraint is representational, not
+evaluative**, which is precisely the argument for Phase B and against further
+evaluation tuning.
+
+The threat matrix (§2e) is kept regardless — it is infrastructure for action
+pruning, double-oracle seeding and the answer map, none of which depend on the
+coverage term.
+
+---
+
+## 2h. Phase B (first milestone): the matrix game beats the greedy solver
+
+**The central thesis of this document is now measured and confirmed.**
+`src/turn_game.py` solves each turn as a two-player zero-sum matrix game and
+plays it against the existing greedy solver:
+
+```
+Nash (depth 1) vs greedy expectimax
+  384 games, 8 teams x 6 enemy brings x 4 of our brings, each played both ways
+  231 W / 151 L / 2 D
+  60% win rate, 95% CI [55%, 65%]     => SIGNIFICANTLY BETTER
+
+null control, same pool, identical configurations
+  192 W / 192 L / 0 D  =  50%          => instrument verified clean
+```
+
+This is the first statistically significant result in the project, and it
+arrives after two evaluation terms measured at 49% and 51%. Read together, the
+three say the same thing: **the binding constraint was representational, not
+evaluative.** §2b's finding that 83% of turns have a mixed equilibrium — an
+answer the old architecture could not express at all — is what the 60% is
+cashing in.
+
+It also needed the widened matchup pool to become visible. At the narrower
+pool the same configuration read 55% (n=80), 56% (n=192), 55% (n=238), all with
+intervals straddling 50%. Varying *our* four as well as theirs — rather than
+always attacking with one fixed team — both enlarged the sample and removed the
+risk of measuring "helps this one team".
+
+### Cost
+
+```
+greedy          13.3 ms / decision      ~0.4 s per 14-turn game
+Nash depth 1   258.5 ms / decision      ~7.2 s per game     (19x)
+Nash depth 2  5488   ms / decision    ~154   s per game    (412x)
+```
+
+Depth 1 at 19× is affordable for verification and interactive use and too slow
+for the large sweeps. Depth 2 is interactive-only, exactly as §2c predicted.
+
+### Two performance bugs, both found by measuring rather than reasoning
+
+Depth 2 first measured at **31.6 s per decision**, eight times worse than
+§2c's prediction. Neither cause was the algorithm:
+
+1. **The nested action cap never applied.** The condition read `depth < 1`,
+   which is never true for a call at depth 1 or 2, so every nested subgame ran
+   at full size — a complete ~23×28 game inside every cell of another one.
+2. **Iteration count, not simulation count, was the bottleneck.** Each nested
+   8×8 subgame ran 3000 regret-matching iterations, once per cell of the outer
+   game. Small games converge long before that; dropping nested solves to 400
+   took depth 2 from 17.6 s to 5.5 s.
+
+Worth recording because the instinct on seeing 31.6 s would have been to
+declare depth 2 unaffordable and design around it. It was a typo and a tuning
+constant.
+
+### Still to do in Phase B
+
+The flag `solver.NASH_SOLVER` is **off by default**. The measurement justifies
+turning it on, but that changes every reported number in every tab, and §7
+requires depth to be chosen per call site rather than globally — so enabling it
+is its own step, not a side effect of this one. Also outstanding: retiring
+`CHECK_TOP_K`, and surfacing the mixed-strategy advice, exploitability, and
+opponent-decision-difficulty that `TurnSolution` already computes.
+
+---
+
+## 2i. Phase D (done): plausibility-weighted preview
+
+`src/preview.py` implements §6a/6b — a logit weighting over their brings plus a
+CVaR tail objective — and `search_robust_composition` now reports a `downside`
+score and a ranked list of their credible leads alongside the existing
+`worst_margin` and win count.
+
+**Shipped additively on purpose.** The existing ranking is untouched by this
+change, so the new number can be compared against the old one on real searches
+before anything depends on it. `τ → ∞` reproduces the current uniform behaviour
+exactly (asserted in `tests/test_preview.py`), so there is no flag day.
+
+Example, our six vs a Rain-ish six, screening all 90 configs:
+
+```
+bring Pelipper / Mega Charizard Y + Archaludon / Grimmsnarl
+   worst_margin = +120.0     downside = +164.4     solver 90/90
+
+their most plausible LEADS
+   14.6%   our margin  +120.1   Grimmsnarl / Mega Metagross
+    7.2%   our margin  +205.1   Archaludon / Mega Swampert
+    7.0%   our margin  +207.3   Pelipper / Mega Swampert
+    ...
+```
+
+Their single strongest opening is correctly the most likely at 14.6%, with the
+rest decaying smoothly rather than being cut off. "Beats 90/90" said nothing
+about *which* of the 90 mattered; this does.
+
+### The list is grouped by LEAD, and that is a finding, not a formatting choice
+
+The first version listed all 90 configs and showed every entry six times. The
+cause is worth recording: the screener (`fast_pair_score`) only looks at the
+**lead pair**, so all six configs sharing a lead score identically. Presenting
+90 rows would imply a precision the screen does not have. Their back two is
+resolved during the battle rather than at preview, so **lead plausibility is
+the honest unit** — which is also what the VGC material treats as the real
+preview decision.
+
+### What was deliberately not built
+
+No LP, no fixed-point iteration, no double oracle. §6c predicted the runtime win
+would shrink to nothing under this design and it did: the sweep still evaluates
+all 90. That is the accepted cost of dropping the equilibrium framing, and §2c's
+finding that double oracle prunes far less than assumed (24% of the matrix, not
+2%) makes the abandoned speedup smaller than it once looked anyway.
+
+---
+
+## 2j. The NASH_SOLVER default: measured, and deliberately left OFF
+
+### Runtime impact
+
+Measured end to end on a real 12-turn play-out, then extrapolated to the
+workflows that actually run:
+
+| | one 12-turn game | Vs Team, verify_top=3 (270 games) | King-style sweep (1620 games) |
+|---|---|---|---|
+| greedy | 0.05 s | 0.2 min | 1.4 min |
+| **Nash depth 1** | **0.82 s (16×)** | **3.7 min** | **22 min** |
+| **Nash depth 2** | **19.8 s (386×)** | **89 min** | **8.9 h** |
+
+**Default stays `False`.** Depth 1 is borderline for the sweeps and depth 2 is
+out of the question — an 8.9-hour team-rating run is not a tool anyone uses. The
+per-call-site tier split §7 asks for is the right shape, and the UI now
+implements it: Nash is offered on both battle pages, with the Vs Team page
+warning against it because it sweeps many brings.
+
+### Non-runtime impact, which matters as much
+
+Flipping the default would also:
+
+- **Change every reported number in every tab.** The solver wins 60% of games
+  head-to-head, so team rankings, win counts and leaderboards genuinely
+  reorder — this is not a rounding difference.
+- **Invalidate cached and previously reported results**, which were produced by
+  a measurably different player.
+- **Move the golden baseline**, deliberately and across the board.
+
+None of that is an argument against the solver — it is an argument for the flip
+being its own decision with its own before/after comparison, rather than a side
+effect of a commit that was about something else.
+
+### A silent bug the question surfaced
+
+`solve_best_action` returns `(action, score, sim)`, and **several callers use
+`sim is None` as a liveness signal** meaning "the solver found nothing, stop
+here" — `committed_plan.py:105`, `committed_plan.py:211`,
+`matchup_search.py:920`. The Nash path returned `sim=None` unconditionally, so
+enabling it made every one of those paths **bail on turn one**, which looks
+exactly like a legitimately dead position rather than like a bug.
+
+Fixed by playing the chosen action against their most likely reply — one extra
+`run_turn` against a ~240-simulation solve. Pinned by
+`tests/test_nash_integration.py`, which also asserts the default stays off.
+
+### Verified: the solver applies on every turn
+
+Confirmed by instrumenting a real play-out rather than by reading the code:
+**7 equilibrium solves for a 7-turn game**, one per turn, with the greedy
+default producing zero. `play_out_worst_case` calls `solve_best_action` inside
+its turn loop and the mode is read from the module global on each call, so
+`solver_mode(...)` around a play-out covers the whole battle. There is a test
+asserting solves ≥ turns, which is what would catch a future change that
+captured a decision function once or restored the global mid-playout.
+
+---
+
+## 2k. Phase C (built): rolls as a safety question, not an average
+
+`src/rolls.py` plus roll-scenario evaluation in `turn_game`. The design changed
+before it was written, because the framing in §4c was wrong — see the
+correction there. The short version:
+
+> An **expectation** over roll buckets averages away the thing that decides
+> whether a play is sound. What matters is whether a bad roll leaves you
+> *punished*: their survivor now threatens Sucker Punch, or outspeeds and KOs in
+> the endgame. **A safe play does not rely on rolls.**
+
+So rolls go where the opponent's choice already is — inside the safety analysis
+— but aggregated differently, because they are stochastic rather than
+adversarial: `min` over their columns, a tunable quantile (`ROLL_RISK`) over the
+roll distribution. Fully roll-averse would be as wrong as risk-neutral: every
+attack would be assumed to low-roll and nothing would read as a KO.
+
+### What is implemented
+
+- **Exact KO probabilities**, free. The engine's 16 rolls are
+  `base × mod × (0.85 + 0.01·i)` — linear in the index — so all 16 reconstruct
+  exactly from the extremes the threat matrix already stores. `Threat.ohko_prob`
+  is now the true `k/16`, which is precisely the corpus's own unit
+  (§8e: "pick up the OHKO with it (62.5%)" = 10/16).
+- **Roll scenarios** at indices 0 / 8 / 15, weighted 5/16, 7/16, 4/16 — three
+  simulations bracketing the distribution rather than sixteen.
+- **Risk aggregation** reusing `preview.cvar`, so "read the bad tail" has one
+  definition in the codebase rather than two.
+- **Roll sensitivity** per cell (best-minus-worst), which is the reportable form
+  of "does this play depend on the dice?"
+
+### Two silent-failure traps, both caught by tests
+
+1. **`force_roll_index` was not carried by `Battle.__deepcopy__`** (only
+   `force_roll` was). Since every candidate is evaluated on a copy, the forced
+   roll was being dropped — which presents as *"roll scenarios make no
+   difference"* rather than as a bug. This is the third instance of the same
+   deepcopy-drop pattern in this project, after `movesets` (§2e).
+2. The engine floors damage to an integer, so reconstructed roll values are
+   pre-floor. The difference is at most 1 HP and only matters exactly on a
+   bucket boundary; recorded rather than silently assumed away.
+
+### Status
+
+`ROLL_SCENARIOS = False`. Costs ~3× per cell, on top of the Nash solver's 16×.
+
+### Measurement so far
+
+Both sides running the equilibrium solver, varying only whether cells are
+evaluated across roll scenarios (`ROLL_RISK = 0.5`):
+
+```
+null control (identical configs)   64 W / 64 L        50%   instrument clean
+ROLL_SCENARIOS on vs off, n=128    67 W / 59 L / 2 D  53%   CI [44%, 62%]
+```
+
+The larger run landed at **51%, CI [44%, 58%] (97 W / 93 L / 2 D, n=192)** —
+the 53% decayed exactly as Phase A4's precedent predicted. **No measurable
+win-rate benefit.**
+
+Before running it, this document predicted head-to-head would be underpowered
+here: roll variance hits **both** sides symmetrically, so the roll-aware player
+still eats the opponent's high rolls, and the effect sought (better *decisions*
+under variance) sits on a first-order noise source the metric cannot remove.
+Rather than leave that as an excuse, it was tested directly.
+
+### The direct measurement (`tools/measure_roll_safety.py`)
+
+Instead of whole games, compare the two configurations' **decisions in the same
+position**, scored at the worst roll against the opponent's best reply — "if I
+low-roll and they answer correctly, where am I":
+
+```
+decision points                        40
+where the two picks DIFFER             5/40  (12%)
+
+value at the WORST roll vs best reply  (higher = safer)
+  risk-neutral (ROLL_RISK = 1.0)      -20.7
+  roll-averse  (ROLL_RISK = 0.3)      -18.5
+
+on the 5 points where the picks differ:
+  roll-averse choice worth            +17.4 points at the worst roll
+  better worst case on                4/5
+```
+
+**This resolves the ambiguity.** The mechanism works: when it engages it picks
+the safer play, by about 17 points at the worst roll. But it **engages on only
+12% of turns**, and 12% × ~0.1 Pokémon is far below what a game-outcome metric
+with a ±7pp interval could ever detect. The flat 51% is therefore *consistent
+with a correct implementation of a small effect*, not evidence against the idea.
+
+Two honest caveats. Five differing points is a tiny sample, so `+17.4` is itself
+noisy. And 88% agreement says something worth knowing independently: **on this
+team pool the average roll is a good enough approximation most of the time.**
+Whether that generalises is a property of the pool, not of the method — a
+library richer in Focus Sash, Sturdy, and bulk-EV mirrors would engage the knob
+far more often. That is a hypothesis this measurement suggests rather than one
+it establishes.
+
+### Verdict
+
+`ROLL_SCENARIOS` stays **off**: ~3× per cell for an effect too small to show up
+in outcomes on this pool. The implementation, tests and both measurement tools
+stay, because the finding is "small here", not "wrong" — and the exact
+`ohko_prob` (`k/16`) it added to the threat matrix is useful on its own, for
+display and for §4a, at no cost.
+
+---
+
+## 2m. Phase E: measured its ceiling first — and it is the largest left
+
+§10 gates Phase E on "only if A–D justify it". Rather than answer that with an
+opinion, `tools/measure_set_uncertainty.py` measures the ceiling, the way §2b
+sized Phase B.
+
+### The assumption nobody was testing
+
+§5 splits hidden information in two. **Their bring** (which four of six) is
+handled structurally — the sweep enumerates it and Phase D weights it. **Their
+sets** are not handled at all, and the reason it never showed up is that the
+assumption is *self-fulfilling*:
+
+> Both sides' movesets are built with `top_k = TOP_K_MOVES` by usage. The solver
+> plans against the four most-used moves, and the simulated opponent then plays
+> exactly those four.
+
+That is structurally the same error as §1's "we compute a best response to a
+policy we authored" — one level down, an assumed **set** rather than an assumed
+**policy** — and invisible for the same reason: nothing in the harness ever
+contradicts it.
+
+### The measurement
+
+The opponent actually runs a different plausible set (usage ranks 0, 1, 4, 5 —
+keeping their signature moves, varying the coverage slots) while our solver
+keeps planning against the usage-standard four. Verified that the sets really
+differ before trusting the result: 4/4 mons changed, including Pelipper losing
+Tailwind, which is a substantial change for a Rain team.
+
+```
+                W    L    D    win rate
+matched        77   42    1        65%
+surprised      58   62    0        48%
+
+win rate lost to set uncertainty : +16 points   95% CI [+4, +29]   SIGNIFICANT
+```
+
+**16 points is larger than the Nash solver's 10-point gain** (§2h), and it is
+the largest measured headroom remaining in the project. An earlier run at n=8
+showed exactly 0 — a reminder that these small samples say nothing; the effect
+only became visible at n=240.
+
+### …but the 16 points does not transfer to the solver we would ship
+
+Re-running with `--nash` changes the conclusion, and this is the more
+interesting result:
+
+```
+                        matched  surprised   drop
+greedy      n=240         65%       48%     +16 points  CI [+4, +29]   significant
+Nash d1     n=64          31%       28%      +3 points  CI [-19, +25]  not significant
+Nash d1     n=240         32%       25%      +8 points  CI [-4,  +19]  not significant
+```
+
+The n=64 Nash figure was itself noise — the point estimate moved from 3 to 8
+once the sample matched greedy's. That is the third time in this project a
+reading at n<100 has failed to survive a larger sample (after Phase A4 and Phase
+C), and it is now a standing rule rather than a lesson: **nothing under ~200
+games gets quoted.**
+
+> **Cost correction.** An earlier draft of this section called the n=240 Nash
+> re-run "a few hours of compute". Measured: **4 min 26 s** — wrong by roughly
+> 40×. The reason is specific and worth remembering when budgeting the next one:
+> in *this* harness only our side runs the solver (the opponent is the cheap
+> greedy heuristic), unlike `measure_headtohead` where both sides do. Per-game
+> cost is ~1.2 s, not ~7 s.
+
+Two things need explaining, and both matter.
+
+**Why Nash's absolute rate is only 31%.** This harness pits our solver against
+`greedy_opponent_joint_action` — the raw damage-maximising heuristic — not
+against another `solve_best_action`. The expectimax solver *best-responds to
+exactly that function by construction*; it is its opponent model. So against
+this specific opponent, greedy's model is **perfectly correct** and it plays
+near-optimally, while Nash pays the standard price of assuming a competent
+adversary. This is §1's argument running in reverse: best-responding to a fixed
+policy is optimal precisely when the opponent really runs that policy. It is an
+artifact of the harness's opponent, **not** evidence against the equilibrium
+solver — Phase B's 60% was measured against a real decision-maker and stands.
+
+**Why the drop is 16 for greedy and ~3 for Nash.** Most of the 16 points is not
+an irreducible cost of hidden information — it is *the greedy solver's own
+assumption breaking*. It models the opponent exactly, so when their set changes
+underneath it, its model is wrong twice over. Nash never relied on that model,
+so being surprised costs it much less.
+
+### Resolved at n=720: set uncertainty costs the equilibrium solver too
+
+```
+                        matched  surprised   drop
+greedy      n=240         65%       48%     +16 points  CI [+4, +29]   significant
+Nash d1     n=64          31%       28%      +3 points  CI [-19, +25]  not significant
+Nash d1     n=240         32%       25%      +8 points  CI [-4,  +19]  not significant
+Nash d1     n=720          —        52%     +10 points  CI [+3,  +17]  SIGNIFICANT
+```
+
+**This flips the verdict below.** At the sample size needed to resolve it,
+being wrong about the opponent's set costs the equilibrium solver **10 points
+of win rate, significantly** — less than greedy's 16, but nowhere near zero.
+Two earlier readings (3 points, 8 points) were both underpowered.
+
+So the hidden-information problem is real *on the solver we would actually
+ship*, not only on the brittle one. §5's gate is met.
+
+### Verdict: ~~Phase E is NOT yet justified~~ superseded — see above and §2n
+
+The gate in §10 asks whether A–D justify E. The honest reading:
+
+- The 16-point figure is real but **measured on a solver we are not shipping**,
+  and it is substantially a measure of that solver's own brittleness.
+- On top of the equilibrium solver, the measured headroom is **+8 points,
+  CI [-4, +19]** at n=240 — about half greedy's, and still not distinguishable
+  from zero.
+- So E stays unbuilt, on the same standard every other phase was held to.
+
+The interval is the whole story here. `[-4, +19]` is compatible with "modelling
+their set is worth nothing" and with "it is worth as much as the Nash solver
+itself", which means the honest answer is **still not known** — not that the
+answer is no. Resolving an 8-point effect needs ~300 games per arm; a run at
+~720 games is in progress and will settle it either way for about 15 minutes of
+compute.
+
+That is the difference between this phase and the others: A's eval terms and C
+were measured to be *small*, whereas E is measured to be *uncertain*. Those
+warrant different responses — the first is a reason to stop, the second is a
+reason to measure again, which is cheap here.
+
+### A caveat this exposes about every earlier measurement
+
+Every head-to-head in this document — including Phase B's 60% — ran with **both
+sides sharing the same correct set assumption**, because the harness cannot be
+wrong about it. Those results are conditional on that world. This section is the
+first measurement in the project to relax it.
+
+---
+
+## 2n. The right metric: exploitability, not win rate
+
+The project's stated aim is **realistic, high-level play** — lines that hold up
+against a competent opponent, and teams built from those lines. Win rate is a
+proxy for that, and this project now has direct evidence that it is a *biased*
+proxy.
+
+**The proxy failing, visibly.** In `measure_set_uncertainty.py` the greedy
+solver scores 65% and the equilibrium solver 31%. Not because greedy plays
+better — because that harness's opponent is `greedy_opponent_joint_action`, and
+the greedy solver **best-responds to exactly that function by construction**.
+Beating an opponent you model perfectly rewards exploitation, not soundness. A
+play can win every game against our own bot and still be one a good player
+punishes on sight.
+
+So `tools/measure_robustness.py` measures the thing the aim actually implies
+(§3c):
+
+```
+exploitability(play) = equilibrium value - worst case of that play
+                     = what a best-responding opponent gains by knowing it
+```
+
+with the opponent's action space built from a **wider moveset than the solver
+plans against**, so "punishable by a move we did not expect" counts as
+punishable — which is what it is in real play.
+
+```
+solver         points  exploitability  regret  severely punishable
+greedy             96          65.1     52.3      34/96  (35%)
+nash-d1 (argmax)   96          75.5     62.6      32/96  (33%)
+nash-mixed         96          58.7     45.8      26/96  (27%)
+nash-maximin       96          70.8     57.9      28/96  (29%)
+```
+
+### Finding 1: we are throwing away the reason to use the equilibrium solver
+
+The Nash **mixture** is the least exploitable thing measured (58.7 vs greedy's
+65.1). The Nash **argmax** — which is what `solve_best_action` actually returns,
+and therefore what the app plays — is the **most** exploitable (75.5).
+
+That is not a measurement artifact. A mixed strategy's support consists of
+actions that are *individually* exploitable; mixing them is what makes the
+strategy safe. Collapsing to the modal action discards precisely the property
+that motivated the equilibrium solver, and lands worse than greedy on the metric
+that matters. Phase B's 60% win rate concealed this completely.
+
+**This is the highest-value open item in the project.** The fix is to sample
+from the mixture rather than take its argmax — and where a single deterministic
+recommendation is genuinely required, to say so and show the distribution
+alongside it, as the Battle Viewer's turn panel already does.
+
+### Finding 2: robustness is bounded by the opponent model's set space
+
+`nash-maximin` scores 70.8 — worse than greedy — which looks wrong, since
+maximin minimises worst case among pure actions *by definition*. The resolution
+is the point: it is maximin **with respect to the opponent action space the
+solver considered**, which is built from the assumed top-4 moveset. Scored
+against the wider space it is no longer maximin at all.
+
+A solver is only as robust as the opponent model it optimises against. That is
+the same lesson as §1 (an authored opponent *policy*) and §2m (an assumed
+opponent *set*), now measured a third way — and it is the concrete argument for
+widening the opponent's plausible move space, which is what Phase E is for.
+
+---
+
+## 2o. Both fixes implemented, and both pay
+
+Measured on exploitability — the metric that matches the aim — rather than win
+rate. Lower is better; `severe` is the share of decisions where a
+best-responding opponent gains more than a third of a Pokémon.
+
+```
+                        opponent move space:  narrow (4)        WIDE (6)
+greedy                                          65.1  35%        65.1  35%
+Nash, argmax of the mixture                     75.5  33%        61.2  26%
+Nash, the mixture itself                        58.7  27%        43.0  21%
+Nash, maximin row                               70.8  29%        44.1  17%
+```
+
+**The shipped configuration is Nash + mixture + wide: 43.0 against greedy's
+65.1 — a 34% reduction in exploitability**, and severe punishments down from
+35% of decisions to 21%.
+
+Cost: **+26%** per decision (300.9 → 379.2 ms; their action space 23 → 40
+columns, 241 → 376 simulated turns). That is far better value than anything in
+Phase A — the coverage term wanted 4.35× for nothing, roll scenarios 3× for
+nothing.
+
+### 1. Play the mixture (`solver.NASH_SAMPLE`, on by default)
+
+`solve_best_action` returned the argmax of the equilibrium distribution, which
+is the single thing mixing exists to avoid. Now it samples from the
+distribution, with `seed_nash_sampling()` for reproducibility. Nash results are
+therefore **stochastic by design** — that is the correct behaviour for a mixed
+strategy, and the Battle Viewer's turn panel already shows the distribution
+being sampled from.
+
+Left off for greedy, so the golden baseline and the sweeps stay deterministic.
+
+### 2. Widen the opponent's move space (`battle.wide_movesets`)
+
+Their action space is now built from their **six** most-used moves rather than
+the four the solver plans with. Ours is unchanged: we know our own set, we do
+not know theirs, and that asymmetry is the actual information structure.
+
+This resolves the `nash-maximin` anomaly in §2n. It scored *worse* than greedy
+(70.8) because it was maximin with respect to too small an opponent space;
+widened, it drops to 44.1. A solver is only as robust as the opponent model it
+optimises against — the same lesson as §1's authored policy and §2m's assumed
+set, now fixed rather than just noted.
+
+Skipped for any Pokémon whose exact set the caller supplied: if the moves are
+known there is nothing to widen.
+
+### Why not ISMCTS (Ihara et al.)
+
+The problem it addresses is real and measured — set uncertainty costs the
+equilibrium solver 10 points (§2m). But ISMCTS targets **strategy fusion**, a
+pathology of *deep determinised sequential* search, and this search is a depth
+1–2 matrix game where there is little room for it to bite. The two changes
+above attack the measured problem directly, reuse existing machinery, and cost
+26% rather than a new search algorithm.
+
+Ihara's *diagnosis* stays relevant for later: if the opponent's **sets** are
+ever sampled and each sampled world searched independently, strategy fusion
+becomes live and determinisation stops being safe. That is the trigger to
+revisit the method — not now.
+
+### A fourth deepcopy-drop
+
+`wide_movesets` had to be added to `Battle.__deepcopy__`, after `movesets` (§2e)
+and `force_roll_index` (§2k). Three of the four bugs in this project's plumbing
+have been the same one. Anything attached to a `Battle` outside `__init__` needs
+a line there and a test, and it is worth treating that as a checklist item
+rather than rediscovering it a fifth time.
+
+---
+
+## 2p. Line auditing: exploitability as a product feature
+
+`src/robustness.py` makes exploitability reusable rather than confined to a
+measurement script, and the Battle Viewer now exposes it as **"How punishable is
+this line?"** — replaying a plan against a best-responding opponent whose moves
+are drawn from the wider set, and reporting what they gain on each turn.
+
+This is the aim stated back as a tool: a play that beats the simulated opponent
+can still be one a good player punishes on sight, and the difference is now
+visible per turn rather than hidden inside a win/loss.
+
+On one real matchup, six turns:
+
+```
+greedy               mean exploitability  95.9    severe 2/6
+  T3   147.4  Incineroar Throat Chop + Farigiraf Psychic     <-- punishable
+  T4   395.3  Incineroar Throat Chop + Gallade Sacred Sword  <-- punishable
+  worst: T4, punished by Pelipper Muddy Water + Grimmsnarl Spirit Break
+
+Nash + mixture + wide   mean exploitability   8.5    severe 0/6
+  worst: T3 at 27.6
+```
+
+**395 points is over two Pokémon** given away on a single turn by a line that
+the win-rate harness was perfectly happy with. The robust configuration averages
+**11× lower** exploitability across the same audit and has no severely
+punishable turn.
+
+Two details that make this an audit rather than a restatement of the solver's
+own opinion:
+
+- The comparison value is the **equilibrium of the turn**, not the solver's
+  estimate of its own play. A solver cannot mark its own homework.
+- The line is advanced **against the punisher**, not against a script — auditing
+  a plan means asking how it holds up when the opponent is actually trying.
+
+`line_report` takes the policy as a callable, so the same audit serves the
+greedy solver, the equilibrium solver, or a hand-written line a player wants
+checked. The naming of the specific punish ("answer this with that") is what
+makes it actionable rather than merely a score.
+
+### What this leaves open for team generation
+
+The stated aim continues past lines to **generating great teams**. The pieces
+now exist — per-turn exploitability, a plausibility-weighted preview (§6a), and
+a downside score — but `search_robust_composition` still ranks by win counts
+against our own bot. Rating a candidate bring by *the exploitability of its best
+line against their most plausible leads* is the natural next step, and it is
+mostly assembly rather than new machinery. It is not cheap: exploitability needs
+the full payoff matrix per turn, so it belongs on the verify stage for the top
+few candidates, not on the 90-config screen.
+
+---
+
+## 2q. Team rating by exploitability — the last place the old proxy lived
+
+`search_robust_composition` ranks by wins against `greedy_opponent_joint_action`,
+a policy this codebase wrote itself. A bring can beat 90/90 of their
+configurations and still be one a strong player dismantles, because the
+simulated opponent never tries the punish. `src/team_rating.py` +
+`tools/rate_teams.py` rate a team the way the aim implies instead:
+
+> against the leads they would **plausibly** bring (§6a, usage-weighted rather
+> than all 90 uniformly), play our best line and measure what a
+> **best-responding** opponent gains, turn by turn (§3c) — with their moves
+> drawn from the **wider** set they might actually be running (§2o).
+
+Run over the library (equilibrium solver, mixture sampling, wide opponent space;
+2 plausible leads per opposing team, 4 turns):
+
+```
+team                  exploitability   severe turns
+NAIC                            29.9         6/56
+Hard Trick Room                 43.3        11/56
+Perish Trap                     66.0        21/56
+Big 6                           66.5        19/56
+Sand                            70.1        19/56
+Sun Rain                        73.1        21/55
+King                           105.6        23/56
+Rain                           120.1        32/55
+```
+
+**A 4× spread**, and it is not the ordering a win count gives. Lower is better:
+this is what a good player gets for free.
+
+The output is diagnostic rather than just a score. The least robust team's
+worst plausible lead, and the exact punish:
+
+```
+Rain's hardest plausible lead: Torkoal / Kingambit
+  worst turn T1: they gain 583 by answering
+    Archaludon Dragon Pulse -> Torkoal + Grimmsnarl switch -> Pelipper
+  with Torkoal Eruption -> Archaludon + Kingambit Sucker Punch -> Archaludon
+```
+
+583 points is over three Pokémon, on turn one, against a lead they would
+plausibly bring. Worth noting that **Kingambit Sucker Punch** is precisely the
+punish pattern this project was asked to catch — it turned up on its own, from
+the metric rather than from being looked for.
+
+### Two runs, two rankings — and the difference is the point
+
+A full 56-pairing run through `tools/search_teams.py` (Standard tier) ranks
+differently from `tools/rate_teams.py`:
+
+```
+                 search_teams        rate_teams
+                 (search-chosen      (first four
+                  bring)              as the bring)
+Hard Trick Room        17.3               43.3
+Sun Rain               41.2               73.1
+NAIC                   44.7               29.9
+Big 6                  50.1               66.5
+Sand                   53.9               70.1
+Perish Trap            54.4               66.0
+Rain                   54.7              120.1
+King                   60.9              105.6
+```
+
+They agree at the extremes — **Hard Trick Room and NAIC are the top two in
+both, King is bottom two in both** — and disagree in the middle. The cause is
+identifiable rather than mysterious: `search_teams` audits **the bring the
+search chose**, while `rate_teams` audits **each team's first four**.
+
+So the gap between the two columns is a real property of a team: **how much it
+depends on getting team preview right.** Rain moves 120.1 → 54.7, the largest
+shift in the table — it is punishing with a default bring and mid-pack with a
+well-chosen one. Hard Trick Room and NAIC are near the top either way, which is
+a stronger claim than topping one list.
+
+Neither number should be read to one decimal place. Adjacent teams in the middle
+(Sand 53.9, Perish Trap 54.4, Rain 54.7) are not distinguishable at this tier;
+the top-two and bottom-two splits are.
+
+### Reading it honestly
+
+- The audit is piloted with the least-exploitable configuration available
+  (§2o). Rating a team while piloting it badly measures the pilot, not the team.
+- These settings are coarse: each team's first four as the bring, two plausible
+  leads per opponent, four turns. Good enough to rank; not a substitute for
+  auditing a specific matchup in the Battle Viewer.
+- Exploitability needs a full payoff matrix per turn, so this belongs on the
+  verify stage for a handful of candidates. The cheap 90-configuration screen in
+  `search_robust_composition` still does the shortlisting.
+
+### Wired in (§2r)
+
+`search_robust_composition` now takes `rate_robustness=True` and, when set, adds
+a final stage that audits each survivor and **re-ranks by exploitability rather
+than win count**. The Vs Team page shows the rating, the hardest plausible lead,
+and the specific punish. The cheap 90-configuration screen still does the
+shortlisting — only survivors get the expensive treatment.
+
+---
+
+## 2r. Search effort as a dial, and a search that survives being killed
+
+The robustness rating is orders of magnitude dearer than the screen it refines,
+which forces two things rather than one.
+
+### Effort is a tier, not a constant
+
+`src/search_effort.py` defines four tiers, exposed as a slider on the Vs Team
+page. They vary the things that actually cost time, in the order they cost it:
+how many survivors get audited, against how many of their plausible leads, to
+what depth.
+
+| tier | verify | leads | turns | ~cost | what it is for |
+|---|---|---|---|---|---|
+| Quick | 3 | — | — | 1× | The original behaviour. Ranked by win count. Nothing is lost at the cheap end. |
+| Standard | 3 | 2 | 4 | ~5× | Ranks by exploitability instead of win count. |
+| Thorough | 6 | 4 | 6 | ~25× | The setting to trust before committing to a team. |
+| Exhaustive | 20 | 6 | 8 | ~161× | For finding a hidden team with great lines. Expected to take a long time. |
+
+**`nash` is deliberately not a tier setting.** The audit is always piloted with
+the equilibrium solver, because rating a team while piloting it badly measures
+the pilot rather than the team. What varies is *how much* auditing happens, not
+how well it is done.
+
+### A long search has to be resumable, or it never finishes
+
+The exhaustive tier is only useful if it can be run across many sessions.
+`tools/search_teams.py` works in batches, writes the cache **between** batches,
+and skips completed work on re-run — kill it at any point and you lose at most
+one batch. Verified on a live cache mid-run: **15/56 pairings skipped on
+resume**.
+
+Two details that decide whether a cache helps or hurts:
+
+- **The key includes the effort tier and the turn cap.** A cache that silently
+  serves results computed under a cheaper tier is worse than no cache. Verified:
+  **0/56 reused** when the tier or turn cap changes.
+- **Writes are atomic** (temp file + `os.replace`). The entire point is
+  surviving being killed, and a half-written JSON file would lose the whole run
+  rather than one entry. A corrupt file is also survivable — it starts over
+  rather than refusing to run.
+
+### Prescreening (§2s)
+
+Built: `src/prescreen.py` ranks candidate brings by static threat-matrix
+coverage — the §4b matching, at ~0.7 ms per candidate, with **no battle
+simulated**. At the Exhaustive tier a candidate costs roughly 161× the Quick
+tier, so eliminating one for a millisecond is worth minutes of avoided work.
+
+**It is off by default on every tier, and that is deliberate.** A prescreen
+discards candidates before they are ever simulated, so set too narrow the search
+becomes faster and *silently wrong* — the dropped candidate never appears in the
+output to be missed. The safe width is a measurement:
+`tools/measure_prescreen.py` reports recall (what share of the full sweep's top
+brings survive the filter) against the width, and the rule is to use the
+narrowest width that still recalls ~100%.
+
+Also selectable: `--teams` and `--vs` on `tools/search_teams.py`, so an
+expensive tier can be spent on the few candidates that survived a cheaper run
+rather than on all 56 pairings.
 
 ---
 
@@ -287,8 +1467,14 @@ and why removing their check to *our* win condition is worth more than its HP.
 
 > Retitled. This section used to be headed *"1 HP is infinitely more than 0
 > HP"*, on the assumption that the vgcguide article of that name was about
-> damage rolls. It is not — see §8b.1. The roll-bucketing argument below stands
-> on its own engine-fidelity merits; the article's actual content is §4d.
+> damage rolls. It is not — see §8b.1; that article's actual content is §4d.
+>
+> **The VGC foundation for this section is real, it is just in a different
+> article** (§8e). *approaching-best-of-1-vs-best-of-3* costs a real play as
+> `50% speed tie × 90% accuracy × 62.5% OHKO`, and **62.5% = 10/16 is a damage
+> roll fraction**. The corpus never says "roll" — it states roll distributions
+> as a *chance to secure the KO*, exactly as a damage calculator reports them,
+> which is why searching for the mechanism by its engine name found nothing.
 
 Average-roll determinism is the wrong abstraction for exactly the situations
 that decide games. But 16 rolls per damage event is a combinatorial explosion.
@@ -305,14 +1491,46 @@ preserves the only distinction that matters: **did it die**.
 > (`×0.925`, `×0.85`, `×1.0`) — i.e. **exactly the min/max/avg scheme this
 > section proposes to replace**, with the instruction generator calling
 > `DamageRolls::Max`. There is no bucketing anywhere in it. So this idea has
-> no external prior art behind it in the sources we have; it stands or falls
-> on the engine-fidelity argument below, which is checkable against our own
-> `damage.py`.
+> no *external engine* prior art behind it in the sources we have — though it
+> does have a VGC foundation (§8e), and the engine-fidelity argument below is
+> checkable against our own `damage.py` regardless.
 
 Concretely: replace the `min/max/avg` roll mode with an outcome-bucketed
-distribution, and make the leaf value an expectation over buckets. This makes
-"survives on 15/16 rolls" and "survives on 1/16" different numbers, which
-Focus Sash, Sturdy, Multiscale, and every bulk-EV decision depend on.
+distribution. This makes "survives on 15/16 rolls" and "survives on 1/16"
+different numbers, which Focus Sash, Sturdy, Multiscale, and every bulk-EV
+decision depend on.
+
+> **Correction — "an expectation over buckets" was wrong.** This section
+> previously said to make the leaf value the *expectation* over the buckets.
+> That averages away the thing that decides whether a play is sound. The right
+> framing, and the one implemented:
+>
+> **A safe play does not rely on rolls.** If a low roll leaves you badly
+> punished — their survivor now threatens Sucker Punch, or outspeeds and KOs in
+> the endgame — the play was not safe, however good its average looked. A low
+> roll whose consequences you have already covered is fine.
+>
+> So rolls belong in the **safety analysis**, not in an average. §3 already
+> makes *"succeeds regardless of what your opponent goes for"* the objective via
+> maximin; this extends it to *"regardless of how the rolls fall"*.
+>
+> The two uncertainties are not aggregated the same way, and that distinction is
+> the whole design:
+>
+> | | nature | aggregation |
+> |---|---|---|
+> | their action | **adversarial** — they pick the worst for us | `min` over columns |
+> | damage roll | **stochastic** — a known distribution | risk-adjusted aggregate, tunable between mean and worst |
+>
+> A pure worst case over rolls would be useless in the other direction — every
+> attack would be assumed to low-roll and nothing would ever read as a KO — so
+> the aggregation is a tunable quantile (`ROLL_RISK`), not a min. See
+> `src/rolls.py`.
+>
+> Note this also explains why rolls **shape future game states** rather than
+> just this turn's damage: a high roll for them changes which threats exist next
+> turn, which is a threat-matrix (§4a) and depth-2 (§10) interaction, not a
+> per-cell number.
 
 ### 4d. Functional value ("1 HP is infinitely more than 0 HP")
 
@@ -482,16 +1700,16 @@ Keep the existing screen-then-verify shape; add tiers rather than replacing.
 |---|---|---|---|
 | 0 | `fast_eval` greedy-vs-greedy | ~1 ms | Pair matrix, beam search over thousands of teams |
 | 1 | Current expectimax vs greedy | 0.05 s/game | Broad sweeps where a rough verdict suffices |
-| 2 | **Double-oracle Nash per turn** (new) | ~0.04 s/game at depth 1; **est. 0.2–0.5 s/game at the required depth 2** | Real verification, Vs Team, Battle Viewer, punish analysis |
+| 2 | **Double-oracle Nash per turn** (new) | **measured (§2c): 0.08 s/decision ≈ 0.96 s/game at depth 1; 3.88 s/decision ≈ 47 s/game at depth 2** | Depth 1: real verification, Vs Team. Depth 2: Battle Viewer and punish analysis only — too slow for sweeps |
 | 3 | **Plausibility-weighted preview** (new, revised — §6) | seconds | Bring selection, team rating, the headline number |
 
 ~~Tier 2 replacing Tier 1 as the default is *cost-neutral* per the §2 numbers.~~
-**No longer true.** That claim rested on a depth-1 solve. Phase B requires
-depth 2 (§10), which is an estimated ~10× on top, or ~5× with selective
-deepening. Tier 2 is therefore *cheaper than a naive full matrix* but **not**
-free relative to Tier 1, and the replace-or-parallel decision (open question 3)
-can no longer be settled by appealing to cost-neutrality. Needs the depth-2
-measurement first.
+**Definitively false, now measured (§2c).** Cost-neutrality was wrong even at
+depth 1: double oracle is 0.08 s/decision (~0.96 s/game) against ~0.05 s/game
+for the current greedy solver — about **20×**, not parity. At the depth 2 that
+Phase B requires it is ~47 s/game, roughly **1000×**. Tier 2 cannot replace
+Tier 1 as a blanket default; the tiers must coexist, with depth chosen per
+call site. Open question 3 is settled by this.
 
 New user-facing outputs this unlocks, all of which the current model cannot
 express:
@@ -581,11 +1799,14 @@ computable conditions on whether a damaged mon is worth preserving:
   Room/Tailwind clock.
 
 So this article belongs in **Phase A**, as a shape change to the HP term plus
-a floor for functional value, not in Phase C. Phase C (roll bucketing) is
-still worth doing, but its justification is now entirely engine-fidelity —
-Sash/Sturdy/Multiscale, survival thresholds, the FoulPlay prior art — and it
-has **no support in the VGC principles corpus**. That materially lowers its
-priority; see §10.
+a floor for functional value, not in Phase C.
+
+> **Correction (see §8e).** This section originally continued: *"Phase C has no
+> support in the VGC principles corpus."* **That was wrong** — it generalised
+> from one article's title to the whole corpus. Roll-distribution reasoning is
+> present, in a different article, and §8e sets out the evidence. What stands is
+> the narrower claim this section actually establishes: the article *titled*
+> "1 HP is infinitely more than 0 HP" is about HP non-linearity, not rolls.
 
 **2. "Pressure" is the threat matrix, not the opponent's security level.**
 
@@ -814,6 +2035,58 @@ factorised-only.
 - **§7** — add three near-free outputs: opponent-decision-difficulty (8c.4),
   most-important-turn (8c.7), match-up-vs-play diagnosis (8c.7).
 
+### 8e. Correction: Phase C *does* have VGC foundations
+
+An earlier draft of §8b.1 concluded that roll bucketing had **no support in the
+VGC principles corpus**. That was an over-generalisation from one article's
+title to the whole corpus, and re-checking all eleven articles refutes it.
+
+**Why the first pass missed it.** The word "roll" appears in **0 of 11**
+articles; so do "Focus Sash" and "Sturdy". Searching for the mechanism by its
+engine name finds nothing. The corpus expresses roll distributions the way a
+*damage calculator* does — as a percentage chance to secure a KO.
+
+**The direct evidence.** *approaching-best-of-1-vs-best-of-3*, Aaron Zheng
+breaking down a real Top-8 game:
+
+> he needs to 1) win a speed tie between our Charizards (50%) 2) connect on
+> Blast Burn (90%) 3) **pick up the OHKO onto Indeedee with it (62.5%)**
+
+`62.5% = 10/16`. That is a damage-roll fraction, and "does this kill?" is
+exactly the quantity outcome-bucketing computes. A player is here reasoning
+about a play as a product of three independent probabilities, one of which is
+the roll distribution — and the model as it stands can represent none of the
+three.
+
+**Supporting material across the corpus:**
+
+| Source | Passage | Bears on |
+|---|---|---|
+| *how-to-analyze* | "look at any turn that involves luck/RNG & ask yourself **how that turn would have played out if you remove that luck/RNG**" | This *is* §4c's roll-sensitivity output: the deterministic result set against the distribution |
+| *how-to-analyze* (Wolfe) | "**luck is a skill**, so getting bad luck normally means you made a mistake in teambuilding or playing" | The thesis of Phase C: outcomes blamed on luck are usually a failure to price the distribution in advance |
+| *how-to-analyze* | "If you missed a crucial attack and lost as a result, ask whether you could have used **more accurate attacks**" | Accuracy belongs in the leaf value, not just damage |
+| *switching* | "a crit, a burn, or even a freeze. This event is **importantly linked to the fact that you get luckier when you have more chances to attack**" | Variance accumulates with the number of attacking opportunities — a property of a line, not of one turn |
+| *bo1-vs-bo3* | "slow paced teams that are **more vulnerable to critical hits/secondary effects**" | Variance exposure is a team property worth measuring |
+| *protect-in-battle* | "the odds of consecutive Protects are only ⅓" | Already noted in §8b.3; the same outcome-probability reasoning |
+
+**What this changes.** Phase C's justification is restored, and it is more
+specific than the generic engine-fidelity argument: the corpus reasons in
+**outcome probabilities** ("62.5% to OHKO"), not in the 16-way roll
+distribution. That is an endorsement of §4c's actual design — bucket by
+*outcome* ({kills, doesn't kill}) rather than enumerate 16 rolls — rather than
+of roll awareness in general.
+
+**And it reclassifies C.** Phase A's two evaluation terms measured at 49% and
+51%; Phase B, which changed what the solver could *represent*, measured 60%.
+Roll bucketing is not an evaluation term — it changes the leaf value from a
+point estimate into a distribution, which is a **representational** change, in
+B's category rather than A's. That is a materially better prior than "another
+eval tweak", and it is the argument for building C rather than skipping to E.
+
+The FoulPlay prior-art refutation in §9 is unaffected: `poke-engine` really does
+use min/max/avg, and really is not evidence for bucketing. C simply never
+needed it.
+
 ---
 
 ## 9. Prior art
@@ -859,8 +2132,9 @@ checked, **[unverified]** means it is still a search-summary lead.
   The PokéAgent Challenge win remains unverified (pokeagent.github.io is
   egress-blocked), but it no longer matters: it was only ever load-bearing as
   authority for the roll-grouping claim, and that claim is now refuted on its
-  own terms. §4c has been rewritten to stand on the engine-fidelity argument,
-  which is checkable against our own `damage.py` and needs no citation. **The
+  own terms. §4c now rests on the VGC foundation in §8e plus the
+  engine-fidelity argument, which is checkable against our own `damage.py` and
+  needs no citation. **The
   phase ordering in §10 is unaffected** — if anything this reinforces C's
   demotion, since we now know of no engine that does it.
 - **Metamon** — *Human-Level Competitive Pokémon via Scalable Offline RL with
@@ -947,16 +2221,23 @@ one level down reintroduces exactly the self-delusion §2b measured (232 points
 / turn) at depth 2, having just removed it at depth 1 — the most likely way to
 build this and get a result that looks fine and is not.
 
-*Cost.* Nested double oracle at ~12 materialised cells per level is ~144
-`run_turn` evaluations per decision against ~12 at depth 1: roughly
-**0.4–0.5 s/game against 0.04 s**, i.e. ~10×, which breaks the "cost-neutral
-with Tier 1" claim in §2 and §7. Selective deepening is the obvious mitigation
-— solve depth 1, re-solve only the top few root actions at depth 2 (`k=4` gives
-~60 cells, ~0.2 s/game) — since the deep search only has to *rank the
-plausible actions correctly*, not evaluate all of them precisely. **These are
-estimates, not measurements**; §2's numbers are depth-1 only. Measuring a
-nested solve is the first thing Phase B should do, before its scope is fixed
-(open question 7).
+*Cost — measured, see §2c.* ~~Estimated ~10×.~~ **Actually 47.9×**: 6778
+simulated turns and 3.88 s per decision, against 118 sims / 0.08 s at depth 1.
+A 12-turn depth-2 game is ~47 s. Selective deepening over the top-4 depth-1
+rows reaches 15× (1.22 s/decision) but **moves the answer by 58.8 points mean
+and 208.8 max**, so `k = 4` is not a safe approximation.
+
+This does not change the *requirement* — the two-turn punish is still invisible
+at depth 1 — but it forces Phase B to be explicit about scope:
+
+- **Depth 2 is for interactive, single-decision use** (Battle Viewer, punish
+  analysis, "explain this turn"), where ~4 s is acceptable.
+- **Sweeps stay at depth 1**, and accept that they cannot see two-turn punishes.
+  Anything that needs depth inside a sweep has to come from the *evaluation*
+  instead (§4d's field-clock term is the worked example), not from search.
+- **Use brute force for the inner game.** §2c.1: at 8×8 the double-oracle
+  best-response scan evaluates ~57 of 64 cells, so DO buys nothing and costs
+  complexity. DO belongs on the large outer matrix only.
 
 Also in scope: the opponent-decision-difficulty output (§8c.4) and
 most-important-turn (§8c.7), both nearly free once the matrix exists.
@@ -1015,15 +2296,32 @@ second.
 
 **C moves behind D and stays there.** Its justification changed rather than
 weakened. The "1 HP is infinitely more than 0 HP" support was a misreading
-(§8b.1) and that work has moved into A; what remains for C is engine fidelity
-— Sash, Sturdy, Multiscale, bulk-EV thresholds — argued from FoulPlay's prior
-art, with no support anywhere in the VGC corpus. There is one countervailing
-pull worth recording: §8b.4's game-state-conditional variance preference
-cannot be expressed at all while every leaf is a point estimate, and C is what
-makes leaf values distributions. But variance preference wants **win
-probability over full-game rollouts**, not a per-damage-event roll bucket —
-different machinery, and reachable from A + B without C. So the coupling is
-real but does not reorder anything.
+(§8b.1) and that work has moved into A.
+
+> **Revised again (§8e), after the ordering above was written.** This paragraph
+> used to continue: *"...with no support anywhere in the VGC corpus."* **That
+> was wrong**, and the correction strengthens C rather than merely restoring it:
+>
+> - The corpus *does* reason about roll distributions — as a **chance to secure
+>   a KO** (`62.5% = 10/16`), never using the word "roll" (§8e). It endorses
+>   §4c's specific design, outcome bucketing, rather than roll awareness in
+>   general.
+> - More importantly, **C is a representational change, not an evaluative one.**
+>   It turns the leaf value from a point estimate into a distribution. Phase A's
+>   two *evaluation* terms measured 49% and 51%; Phase B, which changed what the
+>   solver could represent, measured 60%. C belongs in B's category.
+>
+> The ordering is unchanged — C still comes after D, because it is still the
+> most speculative of the four and D was already built. But C is no longer the
+> weakly-motivated phase this paragraph described, and skipping to E over it
+> would now be the wrong call.
+
+There is one countervailing pull worth recording: §8b.4's game-state-conditional
+variance preference cannot be expressed at all while every leaf is a point
+estimate, and C is what makes leaf values distributions. But variance preference
+wants **win probability over full-game rollouts**, not a per-damage-event roll
+bucket — different machinery, and reachable from A + B without C. So the
+coupling is real but does not reorder anything.
 
 **E stays last and stays conditional**, though it has picked up two concrete
 requirements it did not have: a usage-weighted pessimistic prior rather than a
@@ -1080,20 +2378,25 @@ on the strength of biased cells.
    permutations at 6! = 720).
 3. Should Tier 2 *replace* Tier 1, or stay parallel? ~~§2 says cost-neutral,
    which argues for replacement~~ — **the cost-neutrality argument is
-   withdrawn.** It rested on a depth-1 solve, and Phase B now requires depth 2
-   (§10), estimated at ~10× (or ~5× with selective deepening). Replacement is
-   still plausible but must now be argued on value, not cost, and it still
-   invalidates cached/reported numbers. Blocked on the depth-2 measurement in
-   question 7.
+   withdrawn, and the question is now resolved by §2c: they must stay
+   parallel.** Cost-neutrality was false even at depth 1 — Tier 2 measures
+   0.08 s/decision (~0.96 s/game) against ~0.05 s/game for the current greedy
+   solver, about **20×** — and at the depth 2 Phase B requires it is ~47 s/game,
+   roughly **1000×**. Depth therefore becomes a per-call-site choice
+   (interactive: 2; sweeps: 1), not a global default, and Tier 1 stays.
 4. ~~How much does equilibrium play differ from current output in practice?~~
    **Resolved — see §2b.** Substantially: 58% of turns get a different play,
    58% of turns need a mixed strategy the current design cannot represent, and
    the current solver overstates its position by ~1.3 Pokémon per turn.
-5. *(New, raised by §2b)* `heuristic_eval` is not antisymmetric, so the matrix
-   isn't strictly zero-sum. Either make the eval symmetric (compute it from
-   both perspectives and take the difference) or move to a general-sum solver.
-   Making it symmetric is much cheaper and probably correct — worth doing as
-   part of Phase A.
+5. *(New, raised by §2b; **measured in §2c.4 — now a prerequisite, not a
+   nicety**)* `heuristic_eval` is not antisymmetric, so the matrix isn't
+   strictly zero-sum. Measured at **277.7 points mean asymmetry — larger than
+   the mean |eval| itself (233.0)** — and symmetrising **changes the maximin
+   pick on 65% of turns**. Cause identified: the `seen` filter is applied only
+   to the opponent (`solver.py:290-298`). Fix: score
+   `(eval(s,"p1") − eval(s,"p2")) / 2`, antisymmetric by construction, ~+20%
+   per cell. **Do this first in Phase A**, and re-measure §2b afterwards — its
+   magnitudes are provisional until then.
 6. *(New, raised by §8b.4)* **Is the objective expected points or P(win)?** The
    corpus says P(win), and says so in a way that has teeth: Zheng's rules for
    when to commit to a read are win-probability-threshold rules, and they are
@@ -1102,19 +2405,29 @@ on the strength of biased cells.
    probability, which we do not have and which would need fitting against
    played-out games. Possible middle path: keep points as the leaf value, and
    apply a risk transform whose curvature is set by the current estimated
-   position. Needs a decision before Phase B fixes the solver's objective.
+   position. ~~Needs a decision before Phase B fixes the solver's objective.~~
+   **Direction decided (2026-08-08): P(win) is the preferred target, but Phase
+   A keeps points, and this is revisited immediately after Phase A** — before
+   Phase B fixes the solver's objective, which is the real deadline. Phase A's
+   terms (§4b matching, §4d functional value) are all expressed in points and
+   port to a calibrated scale unchanged, so nothing built in A is wasted either
+   way. What A *should* do is leave the leaf value behind a single accessor
+   rather than scattering `heuristic_eval` calls, so the swap is one edit.
 7. ~~How much depth does Phase B need?~~ **Decided: depth 2 — this turn plus
    the state at the end of next turn** (§10, Phase B). Three independent
    motivating cases agree: the attack→switch, attack→Protect punish sequence;
    burning a field-effect clock (§8c.5); and forcing a Protect (§8c.6).
-   **What remains open is the cost**, which is the thing to measure first: the
-   0.4–0.5 s/game figure for a nested equilibrium-valued solve is an estimate
-   extrapolated from §2's depth-1 numbers, and it could be materially worse if
-   the restricted action sets grow at the second level. Sub-questions: does
-   selective deepening (top-`k` root actions only) preserve the ranking, and
-   what is the smallest `k` that does? Trick Room's 4 effective turns would
-   argue for depth > 2, which is almost certainly unaffordable — the fallback
-   is a field-clock term in the eval (§4d) standing in for depth we cannot buy.
+   ~~What remains open is the cost.~~ **Measured — §2c.2, and much worse than
+   estimated: 47.9×, not ~10×** (3.88 s/decision, ~47 s for a 12-turn game).
+   Selective deepening at `k = 4` reaches 15× but moves the answer by 58.8
+   points mean / 208.8 max, so it is not safe at that width. **What is now open
+   is not the cost but the response to it:** depth 2 is affordable for a single
+   interactive decision (~4 s) and unaffordable inside any sweep, so Phase B
+   must say explicitly which tiers get depth 2 rather than making it a global
+   default. Surviving sub-question: what `k` *does* preserve the ranking — it
+   is larger than 4. Trick Room's 4 effective turns would argue for depth > 2,
+   now definitively unaffordable — the fallback is a field-clock term in the
+   eval (§4d) standing in for depth we cannot buy.
 8. *(New, raised by §8b.3)* The engine's no-double-Protect rule
    (`battle.py:421`) is stricter than the real 1/3 mechanic. Once the matrix
    game can price the gamble, do we relax it to the true probability? The
