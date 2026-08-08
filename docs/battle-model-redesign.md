@@ -619,6 +619,55 @@ opponent-decision-difficulty that `TurnSolution` already computes.
 
 ---
 
+## 2i. Phase D (done): plausibility-weighted preview
+
+`src/preview.py` implements §6a/6b — a logit weighting over their brings plus a
+CVaR tail objective — and `search_robust_composition` now reports a `downside`
+score and a ranked list of their credible leads alongside the existing
+`worst_margin` and win count.
+
+**Shipped additively on purpose.** The existing ranking is untouched by this
+change, so the new number can be compared against the old one on real searches
+before anything depends on it. `τ → ∞` reproduces the current uniform behaviour
+exactly (asserted in `tests/test_preview.py`), so there is no flag day.
+
+Example, our six vs a Rain-ish six, screening all 90 configs:
+
+```
+bring Pelipper / Mega Charizard Y + Archaludon / Grimmsnarl
+   worst_margin = +120.0     downside = +164.4     solver 90/90
+
+their most plausible LEADS
+   14.6%   our margin  +120.1   Grimmsnarl / Mega Metagross
+    7.2%   our margin  +205.1   Archaludon / Mega Swampert
+    7.0%   our margin  +207.3   Pelipper / Mega Swampert
+    ...
+```
+
+Their single strongest opening is correctly the most likely at 14.6%, with the
+rest decaying smoothly rather than being cut off. "Beats 90/90" said nothing
+about *which* of the 90 mattered; this does.
+
+### The list is grouped by LEAD, and that is a finding, not a formatting choice
+
+The first version listed all 90 configs and showed every entry six times. The
+cause is worth recording: the screener (`fast_pair_score`) only looks at the
+**lead pair**, so all six configs sharing a lead score identically. Presenting
+90 rows would imply a precision the screen does not have. Their back two is
+resolved during the battle rather than at preview, so **lead plausibility is
+the honest unit** — which is also what the VGC material treats as the real
+preview decision.
+
+### What was deliberately not built
+
+No LP, no fixed-point iteration, no double oracle. §6c predicted the runtime win
+would shrink to nothing under this design and it did: the sweep still evaluates
+all 90. That is the accepted cost of dropping the equilibrium framing, and §2c's
+finding that double oracle prunes far less than assumed (24% of the matrix, not
+2%) makes the abandoned speedup smaller than it once looked anyway.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum

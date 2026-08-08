@@ -1535,6 +1535,37 @@ with tab_vs:
                 st.write(f"LOSES to lead {lead[0]}/{lead[1]} + back {back[0]}/{back[1]} "
                          f"({w} T{t})")
 
+            # Design doc 6a/6b: score against the brings they would PLAUSIBLY
+            # pick, rather than uniformly over all 90 (which lets a bring no
+            # rational opponent makes drag the number down) or by a win count
+            # (which says nothing about how badly the losses go).
+            if r.get("plausible_brings"):
+                with st.expander("Which of their leads are actually credible?"):
+                    st.caption(
+                        "Good players vary their lead, but they do not pick their "
+                        "worst one -- so neither 'worst of all 90' nor a flat win "
+                        "count describes what you are up against. Leads are "
+                        "weighted by how good they are FOR THEM, and the downside "
+                        "score reads the worst third of that weighted "
+                        "distribution. An implausible lead keeps a small weight "
+                        "rather than being dropped, so a genuine disaster still "
+                        "shows up.")
+                    d1, d2 = st.columns(2)
+                    d1.metric("Downside score", f"{r['downside']:+.0f}",
+                              help="Average margin across the worst third of "
+                                   "plausible enemy leads. Higher is better; "
+                                   "~180 points is one Pokemon.")
+                    d2.metric("Worst of all 90 (old measure)",
+                              f"{r['worst_margin']:+.0f}",
+                              help="Kept for comparison. Dominated by leads a "
+                                   "rational opponent would not choose.")
+                    st.dataframe(pd.DataFrame([
+                        {"Their lead": row["label"],
+                         "Likelihood": f"{100 * row['probability']:.1f}%",
+                         "Our margin": f"{row['our_margin']:+.0f}"}
+                        for row in r["plausible_brings"]
+                    ]), hide_index=True, width='stretch')
+
             if is_quick:
                 vs_matchup = (b4, vres["eb4_tested"], vres["max_turns"]) if vres["eb4_tested"] else None
                 if st.button("Show full battle log", key="vs_log"):

@@ -615,7 +615,8 @@ def aggregate_battle_stats(our_names, enemy_roster, merged, moves_db, natures, t
 
 def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures, typechart,
                                max_turns=MAX_TURNS, our_sets=None, verify_top=3, progress=None,
-                               fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None):
+                               fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None,
+                               preview_tau=None, preview_alpha=None):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -641,20 +642,37 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             seen.add(key)
             our_configs.append(list(key))
 
+    from preview import DEFAULT_ALPHA, DEFAULT_TAU, downside_score, ranked_brings
+    preview_tau = DEFAULT_TAU if preview_tau is None else preview_tau
+    preview_alpha = DEFAULT_ALPHA if preview_alpha is None else preview_alpha
+
     movesets_cache = {}
     scored = []
     for i, oc in enumerate(our_configs):
         worst, worst_cfg, wins = None, None, 0
+        margins = []
         for lead, back in configs:
             r = fast_pair_score(tuple(oc[:2]), tuple(lead), merged, moves_db, natures,
                                  typechart, movesets_cache)
             margin = r["margin"]
+            margins.append(margin)
             if margin > 0:
                 wins += 1
             if worst is None or margin < worst:
                 worst, worst_cfg = margin, (lead, back)
+        # Design doc section 6a/6b: score against the brings they would
+        # PLAUSIBLY pick, not uniformly over all 90 (which lets a bring no
+        # rational opponent makes drag the number down) and not by a win count
+        # (which says nothing about how badly the losses go).
+        #
+        # Reported alongside worst_margin rather than replacing it: the existing
+        # ranking is unchanged by this commit, so the new number can be compared
+        # against the old one on real searches before anything depends on it.
         scored.append({"our_bring4": oc, "worst_margin": worst, "worst_enemy": worst_cfg,
-                        "screen_wins": wins, "screen_total": len(configs)})
+                        "screen_wins": wins, "screen_total": len(configs),
+                        "downside": downside_score(margins, tau=preview_tau,
+                                                   alpha=preview_alpha),
+                        "screen_margins": margins})
         if progress and (i + 1) % max(1, len(our_configs) // 10) == 0:
             progress(i + 1, len(our_configs))
 
@@ -692,10 +710,30 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             rank = (0 if w == "p1" else (1 if w != "p2" else 2), t)
             if worst_seen is None or rank > worst_seen[0]:
                 worst_seen = (rank, (lead, back, w, t))
+        # Which of their openings are actually worth worrying about (section
+        # 6a). A ranking rather than the crisp equilibrium-support SET the
+        # earlier draft promised -- more honest, since the underlying numbers
+        # are estimates, and more useful to show.
+        #
+        # Grouped by LEAD, because the screener (fast_pair_score) only looks at
+        # the lead pair: all six configs sharing a lead score identically, so a
+        # per-config list would repeat every entry six times and imply a
+        # precision the screen does not have. Their back two is resolved during
+        # the battle, not at preview, so lead plausibility is the honest unit.
+        margins = cand.get("screen_margins") or []
+        by_lead = {}
+        for (lead, _back), margin in zip(configs, margins):
+            by_lead.setdefault(tuple(lead), margin)
+        lead_keys = list(by_lead)
+        plausible = ranked_brings([by_lead[k] for k in lead_keys],
+                                  [" / ".join(k) for k in lead_keys],
+                                  tau=preview_tau)
         rec = {**cand, "solver_losses": losses,
                "solver_wins": len(configs) - len(losses),
                "solver_total": len(configs),
-               "worst_case": worst_seen[1] if worst_seen else None}
+               "worst_case": worst_seen[1] if worst_seen else None,
+               "plausible_brings": plausible[:10]}
+        rec.pop("screen_margins", None)
         if script_team:
             # Per-config "did it lose to ANY script/deviation variant" and "did it
             # lose to plain conventional" -- deduplicate by config since a config can
