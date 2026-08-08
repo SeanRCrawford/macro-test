@@ -668,6 +668,65 @@ finding that double oracle prunes far less than assumed (24% of the matrix, not
 
 ---
 
+## 2j. The NASH_SOLVER default: measured, and deliberately left OFF
+
+### Runtime impact
+
+Measured end to end on a real 12-turn play-out, then extrapolated to the
+workflows that actually run:
+
+| | one 12-turn game | Vs Team, verify_top=3 (270 games) | King-style sweep (1620 games) |
+|---|---|---|---|
+| greedy | 0.05 s | 0.2 min | 1.4 min |
+| **Nash depth 1** | **0.82 s (16×)** | **3.7 min** | **22 min** |
+| **Nash depth 2** | **19.8 s (386×)** | **89 min** | **8.9 h** |
+
+**Default stays `False`.** Depth 1 is borderline for the sweeps and depth 2 is
+out of the question — an 8.9-hour team-rating run is not a tool anyone uses. The
+per-call-site tier split §7 asks for is the right shape, and the UI now
+implements it: Nash is offered on both battle pages, with the Vs Team page
+warning against it because it sweeps many brings.
+
+### Non-runtime impact, which matters as much
+
+Flipping the default would also:
+
+- **Change every reported number in every tab.** The solver wins 60% of games
+  head-to-head, so team rankings, win counts and leaderboards genuinely
+  reorder — this is not a rounding difference.
+- **Invalidate cached and previously reported results**, which were produced by
+  a measurably different player.
+- **Move the golden baseline**, deliberately and across the board.
+
+None of that is an argument against the solver — it is an argument for the flip
+being its own decision with its own before/after comparison, rather than a side
+effect of a commit that was about something else.
+
+### A silent bug the question surfaced
+
+`solve_best_action` returns `(action, score, sim)`, and **several callers use
+`sim is None` as a liveness signal** meaning "the solver found nothing, stop
+here" — `committed_plan.py:105`, `committed_plan.py:211`,
+`matchup_search.py:920`. The Nash path returned `sim=None` unconditionally, so
+enabling it made every one of those paths **bail on turn one**, which looks
+exactly like a legitimately dead position rather than like a bug.
+
+Fixed by playing the chosen action against their most likely reply — one extra
+`run_turn` against a ~240-simulation solve. Pinned by
+`tests/test_nash_integration.py`, which also asserts the default stays off.
+
+### Verified: the solver applies on every turn
+
+Confirmed by instrumenting a real play-out rather than by reading the code:
+**7 equilibrium solves for a 7-turn game**, one per turn, with the greedy
+default producing zero. `play_out_worst_case` calls `solve_best_action` inside
+its turn loop and the mode is read from the module global on each call, so
+`solver_mode(...)` around a play-out covers the whole battle. There is a test
+asserting solves ≥ turns, which is what would catch a future change that
+captured a decision function once or restored the global mid-playout.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum

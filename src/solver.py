@@ -632,7 +632,22 @@ def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: 
         solution = solve_turn(battle, my_side_name, movesets, depth=NASH_DEPTH,
                               enemy_script=enemy_script)
         if solution.our_actions:
-            return solution.best_action, solution.value, None
+            # Callers use the third value as a liveness signal, not just as a
+            # convenience: committed_plan and matchup_search both treat
+            # `sim is None` as "the solver found nothing, stop here". Returning
+            # None unconditionally made every one of those paths bail on turn 1
+            # the moment the Nash solver was switched on -- silently, since
+            # bailing looks exactly like a legitimately dead position.
+            #
+            # So play the chosen action against their most likely reply. One
+            # extra run_turn, against a ~240-simulation solve.
+            sim = None
+            if solution.their_actions:
+                from turn_step import step as _step
+                likely = max(range(len(solution.q)), key=lambda j: solution.q[j])
+                sim = _step(battle, solution.best_action,
+                            solution.their_actions[likely])
+            return solution.best_action, solution.value, sim
 
     my_side = battle.p1 if my_side_name == "p1" else battle.p2
     opp_side = battle.p2 if my_side_name == "p1" else battle.p1
