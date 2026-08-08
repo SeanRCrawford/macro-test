@@ -911,8 +911,15 @@ with tab_search:
                         key=f"ps_{tname}",
                         help="All 90 enemy brings are available -- this only controls how "
                              "many are rendered at once, since each is a full battle log.")
+                    ff1, ff2 = st.columns(2)
+                    filt_lead = ff1.multiselect("Filter to enemy LEAD containing", d["roster"],
+                                                 key=f"fl_{tname}")
+                    filt_back = ff2.multiselect("...and BACK containing (optional)", d["roster"],
+                                                 key=f"fb_{tname}")
                     visible = [(l, bk) for l, bk in cfgs
-                               if not (only_losses and (tuple(l), tuple(bk)) not in losses)]
+                               if not (only_losses and (tuple(l), tuple(bk)) not in losses)
+                               and (not filt_lead or any(p in l for p in filt_lead))
+                               and (not filt_back or any(p in bk for p in filt_back))]
                     n_pages = max(1, (len(visible) + page_size - 1) // page_size)
                     page = 1
                     if n_pages > 1:
@@ -996,14 +1003,36 @@ with tab_search:
 with tab_battle:
     st.subheader("Single battle viewer")
     team = get_state_team()
+    def _lead_back_picker(label, pool, lead_key, back_key):
+        """Two linked multiselects (lead/back, 2 each) instead of one flat 4-pick
+        list, so which two are the LEAD is explicit and directly controllable --
+        not dependent on click order. Session state is sanitised before each
+        widget renders: once lead changes, any back selection that's no longer
+        valid (now in the lead, or the pool shrank) would otherwise crash the
+        multiselect, since Streamlit requires the current selection to be a
+        subset of the current options."""
+        st.caption(label)
+        if lead_key in st.session_state:
+            st.session_state[lead_key] = [n for n in st.session_state[lead_key] if n in pool]
+        lead = st.multiselect("Lead (2)", pool,
+                               default=pool[:2] if len(pool) >= 2 else [],
+                               max_selections=2, key=lead_key)
+        back_opts = [n for n in pool if n not in lead]
+        if back_key in st.session_state:
+            st.session_state[back_key] = [n for n in st.session_state[back_key] if n in back_opts]
+        back = st.multiselect("Back (2)", back_opts,
+                               default=back_opts[:2] if len(back_opts) >= 2 else [],
+                               max_selections=2, key=back_key)
+        return lead + back
+
     b1, b2 = st.columns(2)
     with b1:
-        our4 = st.multiselect("Our bring-4 (first two lead)", team or all_names,
-                               default=team[:4] if len(team) >= 4 else [], max_selections=4)
+        our4 = _lead_back_picker("Our bring-4", team or all_names, "bv_our_lead", "bv_our_back")
     with b2:
         opp = st.selectbox("Opponent team", list(teams))
-        their4 = st.multiselect("Their bring-4 (first two lead)", teams[opp],
-                                 default=teams[opp][:4], max_selections=4)
+        their4 = _lead_back_picker(
+            "Their bring-4 -- pick a specific enemy lead, and optionally a specific back",
+            teams[opp], "bv_their_lead", "bv_their_back")
     turns = st.slider("Turn cap", 4, 30, 12, key="bv_turns")
 
     n_roll = st.slider("Rolled games for probability", 0, 200, 60, step=20,
@@ -1066,6 +1095,50 @@ with tab_battle:
         st.code(btl.log.dump())
 
         st.session_state["bv_last_matchup"] = (our4, their4, turns)
+
+    # --- Punish check: is our turn-1 play safe against EVERY legal response? ---
+    st.divider()
+    st.markdown("**Punish check** — given our best turn-1 play, is there a legal response "
+                "(including a switch) that really punishes it?")
+    st.caption("E.g. we target their Garchomp with a Dragon move assuming it stays in, but "
+               "they switch to a Fairy-type immune to Dragon and we eat a hit instead; or we "
+               "split our attacks assuming they Protect one slot, but they Protect the other. "
+               "Tries EVERY legal response of theirs (not just their greedy pick or worst-roll "
+               "assumption) and reports the worst one -- does it KO one of ours outright this "
+               "turn, or does even our best follow-up still lose one of ours next turn.")
+    last_pc = st.session_state.get("bv_last_matchup")
+    if st.button("Check for a punish", disabled=not last_pc, key="punish_go"):
+        from combatants import make_team
+        from battle import Battle
+        from solver import build_moveset, TOP_K_MOVES, solve_best_action, punish_check
+        lo4, lt4, lturns = last_pc
+        pc_sets = st.session_state.get("sets", {})
+        oc = make_team(lo4, merged, natures, sets=pc_sets)
+        ec = make_team(lt4, merged, natures)
+        pb = Battle(oc, ec, typechart, moves)
+        pms = {}
+        for c in oc + ec:
+            spec = pc_sets.get(c.name) or {}
+            pms[c.name] = build_moveset(merged[c.name], moves, top_k=TOP_K_MOVES,
+                                          only_moves=spec.get("moves"))
+        with st.spinner("Finding our best turn-1 play, then trying every legal response..."):
+            our_t1_action, _, _ = solve_best_action(pb, "p1", pms, depth=1)
+            pc_result = punish_check(pb, "p1", our_t1_action, pms, cap=60) if our_t1_action else None
+        if not our_t1_action:
+            st.info("No legal turn-1 action found.")
+        else:
+            st.write("Our planned turn-1 action:",
+                      [(a.combatant.name, a.kind, a.move.name if a.move else "-",
+                        [t.name for t in a.targets]) for a in our_t1_action])
+            if not pc_result["punished"]:
+                st.success("No punish found across every legal response tried -- this play "
+                           "holds up.")
+            else:
+                kind_label = ("KO'd THIS TURN" if pc_result["kind"] == "immediate"
+                               else "survives this turn, but loses a Pokemon on our best "
+                                    "follow-up NEXT turn regardless")
+                st.error(f"Punishable: {kind_label}")
+                st.write("Their punishing response:", pc_result["their_action"])
 
     # --- Path explorer: tie x roll scenario matrix -----------------------------
     st.divider()
@@ -1271,8 +1344,15 @@ with tab_vs:
                     "Battles shown per page", options=[10, 30, 45, 90], value=30, key="vs_page_size",
                     help="All 90 enemy brings are available -- this only controls how many are "
                          "rendered at once, since each is a full battle log.")
+                ff1_vs, ff2_vs = st.columns(2)
+                filt_lead_vs = ff1_vs.multiselect("Filter to enemy LEAD containing",
+                                                   vres["enemy_roster"], key="vs_filt_lead")
+                filt_back_vs = ff2_vs.multiselect("...and BACK containing (optional)",
+                                                   vres["enemy_roster"], key="vs_filt_back")
                 visible_vs = [(l, bk) for l, bk in cfgs
-                              if not (only_losses_vs and (tuple(l), tuple(bk)) not in losses)]
+                              if not (only_losses_vs and (tuple(l), tuple(bk)) not in losses)
+                              and (not filt_lead_vs or any(p in l for p in filt_lead_vs))
+                              and (not filt_back_vs or any(p in bk for p in filt_back_vs))]
                 n_pages_vs = max(1, (len(visible_vs) + page_size_vs - 1) // page_size_vs)
                 page_vs = 1
                 if n_pages_vs > 1:

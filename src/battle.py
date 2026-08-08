@@ -680,9 +680,17 @@ class Battle:
             self.log.add(f"{self.tag(attacker)}'s {move.name} was blocked by {self.tag(t)}'s guard!")
         num_hit = len(hit_targets) if is_spread_move(move.target) else min(1, len(hit_targets))
         total_damage_dealt = 0  # summed across targets; drives recoil/drain amounts
+        # Last Respects: 50 BP base, +50 per fainted ally on the user's own team
+        # (bench included, not just the current partner), capped at 200 -- so it
+        # ramps up hard in the endgame once teammates have gone down.
+        base_power = move.power
+        if move.name == "Last Respects":
+            side = self.side_of(attacker)
+            fainted_allies = sum(1 for c in side.roster if c is not attacker and c.fainted)
+            base_power = min(200, 50 + 50 * fainted_allies)
         # Helping Hand: a partner's Helping Hand this same turn boosts this move's
         # power by 1.5x, once, regardless of how many targets it hits.
-        move_power = move.power * 1.5 if attacker.volatile.pop("helping_hand", False) else move.power
+        move_power = base_power * 1.5 if attacker.volatile.pop("helping_hand", False) else base_power
         for target in hit_targets:
             atk_key = "atk" if move.category == "Physical" else "spa"
             def_key = "def" if move.category == "Physical" else "spd"
