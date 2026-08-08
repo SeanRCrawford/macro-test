@@ -171,13 +171,29 @@ def main():
         return
 
     print("\n===== teams ranked by how punishable they are =====")
-    print(f"{'team':<20}{'exploitability':>16}{'severe':>10}{'matchups':>10}")
+    print(f"{'team':<20}{'exploitability':>16}{'severe':>10}{'won':>12}{'matchups':>10}")
     ranked = sorted(by_team.items(),
                     key=lambda kv: sum(r["exploitability"] for r in kv[1]) / len(kv[1]))
+    flagged = []
     for name, rs in ranked:
         mean = sum(r["exploitability"] for r in rs) / len(rs)
         severe = sum(r.get("severe_turns") or 0 for r in rs)
-        print(f"{name:<20}{mean:>16.1f}{severe:>10}{len(rs):>10}")
+        wins = sum(r.get("solver_wins") or 0 for r in rs)
+        total = sum(r.get("solver_total") or 0 for r in rs)
+        share = f"{wins}/{total}" if total else "-"
+        print(f"{name:<20}{mean:>16.1f}{severe:>10}{share:>12}{len(rs):>10}")
+        # A LOST position has nothing left to punish, so it scores near zero.
+        # Printing the win count beside the rating is what stops a team that
+        # loses everything from topping a table titled "least punishable".
+        if total and wins / total < 0.5:
+            flagged.append(name)
+    if flagged:
+        print(f"\nCareful with: {', '.join(flagged)} -- these lose more than half "
+              f"their games.\nExploitability is measured against each turn's "
+              f"equilibrium, so a position that is\nsimply lost rates as "
+              f"unpunishable. Low rating + low win count means the line was\n"
+              f"played well, not that the team is good. Read the two columns "
+              f"together.")
 
     worst_overall = max(rows, key=lambda r: r.get("exploitability") or -1)
     wt = worst_overall.get("worst_turn")

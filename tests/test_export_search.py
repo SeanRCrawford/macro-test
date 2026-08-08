@@ -73,7 +73,7 @@ class TestExportSearch(unittest.TestCase):
         self.assertAlmostEqual(ws.cell(2, 2).value, 20.0)    # NAIC mean
         self.assertAlmostEqual(ws.cell(3, 2).value, 100.0)   # Sun mean
         # The worst matchup is named, since that is the one to go and fix.
-        self.assertEqual(ws.cell(2, 3).value, "Sand")
+        self.assertEqual(ws.cell(2, 5).value, "Sand")
 
     def test_every_audited_turn_reaches_the_turns_sheet(self):
         wb, _ = _build({"k": _rated_row("Sun", "Rain", 40.0)})
@@ -103,8 +103,8 @@ class TestExportSearch(unittest.TestCase):
         self.assertEqual(opponents, {"Rain", "Sand"})
         # The Teams sheet counts it as searched but not rated.
         teams = wb["Teams"]
-        self.assertEqual(teams.cell(2, 6).value, 1)   # rated
-        self.assertEqual(teams.cell(2, 7).value, 2)   # searched
+        self.assertEqual(teams.cell(2, 8).value, 1)   # rated
+        self.assertEqual(teams.cell(2, 9).value, 2)   # searched
 
     def test_cache_with_no_audit_anywhere_still_writes_a_workbook(self):
         wb, count = _build({"k": _quick_row("Sun", "Rain")})
@@ -126,6 +126,30 @@ class TestExportSearch(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(wb["Teams"].max_row, 1)
         self.assertIn("How to read this", wb.sheetnames)
+
+    def test_a_team_that_loses_everything_is_flagged_despite_a_good_rating(self):
+        """The trap this column exists for.
+
+        Exploitability is measured against each turn's equilibrium, so a LOST
+        position has nothing left to punish and rates near zero. Observed live:
+        a team beating 0/6 configurations rated 8. Without the flag it would
+        top a table headed "least punishable".
+        """
+        losing = _rated_row("Doomed", "King", 8.0)
+        losing["solver_wins"], losing["solver_total"] = 0, 6
+        healthy = _rated_row("Fine", "King", 45.0)     # 80/90 by default
+        wb, _ = _build({"a": losing, "b": healthy})
+        ws = wb["Teams"]
+        flags = {ws.cell(r, 1).value: ws.cell(r, 10).value
+                 for r in range(2, ws.max_row + 1)}
+        # It still SORTS first -- the rating is what it is -- but it cannot be
+        # read without the warning and the win count sitting next to it.
+        self.assertEqual(ws.cell(2, 1).value, "Doomed")
+        self.assertIsNotNone(flags["Doomed"])
+        self.assertIn("loses most games", flags["Doomed"])
+        self.assertIsNone(flags["Fine"])
+        self.assertEqual(ws.cell(2, 3).value, None)   # 0 wins, shown as blank
+        self.assertEqual(ws.cell(2, 4).value, 6)
 
     def test_severity_shading_thresholds_bracket_the_severe_constant(self):
         wb, _ = _build({"a": _rated_row("Low", "X", MILD - 1),

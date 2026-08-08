@@ -549,10 +549,25 @@ def main():
                              if rec and rec.get("exploitability") is not None),
                             key=lambda r: r["exploitability"], default=None)
                 worst_name = next((n for n, rec in v.items() if rec is worst), None)
-                print(f"{i}. {mean:7.1f}   {severe:>2} severe   {', '.join(team)}")
+                wins = sum((rec.get("wins") or 0) for rec in v.values() if rec)
+                total = sum((rec.get("total") or 0) for rec in v.values() if rec)
+                print(f"{i}. {mean:7.1f}   {severe:>2} severe   "
+                      f"{wins}/{total} won   {', '.join(team)}")
                 if worst_name:
                     print(f"          worst matchup: {worst_name} "
                           f"({worst['exploitability']:.0f})")
+                # Exploitability is measured against the equilibrium of each
+                # turn, so a LOST position scores near zero: there is nothing
+                # left for the opponent to gain. Low exploitability plus a poor
+                # win count means "played a bad position well", not "good team",
+                # and reading it as the latter would pick exactly the wrong
+                # team. Shown per team rather than as a footnote.
+                lost = [n for n, rec in v.items()
+                        if rec and rec.get("total") and not rec.get("wins")]
+                if lost:
+                    print(f"          NOTE: wins nothing vs {', '.join(lost)} -- "
+                          f"a lost position rates as unpunishable, so read the "
+                          f"rating for these alongside the win count")
 
     print("\nReminder: coverage/margin numbers above the verification block come from the fast")
     print("screener (greedy, no lookahead). The verification block is the trustworthy one.")

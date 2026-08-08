@@ -75,8 +75,9 @@ def _mean(values):
 def _teams_sheet(wb, rows):
     ws = wb.active
     ws.title = "Teams"
-    ws.append(["Team", "Mean exploitability", "Worst matchup", "Worst value",
-               "Severe turns", "Matchups rated", "Matchups searched"])
+    ws.append(["Team", "Mean exploitability", "Games won", "Games played",
+               "Worst matchup", "Worst value", "Severe turns",
+               "Matchups rated", "Matchups searched", "Read with care"])
     _style_header(ws)
 
     by_team = {}
@@ -91,14 +92,26 @@ def _teams_sheet(wb, rows):
         rated = [x for x in rs if x.get("exploitability") is not None]
         mean = _mean([x["exploitability"] for x in rated])
         worst = max(rated, key=lambda x: x["exploitability"]) if rated else None
+        wins = sum(x.get("solver_wins") or 0 for x in rs)
+        played = sum(x.get("solver_total") or 0 for x in rs)
+        # Exploitability is measured against each turn's equilibrium, so a
+        # position that is simply LOST has nothing left to punish and rates
+        # near zero. Without the win count beside it, a team that loses
+        # everything can top a sheet headed "least punishable".
+        caution = ("loses most games -- low rating here means the line was "
+                   "played well, not that the team is good"
+                   if played and wins / played < 0.5 else None)
         ws.append([name,
                    round(mean, 1) if mean is not None else None,
+                   wins or None, played or None,
                    worst["theirs"] if worst else None,
                    round(worst["exploitability"], 1) if worst else None,
                    sum(x.get("severe_turns") or 0 for x in rs),
-                   len(rated), len(rs)])
+                   len(rated), len(rs), caution])
         _shade(ws.cell(ws.max_row, 2), mean)
-        _shade(ws.cell(ws.max_row, 4), worst["exploitability"] if worst else None)
+        _shade(ws.cell(ws.max_row, 6), worst["exploitability"] if worst else None)
+        if caution:
+            ws.cell(ws.max_row, 10).fill = BAD_FILL
     _autosize(ws)
 
 
@@ -219,8 +232,16 @@ def _legend_sheet(wb):
          "drag a team down."),
         ("Games won / played",
          "The older win-count verification against our own scripted opponent. "
-         "Kept for context only -- it is a biased measure of team strength, "
-         "which is why the ranking does not use it."),
+         "A biased measure of team strength, which is why the ranking does not "
+         "use it -- but do not ignore it either, for the reason in the next "
+         "row."),
+        ("Low rating, few wins",
+         "Read these two columns TOGETHER. Exploitability is measured against "
+         "each turn's equilibrium, so a position that is simply lost has "
+         "nothing left for the opponent to gain and rates near zero. A team "
+         "that loses most of its games while rating well was played well in a "
+         "bad spot -- it is not a good team. The 'Read with care' column flags "
+         "any team winning under half its games."),
         ("Colours",
          f"Green up to {MILD:g}, amber up to {SEVERE:g}, red above."),
     ]:
