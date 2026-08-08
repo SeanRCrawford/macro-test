@@ -923,7 +923,25 @@ assumption breaking*. It models the opponent exactly, so when their set changes
 underneath it, its model is wrong twice over. Nash never relied on that model,
 so being surprised costs it much less.
 
-### Verdict: Phase E is NOT yet justified
+### Resolved at n=720: set uncertainty costs the equilibrium solver too
+
+```
+                        matched  surprised   drop
+greedy      n=240         65%       48%     +16 points  CI [+4, +29]   significant
+Nash d1     n=64          31%       28%      +3 points  CI [-19, +25]  not significant
+Nash d1     n=240         32%       25%      +8 points  CI [-4,  +19]  not significant
+Nash d1     n=720          —        52%     +10 points  CI [+3,  +17]  SIGNIFICANT
+```
+
+**This flips the verdict below.** At the sample size needed to resolve it,
+being wrong about the opponent's set costs the equilibrium solver **10 points
+of win rate, significantly** — less than greedy's 16, but nowhere near zero.
+Two earlier readings (3 points, 8 points) were both underpowered.
+
+So the hidden-information problem is real *on the solver we would actually
+ship*, not only on the brittle one. §5's gate is met.
+
+### Verdict: ~~Phase E is NOT yet justified~~ superseded — see above and §2n
 
 The gate in §10 asks whether A–D justify E. The honest reading:
 
@@ -952,6 +970,73 @@ Every head-to-head in this document — including Phase B's 60% — ran with **b
 sides sharing the same correct set assumption**, because the harness cannot be
 wrong about it. Those results are conditional on that world. This section is the
 first measurement in the project to relax it.
+
+---
+
+## 2n. The right metric: exploitability, not win rate
+
+The project's stated aim is **realistic, high-level play** — lines that hold up
+against a competent opponent, and teams built from those lines. Win rate is a
+proxy for that, and this project now has direct evidence that it is a *biased*
+proxy.
+
+**The proxy failing, visibly.** In `measure_set_uncertainty.py` the greedy
+solver scores 65% and the equilibrium solver 31%. Not because greedy plays
+better — because that harness's opponent is `greedy_opponent_joint_action`, and
+the greedy solver **best-responds to exactly that function by construction**.
+Beating an opponent you model perfectly rewards exploitation, not soundness. A
+play can win every game against our own bot and still be one a good player
+punishes on sight.
+
+So `tools/measure_robustness.py` measures the thing the aim actually implies
+(§3c):
+
+```
+exploitability(play) = equilibrium value - worst case of that play
+                     = what a best-responding opponent gains by knowing it
+```
+
+with the opponent's action space built from a **wider moveset than the solver
+plans against**, so "punishable by a move we did not expect" counts as
+punishable — which is what it is in real play.
+
+```
+solver         points  exploitability  regret  severely punishable
+greedy             96          65.1     52.3      34/96  (35%)
+nash-d1 (argmax)   96          75.5     62.6      32/96  (33%)
+nash-mixed         96          58.7     45.8      26/96  (27%)
+nash-maximin       96          70.8     57.9      28/96  (29%)
+```
+
+### Finding 1: we are throwing away the reason to use the equilibrium solver
+
+The Nash **mixture** is the least exploitable thing measured (58.7 vs greedy's
+65.1). The Nash **argmax** — which is what `solve_best_action` actually returns,
+and therefore what the app plays — is the **most** exploitable (75.5).
+
+That is not a measurement artifact. A mixed strategy's support consists of
+actions that are *individually* exploitable; mixing them is what makes the
+strategy safe. Collapsing to the modal action discards precisely the property
+that motivated the equilibrium solver, and lands worse than greedy on the metric
+that matters. Phase B's 60% win rate concealed this completely.
+
+**This is the highest-value open item in the project.** The fix is to sample
+from the mixture rather than take its argmax — and where a single deterministic
+recommendation is genuinely required, to say so and show the distribution
+alongside it, as the Battle Viewer's turn panel already does.
+
+### Finding 2: robustness is bounded by the opponent model's set space
+
+`nash-maximin` scores 70.8 — worse than greedy — which looks wrong, since
+maximin minimises worst case among pure actions *by definition*. The resolution
+is the point: it is maximin **with respect to the opponent action space the
+solver considered**, which is built from the assumed top-4 moveset. Scored
+against the wider space it is no longer maximin at all.
+
+A solver is only as robust as the opponent model it optimises against. That is
+the same lesson as §1 (an authored opponent *policy*) and §2m (an assumed
+opponent *set*), now measured a third way — and it is the concrete argument for
+widening the opponent's plausible move space, which is what Phase E is for.
 
 ---
 

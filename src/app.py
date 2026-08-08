@@ -119,16 +119,17 @@ def solver_controls(key_prefix: str):
     the equilibrium solver beats the greedy one 60% of games (95% CI
     [55%, 65%], n=384) and costs about 19x more per decision.
     """
-    engine = st.radio(
-        "Solver",
-        ["Greedy expectimax (fast)", "Nash equilibrium (stronger, slower)"],
-        horizontal=True, key=f"{key_prefix}_engine",
-        help="Greedy plays the best response to a fixed, self-authored opponent "
-             "model -- fast, but it overstates its own position by ~1 Pokemon "
-             "per turn and cannot express a mixed strategy, which is the correct "
-             "answer on 83% of turns. Nash solves the turn as a simultaneous-move "
-             "matrix game: it wins 60% head-to-head (n=384) at roughly 19x the cost.")
-    nash = engine.startswith("Nash")
+    nash = st.checkbox(
+        "Use the Nash equilibrium solver (slower, much stronger)",
+        value=False, key=f"{key_prefix}_engine",
+        help="Off = greedy expectimax: fast, but it plays the best response to a "
+             "fixed opponent model this codebase wrote itself. That overstates "
+             "its own position by ~1 Pokemon per turn, and it cannot express a "
+             "mixed strategy -- the correct answer on 83% of turns.\n\n"
+             "On = solve the turn as a simultaneous-move matrix game. Wins 60% "
+             "head-to-head (n=384) and, more importantly, picks plays that are "
+             "far harder for a good opponent to punish. Costs roughly 19x per "
+             "decision, so it is deliberately opt-in rather than the default.")
     depth = 1
     if nash:
         depth = st.select_slider(
