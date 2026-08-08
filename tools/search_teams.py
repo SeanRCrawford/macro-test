@@ -71,7 +71,10 @@ def main():
                     help="keep only the N best candidates by static threat "
                          "coverage before simulating anything. OFF unless set: "
                          "run tools/measure_prescreen.py first and use the "
-                         "narrowest width that still recalls ~100%.")
+                         # %% because argparse formats help through the %
+                         # operator, and Python 3.14 rejects a lone % eagerly
+                         # at add_argument time rather than on --help.
+                         "narrowest width that still recalls ~100%%.")
     ap.add_argument("--vs", default="",
                     help="comma-separated team names to use as OPPONENTS "
                          "(default: all others)")
