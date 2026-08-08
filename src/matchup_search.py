@@ -809,6 +809,7 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
     import solver as _solver
     from combatants import make_team
     from preview import ranked_brings
+    from robustness import describe_action
     from team_rating import rate_bring
 
     def choose(battle):
@@ -847,13 +848,32 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
         rec["exploitability"] = rating.weighted_exploitability
         rec["severe_turns"] = rating.severe_turns
         rec["rated_turns"] = rating.total_turns
+        # The full audit, not just its summary. An exhaustive run costs hours;
+        # throwing away the per-turn detail means the only way to answer "why is
+        # this team rated badly" is to run it again. Plain JSON-able types so it
+        # survives the result cache.
+        rec["audit"] = [{
+            "lead": list(lead),
+            "probability": probability,
+            "mean_exploitability": report.mean_exploitability,
+            "severe_turns": report.severe_count,
+            "turns": [{
+                "turn": t.turn,
+                "exploitability": t.exploitability,
+                "regret": t.regret,
+                "equilibrium": t.equilibrium,
+                "worst_case": t.worst_case,
+                "severe": t.severe,
+                "our_play": describe_action(t.our_action),
+                "punished_by": describe_action(t.punisher) if t.punisher else None,
+            } for t in report.turns],
+        } for lead, probability, report in rating.per_lead]
         worst = rating.worst_lead
         if worst:
             lead, _p, report = worst
             rec["hardest_lead"] = list(lead)
             wt = report.worst_turn
             if wt:
-                from robustness import describe_action
                 rec["worst_turn"] = {
                     "turn": wt.turn,
                     "exploitability": wt.exploitability,

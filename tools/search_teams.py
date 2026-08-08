@@ -1,7 +1,7 @@
 """Resumable, tiered team search ranked by how punishable a team is.
 
-    python search_teams.py --effort thorough --batch 4
-    python search_teams.py --effort exhaustive --batch 4      # resumes
+    python search_teams.py --effort thorough --batch 4 --export
+    python search_teams.py --effort thorough --batch 4 --export   # resumes
 
 Designed around the fact that the expensive setting is expensive: work is done
 in batches, every batch is written to a cache file before the next one starts,
@@ -11,8 +11,14 @@ any point and restart -- you lose at most one batch.
 The cache key includes the effort tier, so switching tiers does not silently
 serve results computed under a cheaper one. That is the failure mode that makes
 a cache worse than no cache.
+
+`--export` writes the workbook (src/export_search.py) from whatever the cache
+holds, so it can be run against a half-finished overnight run without waiting
+for the rest, and re-running the same command with --export after everything is
+cached just re-exports without recomputing anything.
 """
 import argparse
+import os
 import sys
 import time
 
@@ -24,6 +30,28 @@ from search_effort import (TIER_ORDER, ResultCache, batches,  # noqa: E402
                            relative_cost, tier)
 
 DEFAULT_CACHE = "search_cache.json"
+
+# Bumped when the shape of a cached record changes. It is part of the cache key,
+# so a run that recorded less detail is never served to a run that expects more
+# -- the same reasoning that puts the effort tier in the key.
+SCHEMA = 2
+
+
+def _candidate_row(rec):
+    """The JSON-able part of one audited bring, keeping the per-turn detail."""
+    return {
+        "bring": rec.get("our_bring4"),
+        "exploitability": rec.get("exploitability"),
+        "severe_turns": rec.get("severe_turns"),
+        "rated_turns": rec.get("rated_turns"),
+        "worst_margin": rec.get("worst_margin"),
+        "solver_wins": rec.get("solver_wins"),
+        "solver_total": rec.get("solver_total"),
+        "downside": rec.get("downside"),
+        "hardest_lead": rec.get("hardest_lead"),
+        "worst_turn": rec.get("worst_turn"),
+        "audit": rec.get("audit") or [],
+    }
 
 
 def main():
@@ -47,6 +75,11 @@ def main():
     ap.add_argument("--vs", default="",
                     help="comma-separated team names to use as OPPONENTS "
                          "(default: all others)")
+    ap.add_argument("--export", nargs="?", const="", default=None,
+                    metavar="PATH",
+                    help="also write an .xlsx report (default: the cache file "
+                         "name with an .xlsx extension). Exports whatever is in "
+                         "the cache, so it works on an interrupted run too.")
     args = ap.parse_args()
 
     settings = tier(args.effort)
@@ -81,7 +114,8 @@ def main():
         for ours, theirs in batch:
             # The prescreen width is part of the key: a run that filtered
             # candidates must not be served to a run that did not.
-            key = ResultCache.key("bring", ours, theirs, args.effort, args.turns,
+            key = ResultCache.key("bring", SCHEMA, ours, theirs, args.effort,
+                                  args.turns,
                                   args.prescreen or settings.get("prescreen"))
             if cache.get(key) is not None:
                 done += 1
@@ -106,6 +140,10 @@ def main():
                 "downside": (top or {}).get("downside"),
                 "hardest_lead": (top or {}).get("hardest_lead"),
                 "worst_turn": (top or {}).get("worst_turn"),
+                # Every audited candidate, with its per-turn detail -- not just
+                # the winner. An overnight run is too expensive to repeat just
+                # to see why the runner-up lost, or which turn cost the winner.
+                "candidates": [_candidate_row(r) for r in results],
             })
             done += 1
             rate = (time.time() - started) / max(done, 1)
@@ -114,6 +152,13 @@ def main():
         cache.save()   # save point: killing the run now costs at most this batch
 
     cache.save()
+
+    if args.export is not None:
+        from export_search import build_workbook
+        path = args.export or (os.path.splitext(args.cache)[0] + ".xlsx")
+        n = build_workbook(cache.data, path)
+        print(f"\nWorkbook: {os.path.abspath(path)}  ({n} pairings)")
+
     rows = [v for v in cache.data.values() if isinstance(v, dict) and v.get("ours")]
     by_team = {}
     for r in rows:

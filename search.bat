@@ -5,11 +5,13 @@ cd /d "%~dp0"
 rem Overnight team search. Everything after the script name is passed straight
 rem through to tools\search_teams.py, so:
 rem
-rem   search.bat --effort thorough --batch 2 --cache overnight.json
-rem   search.bat --effort exhaustive --batch 2 --teams "NAIC" --cache overnight.json
+rem   search.bat --effort thorough --batch 2 --cache overnight.json --export
+rem   search.bat --effort exhaustive --batch 2 --teams "NAIC" --cache overnight.json --export
 rem
 rem Re-running the SAME command resumes: finished pairings come out of the
-rem cache file instead of being recomputed. Ctrl+C costs you at most one batch.
+rem cache file instead of being recomputed. Ctrl+C costs you at most one batch,
+rem and re-running with --export writes the workbook from whatever is cached,
+rem so a half-finished run can be read without waiting for the rest.
 
 where python >nul 2>nul
 if errorlevel 1 (
@@ -35,6 +37,7 @@ set RC=%ERRORLEVEL%
 echo.
 if %RC%==0 (
     echo Done. Results are in tools\ next to this run's --cache file.
+    echo Pass --export to get the .xlsx report alongside it.
 ) else (
     echo Stopped early ^(exit %RC%^). Re-run the identical command to resume.
 )
