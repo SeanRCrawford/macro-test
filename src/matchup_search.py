@@ -128,7 +128,8 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
         # RNG). Previously the planning copy was adopted as the new state, so the
         # chosen line and the reported outcome were the same sample -- damage rolls,
         # flinch chances and speed ties all resolved in our favour by construction.
-        best_action, _, sim = solve_best_action(battle, "p1", movesets, depth=1)
+        best_action, _, sim = solve_best_action(battle, "p1", movesets, depth=1,
+                                                 enemy_script=enemy_script)
         if not best_action and sim is None:
             break
         opp_actions = None
@@ -150,6 +151,97 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
     if battle.is_over():
         return battle.winner(), battle.turn_num, battle
     return "timeout", battle.turn_num, battle
+
+
+def full_game_punish_audit(our_names, enemy_names, merged, moves_db, natures, typechart,
+                            max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
+                            enemy_script=None, cap=40):
+    """Play the whole match, and at EVERY turn check whether our (script-aware,
+    see solver.solve_best_action) chosen play could be punished -- KO'd outright
+    this turn, or losing a Pokemon on our own best follow-up next turn -- by some
+    legal response the opponent didn't actually make (see solver.punish_check).
+
+    This is the real answer to "is my team just walking into it" across a whole
+    game, not only the opening: every turn's decision gets its own verdict, so a
+    plan that's safe on turn 1 but starts taking unforced risks by turn 4 is
+    visible instead of hidden behind the final win/loss.
+
+    Returns {"winner", "turns", "log", "audit": [{"turn", "our_action", "punished",
+    "kind", "their_punishing_action"}, ...]}. `our_action`/`their_punishing_action`
+    are human-readable strings, not raw Action objects.
+    """
+    from combatants import make_team
+    from solver import punish_check, greedy_opponent_joint_action
+    our_combatants = make_team(our_names, merged, natures, sets=our_sets)
+    enemy_combatants = make_team(enemy_names, merged, natures, sets=enemy_sets)
+
+    movesets = {}
+    for c in our_combatants + enemy_combatants:
+        spec = (our_sets or {}).get(c.name) or (enemy_sets or {}).get(c.name) or {}
+        movesets[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
+                                          only_moves=spec.get("moves"))
+
+    battle = Battle(our_combatants, enemy_combatants, typechart, moves_db)
+    battle._movesets = movesets
+
+    def _fmt_action(joint):
+        parts = []
+        for a in joint:
+            if a.kind == "switch":
+                parts.append(f"{a.combatant.name} switches to {a.targets[0].name}")
+            elif a.move and a.move.name == "Protect":
+                parts.append(f"{a.combatant.name} Protects")
+            else:
+                tgt = ", ".join(t.name for t in a.targets)
+                parts.append(f"{a.combatant.name} uses {a.move.name if a.move else '?'} on {tgt}")
+        return "; ".join(parts)
+
+    def _fmt_tuple_action(desc):
+        """Same formatting as _fmt_action, but for punish_check's plain-tuple
+        (name, kind, move_name, target_names) response instead of real Actions."""
+        parts = []
+        for name, kind, move_name, targets in desc:
+            if kind == "switch":
+                parts.append(f"{name} switches to {targets[0] if targets else '?'}")
+            elif move_name == "Protect":
+                parts.append(f"{name} Protects")
+            else:
+                parts.append(f"{name} uses {move_name} on {', '.join(targets)}")
+        return "; ".join(parts)
+
+    audit = []
+    for _ in range(max_turns):
+        if battle.is_over():
+            break
+        our_action, _, _ = solve_best_action(battle, "p1", movesets, depth=1,
+                                              enemy_script=enemy_script)
+        if not our_action:
+            break
+        result = punish_check(battle, "p1", our_action, movesets, cap=cap)
+        audit.append({
+            "turn": battle.turn_num + 1,
+            "our_action": _fmt_action(our_action),
+            "punished": result["punished"],
+            "kind": result["kind"],
+            "their_punishing_action": (_fmt_tuple_action(result["their_action"])
+                                        if result["their_action"] else None),
+        })
+        opp_actions = None
+        if enemy_script is not None:
+            try:
+                opp_actions = enemy_script(battle, battle.p2, battle.p1, battle.turn_num + 1)
+            except Exception:
+                opp_actions = None
+        if not opp_actions:
+            opp_actions = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets,
+                                                         battle.turn_num + 1)
+        try:
+            battle.run_turn(list(our_action), opp_actions)
+        except ValueError:
+            break
+
+    return {"winner": battle.winner() or "timeout", "turns": battle.turn_num,
+            "log": battle.log.dump(), "audit": audit}
 
 
 def sweep_enemy_leads_fixed_back(our_bring4, enemy_roster, merged, moves_db, natures, typechart,
