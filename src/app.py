@@ -1307,6 +1307,67 @@ with tab_battle:
 
         st.session_state["bv_last_matchup"] = (our4, their4, turns)
 
+    # --- Line robustness: which turn gets punished? -----------------------
+    st.divider()
+    st.markdown("**How punishable is this line?** — audit every turn against an "
+                "opponent who is actually trying.")
+    st.caption("A play that beats the simulated opponent can still be one a good "
+               "player punishes on sight. This replays the plan against a "
+               "BEST-RESPONDING opponent, drawing their moves from a wider set "
+               "than we assume they run, and reports what they gain on each turn. "
+               "Low is good; it is the difference between a line that works and a "
+               "line that happens to have worked.")
+    if st.button("Audit the line", key="bv_audit",
+                 disabled=not (len(our4) == 4 and len(their4) == 4)):
+        from combatants import make_team
+        from battle import Battle
+        from solver import build_moveset, build_wide_movesets, solver_mode
+        from robustness import describe_action, line_report
+        oc = make_team(our4, merged, natures, sets=st.session_state.get("sets", {}))
+        ec = make_team(their4, merged, natures)
+        ms = {c.name: build_moveset(merged[c.name], moves) for c in oc + ec}
+        btl3 = Battle(oc, ec, typechart, moves)
+        btl3.movesets = ms
+        btl3.wide_movesets = {**ms, **build_wide_movesets(
+            [c.name for c in ec], merged, moves)}
+
+        def choose(bt):
+            with solver_mode(nash=bv_nash, depth=bv_depth):
+                act, _s, _x = solve_best_action(bt, "p1", ms)
+            return act
+
+        with st.spinner("Auditing..."):
+            rep = line_report(btl3, ms, choose, max_turns=min(turns, 8))
+
+        if not rep.turns:
+            st.warning("Could not audit this line.")
+        else:
+            a1, a2 = st.columns(2)
+            a1.metric("Mean exploitability", f"{rep.mean_exploitability:.0f}",
+                      help="Average points a best-responding opponent gains per "
+                           "turn. ~180 is one Pokemon. Under ~30 is a solid line.")
+            a2.metric("Severely punishable turns",
+                      f"{rep.severe_count}/{len(rep.turns)}",
+                      help="Turns where a good opponent gains more than a third "
+                           "of a Pokemon.")
+            st.dataframe(pd.DataFrame([
+                {"Turn": t.turn,
+                 "Our play": describe_action(t.our_action),
+                 "They gain": f"{t.exploitability:.0f}",
+                 "Punished by": describe_action(t.punisher) if t.punisher else "-"}
+                for t in rep.turns
+            ]), hide_index=True, width='stretch')
+            worst = rep.worst_turn
+            if worst and worst.severe:
+                st.warning(
+                    f"**Turn {worst.turn} is the weak link** — a good opponent "
+                    f"gains {worst.exploitability:.0f} points by answering "
+                    f"`{describe_action(worst.our_action)}` with "
+                    f"`{describe_action(worst.punisher)}`.")
+            elif worst:
+                st.success(f"No turn is severely punishable. The worst is turn "
+                           f"{worst.turn} at {worst.exploitability:.0f} points.")
+
     # --- Turn-1 equilibrium analysis -------------------------------------
     st.divider()
     st.markdown("**Turn 1 equilibrium** — solve the opening turn as a "

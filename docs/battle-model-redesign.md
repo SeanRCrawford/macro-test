@@ -1113,6 +1113,60 @@ rather than rediscovering it a fifth time.
 
 ---
 
+## 2p. Line auditing: exploitability as a product feature
+
+`src/robustness.py` makes exploitability reusable rather than confined to a
+measurement script, and the Battle Viewer now exposes it as **"How punishable is
+this line?"** — replaying a plan against a best-responding opponent whose moves
+are drawn from the wider set, and reporting what they gain on each turn.
+
+This is the aim stated back as a tool: a play that beats the simulated opponent
+can still be one a good player punishes on sight, and the difference is now
+visible per turn rather than hidden inside a win/loss.
+
+On one real matchup, six turns:
+
+```
+greedy               mean exploitability  95.9    severe 2/6
+  T3   147.4  Incineroar Throat Chop + Farigiraf Psychic     <-- punishable
+  T4   395.3  Incineroar Throat Chop + Gallade Sacred Sword  <-- punishable
+  worst: T4, punished by Pelipper Muddy Water + Grimmsnarl Spirit Break
+
+Nash + mixture + wide   mean exploitability   8.5    severe 0/6
+  worst: T3 at 27.6
+```
+
+**395 points is over two Pokémon** given away on a single turn by a line that
+the win-rate harness was perfectly happy with. The robust configuration averages
+**11× lower** exploitability across the same audit and has no severely
+punishable turn.
+
+Two details that make this an audit rather than a restatement of the solver's
+own opinion:
+
+- The comparison value is the **equilibrium of the turn**, not the solver's
+  estimate of its own play. A solver cannot mark its own homework.
+- The line is advanced **against the punisher**, not against a script — auditing
+  a plan means asking how it holds up when the opponent is actually trying.
+
+`line_report` takes the policy as a callable, so the same audit serves the
+greedy solver, the equilibrium solver, or a hand-written line a player wants
+checked. The naming of the specific punish ("answer this with that") is what
+makes it actionable rather than merely a score.
+
+### What this leaves open for team generation
+
+The stated aim continues past lines to **generating great teams**. The pieces
+now exist — per-turn exploitability, a plausibility-weighted preview (§6a), and
+a downside score — but `search_robust_composition` still ranks by win counts
+against our own bot. Rating a candidate bring by *the exploitability of its best
+line against their most plausible leads* is the natural next step, and it is
+mostly assembly rather than new machinery. It is not cheap: exploitability needs
+the full payoff matrix per turn, so it belongs on the verify stage for the top
+few candidates, not on the 90-config screen.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum
