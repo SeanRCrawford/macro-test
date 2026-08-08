@@ -783,19 +783,56 @@ null control (identical configs)   64 W / 64 L        50%   instrument clean
 ROLL_SCENARIOS on vs off, n=128    67 W / 59 L / 2 D  53%   CI [44%, 62%]
 ```
 
-**Not significant.** 53% is the right side of 50% but the interval straddles it,
-and Phase A4 is the cautionary precedent here: a 55% reading at n=80 fell to 51%
-when the sample tripled. A larger run is in progress; until it lands the honest
-status is *"promising, unproven"*, and the default stays off.
+The larger run landed at **51%, CI [44%, 58%] (97 W / 93 L / 2 D, n=192)** —
+the 53% decayed exactly as Phase A4's precedent predicted. **No measurable
+win-rate benefit.**
 
-Worth noting what would make this measurement hard to win even if the idea is
-right. The harness scores whole games, and roll variance affects **both** sides
-symmetrically — the roll-aware player avoids relying on rolls, but still eats
-the opponent's high rolls. The effect being measured is therefore a
-second-order one (better *decisions* under variance), on top of a first-order
-noise source the metric cannot remove. Head-to-head may simply be an
-underpowered instrument for this particular change, in a way it was not for the
-Nash solver.
+Before running it, this document predicted head-to-head would be underpowered
+here: roll variance hits **both** sides symmetrically, so the roll-aware player
+still eats the opponent's high rolls, and the effect sought (better *decisions*
+under variance) sits on a first-order noise source the metric cannot remove.
+Rather than leave that as an excuse, it was tested directly.
+
+### The direct measurement (`tools/measure_roll_safety.py`)
+
+Instead of whole games, compare the two configurations' **decisions in the same
+position**, scored at the worst roll against the opponent's best reply — "if I
+low-roll and they answer correctly, where am I":
+
+```
+decision points                        40
+where the two picks DIFFER             5/40  (12%)
+
+value at the WORST roll vs best reply  (higher = safer)
+  risk-neutral (ROLL_RISK = 1.0)      -20.7
+  roll-averse  (ROLL_RISK = 0.3)      -18.5
+
+on the 5 points where the picks differ:
+  roll-averse choice worth            +17.4 points at the worst roll
+  better worst case on                4/5
+```
+
+**This resolves the ambiguity.** The mechanism works: when it engages it picks
+the safer play, by about 17 points at the worst roll. But it **engages on only
+12% of turns**, and 12% × ~0.1 Pokémon is far below what a game-outcome metric
+with a ±7pp interval could ever detect. The flat 51% is therefore *consistent
+with a correct implementation of a small effect*, not evidence against the idea.
+
+Two honest caveats. Five differing points is a tiny sample, so `+17.4` is itself
+noisy. And 88% agreement says something worth knowing independently: **on this
+team pool the average roll is a good enough approximation most of the time.**
+Whether that generalises is a property of the pool, not of the method — a
+library richer in Focus Sash, Sturdy, and bulk-EV mirrors would engage the knob
+far more often. That is a hypothesis this measurement suggests rather than one
+it establishes.
+
+### Verdict
+
+`ROLL_SCENARIOS` stays **off**: ~3× per cell for an effect too small to show up
+in outcomes on this pool. The implementation, tests and both measurement tools
+stay, because the finding is "small here", not "wrong" — and the exact
+`ohko_prob` (`k/16`) it added to the threat matrix is useful on its own, for
+display and for §4a, at no cost.
 
 ---
 
