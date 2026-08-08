@@ -6,10 +6,11 @@ This doc exists so the analysis survives a session boundary. It is the design
 input for overhauling `solver.py` / `matchup_search.py` from a greedy
 expectimax model into something that actually models competitive play.
 
-**Outstanding input:** the principles from vgcguide.com (11 articles listed in
-§8) could not be retrieved — that domain is blocked by this environment's
-network egress policy. §8 has slots for them and is deliberately incomplete.
-Fill it in once the domain is allowlisted.
+**Update 2026-08-08:** vgcguide.com is now reachable. All 11 articles have been
+retrieved and read in full, and §8 has been rewritten against the real text
+rather than search summaries. The mapping changed materially — three of the
+placeholder rows were wrong, not merely incomplete — and §10's phase ordering
+has been revised as a result. See §8b and §10.
 
 ---
 
@@ -49,8 +50,8 @@ value that picked the action. §3 is the argument that punish-resistance should
 |---|---|---|
 | No mixed strategies | solver returns a single joint action | Cannot express "Protect 40% / attack 60%", which is genuinely optimal in many doubles spots |
 | Average damage roll, no secondaries | `_play_branch` sets `sim.rng = None` | Survival thresholds vanish; a 15/16 kill and a 1/16 kill score identically |
-| Depth 1 in practice | no caller passes `depth>1` | No modelling of setup payoff, Perish countdown, Tailwind expiry |
-| Material-centric eval | `heuristic_eval` = HP diff + KO credit + positional | No concept of "this mon is my only answer to their win condition" |
+| Depth 1 in practice | no caller passes `depth>1` | No modelling of setup payoff, Perish countdown, Tailwind expiry. **Promoted after §8** — two specific, common plays are invisible at depth 1: burning a field-effect clock (§8c.5) and forcing a Protect (§8c.6) |
+| Material-centric eval | `heuristic_eval` = HP diff + KO credit + positional | No concept of "this mon is my only answer to their win condition"; also **HP is scored linearly** (`solver.py:327`), which §4d/§8b.1 argues is the wrong shape |
 | Single target per move | `candidate_actions` prunes to best target | Spread/target choice is a real mixed-strategy axis in doubles; pruned away |
 | Enemy bring handled as worst-case | `search_robust_composition` | Over-prepares for brings a rational opponent would never pick (see §6) |
 
@@ -261,7 +262,12 @@ microseconds at this size.
 This one term captures: preserving answers, why a "even" trade can be losing,
 and why removing their check to *our* win condition is worth more than its HP.
 
-### 4c. Roll awareness ("1 HP is infinitely more than 0 HP")
+### 4c. Roll awareness (survival thresholds)
+
+> Retitled. This section used to be headed *"1 HP is infinitely more than 0
+> HP"*, on the assumption that the vgcguide article of that name was about
+> damage rolls. It is not — see §8b.1. The roll-bucketing argument below stands
+> on its own engine-fidelity merits; the article's actual content is §4d.
 
 Average-roll determinism is the wrong abstraction for exactly the situations
 that decide games. But 16 rolls per damage event is a combinatorial explosion.
@@ -276,6 +282,37 @@ Concretely: replace the `min/max/avg` roll mode with an outcome-bucketed
 distribution, and make the leaf value an expectation over buckets. This makes
 "survives on 15/16 rolls" and "survives on 1/16" different numbers, which
 Focus Sash, Sturdy, Multiscale, and every bulk-EV decision depend on.
+
+### 4d. Functional value ("1 HP is infinitely more than 0 HP")
+
+*Added from the real article — see §8b.1. Scoped into Phase A.*
+
+`heuristic_eval` scores HP linearly (`score += (my_hp - opp_hp) * 100`,
+`solver.py:327`). Wolfe's article is written directly against that model: "All
+of your Pokemon will function in **exactly the same way** no matter how much
+health they have left." A mon's contribution is mostly a step function — alive
+or not — plus a bulk term, not a proportional one.
+
+Three components, all computable from `T` and existing state:
+
+1. **Re-entry opportunity.** A preserved mon is only worth preserving if it can
+   come back in safely. The article enumerates the routes: after one of ours
+   is KOed, off a self-switch move (`self_switch` is already parsed at
+   `solver.py:57`), into an immunity or heavy resist, or behind a partner's KO.
+   All are checkable against `T`.
+2. **Later impact.** Does it move first (speed, or priority — Fake Out,
+   Follow Me, Grassy Glide), or does it bring an on-switch-in ability
+   (Intimidate, weather, terrain — `on_switch_in` already exists in
+   `engine.py`)? If neither, a preserved mon is worth little beyond (3).
+3. **Sacrifice value — a floor, not zero.** Even a mon with no offensive future
+   is worth something: it re-enables an ally's switch-in ability, buys a free
+   end-of-turn switch, lets a teammate reset stat drops, or burns a turn of the
+   opponent's Trick Room/Tailwind clock (which links this term to §8c.5).
+
+The article is also explicit that preservation has a *cost* — "it can be risky
+to switch, and if the turn doesn't go in the way you anticipate you may end up
+in a worse position than if you'd simply sacrificed your Pokemon" — which is
+`min_j A[switch][j]` and needs no separate machinery once §3 exists.
 
 ---
 
@@ -360,41 +397,326 @@ express:
 
 ## 8. VGC principles → formal mapping
 
-**INCOMPLETE — vgcguide.com blocked, see header.** Articles to fold in:
+**COMPLETE.** All 11 articles retrieved and read 2026-08-08.
 
 *Before the battle:* approaching-best-of-1-vs-best-of-3 · analyzing-your-opponents-teams · team-preview · what-is-a-game-plan
 *General principles:* what-is-pressure · predictions · protect-in-battle · switching
 *Specific concepts:* battling-against-trick-room · 1-hp-is-infinitely-more-than-0-hp · how-to-analyze-a-battle
 
-Mapping established so far (partly from search summaries, to be verified
-against the real articles):
+Worth noting up front: the corpus has three authors with visibly different
+angles, and the disagreements are informative. **Aaron Traylor** (pressure,
+half of team-preview) writes in something very close to game-theoretic
+language and is the source of most of the confirmations below. **Aaron Zheng**
+(predictions, protect, switching, game-plan, bo1-vs-bo3, analyzing-teams,
+half of team-preview) is procedural and game-state-conditional — he is the
+source of most of the *corrections*, because his advice repeatedly departs
+from equilibrium play on purpose. **Wolfe Glick** (trick-room, 1-hp) writes
+about resources and tempo, and supplies two ideas the doc had no slot for at
+all.
 
-| VGC concept | Formal counterpart | Where it lands |
-|---|---|---|
-| "A safe play succeeds regardless of what your opponent goes for" | Maximin / security level of the turn matrix | §3 — becomes the objective |
-| Punishing a committed opponent | Best response; `min_j A[i][j]` | §3a |
-| Predictions, mind games | Mixed strategy over the equilibrium support | §3b |
-| Preserving an answer to their threat | Max-weight bipartite matching term | §4b |
-| Who threatens who | Threat matrix `T` | §4a |
-| "1 HP is infinitely more than 0 HP" | Outcome-bucketed damage rolls | §4c |
-| Attacking first / "best defence is a strong offence" | Already in eval via priority-KO bonus; strengthen via speed in `T` | §4a |
-| Team preview and game plan | Preview-level matrix game + equilibrium support | §6 |
-| Pressure | *TBD — likely: opponent's maximin value falling, i.e. all their options lose material* | — |
-| Best-of-1 vs best-of-3 | *TBD — likely: risk tolerance / variance preference in strategy selection* | — |
-| Protect's scouting value | *TBD — information gain; needs the belief state of §5* | — |
+### 8a. Confirmed mappings
 
-The "Pressure" row is the one I most expect to change the eval design, since a
-formal reading ("every action available to them loses value") is computable
-directly from the matrix we're already building — it is roughly the negative of
-their security level.
+These survive contact with the real text, in several cases more strongly than
+the placeholder claimed.
+
+| VGC concept | Formal counterpart | Where | Evidence |
+|---|---|---|---|
+| Safe plays | Maximin / security level of the turn matrix | §3 — the objective | Stated verbatim, twice, by two authors: "Do you have a 'safe' play that succeeds regardless of what your opponent goes for?" (*game-plan*) and "Did I make the best possible play, **regardless of what my opponent could go for**?" (*how-to-analyze*) |
+| Punishing a committed opponent | Best response; `min_j A[i][j]` | §3a | "Was my play this turn unnecessarily risky? **Even if it worked out**, was there a way my opponent could have punished me that they missed?" (*how-to-analyze*) |
+| Who threatens who | Threat matrix `T` | §4a | This is exactly what *pressure* is — see 8b.2 |
+| Preserving an answer | Max-weight bipartite matching | §4b | "What Pokémon can you absolutely not afford to lose? **If you lose a Pokémon, what Pokémon on their team are freed from its pressure?**" (*team-preview*, Traylor). Independently in *bo1*: "Have answers against all 6 of your opponent's Pokémon" |
+| Speed as a component of threat | `outspeeds` in `T` | §4a | "Which Pokémon is moving first this turn? … Speed plays an important role in pressure" (*pressure*) |
+| Team preview is a game | Preview-level matrix game | §6 | Traylor states the fixed point in prose: "I imagine my opponent asking themselves **the same questions that I'm asking myself, but from their point of view**" |
+| Most brings are dominated | Equilibrium support | §6 | "Can you rule out any Pokémon on each side? … If you can eliminate some of their potential options, you can get a better idea of what Pokémon they will actually bring" (*team-preview*) |
+| Bring strategy must mix | Preview equilibrium is mixed, not pure | §6 | "Many teams have **more than one mode and will force you to choose to prepare for one of them**" (*team-preview*). You cannot cover all modes; therefore no pure bring is optimal — this is the direct argument against today's worst-case-over-90 |
+
+The §4b confirmation is the strongest result here. Traylor's formulation —
+losing a piece *frees* an enemy piece from its pressure — is precisely a
+matching edge being deleted, and it is the exact intuition §4b was designed
+around, arrived at independently.
+
+### 8b. Corrections — placeholder rows that were wrong
+
+Three of the guessed rows were not merely vague; they pointed at the wrong
+formalism. One more was half-right.
+
+**1. "1 HP is infinitely more than 0 HP" is not about damage rolls.**
+
+The placeholder mapped it to §4c outcome-bucketed rolls. Wolfe's article is
+not about rolls at all — it never mentions a damage roll. Its thesis is:
+
+> All of your Pokemon will function in **exactly the same way** no matter how
+> much health they have left — a Pokemon at low HP won't do less damage than
+> if it was fully healthy.
+
+That is a claim that **value is not linear in HP**, and it lands squarely on
+`heuristic_eval`, which currently has `score += (my_hp - opp_hp) * 100`
+(`solver.py:327`) — perfectly linear, i.e. the exact model the article is
+written against. The article's actual content decomposes into three
+computable conditions on whether a damaged mon is worth preserving:
+
+- *"Will you be able to bring it in later?"* — a **re-entry opportunity**
+  term. The listed routes are enumerable from state: after a KO, off a
+  self-switch move (`self_switch` is already parsed in `solver.py:57`), into
+  an immunity, or behind a partner's KO.
+- *"Will the Pokemon be able to have an impact later?"* — moving first
+  (speed, or priority), or an on-switch-in ability (Intimidate, weather,
+  terrain). Note `on_switch_in` already exists in `engine.py`.
+- **Sacrifice value** — a mon at 1 HP retains positive value purely as a
+  sacrifice: it re-enables an ally's switch-in ability, buys a free end-of-turn
+  switch, resets stat drops, or burns a turn of the opponent's Trick
+  Room/Tailwind clock.
+
+So this article belongs in **Phase A**, as a shape change to the HP term plus
+a floor for functional value, not in Phase C. Phase C (roll bucketing) is
+still worth doing, but its justification is now entirely engine-fidelity —
+Sash/Sturdy/Multiscale, survival thresholds, the FoulPlay prior art — and it
+has **no support in the VGC principles corpus**. That materially lowers its
+priority; see §10.
+
+**2. "Pressure" is the threat matrix, not the opponent's security level.**
+
+The placeholder guessed "opponent's maximin value falling, i.e. all their
+options lose material", and predicted this row would drive eval design.
+Traylor's definition is narrower, pairwise, and directional:
+
+> The threat of proactive action is how I define **pressure**; i.e., Pikachu
+> pressures Gyarados.
+
+That is `T[a][b]` — an edge, not a scalar. Pressure does **not** introduce a
+new eval term; it validates §4a and gives `T` a *second* job the doc had not
+assigned it. Traylor is explicit that pressure's main use is predicting the
+opponent:
+
+> pressure is your guide to your opponent's thought process: what are they
+> threatened by? What proactive moves are their safest path to victory? By
+> doing so, you'll figure out **which moves they are most likely to make**.
+
+That is an opponent action prior, derived from `T`. Concretely, it is the
+seeding rule for double oracle (§3): the initial restricted column set should
+be the actions justified by pressure edges, and the prior over their columns
+in §3d should be weighted by them. `T` therefore has to be built before the
+matrix machinery can be seeded well — a dependency that matters for §10.
+
+The security-level idea in the placeholder is real, but it belongs to a
+different article — see 8c.4.
+
+**3. Protect is not primarily about scouting.**
+
+The placeholder guessed "information gain; needs the belief state of §5". The
+article is ~2000 words and information gain is not among them. The real
+content is three things, all cheaper than a belief state:
+
+- **The 1/3 consecutive-Protect probability is a first-class strategic
+  object.** "The odds of consecutive Protects are only ⅓. If you fail to get
+  the Protect off, then your Pokémon will be **completely useless** for the
+  turn." Good news: `battle.py:421-436` already models this as a hard fail on
+  `protected_last_turn`, which is *stricter* than the real 1/3 rule. That
+  strictness is defensible for a solver (the code comment says as much) but it
+  makes Protect strictly worse than reality on the second turn, and the
+  article treats the gamble as sometimes correct — "in the right situation,
+  going for consecutive Protects can be game-defining". Once the matrix game
+  exists, the honest model is a stochastic action with a 1/3 branch, which the
+  matrix can price properly rather than banning.
+- **Protect's drawbacks are exactly the opponent's column.** The article's
+  list of what you give the opponent — set up, switch out for free, set speed
+  control, "double target your other Pokémon" — is precisely `min_j A[protect][j]`.
+  This is a clean confirmation that Protect needs no special-case logic: solve
+  the matrix and its cost appears. Today's `greedy_opponent_joint_action`
+  hard-codes `protect: return -1`, so the model cannot even represent the
+  cost, let alone the benefit.
+- **Usage-conditioned Protect priors.** "only 5% of Incineroar run Protect,
+  while 97% of Zacian run Protect." This is a per-species prior on their
+  action distribution, and it plugs directly into §3d's prior mechanism. It
+  needs a usage table, not a belief state.
+
+**4. "Predictions" is only half mixed-strategy play.**
+
+The placeholder mapped predictions → "mixed strategy over the equilibrium
+support". Zheng splits the skill in two, and only the first half is that:
+
+> Your ability to anticipate **every single possible combination** of moves
+> that your opponent can go for [vs] your ability to anticipate **a specific
+> play** that your opponent is going to go for & reacting accordingly.
+
+The first is building the full column set of `A` — enumeration, which the
+matrix formulation gives for free. The second is *deliberately committing
+off-equilibrium*, and Zheng conditions it on game state:
+
+| Game state | When to commit to a read |
+|---|---|
+| Ahead | Right outright wins; **wrong does not lose the lead** |
+| Neutral | Right swings the game significantly |
+| Behind | "You don't feel like you have a 'safe' play that covers for all your opponent's options"; "you don't think you can win if your opponent finds the correct play, so you look for opportunities where they may **make a mistake**" |
+
+This is not Nash and is not an approximation of it. It is a **variance
+preference that depends on the current win probability** — the standard
+result that when your equilibrium value is below the win threshold, you should
+prefer higher-variance lines even at lower expectation. Two consequences:
+
+- The leaf objective should ultimately be **P(win)**, not expected
+  `heuristic_eval` points. Maximising expected material is only equivalent to
+  maximising P(win) when the value function is linear in the material, which
+  is exactly what the "1 HP" article (8b.1) says it is not.
+- The "behind" row is explicitly *exploitative*, not equilibrium: play for
+  opponent error. This is the same mechanism as §3d's prior — a non-equilibrium
+  opponent model — used deliberately, and it means the solver should be able
+  to run in an exploitative mode as well as an equilibrium one. §3 currently
+  presents equilibrium as the unqualified goal; it is the right *default*, not
+  the right answer in every game state.
+
+### 8c. Concepts with no counterpart in the current design
+
+These are in the corpus and had no row at all. Several are cheap.
+
+**1. Switching (whole article, unmapped).** The doc never had a switching row.
+`candidate_actions` does generate voluntary switches (`solver.py:177`), and
+`heuristic_eval`'s positional terms exist precisely so a pivot can look good at
+depth 1 (see the comment at `solver.py:329-332`) — a good instinct that the
+article confirms in detail. The four motives it gives are all formalisable:
+survive an attack (already implicit), improve next turn's positioning
+(positional score), **make use of a decaying field condition before it
+expires** (see 8c.5), and save a key mon (§4b matching). The three risks
+likewise: the opponent deviates, the switch-in takes too much damage, and — the
+one with no current representation — "**switching doesn't do damage**", i.e. a
+tempo cost that compounds: "if you spend too much time switching, you might
+take too much damage to be able to make use of the positioning you get."
+
+**2. Proactive vs reactive actions → an action-generation rule.** Traylor's
+taxonomy is sharper than it first looks: *"Reactive actions are **always** in
+response to the threat of a specific proactive action."* Reactive actions
+(Protect, switch, heal) are only well-defined relative to a threat in `T`. That
+is a principled pruner: generate reactive actions **only** where `T` shows a
+live threat justifying them. This is a better rule than the current
+`candidate_actions` pruning-to-best-target, and it composes with the free
+pruning §4a already promises.
+
+**3. Pressure is joint, but `T` is pairwise.** "**Can both enemy Pokémon work
+together to secure a knockout?**" A per-pair `T[a][b]` cannot express focus
+fire — two attackers that individually 2HKO but jointly OHKO. §4a as written
+would miss the single most common threat pattern in doubles. `T` needs either
+a joint entry `T2[(a1,a2)][b]` for the "do our two actives together KO `b`"
+question (16–36 pairs becomes a still-tiny 4×4-ish extra table) or a
+combined-damage query. This is a real correction to §4a's design, not just an
+addition.
+
+**4. "Making your opponent make difficult decisions" — the security-level
+idea, from the Trick Room article.** Wolfe states it as a general principle:
+
+> Pokémon is in many ways a game about **making your opponent make difficult
+> decisions**.
+
+This is the formalism the placeholder wrongly attached to "pressure": the
+value of a position includes how *low* the opponent's security level is, and
+how *flat* their options are. It is directly computable from the matrix we are
+already building — `max_j min_i A[i][j]` from their side, plus something like
+the entropy or spread of their best-response distribution. Worth surfacing as
+an output ("their best play is worth X, their second-best X−ε → they are
+guessing") because it is nearly free once §3 exists.
+
+**5. Field-effect clocks, and declining a KO.** Wolfe's Indeedee example is a
+direct counterexample to KO-positive material eval. Against a Trick Room lead
+of setter + Follow Me support, taking the free KO on the support is *wrong*:
+
+> But what happens if you DON'T knock out that Indeedee turn 1? … Compare this
+> choice to what happens if you knock out Indeedee turn 1 — your opponent
+> doesn't have to make a difficult choice and instead can exert pressure
+> immediately. … If your opponent has led two defensive Pokémon, **leaving them
+> on the field to waste turns is extremely valuable**.
+
+Two things the model cannot currently express: (a) an enemy Pokémon can be a
+*liability to its owner*, so `_ko_threat_value`'s floor of 0.35 ("removing ANY
+Pokemon is still real progress") is wrong in this case and should be able to go
+negative; (b) a decaying field effect is a **resource with a clock**, and value
+accrues to whoever spends the opponent's clock. Trick Room is 5 turns
+("effectively four because the setting turn counts") — so this is invisible at
+depth 1 by construction. Along with 8c.6, it is the strongest argument in the
+corpus that depth-1 evaluation is not merely coarse but structurally blind.
+
+**6. Degrading the opponent's option set — "forcing" Protect.** The Protect
+article's sharpest idea:
+
+> it can actually be useful to **attack into something you think is
+> Protecting**: if they don't Protect, you can just get a large amount of
+> damage off/KO them, and if they do Protect, you can **pressure that slot a
+> lot more the subsequent turn**.
+
+An action's value includes *removing options from the opponent next turn*. In
+this engine that is literal: a successful Protect sets `protected_last_turn`,
+which `battle.py:429` uses to fail the next one. So the value is already
+mechanically present in the state — it is simply unreachable at depth 1,
+because the payoff arrives on turn *t+1*. This is a concrete, nameable play
+that a depth-1 Nash solver still gets wrong, and it is the clearest case for
+depth ≥ 2 in the document.
+
+**7. Battle review → three computable UI metrics.** The *how-to-analyze*
+article is about post-hoc review, and maps onto tooling rather than the model:
+
+- **"MOST IMPORTANT TURN"** — "the turn that I generally define as one player
+  gaining an insurmountable lead". Computable as the largest per-turn change in
+  security level. Nearly free once §3 exists, and a better game-log feature
+  than anything currently in Battle Viewer.
+- **Match-up diagnosis.** The article's signatures of "it's a team problem, not
+  a play problem" are both computable: "you constantly feel the need to make
+  predictions and make risky plays" = no action has an acceptable worst case,
+  i.e. maximin is bad across the whole row set; "you can't handle a specific
+  Pokémon" = an uncovered node in the §4b matching. This turns a subjective
+  judgement into two numbers.
+- **Anti-results-orientation.** "just because a play didn't work out doesn't
+  necessarily make it incorrect (and vice versa)". This is a direct
+  endorsement of §3c: score policies by exploitability, not by outcomes. It is
+  the citation for retiring "beats N/90 brings" as the headline number.
+
+**8. Belief-state constraints from item exclusivity.** *analyzing-teams*: "Are
+there **multiple Pokémon that normally like to run the same item**, and if so,
+which one do I think is actually carrying said item?" That is a joint
+constraint across the belief state of §5 — per-mon independent distributions
+cannot represent it. Cheap to add as an exclusivity constraint on
+one-per-team items; worth noting now so §5's belief state isn't built
+factorised-only.
+
+### 8d. What this changes upstream
+
+- **§4a** — `T` needs a joint/focus-fire dimension (8c.3) and acquires a second
+  role as the opponent-action prior and double-oracle seed (8b.2).
+- **§4b** — confirmed as written; extend to run at preview against all **six**
+  of their Pokémon, not just the brought four (*bo1*: "have answers against all
+  6").
+- **§4c** — keep, but demoted: its VGC-principles justification was a
+  misreading. Engine-fidelity arguments only.
+- **§4d — added** — non-linear HP / functional-value / sacrifice-value term
+  (8b.1), and negative KO value for enemy liabilities (8c.5).
+- **§5** — the belief prior should be **usage-weighted and pessimistic** by
+  default, not uniform: *bo1* says "assume they have all their strongest
+  attacks (generally, their top 6 most common attacks, as seen on Pikalytics)
+  until they reveal otherwise". Add item-exclusivity constraints (8c.8).
+- **§6** — confirmed, and extended: in Bo3 the preview game is **repeated with
+  belief carry-over**, and *revealed information is a cost*. "Conserving
+  information is also critical in a best-of-3 — you want to focus on winning
+  while **not revealing unnecessary information**." A one-shot preview solve
+  is the Bo1 model only.
+- **§3** — equilibrium is the right default but not the whole story; an
+  exploitative mode is needed for the "behind" game state (8b.4), and the leaf
+  objective should trend toward P(win) rather than expected points.
+- **§7** — add three near-free outputs: opponent-decision-difficulty (8c.4),
+  most-important-turn (8c.7), match-up-vs-play diagnosis (8c.7).
 
 ---
 
 ## 9. Prior art
 
-Retrieved via search only — **arxiv.org, smogon.com and ieeexplore are also
-egress-blocked**, so these are leads at summary-level confidence, not papers I
-have read. Verify before relying on specifics.
+Retrieved via search only — these are leads at summary-level confidence, not
+papers I have read. Verify before relying on specifics.
+
+**Egress status rechecked 2026-08-08:** arxiv.org and smogon.com are now
+reachable (ieeexplore still is not — returns 418). They have *not* been read
+yet, so the confidence level below is unchanged; this is now a reading task
+rather than a blocked one. The Metamon arXiv ID was spot-checked and is
+correct: 2504.04395 is Grigsby, Xie, Sasek, Zheng & Zhu, *Human-Level
+Competitive Pokémon via Scalable Offline Reinforcement Learning with
+Transformers* — note it is **Singles**, not VGC doubles, which limits how
+directly its results transfer. The Smogon thread is the highest-value unread
+item, since §8 has now independently arrived at much of what its title claims.
 
 - **Ihara et al. (2018)**, *Implementation and Evaluation of Information Set
   Monte Carlo Tree Search for Pokémon* (IEEE) — compares Cheating MCTS,
@@ -422,10 +744,25 @@ bipartite-matching coverage term to `heuristic_eval`. Verifiable immediately:
 existing matchups should re-rank in explainable ways, and the answer map is a
 UI feature on its own. Lowest risk, and it improves every tier at once.
 
+*Revised scope after §8:* `T` gains a joint/focus-fire dimension (§8c.3),
+becomes the opponent-action prior and double-oracle seed (§8b.2), and A now
+also absorbs the work that §8b.1 pulled out of Phase C — non-linear HP,
+functional/sacrifice value, and allowing `_ko_threat_value` to go negative for
+enemy liabilities (§8c.5). Also fold in open question 5 (make the eval
+antisymmetric).
+
 **Phase B — matrix game at the turn level.** Implement payoff-matrix
 construction + LP (or regret matching) + double oracle behind a flag; A/B it
 against the current solver on known matchups. Retire `CHECK_TOP_K`. Deliver
 mixed-strategy output and exploitability in Battle Viewer.
+
+*Revised scope after §8:* B must be **depth-capable, not depth-1-only**. §8c.5
+(field-effect clocks, declining a KO) and §8c.6 (forcing Protect) are two
+named, common plays that a depth-1 solver gets wrong *even with a perfect
+equilibrium at each turn*, because their payoff arrives on turn *t+1*. Shipping
+B as depth-1-only would fix the exploitability problem while leaving both.
+Also in scope: the opponent-decision-difficulty output (§8c.4) and
+most-important-turn (§8c.7), both nearly free once the matrix exists.
 
 **Phase C — roll bucketing.** Replace `min/max/avg` with outcome buckets;
 surface roll-sensitivity.
@@ -435,16 +772,85 @@ bring support, double oracle for the sweep. This is where the runtime win lands.
 
 **Phase E — belief state / ISMCTS.** Only if A–D justify it.
 
-Suggested order of value-per-effort: **A → D → B → C → E.** D before B because
-the preview game is where both the accuracy error (strawman brings) and the
-runtime cost (1620 games) currently live.
+### Ordering: revised to A → B → D → C → E
+
+The previous draft proposed **A → D → B → C → E**, putting D second because
+"the preview game is where both the accuracy error (strawman brings) and the
+runtime cost (1620 games) currently live." Both halves of that are still true.
+The ordering is nonetheless wrong, for a reason that only became visible after
+reading the articles and re-reading §2b together.
+
+**D consumes B's output.** `B[our bring][their bring]` is "the result of that
+4v4" — and that result is produced by playing the game out with the turn-level
+model. §2b measured what that model currently reports: it overstates our
+position by **232 points ≈ 1.3 Pokémon per turn**. Solving the preview matrix
+for Nash does not correct that bias; it *propagates* it, and then does
+something worse than propagating it — it uses those numbers to prune. Today's
+worst-case-over-90 is biased but **conservative**: a strawman bring drags a
+score down, which is a safe direction to be wrong in. An equilibrium computed
+over biased cells deletes brings from the credible support on the strength of
+those cells, and reports a confident, small, wrong answer. Double oracle makes
+this sharper still, since it never materialises the cells it prunes.
+
+This would be tolerable if the bias were roughly uniform across cells, since
+argmax and equilibrium support survive a constant offset. It is not: §2b found
+the divergence concentrated exactly where the equilibrium is mixed (58% of
+turns), which is to say in the sharp, close matchups that decide which brings
+are credible in the first place. The cells D most needs to be right are the
+cells B fixes.
+
+**A now feeds B directly, which it did not in the previous draft.** §8b.2 makes
+`T` the source of the opponent-action prior and the double-oracle seed. Double
+oracle's cost is dominated by how good the initial restricted action set is,
+and pressure edges are the principled way to pick it. Running A → B back to
+back means B is built on top of the structure that makes it cheap, rather than
+seeded arbitrarily and retrofitted.
+
+**D is now the most dependent phase, not the least.** Post-§8 it needs A
+(matching at preview against all six — §8d), B (unbiased cells), and it reaches
+into E (Bo3 preview is repeated with belief carry-over, and revealed
+information is a cost — §8d). It should be built last among {A, B, D}, not
+second.
+
+**C moves behind D and stays there.** Its justification changed rather than
+weakened. The "1 HP is infinitely more than 0 HP" support was a misreading
+(§8b.1) and that work has moved into A; what remains for C is engine fidelity
+— Sash, Sturdy, Multiscale, bulk-EV thresholds — argued from FoulPlay's prior
+art, with no support anywhere in the VGC corpus. There is one countervailing
+pull worth recording: §8b.4's game-state-conditional variance preference
+cannot be expressed at all while every leaf is a point estimate, and C is what
+makes leaf values distributions. But variance preference wants **win
+probability over full-game rollouts**, not a per-damage-event roll bucket —
+different machinery, and reachable from A + B without C. So the coupling is
+real but does not reorder anything.
+
+**E stays last and stays conditional**, though it has picked up two concrete
+requirements it did not have: a usage-weighted pessimistic prior rather than a
+uniform one, and item-exclusivity constraints across the belief state (§8d).
+
+Net: **A → B → D → C → E.** The change from the previous draft is D moving from
+second to third. The runtime argument for doing D early is unchanged and
+genuine — the 121 s King run is real — but it is an argument for doing D
+*soon*, not for doing it *on top of numbers we have already measured to be
+wrong by 1.3 Pokémon per turn*. If the runtime pain needs relief before B
+lands, the cheap intermediate is a dominance filter over the 90 brings (drop
+brings beaten by another bring in every column), which cuts the sweep without
+committing to an equilibrium computed over biased cells.
 
 ---
 
 ## 11. Open questions for the next session
 
-1. Does the vgcguide material change the eval terms in §4 — particularly
-   "pressure" and the best-of-1 vs best-of-3 risk posture?
+1. ~~Does the vgcguide material change the eval terms in §4 — particularly
+   "pressure" and the best-of-1 vs best-of-3 risk posture?~~ **Resolved — see
+   §8.** Yes, in both cases, but not as expected. "Pressure" turned out *not*
+   to be an eval term at all — it is the threat matrix `T` plus an
+   opponent-action prior (§8b.2). The bo1/bo3 posture *is* a real eval change,
+   larger than anticipated: it argues the leaf objective should be P(win)
+   rather than expected points, and that an exploitative (non-equilibrium) mode
+   is needed when behind (§8b.4). The unanticipated eval change came from
+   elsewhere — "1 HP is infinitely more than 0 HP" is about HP non-linearity
+   and functional value, not damage rolls (§8b.1).
 2. ~~Is `scipy` acceptable as a dependency?~~ **Resolved: not needed for the
    game solve.** scipy isn't installed in this venv, so the baseline harness
    uses ~25 lines of hand-rolled regret matching, which converges fine at this
@@ -463,3 +869,29 @@ runtime cost (1620 games) currently live.
    both perspectives and take the difference) or move to a general-sum solver.
    Making it symmetric is much cheaper and probably correct — worth doing as
    part of Phase A.
+6. *(New, raised by §8b.4)* **Is the objective expected points or P(win)?** The
+   corpus says P(win), and says so in a way that has teeth: Zheng's rules for
+   when to commit to a read are win-probability-threshold rules, and they are
+   the only place in the corpus where deliberately *lowering* expected value is
+   correct. But P(win) requires a calibrated map from `heuristic_eval` to a
+   probability, which we do not have and which would need fitting against
+   played-out games. Possible middle path: keep points as the leaf value, and
+   apply a risk transform whose curvature is set by the current estimated
+   position. Needs a decision before Phase B fixes the solver's objective.
+7. *(New, raised by §8c.5 and §8c.6)* **How much depth does Phase B need?**
+   Both named depth-1 failures — burning a field-effect clock, and forcing a
+   Protect — resolve at depth 2. Trick Room's 4 effective turns would argue for
+   more. §2's numbers cover depth-1 matrix solves only; a depth-2 double-oracle
+   solve has not been measured and could be substantially worse than 2× if the
+   restricted action sets grow. Worth measuring before committing to B's scope.
+8. *(New, raised by §8b.3)* The engine's no-double-Protect rule
+   (`battle.py:421`) is stricter than the real 1/3 mechanic. Once the matrix
+   game can price the gamble, do we relax it to the true probability? The
+   current rule exists to stop the solver farming free turns; the matrix should
+   remove that failure mode by making Protect's cost visible, at which point
+   the strictness is just an inaccuracy.
+9. *(New, raised by §8d)* Bo3 as a repeated game with information cost is a
+   genuinely new axis — every current tab implicitly models Bo1. Is Bo3 in
+   scope at all, or do we state Bo1 as an explicit modelling assumption? This
+   should be decided before Phase D, since it changes whether the preview solve
+   is one-shot.
