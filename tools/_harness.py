@@ -34,6 +34,10 @@ def setup_battle(our4, enemy4, world):
     movesets = {c.name: build_moveset(world["merged"][c.name], world["moves"])
                 for c in ours + theirs}
     battle = Battle(ours, theirs, world["typechart"], world["moves"])
+    # The answer-preservation term needs to know what each Pokemon can do, and
+    # Combatant does not carry its moves. Attaching them here turns the term on
+    # for every measurement tool at once.
+    battle.movesets = movesets
     return battle, movesets
 
 

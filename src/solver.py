@@ -357,7 +357,48 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     # things a pivot actually buys.
     score += _positional_score(my, opp, battle.typechart)
     score -= _positional_score(opp, my, battle.typechart)
+
+    # Answer preservation (design doc 4b). Off unless the caller has attached
+    # movesets to the battle, because the threat matrix needs to know what each
+    # Pokemon can actually do and Combatant does not carry its moves. Callers
+    # that want the term set `battle.movesets`; everything else is unchanged.
+    if COVERAGE_WEIGHT:
+        score += COVERAGE_WEIGHT * _coverage_term(battle, my_side_name)
     return score
+
+
+# Scale for the answer-preservation term (design doc 4b).
+#
+# OFF BY DEFAULT: measured, and it does not currently earn its cost.
+#
+#   cost    heuristic_eval 0.028 ms -> 0.702 ms (25x), so a matrix CELL goes
+#           0.201 ms -> 0.876 ms (4.35x). The term rebuilds the whole threat
+#           matrix at every leaf.
+#   benefit head to head against the same solver with the term off, at weights
+#           0.10 and 0.25: 3 W / 5 L both times. n=8 is far too small to claim
+#           it is WORSE, but there is no evidence it is better, and 4.35x is a
+#           lot to pay on a hope -- especially after section 2c found the
+#           matrix-game solver already ~20x more expensive than assumed.
+#
+# The threat matrix itself (src/threat.py) is NOT in question and is used for
+# the answer map, focus-fire detection, and later for action pruning and
+# double-oracle seeding. It is only this evaluation term that is parked.
+#
+# To revisit, in order: (1) make the matrix incremental or cached so the cost
+# is not paid per leaf; (2) re-run tools/measure_headtohead.py over many more
+# games; (3) look at coverage_differential itself, whose second half moves when
+# our roster size changes and which therefore ranks keystone losses less
+# cleanly than our coverage alone (see tests/test_coverage_term.py).
+COVERAGE_WEIGHT = 0.0
+
+
+def _coverage_term(battle: Battle, my_side_name: str) -> float:
+    movesets = getattr(battle, "movesets", None)
+    if not movesets:
+        return 0.0
+    from threat import build_threat_matrix, coverage_differential
+    diff = coverage_differential(build_threat_matrix(battle, movesets))
+    return diff if my_side_name == "p1" else -diff
 
 
 # STAB threat proxy: how hard the opposing actives hit what we have out.

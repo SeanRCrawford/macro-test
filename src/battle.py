@@ -172,6 +172,12 @@ class Battle:
         new.typechart = self.typechart
         new.moves_db = self.moves_db
         new.rng = self.rng
+        # Optional: per-species move lists, attached by callers that want the
+        # threat matrix / answer-preservation evaluation term. Must be carried
+        # across the copy or the term silently evaluates to zero in exactly the
+        # simulated states the search cares about -- a failure that looks like
+        # "the term does nothing" rather than like a bug.
+        new.movesets = getattr(self, "movesets", None)
 
         # Mutable state.
         new.field = copy.deepcopy(self.field, memo)

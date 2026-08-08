@@ -348,6 +348,68 @@ points → P(win) change (open question 6) is one edit rather than a hunt.
 
 ---
 
+## 2e. Phase A2/A3 (done): threat matrix shipped, coverage term parked
+
+**The threat matrix is built, tested and useful** (`src/threat.py`,
+12 tests). It computes both directed edges for every pair, costs **0.7 ms** for
+a 4×4 (32 edges) — the same order as one `run_turn`, as §4a predicted — and its
+output is inspectable via `tools/show_threat_matrix.py`. Spot-checking one
+matchup: Farigiraf reads 0% into Grimmsnarl (Psychic into Dark), Gallade 111%
+into Archaludon, Hydreigon OHKOs and outspeeds both Metagross and Pelipper.
+
+§8c.3's joint dimension paid off immediately: in that single matchup it found
+**7 focus-fire pairs** — two of ours that together KO one of theirs where
+neither OHKOs alone — which a purely pairwise matrix structurally cannot
+represent.
+
+### The coverage evaluation term is measured, and parked
+
+`COVERAGE_WEIGHT = 0.0`. The term works and is covered by tests; it simply does
+not earn its cost yet.
+
+| | |
+|---|---|
+| cost | `heuristic_eval` 0.028 ms → **0.702 ms (25×)**; one matrix **cell** 0.201 ms → 0.876 ms (**4.35×**) |
+| benefit | head-to-head vs the same solver with the term off: **3 W / 5 L at weight 0.25, and again at 0.10** |
+
+n = 8 is far too small to claim the term is *worse* — 3–5 is well inside noise.
+But there is no evidence it is better, and 4.35× per cell is a lot to pay on a
+hope, particularly after §2c found the matrix-game solver already ~20× more
+expensive than this document assumed. Parked rather than deleted.
+
+Three things surfaced that are worth keeping regardless of the verdict.
+
+**1. The measurement gap this exposed.** Neither existing harness can validate
+an *evaluation* change. `measure_exploitability` scores how exploitable the
+greedy solver is — that number moved from 174.4 to 585.8 when coverage was
+switched on, but it moves for two indistinguishable reasons (the evaluation got
+better, or merely noisier across columns). `golden_baseline` detects change by
+design and says nothing about direction. So `tools/measure_headtohead.py` was
+added: two configurations play the same positions, sides swapped on alternate
+matchups. **Every future evaluation change should go through it**, and its
+sample size wants to be much larger than 8.
+
+**2. Matching must penalise unanswered threats.** A matching pairs at most
+`min(threats, answerers)`, so when a Pokémon is lost the matching can simply
+*drop the threat it handled worst* and report **higher** coverage than before —
+losing a piece looking like an improvement. Fixed with an explicit
+`NO_ANSWER_PENALTY` worse than any real answer.
+
+**3. Coverage must be a mean, not a sum.** The sum scales with the number of
+threats, so subtracting one side's from the other's confounds "our answers got
+worse" with "there are fewer Pokémon left to answer". Losing a Pokémon is
+already priced by the KO and HP terms; this term measures answer *structure*.
+
+Normalised and penalised, **our** coverage behaves exactly as §4b claims:
+losing Hydreigon (113.1 → 31.3) or Gallade (→ 34.6) collapses it, while losing
+Farigiraf (→ 74.7) barely moves it. The honest caveat is that
+`coverage_differential` — the antisymmetric wrapper the zero-sum leaf value
+requires — is a **weaker signal** than its own first half, because the second
+half moves when our roster size changes. Recorded in
+`tests/test_coverage_term.py` rather than smoothed over.
+
+---
+
 ## 3. The core reframe: solve the turn as a matrix game
 
 Each turn, both sides commit simultaneously. That is a **two-player zero-sum
