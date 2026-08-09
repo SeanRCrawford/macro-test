@@ -26,11 +26,12 @@ rem   --script-screen    drop teams with no plan against King / Hard Trick
 rem                      Room / Perish Trap before the audit.
 rem   --min-winrate F    skip a generated team whose win rate is below this
 rem                      before spending the audit on it. Default 0.80.
-rem   --audit-all        audit every line against ALL 90 of their bring-4s
-rem                      (leads AND backs) in stage 2, at whatever tier is set.
-rem                      INTENSIVE -- multiplies the audit by 90/leads. Already
-rem                      on at --deep-effort exhaustive. Use it when you want
-rem                      the Lines sheet to cover their whole bring space.
+rem   --sample-leads     audit only a sample of their most plausible leads
+rem                      instead of all 90 of their bring-4s. Much faster, but
+rem                      the Plan sheet's record then reads "X / 4" rather than
+rem                      "X / 90" -- it is no longer a total-pathing number.
+rem                      Auditing all 90 is the DEFAULT because that is the
+rem                      question this pipeline exists to answer.
 rem
 rem Stage 1 generates and rates; stage 2 re-tests the survivors deeply and
 rem writes the workbook. Both are cached and resumable -- if this dies, or you
@@ -43,7 +44,7 @@ set GENS=
 set GENEFFORT=standard
 set DEEPEFFORT=thorough
 set JOBS=0
-set AUDITALL=
+set AUDITALL=--audit-all
 set MINWR=0.80
 set OPTSETS=
 set SCRIPTSCR=
@@ -58,6 +59,7 @@ if /i "%~1"=="--gen-effort"   (set GENEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--deep-effort"  (set DEEPEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--jobs"         (set JOBS=%~2& shift & shift & goto parse)
 if /i "%~1"=="--audit-all"    (set AUDITALL=--audit-all& shift & goto parse)
+if /i "%~1"=="--sample-leads" (set AUDITALL=& shift & goto parse)
 if /i "%~1"=="--min-winrate"  (set MINWR=%~2& shift & shift & goto parse)
 if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& shift & goto parse)
 if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& shift & goto parse)
@@ -132,7 +134,8 @@ echo.
 if %RC%==0 (
     echo ============================================================
     echo DONE. Open tools\overnight_%DEEPEFFORT%.xlsx
-    echo   Best lines   the plan to play against each opponent
+    echo   Plan         THE ANSWER: one committed lead per opponent, X of 90
+    echo   Best lines   that committed plan, line by line, with damage
     echo   Lines        EVERY audited line: their bring, result, punish
     echo   Team sheets  what each gen team is: members, items, EVs, moves
     echo   Teams        ranked by Adjusted wins ^(higher is better^)

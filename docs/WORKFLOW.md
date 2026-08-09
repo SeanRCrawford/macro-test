@@ -1,186 +1,135 @@
-# Workflow: how to actually use this
+# Where things stand
 
-Written to answer four questions: what did the redesign build, which files
-matter, what the honest gaps are, and what to run.
+The single source of truth for what to run and what is current. If anything
+below disagrees with a docstring, this file is right and the docstring is stale.
 
 ---
 
-## 1. What the new engine actually achieved
+## 1. The question the system answers
 
-One thing, and everything else follows from it: **a way to measure how
-punishable a play is, instead of how often it beats our own bot.**
+**Commit to one bring-4 and one lead-2 against an opponent, before seeing what
+they bring. How many of their 90 possible bring-4s does that beat, and how much
+does a good player gain along the way?**
 
-```
-exploitability(play) = equilibrium value of the turn
-                     − worst case of the play actually chosen
-```
+That is *total pathing*. A perfect answer to an opponent is **90 / 90**. It is
+one committed choice, because that is all you get at preview.
 
-Zero is unpunishable. It is measured in points (a KO ≈ 180), and it is *not* a
-win rate. That distinction is the whole point. Win rate against a fixed
-opponent is biased by construction: the greedy solver best-responds to that
-exact opponent, which is why it scores 65% while the equilibrium solver scores
-31% in the same harness — and why the equilibrium solver nevertheless beats it
-**60% [55–65%], n=384** head-to-head.
+Two numbers, and they are not the same thing:
 
-Measured results from the redesign:
-
-| Change | Effect |
+| | |
 |---|---|
-| Equilibrium solver vs greedy, head-to-head | **60%** [55–65%], n=384 |
-| Exploitability: greedy → Nash+mixing+wide movesets | **65.1 → 43.0** |
-| Line audit, mean exploitability per turn | **95.9 → 8.5** |
-| Worst single turn in a greedy line | 395 points (over two Pokémon) |
-| Cost | 0.08s/decision at depth 1 (~16× greedy) |
+| **Record (X / 90)** | commit to this plan, win X of their configurations |
+| **Punish** | points a good player gains per turn along the way (a KO ≈ 180) |
 
-Bugs this surfaced and fixed, each of which was silently corrupting results:
-an evaluation asymmetry of 277 points; a +50 reveal incentive created by the
-design doc's own recommended symmetrisation; a +63 reveal incentive from a
-KO-threat placeholder; four separate `__deepcopy__` omissions that silently
-zeroed features in every simulated state; and a **biased head-to-head harness
-whose null control returned 44% instead of 50%**, which had invalidated every
-head-to-head verdict made before it was caught.
-
-VGC principles that became code rather than prose: the threat matrix
-("pressure" as directional edges, `threat.py`), plausibility-weighted opponent
-brings so an opening no good player makes cannot drag a rating down
-(`preview.py`), damage rolls as distributions with exact k/16 KO probabilities
-(`rolls.py`), and answer-preservation via max-weight matching so trading your
-only answer to their win condition is scored as the loss it is
-(`matching.py`).
+Punish alone is a trap: a **lost** position has nothing left to punish, so it
+scores near zero. Always read the record first.
 
 ---
 
-## 2. Which files matter
-
-**The engine (9 files).** `matrix_game.py` (equilibrium solving, no Pokémon
-knowledge) · `turn_game.py` (one turn as a matrix game) · `turn_step.py` ·
-`robustness.py` (**exploitability lives here**) · `threat.py` · `matching.py` ·
-`rolls.py` · `preview.py` · `team_rating.py`.
-
-**The tools you run (3).** `tools/generate_overnight.py` · `tools/search_teams.py`
-· `src/app.py`.
-
-**Regression guard (1).** `tools/golden_baseline.py` — run after any engine
-change; it pins 6 matchups and 33 turns.
-
-**Everything else in `tools/` is measurement scaffolding**, not workflow. The
-eight `measure_*.py` scripts are the experiments that produced the numbers in
-section 1. They are kept because a claim without its measurement is an opinion,
-but you never need to run them. `src/prescreen.py` is a **documented negative
-result** — 4–15% recall, off everywhere, kept so nobody rebuilds it.
-
-**The Streamlit app** did gain the engine: a Nash checkbox with depth
-(off by default — it is ~16× slower), an effort slider on Vs Team, a "How
-punishable is this line?" audit, and a turn-1 equilibrium panel. You were right
-that it is thin relative to the backend. The app is for inspecting one matchup;
-the batch tools are where the search happens.
-
----
-
-## 3. The gap you identified, stated plainly
-
-> *"the reward in generation may be completely unrelated"*
-
-**Correct, and it is the most important limitation of the current system.**
-
-`team_search.py` — which drives stages 1–4 of generation (pool filter, pair
-matrix, beam search, switch-rescue) — contains **zero** references to
-exploitability, the threat matrix, or the equilibrium solver. It ranks teams on
-type coverage and synergy heuristics scored by a greedy screener.
-
-So generation optimises coverage-and-synergy, and we then judge the winner by
-exploitability. Those are different quantities, and nothing guarantees the beam
-search's favourite is anywhere near the least punishable team available.
-
-`generate_overnight.py` does not fix this. What it does is **widen the funnel**:
-rate 40 beam finalists instead of 3, and let exploitability — not the beam —
-choose the shortlist. That is the honest version available today. The residual
-bias is that every rated team still came from a beam search with the wrong
-objective.
-
-Fixing it properly means putting exploitability (or a cheap proxy that
-correlates with it) inside the beam's scoring function. That has not been
-built, and it should be **measured before being trusted** — the prescreen
-failure is exactly what happens when a plausible-sounding proxy is adopted
-without checking its recall.
-
-Two other things you asked about that **do not exist**:
-
-- **No iterative moveset refinement loop.** `optimize_sets.py` picks moves and
-  items by 1v1 coverage against the threat list, as a one-shot before the
-  search. Nothing feeds exploitability back into set selection.
-- **No substitution loop.** Nothing takes a rated team, swaps its worst member,
-  and re-rates. This is the single most valuable thing left to build, because
-  it attacks the section-3 gap directly and cheaply: the shortlist already
-  names each team's worst matchup and the turn that gets punished.
-
----
-
-## 4. The workflow
-
-### Overnight, unattended
+## 2. What to run
 
 ```bat
-overnight.bat
+overnight.bat --pool-size 50 --candidates 60 --keep 6 --optimise-sets --jobs 8
 ```
 
-Stage 1 generates and rates 40 teams by exploitability, writes
-`tools/shortlist.json`. Stage 2 takes the top 8 and re-tests them deeply
-against every library team, writing `tools/overnight.xlsx`. Both stages are
-cached and resumable — if it dies, run the same command again.
+Generates teams, optimises their sets, screens out the ones that lose, audits
+the survivors against **all 90** of each opponent's bring-4s, and writes the
+workbook. Cached and resumable — if it dies, re-run the identical command.
 
-`overnight.bat 60 10` for 60 candidates, top 10 into the deep search.
+Options worth knowing:
 
-### Or the stages by hand
+| Flag | Default | What it does |
+|---|---|---|
+| `--pool-size N` | 34 | how many Pokémon are ELIGIBLE — the search space, and the dial for finding a hidden gem |
+| `--candidates N` | 40 | how many generated teams get rated |
+| `--keep N` | 6 | how many reach the deep search |
+| `--optimise-sets` | off | optimise item + 4 moves against the real metagame. **Use it** |
+| `--min-winrate F` | 0.80 | skip auditing a team that cannot win |
+| `--generations SPEC` | all | e.g. `1-5` |
+| `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
+| `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
+| `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
 
-```bat
-generate.bat --candidates 40 --effort standard --jobs 0
-search.bat --rosters shortlist.json --teams "gen01,gen02,gen03" ^
-           --effort thorough --jobs 0 --export
-```
+### Reading the output — `tools\overnight_thorough.xlsx`
 
-### Reading the output
+1. **Plan** — the answer. One committed bring/lead per opponent, `Wins / Of`,
+   and **`Losing to`** naming the exact brings that beat it. Sorted worst
+   first. This is the sheet to act on.
+2. **Best lines** — that same committed plan, line by line, with the damage
+   log, KOs and HP after every turn.
+3. **Team sheets** — what each `genNN` actually is: members, item, ability,
+   EVs, four moves, and whether the sets are optimised.
+4. **Lines / Turns / Candidates / Teams** — diagnosis underneath.
 
-Open `tools/overnight.xlsx`.
+### The app
 
-1. **Teams sheet** — ranked by mean exploitability, lowest first. **Always read
-   it next to the win column.** A lost position has nothing left to punish, so
-   it also rates near zero; a team can score 8 while winning 0/6. The red
-   "Read with care" column flags anything winning under half its games.
-2. **Turns sheet** — sort descending by Exploitability. Those rows are your
-   list of specific plays a good player would punish, with the exact answer
-   they would use. This is the actionable output.
-3. **Candidates sheet** — the runner-up bring next to the winner.
+`run.bat` → **Vs Team** tab:
 
-Exploitability within about ±1 of zero is noise (regret-matching convergence).
+- **Load an overnight run** — reads the files above, so generated teams become
+  selectable and you can browse any committed line turn by turn. Instant; it
+  reads the cache rather than recomputing.
+- **Deep dive** — you have led, they have led. Runs the exhaustive analysis on
+  that one position in ~5 s, and offers depth 2 (which the batch run cannot
+  afford). This is the "having already led X" tool.
 
-### Answering "can this team beat a good player" without a full run
+---
 
-You cannot, exactly — that is what the measurement is for. But the ordering is
-cheap → dear, so use it: `--effort quick` (seconds, win counts only) →
-`standard` (~5× quick) → `thorough` (~25×) → `exhaustive`. Screen wide at
-`standard`, spend `thorough` only on survivors.
+## 3. What is current, and what is not
+
+**The engine (all new, all live):** `matrix_game` · `turn_game` · `turn_step` ·
+`robustness` (exploitability lives here) · `team_rating` · `threat` ·
+`matching` · `rolls` · `preview` · `deep_dive` · `search_effort` ·
+`export_search` · `team_sheet_export` · `blas_limits`
+
+**Tools you run:** `overnight.bat` (whole pipeline) · `generate.bat` (stage 1
+alone) · `search.bat` (stage 2, or library teams) · `run.bat` (app)
+
+**Regression guard:** `tools/golden_baseline.py` — run after any engine change.
+
+**Evidence, never run:** the eight `tools/measure_*.py` scripts. They produced
+the numbers this design rests on and are kept so the claims are checkable.
+
+**Legacy but still used:** `team_search.py` (the beam search — see §4),
+`fast_eval.py` (the cheap screen), `optimize_sets.py` (now wired in),
+`run_search.py` and `generate_team.py` (older entry points, still work).
+
+**Dead:** `prescreen.py` — measured 4–15 % recall, off everywhere, kept only as
+a documented negative result.
+
+---
+
+## 4. Known gaps — read before trusting a number
+
+1. **Generation does not optimise for punishability.** `team_search.py` has
+   zero knowledge of exploitability; the beam ranks on coverage and synergy.
+   `generate_overnight` widens the funnel (rate 40 finalists, not 3) but does
+   not steer the search. The teams you get are *high-coverage teams that were
+   then measured*, not *teams found by looking for low punish*.
+2. **Depth-1 horizon.** The solver sees one turn ahead, so a turn that gains
+   nothing looks free. This caused the Protect spam you saw; the pointless
+   double-Protect case is now filtered, but the underlying blind spot is real —
+   setting Tailwind still scores as a wasted turn. Depth 2 fixes it and costs
+   ~48×, which only the app's Deep dive can afford.
+3. **Two ranking numbers can disagree.** The **Teams** sheet averages across
+   all audited candidates; the **Plan** sheet reports the one committed choice.
+   Trust Plan.
+4. **Wins and punish come from different pilots.** The win count uses the
+   greedy solver; the audit uses the equilibrium solver. Not yet reconciled.
+5. **No substitution loop.** Nothing takes a rated team, swaps its worst
+   member, and re-rates. Given that Plan already names what beats each team,
+   this is the highest-value thing left to build.
 
 ---
 
 ## 5. Speed
 
-Everything was single-core. Both batch tools now take `--jobs N` (`0` = one per
-core), parallel across whole pairings or opponents — coarse units, no shared
-state, and **verified bit-identical to serial output**.
+`--jobs N` is parallel across whole pairings, verified bit-identical to serial.
+Measured **3.1× on 4 cores**. Memory, not CPU, is the limit.
 
-Measured: 4 pairings on 4 workers, **68s wall vs 209s CPU — 3.1×**.
+Auditing all 90 brings multiplies the audit by 90/leads — that is the cost of a
+real total-pathing number, and it is why this is an overnight job. Drop to
+`--sample-leads` only to get a fast read, knowing the record is then a sample.
 
-- `--jobs 0` uses every core. Budget ~1GB RAM per worker; if you have 16 cores
-  and 16GB, use `--jobs 8`.
-- The dataset load is ~14s per worker, paid once, so parallelism only pays on
-  long runs. Don't use it for a single pairing.
-- The pair matrix is pickled and reused across generation runs.
-- `--batch` controls the save interval, not speed. Keep it ≥ `--jobs`.
-
-Biggest remaining speedup is not more cores: it is **pruning enemy
-configurations**. Verification plays every survivor against all 90 of their
-configurations while §6a establishes most are implausible and provides the
-weighting to say which. That is potentially several-fold, and unlike the
-prescreen it has evidence behind it — but it must be measured before being
-switched on.
+The biggest remaining speedup is pruning *enemy* configurations by
+plausibility, which §6a of the design doc has evidence for and which has not
+been measured yet.

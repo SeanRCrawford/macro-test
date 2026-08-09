@@ -1,3 +1,5 @@
+**Start here: [docs/WORKFLOW.md](docs/WORKFLOW.md)** -- what to run, how to read the output, what is current, and the known gaps.
+
 # VGC Champions M-B Team/Lead/Back Search
 
 Finds, for each opponent team in `data/teams.csv`, which (bring-4-of-6) x
