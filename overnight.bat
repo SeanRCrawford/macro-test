@@ -19,6 +19,11 @@ rem   --generations SPEC restrict the pool, e.g. "3" or "1-5" or "1,3,5".
 rem   --gen-effort TIER  rating tier for stage 1. Default standard.
 rem   --deep-effort TIER rating tier for stage 2. Default thorough.
 rem   --jobs N           parallel workers. Default 0 = one per core.
+rem   --audit-all        audit every line against ALL 90 of their bring-4s
+rem                      (leads AND backs) in stage 2, at whatever tier is set.
+rem                      INTENSIVE -- multiplies the audit by 90/leads. Already
+rem                      on at --deep-effort exhaustive. Use it when you want
+rem                      the Lines sheet to cover their whole bring space.
 rem
 rem Stage 1 generates and rates; stage 2 re-tests the survivors deeply and
 rem writes the workbook. Both are cached and resumable -- if this dies, or you
@@ -31,6 +36,7 @@ set GENS=
 set GENEFFORT=standard
 set DEEPEFFORT=thorough
 set JOBS=0
+set AUDITALL=
 
 :parse
 if "%~1"=="" goto endparse
@@ -41,6 +47,7 @@ if /i "%~1"=="--generations"  (set GENS=--generations %~2& shift & shift & goto 
 if /i "%~1"=="--gen-effort"   (set GENEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--deep-effort"  (set DEEPEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--jobs"         (set JOBS=%~2& shift & shift & goto parse)
+if /i "%~1"=="--audit-all"    (set AUDITALL=--audit-all& shift & goto parse)
 echo Unknown argument: %~1
 echo Run with no arguments for defaults, or see the header of this file.
 exit /b 1
@@ -101,7 +108,7 @@ echo ============================================================
 echo STAGE 2 of 2 -- %DEEPEFFORT% search for: !TEAMLIST!
 echo ============================================================
 python search_teams.py --rosters shortlist.json --teams "!TEAMLIST!" ^
-    --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 ^
+    --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
     --cache overnight_%DEEPEFFORT%.json --export
 set RC=%ERRORLEVEL%
 
@@ -110,6 +117,7 @@ if %RC%==0 (
     echo ============================================================
     echo DONE. Open tools\overnight_%DEEPEFFORT%.xlsx
     echo   Best lines   the plan to play against each opponent
+    echo   Lines        EVERY audited line: their bring, result, punish
     echo   Teams        ranked by Adjusted wins ^(higher is better^)
     echo   Turns        every audited turn, and whether the line won
     echo ============================================================

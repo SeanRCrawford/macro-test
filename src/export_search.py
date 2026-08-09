@@ -67,6 +67,24 @@ def rows_of(cache_data):
             if isinstance(v, dict) and v.get("ours")]
 
 
+def _line_totals(row):
+    """(lines, wins, adjusted_total) over every audited line of a pairing.
+
+    Counts, not rates. "0.63" does not tell you whether that is 57 wins out of
+    90 or a rate over two sampled leads, and under --audit-all the denominator
+    is the thing that makes the number trustworthy.
+    """
+    lines = wins = 0
+    adjusted = 0.0
+    for cand in row.get("candidates") or []:
+        for lead in cand.get("audit") or []:
+            lines += 1
+            if (lead.get("outcome") or "").lower() == "win":
+                wins += 1
+            adjusted += lead.get("adjusted_value") or 0.0
+    return lines, wins, adjusted
+
+
 def _mean(values):
     values = [v for v in values if v is not None]
     return sum(values) / len(values) if values else None
@@ -76,6 +94,7 @@ def _teams_sheet(wb, rows):
     ws = wb.active
     ws.title = "Teams"
     ws.append(["Team", "Adjusted wins", "Wins vs punisher", "Clean wins",
+               "Lines won", "Lines audited", "Adjusted wins (count)",
                "Mean exploitability", "Games won", "Games played",
                "Worst matchup", "Worst value", "Severe turns",
                "Matchups rated", "Matchups searched", "Read with care"])
@@ -110,10 +129,19 @@ def _teams_sheet(wb, rows):
         adjusted = _mean([x.get("adjusted_win_rate") for x in rs])
         robust = _mean([x.get("robust_win_rate") for x in rs])
         clean = _mean([x.get("reliable_wins") for x in rs])
+        n_lines = n_wins = 0
+        adj_total = 0.0
+        for x in rs:
+            li, wi, ad = _line_totals(x)
+            n_lines += li
+            n_wins += wi
+            adj_total += ad
         ws.append([name,
                    round(adjusted, 3) if adjusted is not None else None,
                    round(robust, 3) if robust is not None else None,
                    round(clean, 3) if clean is not None else None,
+                   n_wins or None, n_lines or None,
+                   round(adj_total, 1) if n_lines else None,
                    round(mean, 1) if mean is not None else None,
                    wins or None, played or None,
                    worst["theirs"] if worst else None,
@@ -126,17 +154,18 @@ def _teams_sheet(wb, rows):
             ws.cell(ws.max_row, 2).fill = (
                 GOOD_FILL if adjusted >= 0.6
                 else (WARN_FILL if adjusted >= 0.3 else BAD_FILL))
-        _shade(ws.cell(ws.max_row, 5), mean)
-        _shade(ws.cell(ws.max_row, 9), worst["exploitability"] if worst else None)
+        _shade(ws.cell(ws.max_row, 8), mean)
+        _shade(ws.cell(ws.max_row, 12), worst["exploitability"] if worst else None)
         if caution:
-            ws.cell(ws.max_row, 13).fill = BAD_FILL
+            ws.cell(ws.max_row, 16).fill = BAD_FILL
     _autosize(ws)
 
 
 def _matchups_sheet(wb, rows):
     ws = wb.create_sheet("Matchups")
     ws.append(["Team", "Opponent", "Best bring (lead first)", "Adjusted wins",
-               "Wins vs punisher", "Exploitability",
+               "Wins vs punisher", "Lines won", "Lines audited",
+               "Adjusted wins (count)", "Exploitability",
                "Severe turns", "Their hardest lead", "Worst turn",
                "Our play", "Punished by", "Games won", "Games played"])
     _style_header(ws)
@@ -150,6 +179,8 @@ def _matchups_sheet(wb, rows):
             if r.get("adjusted_win_rate") is not None else None,
             round(r["robust_win_rate"], 3)
             if r.get("robust_win_rate") is not None else None,
+            _line_totals(r)[1] or None, _line_totals(r)[0] or None,
+            round(_line_totals(r)[2], 1) if _line_totals(r)[0] else None,
             round(r["exploitability"], 1) if r.get("exploitability") is not None else None,
             r.get("severe_turns"),
             " / ".join(r.get("hardest_lead") or []) or None,
@@ -157,7 +188,7 @@ def _matchups_sheet(wb, rows):
             wt.get("our_play"), wt.get("punished_by"),
             r.get("solver_wins"), r.get("solver_total"),
         ])
-        _shade(ws.cell(ws.max_row, 6), r.get("exploitability"))
+        _shade(ws.cell(ws.max_row, 9), r.get("exploitability"))
     _autosize(ws)
 
 
@@ -242,13 +273,66 @@ def _best_lines_sheet(wb, rows):
     _autosize(ws)
 
 
+def _lines_sheet(wb, rows):
+    """EVERY audited line: one row per (our bring x their bring).
+
+    The Best lines sheet answers "what do I play"; this answers "and what
+    happens against everything else they could have brought". Under
+    --audit-all / --effort exhaustive that is all 90 of their bring-4s, so the
+    lines that lose sit next to the ones that win rather than being summarised
+    away into a single team average.
+
+    Adjusted value is this line's own contribution to the team's adjusted-wins
+    number, on the same 0-1 scale, so a team total can be traced back to the
+    lines that produced it.
+    """
+    ws = wb.create_sheet("Lines")
+    ws.append(["Team", "Opponent", "Our bring (lead first)",
+               "Their bring (lead first)", "Lead likelihood", "Result",
+               "Adjusted value", "Mean punish", "Worst punish",
+               "Expected loss", "Severe turns", "Turns"])
+    _style_header(ws)
+    any_rows = False
+    for r in sorted(rows, key=lambda x: (x["ours"], x["theirs"])):
+        for cand in r.get("candidates") or []:
+            for lead in cand.get("audit") or []:
+                any_rows = True
+                outcome = (lead.get("outcome") or "").lower()
+                ws.append([
+                    r["ours"], r["theirs"],
+                    " / ".join(cand.get("bring") or []) or None,
+                    " / ".join(lead.get("enemy_bring")
+                               or lead.get("lead") or []) or None,
+                    round(lead["probability"], 3)
+                    if lead.get("probability") is not None else None,
+                    outcome.upper() or None,
+                    round(lead["adjusted_value"], 3)
+                    if lead.get("adjusted_value") is not None else None,
+                    round(lead["mean_exploitability"], 1)
+                    if lead.get("mean_exploitability") is not None else None,
+                    round(lead["worst_exploitability"], 1)
+                    if lead.get("worst_exploitability") is not None else None,
+                    round(lead["mean_expected_loss"], 1)
+                    if lead.get("mean_expected_loss") is not None else None,
+                    lead.get("severe_turns"), lead.get("line_turns"),
+                ])
+                ws.cell(ws.max_row, 6).fill = (
+                    GOOD_FILL if outcome == "win"
+                    else (WARN_FILL if outcome == "draw" else BAD_FILL))
+                _shade(ws.cell(ws.max_row, 8), lead.get("mean_exploitability"))
+    if not any_rows:
+        ws.append(["No audited lines in this cache "
+                   "(the quick tier does not audit lines)."])
+    _autosize(ws)
+
+
 def _turns_sheet(wb, rows):
     """Every audited turn. The evidence behind every number in the other sheets."""
     ws = wb.create_sheet("Turns")
-    ws.append(["Team", "Opponent", "Bring (lead first)", "Their lead",
+    ws.append(["Team", "Opponent", "Bring (lead first)", "Their bring",
                "Lead likelihood", "Line result", "Turn", "Exploitability",
-               "Regret", "Equilibrium", "Our worst case", "Our play",
-               "Their best answer"])
+               "Expected loss", "Regret", "Equilibrium", "Our worst case",
+               "Our play", "Their best answer"])
     _style_header(ws)
     any_rows = False
     for r in sorted(rows, key=lambda x: (x["ours"], x["theirs"])):
@@ -259,13 +343,16 @@ def _turns_sheet(wb, rows):
                     ws.append([
                         r["ours"], r["theirs"],
                         " / ".join(cand.get("bring") or []) or None,
-                        " / ".join(lead.get("lead") or []) or None,
+                        " / ".join(lead.get("enemy_bring")
+                                   or lead.get("lead") or []) or None,
                         round(lead["probability"], 3)
                         if lead.get("probability") is not None else None,
                         (lead.get("outcome") or "").upper() or None,
                         t.get("turn"),
                         round(t["exploitability"], 1)
                         if t.get("exploitability") is not None else None,
+                        round(t["expected_loss"], 1)
+                        if t.get("expected_loss") is not None else None,
                         round(t["regret"], 1) if t.get("regret") is not None else None,
                         round(t["equilibrium"], 1)
                         if t.get("equilibrium") is not None else None,
@@ -274,6 +361,7 @@ def _turns_sheet(wb, rows):
                         t.get("our_play"), t.get("punished_by"),
                     ])
                     _shade(ws.cell(ws.max_row, 8), t.get("exploitability"))
+                    _shade(ws.cell(ws.max_row, 9), t.get("expected_loss"))
                     outcome = (lead.get("outcome") or "").lower()
                     if outcome == "win":
                         ws.cell(ws.max_row, 6).fill = GOOD_FILL
@@ -307,6 +395,19 @@ def _legend_sheet(wb):
          "Wins with no severe turn anywhere in the line. The strictest column: "
          "these are the lines that win without ever handing a good player "
          "more than a third of a Pokemon."),
+        ("Lines won / audited",
+         "Counts, not rates. Under --audit-all (and at --effort exhaustive) "
+         "the denominator is all 90 of their bring-4s, so '57 / 90' means the "
+         "line was played against every bring they could make. At the cheaper "
+         "tiers it is a sample of their most plausible leads instead, and the "
+         "denominator says so."),
+        ("Adjusted wins (count)",
+         "The same discount applied to counts rather than a rate: the sum of "
+         "each winning line's Adjusted value. Read it as 'this many wins' "
+         "worth of wins, after paying for how punishable each one was'."),
+        ("Adjusted value",
+         "On the Lines sheet: one line's own contribution to Adjusted wins, "
+         "0 to 1. Zero means the line lost or was too punishable to count."),
         ("Line result",
          "On the Turns sheet: whether the line those turns belong to ended in "
          "a WIN, LOSS, DRAW, or UNRESOLVED (turn cap reached)."),
@@ -362,6 +463,7 @@ def build_workbook(cache_data, out_path):
     _teams_sheet(wb, rows)
     _matchups_sheet(wb, rows)
     _best_lines_sheet(wb, rows)
+    _lines_sheet(wb, rows)
     _candidates_sheet(wb, rows)
     _turns_sheet(wb, rows)
     _legend_sheet(wb)

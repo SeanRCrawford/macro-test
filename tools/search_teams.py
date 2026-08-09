@@ -42,7 +42,7 @@ DEFAULT_CACHE = "search_cache.json"
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 4   # expected-loss discount + full-config audit
+SCHEMA = 5   # per-line detail: enemy bring, outcome, adjusted value
 
 
 _WORLD = None       # per-process dataset, loaded once (13-14s) and reused
@@ -83,7 +83,7 @@ def _run_pairing(job):
     types: on Windows the pool uses spawn, so both the function and its result
     cross a pickle boundary.
     """
-    ours, theirs, effort, turns, prescreen = job
+    ours, theirs, effort, turns, prescreen, audit_all = job
     global _WORLD
     if _WORLD is None:                       # serial path, or a pool without init
         _worker_init()
@@ -97,7 +97,7 @@ def _run_pairing(job):
         robustness_leads=settings["leads"] or 1,
         robustness_turns=settings["turns"] or 1,
         prescreen_top=prescreen,
-        audit_all_configs=settings.get('all_configs', False))
+        audit_all_configs=audit_all or settings.get("all_configs", False))
     top = results[0] if results else None
     return {
         "ours": ours, "theirs": theirs,
@@ -167,6 +167,12 @@ def main():
                          "teams that are not in teams.csv can be searched by "
                          "name. This is how generate_overnight.py feeds this "
                          "tool. Roster contents are part of the cache key.")
+    ap.add_argument("--audit-all", action="store_true",
+                    help="audit the line against ALL 90 of their bring-4s "
+                         "(leads AND backs) instead of a sample of their most "
+                         "plausible leads. Already on at --effort exhaustive; "
+                         "this turns it on at any tier. Intensive: it "
+                         "multiplies the audit by 90/leads.")
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="run N pairings in parallel (0 = one per CPU core). "
                          "Each worker loads the dataset once (~14s) and then "
@@ -235,7 +241,8 @@ def main():
     # A generated roster is part of what determines the answer, so it belongs
     # in the key: two teams sharing a name but not a roster must not collide.
     keyed = [(ResultCache.key("bring", SCHEMA, a, b, args.effort, args.turns,
-                              prescreen, extra.get(a), extra.get(b)), a, b)
+                              prescreen, args.audit_all,
+                              extra.get(a), extra.get(b)), a, b)
              for a, b in jobs]
     todo = [(k, a, b) for k, a, b in keyed if cache.get(k) is None]
     skipped = len(keyed) - len(todo)
@@ -260,7 +267,8 @@ def main():
                                         initializer=_worker_init,
                                         initargs=(extra,)) as pool:
                 futures = {pool.submit(_run_pairing,
-                                       (a, b, args.effort, args.turns, prescreen)): (k, a, b)
+                                       (a, b, args.effort, args.turns, prescreen,
+                                        args.audit_all)): (k, a, b)
                            for k, a, b in batch}
                 for future in cf.as_completed(futures):
                     k, a, b = futures[future]
@@ -272,7 +280,8 @@ def main():
         for batch in batches(todo, args.batch):
             for k, ours, theirs in batch:
                 cache.put(k, _run_pairing((ours, theirs, args.effort,
-                                           args.turns, prescreen)))
+                                           args.turns, prescreen,
+                                           args.audit_all)))
                 done += 1
                 _progress(ours, theirs)
             cache.save()

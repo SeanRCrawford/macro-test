@@ -799,6 +799,23 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
     return verified
 
 
+def _line_value(report):
+    """One line's contribution to adjusted wins, on the same scale as the team
+    number: 0 if it did not win, else 1 discounted by the ground conceded.
+
+    Shares team_rating's constants rather than restating them, so the per-line
+    column in the workbook always sums back to the team total.
+    """
+    from solver import KO_WEIGHT
+    from team_rating import READ_RATE
+    if not report.won:
+        return 0.0
+    charged = (report.mean_expected_loss
+               + READ_RATE * (report.mean_exploitability
+                              - report.mean_expected_loss))
+    return max(0.0, 1.0 - max(0.0, charged) / KO_WEIGHT)
+
+
 def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechart,
                       configs, our_sets, enemy_sets, preview_tau,
                       leads_per_candidate, turns, audit_all_configs=False):
@@ -845,15 +862,17 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             chosen = [(lead_keys[row["index"]], row["probability"])
                       for row in ranked[:leads_per_candidate]]
 
-        def build(our_names, enemy_spec):
+        def _enemy4(enemy_spec):
             # `enemy_spec` is either a lead PAIR (backs inferred, the cheap
-            # tiers) or a full bring-4 (exhaustive, which audits their backs
+            # tiers) or a full bring-4 (all-configs, which audits their backs
             # too -- a lead pair says nothing about what comes in behind it).
             if len(enemy_spec) >= 4:
-                enemy4 = list(enemy_spec)[:4]
-            else:
-                rest = [x for x in enemy_roster if x not in enemy_spec]
-                enemy4 = list(enemy_spec) + rest[:2]
+                return list(enemy_spec)[:4]
+            rest = [x for x in enemy_roster if x not in enemy_spec]
+            return list(enemy_spec) + rest[:2]
+
+        def build(our_names, enemy_spec):
+            enemy4 = _enemy4(enemy_spec)
             oc = make_team(list(our_names), merged, natures, sets=our_sets)
             ec = make_team(enemy4, merged, natures, sets=enemy_sets)
             ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)
@@ -876,9 +895,18 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
         rec["outcomes"] = rating.outcomes
         rec["audit"] = [{
             "lead": list(lead)[:2],
-            "enemy_bring": list(lead),
+            # The bring they ACTUALLY played in this line, backs resolved the
+            # same way build() resolves them, so a row in the workbook names
+            # the four Pokemon the line was played against rather than two.
+            "enemy_bring": _enemy4(lead),
             "probability": probability,
             "mean_exploitability": report.mean_exploitability,
+            "mean_expected_loss": report.mean_expected_loss,
+            "worst_exploitability": (report.worst_turn.exploitability
+                                     if report.worst_turn else 0.0),
+            # What this single line contributes to adjusted wins, so the team
+            # total can be traced back to the lines that produced it.
+            "adjusted_value": _line_value(report),
             "severe_turns": report.severe_count,
             "outcome": report.outcome,
             "final_margin": report.final_margin,
@@ -886,6 +914,7 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             "turns": [{
                 "turn": t.turn,
                 "exploitability": t.exploitability,
+                "expected_loss": t.expected_loss,
                 "regret": t.regret,
                 "equilibrium": t.equilibrium,
                 "worst_case": t.worst_case,
