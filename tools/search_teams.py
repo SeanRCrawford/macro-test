@@ -39,6 +39,15 @@ from search_effort import (TIER_ORDER, ResultCache, batches,  # noqa: E402
 
 DEFAULT_CACHE = "search_cache.json"
 
+# Seconds per audited TURN, measured on this engine at depth 1 (tools timing:
+# a 6-turn line took 5.3s => ~0.9s/turn). Only used for the up-front estimate
+# before the first pairing finishes -- after that the real rate takes over.
+SECONDS_PER_AUDITED_TURN = 0.9
+# Lines rarely run to the cap: a game usually resolves first. Measured lines
+# averaged 6-10 turns against caps of 16-20, so the estimate uses this rather
+# than the cap, which would overstate the wait by 2-3x.
+TYPICAL_LINE_TURNS = 8
+
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
@@ -256,14 +265,37 @@ def main():
     if not jobs:
         raise SystemExit("no pairings selected")
 
+    _audit_all = args.audit_all or settings.get("all_configs", False)
     print(f"effort   : {settings['label']} (~{relative_cost(args.effort):.0f}x quick)")
-    print(f"           {settings['blurb']}")
+    # The tier blurb names a lead sample, which --audit-all overrides. Printing
+    # both unedited would contradict the audit line two rows below.
+    if not _audit_all:
+        print(f"           {settings['blurb']}")
     print(f"pairings : {len(jobs)}   batch {args.batch}   cache {args.cache}")
     print(f"workers  : {args.jobs}"
           f"{' (serial)' if args.jobs <= 1 else ''}   of {os.cpu_count()} cores")
     if _warning:
         print(f"WARNING  : {_warning}")
-    print(f"resuming : {len(cache)} already done\n")
+    print(f"resuming : {len(cache)} already done")
+
+    # What --audit-all actually means, in the units that cost time, plus an
+    # up-front estimate. Without this the first feedback of a multi-hour stage
+    # arrives only when pairing 1 completes, which can itself be half an hour.
+    audit_all = _audit_all
+    if settings["robustness"]:
+        their_configs = 90 if audit_all else settings["leads"]
+        lines_each = settings["verify_top"] * their_configs
+        print(f"audit    : {settings['verify_top']} of our brings x "
+              f"{their_configs} of their bring-4s "
+              f"{'(ALL of them: leads AND backs)' if audit_all else '(sampled leads)'}"
+              f" = {lines_each} lines per pairing")
+        seconds = (len(jobs) * lines_each * TYPICAL_LINE_TURNS
+                   * SECONDS_PER_AUDITED_TURN / max(args.jobs, 1))
+        print(f"estimate : ~{seconds / 3600:.1f} h for {len(jobs)} pairings on "
+              f"{args.jobs} worker(s)")
+        print(f"           (rough -- a real ETA replaces it once the first "
+              f"pairing finishes)")
+    print()
 
     # The prescreen width is part of the key: a run that filtered candidates
     # must not be served to a run that did not.
@@ -283,10 +315,14 @@ def main():
     def _progress(ours, theirs):
         nonlocal computed
         computed += 1
-        rate = (time.time() - started) / computed
-        left = (len(keyed) - done) * rate / 60
+        elapsed = time.time() - started
+        rate = elapsed / computed                  # seconds per pairing, real
+        left = (len(keyed) - done) * rate
+        eta = time.strftime("%H:%M", time.localtime(time.time() + left))
         print(f"  [{done}/{len(keyed)}] {ours} vs {theirs}"
-              f"   ~{left:.0f} min left", flush=True)
+              f"   {rate / 60:.0f} min/pairing"
+              f"   elapsed {elapsed / 60:.0f} min"
+              f"   left ~{left / 3600:.1f} h (done ~{eta})", flush=True)
 
     if args.jobs > 1 and todo:
         # Pairings are independent, so the whole pairing is the parallel unit --

@@ -50,6 +50,38 @@ Options worth knowing:
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
 
+### What `--audit-all` actually does, and how long it takes
+
+Stage 2 prints this before it starts:
+
+```
+audit    : 6 of our brings x 90 of their bring-4s (ALL of them: leads AND backs)
+           = 540 lines per pairing
+estimate : ~4.5 h for 42 pairings on 8 worker(s)
+```
+
+A **line** is one full game: our committed bring against one of their bring-4s,
+played to a finish, with a complete payoff matrix solved on every turn to
+measure the punish. Their 90 comes from choosing 4 of their 6 and a lead pair:
+15 brings x 6 lead orders.
+
+Without `--audit-all` only their most plausible *leads* are sampled (4 at
+thorough), their backs are assumed, and a plan that beats their lead but loses
+to their back is scored as a win. That is why it is on by default: **90 is the
+denominator that makes `Wins / Of` a total-pathing number.** The cost is
+exactly the ratio, 90/4 -- about 22x the audit stage.
+
+The up-front estimate uses a measured ~0.9 s per audited turn and an assumed
+8-turn line. It is rough on purpose; once the first pairing finishes, each
+progress line reports the real rate and a clock time:
+
+```
+[3/42] gen01 vs Rain   7 min/pairing   elapsed 21 min   left ~4.6 h (done ~03:14)
+```
+
+Kill it whenever you like -- every batch is saved, and re-running the identical
+command resumes.
+
 ### Reading the output — `tools\overnight_thorough.xlsx`
 
 1. **Plan** — the answer. One committed bring/lead per opponent, `Wins / Of`,
