@@ -3,6 +3,17 @@
 The single source of truth for what to run and what is current. If anything
 below disagrees with a docstring, this file is right and the docstring is stale.
 
+**The short version:**
+
+```bat
+overnight.bat --list                  :: generate + rate teams, show the ranking
+overnight.bat --pick "6"              :: deep-search #6 (results accumulate)
+run.bat                               :: the app -- preview, deep dive, results
+```
+
+Read `tools\overnight_thorough.xlsx` → **Plan** sheet. It gives one committed
+bring and lead per opponent, and how many of their 90 brings it beats.
+
 ---
 
 ## 1. The question the system answers
