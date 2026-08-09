@@ -209,6 +209,45 @@ class TestExportSearch(unittest.TestCase):
         tied = [ws.cell(r, 15).value for r in range(2, ws.max_row + 1)]
         self.assertIn(46, tied)
 
+    def test_the_plan_commits_to_one_bring_per_opponent(self):
+        """You pick your four and your lead at preview, before seeing theirs.
+
+        The sheets used to show the best line found PER enemy configuration,
+        which could switch our lead depending on what they brought -- a plan
+        nobody can execute.
+        """
+        row = _rated_row("Sun", "Rain", 40.0)
+        # Candidate 0 wins one of two lines; candidate 1 wins both.
+        row["candidates"][0]["audit"][0]["outcome"] = "loss"
+        row["candidates"][1]["audit"].append(
+            dict(row["candidates"][1]["audit"][0]))
+        wb, _ = _build({"k": row})
+        ws = wb["Plan"]
+        self.assertEqual(ws.max_row - 1, 1, "one committed plan per pairing")
+        self.assertEqual(ws.cell(2, 3).value, "A / B / C / E")   # candidate 1
+        self.assertEqual(ws.cell(2, 4).value, 2)   # wins
+        self.assertEqual(ws.cell(2, 5).value, 2)   # of
+
+    def test_the_plan_names_what_beats_it(self):
+        row = _rated_row("Sun", "Rain", 40.0)
+        for cand in row["candidates"]:
+            cand["audit"][0]["outcome"] = "loss"
+        wb, _ = _build({"k": row})
+        ws = wb["Plan"]
+        self.assertEqual(ws.cell(2, 4).value, 0)
+        self.assertIn("A / B / P / Q", ws.cell(2, 11).value)
+
+    def test_best_lines_uses_only_the_committed_bring(self):
+        """Every row of the plan must be the SAME bring of ours."""
+        row = _rated_row("Sun", "Rain", 40.0)
+        row["candidates"][1]["audit"].append(
+            dict(row["candidates"][1]["audit"][0]))
+        wb, _ = _build({"k": row})
+        ws = wb["Best lines"]
+        brings = {ws.cell(r, 3).value for r in range(2, ws.max_row + 1)
+                  if ws.cell(r, 3).value}
+        self.assertEqual(len(brings), 1, f"mixed brings in one plan: {brings}")
+
     def test_severity_shading_thresholds_bracket_the_severe_constant(self):
         wb, _ = _build({"a": _rated_row("Low", "X", MILD - 1),
                         "b": _rated_row("High", "X", SEVERE + 1)})

@@ -85,6 +85,37 @@ def _line_totals(row):
     return lines, wins, adjusted
 
 
+def committed_plan(row):
+    """The ONE bring-4/lead-2 to commit to against this opponent, and its record.
+
+    At team preview you choose your four and your lead pair BEFORE seeing which
+    four they bring, let alone which two they lead. So a plan is a single
+    committed choice measured across everything they might do -- not the best
+    line found per enemy configuration, which is what the sheets used to show
+    and which no player can actually execute.
+
+    Picks the candidate with the most wins across the enemy configurations it
+    was audited against, breaking ties on the lower mean punish. Returns
+    (candidate, wins, total, adjusted_total) or None.
+    """
+    best = None
+    for cand in row.get("candidates") or []:
+        lines = cand.get("audit") or []
+        if not lines:
+            continue
+        wins = sum(1 for ln in lines
+                   if (ln.get("outcome") or "").lower() == "win")
+        adjusted = sum(ln.get("adjusted_value") or 0.0 for ln in lines)
+        punish = _mean([ln.get("mean_exploitability") for ln in lines]) or 0.0
+        rank = (-wins, punish)
+        if best is None or rank < best[0]:
+            best = (rank, cand, wins, len(lines), adjusted)
+    if best is None:
+        return None
+    _rank, cand, wins, total, adjusted = best
+    return cand, wins, total, adjusted
+
+
 def _mean(values):
     values = [v for v in values if v is not None]
     return sum(values) / len(values) if values else None
@@ -224,65 +255,123 @@ def _candidates_sheet(wb, rows):
     _autosize(ws)
 
 
-def _best_lines_sheet(wb, rows):
-    """The deliverable: for each opponent, the plan to actually play.
+def _plan_sheet(wb, rows):
+    """THE deliverable: one committed bring/lead per opponent, and its record.
 
-    Everything else in this workbook is diagnosis. This is the answer -- the
-    bring, the lead, and the turn-by-turn plays of the best line that WINS
-    against an opponent punishing every turn, chosen for the least punish
-    among the winning lines.
+    You choose your four and your lead pair at preview, before seeing theirs.
+    So the only number that describes a playable plan is: commit to this, and
+    win X of their N configurations. A perfect answer to an opponent is X == N
+    (90/90 when the run used --audit-all or --effort exhaustive).
+
+    Sorted worst record first, because the matchup you cannot answer is the one
+    that decides whether the team is worth taking.
+    """
+    ws = wb.create_sheet("Plan")
+    ws.append(["Team", "Opponent", "COMMIT: bring (lead first)",
+               "Wins", "Of", "Win rate", "Adjusted wins", "Mean punish",
+               "Worst punish", "Severe turns", "Losing to"])
+    _style_header(ws)
+    any_rows = False
+    entries = []
+    for r in rows:
+        plan = committed_plan(r)
+        if plan is None:
+            continue
+        any_rows = True
+        cand, wins, total, adjusted = plan
+        lines = cand.get("audit") or []
+        punish = _mean([ln.get("mean_exploitability") for ln in lines]) or 0.0
+        worst = max((ln.get("worst_exploitability") or 0.0) for ln in lines)
+        severe = sum(ln.get("severe_turns") or 0 for ln in lines)
+        losses = [" / ".join(ln.get("enemy_bring") or ln.get("lead") or [])
+                  for ln in lines
+                  if (ln.get("outcome") or "").lower() != "win"]
+        entries.append((wins / total if total else 0.0, r, cand, wins, total,
+                        adjusted, punish, worst, severe, losses))
+
+    for rate, r, cand, wins, total, adjusted, punish, worst, severe, losses \
+            in sorted(entries, key=lambda e: (e[0], -e[6])):
+        ws.append([
+            r["ours"], r["theirs"], " / ".join(cand.get("bring") or []),
+            wins, total, round(rate, 3), round(adjusted, 1),
+            round(punish, 1), round(worst, 1), severe,
+            # Naming the configurations that beat this plan is the actionable
+            # part: they are what a different bring, or a different team, has
+            # to answer.
+            "; ".join(losses[:6]) + ("  ..." if len(losses) > 6 else "") or None,
+        ])
+        ws.cell(ws.max_row, 6).fill = (
+            GOOD_FILL if rate >= 0.9 else (WARN_FILL if rate >= 0.7 else BAD_FILL))
+        _shade(ws.cell(ws.max_row, 8), punish)
+    if not any_rows:
+        ws.append(["No audited plans in this cache "
+                   "(the quick tier does not audit lines)."])
+    _autosize(ws)
+
+
+def _best_lines_sheet(wb, rows):
+    """The plan: ONE committed bring per opponent, and how it fares against all
+    of their configurations.
+
+    Everything else in this workbook is diagnosis. This is the answer, and it
+    is deliberately a single lead per opponent -- you commit at preview, so a
+    sheet that switched lead depending on what they brought would be showing a
+    plan nobody can play.
     """
     ws = wb.create_sheet("Best lines")
-    ws.append(["Opponent", "Team", "Bring (lead first)", "Their lead",
-               "Result", "Worst punish", "Turn", "Play this",
-               "If they answer with", "What happens", "KOs", "HP after"])
+    ws.append(["Opponent", "Team", "COMMIT: bring (lead first)", "Record",
+               "Adjusted", "Their bring", "Result", "Worst punish", "Turn",
+               "Play this", "If they answer with", "What happens", "KOs",
+               "HP after"])
     _style_header(ws)
     any_rows = False
     for r in sorted(rows, key=lambda x: (x["ours"], x["theirs"])):
-        best = None
-        for cand in r.get("candidates") or []:
-            for lead in cand.get("audit") or []:
-                if lead.get("outcome") != "win":
-                    continue
-                worst = max((t.get("exploitability") or 0.0)
-                            for t in lead.get("turns") or [0]) \
-                    if lead.get("turns") else 0.0
-                if best is None or worst < best[0]:
-                    best = (worst, cand, lead)
-        if best is None:
+        plan = committed_plan(r)
+        if plan is None:
             ws.append([r["theirs"], r["ours"],
-                       " / ".join(r.get("bring") or []) or None, None,
-                       "NO WINNING LINE FOUND against a punishing opponent",
+                       " / ".join(r.get("bring") or []) or None,
+                       "not audited", None, None, None, None, None, None,
                        None, None, None, None])
-            ws.cell(ws.max_row, 5).fill = BAD_FILL
             continue
+        cand, wins, total, adjusted = plan
         any_rows = True
-        worst, cand, lead = best
-        for i, t in enumerate(lead.get("turns") or []):
-            ws.append([
-                r["theirs"] if i == 0 else None,
-                r["ours"] if i == 0 else None,
-                " / ".join(cand.get("bring") or []) if i == 0 else None,
-                " / ".join(lead.get("enemy_bring")
-                           or lead.get("lead") or []) if i == 0 else None,
-                "WIN" if i == 0 else None,
-                round(worst, 1) if i == 0 else None,
-                t.get("turn"), t.get("our_play"),
-                t.get("punished_by") or ("no punish available"
-                                         if t.get("no_punish") else None),
-                # The engine's own log for this turn: damage numbers, KOs,
-                # weather and item triggers, in the order they resolved.
-                "\n".join(t.get("events") or []) or None,
-                ", ".join(t.get("kos") or []) or None,
-                ", ".join(t.get("hp_after") or []) or None,
-            ])
-            ws.cell(ws.max_row, 10).alignment = Alignment(wrap_text=True,
-                                                          vertical="top")
-            if i == 0:
-                ws.cell(ws.max_row, 5).fill = GOOD_FILL
-                _shade(ws.cell(ws.max_row, 6), worst)
+        # Winning lines first, then the worst offenders -- the losses are the
+        # reason the record is not X/X and are what a plan has to answer.
+        lines = sorted(cand.get("audit") or [],
+                       key=lambda ln: ((ln.get("outcome") or "").lower() != "win",
+                                       -(ln.get("mean_exploitability") or 0)))
+        header_done = False
+        for ln in lines:
+            outcome = (ln.get("outcome") or "").lower()
+            worst = ln.get("worst_exploitability")
+            turns = ln.get("turns") or []
+            for i, t in enumerate(turns) or [(0, None)]:
+                ws.append([
+                    r["theirs"] if not header_done else None,
+                    r["ours"] if not header_done else None,
+                    " / ".join(cand.get("bring") or [])
+                    if not header_done else None,
+                    f"{wins} / {total}" if not header_done else None,
+                    f"{adjusted:.1f} / {total}" if not header_done else None,
+                    " / ".join(ln.get("enemy_bring") or ln.get("lead") or [])
+                    if i == 0 else None,
+                    outcome.upper() if i == 0 else None,
+                    round(worst, 1) if (i == 0 and worst is not None) else None,
+                    t.get("turn"), t.get("our_play"),
+                    t.get("punished_by") or ("no punish available"
+                                             if t.get("no_punish") else None),
+                    "\n".join(t.get("events") or []) or None,
+                    ", ".join(t.get("kos") or []) or None,
+                    ", ".join(t.get("hp_after") or []) or None,
+                ])
+                if i == 0:
+                    ws.cell(ws.max_row, 7).fill = (
+                        GOOD_FILL if outcome == "win" else BAD_FILL)
+                ws.cell(ws.max_row, 12).alignment = Alignment(wrap_text=True,
+                                                              vertical="top")
+                header_done = True
     if not any_rows:
-        ws.append(["No winning lines in this cache "
+        ws.append(["No audited lines in this cache "
                    "(the quick tier does not audit lines)."])
     _autosize(ws)
 
@@ -395,6 +484,14 @@ def _legend_sheet(wb):
     ws.append(["Column", "What it means"])
     _style_header(ws)
     for row in [
+        ("Plan sheet",
+         "The deliverable. One COMMITTED bring-4/lead-2 per opponent and its "
+         "record against every configuration of theirs that was audited. You "
+         "choose your four and your lead at preview, before seeing theirs, so "
+         "this is the only number describing something you can actually play. "
+         "A perfect answer is Wins == Of -- 90/90 when the run used "
+         "--audit-all or --effort exhaustive. Anything less, and 'Losing to' "
+         "names the brings that beat the plan."),
         ("Adjusted wins",
          "THE RANKING NUMBER. Share of their plausible leads where our line "
          "WINS against an opponent who punishes correctly every turn, with "
@@ -518,6 +615,7 @@ def build_workbook(cache_data, out_path, team_sheets=None):
     rows = rows_of(cache_data)
     wb = Workbook()
     _teams_sheet(wb, rows)
+    _plan_sheet(wb, rows)
     _matchups_sheet(wb, rows)
     _best_lines_sheet(wb, rows)
     _lines_sheet(wb, rows)
