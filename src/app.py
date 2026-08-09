@@ -179,6 +179,50 @@ def weakness_table(team):
     return pd.DataFrame(rows)
 
 
+def render_audited_turn(turn, key=None):
+    """One audited turn: our play, their answer, the damage, the KOs.
+
+    Shared by the cached overnight browser and the live deep dive so the two
+    can never drift into showing the same turn differently. `turn` is either
+    the dict stored in the cache or a robustness.TurnRobustness.
+    """
+    from robustness import describe_action
+
+    def _g(name, default=None):
+        if isinstance(turn, dict):
+            return turn.get(name, default)
+        return getattr(turn, name, default)
+
+    punish = _g("exploitability") or 0.0
+    flag = " \u26a0\ufe0f" if punish > 60 else ""
+    play = _g("our_play") or (describe_action(_g("our_action"))
+                              if _g("our_action") is not None else "?")
+    answer = _g("punished_by")
+    if answer is None and _g("punisher") is not None and _g("has_punish", True):
+        answer = describe_action(_g("punisher"))
+    with st.expander(f"Turn {_g('turn')} \u2014 punish {punish:.0f}{flag}"
+                     f"   |   {play}", expanded=False):
+        st.markdown(f"**We play:** {play}")
+        st.markdown(f"**Their best answer:** {answer}" if answer
+                    else "**Their best answer:** none \u2014 nothing they can "
+                         "do gains meaningful ground here.")
+        tied = _g("tied_replies", 1) or 1
+        if tied > 5:
+            st.caption(f"{tied} of their replies score identically, so the "
+                       f"named answer is a tie-break, not a read.")
+        events = _g("events") or []
+        if events:
+            st.code("\n".join(events), language=None)
+        kos = _g("kos") or []
+        if kos:
+            st.error("Knocked out: " + ", ".join(kos))
+        hp = _g("hp_after") or []
+        if hp and not isinstance(hp[0], str):
+            hp = [f"{n} {v}/{mx}" for _s, n, v, mx in hp if v > 0]
+        if hp:
+            st.caption("After: " + ", ".join(hp))
+
+
 def get_state_team():
     return st.session_state.get("team", [])
 
@@ -1567,33 +1611,73 @@ with tab_vs:
                           f"{lead.get('adjusted_value') or 0:.2f}")
 
                 for t in lead.get("turns") or []:
-                    punish = t.get("exploitability") or 0.0
-                    flag = " ⚠️" if punish > 60 else ""
-                    with st.expander(
-                            f"Turn {t.get('turn')} — punish {punish:.0f}{flag}"
-                            f"   |   {t.get('our_play')}", expanded=False):
-                        st.markdown(f"**We play:** {t.get('our_play')}")
-                        answer = t.get("punished_by")
-                        st.markdown(
-                            f"**Their best answer:** {answer}" if answer
-                            else "**Their best answer:** none — nothing they "
-                                 "can do gains meaningful ground here.")
-                        if t.get("tied_replies", 1) > 5:
-                            st.caption(
-                                f"{t['tied_replies']} of their replies score "
-                                f"identically, so the named answer is a "
-                                f"tie-break, not a read.")
-                        if t.get("events"):
-                            st.code("\n".join(t["events"]), language=None)
-                        if t.get("kos"):
-                            st.error("Knocked out: " + ", ".join(t["kos"]))
-                        if t.get("hp_after"):
-                            st.caption("After: " + ", ".join(t["hp_after"]))
+                    render_audited_turn(t)
 
     st.caption("Check the currently loaded team (Team Builder tab) against any enemy team you "
                "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
                "(pokepast.es 'Paste'/'Export' view) -- without saving it to data/teams/ first. "
                "See data/teams/ if you want this enemy team to stick around permanently instead.")
+    # --- Deep dive: one position, at full strength ----------------------
+    # The exhaustive tier is expensive because of BREADTH -- 8 brings against
+    # all 90 of their bring-4s. Once you have actually led, that breadth is
+    # gone: one bring, one lead, one position. So the same analysis runs here
+    # in seconds, and can afford a depth the batch run cannot.
+    with st.expander("Deep dive: my answer to a specific lead", expanded=False):
+        st.caption("You have led. They have led. This runs the exhaustive "
+                   "tier's analysis on that single position -- full payoff "
+                   "matrix every turn, their wider move space, the "
+                   "equilibrium solver piloting -- and shows the match.")
+        dd1, dd2 = st.columns(2)
+        # Deliberately not tied to the team loaded above: the question "what
+        # is my answer to THIS lead" is worth asking about any matchup, not
+        # only the one currently selected.
+        our_bring = dd1.multiselect(
+            "My bring-4 (LEAD FIRST, order matters)", all_names,
+            max_selections=4, key="dd_ours",
+            default=get_state_team()[:4] if len(get_state_team()) >= 4 else [],
+            help="The first two are the pair you actually led with.")
+        their_bring = dd2.multiselect(
+            "Their bring-4 (lead first)", all_names,
+            max_selections=4, key="dd_theirs")
+
+        dd3, dd4 = st.columns(2)
+        dd_depth = dd3.select_slider(
+            "Solver depth", options=[1, 2], value=1, key="dd_depth",
+            help="Depth 2 sees one turn further -- the setup or switch-in that "
+                 "depth 1 prices as free. Measured ~48x the cost, which is "
+                 "affordable for ONE line and is not affordable for a batch. "
+                 "Expect seconds at depth 1, minutes at depth 2.")
+        dd_turns = dd4.slider("Turn cap", 4, 24, 16, key="dd_turns")
+
+        if st.button("Analyse this position", key="dd_run"):
+            if len(our_bring) != 4 or len(their_bring) != 4:
+                st.warning("Pick exactly 4 Pokemon on each side, lead first.")
+            else:
+                from deep_dive import audit_position, summarise
+                with st.spinner("Solving every turn of this line..."):
+                    report = audit_position(
+                        our_bring, their_bring, merged, moves, natures,
+                        typechart, max_turns=dd_turns, depth=dd_depth)
+                st.session_state["dd_report"] = report
+
+        report = st.session_state.get("dd_report")
+        if report is not None:
+            from deep_dive import summarise
+            info = summarise(report)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Result", info["outcome"].upper())
+            k2.metric("Mean punish", f"{info['mean_exploitability']:.0f}")
+            k3.metric("Worst punish", f"{info['worst_exploitability']:.0f}",
+                      f"T{info['worst_turn']}" if info["worst_turn"] else None)
+            k4.metric("Severe turns", info["severe_turns"])
+            if info["outcome"] != "win":
+                st.warning(
+                    "This line does not win against an opponent playing its "
+                    "equilibrium every turn. The turns below show where it "
+                    "goes wrong -- the highest punish is the one to change.")
+            for t in report.turns:
+                render_audited_turn(t)
+
     vs_team = get_state_team()
     if len(vs_team) != 6:
         st.warning("Pick 6 Pokemon in the Team Builder tab first.")
