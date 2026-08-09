@@ -194,6 +194,12 @@ def main():
                          "teams that are not in teams.csv can be searched by "
                          "name. This is how generate_overnight.py feeds this "
                          "tool. Roster contents are part of the cache key.")
+    ap.add_argument("--pick", default="",
+                    help="which of the roster file's teams to search, by RANK "
+                         "NUMBER: --pick \"4,10,12\". The numbering is stable "
+                         "across runs, and results accumulate in the cache, so "
+                         "you can search #6 tonight and come back for #4 and "
+                         "#10 tomorrow without redoing either.")
     ap.add_argument("--audit-all", action="store_true",
                     help="audit the line against ALL 90 of their bring-4s "
                          "(leads AND backs) instead of a sample of their most "
@@ -259,7 +265,27 @@ def main():
     # the names back in -- which is exactly what broke when the shortlist grew
     # a wrapper for optimised sets.
     library = [n for n in names if n not in extra]
-    ours_pool = _select(args.teams, "team", list(extra) if extra else None)
+
+    picked = None
+    if args.pick:
+        order = list(extra) if extra else names
+        wanted = []
+        for token in args.pick.replace(" ", "").split(","):
+            if not token:
+                continue
+            if not token.lstrip("-").isdigit():
+                raise SystemExit(f"--pick takes rank NUMBERS, got {token!r}")
+            idx = int(token)
+            if not 1 <= idx <= len(order):
+                raise SystemExit(f"--pick {idx} is out of range: the roster "
+                                 f"file has {len(order)} teams (1-{len(order)})")
+            wanted.append(order[idx - 1])
+        picked = wanted or None
+        if picked:
+            print(f"picked   : {', '.join(picked)}")
+
+    ours_pool = _select(args.teams, "team",
+                        picked or (list(extra) if extra else None))
     theirs_pool = _select(args.vs, "opponent", library if extra else None)
     jobs = [(a, b) for a in ours_pool for b in theirs_pool if a != b]
     if not jobs:

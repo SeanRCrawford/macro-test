@@ -48,7 +48,31 @@ Options worth knowing:
 | `--generations SPEC` | all | e.g. `1-5` |
 | `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
+| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate |
+| `--list` | off | stage 1 only — rate and rank, then stop |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
+
+### Picking what is worth the night
+
+Stage 2 is the expensive half, so you do not have to spend it on everything.
+
+```bat
+overnight.bat --list                     :: generate and rate, then STOP
+overnight.bat --pick "6"                 :: deep-search #6 only
+overnight.bat --pick "4,10,12"           :: later -- #6 is NOT redone
+```
+
+`--list` runs stage 1 and prints the ranked teams, so you can look before
+committing. `--pick` takes stage 1's **rank numbers**.
+
+Two things make coming back later work:
+
+* stage 1 writes **every** rated team to `shortlist.json` in rank order, so
+  `gen06` means the same team tomorrow as today — the numbering never shifts;
+* stage 2 shares one cache, so a later `--pick` **adds** to it and the workbook
+  is rebuilt to include everything searched so far.
+
+Omit `--pick` and stage 2 searches the top `--keep`, as before.
 
 ### What `--audit-all` actually does, and how long it takes
 

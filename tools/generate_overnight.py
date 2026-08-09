@@ -314,13 +314,16 @@ def main():
         if r.get("worst_opponent"):
             print(f"    worst vs {r['worst_opponent']} ({r['worst_value']:.0f})")
 
-    shortlist = {f"gen{i:02d}": r["team"] for i, r in enumerate(ranked[:args.keep], 1)}
+    # EVERY rated team, not just the top --keep. The numbering is the ranking,
+    # so gen06 means the same team tomorrow as it does today -- which is what
+    # makes "run #6 now, come back for #4 and #10 later" work at all.
+    shortlist = {f"gen{i:02d}": r["team"] for i, r in enumerate(ranked, 1)}
     # Carry the SETS as well as the roster. Without them the deep search would
     # re-simulate these teams on usage defaults -- rating a different team than
     # the one generation ranked, silently.
     payload = {"teams": shortlist,
                "sets": {f"gen{i:02d}": (r.get("sets") or {})
-                        for i, r in enumerate(ranked[:args.keep], 1)}}
+                        for i, r in enumerate(ranked, 1)}}
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
 
@@ -332,12 +335,15 @@ def main():
     write_team_sheets(shortlist, merged, sheets_path,
                       optimised=args.optimise_sets,
                       sets={f"gen{i:02d}": (r.get("sets") or {})
-                            for i, r in enumerate(ranked[:args.keep], 1)})
+                            for i, r in enumerate(ranked, 1)})
     print(f"Team sheets: {os.path.abspath(sheets_path)}")
-    print(f"\nShortlist: {os.path.abspath(args.out)}  ({len(shortlist)} teams)")
-    print("Feed it to the deep search with:")
-    print(f'  search_teams.py --rosters {args.out} '
-          f'--teams "{",".join(list(shortlist)[:3])}" --effort thorough --jobs 0 --export')
+    print(f"\nShortlist: {os.path.abspath(args.out)}  ({len(shortlist)} teams, "
+          f"numbered by rank)")
+    print("The deep search is the expensive half, so pick what is worth it:")
+    print(f'  overnight.bat --pick "{",".join(str(i) for i in range(1, min(args.keep, len(shortlist)) + 1))}"')
+    print("  ...then come back later and run --pick with other numbers; the "
+          "results accumulate\n  in the same cache and the workbook is "
+          "rebuilt to include everything done so far.")
     print("\nNOTE: beam search still ranks on coverage/synergy, not "
           "exploitability.\nThis widens the funnel (rating many finalists) but "
           "does not steer generation itself.")

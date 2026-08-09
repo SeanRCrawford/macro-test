@@ -26,6 +26,14 @@ rem   --script-screen    drop teams with no plan against King / Hard Trick
 rem                      Room / Perish Trap before the audit.
 rem   --min-winrate F    skip a generated team whose win rate is below this
 rem                      before spending the audit on it. Default 0.80.
+rem   --pick "4,10,12"   deep-search ONLY these teams, by their stage 1 RANK
+rem                      number. The numbering is stable and results
+rem                      accumulate, so you can run --pick "6" tonight and
+rem                      --pick "4,10,12" tomorrow without redoing #6. The
+rem                      workbook is rebuilt each time to include everything
+rem                      searched so far. Omit to search the top --keep.
+rem   --list             run stage 1 only, print the ranked teams, and stop --
+rem                      so you can look before spending the night on stage 2.
 rem   --sample-leads     audit only a sample of their most plausible leads
 rem                      instead of all 90 of their bring-4s. Much faster, but
 rem                      the Plan sheet's record then reads "X / 4" rather than
@@ -48,6 +56,8 @@ set AUDITALL=--audit-all
 set MINWR=0.80
 set OPTSETS=
 set SCRIPTSCR=
+set PICK=
+set LISTONLY=
 
 :parse
 if "%~1"=="" goto endparse
@@ -63,6 +73,8 @@ if /i "%~1"=="--sample-leads" (set AUDITALL=& shift & goto parse)
 if /i "%~1"=="--min-winrate"  (set MINWR=%~2& shift & shift & goto parse)
 if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& shift & goto parse)
 if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& shift & goto parse)
+if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
+if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
 echo Unknown argument: %~1
 echo Run with no arguments for defaults, or see the header of this file.
 exit /b 1
@@ -116,6 +128,17 @@ if not exist shortlist.json (
     exit /b 1
 )
 
+if defined LISTONLY (
+    echo.
+    echo ============================================================
+    echo Stage 1 done. The ranked teams are listed above.
+    echo Pick the ones worth the deep search, e.g.:
+    echo     overnight.bat --pick "6"
+    echo     overnight.bat --pick "4,10,12"     ^(later; #6 is not redone^)
+    echo ============================================================
+    exit /b 0
+)
+
 echo.
 echo ============================================================
 echo STAGE 2 of 2 -- %DEEPEFFORT% search of the shortlisted teams
@@ -124,7 +147,7 @@ rem No --teams: with a roster file, search_teams defaults OUR side to the
 rem generated teams and theirs to the library. Parsing the shortlist here and
 rem passing the names back in is what broke stage 2 when the file grew a
 rem wrapper for the optimised sets.
-python search_teams.py --rosters shortlist.json ^
+python search_teams.py --rosters shortlist.json %PICK% ^
     --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
     --sheets shortlist_sheets.json ^
     --cache overnight_%DEEPEFFORT%.json --export
@@ -140,6 +163,10 @@ if %RC%==0 (
     echo   Team sheets  what each gen team is: members, items, EVs, moves
     echo   Teams        ranked by Adjusted wins ^(higher is better^)
     echo   Turns        every audited turn, and whether the line won
+    echo.
+    echo Add more teams later with:  overnight.bat --pick "4,10,12"
+    echo Already-searched teams are not redone, and the workbook is rebuilt
+    echo to include everything done so far.
     echo ============================================================
 ) else (
     echo Stage 2 stopped early ^(exit %RC%^). Re-run the same command to resume.

@@ -101,6 +101,30 @@ class TestRosterChaining(unittest.TestCase):
         self.assertNotIn("teams", names)
         self.assertNotIn("sets", names)
 
+    def test_rank_numbers_are_stable_so_you_can_come_back(self):
+        """#6 must mean the same team tomorrow as it does today.
+
+        The whole point of picking by number is returning later for #4 and #10
+        without redoing #6, which only works if the numbering does not shift.
+        Stage 1 therefore writes EVERY rated team, in rank order, rather than
+        just the top --keep -- otherwise changing --keep would renumber them.
+        """
+        import search_teams
+        path = _write({"teams": {f"gen{i:02d}": [f"M{i}"] for i in range(1, 13)}})
+        order = list(search_teams.load_rosters(path))
+        self.assertEqual(order[5], "gen06")
+        self.assertEqual(order[3], "gen04")
+        self.assertEqual(order[11], "gen12")
+
+    def test_a_pick_of_different_teams_shares_one_cache(self):
+        """Searching #6, then #4, must leave BOTH in the cache."""
+        cache = ResultCache(None)
+        for name in ("gen06", "gen04"):
+            cache.put(ResultCache.key("bring", 6, name, "Rain"),
+                      {"ours": name, "theirs": "Rain"})
+        teams = sorted(v["ours"] for v in cache.data.values())
+        self.assertEqual(teams, ["gen04", "gen06"])
+
     def test_reads_a_wrapped_teams_key(self):
         path = _write({"teams": {"gen01": ["A", "B"]}, "generated_at": "today"})
         self.assertEqual(self.load_rosters(path), {"gen01": ["A", "B"]})
