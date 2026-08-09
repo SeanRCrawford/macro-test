@@ -17,13 +17,20 @@ holds, so it can be run against a half-finished overnight run without waiting
 for the rest, and re-running the same command with --export after everything is
 cached just re-exports without recomputing anything.
 """
-import argparse
-import json
 import os
 import sys
-import time
 
-import _harness  # noqa: F401  (adds ../src to sys.path)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "src"))
+# MUST come before anything that reaches numpy/pandas -- see the module
+# docstring. Every import below this line is deliberately ordered, not sorted.
+import blas_limits  # noqa: E402,F401
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import time  # noqa: E402
+
+import _harness  # noqa: E402,F401  (adds ../src to sys.path)
 
 sys.path.insert(0, "../src")
 from matchup_search import search_robust_composition  # noqa: E402
@@ -174,8 +181,7 @@ def main():
     args = ap.parse_args()
 
     settings = tier(args.effort)
-    if args.jobs == 0:
-        args.jobs = os.cpu_count() or 1
+    args.jobs, _warning = blas_limits.workers_advice(args.jobs)
     # The parent needs the team list; workers load their own copy. Reusing this
     # one in the serial path avoids loading the dataset twice.
     extra = load_rosters(args.rosters) if args.rosters else {}
@@ -219,6 +225,8 @@ def main():
     print(f"pairings : {len(jobs)}   batch {args.batch}   cache {args.cache}")
     print(f"workers  : {args.jobs}"
           f"{' (serial)' if args.jobs <= 1 else ''}   of {os.cpu_count()} cores")
+    if _warning:
+        print(f"WARNING  : {_warning}")
     print(f"resuming : {len(cache)} already done\n")
 
     # The prescreen width is part of the key: a run that filtered candidates

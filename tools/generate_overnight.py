@@ -26,13 +26,20 @@ stages chain:
     generate_overnight.py --candidates 40 --effort standard --out shortlist.json
     search_teams.py --rosters shortlist.json --teams "gen01,gen02" --effort thorough
 """
-import argparse
-import json
 import os
 import sys
-import time
 
-import _harness  # noqa: F401  (adds ../src to sys.path)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "src"))
+# MUST come before anything that reaches numpy/pandas -- see the module
+# docstring. Every import below this line is deliberately ordered, not sorted.
+import blas_limits  # noqa: E402,F401
+
+import argparse  # noqa: E402
+import json  # noqa: E402
+import time  # noqa: E402
+
+import _harness  # noqa: E402,F401  (adds ../src to sys.path)
 
 sys.path.insert(0, "../src")
 import generate_team as gt  # noqa: E402
@@ -127,8 +134,9 @@ def main():
     ap.add_argument("--keep", type=int, default=10,
                     help="how many of the rated teams to write to --out")
     args = ap.parse_args()
-    if args.jobs == 0:
-        args.jobs = os.cpu_count() or 1
+    args.jobs, _warning = blas_limits.workers_advice(args.jobs)
+    if _warning:
+        print(f"WARNING  : {_warning}")
 
     merged, _usage, moves, natures, typechart = build_merged_dataset()
     teams = gt.load_teams(merged=merged)

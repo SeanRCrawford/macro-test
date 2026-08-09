@@ -39,16 +39,21 @@ IMPORTANT: Stage 2/3/4 numbers come from the fast screener, which plays both
 sides greedily with no lookahead. Stage 5 is the trustworthy one. If a team
 looks great in stage 3 but poor in stage 5, believe stage 5.
 """
-import argparse
 import os
-import itertools
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import pandas as pd
+# MUST come before pandas/numpy: OpenBLAS sizes its thread pool once, at load,
+# and a pool of workers each starting a full-width pool exhausts memory.
+import blas_limits  # noqa: E402,F401
+
+import argparse  # noqa: E402
+import itertools  # noqa: E402
+import time  # noqa: E402
+
+import pandas as pd  # noqa: E402
 import species_data
 from species_data import build_merged_dataset, load_preferences
 from team_search import (build_candidate_pool, enemy_pairs_from_teams, build_pair_matrix,
@@ -366,8 +371,9 @@ def main():
                           "overwritten automatically the moment the pool or enemy teams "
                           "change.")
     args = ap.parse_args()
-    if args.jobs == 0:
-        args.jobs = os.cpu_count() or 1
+    args.jobs, _jobs_warning = blas_limits.workers_advice(args.jobs)
+    if _jobs_warning:
+        print(f"WARNING: {_jobs_warning}")
 
     print("Loading data...")
     merged, unresolved, moves, natures, typechart = build_merged_dataset()

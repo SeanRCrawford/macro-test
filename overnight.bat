@@ -46,6 +46,18 @@ echo Run with no arguments for defaults, or see the header of this file.
 exit /b 1
 :endparse
 
+rem OpenBLAS sizes its thread pool to the core count in EVERY worker process,
+rem which on a many-core machine exhausts memory before the search even starts
+rem ("OpenBLAS error: Memory Allocation still failed after 10 retries").
+rem Nothing here is numerically parallel, so one BLAS thread per process costs
+rem nothing. Set here as well as in Python because these are read when the
+rem library loads, and belt-and-braces is cheap.
+set OMP_NUM_THREADS=1
+set OPENBLAS_NUM_THREADS=1
+set MKL_NUM_THREADS=1
+set NUMEXPR_NUM_THREADS=1
+set VECLIB_MAXIMUM_THREADS=1
+
 where python >nul 2>nul
 if errorlevel 1 (
     echo ERROR: python not found. Install Python 3.11+ from python.org first
