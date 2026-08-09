@@ -51,7 +51,7 @@ TYPICAL_LINE_TURNS = 8
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 6   # optimised sets travel with the roster
+SCHEMA = 7   # --brings is part of what was computed
 
 
 _WORLD = None       # per-process dataset, loaded once (13-14s) and reused
@@ -108,7 +108,7 @@ def _run_pairing(job):
     types: on Windows the pool uses spawn, so both the function and its result
     cross a pickle boundary.
     """
-    ours, theirs, effort, turns, prescreen, audit_all = job
+    ours, theirs, effort, turns, prescreen, audit_all, brings = job
     global _WORLD
     if _WORLD is None:                       # serial path, or a pool without init
         _worker_init()
@@ -119,7 +119,7 @@ def _run_pairing(job):
         _WORLD["typechart"], max_turns=turns,
         our_sets=_EXTRA_SETS.get(ours) or None,
         enemy_sets=_EXTRA_SETS.get(theirs) or None,
-        verify_top=settings["verify_top"],
+        verify_top=brings or settings["verify_top"],
         rate_robustness=settings["robustness"],
         robustness_leads=settings["leads"] or 1,
         robustness_turns=settings["turns"] or 1,
@@ -194,6 +194,14 @@ def main():
                          "teams that are not in teams.csv can be searched by "
                          "name. This is how generate_overnight.py feeds this "
                          "tool. Roster contents are part of the cache key.")
+    ap.add_argument("--brings", type=int, default=0, metavar="N",
+                    help="audit only the N best of OUR brings instead of the "
+                         "tier's default. The cheap screen has already ranked "
+                         "them by worst-case margin, so this keeps the most "
+                         "promising few and skips auditing the rest. Cost is "
+                         "linear in N: --brings 2 at thorough is a third of "
+                         "the work. The runner-up you did not audit will not "
+                         "appear in the workbook, which is the trade.")
     ap.add_argument("--pick", default="",
                     help="which of the roster file's teams to search, by RANK "
                          "NUMBER: --pick \"4,10,12\". The numbering is stable "
@@ -310,8 +318,9 @@ def main():
     audit_all = _audit_all
     if settings["robustness"]:
         their_configs = 90 if audit_all else settings["leads"]
-        lines_each = settings["verify_top"] * their_configs
-        print(f"audit    : {settings['verify_top']} of our brings x "
+        our_brings = args.brings or settings["verify_top"]
+        lines_each = our_brings * their_configs
+        print(f"audit    : {our_brings} of our brings x "
               f"{their_configs} of their bring-4s "
               f"{'(ALL of them: leads AND backs)' if audit_all else '(sampled leads)'}"
               f" = {lines_each} lines per pairing")
@@ -321,6 +330,16 @@ def main():
               f"{args.jobs} worker(s)")
         print(f"           (rough -- a real ETA replaces it once the first "
               f"pairing finishes)")
+        if seconds > 4 * 3600:
+            # Naming the levers beside the number, because "83 hours" with no
+            # suggestion is where a tool gets abandoned.
+            print("           TOO LONG? the three levers, in order of effect:")
+            print(f"             --vs \"Big 6\"   one opponent instead of "
+                  f"{len(theirs_pool)}  ->  {len(theirs_pool)}x less")
+            print(f"             --brings 2      instead of {our_brings}"
+                  f"  ->  {our_brings / 2:.0f}x less")
+            print("             --sample-leads  their likely leads instead of "
+                  "all 90  ->  ~22x less")
     print()
 
     # The prescreen width is part of the key: a run that filtered candidates
@@ -329,7 +348,7 @@ def main():
     # A generated roster is part of what determines the answer, so it belongs
     # in the key: two teams sharing a name but not a roster must not collide.
     keyed = [(ResultCache.key("bring", SCHEMA, a, b, args.effort, args.turns,
-                              prescreen, args.audit_all,
+                              prescreen, args.audit_all, args.brings,
                               extra.get(a), extra.get(b),
                               extra_sets.get(a), extra_sets.get(b)), a, b)
              for a, b in jobs]
@@ -361,7 +380,7 @@ def main():
                                         initargs=(extra, extra_sets)) as pool:
                 futures = {pool.submit(_run_pairing,
                                        (a, b, args.effort, args.turns, prescreen,
-                                        args.audit_all)): (k, a, b)
+                                        args.audit_all, args.brings)): (k, a, b)
                            for k, a, b in batch}
                 for future in cf.as_completed(futures):
                     k, a, b = futures[future]
@@ -374,7 +393,7 @@ def main():
             for k, ours, theirs in batch:
                 cache.put(k, _run_pairing((ours, theirs, args.effort,
                                            args.turns, prescreen,
-                                           args.audit_all)))
+                                           args.audit_all, args.brings)))
                 done += 1
                 _progress(ours, theirs)
             cache.save()

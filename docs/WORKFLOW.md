@@ -59,6 +59,8 @@ Options worth knowing:
 | `--generations SPEC` | all | e.g. `1-5` |
 | `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
+| `--vs "Big 6"` | all | deep-search only these opponents — the biggest single lever |
+| `--brings N` | tier default | audit only the N best of our brings per pairing |
 | `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate |
 | `--list` | off | stage 1 only — rate and rank, then stop |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
@@ -84,6 +86,23 @@ Two things make coming back later work:
   is rebuilt to include everything searched so far.
 
 Omit `--pick` and stage 2 searches the top `--keep`, as before.
+
+### If the estimate is hours you do not have
+
+Stage 2 prints the three levers when the wait exceeds 4 hours. They multiply:
+
+| Lever | Effect | Cost |
+|---|---|---|
+| `--vs "Big 6"` | one opponent instead of 8 → **8x less** | you only learn about that opponent |
+| `--brings 2` | 2 of our brings instead of 6 → **3x less** | the runner-up bring is not audited, so it cannot appear in the workbook |
+| `--sample-leads` | their likely leads instead of all 90 → **~22x less** | the record stops being `X / 90` |
+
+Measured, on the full library at thorough: `7.6 h` → `--vs "Big 6" --brings 2`
+→ **`0.3 h`**. The first two keep the total-pathing property intact; only
+`--sample-leads` gives it up.
+
+The honest order to reach for them: narrow the opponents first (you usually
+care about one matchup), then the brings, and only give up the 90 if you must.
 
 ### What `--audit-all` actually does, and how long it takes
 

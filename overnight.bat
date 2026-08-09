@@ -26,6 +26,13 @@ rem   --script-screen    drop teams with no plan against King / Hard Trick
 rem                      Room / Perish Trap before the audit.
 rem   --min-winrate F    skip a generated team whose win rate is below this
 rem                      before spending the audit on it. Default 0.80.
+rem   --vs "Big 6"       deep-search against ONLY these opponents instead of
+rem                      the whole library. THE biggest lever: 1 opponent
+rem                      instead of 7 is 7x less work. Comma-separated.
+rem   --brings N         audit only the N best of OUR brings per pairing
+rem                      instead of the tier's default (6 at thorough). The
+rem                      cheap screen has already ranked them, so this keeps
+rem                      the most promising few. Cost is linear in N.
 rem   --pick "4,10,12"   deep-search ONLY these teams, by their stage 1 RANK
 rem                      number. The numbering is stable and results
 rem                      accumulate, so you can run --pick "6" tonight and
@@ -58,6 +65,8 @@ set OPTSETS=
 set SCRIPTSCR=
 set PICK=
 set LISTONLY=
+set VS=
+set BRINGS=
 
 :parse
 if "%~1"=="" goto endparse
@@ -75,6 +84,8 @@ if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& shift & goto parse)
 if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& shift & goto parse)
 if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
+if /i "%~1"=="--vs"           (set VS=--vs "%~2"& shift & shift & goto parse)
+if /i "%~1"=="--brings"       (set BRINGS=--brings %~2& shift & shift & goto parse)
 echo Unknown argument: %~1
 echo Run with no arguments for defaults, or see the header of this file.
 exit /b 1
@@ -147,7 +158,7 @@ rem No --teams: with a roster file, search_teams defaults OUR side to the
 rem generated teams and theirs to the library. Parsing the shortlist here and
 rem passing the names back in is what broke stage 2 when the file grew a
 rem wrapper for the optimised sets.
-python search_teams.py --rosters shortlist.json %PICK% ^
+python search_teams.py --rosters shortlist.json %PICK% %VS% %BRINGS% ^
     --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
     --sheets shortlist_sheets.json ^
     --cache overnight_%DEEPEFFORT%.json --export
