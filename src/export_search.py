@@ -235,7 +235,7 @@ def _best_lines_sheet(wb, rows):
     ws = wb.create_sheet("Best lines")
     ws.append(["Opponent", "Team", "Bring (lead first)", "Their lead",
                "Result", "Worst punish", "Turn", "Play this",
-               "If they answer with"])
+               "If they answer with", "What happens", "KOs", "HP after"])
     _style_header(ws)
     any_rows = False
     for r in sorted(rows, key=lambda x: (x["ours"], x["theirs"])):
@@ -263,11 +263,21 @@ def _best_lines_sheet(wb, rows):
                 r["theirs"] if i == 0 else None,
                 r["ours"] if i == 0 else None,
                 " / ".join(cand.get("bring") or []) if i == 0 else None,
-                " / ".join(lead.get("lead") or []) if i == 0 else None,
+                " / ".join(lead.get("enemy_bring")
+                           or lead.get("lead") or []) if i == 0 else None,
                 "WIN" if i == 0 else None,
                 round(worst, 1) if i == 0 else None,
-                t.get("turn"), t.get("our_play"), t.get("punished_by"),
+                t.get("turn"), t.get("our_play"),
+                t.get("punished_by") or ("no punish available"
+                                         if t.get("no_punish") else None),
+                # The engine's own log for this turn: damage numbers, KOs,
+                # weather and item triggers, in the order they resolved.
+                "\n".join(t.get("events") or []) or None,
+                ", ".join(t.get("kos") or []) or None,
+                ", ".join(t.get("hp_after") or []) or None,
             ])
+            ws.cell(ws.max_row, 10).alignment = Alignment(wrap_text=True,
+                                                          vertical="top")
             if i == 0:
                 ws.cell(ws.max_row, 5).fill = GOOD_FILL
                 _shade(ws.cell(ws.max_row, 6), worst)
@@ -402,6 +412,10 @@ def _legend_sheet(wb):
          "Wins with no severe turn anywhere in the line. The strictest column: "
          "these are the lines that win without ever handing a good player "
          "more than a third of a Pokemon."),
+        ("What happens",
+         "On the Best lines sheet: the engine's own log for that turn -- the "
+         "damage numbers, who fainted, weather and item triggers, in the order "
+         "they resolved. This is the match itself, not a summary of it."),
         ("Their best answer",
          "Blank, shown as 'no punish available', when nothing they can do "
          "gains more than a couple of points. Naming a 'punish' there would be "

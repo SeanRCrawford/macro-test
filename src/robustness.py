@@ -73,6 +73,13 @@ class TurnRobustness:
     # to score a single turn (that is what exploitability means); use this to
     # advance a line, or the opponent reads our mind on every turn of the game.
     equilibrium_reply: object = None
+    # What actually happened when the line advanced through this turn: the
+    # engine's own log lines (damage dealt, KOs, weather, item triggers) and
+    # the HP left on both sides afterwards. A plan you cannot see the damage
+    # for is a plan you have to take on faith.
+    events: list = field(default_factory=list)
+    hp_after: list = field(default_factory=list)   # (side, name, hp, max)
+    kos: list = field(default_factory=list)        # names that fainted here
 
     @property
     def severe(self) -> bool:
@@ -239,9 +246,22 @@ def line_report(battle, movesets, choose, max_turns=8, side_name="p1"):
         # against the standard model. Exploitability still scores the turn
         # against the best response, which is what the definition requires;
         # only the trajectory changes.
+        seen_before = len(battle.log.lines)
+        dead_before = {c.name for side in (battle.p1, battle.p2)
+                       for c in side.roster if c.fainted}
         nxt = step(battle, our_action, rec.equilibrium_reply) if rec else None
         if nxt is None:
             break
+        if rec is not None:
+            # Only the lines THIS turn produced: step deepcopies, so the copy
+            # carries the whole history and the tail is what is new.
+            rec.events = list(nxt.log.lines[seen_before:])
+            rec.hp_after = [
+                (side_key, c.name, int(c.current_hp), int(c.max_hp()))
+                for side_key, s_ in (("us", nxt.p1), ("them", nxt.p2))
+                for c in s_.roster]
+            rec.kos = sorted({c.name for s_ in (nxt.p1, nxt.p2)
+                              for c in s_.roster if c.fainted} - dead_before)
         battle = nxt
         report.length += 1
 

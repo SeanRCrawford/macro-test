@@ -1458,6 +1458,138 @@ with tab_battle:
 # ------------------------------------------------------------------ vs team
 with tab_vs:
     st.subheader("Vs a specific team")
+
+    # --- Overnight results browser -------------------------------------
+    # The batch tools already computed and cached every audited line. Reading
+    # that cache here is far better than recomputing it in the app: it is the
+    # SAME numbers the workbook reports, and it is instant.
+    with st.expander("Load an overnight run (shortlist / results cache)",
+                     expanded=False):
+        st.caption("Point this at the files overnight.bat wrote in tools\\. "
+                   "The shortlist makes generated teams selectable as YOUR "
+                   "team; the results cache lets you read the best line "
+                   "against each opponent, turn by turn, with damage.")
+        c1, c2 = st.columns(2)
+        shortlist_path = c1.text_input(
+            "Shortlist JSON", value="../tools/shortlist.json",
+            key="vs_shortlist_path",
+            help="Written by generate_overnight / overnight.bat. Carries the "
+                 "generated rosters and their optimised sets.")
+        cache_path = c2.text_input(
+            "Results cache JSON", value="../tools/overnight_thorough.json",
+            key="vs_cache_path",
+            help="The search cache. Same data the .xlsx is built from.")
+
+        if st.button("Load", key="vs_load_overnight"):
+            import json as _json
+            loaded = {}
+            for label, path in (("shortlist", shortlist_path),
+                                ("cache", cache_path)):
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        loaded[label] = _json.load(fh)
+                except (OSError, ValueError) as exc:
+                    st.warning(f"{label}: {exc}")
+            st.session_state["vs_overnight"] = loaded
+            if loaded:
+                st.success(f"Loaded: {', '.join(loaded)}")
+
+        blob = st.session_state.get("vs_overnight") or {}
+        sl = blob.get("shortlist") or {}
+        gen_teams = sl.get("teams", sl) if isinstance(sl, dict) else {}
+        gen_sets = sl.get("sets", {}) if isinstance(sl, dict) else {}
+        if gen_teams:
+            pick = st.selectbox("Generated team", ["(none)"] + list(gen_teams),
+                                key="vs_gen_pick")
+            if pick != "(none)":
+                members = gen_teams[pick]
+                st.write(" / ".join(members))
+                sheet = gen_sets.get(pick) or {}
+                if sheet:
+                    st.dataframe(
+                        [{"Pokemon": n, "Item": spec.get("item"),
+                          "Moves": ", ".join(spec.get("moves") or [])}
+                         for n, spec in sheet.items()],
+                        use_container_width=True, hide_index=True)
+                    st.caption("Optimised sets, as simulated.")
+                else:
+                    st.caption("No optimised sets recorded -- this team was "
+                               "rated on usage defaults.")
+                if st.button(f"Use {pick} as my team", key="vs_use_gen"):
+                    st.session_state["team"] = list(members)
+                    st.session_state["team_analysis"] = None
+                    st.success(f"{pick} loaded into the Team Builder tab.")
+                    st.rerun()
+
+        cache = blob.get("cache") or {}
+        rows = [v for v in cache.values()
+                if isinstance(v, dict) and v.get("ours")] if cache else []
+        if rows:
+            st.markdown("**Best line against a specific opponent**")
+            teams_in = sorted({r["ours"] for r in rows})
+            ours_pick = st.selectbox("Our team", teams_in, key="vs_line_ours")
+            opps = sorted({r["theirs"] for r in rows if r["ours"] == ours_pick})
+            theirs_pick = st.selectbox("Opponent", opps, key="vs_line_theirs")
+            row = next((r for r in rows if r["ours"] == ours_pick
+                        and r["theirs"] == theirs_pick), None)
+
+            # Every audited line for this pairing, so a specific LEAD of theirs
+            # can be inspected rather than only the recommended one.
+            lines = [(cand, lead) for cand in (row.get("candidates") or [])
+                     for lead in (cand.get("audit") or [])] if row else []
+            if not lines:
+                st.info("No audited lines for this pairing "
+                        "(the quick tier does not audit lines).")
+            else:
+                def _label(pair):
+                    cand, lead = pair
+                    bring = " / ".join(cand.get("bring") or [])
+                    theirs = " / ".join(lead.get("enemy_bring")
+                                        or lead.get("lead") or [])
+                    return (f"[{(lead.get('outcome') or '?').upper()}] "
+                            f"vs {theirs}   (we bring {bring})")
+
+                wins_first = sorted(
+                    lines,
+                    key=lambda pr: (pr[1].get("outcome") != "win",
+                                    pr[1].get("mean_exploitability") or 0))
+                chosen = st.selectbox("Their bring (winning lines first)",
+                                      wins_first, format_func=_label,
+                                      key="vs_line_pick")
+                cand, lead = chosen
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Result", (lead.get("outcome") or "?").upper())
+                m2.metric("Mean punish",
+                          f"{lead.get('mean_exploitability') or 0:.0f}")
+                m3.metric("Worst punish",
+                          f"{lead.get('worst_exploitability') or 0:.0f}")
+                m4.metric("Line value",
+                          f"{lead.get('adjusted_value') or 0:.2f}")
+
+                for t in lead.get("turns") or []:
+                    punish = t.get("exploitability") or 0.0
+                    flag = " ⚠️" if punish > 60 else ""
+                    with st.expander(
+                            f"Turn {t.get('turn')} — punish {punish:.0f}{flag}"
+                            f"   |   {t.get('our_play')}", expanded=False):
+                        st.markdown(f"**We play:** {t.get('our_play')}")
+                        answer = t.get("punished_by")
+                        st.markdown(
+                            f"**Their best answer:** {answer}" if answer
+                            else "**Their best answer:** none — nothing they "
+                                 "can do gains meaningful ground here.")
+                        if t.get("tied_replies", 1) > 5:
+                            st.caption(
+                                f"{t['tied_replies']} of their replies score "
+                                f"identically, so the named answer is a "
+                                f"tie-break, not a read.")
+                        if t.get("events"):
+                            st.code("\n".join(t["events"]), language=None)
+                        if t.get("kos"):
+                            st.error("Knocked out: " + ", ".join(t["kos"]))
+                        if t.get("hp_after"):
+                            st.caption("After: " + ", ".join(t["hp_after"]))
+
     st.caption("Check the currently loaded team (Team Builder tab) against any enemy team you "
                "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
                "(pokepast.es 'Paste'/'Export' view) -- without saving it to data/teams/ first. "

@@ -921,6 +921,10 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
                 "severe": t.severe,
                 "tied_replies": t.tied_replies,
                 "our_play": describe_action(t.our_action),
+                "events": list(t.events),
+                "kos": list(t.kos),
+                "hp_after": [f"{n} {hp}/{mx}" for _s, n, hp, mx in t.hp_after
+                             if hp > 0],
                 # Only name a punish when one exists. Below NO_PUNISH every
                 # reply scores the same and this field would be the arbitrary
                 # winner of a tie presented as a read.
