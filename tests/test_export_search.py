@@ -181,9 +181,10 @@ class TestExportSearch(unittest.TestCase):
         header = [c.value for c in ws[1]]
         self.assertEqual(header[4:7],
                          ["Lines won", "Lines audited", "Adjusted wins (count)"])
-        self.assertEqual(ws.cell(2, 5).value, 2)      # both lines won
-        self.assertEqual(ws.cell(2, 6).value, 2)      # both audited
-        self.assertAlmostEqual(ws.cell(2, 7).value, 1.0)   # 0.5 + 0.5
+        # Written against the denominator, not as a bare decimal.
+        self.assertEqual(ws.cell(2, 5).value, "2 / 2")
+        self.assertEqual(ws.cell(2, 6).value, 2)
+        self.assertEqual(ws.cell(2, 7).value, "1.0 / 2")   # 0.5 + 0.5
 
     def test_a_losing_line_is_shown_not_hidden(self):
         row = _rated_row("Sun", "Rain", 40.0)
@@ -193,7 +194,20 @@ class TestExportSearch(unittest.TestCase):
         ws = wb["Lines"]
         results = {ws.cell(r, 6).value for r in range(2, ws.max_row + 1)}
         self.assertEqual(results, {"LOSS", "WIN"})
-        self.assertEqual(wb["Teams"].cell(2, 5).value, 1)   # one line won
+        self.assertEqual(wb["Teams"].cell(2, 5).value, "1 / 2")
+
+    def test_a_turn_with_no_real_punish_says_so_instead_of_naming_one(self):
+        """The nonsense this removes: a 46-way tie reported as a read."""
+        row = _rated_row("Sun", "Rain", 40.0)
+        turn = row["candidates"][0]["audit"][0]["turns"][0]
+        turn["punished_by"], turn["no_punish"] = None, True
+        turn["tied_replies"] = 46
+        wb, _ = _build({"k": row})
+        ws = wb["Turns"]
+        answers = [ws.cell(r, 14).value for r in range(2, ws.max_row + 1)]
+        self.assertIn("no punish available", answers)
+        tied = [ws.cell(r, 15).value for r in range(2, ws.max_row + 1)]
+        self.assertIn(46, tied)
 
     def test_severity_shading_thresholds_bracket_the_severe_constant(self):
         wb, _ = _build({"a": _rated_row("Low", "X", MILD - 1),

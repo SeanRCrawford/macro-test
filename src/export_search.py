@@ -140,8 +140,9 @@ def _teams_sheet(wb, rows):
                    round(adjusted, 3) if adjusted is not None else None,
                    round(robust, 3) if robust is not None else None,
                    round(clean, 3) if clean is not None else None,
-                   n_wins or None, n_lines or None,
-                   round(adj_total, 1) if n_lines else None,
+                   f"{n_wins} / {n_lines}" if n_lines else None,
+                   n_lines or None,
+                   f"{adj_total:.1f} / {n_lines}" if n_lines else None,
                    round(mean, 1) if mean is not None else None,
                    wins or None, played or None,
                    worst["theirs"] if worst else None,
@@ -179,8 +180,11 @@ def _matchups_sheet(wb, rows):
             if r.get("adjusted_win_rate") is not None else None,
             round(r["robust_win_rate"], 3)
             if r.get("robust_win_rate") is not None else None,
-            _line_totals(r)[1] or None, _line_totals(r)[0] or None,
-            round(_line_totals(r)[2], 1) if _line_totals(r)[0] else None,
+            (f"{_line_totals(r)[1]} / {_line_totals(r)[0]}"
+             if _line_totals(r)[0] else None),
+            _line_totals(r)[0] or None,
+            (f"{_line_totals(r)[2]:.1f} / {_line_totals(r)[0]}"
+             if _line_totals(r)[0] else None),
             round(r["exploitability"], 1) if r.get("exploitability") is not None else None,
             r.get("severe_turns"),
             " / ".join(r.get("hardest_lead") or []) or None,
@@ -332,7 +336,7 @@ def _turns_sheet(wb, rows):
     ws.append(["Team", "Opponent", "Bring (lead first)", "Their bring",
                "Lead likelihood", "Line result", "Turn", "Exploitability",
                "Expected loss", "Regret", "Equilibrium", "Our worst case",
-               "Our play", "Their best answer"])
+               "Our play", "Their best answer", "Tied replies"])
     _style_header(ws)
     any_rows = False
     for r in sorted(rows, key=lambda x: (x["ours"], x["theirs"])):
@@ -358,7 +362,10 @@ def _turns_sheet(wb, rows):
                         if t.get("equilibrium") is not None else None,
                         round(t["worst_case"], 1)
                         if t.get("worst_case") is not None else None,
-                        t.get("our_play"), t.get("punished_by"),
+                        t.get("our_play"),
+                        t.get("punished_by") or ("no punish available"
+                                                 if t.get("no_punish") else None),
+                        t.get("tied_replies"),
                     ])
                     _shade(ws.cell(ws.max_row, 8), t.get("exploitability"))
                     _shade(ws.cell(ws.max_row, 9), t.get("expected_loss"))
@@ -395,6 +402,16 @@ def _legend_sheet(wb):
          "Wins with no severe turn anywhere in the line. The strictest column: "
          "these are the lines that win without ever handing a good player "
          "more than a third of a Pokemon."),
+        ("Their best answer",
+         "Blank, shown as 'no punish available', when nothing they can do "
+         "gains more than a couple of points. Naming a 'punish' there would be "
+         "reporting the arbitrary winner of a tie as if it were a read -- "
+         "measured on a real line, 46 of their 62 replies scored identically "
+         "on one turn."),
+        ("Tied replies",
+         "How many of their actions scored the same as the one named. A big "
+         "number means the position is insensitive to what they do, usually "
+         "because we protected, and the 'punish' is a tie-break."),
         ("Lines won / audited",
          "Counts, not rates. Under --audit-all (and at --effort exhaustive) "
          "the denominator is all 90 of their bring-4s, so '57 / 90' means the "
@@ -402,9 +419,10 @@ def _legend_sheet(wb):
          "tiers it is a sample of their most plausible leads instead, and the "
          "denominator says so."),
         ("Adjusted wins (count)",
-         "The same discount applied to counts rather than a rate: the sum of "
-         "each winning line's Adjusted value. Read it as 'this many wins' "
-         "worth of wins, after paying for how punishable each one was'."),
+         "The same discount applied to counts rather than a rate, written as "
+         "'X / N' against the number of lines audited -- so under --audit-all "
+         "it reads directly as 'this many wins out of 90, after paying for how "
+         "punishable each one was'."),
         ("Adjusted value",
          "On the Lines sheet: one line's own contribution to Adjusted wins, "
          "0 to 1. Zero means the line lost or was too punishable to count."),
@@ -456,7 +474,32 @@ def _legend_sheet(wb):
     return ws
 
 
-def build_workbook(cache_data, out_path):
+def _team_sheets_sheet(wb, sheets):
+    """What each generated team actually IS: members, item, ability, EVs, moves.
+
+    Without this the workbook names "gen03" and there is no way to see which
+    six Pokemon that is, let alone which four moves each runs -- so a promising
+    result cannot be taken to a game without re-running generation.
+    """
+    ws = wb.create_sheet("Team sheets")
+    ws.append(["Team", "Pokemon", "Types", "Item", "Ability", "Nature",
+               "EVs (hp/atk/def/spa/spd/spe)", "Moves", "Sets"])
+    _style_header(ws)
+    for name, members in (sheets or {}).items():
+        for i, m in enumerate(members):
+            ws.append([name if i == 0 else None, m.get("pokemon"),
+                       m.get("types"), m.get("item"), m.get("ability"),
+                       m.get("nature"), m.get("evs"),
+                       ", ".join(m.get("moves") or []), m.get("sets")])
+    if not sheets:
+        ws.append(["No team sheets for this run.",
+                   "Generated teams write <shortlist>_sheets.json; pass it to "
+                   "--export-sheets, or this run used library teams whose sets "
+                   "are already in the data files."])
+    _autosize(ws)
+
+
+def build_workbook(cache_data, out_path, team_sheets=None):
     """Write the workbook. Returns the number of pairing rows exported."""
     rows = rows_of(cache_data)
     wb = Workbook()
@@ -466,6 +509,7 @@ def build_workbook(cache_data, out_path):
     _lines_sheet(wb, rows)
     _candidates_sheet(wb, rows)
     _turns_sheet(wb, rows)
+    _team_sheets_sheet(wb, team_sheets)
     _legend_sheet(wb)
     wb.save(out_path)
     return len(rows)

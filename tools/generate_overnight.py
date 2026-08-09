@@ -133,6 +133,12 @@ def main():
                     help="where to write the shortlist search_teams.py reads")
     ap.add_argument("--keep", type=int, default=10,
                     help="how many of the rated teams to write to --out")
+    ap.add_argument("--min-winrate", type=float, default=0.80, metavar="F",
+                    help="abandon a team as soon as its running win rate "
+                         "against the opponents checked so far falls below "
+                         "this (default 0.80). A team that cannot win is not "
+                         "worth auditing for punishability, and the audit is "
+                         "the expensive stage. Set 0 to rate everything.")
     args = ap.parse_args()
     args.jobs, _warning = blas_limits.workers_advice(args.jobs)
     if _warning:
@@ -156,6 +162,32 @@ def main():
         key = ResultCache.key("team", SCHEMA, sorted(team), args.effort, args.turns)
         record = cache.get(key)
         if record is None:
+            # SCREEN FIRST. The win check is cheap next to the audit, and a
+            # team losing its games is not a team whose lines are worth
+            # measuring -- a lost position rates as unpunishable, so auditing
+            # it produces a flattering number for a bad team. Rate only what
+            # already wins, then rank those by punishability.
+            if args.min_winrate > 0:
+                screen = gt.verify_with_solver(
+                    team, teams, merged, moves, natures, typechart, {}, [],
+                    max_turns=args.turns, all_backs=True, effort="quick",
+                    jobs=args.jobs)
+                s_wins = sum((r.get("wins") or 0) for r in screen.values() if r)
+                s_total = sum((r.get("total") or 0) for r in screen.values() if r)
+                if s_total and s_wins / s_total < args.min_winrate:
+                    record = {"team": list(team), "beam_score": beam_score,
+                              "exploitability": None, "adjusted_win_rate": None,
+                              "robust_win_rate": None, "severe_turns": 0,
+                              "wins": s_wins, "total": s_total,
+                              "skipped": "below --min-winrate"}
+                    cache.put(key, record)
+                    cache.save()
+                    rated.append(record)
+                    print(f"  [{i}/{len(finals)}] skipped: "
+                          f"{s_wins}/{s_total} won "
+                          f"({s_wins / s_total:.0%} < {args.min_winrate:.0%})",
+                          flush=True)
+                    continue
             verdict = gt.verify_with_solver(
                 team, teams, merged, moves, natures, typechart, {}, [],
                 max_turns=args.turns, all_backs=True, effort=args.effort,
@@ -226,6 +258,14 @@ def main():
     shortlist = {f"gen{i:02d}": r["team"] for i, r in enumerate(ranked[:args.keep], 1)}
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(shortlist, fh, indent=2)
+
+    # The full sheets alongside the bare rosters. Without these the workbook
+    # names "gen03" and the user has no way to see WHAT gen03 is -- which
+    # Pokemon, which item, which four moves -- short of re-running generation.
+    from team_sheet_export import write_team_sheets
+    sheets_path = os.path.splitext(args.out)[0] + "_sheets.json"
+    write_team_sheets(shortlist, merged, sheets_path)
+    print(f"Team sheets: {os.path.abspath(sheets_path)}")
     print(f"\nShortlist: {os.path.abspath(args.out)}  ({len(shortlist)} teams)")
     print("Feed it to the deep search with:")
     print(f'  search_teams.py --rosters {args.out} '

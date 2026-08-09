@@ -38,6 +38,14 @@ LOSS = -1e4
 # third of a Pokemon at KO_WEIGHT = 180.
 SEVERE = 60.0
 
+# Below this, a "best response" is not a punish at all -- it is the arbitrary
+# winner of a tie. Measured on a real line: on one turn 46 of their 62 actions
+# scored IDENTICALLY, and the reported punisher was simply the first of them,
+# which is why the workbook showed opponents "punishing" by switching into
+# positions that gained them nothing. A gap this small is noise from regret
+# matching, not a play anyone would make.
+NO_PUNISH = 2.0
+
 
 @dataclass
 class TurnRobustness:
@@ -53,7 +61,11 @@ class TurnRobustness:
     # sound play for them too, chosen without knowing ours. Near zero means the
     # play only loses ground to a read they cannot reliably make.
     expected_loss: float = 0.0
-    punisher: object = None    # their joint action that does it
+    punisher: object = None     # their best reply, or None when there is none
+    # How many of their actions tied at that same worst value. A large number
+    # means the position is insensitive to what they do -- typically because we
+    # protected -- and the named punisher is a tie-break, not a read.
+    tied_replies: int = 1
     our_action: object = None
     # Their EQUILIBRIUM reply -- the action a strong player picks without
     # seeing ours. Distinct from `punisher`, which is the best response to the
@@ -65,6 +77,15 @@ class TurnRobustness:
     @property
     def severe(self) -> bool:
         return self.exploitability > SEVERE
+
+    @property
+    def has_punish(self) -> bool:
+        """Is there actually a play that hurts us here?
+
+        False means every reply is worth the same and the `punisher` field is a
+        tie-break. Reporting one anyway invents a read the opponent never had.
+        """
+        return self.exploitability > NO_PUNISH
 
 
 @dataclass
@@ -155,7 +176,18 @@ def turn_robustness(battle, movesets, our_action, side_name="p1"):
     equilibrium, _p, q = solve_matrix(A)
     worst_per_row = [min(r) for r in A]
     maximin = max(worst_per_row)
-    worst_j = min(range(len(theirs)), key=lambda j: A[idx][j])
+    row_min = min(A[idx])
+    tied = [j for j in range(len(theirs)) if A[idx][j] <= row_min + 1e-9]
+    # Among equal-valued replies prefer one that actually commits to something:
+    # an attack reads as a punish, a switch or a Protect that scores the same is
+    # the tie-break talking. Without this the first-indexed action wins and the
+    # report claims the opponent "punished" by repositioning for no gain.
+    def _passivity(j):
+        acts = theirs[j]
+        return (any(a.kind == "switch" for a in acts),
+                any(a.kind == "protect" for a in acts), j)
+
+    worst_j = min(tied, key=_passivity)
     # Their equilibrium play, taken as the highest-probability action in the
     # equilibrium mixture. argmax rather than a sample so a line is
     # reproducible -- the golden baseline and the parallel path both depend on
@@ -176,6 +208,7 @@ def turn_robustness(battle, movesets, our_action, side_name="p1"):
         equilibrium=equilibrium,
         worst_case=worst_per_row[idx],
         punisher=theirs[worst_j],
+        tied_replies=len(tied),
         our_action=our_action,
         equilibrium_reply=theirs[eq_j],
     )

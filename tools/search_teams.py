@@ -179,6 +179,11 @@ def main():
                          "reuses it, so this is close to a linear speedup on a "
                          "long run. Memory is the limit, not CPU: budget "
                          "roughly 1GB per worker.")
+    ap.add_argument("--sheets", default="", metavar="PATH",
+                    help="team-sheet JSON written by generate_overnight "
+                         "(<shortlist>_sheets.json). Rendered as a Team sheets "
+                         "tab so the workbook says what each generated team "
+                         "actually is -- members, item, ability, EVs, moves.")
     ap.add_argument("--export", nargs="?", const="", default=None,
                     metavar="PATH",
                     help="also write an .xlsx report (default: the cache file "
@@ -291,7 +296,16 @@ def main():
     if args.export is not None:
         from export_search import build_workbook
         path = args.export or (os.path.splitext(args.cache)[0] + ".xlsx")
-        n = build_workbook(cache.data, path)
+        sheets = None
+        # Default to the sheets sitting beside the roster file, so the chained
+        # pipeline picks them up without a third flag to remember.
+        sheets_path = args.sheets or (
+            os.path.splitext(args.rosters)[0] + "_sheets.json"
+            if args.rosters else "")
+        if sheets_path and os.path.exists(sheets_path):
+            with open(sheets_path, encoding="utf-8") as fh:
+                sheets = json.load(fh)
+        n = build_workbook(cache.data, path, team_sheets=sheets)
         print(f"\nWorkbook: {os.path.abspath(path)}  ({n} pairings)")
 
     rows = [v for v in cache.data.values() if isinstance(v, dict) and v.get("ours")]

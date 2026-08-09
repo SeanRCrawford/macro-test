@@ -19,6 +19,8 @@ rem   --generations SPEC restrict the pool, e.g. "3" or "1-5" or "1,3,5".
 rem   --gen-effort TIER  rating tier for stage 1. Default standard.
 rem   --deep-effort TIER rating tier for stage 2. Default thorough.
 rem   --jobs N           parallel workers. Default 0 = one per core.
+rem   --min-winrate F    skip a generated team whose win rate is below this
+rem                      before spending the audit on it. Default 0.80.
 rem   --audit-all        audit every line against ALL 90 of their bring-4s
 rem                      (leads AND backs) in stage 2, at whatever tier is set.
 rem                      INTENSIVE -- multiplies the audit by 90/leads. Already
@@ -37,6 +39,7 @@ set GENEFFORT=standard
 set DEEPEFFORT=thorough
 set JOBS=0
 set AUDITALL=
+set MINWR=0.80
 
 :parse
 if "%~1"=="" goto endparse
@@ -48,6 +51,7 @@ if /i "%~1"=="--gen-effort"   (set GENEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--deep-effort"  (set DEEPEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--jobs"         (set JOBS=%~2& shift & shift & goto parse)
 if /i "%~1"=="--audit-all"    (set AUDITALL=--audit-all& shift & goto parse)
+if /i "%~1"=="--min-winrate"  (set MINWR=%~2& shift & shift & goto parse)
 echo Unknown argument: %~1
 echo Run with no arguments for defaults, or see the header of this file.
 exit /b 1
@@ -88,7 +92,7 @@ echo STAGE 1 of 2 -- rating %CANDIDATES% teams from a pool of %POOL%
 echo ============================================================
 python generate_overnight.py --pool-size %POOL% --candidates %CANDIDATES% ^
     --keep %KEEP% %GENS% --effort %GENEFFORT% --jobs %JOBS% ^
-    --cache overnight_gen.json --out shortlist.json
+    --min-winrate %MINWR% --cache overnight_gen.json --out shortlist.json
 if errorlevel 1 (
     echo.
     echo Stage 1 stopped early. Re-run the same command to resume.
@@ -109,6 +113,7 @@ echo STAGE 2 of 2 -- %DEEPEFFORT% search for: !TEAMLIST!
 echo ============================================================
 python search_teams.py --rosters shortlist.json --teams "!TEAMLIST!" ^
     --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
+    --sheets shortlist_sheets.json ^
     --cache overnight_%DEEPEFFORT%.json --export
 set RC=%ERRORLEVEL%
 
@@ -118,6 +123,7 @@ if %RC%==0 (
     echo DONE. Open tools\overnight_%DEEPEFFORT%.xlsx
     echo   Best lines   the plan to play against each opponent
     echo   Lines        EVERY audited line: their bring, result, punish
+    echo   Team sheets  what each gen team is: members, items, EVs, moves
     echo   Teams        ranked by Adjusted wins ^(higher is better^)
     echo   Turns        every audited turn, and whether the line won
     echo ============================================================

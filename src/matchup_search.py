@@ -919,8 +919,14 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
                 "equilibrium": t.equilibrium,
                 "worst_case": t.worst_case,
                 "severe": t.severe,
+                "tied_replies": t.tied_replies,
                 "our_play": describe_action(t.our_action),
-                "punished_by": describe_action(t.punisher) if t.punisher else None,
+                # Only name a punish when one exists. Below NO_PUNISH every
+                # reply scores the same and this field would be the arbitrary
+                # winner of a tie presented as a read.
+                "punished_by": (describe_action(t.punisher)
+                                if (t.punisher and t.has_punish) else None),
+                "no_punish": not t.has_punish,
             } for t in report.turns],
         } for lead, probability, report in rating.per_lead]
         worst = rating.worst_lead
@@ -933,7 +939,9 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
                     "turn": wt.turn,
                     "exploitability": wt.exploitability,
                     "our_play": describe_action(wt.our_action),
-                    "punished_by": describe_action(wt.punisher) if wt.punisher else None,
+                    "punished_by": (describe_action(wt.punisher)
+                                    if (wt.punisher and wt.has_punish) else None),
+                    "no_punish": not wt.has_punish,
                 }
 
     rated = [r for r in verified if "exploitability" in r]
