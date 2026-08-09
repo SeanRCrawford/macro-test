@@ -652,9 +652,13 @@ def leaf_value(battle: Battle, my_side_name: str) -> float:
 # attack they make leads to the same protected state -- 46 of 62 replies
 # identical on one turn).
 #
-# The exception is real and is why this is a targeted filter rather than a
-# blanket ban: when the opponent's speed control is ticking, stalling it out is
-# exactly what Protect is for.
+# The exceptions are real and are why this is a targeted filter rather than a
+# blanket ban. Double Protect is a genuine option when the opponent's speed
+# control is ticking (stalling it out is what Protect is for) and on a turn
+# they could Fake Out. In those positions the combo stays a CANDIDATE -- the
+# search then decides, which matters because it is often still wrong: Fake Out
+# does almost no damage, so eating it and switching can beat handing them a
+# free turn to set up.
 ALLOW_DOUBLE_PROTECT = False
 
 
@@ -672,6 +676,41 @@ def _opposing_speed_control(battle: Battle, side: Side) -> bool:
     return bool(theirs > 0 or f.trick_room)
 
 
+def _fake_out_pressure(battle: Battle, side: Side) -> bool:
+    """Could an opposing active Fake Out THIS turn?
+
+    Fake Out is legal only on the turn a Pokemon is sent out
+    (`active_turn_count == 0`), so this is a one-turn window, not a property of
+    the matchup. Their move space is read from `wide_movesets` where the caller
+    attached it, because a Fake Out we did not plan for is exactly the case
+    that matters.
+    """
+    opp = battle.p2 if side.name == "p1" else battle.p1
+    known = (getattr(battle, "wide_movesets", None)
+             or getattr(battle, "movesets", None) or {})
+    for c in opp.active:
+        if c is None or c.fainted or getattr(c, "active_turn_count", 1) != 0:
+            continue
+        for m in known.get(c.name) or []:
+            if getattr(m, "name", m) == "Fake Out":
+                return True
+    return False
+
+
+def _double_protect_has_a_purpose(battle: Battle, side: Side) -> bool:
+    """The cases where passing the turn with both slots is a real option.
+
+    Note what this does NOT claim: that double Protect is right in these
+    positions. It only keeps the option in the candidate set so the search can
+    price it. Against Fake Out in particular it is often wrong -- Fake Out does
+    almost no damage, so eating it and switching or attacking can be far better
+    than handing them a free turn to set up or improve their board. Removing
+    the option would decide that for the search; leaving it in lets the
+    position decide.
+    """
+    return _opposing_speed_control(battle, side) or _fake_out_pressure(battle, side)
+
+
 def _is_pointless_double_protect(combo, battle: Battle, side: Side) -> bool:
     """Every active slot protecting, with no speed control to stall."""
     acting = [a for a in combo if a.kind != "switch"]
@@ -679,7 +718,7 @@ def _is_pointless_double_protect(combo, battle: Battle, side: Side) -> bool:
         return False           # a switch alongside a Protect is a real play
     if not all(a.kind == "protect" for a in acting):
         return False
-    return not _opposing_speed_control(battle, side)
+    return not _double_protect_has_a_purpose(battle, side)
 
 
 def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, movesets: dict,
