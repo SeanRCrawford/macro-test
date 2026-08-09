@@ -19,6 +19,11 @@ rem   --generations SPEC restrict the pool, e.g. "3" or "1-5" or "1,3,5".
 rem   --gen-effort TIER  rating tier for stage 1. Default standard.
 rem   --deep-effort TIER rating tier for stage 2. Default thorough.
 rem   --jobs N           parallel workers. Default 0 = one per core.
+rem   --optimise-sets    optimise each member's item and four moves against
+rem                      the actual metagame before rating. Cheap, and it
+rem                      changes what is simulated -- strongly recommended.
+rem   --script-screen    drop teams with no plan against King / Hard Trick
+rem                      Room / Perish Trap before the audit.
 rem   --min-winrate F    skip a generated team whose win rate is below this
 rem                      before spending the audit on it. Default 0.80.
 rem   --audit-all        audit every line against ALL 90 of their bring-4s
@@ -40,6 +45,8 @@ set DEEPEFFORT=thorough
 set JOBS=0
 set AUDITALL=
 set MINWR=0.80
+set OPTSETS=
+set SCRIPTSCR=
 
 :parse
 if "%~1"=="" goto endparse
@@ -52,6 +59,8 @@ if /i "%~1"=="--deep-effort"  (set DEEPEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--jobs"         (set JOBS=%~2& shift & shift & goto parse)
 if /i "%~1"=="--audit-all"    (set AUDITALL=--audit-all& shift & goto parse)
 if /i "%~1"=="--min-winrate"  (set MINWR=%~2& shift & shift & goto parse)
+if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& shift & goto parse)
+if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& shift & goto parse)
 echo Unknown argument: %~1
 echo Run with no arguments for defaults, or see the header of this file.
 exit /b 1
@@ -92,7 +101,8 @@ echo STAGE 1 of 2 -- rating %CANDIDATES% teams from a pool of %POOL%
 echo ============================================================
 python generate_overnight.py --pool-size %POOL% --candidates %CANDIDATES% ^
     --keep %KEEP% %GENS% --effort %GENEFFORT% --jobs %JOBS% ^
-    --min-winrate %MINWR% --cache overnight_gen.json --out shortlist.json
+    --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% ^
+    --cache overnight_gen.json --out shortlist.json
 if errorlevel 1 (
     echo.
     echo Stage 1 stopped early. Re-run the same command to resume.

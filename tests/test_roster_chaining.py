@@ -50,6 +50,40 @@ class TestRosterChaining(unittest.TestCase):
         self.assertEqual(self.load_rosters(path),
                          {"gen01": ["A", "B"], "gen02": ["C", "D"]})
 
+    def test_optimised_sets_travel_with_the_roster(self):
+        """Rating a team on optimised sets then re-simulating it on usage
+        defaults would silently measure a different team."""
+        import search_teams
+        path = _write({"teams": {"gen01": ["A", "B"]},
+                       "sets": {"gen01": {"A": {"item": "Life Orb",
+                                                "moves": ["X", "Y"]}}}})
+        self.assertEqual(search_teams.load_rosters(path), {"gen01": ["A", "B"]})
+        sets = search_teams.load_roster_sets(path)
+        self.assertEqual(sets["gen01"]["A"]["item"], "Life Orb")
+
+    def test_no_sets_key_yields_an_empty_mapping_not_an_error(self):
+        import search_teams
+        path = _write({"gen01": ["A", "B"]})
+        self.assertEqual(search_teams.load_roster_sets(path), {})
+
+    def test_empty_per_team_sets_are_dropped(self):
+        """A team generation did not optimise must not get an empty override."""
+        import search_teams
+        path = _write({"teams": {"gen01": ["A"], "gen02": ["B"]},
+                       "sets": {"gen01": {"A": {"item": "Leftovers"}},
+                                "gen02": {}}})
+        sets = search_teams.load_roster_sets(path)
+        self.assertIn("gen01", sets)
+        self.assertNotIn("gen02", sets)
+
+    def test_sets_change_the_cache_key(self):
+        """An optimised run must not be served a usage-default result."""
+        base = ("bring", 6, "gen01", "Rain", "thorough", 10, None, False,
+                ["A"], None)
+        a = ResultCache.key(*base, {"A": {"item": "Life Orb"}}, None)
+        b = ResultCache.key(*base, None, None)
+        self.assertNotEqual(a, b)
+
     def test_reads_a_wrapped_teams_key(self):
         path = _write({"teams": {"gen01": ["A", "B"]}, "generated_at": "today"})
         self.assertEqual(self.load_rosters(path), {"gen01": ["A", "B"]})

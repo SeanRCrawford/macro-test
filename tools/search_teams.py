@@ -42,24 +42,26 @@ DEFAULT_CACHE = "search_cache.json"
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 5   # per-line detail: enemy bring, outcome, adjusted value
+SCHEMA = 6   # optimised sets travel with the roster
 
 
 _WORLD = None       # per-process dataset, loaded once (13-14s) and reused
 _EXTRA_ROSTERS = {}  # generated teams, merged into the library per process
+_EXTRA_SETS = {}     # their optimised item/moves, so we simulate what was rated
 
 
-def _worker_init(extra=None):
+def _worker_init(extra=None, sets=None):
     """Load the dataset once per worker process rather than once per pairing.
 
     `extra` carries generated rosters, which do not exist in teams.csv. They
     are merged into the team library so a generated team is searchable by name
     exactly like a real one -- that is what lets generation feed this tool.
     """
-    global _WORLD, _EXTRA_ROSTERS
+    global _WORLD, _EXTRA_ROSTERS, _EXTRA_SETS
     from _harness import load_world
     _WORLD = load_world()
     _EXTRA_ROSTERS = dict(extra or {})
+    _EXTRA_SETS = dict(sets or {})
     _WORLD["teams"].update(_EXTRA_ROSTERS)
 
 
@@ -78,6 +80,20 @@ def load_rosters(path):
     return {name: list(members) for name, members in blob.items()}
 
 
+def load_roster_sets(path):
+    """{team: {pokemon: {"item":..., "moves":[...]}}} from the same file.
+
+    Empty when generation did not optimise. Simulating a generated team on
+    usage defaults after it was RATED on optimised sets would silently measure
+    a different team, so these travel with the roster.
+    """
+    with open(path, encoding="utf-8") as fh:
+        blob = json.load(fh)
+    if isinstance(blob, dict) and "sets" in blob:
+        return {k: v for k, v in (blob["sets"] or {}).items() if v}
+    return {}
+
+
 def _run_pairing(job):
     """One pairing, start to finish. Must be top-level and return only plain
     types: on Windows the pool uses spawn, so both the function and its result
@@ -92,6 +108,8 @@ def _run_pairing(job):
         list(_WORLD["teams"][ours]), list(_WORLD["teams"][theirs]),
         _WORLD["merged"], _WORLD["moves"], _WORLD["natures"],
         _WORLD["typechart"], max_turns=turns,
+        our_sets=_EXTRA_SETS.get(ours) or None,
+        enemy_sets=_EXTRA_SETS.get(theirs) or None,
         verify_top=settings["verify_top"],
         rate_robustness=settings["robustness"],
         robustness_leads=settings["leads"] or 1,
@@ -196,7 +214,8 @@ def main():
     # The parent needs the team list; workers load their own copy. Reusing this
     # one in the serial path avoids loading the dataset twice.
     extra = load_rosters(args.rosters) if args.rosters else {}
-    _worker_init(extra)
+    extra_sets = load_roster_sets(args.rosters) if args.rosters else {}
+    _worker_init(extra, extra_sets)
     world = _WORLD
 
     # Validate roster members NOW. An unknown species otherwise surfaces as a
@@ -247,7 +266,8 @@ def main():
     # in the key: two teams sharing a name but not a roster must not collide.
     keyed = [(ResultCache.key("bring", SCHEMA, a, b, args.effort, args.turns,
                               prescreen, args.audit_all,
-                              extra.get(a), extra.get(b)), a, b)
+                              extra.get(a), extra.get(b),
+                              extra_sets.get(a), extra_sets.get(b)), a, b)
              for a, b in jobs]
     todo = [(k, a, b) for k, a, b in keyed if cache.get(k) is None]
     skipped = len(keyed) - len(todo)
@@ -270,7 +290,7 @@ def main():
         for batch in batches(todo, max(args.batch, args.jobs)):
             with cf.ProcessPoolExecutor(max_workers=args.jobs,
                                         initializer=_worker_init,
-                                        initargs=(extra,)) as pool:
+                                        initargs=(extra, extra_sets)) as pool:
                 futures = {pool.submit(_run_pairing,
                                        (a, b, args.effort, args.turns, prescreen,
                                         args.audit_all)): (k, a, b)

@@ -133,6 +133,18 @@ def main():
                     help="where to write the shortlist search_teams.py reads")
     ap.add_argument("--keep", type=int, default=10,
                     help="how many of the rated teams to write to --out")
+    ap.add_argument("--optimise-sets", action="store_true",
+                    help="optimise each member's item and four moves against "
+                         "the Pokemon actually in teams.csv, instead of using "
+                         "usage defaults. Cheap (1v1 damage coverage, no full "
+                         "battles) and it changes what is simulated, so the "
+                         "sets are part of the cache key and appear in the "
+                         "Team sheets tab.")
+    ap.add_argument("--script-screen", action="store_true",
+                    help="drop a team that loses to EVERY scripted opening "
+                         "(King / Hard Trick Room / Perish Trap) before the "
+                         "audit. A team with no plan against a rehearsed line "
+                         "is not worth auditing.")
     ap.add_argument("--min-winrate", type=float, default=0.80, metavar="F",
                     help="abandon a team as soon as its running win rate "
                          "against the opponents checked so far falls below "
@@ -154,12 +166,34 @@ def main():
     print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
 
     finals = _beam_finalists(args, world)
+
+    # Optimise item + four moves per team BEFORE anything is simulated, so the
+    # rating measures the team you would actually field rather than its usage
+    # defaults. This is the piece the old generate_team.py had and this tool
+    # did not, which meant the pipeline rated teams running the wrong moves.
+    sets_by_team = {}
+    if args.optimise_sets:
+        from optimize_sets import enemy_individuals, optimise_team_unique
+        enemies = enemy_individuals(teams)
+        print(f"sets     : optimising vs {len(enemies)} distinct Pokemon...")
+        for _score, team in finals:
+            opt = optimise_team_unique(team, merged, moves, natures, typechart,
+                                       enemies)
+            sets_by_team[tuple(sorted(team))] = {
+                n: {"item": opt[n]["item"], "moves": opt[n]["moves"]}
+                for n in team}
+        print(f"sets     : {len(sets_by_team)} teams optimised\n")
+
     cache = ResultCache(None if args.fresh else args.cache)
     print(f"resuming : {len(cache)} already rated\n")
 
     rated, started = [], time.time()
     for i, (beam_score, team) in enumerate(finals, start=1):
-        key = ResultCache.key("team", SCHEMA, sorted(team), args.effort, args.turns)
+        our_sets = sets_by_team.get(tuple(sorted(team)))
+        # The sets change what is simulated, so they belong in the key: an
+        # optimised run must never be served a usage-default result.
+        key = ResultCache.key("team", SCHEMA, sorted(team), args.effort,
+                              args.turns, our_sets)
         record = cache.get(key)
         if record is None:
             # SCREEN FIRST. The win check is cheap next to the audit, and a
@@ -167,11 +201,31 @@ def main():
             # measuring -- a lost position rates as unpunishable, so auditing
             # it produces a flattering number for a bad team. Rate only what
             # already wins, then rank those by punishability.
+            if args.script_screen:
+                # A team with no plan against a rehearsed opening is not worth
+                # auditing. One sampled config per scripted opponent, so this
+                # is cheap next to the audit it protects.
+                screened = gt.quick_script_screen(
+                    [(beam_score, list(team))], teams, {}, merged, moves,
+                    natures, typechart, max_turns=args.turns,
+                    our_sets=our_sets)
+                if screened and screened[0][2]:
+                    record = {"team": list(team), "beam_score": beam_score,
+                              "sets": our_sets, "exploitability": None,
+                              "adjusted_win_rate": None, "robust_win_rate": None,
+                              "severe_turns": 0, "wins": 0, "total": 0,
+                              "skipped": "loses every scripted opening"}
+                    cache.put(key, record)
+                    cache.save()
+                    rated.append(record)
+                    print(f"  [{i}/{len(finals)}] skipped: no plan vs any "
+                          f"scripted opening", flush=True)
+                    continue
             if args.min_winrate > 0:
                 screen = gt.verify_with_solver(
                     team, teams, merged, moves, natures, typechart, {}, [],
                     max_turns=args.turns, all_backs=True, effort="quick",
-                    jobs=args.jobs)
+                    jobs=args.jobs, our_sets=our_sets)
                 s_wins = sum((r.get("wins") or 0) for r in screen.values() if r)
                 s_total = sum((r.get("total") or 0) for r in screen.values() if r)
                 if s_total and s_wins / s_total < args.min_winrate:
@@ -191,7 +245,7 @@ def main():
             verdict = gt.verify_with_solver(
                 team, teams, merged, moves, natures, typechart, {}, [],
                 max_turns=args.turns, all_backs=True, effort=args.effort,
-                jobs=args.jobs)
+                jobs=args.jobs, our_sets=our_sets)
             scores = [r["exploitability"] for r in verdict.values()
                       if r and r.get("exploitability") is not None]
             adj = [r["adjusted_win_rate"] for r in verdict.values()
@@ -205,6 +259,7 @@ def main():
                         key=lambda r: r["exploitability"], default=None)
             record = {
                 "team": list(team),
+                "sets": our_sets,
                 "beam_score": beam_score,
                 "exploitability": (sum(scores) / len(scores)) if scores else None,
                 "adjusted_win_rate": (sum(adj) / len(adj)) if adj else None,
@@ -256,15 +311,24 @@ def main():
             print(f"    worst vs {r['worst_opponent']} ({r['worst_value']:.0f})")
 
     shortlist = {f"gen{i:02d}": r["team"] for i, r in enumerate(ranked[:args.keep], 1)}
+    # Carry the SETS as well as the roster. Without them the deep search would
+    # re-simulate these teams on usage defaults -- rating a different team than
+    # the one generation ranked, silently.
+    payload = {"teams": shortlist,
+               "sets": {f"gen{i:02d}": (r.get("sets") or {})
+                        for i, r in enumerate(ranked[:args.keep], 1)}}
     with open(args.out, "w", encoding="utf-8") as fh:
-        json.dump(shortlist, fh, indent=2)
+        json.dump(payload, fh, indent=2)
 
     # The full sheets alongside the bare rosters. Without these the workbook
     # names "gen03" and the user has no way to see WHAT gen03 is -- which
     # Pokemon, which item, which four moves -- short of re-running generation.
     from team_sheet_export import write_team_sheets
     sheets_path = os.path.splitext(args.out)[0] + "_sheets.json"
-    write_team_sheets(shortlist, merged, sheets_path)
+    write_team_sheets(shortlist, merged, sheets_path,
+                      optimised=args.optimise_sets,
+                      sets={f"gen{i:02d}": (r.get("sets") or {})
+                            for i, r in enumerate(ranked[:args.keep], 1)})
     print(f"Team sheets: {os.path.abspath(sheets_path)}")
     print(f"\nShortlist: {os.path.abspath(args.out)}  ({len(shortlist)} teams)")
     print("Feed it to the deep search with:")

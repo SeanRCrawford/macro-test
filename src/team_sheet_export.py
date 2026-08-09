@@ -13,32 +13,41 @@ the optimised sets; if they are usage defaults, they say so.
 from team_search import team_items
 
 
-def build_sheets(rosters, merged, optimised=False):
-    """{name: [ {pokemon, types, item, ability, nature, evs, moves}, ... ]}."""
+def build_sheets(rosters, merged, optimised=False, sets=None):
+    """{name: [ {pokemon, types, item, ability, nature, evs, moves}, ... ]}.
+
+    `sets` is {team: {pokemon: {"item":..., "moves":[...]}}} from
+    optimize_sets. Where present it OVERRIDES the usage defaults, because the
+    optimised set is what was simulated -- printing the default here would hand
+    back a sheet that does not match the numbers it sits beside.
+    """
+    sets = sets or {}
     out = {}
     for name, members in rosters.items():
+        chosen = sets.get(name) or {}
         rows = []
         for r in team_items(list(members), merged):
             ev = r.get("evs") or {}
+            spec = chosen.get(r["name"]) or {}
             rows.append({
                 "pokemon": r["name"],
                 "types": r.get("types"),
-                "item": r.get("item"),
+                "item": spec.get("item") or r.get("item"),
                 "ability": r.get("ability"),
                 "nature": r.get("nature"),
                 "evs": "/".join(str(ev.get(k, 0)) for k in
                                 ("hp", "atk", "def", "spa", "spd", "spe")),
-                "moves": list(r.get("moves") or []),
+                "moves": list(spec.get("moves") or r.get("moves") or []),
                 "score": r.get("score"),
-                "sets": "optimised" if optimised else "usage defaults",
+                "sets": "optimised" if (optimised and spec) else "usage defaults",
             })
         out[name] = rows
     return out
 
 
-def write_team_sheets(rosters, merged, path, optimised=False):
+def write_team_sheets(rosters, merged, path, optimised=False, sets=None):
     import json
-    sheets = build_sheets(rosters, merged, optimised=optimised)
+    sheets = build_sheets(rosters, merged, optimised=optimised, sets=sets)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(sheets, fh, indent=2)
     return sheets
