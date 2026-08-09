@@ -84,6 +84,23 @@ class TestRosterChaining(unittest.TestCase):
         b = ResultCache.key(*base, None, None)
         self.assertNotEqual(a, b)
 
+    def test_the_wrapped_shape_does_not_leak_its_wrapper_keys(self):
+        """The bug that made overnight.bat stage 2 exit 1.
+
+        The shortlist grew a {"teams":..., "sets":...} wrapper so optimised
+        sets could travel with the rosters. The batch file was still doing
+        ','.join(json.load(f)) over the TOP-LEVEL keys, so stage 2 was invoked
+        with --teams "teams,sets" and died on unknown team names. Nothing
+        should ever have to parse this file to recover the team list.
+        """
+        import search_teams
+        path = _write({"teams": {"gen01": ["A"], "gen02": ["B"]},
+                       "sets": {"gen01": {}}})
+        names = list(search_teams.load_rosters(path))
+        self.assertEqual(names, ["gen01", "gen02"])
+        self.assertNotIn("teams", names)
+        self.assertNotIn("sets", names)
+
     def test_reads_a_wrapped_teams_key(self):
         path = _write({"teams": {"gen01": ["A", "B"]}, "generated_at": "today"})
         self.assertEqual(self.load_rosters(path), {"gen01": ["A", "B"]})

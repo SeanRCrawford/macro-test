@@ -109,19 +109,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem The shortlist names its teams gen01..genNN. Build the list stage 2 wants.
-set TEAMLIST=
-for /f "usebackq delims=" %%N in (`python -c "import json;print(','.join(json.load(open('shortlist.json'))))"`) do set TEAMLIST=%%N
-if "!TEAMLIST!"=="" (
-    echo ERROR: shortlist.json is empty -- stage 1 rated nothing.
+if not exist shortlist.json (
+    echo ERROR: shortlist.json was not written -- stage 1 rated nothing.
     exit /b 1
 )
 
 echo.
 echo ============================================================
-echo STAGE 2 of 2 -- %DEEPEFFORT% search for: !TEAMLIST!
+echo STAGE 2 of 2 -- %DEEPEFFORT% search of the shortlisted teams
 echo ============================================================
-python search_teams.py --rosters shortlist.json --teams "!TEAMLIST!" ^
+rem No --teams: with a roster file, search_teams defaults OUR side to the
+rem generated teams and theirs to the library. Parsing the shortlist here and
+rem passing the names back in is what broke stage 2 when the file grew a
+rem wrapper for the optimised sets.
+python search_teams.py --rosters shortlist.json ^
     --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
     --sheets shortlist_sheets.json ^
     --cache overnight_%DEEPEFFORT%.json --export

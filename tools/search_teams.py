@@ -235,17 +235,23 @@ def main():
 
     names = list(world["teams"])
 
-    def _select(spec, label):
+    def _select(spec, label, default=None):
         if not spec:
-            return names
+            return default if default is not None else names
         wanted = [t.strip() for t in spec.split(",") if t.strip()]
         unknown = [t for t in wanted if t not in names]
         if unknown:
             raise SystemExit(f"unknown {label}: {unknown}\navailable: {names}")
         return wanted
 
-    ours_pool = _select(args.teams, "team")
-    theirs_pool = _select(args.vs, "opponent")
+    # With a roster file and no explicit --teams, OUR side is the generated
+    # teams and theirs is the library. That is what the pipeline always wants,
+    # and it removes the need for the caller to parse the shortlist and pass
+    # the names back in -- which is exactly what broke when the shortlist grew
+    # a wrapper for optimised sets.
+    library = [n for n in names if n not in extra]
+    ours_pool = _select(args.teams, "team", list(extra) if extra else None)
+    theirs_pool = _select(args.vs, "opponent", library if extra else None)
     jobs = [(a, b) for a in ours_pool for b in theirs_pool if a != b]
     if not jobs:
         raise SystemExit("no pairings selected")

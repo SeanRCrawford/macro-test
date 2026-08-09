@@ -1628,14 +1628,14 @@ with tab_vs:
                    "matrix every turn, their wider move space, the "
                    "equilibrium solver piloting -- and shows the match.")
         dd1, dd2 = st.columns(2)
-        # Deliberately not tied to the team loaded above: the question "what
-        # is my answer to THIS lead" is worth asking about any matchup, not
-        # only the one currently selected.
+        _loaded = get_state_team()
+        if not _loaded:
+            st.info("Load a team in the Team Builder tab to pick a bring from it.")
         our_bring = dd1.multiselect(
-            "My bring-4 (LEAD FIRST, order matters)", all_names,
+            "My bring-4 (LEAD FIRST, order matters)", _loaded,
             max_selections=4, key="dd_ours",
-            default=get_state_team()[:4] if len(get_state_team()) >= 4 else [],
-            help="The first two are the pair you actually led with.")
+            help="Your six from the Team Builder tab. The first two you pick "
+                 "are the pair you actually led with.")
         their_bring = dd2.multiselect(
             "Their bring-4 (lead first)", all_names,
             max_selections=4, key="dd_theirs")
