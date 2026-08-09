@@ -32,6 +32,9 @@ class _Recorder:
         }
         if self.exploitability is not None:
             rec["exploitability"] = self.exploitability
+            rec["adjusted_win_rate"] = 0.42
+            rec["robust_win_rate"] = 0.75
+            rec["reliable_wins"] = 0.25
             rec["severe_turns"] = 2
             rec["hardest_lead"] = list(enemy_roster)[:2]
             rec["worst_turn"] = {"turn": 3, "exploitability": self.exploitability,
@@ -91,6 +94,25 @@ class TestGenerateEffort(unittest.TestCase):
         self.assertEqual(out["Rain"]["worst_turn"]["turn"], 3)
         # The win count is still reported alongside, not replaced.
         self.assertEqual(out["Rain"]["wins"], 88)
+
+    def test_win_quality_fields_survive_the_verify_boundary(self):
+        """They did not, and generation reported "adj 0.00" for every team.
+
+        verify_with_solver builds its own record rather than passing the rated
+        one through, so any field not copied here is silently dropped -- the
+        search reported real values for the same rating while generation
+        reported zero.
+        """
+        _rec, out = self._verify("standard", exploitability=42.5)
+        self.assertAlmostEqual(out["Rain"]["adjusted_win_rate"], 0.42)
+        self.assertAlmostEqual(out["Rain"]["robust_win_rate"], 0.75)
+        self.assertAlmostEqual(out["Rain"]["reliable_wins"], 0.25)
+
+    def test_quick_effort_leaves_the_win_quality_fields_absent(self):
+        """Not zero -- absent. Zero would read as "this team never wins"."""
+        _rec, out = self._verify("quick")
+        self.assertIsNone(out["Rain"]["adjusted_win_rate"])
+        self.assertIsNone(out["Rain"]["robust_win_rate"])
 
     def test_an_unknown_effort_name_falls_back_rather_than_crashing(self):
         """A typo must not silently skip verification or raise mid-run."""

@@ -273,6 +273,8 @@ def main():
                 "worst_turn": worst.get("worst_turn") if worst else None,
                 "per_opponent": {n: {"wins": r.get("wins"), "total": r.get("total"),
                                      "exploitability": r.get("exploitability"),
+                                     "adjusted_win_rate": r.get("adjusted_win_rate"),
+                                     "robust_win_rate": r.get("robust_win_rate"),
                                      "severe_turns": r.get("severe_turns")}
                                  for n, r in verdict.items() if r},
             }
@@ -280,8 +282,9 @@ def main():
             cache.save()          # every team is a save point: teams are slow
         rated.append(record)
         elapsed = time.time() - started
+        adj = record.get("adjusted_win_rate")
         print(f"  [{i}/{len(finals)}] "
-              f"adj {record.get('adjusted_win_rate') or 0:.2f}   "
+              f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
               f"punish {record['exploitability'] or float('nan'):6.1f}   "
               f"{record['wins']}/{record['total']} won   "
               f"~{elapsed / i * (len(finals) - i) / 60:.0f} min left", flush=True)
@@ -303,7 +306,8 @@ def main():
         share = f"{r['wins']}/{r['total']}"
         flag = ("   <-- loses most games: a lost position rates as unpunishable"
                 if r["total"] and r["wins"] / r["total"] < 0.5 else "")
-        print(f"{i:2}. adj {r.get('adjusted_win_rate') or 0:.2f}  "
+        radj = r.get("adjusted_win_rate")
+        print(f"{i:2}. adj {f'{radj:.2f}' if radj is not None else ' n/a'}  "
               f"punish {r['exploitability']:6.1f}  {r['severe_turns']:>3} severe  "
               f"{share:>9} won{flag}")
         print(f"    {', '.join(r['team'])}")

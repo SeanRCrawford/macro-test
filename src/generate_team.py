@@ -246,6 +246,14 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
                 "mode": "all_backs", "total": r["solver_total"], "wins": r["solver_wins"],
                 "losses": r["solver_losses"], "our_bring4": r["our_bring4"],
                 "exploitability": r.get("exploitability"),
+                # The win-quality numbers, not just punishability. Omitting
+                # them here made generation report "adj 0.00" for every team
+                # while the search reported real values for the same rating --
+                # the fields simply never crossed this boundary.
+                "adjusted_win_rate": r.get("adjusted_win_rate"),
+                "robust_win_rate": r.get("robust_win_rate"),
+                "reliable_wins": r.get("reliable_wins"),
+                "outcomes": r.get("outcomes"),
                 "severe_turns": r.get("severe_turns"),
                 "hardest_lead": r.get("hardest_lead"),
                 "worst_turn": r.get("worst_turn"),
