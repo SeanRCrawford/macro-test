@@ -39,10 +39,14 @@ from search_effort import (TIER_ORDER, ResultCache, batches,  # noqa: E402
 
 DEFAULT_CACHE = "search_cache.json"
 
-# Seconds per audited TURN, measured on this engine at depth 1 (tools timing:
-# a 6-turn line took 5.3s => ~0.9s/turn). Only used for the up-front estimate
-# before the first pairing finishes -- after that the real rate takes over.
-SECONDS_PER_AUDITED_TURN = 0.9
+# Seconds per audited TURN, measured on this engine at depth 1: a 6-turn line
+# takes 3.2s => ~0.53s/turn. Was 0.9 before solve_matrix was vectorised; an
+# estimate left on a stale constant overstates the wait by the exact factor of
+# the speedup, which is worse than no estimate. Re-measure with
+#   audit_position(..., max_turns=8) and divide by len(report.turns)
+# after any change to the solver's inner loop. Only used up front -- once the
+# first pairing finishes, the real observed rate takes over.
+SECONDS_PER_AUDITED_TURN = 0.53
 # Lines rarely run to the cap: a game usually resolves first. Measured lines
 # averaged 6-10 turns against caps of 16-20, so the estimate uses this rather
 # than the cap, which would overstate the wait by 2-3x.

@@ -221,6 +221,14 @@ a documented negative result.
 `--jobs N` is parallel across whole pairings, verified bit-identical to serial.
 Measured **3.1× on 4 cores**. Memory, not CPU, is the limit.
 
+The equilibrium solver's inner loop is vectorised. Profiling put **69 % of an
+audited line inside `solve_matrix`** — two matrix-vector products written as
+nested Python sums, 15 million generator calls for a single 30×60 turn. With
+numpy: **one audited line 15.8 s → 2.7 s (5.9×)**, golden baseline unchanged.
+Small matrices keep the scalar path; the 64-cell crossover is measured, not
+guessed. Gains are largest on `--audit-all` runs, where the audit dominates —
+a preview pairing, which is mostly screening, went 126 s → 94 s.
+
 Auditing all 90 brings multiplies the audit by 90/leads — that is the cost of a
 real total-pathing number, and it is why this is an overnight job. Drop to
 `--sample-leads` only to get a fast read, knowing the record is then a sample.
