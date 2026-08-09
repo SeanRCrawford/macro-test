@@ -179,6 +179,42 @@ def weakness_table(team):
     return pd.DataFrame(rows)
 
 
+def advanced_model_controls(key_prefix, default="standard"):
+    """The one place the advanced model's strength is chosen.
+
+    Returns (effort_name, audit_all). Used by every panel that runs the new
+    engine live, so the answer to "where is the advanced model" is the same
+    control everywhere rather than a different widget per tab.
+    """
+    from search_effort import TIER_ORDER, relative_cost, tier as _t
+    effort = st.select_slider(
+        "Advanced model strength", options=TIER_ORDER, value=default,
+        format_func=lambda k: _t(k)["label"], key=f"{key_prefix}_adv_effort",
+        help="How hard the equilibrium engine works.\n\n"
+             "QUICK - no punish analysis at all: it screens brings and counts "
+             "wins against the standard opponent model. Seconds.\n\n"
+             "STANDARD - audits the 3 best brings against their 2 likeliest "
+             "leads, playing each line out against an opponent choosing "
+             "optimally, and measures how much a good player gains per turn.\n\n"
+             "THOROUGH - 6 brings, 4 of their leads, longer lines. The setting "
+             "to trust before committing to a team.\n\n"
+             "EXHAUSTIVE - 8 brings against ALL 90 of their bring-4s, leads "
+             "and backs. This is the total-pathing answer and it is slow.")
+    audit_all = st.checkbox(
+        "Test against ALL 90 of their brings (leads and backs)",
+        value=_t(effort).get("all_configs", False), key=f"{key_prefix}_adv_all",
+        help="Off, only their most plausible LEADS are tested and their backs "
+             "are assumed -- so a plan that beats their lead and loses to "
+             "their back still counts as a win. On, the record is a true "
+             "X of 90. Costs about 90/leads times as much: this is the "
+             "difference between a fast read and a number you can commit to.")
+    st.caption(f"{_t(effort)['label']}"
+               f"{' + all 90 brings' if audit_all else ''} "
+               f"— roughly {relative_cost(effort) * (22 if audit_all and not _t(effort).get('all_configs') else 1):.0f}x "
+               f"the quick setting.")
+    return effort, audit_all
+
+
 def render_audited_turn(turn, key=None):
     """One audited turn: our play, their answer, the damage, the KOs.
 
@@ -1617,13 +1653,74 @@ with tab_vs:
                "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
                "(pokepast.es 'Paste'/'Export' view) -- without saving it to data/teams/ first. "
                "See data/teams/ if you want this enemy team to stick around permanently instead.")
+    # --- Team preview: their six are known, their four are not ----------
+    # The decision the whole pipeline exists to support, at the one moment you
+    # actually make it. Runs the same analysis the overnight search runs, for
+    # this one pairing, live.
+    with st.expander("Team preview: what do I bring against this team?",
+                     expanded=False):
+        st.caption("You can see their six. Pick your four and your lead pair "
+                   "BEFORE they reveal theirs. This runs the advanced model on "
+                   "that decision and reports the one committed plan, its "
+                   "record across their brings, and what beats it.")
+        pv_ours = st.multiselect(
+            "My six", all_names, max_selections=6, key="pv_ours",
+            default=get_state_team()[:6] if get_state_team() else [],
+            help="Defaults to the team loaded in Team Builder.")
+        pv_theirs = st.multiselect(
+            "Their six (from team preview)", all_names, max_selections=6,
+            key="pv_theirs")
+        pv_effort, pv_all = advanced_model_controls("pv")
+
+        if st.button("Find my bring and lead", key="pv_run"):
+            if len(pv_ours) != 6 or len(pv_theirs) != 6:
+                st.warning("Both sides need six Pokemon.")
+            else:
+                from preview_plan import plan_against
+                with st.spinner("Running the advanced model on this preview..."):
+                    st.session_state["pv_plan"] = plan_against(
+                        pv_ours, pv_theirs, merged, moves, natures, typechart,
+                        effort=pv_effort, audit_all=pv_all)
+
+        plan = st.session_state.get("pv_plan")
+        if plan:
+            st.success("BRING: " + " / ".join(plan["bring"] or []))
+            st.caption("Lead with the first two.")
+            if not plan.get("audited"):
+                st.warning(
+                    "Quick strength does no punish analysis -- this is the "
+                    "screen's pick, verified only by win count "
+                    f"({plan.get('solver_wins')}/{plan.get('solver_total')}). "
+                    "Raise the slider for a plan you can trust.")
+            else:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Record", f"{plan['wins']} / {plan['of']}",
+                          help="Commit to this bring and lead, and win this "
+                               "many of their configurations.")
+                c2.metric("Mean punish", f"{plan['punish']:.0f}",
+                          help="Points a good player gains per turn. A KO is "
+                               "about 180. Lower is better.")
+                c3.metric("Severe turns", plan.get("severe_turns") or 0)
+                if plan["losing_to"]:
+                    st.error("Loses to: " + "; ".join(plan["losing_to"][:8])
+                             + ("  ..." if len(plan["losing_to"]) > 8 else ""))
+                else:
+                    st.success(f"Beats all {plan['of']} of their brings tested.")
+                if plan.get("of") and plan["of"] < 90:
+                    st.caption(f"Only {plan['of']} of their 90 possible brings "
+                               f"were tested. Tick the box above for the full "
+                               f"X-of-90 answer.")
+
     # --- Deep dive: one position, at full strength ----------------------
     # The exhaustive tier is expensive because of BREADTH -- 8 brings against
     # all 90 of their bring-4s. Once you have actually led, that breadth is
     # gone: one bring, one lead, one position. So the same analysis runs here
     # in seconds, and can afford a depth the batch run cannot.
-    with st.expander("Deep dive: my answer to a specific lead", expanded=False):
-        st.caption("You have led. They have led. This runs the exhaustive "
+    with st.expander("Deep dive: my answer to a specific lead (after they lead)",
+                     expanded=False):
+        st.caption("The same advanced model, one notch deeper, once their four "
+                   "and their lead are known. "
+                   "You have led. They have led. This runs the exhaustive "
                    "tier's analysis on that single position -- full payoff "
                    "matrix every turn, their wider move space, the "
                    "equilibrium solver piloting -- and shows the match.")

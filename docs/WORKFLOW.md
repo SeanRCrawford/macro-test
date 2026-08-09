@@ -119,14 +119,23 @@ command resumes.
 
 ### The app
 
-`run.bat` → **Vs Team** tab:
+`run.bat` → **Vs Team** tab. Three panels, matching the three moments of a game:
 
-- **Load an overnight run** — reads the files above, so generated teams become
-  selectable and you can browse any committed line turn by turn. Instant; it
-  reads the cache rather than recomputing.
-- **Deep dive** — you have led, they have led. Runs the exhaustive analysis on
-  that one position in ~5 s, and offers depth 2 (which the batch run cannot
-  afford). This is the "having already led X" tool.
+| Panel | When | What it does |
+|---|---|---|
+| **Team preview** | you see their six, not their four | runs the advanced model on the bring/lead decision and returns ONE committed plan, its record, and what beats it |
+| **Deep dive** | both sides have led | the same model one notch deeper on that single position, ~5 s, and depth 2 is available here because one line can afford it |
+| **Load an overnight run** | after a batch run | browse any committed line turn by turn, from the cache. Instant |
+
+**Where the advanced model is:** the *Advanced model strength* slider —
+Quick → Standard → Thorough → Exhaustive — with a tooltip explaining each, plus
+a checkbox for "test against ALL 90 of their brings". The same control appears
+in every panel that runs the engine live, so there is one answer to "which
+setting am I using".
+
+Timing, measured: one preview pairing at **Standard is ~2 minutes**. Thorough
+and Exhaustive are much longer — for those, use the overnight pipeline and read
+the result here rather than waiting in the browser.
 
 ---
 
