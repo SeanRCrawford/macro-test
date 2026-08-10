@@ -50,6 +50,18 @@ rem                      workbook is rebuilt each time to include everything
 rem                      searched so far. Omit to search the top --keep.
 rem   --list             run stage 1 only, print the ranked teams, and stop --
 rem                      so you can look before spending the night on stage 2.
+rem   --stage2-only      SKIP stage 1 entirely and deep-search the shortlist
+rem                      that is already on disk. This is the flag for coming
+rem                      back later: pair it with --pick to spend the night on
+rem                      specific teams.
+rem                          overnight.bat --list                 (last night)
+rem                          overnight.bat --stage2-only --pick "5" --vs "Big 6"
+rem                      WITHOUT it, stage 1 runs again -- and if you do not
+rem                      repeat the SAME --pool-size / --candidates /
+rem                      --generations you used the first time, it generates a
+rem                      DIFFERENT set of teams, renumbers the shortlist, and
+rem                      --pick "5" then means a different team. Stage 1 warns
+rem                      when it notices that.
 rem   --sample-leads     audit only a sample of their most plausible leads
 rem                      instead of all 90 of their bring-4s. Much faster, but
 rem                      the Plan sheet's record then reads "X / 4" rather than
@@ -74,6 +86,9 @@ set OPTSETS=
 set SCRIPTSCR=
 set PICK=
 set LISTONLY=
+set STAGE2ONLY=
+set GENFLAGS=
+set REGEN=
 set VS=
 set BRINGS=
 set SUBST=
@@ -84,20 +99,27 @@ set SHEETS=shortlist_sheets.json
 
 :parse
 if "%~1"=="" goto endparse
-if /i "%~1"=="--pool-size"    (set POOL=%~2& shift & shift & goto parse)
-if /i "%~1"=="--candidates"   (set CANDIDATES=%~2& shift & shift & goto parse)
+rem GENFLAGS records "this command asked for GENERATION", which is what makes
+rem `--pick "5"` on its own mean "deep-search what I already have" rather than
+rem "generate a fresh 40 teams and then pick the fifth of THOSE".
+if /i "%~1"=="--pool-size"    (set POOL=%~2& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--candidates"   (set CANDIDATES=%~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--keep"         (set KEEP=%~2& shift & shift & goto parse)
-if /i "%~1"=="--generations"  (set GENS=--generations %~2& shift & shift & goto parse)
-if /i "%~1"=="--gen-effort"   (set GENEFFORT=%~2& shift & shift & goto parse)
+if /i "%~1"=="--generations"  (set GENS=--generations %~2& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--gen-effort"   (set GENEFFORT=%~2& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--regenerate"   (set REGEN=1& shift & goto parse)
 if /i "%~1"=="--deep-effort"  (set DEEPEFFORT=%~2& shift & shift & goto parse)
 if /i "%~1"=="--jobs"         (set JOBS=%~2& shift & shift & goto parse)
 if /i "%~1"=="--audit-all"    (set AUDITALL=--audit-all& shift & goto parse)
 if /i "%~1"=="--sample-leads" (set AUDITALL=& shift & goto parse)
 if /i "%~1"=="--min-winrate"  (set MINWR=%~2& shift & shift & goto parse)
-if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& shift & goto parse)
-if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& shift & goto parse)
+if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& set GENFLAGS=1& shift & goto parse)
+if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& set GENFLAGS=1& shift & goto parse)
 if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
+if /i "%~1"=="--stage2-only"  (set STAGE2ONLY=1& shift & goto parse)
+if /i "%~1"=="--stage2"       (set STAGE2ONLY=1& shift & goto parse)
+if /i "%~1"=="--skip-stage1"  (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--vs"           (set VS=--vs "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--brings"       (set BRINGS=--brings %~2& shift & shift & goto parse)
 if /i "%~1"=="--substitute"   (set SUBST=%~2& shift & shift & goto parse)
@@ -137,6 +159,33 @@ python -m pip install --quiet -r requirements.txt
 
 cd tools
 
+rem `--pick N` refers to a numbering a PREVIOUS stage 1 produced. If this
+rem command asked for no generation of its own, then re-generating is never
+rem what was meant -- it would renumber the very thing being picked. Measured
+rem on the real dataset: pool 50/60 and the default 34/40 share ZERO of their
+rem top five teams, so "--pick 5" after dropping the flags is a team you have
+rem never seen.
+if defined PICK if not defined GENFLAGS if not defined REGEN if not defined LISTONLY (
+    if exist shortlist.json set STAGE2ONLY=1
+)
+
+if defined STAGE2ONLY (
+    if not exist shortlist.json (
+        echo ERROR: --stage2-only needs a shortlist.json from an earlier run,
+        echo and there is none in %CD%. Run stage 1 first, e.g.
+        echo     overnight.bat --pool-size 50 --candidates 60 --optimise-sets --list
+        exit /b 1
+    )
+    echo.
+    echo ============================================================
+    echo STAGE 1 SKIPPED -- deep-searching the shortlist already on disk
+    echo ============================================================
+    echo Using shortlist.json as written by the last stage 1 run, so --pick
+    echo numbers mean exactly what they meant then.
+    echo ^(Pass --regenerate if you actually wanted to build new teams.^)
+    goto stage2
+)
+
 echo.
 echo ============================================================
 echo STAGE 1 of 2 -- rating %CANDIDATES% teams from a pool of %POOL%
@@ -160,9 +209,11 @@ if defined LISTONLY (
     echo.
     echo ============================================================
     echo Stage 1 done. The ranked teams are listed above.
-    echo Pick the ones worth the deep search, e.g.:
-    echo     overnight.bat --pick "6"
-    echo     overnight.bat --pick "4,10,12"     ^(later; #6 is not redone^)
+    echo Pick the ones worth the deep search. Use --stage2-only, or stage 1
+    echo runs all over again:
+    echo     overnight.bat --stage2-only --pick "6"
+    echo     overnight.bat --stage2-only --pick "4,10,12"   ^(#6 is not redone^)
+    echo     overnight.bat --stage2-only --pick "6" --vs "Big 6"
     echo ============================================================
     exit /b 0
 )
@@ -196,6 +247,7 @@ if defined SUBST (
     )
 )
 
+:stage2
 echo.
 echo ============================================================
 echo STAGE 2 of 2 -- %DEEPEFFORT% search of !ROSTERS!

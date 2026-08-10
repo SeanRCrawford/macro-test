@@ -52,6 +52,63 @@ from team_search import (beam_search_teams, build_candidate_pool,  # noqa: E402
 DEFAULT_CACHE = "generate_cache.json"
 
 
+def _stage1_settings(args):
+    """The arguments that decide WHICH teams stage 1 produces, and in what
+    order. Not the ones that only decide how long it takes."""
+    return {"pool_size": args.pool_size, "candidates": args.candidates,
+            "generations": args.generations, "beam_width": args.beam_width,
+            "effort": args.effort, "turns": args.turns,
+            "optimise_sets": bool(args.optimise_sets),
+            "min_winrate": args.min_winrate,
+            "script_screen": bool(args.script_screen)}
+
+
+def _warn_if_renumbering(args):
+    """Shout if this run will rewrite an existing shortlist under different
+    settings.
+
+    THE TRAP THIS CATCHES, reported from real use: you generate 60 teams from a
+    pool of 50, look at the ranking, and come back with
+
+        overnight.bat --deep-effort thorough --pick "5" --vs "Big 6"
+
+    The stage 1 flags are gone from that command, so it silently falls back to
+    the defaults (34 / 40), generates a DIFFERENT set of teams -- hours of
+    re-rating, since none of them are in the cache -- and rewrites shortlist
+    .json. `--pick "5"` then means a team you have never seen. The numbering is
+    only stable across runs that generate the same teams, and nothing said so.
+    """
+    path = args.out
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            previous = (json.load(fh) or {}).get("settings")
+    except (OSError, ValueError):
+        return
+    if not previous:
+        return
+    now = _stage1_settings(args)
+    differing = {k: (previous.get(k), now[k]) for k in now
+                 if previous.get(k) != now[k]}
+    if not differing:
+        return
+    print("=" * 78)
+    print("WARNING: this run does NOT match the one that wrote "
+          f"{os.path.basename(path)}.")
+    for key, (was, now_v) in sorted(differing.items()):
+        print(f"    {key:<14} was {was!r}, now {now_v!r}")
+    print("It will therefore generate a different set of teams and RENUMBER "
+          "the shortlist,\nso a --pick number will not mean what it meant "
+          "before -- and none of the new\nteams are in the cache, so nothing "
+          "resumes.")
+    print("\nIf you meant to deep-search what you already have, stop this and "
+          "run:")
+    print('    overnight.bat --stage2-only --pick "N" [--vs "Big 6"]')
+    print("If you meant to generate again, repeat the original stage 1 flags.")
+    print("=" * 78 + "\n", flush=True)
+
+
 def _beam_finalists(args, world):
     """Stage 1-3 of generate_team: pool -> pair matrix -> beam search.
 
@@ -165,6 +222,10 @@ def main():
     print(f"effort   : {settings['label']} (~{relative_cost(args.effort):.0f}x quick)")
     print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
 
+    # Before anything expensive: is this run about to renumber a shortlist the
+    # user is already referring to by number?
+    _warn_if_renumbering(args)
+
     finals = _beam_finalists(args, world)
 
     # Optimise item + four moves per team BEFORE anything is simulated, so the
@@ -252,7 +313,11 @@ def main():
     # the one generation ranked, silently.
     payload = {"teams": shortlist,
                "sets": {f"gen{i:02d}": (r.get("sets") or {})
-                        for i, r in enumerate(ranked, 1)}}
+                        for i, r in enumerate(ranked, 1)},
+               # What produced this numbering. Read back by _warn_if_renumbering
+               # on the next run, so re-running with different stage 1 flags
+               # cannot quietly change what "gen05" refers to.
+               "settings": _stage1_settings(args)}
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
 

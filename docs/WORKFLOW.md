@@ -61,8 +61,10 @@ Options worth knowing:
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
 | `--vs "Big 6"` | all | deep-search only these opponents — the biggest single lever |
 | `--brings N` | tier default | audit only the N best of our brings per pairing |
-| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate |
+| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate. On its own it does NOT regenerate |
 | `--list` | off | stage 1 only — rate and rank, then stop |
+| `--stage2-only` | off | skip generation, deep-search the shortlist on disk |
+| `--regenerate` | off | force stage 1 even when `--pick` would have skipped it |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
 | `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
 
@@ -105,18 +107,36 @@ line at all.
 Stage 2 is the expensive half, so you do not have to spend it on everything.
 
 ```bat
-overnight.bat --list                     :: generate and rate, then STOP
-overnight.bat --pick "6"                 :: deep-search #6 only
+overnight.bat --pool-size 50 --candidates 60 --optimise-sets --list
+                                         :: generate and rate, then STOP
+overnight.bat --pick "6"                 :: deep-search #6 only, no regenerating
 overnight.bat --pick "4,10,12"           :: later -- #6 is NOT redone
+overnight.bat --stage2-only --keep 6     :: deep-search the top 6, same idea
 ```
 
 `--list` runs stage 1 and prints the ranked teams, so you can look before
 committing. `--pick` takes stage 1's **rank numbers**.
 
+**A `--pick` command does not regenerate.** If nothing on the command line asks
+for generation, `--pick` deep-searches the `shortlist.json` already on disk —
+which is the only reading that makes sense, since the number you are picking
+came from that file. `--stage2-only` says the same thing explicitly (and works
+without `--pick`), and `--regenerate` forces stage 1 back on.
+
+That matters more than it sounds, because **the numbering is only stable across
+runs that generate the same teams**. Stage 1's flags decide which teams exist:
+drop them and the defaults (34 / 40) take over. Measured on the real dataset,
+`--pool-size 50 --candidates 60` and the defaults share **none** of their top
+five teams — so a `--pick "5"` that quietly re-ran stage 1 was searching a team
+you had never seen, after hours of re-rating nothing in the cache. Stage 1 now
+records its settings in `shortlist.json` and warns loudly before renumbering
+one that does not match.
+
 Two things make coming back later work:
 
 * stage 1 writes **every** rated team to `shortlist.json` in rank order, so
-  `gen06` means the same team tomorrow as today — the numbering never shifts;
+  `gen06` means the same team tomorrow as today — *provided the same stage 1
+  flags*, which is what the warning above protects;
 * stage 2 shares one cache, so a later `--pick` **adds** to it and the workbook
   is rebuilt to include everything searched so far.
 
