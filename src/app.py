@@ -485,6 +485,56 @@ with tab_build:
                     f"Mega Evolve per battle -- which one is chosen per matchup by the search.")
         st.dataframe(team_sheet_df(team, sets), width='stretch', hide_index=True)
 
+        # --- EV editor -------------------------------------------------
+        # make_team already accepts a per-Pokemon "evs" override and
+        # st.session_state["sets"] is already threaded everywhere as our_sets,
+        # so editing here reaches the solver, the search and the export without
+        # any new plumbing. The dataset's spreads are small usage-derived
+        # budgets, not the 508-point spreads a real sheet uses, so the cap is
+        # taken from the loaded spread rather than assumed.
+        with st.expander("Edit EVs", expanded=False):
+            st.caption("Per-Pokemon EV spreads. These are used by every "
+                       "simulation the app runs — the battle viewer, the "
+                       "preview, the deep dive — because they travel with the "
+                       "same set overrides as items and moves.")
+            cur_sets = dict(st.session_state.get("sets") or {})
+            STATS = ("hp", "atk", "def", "spa", "spd", "spe")
+            changed = False
+            for mon in team:
+                base = dict((merged.get(mon) or {}).get("evs") or {})
+                spec = dict(cur_sets.get(mon) or {})
+                have = dict(spec.get("evs") or base)
+                st.markdown(f"**{mon}**")
+                cols = st.columns(6)
+                new = {}
+                for col, stat in zip(cols, STATS):
+                    new[stat] = col.number_input(
+                        stat.upper(), min_value=0, max_value=252, step=4,
+                        value=int(have.get(stat, 0)), key=f"ev_{mon}_{stat}")
+                total = sum(new.values())
+                budget = sum(base.values()) or 508
+                st.caption(f"total {total}"
+                           + (f" — over the {budget} this Pokemon's loaded "
+                              f"spread uses" if total > budget else ""))
+                if new != have:
+                    spec["evs"] = new
+                    cur_sets[mon] = spec
+                    changed = True
+            e1, e2 = st.columns(2)
+            if e1.button("Apply EVs", width='stretch', key="ev_apply"):
+                st.session_state["sets"] = cur_sets
+                st.success("EVs applied — every simulation now uses them.")
+                st.rerun()
+            if e2.button("Reset to dataset spreads", width='stretch',
+                         key="ev_reset"):
+                for mon in team:
+                    if mon in cur_sets:
+                        cur_sets[mon].pop("evs", None)
+                st.session_state["sets"] = cur_sets
+                st.rerun()
+            if changed:
+                st.info("Edited but not applied — press Apply EVs.")
+
         cc1, cc2 = st.columns(2)
         with cc1:
             if st.button("Optimise items + movesets vs teams.csv", type="primary",
