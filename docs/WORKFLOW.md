@@ -125,7 +125,7 @@ to their back is scored as a win. That is why it is on by default: **90 is the
 denominator that makes `Wins / Of` a total-pathing number.** The cost is
 exactly the ratio, 90/4 -- about 22x the audit stage.
 
-The up-front estimate uses a measured ~0.9 s per audited turn and an assumed
+The up-front estimate uses a measured ~0.41 s per audited turn and an assumed
 8-turn line. It is rough on purpose; once the first pairing finishes, each
 progress line reports the real rate and a clock time:
 
@@ -224,9 +224,10 @@ Measured **3.1× on 4 cores**. Memory, not CPU, is the limit.
 The equilibrium solver's inner loop is vectorised. Profiling put **69 % of an
 audited line inside `solve_matrix`** — two matrix-vector products written as
 nested Python sums, 15 million generator calls for a single 30×60 turn. With
-numpy: **one audited line 15.8 s → 2.7 s (5.9×)**, golden baseline unchanged.
-Small matrices keep the scalar path; the 64-cell crossover is measured, not
-guessed. Gains are largest on `--audit-all` runs, where the audit dominates —
+numpy, plus cutting the scalar path's iteration count (a 4x4 subgame is
+converged long before 3000 sweeps): **one audited line 15.8 s → 2.1 s, 7.5×**,
+golden baseline unchanged through both changes. Small matrices keep the scalar
+path; the 64-cell crossover is measured, not guessed. Gains are largest on `--audit-all` runs, where the audit dominates —
 a preview pairing, which is mostly screening, went 126 s → 94 s.
 
 Auditing all 90 brings multiplies the audit by 90/leads — that is the cost of a
