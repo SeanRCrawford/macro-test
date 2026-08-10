@@ -219,6 +219,25 @@ def our_side_pool(key_prefix, teams, all_names):
     return list(all_names)
 
 
+def their_side_pool(key_prefix, teams, all_names):
+    """Where THEIR six come from. Mirrors our_side_pool.
+
+    The Battle Viewer could only face a saved team, so a matchup against six
+    Pokemon you had just seen -- the actual team-preview situation -- could not
+    be set up there at all.
+    """
+    source = st.radio("Their side", ["A saved team", "Pick 6"], index=0,
+                      horizontal=True, key=f"{key_prefix}_foe_source")
+    if source == "A saved team":
+        if not teams:
+            st.warning("No saved teams in data/teams.")
+            return []
+        pick = st.selectbox("Opponent team", list(teams), key=f"{key_prefix}_foe_saved")
+        return list(teams[pick])
+    return st.multiselect("Their six", all_names, max_selections=6,
+                          key=f"{key_prefix}_foe_manual")
+
+
 def advanced_model_controls(key_prefix, default="standard"):
     """The one place the advanced model's strength is chosen.
 
@@ -1407,10 +1426,18 @@ with tab_battle:
         our_pool = our_side_pool("bv", teams, all_names) or list(all_names)
         our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
-        opp = st.selectbox("Opponent team", list(teams))
+        their_pool = their_side_pool("bv", teams, all_names)
+        # Feeds the scripted-opponent lookup, so it must be a REAL team name
+        # or None. A hand-picked six has no script, and inventing a label for
+        # it would send a name into all_scripts that means nothing.
+        opp = (st.session_state.get("bv_foe_saved")
+               if st.session_state.get("bv_foe_source") == "A saved team"
+               else None)
+        if len(their_pool) < 2:
+            st.info("Pick at least two of theirs.")
         their4 = _lead_back_picker(
             "Their bring-4 -- pick a specific enemy lead, and optionally a specific back",
-            teams[opp], "bv_their_lead", "bv_their_back")
+            their_pool or list(all_names), "bv_their_lead", "bv_their_back")
     turns = st.slider("Turn cap", 4, 30, 12, key="bv_turns")
     bv_nash, bv_depth = solver_controls("bv")
 
@@ -1656,15 +1683,28 @@ with tab_vs:
             key="vs_cache_path",
             help="The search cache. Same data the .xlsx is built from.")
 
+        st.caption("Or upload them, if the app is not running next to the "
+                   "files (a different machine, or a copy someone sent you).")
+        u1, u2 = st.columns(2)
+        up_shortlist = u1.file_uploader("Shortlist JSON", type="json",
+                                        key="vs_up_shortlist")
+        up_cache = u2.file_uploader("Results cache JSON", type="json",
+                                    key="vs_up_cache")
+
         if st.button("Load", key="vs_load_overnight"):
             import json as _json
             loaded = {}
-            for label, path in (("shortlist", shortlist_path),
-                                ("cache", cache_path)):
+            # An upload wins over the path: if you went to the trouble of
+            # picking a file, that is the one you meant.
+            for label, upload, path in (("shortlist", up_shortlist, shortlist_path),
+                                        ("cache", up_cache, cache_path)):
                 try:
-                    with open(path, encoding="utf-8") as fh:
-                        loaded[label] = _json.load(fh)
-                except (OSError, ValueError) as exc:
+                    if upload is not None:
+                        loaded[label] = _json.loads(upload.getvalue().decode("utf-8"))
+                    elif path:
+                        with open(path, encoding="utf-8") as fh:
+                            loaded[label] = _json.load(fh)
+                except (OSError, ValueError, UnicodeDecodeError) as exc:
                     st.warning(f"{label}: {exc}")
             st.session_state["vs_overnight"] = loaded
             if loaded:
