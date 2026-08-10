@@ -92,9 +92,16 @@ def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_st
                                           # which is exactly why Shadow Tag is the other
                                           # half of a Perish Trap: it denies the escape
     if entering.ability == "Intimidate":
+        if log is not None and any(f is not None for f in opposing_active):
+            log.add(f"{entering.name}'s Intimidate!")
         for foe in opposing_active:
             if foe is not None:
-                apply_intimidate(foe)
+                said = apply_intimidate(foe)
+                # apply_intimidate reports which of its four outcomes fired --
+                # a Defiant boost and an Attack drop are not the same event and
+                # must not be logged as one.
+                if said and log is not None:
+                    log.add(f"  {said}")
     if entering.ability == "Hospitality" and ally is not None and not ally.fainted:
         heal = int(round(entering.max_hp() * 0.25))
         before = ally.current_hp

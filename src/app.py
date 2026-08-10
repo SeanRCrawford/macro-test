@@ -179,6 +179,11 @@ def weakness_table(team):
     return pd.DataFrame(rows)
 
 
+# The house-rule stat-point budget. Dataset spreads total 32-66 points with 66
+# by far the most common, so it is the fallback when a species has no spread.
+STAT_POINT_BUDGET = 66
+
+
 def our_side_pool(key_prefix, teams, all_names):
     """Where OUR six come from, offered the same way everywhere.
 
@@ -485,45 +490,50 @@ with tab_build:
                     f"Mega Evolve per battle -- which one is chosen per matchup by the search.")
         st.dataframe(team_sheet_df(team, sets), width='stretch', hide_index=True)
 
-        # --- EV editor -------------------------------------------------
-        # make_team already accepts a per-Pokemon "evs" override and
-        # st.session_state["sets"] is already threaded everywhere as our_sets,
-        # so editing here reaches the solver, the search and the export without
-        # any new plumbing. The dataset's spreads are small usage-derived
-        # budgets, not the 508-point spreads a real sheet uses, so the cap is
-        # taken from the loaded spread rather than assumed.
-        with st.expander("Edit EVs", expanded=False):
-            st.caption("Per-Pokemon EV spreads. These are used by every "
-                       "simulation the app runs — the battle viewer, the "
-                       "preview, the deep dive — because they travel with the "
-                       "same set overrides as items and moves.")
+        # --- Stat point editor -----------------------------------------
+        # These are NOT standard EVs. stats.py is explicit:
+        #     final_stat = normal_stat + ev_points   (flat, no /4)
+        # One point is one stat point, added after the level-50 formula --
+        # a Champions M-B house rule. The dataset's spreads total 32 to 66
+        # points, 66 being by far the most common, so 66 is the budget and the
+        # per-stat cap. Treating these as real EVs (step 4, cap 252, 508 total)
+        # would let a 1512-point Pokemon be built and reported as legal.
+        with st.expander("Edit stat points", expanded=False):
+            st.caption("Flat stat points, not EVs: each point is +1 to that "
+                       "stat after the level-50 formula. No division by four. "
+                       "Used by every simulation the app runs, because they "
+                       "travel with the same overrides as items and moves.")
             cur_sets = dict(st.session_state.get("sets") or {})
             STATS = ("hp", "atk", "def", "spa", "spd", "spe")
             changed = False
             for mon in team:
                 base = dict((merged.get(mon) or {}).get("evs") or {})
+                budget = sum(base.values()) or STAT_POINT_BUDGET
                 spec = dict(cur_sets.get(mon) or {})
                 have = dict(spec.get("evs") or base)
                 st.markdown(f"**{mon}**")
                 cols = st.columns(6)
-                new = {}
+                new_spread = {}
                 for col, stat in zip(cols, STATS):
-                    new[stat] = col.number_input(
-                        stat.upper(), min_value=0, max_value=252, step=4,
+                    new_spread[stat] = col.number_input(
+                        stat.upper(), min_value=0, max_value=budget, step=1,
                         value=int(have.get(stat, 0)), key=f"ev_{mon}_{stat}")
-                total = sum(new.values())
-                budget = sum(base.values()) or 508
-                st.caption(f"total {total}"
-                           + (f" — over the {budget} this Pokemon's loaded "
-                              f"spread uses" if total > budget else ""))
-                if new != have:
-                    spec["evs"] = new
+                total = sum(new_spread.values())
+                if total > budget:
+                    st.error(f"{total} points — {total - budget} over this "
+                             f"Pokemon's {budget}-point budget.")
+                else:
+                    st.caption(f"{total} / {budget} points"
+                               + (f" — {budget - total} unspent"
+                                  if total < budget else ""))
+                if new_spread != have:
+                    spec["evs"] = new_spread
                     cur_sets[mon] = spec
                     changed = True
             e1, e2 = st.columns(2)
-            if e1.button("Apply EVs", width='stretch', key="ev_apply"):
+            if e1.button("Apply stat points", width='stretch', key="ev_apply"):
                 st.session_state["sets"] = cur_sets
-                st.success("EVs applied — every simulation now uses them.")
+                st.success("Applied — every simulation now uses them.")
                 st.rerun()
             if e2.button("Reset to dataset spreads", width='stretch',
                          key="ev_reset"):
@@ -533,7 +543,7 @@ with tab_build:
                 st.session_state["sets"] = cur_sets
                 st.rerun()
             if changed:
-                st.info("Edited but not applied — press Apply EVs.")
+                st.info("Edited but not applied — press Apply stat points.")
 
         cc1, cc2 = st.columns(2)
         with cc1:
