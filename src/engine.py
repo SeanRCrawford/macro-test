@@ -18,6 +18,10 @@ this format, and is meant to be extended incrementally.
 from dataclasses import dataclass, field
 from damage import Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate, effective_stat
 
+# Display names, so the log reads like the game rather than like the code.
+WEATHER_NAMES = {"rain": "a rainstorm", "sun": "harsh sunlight",
+                 "sand": "a sandstorm", "snow": "snow"}
+
 WEATHER_SETTERS = {
     "Drizzle": "rain", "Drought": "sun", "Sand Stream": "sand", "Snow Warning": "snow",
 }
@@ -88,9 +92,16 @@ def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_st
                                           # which is exactly why Shadow Tag is the other
                                           # half of a Perish Trap: it denies the escape
     if entering.ability == "Intimidate":
+        if log is not None and any(f is not None for f in opposing_active):
+            log.add(f"{entering.name}'s Intimidate!")
         for foe in opposing_active:
             if foe is not None:
-                apply_intimidate(foe)
+                said = apply_intimidate(foe)
+                # apply_intimidate reports which of its four outcomes fired --
+                # a Defiant boost and an Attack drop are not the same event and
+                # must not be logged as one.
+                if said and log is not None:
+                    log.add(f"  {said}")
     if entering.ability == "Hospitality" and ally is not None and not ally.fainted:
         heal = int(round(entering.max_hp() * 0.25))
         before = ally.current_hp
@@ -107,6 +118,14 @@ def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_st
         if field_state.weather != new_weather:
             field_state.weather = new_weather
             field_state.weather_turns_left = 5  # 8 with the matching weather rock/seed item, simplified here
+            # Every other switch-in ability here announces itself; this one did
+            # not, so a Tyranitar lead set sand SILENTLY and the battle log gave
+            # no reason for the Rock Sp.Def boost or the Weather Ball that
+            # followed. Reported as "Tyranitar does not set sand" -- it did, it
+            # just never said so.
+            if log is not None:
+                log.add(f"{entering.name}'s {entering.ability} whipped up "
+                        f"{WEATHER_NAMES.get(new_weather, new_weather)}!")
 
 
 def effective_speed(c: Combatant, field_state: FieldState, side: str) -> float:

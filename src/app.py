@@ -179,6 +179,65 @@ def weakness_table(team):
     return pd.DataFrame(rows)
 
 
+# The house-rule stat-point budget. Dataset spreads total 32-66 points with 66
+# by far the most common, so it is the fallback when a species has no spread.
+STAT_POINT_BUDGET = 66
+
+
+def our_side_pool(key_prefix, teams, all_names):
+    """Where OUR six come from, offered the same way everywhere.
+
+    Every view that puts our team against someone else's needs this, and each
+    one used to answer it differently: the Battle Viewer silently fell back to
+    all 271 species when the Team Builder was empty, which is unusable, and the
+    preview panels only ever offered the loaded team. One control, three
+    sources: the team in the Team Builder tab, any saved team from the library,
+    or the whole dataset for a one-off.
+
+    Returns the list of names to pick a bring from (possibly empty).
+    """
+    loaded = get_state_team()
+    options = ["My loaded team", "A saved team", "Any Pokemon"]
+    default = 0 if loaded else 1
+    source = st.radio("Our side", options, index=default, horizontal=True,
+                      key=f"{key_prefix}_side_source",
+                      help="'My loaded team' is whatever the Team Builder tab "
+                           "currently holds. 'A saved team' is anything in "
+                           "data/teams. 'Any Pokemon' opens the whole dataset "
+                           "for a one-off matchup.")
+    if source == "My loaded team":
+        if not loaded:
+            st.warning("No team loaded — pick six in the Team Builder tab, "
+                       "or choose another source above.")
+        return list(loaded)
+    if source == "A saved team":
+        if not teams:
+            st.warning("No saved teams in data/teams.")
+            return []
+        pick = st.selectbox("Saved team", list(teams), key=f"{key_prefix}_saved")
+        return list(teams[pick])
+    return list(all_names)
+
+
+def their_side_pool(key_prefix, teams, all_names):
+    """Where THEIR six come from. Mirrors our_side_pool.
+
+    The Battle Viewer could only face a saved team, so a matchup against six
+    Pokemon you had just seen -- the actual team-preview situation -- could not
+    be set up there at all.
+    """
+    source = st.radio("Their side", ["A saved team", "Pick 6"], index=0,
+                      horizontal=True, key=f"{key_prefix}_foe_source")
+    if source == "A saved team":
+        if not teams:
+            st.warning("No saved teams in data/teams.")
+            return []
+        pick = st.selectbox("Opponent team", list(teams), key=f"{key_prefix}_foe_saved")
+        return list(teams[pick])
+    return st.multiselect("Their six", all_names, max_selections=6,
+                          key=f"{key_prefix}_foe_manual")
+
+
 def advanced_model_controls(key_prefix, default="standard"):
     """The one place the advanced model's strength is chosen.
 
@@ -213,6 +272,48 @@ def advanced_model_controls(key_prefix, default="standard"):
                f"— roughly {relative_cost(effort) * (22 if audit_all and not _t(effort).get('all_configs') else 1):.0f}x "
                f"the quick setting.")
     return effort, audit_all
+
+
+def render_line_result(lead, key):
+    """A whole audited line as one battle, the way the Lead/Back tab shows one.
+
+    render_audited_turn gives the analysis per turn -- punish, their answer,
+    the tie count. This gives the other half a player wants: the result, and
+    the battle log end to end in one block you can read or copy, assembled from
+    the per-turn engine logs the audit already recorded.
+    """
+    outcome = (lead.get("outcome") or "?").lower()
+    turns = lead.get("turns") or []
+    label = {"win": "WIN", "loss": "LOSS",
+             "draw": "DRAW"}.get(outcome, "UNRESOLVED")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Result", label)
+    c2.metric("Turns", lead.get("line_turns") or len(turns))
+    kos = [k for t in turns for k in (t.get("kos") or [])]
+    c3.metric("Knocked out", len(kos))
+    if outcome != "win":
+        st.warning("This line does not win against an opponent playing its "
+                   "equilibrium every turn.")
+
+    log = []
+    for t in turns:
+        log.append(f"--- Turn {t.get('turn')} ---")
+        log.append(f"  we play: {t.get('our_play')}")
+        answer = t.get("punished_by")
+        log.append(f"  their best answer: {answer}" if answer
+                   else "  their best answer: none worth making")
+        # The engine's log already opens each turn with its own "--- Turn N ---"
+        # banner, so keeping both would double every header.
+        log.extend("  " + e for e in (t.get("events") or [])
+                   if e.strip() and not e.strip().startswith("--- Turn"))
+        if t.get("kos"):
+            log.append("  KO: " + ", ".join(t["kos"]))
+        if t.get("hp_after"):
+            log.append("  after: " + ", ".join(t["hp_after"]))
+    if log:
+        st.code("\n".join(log))
+    else:
+        st.caption("No per-turn log recorded for this line.")
 
 
 def render_audited_turn(turn, key=None):
@@ -449,6 +550,61 @@ with tab_build:
             st.info(f"{len(megas)} Mega-capable picks ({', '.join(megas)}). Only one can "
                     f"Mega Evolve per battle -- which one is chosen per matchup by the search.")
         st.dataframe(team_sheet_df(team, sets), width='stretch', hide_index=True)
+
+        # --- Stat point editor -----------------------------------------
+        # These are NOT standard EVs. stats.py is explicit:
+        #     final_stat = normal_stat + ev_points   (flat, no /4)
+        # One point is one stat point, added after the level-50 formula --
+        # a Champions M-B house rule. The dataset's spreads total 32 to 66
+        # points, 66 being by far the most common, so 66 is the budget and the
+        # per-stat cap. Treating these as real EVs (step 4, cap 252, 508 total)
+        # would let a 1512-point Pokemon be built and reported as legal.
+        with st.expander("Edit stat points", expanded=False):
+            st.caption("Flat stat points, not EVs: each point is +1 to that "
+                       "stat after the level-50 formula. No division by four. "
+                       "Used by every simulation the app runs, because they "
+                       "travel with the same overrides as items and moves.")
+            cur_sets = dict(st.session_state.get("sets") or {})
+            STATS = ("hp", "atk", "def", "spa", "spd", "spe")
+            changed = False
+            for mon in team:
+                base = dict((merged.get(mon) or {}).get("evs") or {})
+                budget = sum(base.values()) or STAT_POINT_BUDGET
+                spec = dict(cur_sets.get(mon) or {})
+                have = dict(spec.get("evs") or base)
+                st.markdown(f"**{mon}**")
+                cols = st.columns(6)
+                new_spread = {}
+                for col, stat in zip(cols, STATS):
+                    new_spread[stat] = col.number_input(
+                        stat.upper(), min_value=0, max_value=budget, step=1,
+                        value=int(have.get(stat, 0)), key=f"ev_{mon}_{stat}")
+                total = sum(new_spread.values())
+                if total > budget:
+                    st.error(f"{total} points — {total - budget} over this "
+                             f"Pokemon's {budget}-point budget.")
+                else:
+                    st.caption(f"{total} / {budget} points"
+                               + (f" — {budget - total} unspent"
+                                  if total < budget else ""))
+                if new_spread != have:
+                    spec["evs"] = new_spread
+                    cur_sets[mon] = spec
+                    changed = True
+            e1, e2 = st.columns(2)
+            if e1.button("Apply stat points", width='stretch', key="ev_apply"):
+                st.session_state["sets"] = cur_sets
+                st.success("Applied — every simulation now uses them.")
+                st.rerun()
+            if e2.button("Reset to dataset spreads", width='stretch',
+                         key="ev_reset"):
+                for mon in team:
+                    if mon in cur_sets:
+                        cur_sets[mon].pop("evs", None)
+                st.session_state["sets"] = cur_sets
+                st.rerun()
+            if changed:
+                st.info("Edited but not applied — press Apply stat points.")
 
         cc1, cc2 = st.columns(2)
         with cc1:
@@ -1309,12 +1465,21 @@ with tab_battle:
 
     b1, b2 = st.columns(2)
     with b1:
-        our4 = _lead_back_picker("Our bring-4", team or all_names, "bv_our_lead", "bv_our_back")
+        our_pool = our_side_pool("bv", teams, all_names) or list(all_names)
+        our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
-        opp = st.selectbox("Opponent team", list(teams))
+        their_pool = their_side_pool("bv", teams, all_names)
+        # Feeds the scripted-opponent lookup, so it must be a REAL team name
+        # or None. A hand-picked six has no script, and inventing a label for
+        # it would send a name into all_scripts that means nothing.
+        opp = (st.session_state.get("bv_foe_saved")
+               if st.session_state.get("bv_foe_source") == "A saved team"
+               else None)
+        if len(their_pool) < 2:
+            st.info("Pick at least two of theirs.")
         their4 = _lead_back_picker(
             "Their bring-4 -- pick a specific enemy lead, and optionally a specific back",
-            teams[opp], "bv_their_lead", "bv_their_back")
+            their_pool or list(all_names), "bv_their_lead", "bv_their_back")
     turns = st.slider("Turn cap", 4, 30, 12, key="bv_turns")
     bv_nash, bv_depth = solver_controls("bv")
 
@@ -1560,15 +1725,28 @@ with tab_vs:
             key="vs_cache_path",
             help="The search cache. Same data the .xlsx is built from.")
 
+        st.caption("Or upload them, if the app is not running next to the "
+                   "files (a different machine, or a copy someone sent you).")
+        u1, u2 = st.columns(2)
+        up_shortlist = u1.file_uploader("Shortlist JSON", type="json",
+                                        key="vs_up_shortlist")
+        up_cache = u2.file_uploader("Results cache JSON", type="json",
+                                    key="vs_up_cache")
+
         if st.button("Load", key="vs_load_overnight"):
             import json as _json
             loaded = {}
-            for label, path in (("shortlist", shortlist_path),
-                                ("cache", cache_path)):
+            # An upload wins over the path: if you went to the trouble of
+            # picking a file, that is the one you meant.
+            for label, upload, path in (("shortlist", up_shortlist, shortlist_path),
+                                        ("cache", up_cache, cache_path)):
                 try:
-                    with open(path, encoding="utf-8") as fh:
-                        loaded[label] = _json.load(fh)
-                except (OSError, ValueError) as exc:
+                    if upload is not None:
+                        loaded[label] = _json.loads(upload.getvalue().decode("utf-8"))
+                    elif path:
+                        with open(path, encoding="utf-8") as fh:
+                            loaded[label] = _json.load(fh)
+                except (OSError, ValueError, UnicodeDecodeError) as exc:
                     st.warning(f"{label}: {exc}")
             st.session_state["vs_overnight"] = loaded
             if loaded:
@@ -1646,8 +1824,13 @@ with tab_vs:
                 m4.metric("Line value",
                           f"{lead.get('adjusted_value') or 0:.2f}")
 
-                for t in lead.get("turns") or []:
-                    render_audited_turn(t)
+                tab_log, tab_turns = st.tabs(["Battle result + log",
+                                              "Turn-by-turn analysis"])
+                with tab_log:
+                    render_line_result(lead, "vs_line")
+                with tab_turns:
+                    for t in lead.get("turns") or []:
+                        render_audited_turn(t)
 
     st.caption("Check the currently loaded team (Team Builder tab) against any enemy team you "
                "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
@@ -1663,10 +1846,11 @@ with tab_vs:
                    "BEFORE they reveal theirs. This runs the advanced model on "
                    "that decision and reports the one committed plan, its "
                    "record across their brings, and what beats it.")
+        pv_pool = our_side_pool("pv", teams, all_names)
         pv_ours = st.multiselect(
-            "My six", all_names, max_selections=6, key="pv_ours",
-            default=get_state_team()[:6] if get_state_team() else [],
-            help="Defaults to the team loaded in Team Builder.")
+            "My six", pv_pool or all_names, max_selections=6, key="pv_ours",
+            default=list(pv_pool)[:6] if len(pv_pool) == 6 else [],
+            help="Filled in from the source chosen above.")
         pv_theirs = st.multiselect(
             "Their six (from team preview)", all_names, max_selections=6,
             key="pv_theirs")
@@ -1725,11 +1909,9 @@ with tab_vs:
                    "matrix every turn, their wider move space, the "
                    "equilibrium solver piloting -- and shows the match.")
         dd1, dd2 = st.columns(2)
-        _loaded = get_state_team()
-        if not _loaded:
-            st.info("Load a team in the Team Builder tab to pick a bring from it.")
+        _loaded = our_side_pool("dd", teams, all_names)
         our_bring = dd1.multiselect(
-            "My bring-4 (LEAD FIRST, order matters)", _loaded,
+            "My bring-4 (LEAD FIRST, order matters)", _loaded or all_names,
             max_selections=4, key="dd_ours",
             help="Your six from the Team Builder tab. The first two you pick "
                  "are the pair you actually led with.")

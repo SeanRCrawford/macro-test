@@ -215,16 +215,29 @@ def apply_boosts(target: Combatant, boosts: dict, from_foe: bool = False) -> dic
 
 
 def apply_intimidate(target: Combatant):
-    """Call when `target` switches in against a foe with Intimidate."""
+    """Call when `target` switches in against a foe with Intimidate.
+
+    Returns a short description of what actually happened, so a caller can log
+    it truthfully. There are four outcomes and they are not interchangeable:
+    announcing "Attack fell" when the target has Defiant, Competitive or an
+    immunity would be worse than saying nothing.
+    """
     if target.ability == "Defiant":
-        target.stages["atk"] = min(6, target.stages["atk"] + 1)
-    elif target.ability == "Competitive":
-        target.stages["spa"] = min(6, target.stages["spa"] + 2)
-    elif target.ability in ("Clear Body", "Full Metal Body", "White Smoke", "Hyper Cutter",
-                             "Inner Focus", "Own Tempo", "Oblivious", "Scrappy"):
-        pass  # immune to the stat drop (Hyper Cutter only blocks Atk drops specifically)
-    else:
-        target.stages["atk"] = max(-6, target.stages["atk"] - 1)
+        before = target.stages["atk"]
+        target.stages["atk"] = min(6, before + 1)
+        return f"{target.name}'s Defiant raised its Attack!"
+    if target.ability == "Competitive":
+        before = target.stages["spa"]
+        target.stages["spa"] = min(6, before + 2)
+        return f"{target.name}'s Competitive sharply raised its Sp. Atk!"
+    if target.ability in ("Clear Body", "Full Metal Body", "White Smoke", "Hyper Cutter",
+                          "Inner Focus", "Own Tempo", "Oblivious", "Scrappy"):
+        # immune to the stat drop (Hyper Cutter only blocks Atk drops specifically)
+        return f"{target.name}'s {target.ability} blocked the Attack drop!"
+    if target.stages["atk"] <= -6:
+        return f"{target.name}'s Attack won't go any lower!"
+    target.stages["atk"] = max(-6, target.stages["atk"] - 1)
+    return f"{target.name}'s Attack fell!"
 
 
 SLICING_BOOST_ABILITY = "Sharpness"
