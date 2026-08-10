@@ -43,13 +43,13 @@ import _harness  # noqa: E402,F401  (adds ../src to sys.path)
 
 sys.path.insert(0, "../src")
 import generate_team as gt  # noqa: E402
+import roster_rating  # noqa: E402
 from search_effort import TIER_ORDER, ResultCache, relative_cost, tier  # noqa: E402
-from species_data import build_merged_dataset, load_preferences  # noqa: E402
+from species_data import load_preferences  # noqa: E402
 from team_search import (beam_search_teams, build_candidate_pool,  # noqa: E402
                          build_pair_matrix, enemy_pairs_from_teams)
 
 DEFAULT_CACHE = "generate_cache.json"
-SCHEMA = 1
 
 
 def _beam_finalists(args, world):
@@ -156,10 +156,10 @@ def main():
     if _warning:
         print(f"WARNING  : {_warning}")
 
-    merged, _usage, moves, natures, typechart = build_merged_dataset()
-    teams = gt.load_teams(merged=merged)
-    world = dict(merged=merged, moves=moves, natures=natures,
-                 typechart=typechart, teams=teams)
+    world = roster_rating.load_world()
+    merged, moves = world["merged"], world["moves"]
+    natures, typechart, teams = (world["natures"], world["typechart"],
+                                 world["teams"])
 
     settings = tier(args.effort)
     print(f"effort   : {settings['label']} (~{relative_cost(args.effort):.0f}x quick)")
@@ -192,97 +192,27 @@ def main():
         our_sets = sets_by_team.get(tuple(sorted(team)))
         # The sets change what is simulated, so they belong in the key: an
         # optimised run must never be served a usage-default result.
-        key = ResultCache.key("team", SCHEMA, sorted(team), args.effort,
-                              args.turns, our_sets)
+        key = roster_rating.rating_key(team, args.effort, args.turns, our_sets)
         record = cache.get(key)
         if record is None:
-            # SCREEN FIRST. The win check is cheap next to the audit, and a
-            # team losing its games is not a team whose lines are worth
-            # measuring -- a lost position rates as unpunishable, so auditing
-            # it produces a flattering number for a bad team. Rate only what
-            # already wins, then rank those by punishability.
-            if args.script_screen:
-                # A team with no plan against a rehearsed opening is not worth
-                # auditing. One sampled config per scripted opponent, so this
-                # is cheap next to the audit it protects.
-                screened = gt.quick_script_screen(
-                    [(beam_score, list(team))], teams, {}, merged, moves,
-                    natures, typechart, max_turns=args.turns,
-                    our_sets=our_sets)
-                if screened and screened[0][2]:
-                    record = {"team": list(team), "beam_score": beam_score,
-                              "sets": our_sets, "exploitability": None,
-                              "adjusted_win_rate": None, "robust_win_rate": None,
-                              "severe_turns": 0, "wins": 0, "total": 0,
-                              "skipped": "loses every scripted opening"}
-                    cache.put(key, record)
-                    cache.save()
-                    rated.append(record)
-                    print(f"  [{i}/{len(finals)}] skipped: no plan vs any "
-                          f"scripted opening", flush=True)
-                    continue
-            if args.min_winrate > 0:
-                screen = gt.verify_with_solver(
-                    team, teams, merged, moves, natures, typechart, {}, [],
-                    max_turns=args.turns, all_backs=True, effort="quick",
-                    jobs=args.jobs, our_sets=our_sets)
-                s_wins = sum((r.get("wins") or 0) for r in screen.values() if r)
-                s_total = sum((r.get("total") or 0) for r in screen.values() if r)
-                if s_total and s_wins / s_total < args.min_winrate:
-                    record = {"team": list(team), "beam_score": beam_score,
-                              "exploitability": None, "adjusted_win_rate": None,
-                              "robust_win_rate": None, "severe_turns": 0,
-                              "wins": s_wins, "total": s_total,
-                              "skipped": "below --min-winrate"}
-                    cache.put(key, record)
-                    cache.save()
-                    rated.append(record)
-                    print(f"  [{i}/{len(finals)}] skipped: "
-                          f"{s_wins}/{s_total} won "
-                          f"({s_wins / s_total:.0%} < {args.min_winrate:.0%})",
-                          flush=True)
-                    continue
-            verdict = gt.verify_with_solver(
-                team, teams, merged, moves, natures, typechart, {}, [],
-                max_turns=args.turns, all_backs=True, effort=args.effort,
-                jobs=args.jobs, our_sets=our_sets)
-            scores = [r["exploitability"] for r in verdict.values()
-                      if r and r.get("exploitability") is not None]
-            adj = [r["adjusted_win_rate"] for r in verdict.values()
-                   if r and r.get("adjusted_win_rate") is not None]
-            rob = [r["robust_win_rate"] for r in verdict.values()
-                   if r and r.get("robust_win_rate") is not None]
-            wins = sum((r.get("wins") or 0) for r in verdict.values() if r)
-            total = sum((r.get("total") or 0) for r in verdict.values() if r)
-            worst = max((r for r in verdict.values()
-                         if r and r.get("exploitability") is not None),
-                        key=lambda r: r["exploitability"], default=None)
-            record = {
-                "team": list(team),
-                "sets": our_sets,
-                "beam_score": beam_score,
-                "exploitability": (sum(scores) / len(scores)) if scores else None,
-                "adjusted_win_rate": (sum(adj) / len(adj)) if adj else None,
-                "robust_win_rate": (sum(rob) / len(rob)) if rob else None,
-                "severe_turns": sum((r.get("severe_turns") or 0)
-                                    for r in verdict.values() if r),
-                "wins": wins, "total": total,
-                "worst_opponent": next((n for n, r in verdict.items()
-                                        if r is worst), None),
-                "worst_value": worst["exploitability"] if worst else None,
-                "worst_turn": worst.get("worst_turn") if worst else None,
-                "per_opponent": {n: {"wins": r.get("wins"), "total": r.get("total"),
-                                     "exploitability": r.get("exploitability"),
-                                     "adjusted_win_rate": r.get("adjusted_win_rate"),
-                                     "robust_win_rate": r.get("robust_win_rate"),
-                                     "severe_turns": r.get("severe_turns")}
-                                 for n, r in verdict.items() if r},
-            }
+            # SCREEN FIRST, then audit -- see roster_rating.rate_team. A team
+            # losing its games is not a team whose lines are worth measuring: a
+            # lost position rates as unpunishable, so auditing it produces a
+            # flattering number for a bad team.
+            record = roster_rating.rate_team(
+                team, world, effort=args.effort, turns=args.turns,
+                our_sets=our_sets, jobs=args.jobs,
+                min_winrate=args.min_winrate, script_screen=args.script_screen,
+                beam_score=beam_score)
             cache.put(key, record)
             cache.save()          # every team is a save point: teams are slow
         rated.append(record)
         elapsed = time.time() - started
         adj = record.get("adjusted_win_rate")
+        if record.get("skipped"):
+            print(f"  [{i}/{len(finals)}] skipped: {record['skipped']} "
+                  f"({record['wins']}/{record['total']} won)", flush=True)
+            continue
         print(f"  [{i}/{len(finals)}] "
               f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
               f"punish {record['exploitability'] or float('nan'):6.1f}   "
@@ -293,8 +223,7 @@ def main():
     # that loses everything first, because a lost position has nothing left to
     # punish -- observed live before this was changed.
     ranked = sorted([r for r in rated if r.get("exploitability") is not None],
-                    key=lambda r: (-(r.get("adjusted_win_rate") or 0.0),
-                                   r["exploitability"]))
+                    key=roster_rating.rank_key)
     if not ranked:
         print("\nNo ratings produced (quick tier does not compute them).")
         return

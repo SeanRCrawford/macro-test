@@ -92,16 +92,22 @@ def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_st
                                           # which is exactly why Shadow Tag is the other
                                           # half of a Perish Trap: it denies the escape
     if entering.ability == "Intimidate":
-        if log is not None and any(f is not None for f in opposing_active):
+        # A FAINTED Pokemon cannot be intimidated. It can still be sitting in
+        # its slot when this runs -- during a mid-turn pivot, or in the gap
+        # before end-of-turn replacements -- and dropping its Attack is an
+        # effect on nothing. Worse, it used to hide the real target: in a double
+        # KO the drop landed on the corpse and the replacement walked in
+        # unintimidated. See Battle._replace_fainted.
+        live_foes = [f for f in opposing_active if f is not None and not f.fainted]
+        if log is not None and live_foes:
             log.add(f"{entering.name}'s Intimidate!")
-        for foe in opposing_active:
-            if foe is not None:
-                said = apply_intimidate(foe)
-                # apply_intimidate reports which of its four outcomes fired --
-                # a Defiant boost and an Attack drop are not the same event and
-                # must not be logged as one.
-                if said and log is not None:
-                    log.add(f"  {said}")
+        for foe in live_foes:
+            said = apply_intimidate(foe)
+            # apply_intimidate reports which of its four outcomes fired -- a
+            # Defiant boost and an Attack drop are not the same event and must
+            # not be logged as one.
+            if said and log is not None:
+                log.add(f"  {said}")
     if entering.ability == "Hospitality" and ally is not None and not ally.fainted:
         heal = int(round(entering.max_hp() * 0.25))
         before = ally.current_hp

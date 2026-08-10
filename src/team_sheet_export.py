@@ -27,8 +27,12 @@ def build_sheets(rosters, merged, optimised=False, sets=None):
         chosen = sets.get(name) or {}
         rows = []
         for r in team_items(list(members), merged):
-            ev = r.get("evs") or {}
             spec = chosen.get(r["name"]) or {}
+            # An edited stat-point spread is an override like any other, and
+            # the whole point of this file is that it matches what was
+            # simulated. Reading the dataset spread here printed a sheet that
+            # disagreed with the numbers beside it.
+            ev = spec.get("evs") or r.get("evs") or {}
             rows.append({
                 "pokemon": r["name"],
                 "types": r.get("types"),

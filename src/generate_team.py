@@ -157,7 +157,7 @@ def _verify_one_opponent(job):
     """One (team, opponent) verification. Top-level and plain-typed, because on
     Windows the pool uses spawn and both ends cross a pickle boundary.
     """
-    team, team_name, max_turns, our_sets, effort = job
+    team, team_name, max_turns, our_sets, effort, pilot = job
     global _WORLD
     if _WORLD is None:
         _verify_worker_init()
@@ -165,13 +165,14 @@ def _verify_one_opponent(job):
     out = verify_with_solver(team, {team_name: _WORLD["teams"][team_name]},
                              _WORLD["merged"], _WORLD["moves"], _WORLD["natures"],
                              _WORLD["typechart"], {}, [], max_turns=max_turns,
-                             all_backs=True, our_sets=our_sets, effort=effort)
+                             all_backs=True, our_sets=our_sets, effort=effort,
+                             pilot=pilot)
     return team_name, out.get(team_name)
 
 
 def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, enemy_pairs,
                         max_turns=12, all_backs=True, our_sets=None, effort=None,
-                        jobs=1):
+                        jobs=1, pilot=None):
     """Re-run this team through the REAL solver.
 
     all_backs=True (default): test EVERY enemy bring-4 -- all C(6,2) lead pairs
@@ -179,6 +180,11 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
     choose their own configuration, so a team only counts as beating an
     opponent if it beats all 90. Sampling one back pair (the old default) let
     compositions look clean while losing to backs never tried.
+
+    `pilot` chooses who plays the games the WIN COUNT is taken from --
+    "greedy" (the default, and what every record in the workbook has always
+    meant) or "equilibrium", the pilot the punish audit uses. They disagree,
+    measurably: see tools/measure_pilot_gap.py and WORKFLOW.md §4.4.
 
     `effort` is a search_effort tier name. Anything above "quick" additionally
     rates each opponent by EXPLOITABILITY -- how much a best-responding player
@@ -201,7 +207,8 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
         with cf.ProcessPoolExecutor(max_workers=jobs,
                                     initializer=_verify_worker_init) as pool:
             futures = [pool.submit(_verify_one_opponent,
-                                   (list(team), name, max_turns, our_sets, effort))
+                                   (list(team), name, max_turns, our_sets,
+                                    effort, pilot))
                        for name in teams]
             for future in cf.as_completed(futures):
                 name, rec = future.result()
@@ -237,7 +244,8 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
                                                 robustness_leads=(settings["leads"] or 1)
                                                 if rate else 3,
                                                 robustness_turns=(settings["turns"] or 1)
-                                                if rate else 5)
+                                                if rate else 5,
+                                                **({"pilot": pilot} if pilot else {}))
             if not robust:
                 results[team_name] = None
                 continue
@@ -245,6 +253,10 @@ def verify_with_solver(team, teams, merged, moves, natures, typechart, matrix, e
             rec = {
                 "mode": "all_backs", "total": r["solver_total"], "wins": r["solver_wins"],
                 "losses": r["solver_losses"], "our_bring4": r["our_bring4"],
+                # Who played the games behind `wins`. The punish numbers below
+                # always come from the equilibrium pilot, so without this a
+                # reader cannot tell whether the two describe the same players.
+                "pilot": r.get("pilot"),
                 "exploitability": r.get("exploitability"),
                 # The win-quality numbers, not just punishability. Omitting
                 # them here made generation report "adj 0.00" for every team

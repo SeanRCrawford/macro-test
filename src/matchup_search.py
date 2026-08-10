@@ -30,6 +30,13 @@ from solver import (build_moveset, build_wide_movesets, solve_best_action,
 
 MAX_TURNS = 8
 
+# WHO PLAYS THE GAME when a win is counted. See play_out_pair's `pilot`, and
+# WORKFLOW.md §4.4: the record has always been played by the greedy pilot while
+# the punish audit is played by the equilibrium one, so the two headline numbers
+# describe two different pairs of players.
+GREEDY_PILOT = "greedy"
+EQUILIBRIUM_PILOT = "equilibrium"
+
 
 def make_combatant(name, merged, natures):
     """Delegates to the shared, Mega-aware factory in combatants.py."""
@@ -61,7 +68,8 @@ def _attach_movesets(battle, movesets, enemy_combatants, merged, moves_db, enemy
 
 def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
                          max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
-                         return_choice=False, enemy_script=None, roll_index=None, tie_bias=None):
+                         return_choice=False, enemy_script=None, roll_index=None, tie_bias=None,
+                         pilot=GREEDY_PILOT):
     """Minimax over BOTH sides' Mega Evolution choices.
 
     Either side may bring two Mega-capable Pokemon, but only one can actually
@@ -88,7 +96,7 @@ def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typec
                 our_names, enemy_names, merged, moves_db, natures, typechart, max_turns,
                 our_mega_transforms=ov, enemy_mega_transforms=ev,
                 our_sets=our_sets, enemy_sets=enemy_sets, enemy_script=enemy_script,
-                roll_index=roll_index, tie_bias=tie_bias)
+                roll_index=roll_index, tie_bias=tie_bias, pilot=pilot)
             # Rank by how BAD the outcome is for us (higher = worse), so the enemy
             # branch maximises and ours minimises.
             #   we lose            -> worst; the faster we lose, the worse
@@ -112,16 +120,59 @@ def play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typec
     return best[1]
 
 
+def _equilibrium_joint_actions(battle, movesets, enemy_script=None):
+    """Both sides' plays for one turn, from the SAME equilibrium solve.
+
+    The pilot the audit uses (`matchup_search._rate_and_rerank`,
+    `robustness.line_report`): we play the equilibrium MIXTURE, they play their
+    equilibrium reply. Deliberately not the best response to our revealed move
+    -- that opponent is clairvoyant and beats every team ever built.
+
+    Returns (ours, theirs), either of which may be None when the position has
+    no legal action left to solve.
+    """
+    import solver as _solver
+    from turn_game import solve_turn
+    with _solver.solver_mode(nash=True, depth=1):
+        # Reseeded per decision, exactly as the audit's pilot does
+        # (_rate_and_rerank.choose). Mixture sampling is otherwise a global RNG
+        # walk, which would make a measured record depend on how many games ran
+        # before it -- and a record you cannot reproduce is not a measurement.
+        _solver.seed_nash_sampling(20260808)
+        solution = solve_turn(battle, "p1", movesets, depth=1,
+                              enemy_script=enemy_script)
+    if not solution.our_actions:
+        return None, None
+    ours = (_solver._pick_from_mixture(solution.our_actions, solution.p)
+            if _solver.NASH_SAMPLE else solution.best_action)
+    theirs = None
+    if solution.their_actions:
+        theirs = solution.their_actions[
+            max(range(len(solution.q)), key=lambda j: solution.q[j])]
+    return ours, theirs
+
+
 def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
                    max_turns=MAX_TURNS, our_mega_transforms=None, enemy_mega_transforms=None,
                    our_sets=None, enemy_sets=None, rng_seed=None, tie_bias=None,
-                   enemy_script=None, roll_index=None):
+                   enemy_script=None, roll_index=None, pilot=GREEDY_PILOT):
     """our_names / enemy_names: lists of Pokemon names, length 2 (pure lead
     duel) or 4 (lead pair + back pair, roster[0:2] leads / roster[2:] bench).
     Multiple Mega-named picks per side are allowed (resolved via make_team;
     by default the first one in list order actually transforms -- pass
     *_mega_transforms=<name> to force a specific one instead, e.g. to
     search over which Mega a team actually evolves).
+
+    `pilot` chooses WHO PLAYS THE GAME, and it is the subject of WORKFLOW.md
+    §4.4. The default "greedy" is unchanged: our side best-responds to
+    `greedy_opponent_joint_action`, a policy this codebase wrote itself, and
+    that is what every `Wins / Of` record in the workbook has always meant.
+    "equilibrium" instead plays the turn as a matrix game for both sides --
+    the same pilot the punish audit uses -- so the record and the audit finally
+    describe the same two players. It costs a full payoff matrix per turn,
+    which is why it is not the default; `tools/measure_pilot_gap.py` is the
+    measurement of what the choice is worth.
+
     Returns (winner 'p1'|'p2'|'draw'|'timeout', turn_count, battle)."""
     from combatants import make_team
     our_combatants = make_team(our_names, merged, natures, mega_transforms=our_mega_transforms,
@@ -148,16 +199,25 @@ def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
     for _ in range(max_turns):
         if battle.is_over():
             break
-        # Plan deterministically, then RESOLVE on the real battle (which carries the
-        # RNG). Previously the planning copy was adopted as the new state, so the
-        # chosen line and the reported outcome were the same sample -- damage rolls,
-        # flinch chances and speed ties all resolved in our favour by construction.
-        best_action, _, sim = solve_best_action(battle, "p1", movesets, depth=1,
-                                                 enemy_script=enemy_script)
-        if not best_action and sim is None:
-            break
-        opp_actions = None
-        if enemy_script is not None:
+        if pilot == EQUILIBRIUM_PILOT:
+            # Both plays come from ONE solve, so the record is measured against
+            # the same opponent the audit measures the punish against.
+            best_action, equilibrium_reply = _equilibrium_joint_actions(
+                battle, movesets, enemy_script=enemy_script)
+            if not best_action:
+                break
+        else:
+            # Plan deterministically, then RESOLVE on the real battle (which carries the
+            # RNG). Previously the planning copy was adopted as the new state, so the
+            # chosen line and the reported outcome were the same sample -- damage rolls,
+            # flinch chances and speed ties all resolved in our favour by construction.
+            equilibrium_reply = None
+            best_action, _, sim = solve_best_action(battle, "p1", movesets, depth=1,
+                                                     enemy_script=enemy_script)
+            if not best_action and sim is None:
+                break
+        opp_actions = equilibrium_reply
+        if opp_actions is None and enemy_script is not None:
             # Scripted teams execute a rehearsed opening a greedy AI would never
             # find (double Protect, Perish Song, spending a turn on Shell Smash).
             try:
@@ -644,7 +704,7 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                preview_tau=None, preview_alpha=None,
                                rate_robustness=False, robustness_leads=3,
                                robustness_turns=5, prescreen_top=None,
-                               audit_all_configs=False):
+                               audit_all_configs=False, pilot=GREEDY_PILOT):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -743,7 +803,8 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
             else:
                 w, t, _ = play_out_worst_case(cand["our_bring4"], eb4, merged, moves_db, natures,
                                                typechart, max_turns, our_sets=our_sets,
-                                               enemy_sets=enemy_sets, enemy_script=enemy_script)
+                                               enemy_sets=enemy_sets, enemy_script=enemy_script,
+                                               pilot=pilot)
             if w != "p1":
                 losses.append((tuple(lead), tuple(back), w, t))
             rank = (0 if w == "p1" else (1 if w != "p2" else 2), t)
@@ -770,6 +831,10 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
         rec = {**cand, "solver_losses": losses,
                "solver_wins": len(configs) - len(losses),
                "solver_total": len(configs),
+               # WHO played those games. Without it a cached or exported record
+               # cannot say whether its `Wins / Of` is the greedy pilot's or the
+               # equilibrium one's, and the two disagree (WORKFLOW.md §4.4).
+               "pilot": pilot,
                "worst_case": worst_seen[1] if worst_seen else None,
                "plausible_brings": plausible[:10]}
         if script_team:

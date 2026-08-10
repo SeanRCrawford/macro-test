@@ -64,6 +64,41 @@ Options worth knowing:
 | `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate |
 | `--list` | off | stage 1 only — rate and rank, then stop |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
+| `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
+
+### Swapping a team's worst member — `--substitute`
+
+```bat
+overnight.bat --substitute 3                :: hill-climb the top 3, then deep-search them
+tools\substitute.py --rosters shortlist.json --team 6 --rounds 3
+```
+
+Generation used to stop the moment a team was rated. This takes a rated team,
+works out which member is not earning its slot, tries better ones, and keeps a
+swap **only if the rating improves**:
+
+* **what to drop** — first, whether the member appears in the bring the audit
+  actually committed to against any opponent (a member on the bench in every
+  matchup is doing nothing); then how much the team's screened coverage
+  degrades without it. A member no pair can answer a threat without is a
+  keystone and is dropped last.
+* **what to bring in** — candidates are scored against the opponents the team
+  is *failing*, weighted by `1 - adjusted win rate`, not against the whole
+  field evenly.
+* **whether to keep it** — the candidate is rated by the same audit, at the
+  same effort, through the same cache as stage 1. The screener only proposes.
+
+**The record comes first.** A swap that beats fewer of their 90 is rejected
+however good its adjusted win rate looks — the first real run of this loop
+raised adjusted wins 0.426 → 0.467 while the record fell 75/90 → 56/90, which
+is not an improvement. `--max-record-loss` relaxes that if you mean to trade
+record for line quality.
+
+It is a local search: one member at a time, improvements only, so it finds the
+best team *near* the one it started from. When a round finds nothing it says
+so and stops rather than churning. The usual reason nothing changes is printed
+too — if the audit never brings the new member, the swap changed no audited
+line at all.
 
 ### Picking what is worth the night
 
@@ -157,6 +192,21 @@ command resumes.
 | **Deep dive** | both sides have led | the same model one notch deeper on that single position, ~5 s, and depth 2 is available here because one line can afford it |
 | **Load an overnight run** | after a batch run | browse any committed line turn by turn, from the cache. Instant |
 
+**Lead / Back → Battle Viewer.** The two tabs are connected, in both the ways
+that matter:
+
+* **Salvage all N losses together.** Expand an opponent you lose to and the
+  losing brings are solved *jointly*: every single change (EV spread, resist
+  berry, one support or setup move) is replayed against every one of them and
+  ranked by how many it fixes. One fix per loss is one team per loss, and the
+  fix for one matchup routinely breaks another — so changes that break a
+  matchup you already win are counted and shown. "Only show changes that fix
+  ALL of them" is much faster, since a candidate is abandoned on its first
+  miss.
+* **Open in Battle Viewer.** Any individual battle can be sent to the Battle
+  Viewer, where the punish check, path explorer and per-matchup salvage then
+  act on that exact matchup instead of one rebuilt by hand from dropdowns.
+
 **Where the advanced model is:** the *Advanced model strength* slider —
 Quick → Standard → Thorough → Exhaustive — with a tooltip explaining each, plus
 a checkbox for "test against ALL 90 of their brings". The same control appears
@@ -172,17 +222,23 @@ the result here rather than waiting in the browser.
 ## 3. What is current, and what is not
 
 **The engine (all new, all live):** `matrix_game` · `turn_game` · `turn_step` ·
-`robustness` (exploitability lives here) · `team_rating` · `threat` ·
-`matching` · `rolls` · `preview` · `deep_dive` · `search_effort` ·
-`export_search` · `team_sheet_export` · `blas_limits`
+`robustness` (exploitability lives here) · `team_rating` · `roster_rating`
+(rates a whole six, shared by stage 1 and the substitution loop) ·
+`substitution` · `threat` · `matching` · `rolls` · `preview` · `deep_dive` ·
+`search_effort` · `export_search` · `team_sheet_export` · `blas_limits`
 
 **Tools you run:** `overnight.bat` (whole pipeline) · `generate.bat` (stage 1
-alone) · `search.bat` (stage 2, or library teams) · `run.bat` (app)
+alone) · `search.bat` (stage 2, or library teams) · `run.bat` (app) ·
+`tools/substitute.py` (swap a rated team's worst member — also reachable as
+`overnight.bat --substitute N`)
 
 **Regression guard:** `tools/golden_baseline.py` — run after any engine change.
 
-**Evidence, never run:** the eight `tools/measure_*.py` scripts. They produced
-the numbers this design rests on and are kept so the claims are checkable.
+**Evidence, never run:** the `tools/measure_*.py` scripts. They produced the
+numbers this design rests on and are kept so the claims are checkable.
+`measure_pilot_gap.py` is the newest: it replays the same configurations under
+both pilots and reports how often the winner changes. `measure_robustness.py`
+takes `--set NAME=VALUE` so any solver tunable can be swept through it.
 
 **Legacy but still used:** `team_search.py` (the beam search — see §4),
 `fast_eval.py` (the cheap screen), `optimize_sets.py` (now wired in),
@@ -195,24 +251,66 @@ a documented negative result.
 
 ## 4. Known gaps — read before trusting a number
 
-1. **Generation does not optimise for punishability.** `team_search.py` has
-   zero knowledge of exploitability; the beam ranks on coverage and synergy.
-   `generate_overnight` widens the funnel (rate 40 finalists, not 3) but does
-   not steer the search. The teams you get are *high-coverage teams that were
-   then measured*, not *teams found by looking for low punish*.
-2. **Depth-1 horizon.** The solver sees one turn ahead, so a turn that gains
-   nothing looks free. This caused the Protect spam you saw; the pointless
-   double-Protect case is now filtered, but the underlying blind spot is real —
-   setting Tailwind still scores as a wasted turn. Depth 2 fixes it and costs
-   ~48×, which only the app's Deep dive can afford.
+1. **The beam still ranks on coverage, but the search no longer ends there.**
+   `team_search.py` has zero knowledge of exploitability; the beam ranks on
+   coverage and synergy, and `generate_overnight` only widens the funnel (rate
+   40 finalists, not 3). What is new is `--substitute` (§2): it takes the rated
+   teams and hill-climbs them on the **rating itself**, accepting a swap only
+   when the audit improves. So the shortlist is no longer purely
+   *high-coverage teams that were then measured* — its top entries have been
+   refined against the real objective. The generator's own objective is still
+   coverage, and a local search around a coverage-picked team cannot reach a
+   great team that the beam never proposed.
+2. **Depth-1 horizon — real, fixable, and the fix is parked.** The solver sees
+   one turn ahead, so a turn that gains nothing looks free. This caused the
+   Protect spam; the pointless double-Protect case is filtered, and setting
+   Tailwind still scores as a wasted turn.
+
+   `solver.SPEED_CONTROL_WEIGHT` closes it, and demonstrably: switched on, 11
+   of the golden baseline's 33 pinned turns change and 5 of them are
+   `Farigiraf: Protect` becoming `Farigiraf: Trick Room`. A companion term,
+   `solver.FRAGILE_HP`, stops the evaluation paying a full threat credit for a
+   Pokémon that is one hit from gone and outsped — the "why did it switch out
+   instead of sacrificing that mon" case (192 points of phantom value, down to
+   61).
+
+   **Both ship at 0.** Measured three ways: head to head they are neutral
+   (46–53%, every CI spanning 50); per-decision exploitability improves a lot
+   (nash-mixed 44.8 → 21.9); and the whole-team audit — the number teams are
+   ranked by — gains 0.435 → 0.487 mean adjusted wins while *losing* six points
+   of record, with each term alone scoring worse than neither. That
+   non-monotonicity says the sample cannot resolve the effect. No measurable
+   gain on the ranking metric plus a consistent record cost is not enough to
+   move the default. The constants, the evidence and the switch-on checklist
+   are in the comment blocks above each one in `src/solver.py`.
 3. **Two ranking numbers can disagree.** The **Teams** sheet averages across
    all audited candidates; the **Plan** sheet reports the one committed choice.
    Trust Plan.
-4. **Wins and punish come from different pilots.** The win count uses the
-   greedy solver; the audit uses the equilibrium solver. Not yet reconciled.
-5. **No substitution loop.** Nothing takes a rated team, swaps its worst
-   member, and re-rates. Given that Plan already names what beats each team,
-   this is the highest-value thing left to build.
+4. **Wins and punish still come from different pilots — now measured, and
+   selectable.** The win count is played by the greedy solver against
+   `greedy_opponent_joint_action`; the audit is played by the equilibrium
+   solver against their equilibrium reply, with their *wider* six-move set. So
+   "beats 75 of their 90, concedes 56 points a turn" is two sentences about two
+   different pairs of players.
+
+   `tools/measure_pilot_gap.py` says how much that matters: replaying the same
+   40 configurations under both pilots (Rain and Big 6, turn cap 18), the
+   greedy pilot wins 23 and the equilibrium pilot 3 — and **the winner changes
+   on 50% of them**. The flip rate, not the difference in counts, is the
+   number: two pilots winning the same total is not agreement if they win
+   different games.
+
+   Any caller can now ask for either (`pilot="equilibrium"` through
+   `verify_with_solver` / `rate_team`, `--record-pilot` on `substitute.py`),
+   and a record carries the name of the pilot that played it. The default is
+   unchanged — greedy, as every workbook to date — because the equilibrium
+   pilot costs a payoff matrix per turn. Reconciled in the sense that the
+   disagreement is measured and switchable, not in the sense that one number
+   now covers both.
+5. ~~**No substitution loop.**~~ **Built** — `overnight.bat --substitute N`,
+   or `tools/substitute.py`. See §2 for what it drops, what it brings in, and
+   why a swap that gives up record is rejected however good its adjusted win
+   rate looks.
 
 ---
 

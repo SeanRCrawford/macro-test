@@ -56,7 +56,10 @@ TYPICAL_LINE_TURNS = 8
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 7   # --brings is part of what was computed
+SCHEMA = 7   # --brings is part of what was computed. Bump this whenever the
+             # EVALUATION moves too -- e.g. switching on one of the parked
+             # terms in solver.py (WORKFLOW.md §4.2) -- since every cached
+             # number was produced by it.
 
 
 _WORLD = None       # per-process dataset, loaded once (13-14s) and reused

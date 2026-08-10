@@ -33,6 +33,15 @@ rem   --brings N         audit only the N best of OUR brings per pairing
 rem                      instead of the tier's default (6 at thorough). The
 rem                      cheap screen has already ranked them, so this keeps
 rem                      the most promising few. Cost is linear in N.
+rem   --substitute N     after stage 1, take the top N rated teams and try
+rem                      swapping their worst member for a better one, keeping
+rem                      a swap only if the RATING improves. This is the only
+rem                      stage that steers the search by the number the teams
+rem                      are judged on -- the beam ranks on coverage/synergy.
+rem                      Costs --sub-per-round full team ratings per round, per
+rem                      team; stage 2 then searches the improved rosters.
+rem   --sub-rounds N     how many swaps to attempt per team. Default 2.
+rem   --sub-per-round N  candidates rated per round. Default 4.
 rem   --pick "4,10,12"   deep-search ONLY these teams, by their stage 1 RANK
 rem                      number. The numbering is stable and results
 rem                      accumulate, so you can run --pick "6" tonight and
@@ -67,6 +76,11 @@ set PICK=
 set LISTONLY=
 set VS=
 set BRINGS=
+set SUBST=
+set SUBROUNDS=2
+set SUBPER=4
+set ROSTERS=shortlist.json
+set SHEETS=shortlist_sheets.json
 
 :parse
 if "%~1"=="" goto endparse
@@ -86,6 +100,9 @@ if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse
 if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
 if /i "%~1"=="--vs"           (set VS=--vs "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--brings"       (set BRINGS=--brings %~2& shift & shift & goto parse)
+if /i "%~1"=="--substitute"   (set SUBST=%~2& shift & shift & goto parse)
+if /i "%~1"=="--sub-rounds"   (set SUBROUNDS=%~2& shift & shift & goto parse)
+if /i "%~1"=="--sub-per-round" (set SUBPER=%~2& shift & shift & goto parse)
 echo Unknown argument: %~1
 echo Run with no arguments for defaults, or see the header of this file.
 exit /b 1
@@ -150,17 +167,46 @@ if defined LISTONLY (
     exit /b 0
 )
 
+if defined SUBST (
+    echo.
+    echo ============================================================
+    echo STAGE 1b -- swapping the worst member of the top %SUBST% team^(s^)
+    echo ============================================================
+    rem Hill climbing on the rating itself: propose a swap with the cheap
+    rem screener, then rate the candidate exactly the way stage 1 rates a team
+    rem and keep it only if the rating improves. Shares stage 1's cache, so a
+    rem roster either stage has already rated is never rated twice.
+    if exist substituted.json del substituted.json
+    for /L %%i in (1,1,%SUBST%) do (
+        echo.
+        echo --- team %%i ---
+        python substitute.py --rosters shortlist.json --team %%i --append ^
+            --rounds %SUBROUNDS% --per-round %SUBPER% --pool-size %POOL% ^
+            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% ^
+            --cache overnight_gen.json --out substituted.json
+        if errorlevel 1 (
+            echo.
+            echo Stage 1b stopped early. Re-run the same command to resume.
+            exit /b 1
+        )
+    )
+    if exist substituted.json (
+        set ROSTERS=substituted.json
+        set SHEETS=substituted_sheets.json
+    )
+)
+
 echo.
 echo ============================================================
-echo STAGE 2 of 2 -- %DEEPEFFORT% search of the shortlisted teams
+echo STAGE 2 of 2 -- %DEEPEFFORT% search of !ROSTERS!
 echo ============================================================
 rem No --teams: with a roster file, search_teams defaults OUR side to the
 rem generated teams and theirs to the library. Parsing the shortlist here and
 rem passing the names back in is what broke stage 2 when the file grew a
 rem wrapper for the optimised sets.
-python search_teams.py --rosters shortlist.json %PICK% %VS% %BRINGS% ^
+python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% ^
     --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
-    --sheets shortlist_sheets.json ^
+    --sheets !SHEETS! ^
     --cache overnight_%DEEPEFFORT%.json --export
 set RC=%ERRORLEVEL%
 

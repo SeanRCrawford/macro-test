@@ -154,13 +154,20 @@ def team_sheet_df(team, sets=None):
         spec = sets.get(n) or {}
         item = spec.get("item") or (p["items_usage"][0][0] if p["items_usage"] else "-")
         mvs = spec.get("moves") or [m for m, _ in p["moves_usage"][:4]]
-        ev = p["evs"]
+        # The OVERRIDE if there is one, exactly as item and moves are handled.
+        # Reading the dataset spread unconditionally is what made an applied
+        # stat-point edit invisible here: the simulations used the edited
+        # spread, the table above them showed the dataset's.
+        ev = spec.get("evs") or p["evs"]
+        edited = bool(spec.get("evs")) and dict(spec["evs"]) != dict(p["evs"])
         from combatants import _default_ability
         rows.append({
             "Pokemon": n, "Types": "/".join(p["types"]), "Item": item,
             "Ability": _default_ability(p["abilities_usage"]) if p["abilities_usage"] else "-",
             "Nature": p["nature"],
-            "EVs": "/".join(str(ev[k]) for k in ["hp", "atk", "def", "spa", "spd", "spe"]),
+            "EVs": "/".join(str(ev.get(k, 0))
+                            for k in ["hp", "atk", "def", "spa", "spd", "spe"])
+                   + (" (edited)" if edited else ""),
             "Moves": ", ".join(mvs), "Score": round(p["score"], 1) if p["score"] else None,
         })
     return pd.DataFrame(rows)
@@ -460,6 +467,92 @@ def render_salvage(key_prefix, matchup, our_sets):
                 fn = sv_fname if sv_fname.endswith(".json") else sv_fname + ".json"
                 save_team(ROOT / fn, get_state_team(), cur_sets)
                 st.success(f"Saved to {ROOT / fn}")
+
+
+def send_to_battle_viewer(our4, enemy4, turns, label=""):
+    """Hand a matchup to the Battle Viewer tab.
+
+    `bv_last_matchup` is the state the Battle Viewer's punish check, path
+    explorer and salvage panel all read, so setting it here is what connects
+    the two tabs: find a loss in the Lead/Back search, then take THAT battle
+    apart in the viewer instead of rebuilding it by hand from two dropdowns.
+    """
+    st.session_state["bv_last_matchup"] = (list(our4), list(enemy4), turns)
+    st.session_state["bv_handoff"] = label or f"{'/'.join(our4)} vs {'/'.join(enemy4)}"
+
+
+def render_joint_salvage(key_prefix, our4, losing_brings, turns, our_sets):
+    """ONE change that fixes ALL the losses -- see salvage.salvage_all_losses.
+
+    Salvaging losses one at a time answers the wrong question: six fixes for
+    six losses is six different teams, and the fix for one matchup routinely
+    breaks another. This asks whether a single change turns the whole set
+    around, and ranks the partial answers when nothing does.
+    """
+    res_key = f"{key_prefix}_joint_salvage"
+    n = len(losing_brings)
+    st.markdown(f"**Salvage all {n} losses together** — one change, scored "
+                f"against every one of them.")
+    st.caption("Each candidate is replayed against every losing bring with the "
+               "real engine. A change that fixes four and breaks two is not a "
+               "fix, so regressions are counted and shown.")
+    c1, c2 = st.columns([1, 2])
+    require_all = c2.checkbox("Only show changes that fix ALL of them",
+                              value=False, key=f"{key_prefix}_js_all",
+                              help="Much faster: a candidate is abandoned as "
+                                   "soon as it fails one matchup.")
+    if c1.button(f"Salvage all {n}", key=f"{key_prefix}_js_go", disabled=not n):
+        from salvage import salvage_all_losses
+        bar = st.progress(0.0, text="Replaying candidate changes...")
+        try:
+            res = salvage_all_losses(
+                list(our4), losing_brings, merged, moves, natures, typechart,
+                turns, our_sets=our_sets, require_all=require_all,
+                progress=lambda i, total: bar.progress(
+                    i / total, text=f"Candidate {i} of {total}"))
+        finally:
+            bar.empty()
+        st.session_state[res_key] = res
+
+    res = st.session_state.get(res_key)
+    if not res:
+        return
+    st.caption(f"{res['trials']} single changes tried against {n} losing brings.")
+    if not res["fixes"]:
+        st.info("No single change fixed any of them. The losses do not share "
+                "one cause -- try the per-matchup salvage, or a substitution "
+                "(tools/substitute.py) which changes a team MEMBER rather than "
+                "a set.")
+        return
+    complete = [f for f in res["fixes"] if f["fixed"] == f["of"]]
+    if complete:
+        st.success(f"{len(complete)} single change(s) fix all {n}.")
+    else:
+        st.warning(f"Nothing fixes all {n}. The best single change fixes "
+                   f"{res['fixes'][0]['fixed']}.")
+    FIELD_FOR_KIND = {"evs": "evs", "item": "item", "support": "moves",
+                      "setup": "moves"}
+    for i, f in enumerate(res["fixes"][:10]):
+        cols = st.columns([5, 1])
+        warn = (f"  ·  breaks {f['regressed']}" if f["regressed"] else "")
+        cols[0].write(f"**{f['mon']}** ({f['kind']}): {f['change']} → fixes "
+                      f"**{f['fixed']} of {f['of']}**{warn}")
+        if cols[1].button("Apply", key=f"{key_prefix}_js_apply_{i}",
+                          width='stretch'):
+            cur = dict(st.session_state.get("sets", {}))
+            spec = dict(cur.get(f["mon"]) or {})
+            field = FIELD_FOR_KIND[f["kind"]]
+            spec[field] = f["new_spec"][field]
+            cur[f["mon"]] = spec
+            st.session_state["sets"] = cur
+            st.rerun()
+        with cols[0].expander("per matchup"):
+            for m in f["per_matchup"]:
+                mark = ("fixed" if m["improved"] else
+                        "BROKE" if m["regressed"] else "no change")
+                st.write(f"{mark} — vs {'/'.join(m['enemy'])}: "
+                         f"{ {'p1': 'WIN', 'p2': 'LOSS'}.get(m['winner'], m['winner'])}"
+                         f" (turn {m['turns']})")
 
 
 def render_punish_audit(res):
@@ -1337,6 +1430,16 @@ with tab_search:
                                    "overall count above blends both together.")
                     cfgs = enemy_configs(d["roster"],
                                           fixed_lead=team_meta.get(tname, {}).get('lead'))
+                    # The losses, solved TOGETHER. One fix per loss is one team
+                    # per loss; what a player needs is the single change that
+                    # turns the whole set around, if there is one.
+                    if losses:
+                        st.divider()
+                        render_joint_salvage(
+                            f"lb_{tname}", b4,
+                            [list(l) + list(bk) for l, bk in losses],
+                            st.session_state.get("search_maxturns", 12), sets)
+                        st.divider()
                     fc1, fc2 = st.columns([1, 2])
                     only_losses = fc1.checkbox("Show only losses", value=bool(losses),
                                                 key=f"ol_{tname}")
@@ -1433,6 +1536,20 @@ with tab_search:
                                         "secondary procs -- it is the planned line, not a "
                                         "guaranteed one.")
                             st.code(btl.log.dump())
+                            # Take THIS battle apart in the Battle Viewer --
+                            # punish check, path explorer, per-matchup salvage
+                            # -- instead of rebuilding it there from dropdowns.
+                            if st.button("Open in Battle Viewer",
+                                          key=f"bv_{tname}_{lead}_{back}",
+                                          width='stretch'):
+                                send_to_battle_viewer(
+                                    b4, list(lead) + list(back),
+                                    st.session_state.get("search_maxturns", 12),
+                                    label=f"{tname}: {lead[0]}/{lead[1]} + "
+                                          f"{back[0]}/{back[1]}")
+                                st.success("Sent to the Battle Viewer tab — "
+                                           "its punish check, path explorer and "
+                                           "salvage now act on this matchup.")
                     if shown == 0:
                         st.success("No losses against any of the 90 enemy brings.")
 
@@ -1440,6 +1557,18 @@ with tab_search:
 # ------------------------------------------------------------------ battle
 with tab_battle:
     st.subheader("Single battle viewer")
+    # A matchup handed over from the Lead/Back search. The panels below all read
+    # `bv_last_matchup`, so the hand-off is already live -- this just says so,
+    # since otherwise the tab looks unchanged and the button that sent it here
+    # looks like it did nothing.
+    if st.session_state.get("bv_handoff"):
+        hc1, hc2 = st.columns([4, 1])
+        hc1.info(f"From the Lead/Back search: **{st.session_state['bv_handoff']}**. "
+                 f"The punish check, path explorer and salvage panels below act "
+                 f"on it; the pickers are for starting a different battle.")
+        if hc2.button("Clear", key="bv_clear_handoff", width='stretch'):
+            st.session_state.pop("bv_handoff", None)
+            st.rerun()
     team = get_state_team()
     def _lead_back_picker(label, pool, lead_key, back_key):
         """Two linked multiselects (lead/back, 2 each) instead of one flat 4-pick

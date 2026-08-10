@@ -1065,9 +1065,27 @@ class Battle:
     def _replace_fainted(self):
         """Send in replacements for fainted actives at the END of the turn, so
         they are on the field ready to act on the NEXT turn (they do not get an
-        action on the turn they came in). Switch-in abilities fire now; Mega
-        Evolution does not -- that is resolved at the start of the next turn,
-        after any voluntary switches, by _resolve_mega_evolutions()."""
+        action on the turn they came in). Mega Evolution is NOT resolved here --
+        that happens at the start of the next turn, after any voluntary
+        switches, in _resolve_mega_evolutions().
+
+        TWO PHASES, and the split is the whole point. Everything is sent in
+        first; only then do switch-in abilities fire. Doing both in one pass
+        (which is what this used to do) gets Intimidate wrong in the common
+        double-KO case, because the first side's replacement resolves against a
+        field where the other side's fainted Pokemon is still standing in its
+        slot:
+
+            p1's Intimidate dropped the Attack of a FAINTED Pokemon -- an
+            effect that goes nowhere -- and then p2's replacement came in
+            afterwards and was never intimidated at all.
+
+        A fainted Pokemon cannot be intimidated; its replacement can, and is.
+        The second phase also runs in SPEED ORDER, which is how simultaneous
+        switch-in abilities resolve -- it decides which of two weather setters
+        ends up owning the weather.
+        """
+        arrivals = []
         for side in (self.p1, self.p2):
             opp = self.p2 if side is self.p1 else self.p1
             for slot, c in enumerate(side.active):
@@ -1079,11 +1097,17 @@ class Battle:
                 incoming = self._best_replacement(alive_bench, opp.active)
                 side.bench[:] = [b for b in side.bench if b is not incoming]
                 side.active[slot] = incoming
-                ally = side.active[1 - slot] if len(side.active) == 2 else None
-                on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
-                self.log.add(f"{side.name} sends in {self.tag(incoming)} (replacing fainted {self.tag(c)})")
-                self._emit(event="replacement", side=side.name, out=c.name,
-                           incoming=incoming.name, weather_after=self.field.weather)
+                arrivals.append((side, slot, incoming, c))
+                self.log.add(f"{side.name} sends in {self.tag(incoming)} "
+                             f"(replacing fainted {self.tag(c)})")
+
+        arrivals.sort(key=lambda a: -effective_speed(a[2], self.field, a[0].name))
+        for side, slot, incoming, replaced in arrivals:
+            opp = self.p2 if side is self.p1 else self.p1
+            ally = side.active[1 - slot] if len(side.active) == 2 else None
+            on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
+            self._emit(event="replacement", side=side.name, out=replaced.name,
+                       incoming=incoming.name, weather_after=self.field.weather)
 
     def _end_of_turn(self):
         # Carry this turn's successful Protect into next turn's "no double Protect" check.
