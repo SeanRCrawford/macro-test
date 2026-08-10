@@ -179,6 +179,41 @@ def weakness_table(team):
     return pd.DataFrame(rows)
 
 
+def our_side_pool(key_prefix, teams, all_names):
+    """Where OUR six come from, offered the same way everywhere.
+
+    Every view that puts our team against someone else's needs this, and each
+    one used to answer it differently: the Battle Viewer silently fell back to
+    all 271 species when the Team Builder was empty, which is unusable, and the
+    preview panels only ever offered the loaded team. One control, three
+    sources: the team in the Team Builder tab, any saved team from the library,
+    or the whole dataset for a one-off.
+
+    Returns the list of names to pick a bring from (possibly empty).
+    """
+    loaded = get_state_team()
+    options = ["My loaded team", "A saved team", "Any Pokemon"]
+    default = 0 if loaded else 1
+    source = st.radio("Our side", options, index=default, horizontal=True,
+                      key=f"{key_prefix}_side_source",
+                      help="'My loaded team' is whatever the Team Builder tab "
+                           "currently holds. 'A saved team' is anything in "
+                           "data/teams. 'Any Pokemon' opens the whole dataset "
+                           "for a one-off matchup.")
+    if source == "My loaded team":
+        if not loaded:
+            st.warning("No team loaded — pick six in the Team Builder tab, "
+                       "or choose another source above.")
+        return list(loaded)
+    if source == "A saved team":
+        if not teams:
+            st.warning("No saved teams in data/teams.")
+            return []
+        pick = st.selectbox("Saved team", list(teams), key=f"{key_prefix}_saved")
+        return list(teams[pick])
+    return list(all_names)
+
+
 def advanced_model_controls(key_prefix, default="standard"):
     """The one place the advanced model's strength is chosen.
 
@@ -1309,7 +1344,8 @@ with tab_battle:
 
     b1, b2 = st.columns(2)
     with b1:
-        our4 = _lead_back_picker("Our bring-4", team or all_names, "bv_our_lead", "bv_our_back")
+        our_pool = our_side_pool("bv", teams, all_names) or list(all_names)
+        our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
         opp = st.selectbox("Opponent team", list(teams))
         their4 = _lead_back_picker(
@@ -1663,10 +1699,11 @@ with tab_vs:
                    "BEFORE they reveal theirs. This runs the advanced model on "
                    "that decision and reports the one committed plan, its "
                    "record across their brings, and what beats it.")
+        pv_pool = our_side_pool("pv", teams, all_names)
         pv_ours = st.multiselect(
-            "My six", all_names, max_selections=6, key="pv_ours",
-            default=get_state_team()[:6] if get_state_team() else [],
-            help="Defaults to the team loaded in Team Builder.")
+            "My six", pv_pool or all_names, max_selections=6, key="pv_ours",
+            default=list(pv_pool)[:6] if len(pv_pool) == 6 else [],
+            help="Filled in from the source chosen above.")
         pv_theirs = st.multiselect(
             "Their six (from team preview)", all_names, max_selections=6,
             key="pv_theirs")
@@ -1725,11 +1762,9 @@ with tab_vs:
                    "matrix every turn, their wider move space, the "
                    "equilibrium solver piloting -- and shows the match.")
         dd1, dd2 = st.columns(2)
-        _loaded = get_state_team()
-        if not _loaded:
-            st.info("Load a team in the Team Builder tab to pick a bring from it.")
+        _loaded = our_side_pool("dd", teams, all_names)
         our_bring = dd1.multiselect(
-            "My bring-4 (LEAD FIRST, order matters)", _loaded,
+            "My bring-4 (LEAD FIRST, order matters)", _loaded or all_names,
             max_selections=4, key="dd_ours",
             help="Your six from the Team Builder tab. The first two you pick "
                  "are the pair you actually led with.")
