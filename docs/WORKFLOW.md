@@ -189,8 +189,26 @@ command resumes.
 | Panel | When | What it does |
 |---|---|---|
 | **Team preview** | you see their six, not their four | runs the advanced model on the bring/lead decision and returns ONE committed plan, its record, and what beats it |
-| **Deep dive** | both sides have led | the same model one notch deeper on that single position, ~5 s, and depth 2 is available here because one line can afford it |
+| **Deep dive** | you have led, and so have they | the same model one notch deeper on that position, ~5 s, and depth 2 is available here because one line can afford it |
 | **Load an overnight run** | after a batch run | browse any committed line turn by turn, from the cache. Instant |
+
+**Picking the opponent, in all three.** Every panel takes the enemy team the
+same way: a **preset** from `teams.csv` (Big 6, Rain, …), six hand-picked
+Pokémon, or a pokepaste. A preset brings its recorded sets with it, and fills
+in its fixed lead and its scripted opening where it has them — hand-typing the
+same six by name silently answers a slightly different question, because the
+script and the sets do not come along.
+
+**Deep dive assumes you cannot see their back.** You give their six and the two
+they led with; the back is what you do *not* know at that moment, so by default
+it audits **every back pair they could still be holding** behind that lead and
+reports how the answer varies. One winning line is not a plan if the other five
+lose. Pick a specific back only if you have actually scouted it.
+
+**Every match, in every panel, has its log.** Team preview lists the games
+behind its record, deep dive lists one per back, and the bottom section lists
+one per enemy bring-4 — each with the full battle log and the turn-by-turn
+punish analysis side by side.
 
 **Lead / Back → Battle Viewer.** The two tabs are connected, in both the ways
 that matter:

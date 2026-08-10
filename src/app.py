@@ -245,6 +245,136 @@ def their_side_pool(key_prefix, teams, all_names):
                           key=f"{key_prefix}_foe_manual")
 
 
+def enemy_side_input(key_prefix, teams, team_meta, all_names, merged,
+                     allow_paste=True, label="Their six"):
+    """Where THEIR six come from, offered the SAME way everywhere in Vs Team.
+
+    Every panel in that tab used to ask differently: team preview and deep dive
+    made you type six (or four) names by hand, and only the bottom section
+    could take a pokepaste -- so answering "what do I bring against Big 6" meant
+    retyping Big 6 in each panel, from memory, with no way to be sure the three
+    answers were about the same team.
+
+    A preset also brings its RECORDED SETS and its fixed lead along with it,
+    which hand-picking cannot: a scripted team typed out by name is simulated
+    without the script's sets, and quietly answers a slightly different
+    question.
+
+    Returns (roster, sets, meta) where meta carries {"name", "lead"} for a
+    preset and empty values otherwise.
+    """
+    options = ["A preset team", "Pick 6"] + (["Paste a pokepaste"] if allow_paste else [])
+    source = st.radio("Their side", options, index=0, horizontal=True,
+                      key=f"{key_prefix}_foe_source")
+
+    if source == "A preset team":
+        if not teams:
+            st.warning("No teams in data/teams.csv.")
+            return [], {}, {}
+        pick = st.selectbox("Opponent team", list(teams),
+                            key=f"{key_prefix}_foe_preset")
+        info = team_meta.get(pick) or {}
+        roster = list(teams[pick])
+        st.caption(" / ".join(roster)
+                   + (f"  ·  FIXED LEAD {' + '.join(info['lead'])}"
+                      if info.get("lead") else ""))
+        return roster, dict(info.get("sets") or {}), {"name": pick,
+                                                      "lead": info.get("lead")}
+
+    if source == "Pick 6":
+        roster = st.multiselect(label, all_names, max_selections=6,
+                                key=f"{key_prefix}_foe_manual")
+        return list(roster), {}, {}
+
+    paste = st.text_area(
+        "Paste Showdown export text here (blank line between each Pokemon)",
+        height=200, key=f"{key_prefix}_foe_paste")
+    if not paste.strip():
+        return [], {}, {}
+    from species_data import custom_team_from_export
+    roster, sets = custom_team_from_export(paste, merged)
+    unknown = [n for n in roster if n not in merged]
+    if unknown:
+        st.error(f"Unrecognised species (check spelling against "
+                 f"mbsmogon.xlsx): {unknown}")
+        return [], {}, {}
+    if len(roster) != 6:
+        st.error(f"Parsed {len(roster)} Pokemon, need exactly 6.")
+        return [], {}, {}
+    st.success(f"Parsed: {', '.join(roster)}")
+    with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
+        st.json(sets)
+    return list(roster), sets, {}
+
+
+def enemy_lead_and_backs(key_prefix, roster, fixed_lead=None):
+    """Their lead pair, and which back pairs to test behind it.
+
+    THE POINT: at the moment you have to answer this you know their lead --
+    you just watched them send it out -- and you do NOT know their back two.
+    Making the caller name a bring-4 forces them to invent the half they
+    cannot see, and then reports an answer that is only right if the guess was.
+
+    Returns (lead, [back pairs]). "All 6" is the honest default: it is every
+    back they could still be holding, and six lines is affordable for a single
+    position.
+    """
+    import itertools
+    # Sanitise before the widget renders. Streamlit requires the current
+    # selection to be a subset of the options, so switching opponent while a
+    # lead from the previous one is still selected CRASHES the multiselect
+    # rather than quietly re-defaulting (the same trap _lead_back_picker
+    # documents).
+    state_key = f"{key_prefix}_lead"
+    if state_key in st.session_state:
+        kept = [n for n in st.session_state[state_key] if n in roster]
+        if kept != list(st.session_state[state_key]):
+            st.session_state[state_key] = kept
+    default = [n for n in (fixed_lead or []) if n in roster][:2]
+    lead = st.multiselect(
+        "Their lead (exactly 2 -- what you can actually see)", roster,
+        default=default, max_selections=2, key=state_key)
+    if len(lead) != 2:
+        return list(lead), []
+    rest = [n for n in roster if n not in lead]
+    all_backs = [list(p) for p in itertools.combinations(rest, 2)]
+    labels = ["All %d possible backs" % len(all_backs)] + \
+             [" + ".join(p) for p in all_backs]
+    choice = st.selectbox(
+        "Their back two", labels, key=f"{key_prefix}_back",
+        help="You do not see their back at the moment you decide, so the "
+             "default tests every one they could still be holding. Pick a "
+             "specific pair only if you have actually scouted it.")
+    if choice == labels[0]:
+        return list(lead), all_backs
+    return list(lead), [all_backs[labels.index(choice) - 1]]
+
+
+def report_as_line(report):
+    """A deep_dive LineReport in the dict shape render_line_result reads.
+
+    The audited-line renderer was written against the JSON the overnight cache
+    stores. A live report holds the same information as objects, so converting
+    is what lets one renderer serve both -- rather than a second, subtly
+    different battle log for the live path.
+    """
+    from robustness import describe_action
+    return {
+        "outcome": report.outcome,
+        "line_turns": report.length,
+        "turns": [{
+            "turn": t.turn,
+            "our_play": describe_action(t.our_action) if t.our_action else None,
+            "punished_by": (describe_action(t.punisher)
+                            if (t.punisher and t.has_punish) else None),
+            "events": list(t.events),
+            "kos": list(t.kos),
+            "hp_after": [f"{n} {hp}/{mx}" for _s, n, hp, mx in t.hp_after
+                         if hp > 0],
+        } for t in report.turns],
+    }
+
+
 def advanced_model_controls(key_prefix, default="standard"):
     """The one place the advanced model's strength is chosen.
 
@@ -2061,9 +2191,9 @@ with tab_vs:
             "My six", pv_pool or all_names, max_selections=6, key="pv_ours",
             default=list(pv_pool)[:6] if len(pv_pool) == 6 else [],
             help="Filled in from the source chosen above.")
-        pv_theirs = st.multiselect(
-            "Their six (from team preview)", all_names, max_selections=6,
-            key="pv_theirs")
+        pv_theirs, pv_esets, _pv_meta = enemy_side_input(
+            "pv", teams, team_meta, all_names, merged,
+            label="Their six (from team preview)")
         pv_effort, pv_all = advanced_model_controls("pv")
 
         if st.button("Find my bring and lead", key="pv_run"):
@@ -2074,7 +2204,9 @@ with tab_vs:
                 with st.spinner("Running the advanced model on this preview..."):
                     st.session_state["pv_plan"] = plan_against(
                         pv_ours, pv_theirs, merged, moves, natures, typechart,
-                        effort=pv_effort, audit_all=pv_all)
+                        effort=pv_effort, audit_all=pv_all,
+                        our_sets=st.session_state.get("sets", {}),
+                        enemy_sets=pv_esets)
 
         plan = st.session_state.get("pv_plan")
         if plan:
@@ -2105,6 +2237,33 @@ with tab_vs:
                                f"were tested. Tick the box above for the full "
                                f"X-of-90 answer.")
 
+                # Every line behind that record, with its battle log. The plan
+                # is one number until you can see the games it came from --
+                # and "loses to X" is only actionable once you can read HOW.
+                lines = plan.get("lines") or []
+                if lines:
+                    st.markdown("#### The games behind that record")
+                    st.caption("One line per enemy bring audited. Losing lines "
+                               "first, since those are the ones to look at.")
+                    ordered = sorted(
+                        lines,
+                        key=lambda ln: ((ln.get("outcome") or "").lower() == "win",
+                                        -(ln.get("mean_exploitability") or 0)))
+                    for i, ln in enumerate(ordered):
+                        theirs = " / ".join(ln.get("enemy_bring")
+                                            or ln.get("lead") or [])
+                        head = (f"[{(ln.get('outcome') or '?').upper()}] "
+                                f"vs {theirs}   punish "
+                                f"{ln.get('mean_exploitability') or 0:.0f}")
+                        with st.expander(head):
+                            lt1, lt2 = st.tabs(["Battle result + log",
+                                                "Turn-by-turn analysis"])
+                            with lt1:
+                                render_line_result(ln, f"pv_line_{i}")
+                            with lt2:
+                                for t in ln.get("turns") or []:
+                                    render_audited_turn(t, key=f"pv_{i}_{t.get('turn')}")
+
     # --- Deep dive: one position, at full strength ----------------------
     # The exhaustive tier is expensive because of BREADTH -- 8 brings against
     # all 90 of their bring-4s. Once you have actually led, that breadth is
@@ -2118,16 +2277,18 @@ with tab_vs:
                    "tier's analysis on that single position -- full payoff "
                    "matrix every turn, their wider move space, the "
                    "equilibrium solver piloting -- and shows the match.")
-        dd1, dd2 = st.columns(2)
         _loaded = our_side_pool("dd", teams, all_names)
-        our_bring = dd1.multiselect(
+        our_bring = st.multiselect(
             "My bring-4 (LEAD FIRST, order matters)", _loaded or all_names,
             max_selections=4, key="dd_ours",
             help="Your six from the Team Builder tab. The first two you pick "
                  "are the pair you actually led with.")
-        their_bring = dd2.multiselect(
-            "Their bring-4 (lead first)", all_names,
-            max_selections=4, key="dd_theirs")
+        dd_theirs, dd_esets, dd_meta = enemy_side_input(
+            "dd", teams, team_meta, all_names, merged)
+        dd_lead, dd_backs = ([], [])
+        if len(dd_theirs) == 6:
+            dd_lead, dd_backs = enemy_lead_and_backs(
+                "dd", dd_theirs, fixed_lead=dd_meta.get("lead"))
 
         dd3, dd4 = st.columns(2)
         dd_depth = dd3.select_slider(
@@ -2138,64 +2299,117 @@ with tab_vs:
                  "Expect seconds at depth 1, minutes at depth 2.")
         dd_turns = dd4.slider("Turn cap", 4, 24, 16, key="dd_turns")
 
-        if st.button("Analyse this position", key="dd_run"):
-            if len(our_bring) != 4 or len(their_bring) != 4:
-                st.warning("Pick exactly 4 Pokemon on each side, lead first.")
-            else:
-                from deep_dive import audit_position, summarise
-                with st.spinner("Solving every turn of this line..."):
-                    report = audit_position(
-                        our_bring, their_bring, merged, moves, natures,
-                        typechart, max_turns=dd_turns, depth=dd_depth)
-                st.session_state["dd_report"] = report
+        if dd_depth == 2 and len(dd_backs) > 1:
+            st.warning(f"Depth 2 costs ~48x per line, and this is "
+                       f"{len(dd_backs)} lines. Pick one back pair above, or "
+                       f"expect minutes.")
 
-        report = st.session_state.get("dd_report")
-        if report is not None:
+        if st.button("Analyse this position", key="dd_run"):
+            if len(our_bring) != 4:
+                st.warning("Pick exactly 4 Pokemon on your side, lead first.")
+            elif len(dd_lead) != 2 or not dd_backs:
+                st.warning("Pick their six and the two they led with.")
+            else:
+                from deep_dive import audit_position
+                bar = st.progress(0.0, text="Solving every turn...")
+                runs = []
+                try:
+                    for i, back in enumerate(dd_backs):
+                        enemy4 = list(dd_lead) + list(back)
+                        bar.progress(i / len(dd_backs),
+                                     text=f"Line {i + 1} of {len(dd_backs)}: "
+                                          f"back {' + '.join(back)}")
+                        runs.append((enemy4, audit_position(
+                            our_bring, enemy4, merged, moves, natures,
+                            typechart, max_turns=dd_turns, depth=dd_depth,
+                            our_sets=st.session_state.get("sets", {}),
+                            enemy_sets=dd_esets)))
+                finally:
+                    bar.empty()
+                st.session_state["dd_runs"] = runs
+
+        runs = st.session_state.get("dd_runs")
+        if runs:
             from deep_dive import summarise
-            info = summarise(report)
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Result", info["outcome"].upper())
-            k2.metric("Mean punish", f"{info['mean_exploitability']:.0f}")
-            k3.metric("Worst punish", f"{info['worst_exploitability']:.0f}",
-                      f"T{info['worst_turn']}" if info["worst_turn"] else None)
-            k4.metric("Severe turns", info["severe_turns"])
-            if info["outcome"] != "win":
-                st.warning(
-                    "This line does not win against an opponent playing its "
-                    "equilibrium every turn. The turns below show where it "
-                    "goes wrong -- the highest punish is the one to change.")
-            for t in report.turns:
-                render_audited_turn(t)
+            rows = [(enemy4, summarise(rep), rep) for enemy4, rep in runs]
+
+            # Their back is the half you cannot see, so the summary leads with
+            # how the answer VARIES across it: one winning line is not a plan
+            # if the other five lose.
+            if len(rows) > 1:
+                won = sum(1 for _e, info, _r in rows if info["outcome"] == "win")
+                s1, s2, s3 = st.columns(3)
+                s1.metric("Lines won", f"{won} / {len(rows)}",
+                          help="Across every back two they could still be "
+                               "holding behind that lead.")
+                s2.metric("Mean punish",
+                          f"{sum(i['mean_exploitability'] for _e, i, _r in rows) / len(rows):.0f}")
+                worst = max(rows, key=lambda t: t[1]["worst_exploitability"])
+                s3.metric("Worst single turn",
+                          f"{worst[1]['worst_exploitability']:.0f}",
+                          help="vs " + " / ".join(worst[0][2:]))
+                if won == len(rows):
+                    st.success("Beats every back they could have behind that "
+                               "lead.")
+                elif won == 0:
+                    st.error("Loses to every back they could have. The lead "
+                             "itself is the problem, not the guess about "
+                             "their back.")
+                else:
+                    st.warning("Depends on their back: "
+                               + "; ".join(" + ".join(e[2:]) for e, i, _r
+                                           in rows if i["outcome"] != "win")
+                               + " beat this.")
+
+            for i, (enemy4, info, rep) in enumerate(
+                    sorted(rows, key=lambda t: (t[1]["outcome"] == "win",
+                                                -t[1]["mean_exploitability"]))):
+                head = (f"[{info['outcome'].upper()}] their back "
+                        f"{' + '.join(enemy4[2:])}   punish "
+                        f"{info['mean_exploitability']:.0f}")
+                # A single line opens expanded -- there is nothing to choose
+                # between, so making the user click would just hide the answer.
+                with st.expander(head, expanded=len(rows) == 1):
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("Result", info["outcome"].upper())
+                    k2.metric("Mean punish", f"{info['mean_exploitability']:.0f}")
+                    k3.metric("Worst punish", f"{info['worst_exploitability']:.0f}",
+                              f"T{info['worst_turn']}" if info["worst_turn"] else None)
+                    k4.metric("Severe turns", info["severe_turns"])
+                    if info["outcome"] != "win":
+                        st.warning(
+                            "This line does not win against an opponent playing "
+                            "its equilibrium every turn. The turns below show "
+                            "where it goes wrong -- the highest punish is the "
+                            "one to change.")
+                    dt1, dt2 = st.tabs(["Battle result + log",
+                                        "Turn-by-turn analysis"])
+                    with dt1:
+                        render_line_result(report_as_line(rep), f"dd_line_{i}")
+                    with dt2:
+                        for t in rep.turns:
+                            render_audited_turn(t, key=f"dd_{i}_{t.turn}")
 
     vs_team = get_state_team()
     if len(vs_team) != 6:
         st.warning("Pick 6 Pokemon in the Team Builder tab first.")
     else:
-        vs_mode = st.radio("Enemy team input", ["Pick 6 Pokemon", "Paste a pokepaste"],
-                            horizontal=True, key="vs_mode")
-        enemy_roster, enemy_sets_vs = [], {}
-        if vs_mode == "Pick 6 Pokemon":
-            enemy_roster = st.multiselect("Enemy team (choose 6)", all_names, max_selections=6,
-                                           key="vs_manual")
-        else:
-            paste_text = st.text_area("Paste Showdown export text here (blank line between "
-                                       "each Pokemon)", height=220, key="vs_paste")
-            if paste_text.strip():
-                from species_data import custom_team_from_export
-                enemy_roster, enemy_sets_vs = custom_team_from_export(paste_text, merged)
-                unresolved_vs = [n for n in enemy_roster if n not in merged]
-                if unresolved_vs:
-                    st.error(f"Unrecognised species (check spelling against mbsmogon.xlsx): "
-                              f"{unresolved_vs}")
-                    enemy_roster = []
-                elif len(enemy_roster) != 6:
-                    st.error(f"Parsed {len(enemy_roster)} Pokemon, need exactly 6.")
-                else:
-                    st.success(f"Parsed: {', '.join(enemy_roster)}")
-                    with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
-                        st.json(enemy_sets_vs)
+        enemy_roster, enemy_sets_vs, vs_foe_meta = enemy_side_input(
+            "vs", teams, team_meta, all_names, merged,
+            label="Enemy team (choose 6)")
 
         if len(enemy_roster) == 6:
+            # Changing opponent must re-derive the widgets that describe THAT
+            # opponent. Streamlit keys win over a computed default once they
+            # hold a value, so without this the fixed lead and the script stay
+            # on whatever the previous preset set them to -- and a stale lead
+            # is not even a legal selection for the new roster.
+            if st.session_state.get("vs_foe_current") != tuple(enemy_roster):
+                st.session_state["vs_foe_current"] = tuple(enemy_roster)
+                st.session_state.pop("vs_fixed_lead", None)
+                st.session_state.pop("vs_script_team", None)
+                st.session_state.pop("vs_filt_lead", None)
+                st.session_state.pop("vs_filt_back", None)
             vs_search_mode = st.radio(
                 "Search mode",
                 ["Quick (sampled toughest lead)", "All enemy brings (90, slower, trustworthy)",
@@ -2207,17 +2421,29 @@ with tab_vs:
                      "all 90.")
             fixed_lead_vs = None
             if vs_search_mode == "Assume a guaranteed enemy lead (6 configs)":
-                fixed_lead_vs = st.multiselect("Guaranteed enemy lead (exactly 2)", enemy_roster,
-                                                max_selections=2, key="vs_fixed_lead")
+                # A preset that declares a fixed lead fills this in: retyping
+                # Hard Trick Room's known Incineroar+Farigiraf by hand is a
+                # chance to get it wrong for no benefit.
+                fixed_lead_vs = st.multiselect(
+                    "Guaranteed enemy lead (exactly 2)", enemy_roster,
+                    default=[n for n in (vs_foe_meta.get("lead") or [])
+                             if n in enemy_roster][:2],
+                    max_selections=2, key="vs_fixed_lead")
             max_turns_vs = st.slider("Turn cap", 6, 24, 12, key="vs_turns")
             import scripted_openings as _so_vs
+            # Likewise the script: if the preset IS one of the scripted
+            # archetypes, it is selected by default rather than left off, which
+            # is what silently rated King without its opening.
+            _script_options = ["None"] + list(_so_vs.SCRIPTS)
+            _script_default = (_script_options.index(vs_foe_meta["name"])
+                               if vs_foe_meta.get("name") in _so_vs.SCRIPTS else 0)
             script_team_vs = st.selectbox(
-                "This enemy team runs a known scripted opening", ["None"] + list(_so_vs.SCRIPTS),
-                key="vs_script_team",
+                "This enemy team runs a known scripted opening", _script_options,
+                index=_script_default, key="vs_script_team",
                 help="Only pick this if the enemy roster you entered above IS that fixed-lead "
                      "archetype (same key Pokemon/names) -- lets results be split into 'vs "
                      "script' and 'vs conventional (normal 6/6)' below, instead of one blended "
-                     "number.")
+                     "number. Filled in automatically when you choose a preset that has one.")
             script_team_vs = None if script_team_vs == "None" else script_team_vs
 
             from search_effort import TIER_ORDER, relative_cost, tier as _tier
