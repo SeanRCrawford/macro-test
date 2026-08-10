@@ -644,6 +644,87 @@ with tab_build:
                     f"Mega Evolve per battle -- which one is chosen per matchup by the search.")
         st.dataframe(team_sheet_df(team, sets), width='stretch', hide_index=True)
 
+        # --- Item editor -------------------------------------------------
+        # Items were only settable by running the optimiser, which decides all
+        # six at once. Picking one by hand is a different job -- you know this
+        # Pokemon wants a Choice Scarf and want the rest left alone -- and it
+        # has to write to the same `sets` override every simulation reads, or
+        # the choice would be cosmetic.
+        with st.expander("Edit items", expanded=False):
+            st.caption("Used by every simulation the app runs. A Mega-capable "
+                       "pick is locked to its stone -- that is what makes it a "
+                       "Mega. The list is what this Pokemon is actually "
+                       "recorded holding; 'Any item...' below it opens the "
+                       "full catalogue for something the usage data has never "
+                       "seen.")
+            from optimize_sets import TYPE_RESIST_BERRY, legal_items
+            item_sets = dict(st.session_state.get("sets") or {})
+            OTHER = "Any item..."
+            # Every item anyone in the dataset is recorded holding, plus the
+            # resist berries (which nobody logs usage for, so they would
+            # otherwise be unreachable by hand). Mega Stones are excluded: a
+            # Mega is a SPECIES choice here ("Mega Metagross" in the team
+            # picker), and handing a stone to a base form would produce a
+            # Pokemon the rest of the engine does not treat as a Mega -- an
+            # item that silently does nothing.
+            def _is_stone(item):
+                low = item.lower().replace(" x", "").replace(" y", "")
+                return low.endswith("ite")
+
+            # Safety Goggles is in the catalogue despite nobody in the dataset
+            # being recorded holding one, because it is now a real decision:
+            # it turns off sandstorm chip damage (Battle._sand_immune), and an
+            # item you cannot select is not a decision.
+            all_items = sorted(
+                {i for rec in merged.values()
+                 for i, _pct in (rec.get("items_usage") or [])
+                 if i and i.lower() != "other" and not _is_stone(i)}
+                | set(TYPE_RESIST_BERRY.values()) | {"Safety Goggles"})
+            item_changed = False
+            for mon in team:
+                spec = dict(item_sets.get(mon) or {})
+                usage = merged[mon].get("items_usage") or []
+                default_item = usage[0][0] if usage else "(none)"
+                options = legal_items(mon, merged)
+                locked = bool(find_mega_stone(mon, merged))
+                current = spec.get("item") or default_item
+                if current not in options:
+                    options = options + [current]
+                ic1, ic2 = st.columns([2, 3])
+                ic1.markdown(f"**{mon}**")
+                if locked:
+                    ic2.text_input("Item", value=options[0], disabled=True,
+                                   key=f"item_{mon}_locked",
+                                   label_visibility="collapsed")
+                    continue
+                choice = ic2.selectbox(
+                    "Item", options + [OTHER], index=options.index(current),
+                    key=f"item_{mon}", label_visibility="collapsed",
+                    help=f"usage default: {default_item}")
+                if choice == OTHER:
+                    choice = ic2.selectbox(
+                        "Any item", all_items,
+                        index=all_items.index(current) if current in all_items else 0,
+                        key=f"item_any_{mon}", label_visibility="collapsed")
+                if choice != current:
+                    spec["item"] = choice
+                    item_sets[mon] = spec
+                    item_changed = True
+            b1, b2 = st.columns(2)
+            if b1.button("Apply items", width='stretch', key="item_apply"):
+                st.session_state["sets"] = item_sets
+                st.success("Applied — every simulation now uses them.")
+                st.rerun()
+            if b2.button("Reset to usage defaults", width='stretch',
+                         key="item_reset"):
+                for mon in team:
+                    if mon in item_sets:
+                        item_sets[mon].pop("item", None)
+                st.session_state["sets"] = item_sets
+                st.rerun()
+            if item_changed:
+                st.info("Edited but not applied — press Apply items.")
+
         # --- Stat point editor -----------------------------------------
         # These are NOT standard EVs. stats.py is explicit:
         #     final_stat = normal_stat + ev_points   (flat, no /4)

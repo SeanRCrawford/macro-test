@@ -1119,6 +1119,52 @@ class Battle:
             self._emit(event="replacement", side=side.name, out=replaced.name,
                        incoming=incoming.name, weather_after=self.field.weather)
 
+    # Sandstorm chips everything that is not Ground, Rock or Steel for 1/16 of
+    # its max HP at the end of every turn. Nothing implemented it: weather only
+    # ever counted down, so a sand team's central pressure -- the reason to run
+    # it at all -- was worth exactly zero, and any line that stalled under sand
+    # was scored as free.
+    #
+    # The type list is the rule as stated. The abilities and the item are the
+    # standard exemptions on top of it: without them Excadrill and friends take
+    # damage from their own team's weather, which is the opposite of why they
+    # are on it. Sand Veil / Sand Rush / Sand Force are the sand-synergy
+    # abilities, Overcoat and Safety Goggles are the general weather-immunity
+    # pair, and Magic Guard blocks all indirect damage.
+    SAND_IMMUNE_TYPES = {"Ground", "Rock", "Steel"}
+    SAND_IMMUNE_ABILITIES = {"Sand Veil", "Sand Rush", "Sand Force", "Overcoat",
+                             "Magic Guard"}
+    SAND_IMMUNE_ITEMS = {"Safety Goggles"}
+
+    def _sand_immune(self, c) -> bool:
+        return (bool(self.SAND_IMMUNE_TYPES.intersection(c.types))
+                or c.ability in self.SAND_IMMUNE_ABILITIES
+                or c.item in self.SAND_IMMUNE_ITEMS)
+
+    def _sandstorm_damage(self):
+        """1/16 max HP to every ACTIVE Pokemon the sand can touch.
+
+        Active only: a Pokemon on the bench is not in the weather. (Burn and
+        poison above do run over the whole roster, which is a separate and
+        older discrepancy -- left alone here rather than folded into a weather
+        change.)
+
+        Runs before the burn/poison block, matching the real residual order --
+        weather resolves first -- and before `_check_berry` in that same loop,
+        so a Sitrus triggered by sand damage fires on the turn it happens.
+        """
+        if self.field.weather != "sand":
+            return
+        for side in (self.p1, self.p2):
+            for c in side.active:
+                if c is None or c.fainted or self._sand_immune(c):
+                    continue
+                c.apply_damage(c.max_hp() / 16)
+                self.log.add(f"{self.tag(c)} is buffeted by the sandstorm!"
+                             + (" [FAINTED]" if c.fainted else ""))
+                self._emit(event="weather_damage", side=side.name, actor=c.name,
+                           detail="sandstorm", fainted=c.fainted)
+
     def _end_of_turn(self):
         # Carry this turn's successful Protect into next turn's "no double Protect" check.
         # (Set for every roster member, not just actives, so a mon that protected and then
@@ -1139,6 +1185,8 @@ class Battle:
                     self.log.add(f"{self.tag(c)}'s {self._fmt_boosts(changed)} (Speed Boost)")
                     self._emit(event="stat_change", side=self.side_of(c).name, actor=c.name,
                                detail=self._fmt_boosts(changed), source="Speed Boost")
+        self._sandstorm_damage()
+
         for c in self.p1.roster + self.p2.roster:
             if c.fainted:
                 continue

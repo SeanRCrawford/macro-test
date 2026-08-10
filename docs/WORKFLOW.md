@@ -207,6 +207,14 @@ that matter:
   Viewer, where the punish check, path explorer and per-matchup salvage then
   act on that exact matchup instead of one rebuilt by hand from dropdowns.
 
+**Team Builder — what you can set by hand.** Items, stat points and moves are
+all overrides that travel together and are read by *every* simulation the app
+runs, not just the tab you set them in. Items can be picked one at a time
+(the optimiser decides all six at once, which is a different job); a
+Mega-capable pick is locked to its stone, since a Mega is a species choice
+here, and the "Any item…" option opens the full catalogue for something the
+usage data has never seen.
+
 **Where the advanced model is:** the *Advanced model strength* slider —
 Quick → Standard → Thorough → Exhaustive — with a tooltip explaining each, plus
 a checkbox for "test against ALL 90 of their brings". The same control appears
