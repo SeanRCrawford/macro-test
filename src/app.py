@@ -274,6 +274,48 @@ def advanced_model_controls(key_prefix, default="standard"):
     return effort, audit_all
 
 
+def render_line_result(lead, key):
+    """A whole audited line as one battle, the way the Lead/Back tab shows one.
+
+    render_audited_turn gives the analysis per turn -- punish, their answer,
+    the tie count. This gives the other half a player wants: the result, and
+    the battle log end to end in one block you can read or copy, assembled from
+    the per-turn engine logs the audit already recorded.
+    """
+    outcome = (lead.get("outcome") or "?").lower()
+    turns = lead.get("turns") or []
+    label = {"win": "WIN", "loss": "LOSS",
+             "draw": "DRAW"}.get(outcome, "UNRESOLVED")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Result", label)
+    c2.metric("Turns", lead.get("line_turns") or len(turns))
+    kos = [k for t in turns for k in (t.get("kos") or [])]
+    c3.metric("Knocked out", len(kos))
+    if outcome != "win":
+        st.warning("This line does not win against an opponent playing its "
+                   "equilibrium every turn.")
+
+    log = []
+    for t in turns:
+        log.append(f"--- Turn {t.get('turn')} ---")
+        log.append(f"  we play: {t.get('our_play')}")
+        answer = t.get("punished_by")
+        log.append(f"  their best answer: {answer}" if answer
+                   else "  their best answer: none worth making")
+        # The engine's log already opens each turn with its own "--- Turn N ---"
+        # banner, so keeping both would double every header.
+        log.extend("  " + e for e in (t.get("events") or [])
+                   if e.strip() and not e.strip().startswith("--- Turn"))
+        if t.get("kos"):
+            log.append("  KO: " + ", ".join(t["kos"]))
+        if t.get("hp_after"):
+            log.append("  after: " + ", ".join(t["hp_after"]))
+    if log:
+        st.code("\n".join(log))
+    else:
+        st.caption("No per-turn log recorded for this line.")
+
+
 def render_audited_turn(turn, key=None):
     """One audited turn: our play, their answer, the damage, the KOs.
 
@@ -1782,8 +1824,13 @@ with tab_vs:
                 m4.metric("Line value",
                           f"{lead.get('adjusted_value') or 0:.2f}")
 
-                for t in lead.get("turns") or []:
-                    render_audited_turn(t)
+                tab_log, tab_turns = st.tabs(["Battle result + log",
+                                              "Turn-by-turn analysis"])
+                with tab_log:
+                    render_line_result(lead, "vs_line")
+                with tab_turns:
+                    for t in lead.get("turns") or []:
+                        render_audited_turn(t)
 
     st.caption("Check the currently loaded team (Team Builder tab) against any enemy team you "
                "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
