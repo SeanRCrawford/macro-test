@@ -6,3 +6,7 @@ results.html
 
 # Local virtualenv and measurement scratch
 .venv/
+
+# Overnight search output: caches are machine-local and workbooks are generated
+tools/*.json
+tools/*.xlsx

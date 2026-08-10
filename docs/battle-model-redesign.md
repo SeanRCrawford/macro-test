@@ -1310,24 +1310,49 @@ Two details that decide whether a cache helps or hurts:
   rather than one entry. A corrupt file is also survivable — it starts over
   rather than refusing to run.
 
-### Prescreening (§2s)
+### Prescreening: built, measured, and it does not work (§2s)
 
-Built: `src/prescreen.py` ranks candidate brings by static threat-matrix
-coverage — the §4b matching, at ~0.7 ms per candidate, with **no battle
-simulated**. At the Exhaustive tier a candidate costs roughly 161× the Quick
-tier, so eliminating one for a millisecond is worth minutes of avoided work.
+`src/prescreen.py` ranks candidate brings by static threat-matrix coverage (§4b),
+at ~0.7 ms per candidate with no battle simulated. Measured against what the
+full sweep actually picks, over 56 pairings × 90 candidates:
 
-**It is off by default on every tier, and that is deliberate.** A prescreen
-discards candidates before they are ever simulated, so set too narrow the search
-becomes faster and *silently wrong* — the dropped candidate never appears in the
-output to be missed. The safe width is a measurement:
-`tools/measure_prescreen.py` reports recall (what share of the full sweep's top
-brings survive the filter) against the width, and the rule is to use the
-narrowest width that still recalls ~100%.
+```
+keep    recall    saved
+   3       4%       97%
+   5       9%       94%
+   8      11%       91%
+  12      15%       87%
+```
+
+**At its widest setting it deletes the eventual winner 85% of the time.** It is
+off on every tier, a test enforces that, and the module is kept as the record of
+a negative result rather than as a feature.
+
+**Why it fails**, which is the useful part: coverage is a *set*-based matching
+over the four brought, so it is blind to **lead order** — all six lead
+arrangements of a bring score identically (verified: 75.89 for each). The sweep
+it was meant to filter for ranks by `fast_pair_score`, which reads **only the
+lead pair**. The two rank on orthogonal axes; agreement was never likely.
+
+**And the premise behind it was wrong.** This was built on the claim that
+"cutting the candidate set before the sweep is where the leverage is". It is
+not. The sweep's screen is `fast_pair_score` over 90 configurations, cached by
+lead pair, and costs almost nothing. The expensive stages are verification
+(`verify_top` × 90 full games) and the exploitability rating (`verify_top` ×
+leads × turns payoff matrices) — both governed by `verify_top`. Prescreening
+candidates optimised a stage that was never the bottleneck.
+
+**The lever that would work is the mirror image**: prune the *enemy*
+configurations, not ours. Verification plays every survivor against all 90 of
+theirs, while §6a establishes that most are implausible and supplies the
+weighting to say which. That has evidence behind it where this did not — and it
+should still be measured before being switched on, on exactly the same standard
+that killed this one.
 
 Also selectable: `--teams` and `--vs` on `tools/search_teams.py`, so an
 expensive tier can be spent on the few candidates that survived a cheaper run
-rather than on all 56 pairings.
+rather than on all 56 pairings. That is the *working* way to cut the search, and
+it is the one to use for a long run.
 
 ---
 

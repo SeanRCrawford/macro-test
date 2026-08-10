@@ -643,6 +643,84 @@ def leaf_value(battle: Battle, my_side_name: str) -> float:
     return heuristic_eval(battle, my_side_name)
 
 
+# Both slots protecting on the same turn passes the whole turn: no damage, no
+# position, no progress -- and it hands the opponent a free turn to switch or
+# set up. It survives a depth-1 maximin search anyway, because Protect's worst
+# case is the best worst case when the evaluation cannot see that nothing was
+# gained. Measured on one line: our side protected on 3 of 6 turns, and it is
+# also what produced the enormous ties that made "punishes" meaningless (every
+# attack they make leads to the same protected state -- 46 of 62 replies
+# identical on one turn).
+#
+# The exceptions are real and are why this is a targeted filter rather than a
+# blanket ban. Double Protect is a genuine option when the opponent's speed
+# control is ticking (stalling it out is what Protect is for) and on a turn
+# they could Fake Out. In those positions the combo stays a CANDIDATE -- the
+# search then decides, which matters because it is often still wrong: Fake Out
+# does almost no damage, so eating it and switching can beat handing them a
+# free turn to set up.
+ALLOW_DOUBLE_PROTECT = False
+
+
+def _opposing_speed_control(battle: Battle, side: Side) -> bool:
+    """Is there a speed-control effect worth stalling out?
+
+    Tailwind is attributed, so "theirs" is exact. Trick Room is not -- the
+    engine does not record who set it -- so any active Trick Room permits the
+    stall. That is deliberately permissive: this filter only REMOVES an option,
+    and wrongly leaving it available costs a search branch, while wrongly
+    removing it would hide the correct play against a Trick Room team.
+    """
+    f = battle.field
+    theirs = f.tailwind_p2 if side.name == "p1" else f.tailwind_p1
+    return bool(theirs > 0 or f.trick_room)
+
+
+def _fake_out_pressure(battle: Battle, side: Side) -> bool:
+    """Could an opposing active Fake Out THIS turn?
+
+    Fake Out is legal only on the turn a Pokemon is sent out
+    (`active_turn_count == 0`), so this is a one-turn window, not a property of
+    the matchup. Their move space is read from `wide_movesets` where the caller
+    attached it, because a Fake Out we did not plan for is exactly the case
+    that matters.
+    """
+    opp = battle.p2 if side.name == "p1" else battle.p1
+    known = (getattr(battle, "wide_movesets", None)
+             or getattr(battle, "movesets", None) or {})
+    for c in opp.active:
+        if c is None or c.fainted or getattr(c, "active_turn_count", 1) != 0:
+            continue
+        for m in known.get(c.name) or []:
+            if getattr(m, "name", m) == "Fake Out":
+                return True
+    return False
+
+
+def _double_protect_has_a_purpose(battle: Battle, side: Side) -> bool:
+    """The cases where passing the turn with both slots is a real option.
+
+    Note what this does NOT claim: that double Protect is right in these
+    positions. It only keeps the option in the candidate set so the search can
+    price it. Against Fake Out in particular it is often wrong -- Fake Out does
+    almost no damage, so eating it and switching or attacking can be far better
+    than handing them a free turn to set up or improve their board. Removing
+    the option would decide that for the search; leaving it in lets the
+    position decide.
+    """
+    return _opposing_speed_control(battle, side) or _fake_out_pressure(battle, side)
+
+
+def _is_pointless_double_protect(combo, battle: Battle, side: Side) -> bool:
+    """Every active slot protecting, with no speed control to stall."""
+    acting = [a for a in combo if a.kind != "switch"]
+    if len(acting) < 2 or len(acting) != len(combo):
+        return False           # a switch alongside a Protect is a real play
+    if not all(a.kind == "protect" for a in acting):
+        return False
+    return not _double_protect_has_a_purpose(battle, side)
+
+
 def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, movesets: dict,
                                  turn_num: int):
     per_mon_options = []
@@ -667,7 +745,10 @@ def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, move
     def valid(combo):
         incoming = [id(a.targets[0]) for a in combo if a.kind == "switch"]
         return len(incoming) == len(set(incoming))
-    return [c for c in combos if valid(c)]
+    combos = [c for c in combos if valid(c)]
+    if not ALLOW_DOUBLE_PROTECT:
+        combos = [c for c in combos if not _is_pointless_double_protect(c, battle, side)]
+    return combos or [c for c in itertools.product(*per_mon_options)][:1]
 
 
 def solve_best_action(battle: Battle, my_side_name: str, movesets: dict, depth: int = 1,

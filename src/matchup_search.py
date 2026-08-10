@@ -643,7 +643,8 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                fixed_lead=None, enemy_script=None, script_team=None, enemy_sets=None,
                                preview_tau=None, preview_alpha=None,
                                rate_robustness=False, robustness_leads=3,
-                               robustness_turns=5, prescreen_top=None):
+                               robustness_turns=5, prescreen_top=None,
+                               audit_all_configs=False):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -794,13 +795,30 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
         verified = _rate_and_rerank(verified, enemy_roster, merged, moves_db,
                                      natures, typechart, configs, our_sets,
                                      enemy_sets, preview_tau, robustness_leads,
-                                     robustness_turns)
+                                     robustness_turns, audit_all_configs)
     return verified
+
+
+def _line_value(report):
+    """One line's contribution to adjusted wins, on the same scale as the team
+    number: 0 if it did not win, else 1 discounted by the ground conceded.
+
+    Shares team_rating's constants rather than restating them, so the per-line
+    column in the workbook always sums back to the team total.
+    """
+    from solver import KO_WEIGHT
+    from team_rating import READ_RATE
+    if not report.won:
+        return 0.0
+    charged = (report.mean_expected_loss
+               + READ_RATE * (report.mean_exploitability
+                              - report.mean_expected_loss))
+    return max(0.0, 1.0 - max(0.0, charged) / KO_WEIGHT)
 
 
 def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechart,
                       configs, our_sets, enemy_sets, preview_tau,
-                      leads_per_candidate, turns):
+                      leads_per_candidate, turns, audit_all_configs=False):
     """Attach an exploitability rating to each survivor and sort by it.
 
     Piloted with the least-exploitable solver configuration available: rating a
@@ -809,6 +827,7 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
     import solver as _solver
     from combatants import make_team
     from preview import ranked_brings
+    from robustness import describe_action
     from team_rating import rate_bring
 
     def choose(battle):
@@ -829,12 +848,31 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             continue
         ranked = ranked_brings([by_lead[k] for k in lead_keys],
                                [" / ".join(k) for k in lead_keys], tau=preview_tau)
-        chosen = [(lead_keys[row["index"]], row["probability"])
-                  for row in ranked[:leads_per_candidate]]
+        if audit_all_configs:
+            # Every one of their bring-4s, leads AND backs. The lead's
+            # plausibility is carried onto each of its six back pairs, which
+            # are not separately ranked -- the screen only reads the lead pair,
+            # so pretending to rank backs would imply a precision it lacks.
+            lead_prob = {lead_keys[row["index"]]: row["probability"]
+                         for row in ranked}
+            chosen = [(tuple(list(lead) + list(back)),
+                       lead_prob.get(tuple(lead), 0.0))
+                      for lead, back in configs]
+        else:
+            chosen = [(lead_keys[row["index"]], row["probability"])
+                      for row in ranked[:leads_per_candidate]]
 
-        def build(our_names, enemy_lead):
-            rest = [x for x in enemy_roster if x not in enemy_lead]
-            enemy4 = list(enemy_lead) + rest[:2]
+        def _enemy4(enemy_spec):
+            # `enemy_spec` is either a lead PAIR (backs inferred, the cheap
+            # tiers) or a full bring-4 (all-configs, which audits their backs
+            # too -- a lead pair says nothing about what comes in behind it).
+            if len(enemy_spec) >= 4:
+                return list(enemy_spec)[:4]
+            rest = [x for x in enemy_roster if x not in enemy_spec]
+            return list(enemy_spec) + rest[:2]
+
+        def build(our_names, enemy_spec):
+            enemy4 = _enemy4(enemy_spec)
             oc = make_team(list(our_names), merged, natures, sets=our_sets)
             ec = make_team(enemy4, merged, natures, sets=enemy_sets)
             ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)
@@ -847,23 +885,79 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
         rec["exploitability"] = rating.weighted_exploitability
         rec["severe_turns"] = rating.severe_turns
         rec["rated_turns"] = rating.total_turns
+        # The full audit, not just its summary. An exhaustive run costs hours;
+        # throwing away the per-turn detail means the only way to answer "why is
+        # this team rated badly" is to run it again. Plain JSON-able types so it
+        # survives the result cache.
+        rec["adjusted_win_rate"] = rating.adjusted_win_rate
+        rec["robust_win_rate"] = rating.robust_win_rate
+        rec["reliable_wins"] = rating.reliable_wins
+        rec["outcomes"] = rating.outcomes
+        rec["audit"] = [{
+            "lead": list(lead)[:2],
+            # The bring they ACTUALLY played in this line, backs resolved the
+            # same way build() resolves them, so a row in the workbook names
+            # the four Pokemon the line was played against rather than two.
+            "enemy_bring": _enemy4(lead),
+            "probability": probability,
+            "mean_exploitability": report.mean_exploitability,
+            "mean_expected_loss": report.mean_expected_loss,
+            "worst_exploitability": (report.worst_turn.exploitability
+                                     if report.worst_turn else 0.0),
+            # What this single line contributes to adjusted wins, so the team
+            # total can be traced back to the lines that produced it.
+            "adjusted_value": _line_value(report),
+            "severe_turns": report.severe_count,
+            "outcome": report.outcome,
+            "final_margin": report.final_margin,
+            "line_turns": report.length,
+            "turns": [{
+                "turn": t.turn,
+                "exploitability": t.exploitability,
+                "expected_loss": t.expected_loss,
+                "regret": t.regret,
+                "equilibrium": t.equilibrium,
+                "worst_case": t.worst_case,
+                "severe": t.severe,
+                "tied_replies": t.tied_replies,
+                "our_play": describe_action(t.our_action),
+                "events": list(t.events),
+                "kos": list(t.kos),
+                "hp_after": [f"{n} {hp}/{mx}" for _s, n, hp, mx in t.hp_after
+                             if hp > 0],
+                # Only name a punish when one exists. Below NO_PUNISH every
+                # reply scores the same and this field would be the arbitrary
+                # winner of a tie presented as a read.
+                "punished_by": (describe_action(t.punisher)
+                                if (t.punisher and t.has_punish) else None),
+                "no_punish": not t.has_punish,
+            } for t in report.turns],
+        } for lead, probability, report in rating.per_lead]
         worst = rating.worst_lead
         if worst:
             lead, _p, report = worst
             rec["hardest_lead"] = list(lead)
             wt = report.worst_turn
             if wt:
-                from robustness import describe_action
                 rec["worst_turn"] = {
                     "turn": wt.turn,
                     "exploitability": wt.exploitability,
                     "our_play": describe_action(wt.our_action),
-                    "punished_by": describe_action(wt.punisher) if wt.punisher else None,
+                    "punished_by": (describe_action(wt.punisher)
+                                    if (wt.punisher and wt.has_punish) else None),
+                    "no_punish": not wt.has_punish,
                 }
 
     rated = [r for r in verified if "exploitability" in r]
     unrated = [r for r in verified if "exploitability" not in r]
-    rated.sort(key=lambda d: d["exploitability"])
+    # Rank by WINS THAT HOLD UP, not by punishability alone. Sorting on
+    # exploitability by itself puts a team that loses everything at the top,
+    # because a lost position has nothing left to punish; sorting on wins alone
+    # is the biased measure this whole redesign replaced. adjusted_win_rate is
+    # wins against a punishing opponent, discounted by how punishable the
+    # winning line was, so it needs both to be good. Exploitability breaks ties.
+    rated.sort(key=lambda d: (-(d.get("adjusted_win_rate") or 0.0),
+                              d["exploitability"]))
     return rated + unrated
 
 

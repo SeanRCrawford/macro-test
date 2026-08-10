@@ -179,6 +179,86 @@ def weakness_table(team):
     return pd.DataFrame(rows)
 
 
+def advanced_model_controls(key_prefix, default="standard"):
+    """The one place the advanced model's strength is chosen.
+
+    Returns (effort_name, audit_all). Used by every panel that runs the new
+    engine live, so the answer to "where is the advanced model" is the same
+    control everywhere rather than a different widget per tab.
+    """
+    from search_effort import TIER_ORDER, relative_cost, tier as _t
+    effort = st.select_slider(
+        "Advanced model strength", options=TIER_ORDER, value=default,
+        format_func=lambda k: _t(k)["label"], key=f"{key_prefix}_adv_effort",
+        help="How hard the equilibrium engine works.\n\n"
+             "QUICK - no punish analysis at all: it screens brings and counts "
+             "wins against the standard opponent model. Seconds.\n\n"
+             "STANDARD - audits the 3 best brings against their 2 likeliest "
+             "leads, playing each line out against an opponent choosing "
+             "optimally, and measures how much a good player gains per turn.\n\n"
+             "THOROUGH - 6 brings, 4 of their leads, longer lines. The setting "
+             "to trust before committing to a team.\n\n"
+             "EXHAUSTIVE - 8 brings against ALL 90 of their bring-4s, leads "
+             "and backs. This is the total-pathing answer and it is slow.")
+    audit_all = st.checkbox(
+        "Test against ALL 90 of their brings (leads and backs)",
+        value=_t(effort).get("all_configs", False), key=f"{key_prefix}_adv_all",
+        help="Off, only their most plausible LEADS are tested and their backs "
+             "are assumed -- so a plan that beats their lead and loses to "
+             "their back still counts as a win. On, the record is a true "
+             "X of 90. Costs about 90/leads times as much: this is the "
+             "difference between a fast read and a number you can commit to.")
+    st.caption(f"{_t(effort)['label']}"
+               f"{' + all 90 brings' if audit_all else ''} "
+               f"— roughly {relative_cost(effort) * (22 if audit_all and not _t(effort).get('all_configs') else 1):.0f}x "
+               f"the quick setting.")
+    return effort, audit_all
+
+
+def render_audited_turn(turn, key=None):
+    """One audited turn: our play, their answer, the damage, the KOs.
+
+    Shared by the cached overnight browser and the live deep dive so the two
+    can never drift into showing the same turn differently. `turn` is either
+    the dict stored in the cache or a robustness.TurnRobustness.
+    """
+    from robustness import describe_action
+
+    def _g(name, default=None):
+        if isinstance(turn, dict):
+            return turn.get(name, default)
+        return getattr(turn, name, default)
+
+    punish = _g("exploitability") or 0.0
+    flag = " \u26a0\ufe0f" if punish > 60 else ""
+    play = _g("our_play") or (describe_action(_g("our_action"))
+                              if _g("our_action") is not None else "?")
+    answer = _g("punished_by")
+    if answer is None and _g("punisher") is not None and _g("has_punish", True):
+        answer = describe_action(_g("punisher"))
+    with st.expander(f"Turn {_g('turn')} \u2014 punish {punish:.0f}{flag}"
+                     f"   |   {play}", expanded=False):
+        st.markdown(f"**We play:** {play}")
+        st.markdown(f"**Their best answer:** {answer}" if answer
+                    else "**Their best answer:** none \u2014 nothing they can "
+                         "do gains meaningful ground here.")
+        tied = _g("tied_replies", 1) or 1
+        if tied > 5:
+            st.caption(f"{tied} of their replies score identically, so the "
+                       f"named answer is a tie-break, not a read.")
+        events = _g("events") or []
+        if events:
+            st.code("\n".join(events), language=None)
+        kos = _g("kos") or []
+        if kos:
+            st.error("Knocked out: " + ", ".join(kos))
+        hp = _g("hp_after") or []
+        if hp and not isinstance(hp[0], str):
+            hp = [f"{n} {v}/{mx}" for _s, n, v, mx in hp if v > 0]
+        if hp:
+            st.caption("After: " + ", ".join(hp))
+
+
 def get_state_team():
     return st.session_state.get("team", [])
 
@@ -1458,10 +1538,243 @@ with tab_battle:
 # ------------------------------------------------------------------ vs team
 with tab_vs:
     st.subheader("Vs a specific team")
+
+    # --- Overnight results browser -------------------------------------
+    # The batch tools already computed and cached every audited line. Reading
+    # that cache here is far better than recomputing it in the app: it is the
+    # SAME numbers the workbook reports, and it is instant.
+    with st.expander("Load an overnight run (shortlist / results cache)",
+                     expanded=False):
+        st.caption("Point this at the files overnight.bat wrote in tools\\. "
+                   "The shortlist makes generated teams selectable as YOUR "
+                   "team; the results cache lets you read the best line "
+                   "against each opponent, turn by turn, with damage.")
+        c1, c2 = st.columns(2)
+        shortlist_path = c1.text_input(
+            "Shortlist JSON", value="../tools/shortlist.json",
+            key="vs_shortlist_path",
+            help="Written by generate_overnight / overnight.bat. Carries the "
+                 "generated rosters and their optimised sets.")
+        cache_path = c2.text_input(
+            "Results cache JSON", value="../tools/overnight_thorough.json",
+            key="vs_cache_path",
+            help="The search cache. Same data the .xlsx is built from.")
+
+        if st.button("Load", key="vs_load_overnight"):
+            import json as _json
+            loaded = {}
+            for label, path in (("shortlist", shortlist_path),
+                                ("cache", cache_path)):
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        loaded[label] = _json.load(fh)
+                except (OSError, ValueError) as exc:
+                    st.warning(f"{label}: {exc}")
+            st.session_state["vs_overnight"] = loaded
+            if loaded:
+                st.success(f"Loaded: {', '.join(loaded)}")
+
+        blob = st.session_state.get("vs_overnight") or {}
+        sl = blob.get("shortlist") or {}
+        gen_teams = sl.get("teams", sl) if isinstance(sl, dict) else {}
+        gen_sets = sl.get("sets", {}) if isinstance(sl, dict) else {}
+        if gen_teams:
+            pick = st.selectbox("Generated team", ["(none)"] + list(gen_teams),
+                                key="vs_gen_pick")
+            if pick != "(none)":
+                members = gen_teams[pick]
+                st.write(" / ".join(members))
+                sheet = gen_sets.get(pick) or {}
+                if sheet:
+                    st.dataframe(
+                        [{"Pokemon": n, "Item": spec.get("item"),
+                          "Moves": ", ".join(spec.get("moves") or [])}
+                         for n, spec in sheet.items()],
+                        use_container_width=True, hide_index=True)
+                    st.caption("Optimised sets, as simulated.")
+                else:
+                    st.caption("No optimised sets recorded -- this team was "
+                               "rated on usage defaults.")
+                if st.button(f"Use {pick} as my team", key="vs_use_gen"):
+                    st.session_state["team"] = list(members)
+                    st.session_state["team_analysis"] = None
+                    st.success(f"{pick} loaded into the Team Builder tab.")
+                    st.rerun()
+
+        cache = blob.get("cache") or {}
+        rows = [v for v in cache.values()
+                if isinstance(v, dict) and v.get("ours")] if cache else []
+        if rows:
+            st.markdown("**Best line against a specific opponent**")
+            teams_in = sorted({r["ours"] for r in rows})
+            ours_pick = st.selectbox("Our team", teams_in, key="vs_line_ours")
+            opps = sorted({r["theirs"] for r in rows if r["ours"] == ours_pick})
+            theirs_pick = st.selectbox("Opponent", opps, key="vs_line_theirs")
+            row = next((r for r in rows if r["ours"] == ours_pick
+                        and r["theirs"] == theirs_pick), None)
+
+            # Every audited line for this pairing, so a specific LEAD of theirs
+            # can be inspected rather than only the recommended one.
+            lines = [(cand, lead) for cand in (row.get("candidates") or [])
+                     for lead in (cand.get("audit") or [])] if row else []
+            if not lines:
+                st.info("No audited lines for this pairing "
+                        "(the quick tier does not audit lines).")
+            else:
+                def _label(pair):
+                    cand, lead = pair
+                    bring = " / ".join(cand.get("bring") or [])
+                    theirs = " / ".join(lead.get("enemy_bring")
+                                        or lead.get("lead") or [])
+                    return (f"[{(lead.get('outcome') or '?').upper()}] "
+                            f"vs {theirs}   (we bring {bring})")
+
+                wins_first = sorted(
+                    lines,
+                    key=lambda pr: (pr[1].get("outcome") != "win",
+                                    pr[1].get("mean_exploitability") or 0))
+                chosen = st.selectbox("Their bring (winning lines first)",
+                                      wins_first, format_func=_label,
+                                      key="vs_line_pick")
+                cand, lead = chosen
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Result", (lead.get("outcome") or "?").upper())
+                m2.metric("Mean punish",
+                          f"{lead.get('mean_exploitability') or 0:.0f}")
+                m3.metric("Worst punish",
+                          f"{lead.get('worst_exploitability') or 0:.0f}")
+                m4.metric("Line value",
+                          f"{lead.get('adjusted_value') or 0:.2f}")
+
+                for t in lead.get("turns") or []:
+                    render_audited_turn(t)
+
     st.caption("Check the currently loaded team (Team Builder tab) against any enemy team you "
                "specify right here -- hand-pick 6 Pokemon, or paste a Showdown export "
                "(pokepast.es 'Paste'/'Export' view) -- without saving it to data/teams/ first. "
                "See data/teams/ if you want this enemy team to stick around permanently instead.")
+    # --- Team preview: their six are known, their four are not ----------
+    # The decision the whole pipeline exists to support, at the one moment you
+    # actually make it. Runs the same analysis the overnight search runs, for
+    # this one pairing, live.
+    with st.expander("Team preview: what do I bring against this team?",
+                     expanded=False):
+        st.caption("You can see their six. Pick your four and your lead pair "
+                   "BEFORE they reveal theirs. This runs the advanced model on "
+                   "that decision and reports the one committed plan, its "
+                   "record across their brings, and what beats it.")
+        pv_ours = st.multiselect(
+            "My six", all_names, max_selections=6, key="pv_ours",
+            default=get_state_team()[:6] if get_state_team() else [],
+            help="Defaults to the team loaded in Team Builder.")
+        pv_theirs = st.multiselect(
+            "Their six (from team preview)", all_names, max_selections=6,
+            key="pv_theirs")
+        pv_effort, pv_all = advanced_model_controls("pv")
+
+        if st.button("Find my bring and lead", key="pv_run"):
+            if len(pv_ours) != 6 or len(pv_theirs) != 6:
+                st.warning("Both sides need six Pokemon.")
+            else:
+                from preview_plan import plan_against
+                with st.spinner("Running the advanced model on this preview..."):
+                    st.session_state["pv_plan"] = plan_against(
+                        pv_ours, pv_theirs, merged, moves, natures, typechart,
+                        effort=pv_effort, audit_all=pv_all)
+
+        plan = st.session_state.get("pv_plan")
+        if plan:
+            st.success("BRING: " + " / ".join(plan["bring"] or []))
+            st.caption("Lead with the first two.")
+            if not plan.get("audited"):
+                st.warning(
+                    "Quick strength does no punish analysis -- this is the "
+                    "screen's pick, verified only by win count "
+                    f"({plan.get('solver_wins')}/{plan.get('solver_total')}). "
+                    "Raise the slider for a plan you can trust.")
+            else:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Record", f"{plan['wins']} / {plan['of']}",
+                          help="Commit to this bring and lead, and win this "
+                               "many of their configurations.")
+                c2.metric("Mean punish", f"{plan['punish']:.0f}",
+                          help="Points a good player gains per turn. A KO is "
+                               "about 180. Lower is better.")
+                c3.metric("Severe turns", plan.get("severe_turns") or 0)
+                if plan["losing_to"]:
+                    st.error("Loses to: " + "; ".join(plan["losing_to"][:8])
+                             + ("  ..." if len(plan["losing_to"]) > 8 else ""))
+                else:
+                    st.success(f"Beats all {plan['of']} of their brings tested.")
+                if plan.get("of") and plan["of"] < 90:
+                    st.caption(f"Only {plan['of']} of their 90 possible brings "
+                               f"were tested. Tick the box above for the full "
+                               f"X-of-90 answer.")
+
+    # --- Deep dive: one position, at full strength ----------------------
+    # The exhaustive tier is expensive because of BREADTH -- 8 brings against
+    # all 90 of their bring-4s. Once you have actually led, that breadth is
+    # gone: one bring, one lead, one position. So the same analysis runs here
+    # in seconds, and can afford a depth the batch run cannot.
+    with st.expander("Deep dive: my answer to a specific lead (after they lead)",
+                     expanded=False):
+        st.caption("The same advanced model, one notch deeper, once their four "
+                   "and their lead are known. "
+                   "You have led. They have led. This runs the exhaustive "
+                   "tier's analysis on that single position -- full payoff "
+                   "matrix every turn, their wider move space, the "
+                   "equilibrium solver piloting -- and shows the match.")
+        dd1, dd2 = st.columns(2)
+        _loaded = get_state_team()
+        if not _loaded:
+            st.info("Load a team in the Team Builder tab to pick a bring from it.")
+        our_bring = dd1.multiselect(
+            "My bring-4 (LEAD FIRST, order matters)", _loaded,
+            max_selections=4, key="dd_ours",
+            help="Your six from the Team Builder tab. The first two you pick "
+                 "are the pair you actually led with.")
+        their_bring = dd2.multiselect(
+            "Their bring-4 (lead first)", all_names,
+            max_selections=4, key="dd_theirs")
+
+        dd3, dd4 = st.columns(2)
+        dd_depth = dd3.select_slider(
+            "Solver depth", options=[1, 2], value=1, key="dd_depth",
+            help="Depth 2 sees one turn further -- the setup or switch-in that "
+                 "depth 1 prices as free. Measured ~48x the cost, which is "
+                 "affordable for ONE line and is not affordable for a batch. "
+                 "Expect seconds at depth 1, minutes at depth 2.")
+        dd_turns = dd4.slider("Turn cap", 4, 24, 16, key="dd_turns")
+
+        if st.button("Analyse this position", key="dd_run"):
+            if len(our_bring) != 4 or len(their_bring) != 4:
+                st.warning("Pick exactly 4 Pokemon on each side, lead first.")
+            else:
+                from deep_dive import audit_position, summarise
+                with st.spinner("Solving every turn of this line..."):
+                    report = audit_position(
+                        our_bring, their_bring, merged, moves, natures,
+                        typechart, max_turns=dd_turns, depth=dd_depth)
+                st.session_state["dd_report"] = report
+
+        report = st.session_state.get("dd_report")
+        if report is not None:
+            from deep_dive import summarise
+            info = summarise(report)
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Result", info["outcome"].upper())
+            k2.metric("Mean punish", f"{info['mean_exploitability']:.0f}")
+            k3.metric("Worst punish", f"{info['worst_exploitability']:.0f}",
+                      f"T{info['worst_turn']}" if info["worst_turn"] else None)
+            k4.metric("Severe turns", info["severe_turns"])
+            if info["outcome"] != "win":
+                st.warning(
+                    "This line does not win against an opponent playing its "
+                    "equilibrium every turn. The turns below show where it "
+                    "goes wrong -- the highest punish is the one to change.")
+            for t in report.turns:
+                render_audited_turn(t)
+
     vs_team = get_state_team()
     if len(vs_team) != 6:
         st.warning("Pick 6 Pokemon in the Team Builder tab first.")

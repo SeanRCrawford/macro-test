@@ -93,6 +93,36 @@ def test_an_unbuildable_candidate_ranks_last_rather_than_raising():
     assert ranked[-1][1] == float("-inf")
 
 
+def test_no_tier_enables_the_prescreen():
+    """Measured recall is 4-15%: enabling it deletes the winner most of the time.
+
+    This asserts the negative result stays enforced, so a future change cannot
+    quietly switch on a filter that makes the search faster and wrong.
+    """
+    from search_effort import TIERS
+    for name, settings in TIERS.items():
+        assert not settings.get("prescreen"), (
+            f"tier {name} enables the prescreen; measured recall is 4-15%")
+
+
+def test_coverage_is_blind_to_lead_order():
+    """The diagnosis, pinned: this is WHY recall is so low.
+
+    The sweep ranks by fast_pair_score, which reads only the lead pair; this
+    score is a set-based matching that cannot distinguish lead orderings at all.
+    """
+    w = world()
+    names = list(w["teams"])
+    four = list(w["teams"][names[0]])[:4]
+    enemy = list(w["teams"][names[1]])
+    swapped = [four[1], four[0], four[2], four[3]]
+    a = coverage_score(four, enemy, w["merged"], w["moves"], w["natures"],
+                       w["typechart"])
+    b = coverage_score(swapped, enemy, w["merged"], w["moves"], w["natures"],
+                       w["typechart"])
+    assert abs(a - b) < 1e-9, "unexpectedly lead-aware -- re-measure recall"
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

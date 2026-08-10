@@ -1,30 +1,36 @@
-"""Rank candidate brings without simulating a single battle.
+"""Rank candidate brings without simulating a battle. MEASURED: DOES NOT WORK.
 
-The expensive stages of a team search -- playing out 90 configurations, then
-auditing survivors for exploitability -- are worth spending on good candidates
-and wasted on bad ones. The threat matrix (src/threat.py) already answers "does
-this team have an answer to each of their threats", costs about 0.7 ms per
-matchup, and needs no simulation at all. Using it to cut the candidate set
-BEFORE the sweep is where the leverage is at the expensive tiers: the
-Exhaustive tier pays ~161x the Quick tier per candidate, so eliminating a
-candidate for a millisecond is worth roughly six minutes of avoided work.
+    keep    recall    saved      (tools/measure_prescreen.py, 56 pairings,
+       3       4%       97%       90 candidates each, recall = share of the
+       5       9%       94%       full sweep's top-3 brings that survive)
+       8      11%       91%
+      12      15%       87%
 
-The score is the answer-preservation matching of section 4b, computed at full
-health for the bring as brought:
+At its widest setting this filter deletes the eventual winner 85% of the time.
+It must not be enabled, and it is off on every tier. The module is kept as the
+record of a negative result, not as a feature.
 
-    coverage(our four vs their six) = mean over their threats of how well our
-                                      best available answer handles it
+WHY IT FAILS, which is the useful part. The score is a set-based matching over
+the four Pokemon brought, so it is blind to LEAD ORDER -- every one of the six
+lead arrangements of a bring scores identically (verified: 75.89 for all three
+tested orderings). The sweep it was meant to filter for ranks by
+`fast_pair_score`, which reads ONLY the lead pair. The two rank on orthogonal
+axes, so agreement was never likely.
 
-with the exclusivity that makes matching the right tool rather than a sum: one
-Pokemon cannot be the answer to three of their threats at once.
+AND THE PREMISE WAS WRONG. This was built on the claim that "cutting the
+candidate set before the sweep is where the leverage is". It is not: the sweep's
+screen is `fast_pair_score` over 90 configurations, cached by lead pair, and
+costs almost nothing. The expensive stages are verification (verify_top x 90
+full games) and the exploitability rating (verify_top x leads x turns payoff
+matrices), both governed by `verify_top`. Prescreening candidates optimises a
+stage that was never the bottleneck.
 
-IMPORTANT -- this is a FILTER, not a ranking to trust. It is a static,
-full-health, no-simulation proxy: it cannot see speed control coming down, a
-Trick Room flip, item effects that only matter mid-game, or anything about how
-the line actually plays. Its only job is to be right about which candidates are
-*obviously hopeless*, cheaply. `tools/measure_prescreen.py` measures how often
-it drops a candidate the full sweep would have ranked top -- the number that
-decides how aggressively it can be set.
+The lever that would actually work is the mirror image: prune the ENEMY
+configurations rather than ours. Verification currently plays every survivor
+against all 90 of their configurations, while section 6a establishes that most
+are implausible and provides the weighting to say which. That has evidence
+behind it, where this did not -- and it should still be measured before being
+switched on.
 """
 from combatants import make_team
 from battle import Battle

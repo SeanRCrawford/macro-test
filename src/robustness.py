@@ -38,25 +38,88 @@ LOSS = -1e4
 # third of a Pokemon at KO_WEIGHT = 180.
 SEVERE = 60.0
 
+# Below this, a "best response" is not a punish at all -- it is the arbitrary
+# winner of a tie. Measured on a real line: on one turn 46 of their 62 actions
+# scored IDENTICALLY, and the reported punisher was simply the first of them,
+# which is why the workbook showed opponents "punishing" by switching into
+# positions that gained them nothing. A gap this small is noise from regret
+# matching, not a play anyone would make.
+NO_PUNISH = 2.0
+
 
 @dataclass
 class TurnRobustness:
     turn: int
-    exploitability: float      # what a best-responding opponent gains
+    exploitability: float      # what a PERFECTLY READING opponent gains
     regret: float              # how far short of the safest available play
     equilibrium: float         # value of the turn played out properly
     worst_case: float          # value of our play against their best reply
-    punisher: object = None    # their joint action that does it
+    # What a strong opponent actually takes when it CANNOT see our move: the
+    # equilibrium value minus our play's value against their equilibrium
+    # mixture. Exploitability is the worst case and assumes they guess right
+    # every time; this is the realistic one, because their punish has to be a
+    # sound play for them too, chosen without knowing ours. Near zero means the
+    # play only loses ground to a read they cannot reliably make.
+    expected_loss: float = 0.0
+    punisher: object = None     # their best reply, or None when there is none
+    # How many of their actions tied at that same worst value. A large number
+    # means the position is insensitive to what they do -- typically because we
+    # protected -- and the named punisher is a tie-break, not a read.
+    tied_replies: int = 1
     our_action: object = None
+    # Their EQUILIBRIUM reply -- the action a strong player picks without
+    # seeing ours. Distinct from `punisher`, which is the best response to the
+    # move we actually made and therefore assumes clairvoyance. Use `punisher`
+    # to score a single turn (that is what exploitability means); use this to
+    # advance a line, or the opponent reads our mind on every turn of the game.
+    equilibrium_reply: object = None
+    # What actually happened when the line advanced through this turn: the
+    # engine's own log lines (damage dealt, KOs, weather, item triggers) and
+    # the HP left on both sides afterwards. A plan you cannot see the damage
+    # for is a plan you have to take on faith.
+    events: list = field(default_factory=list)
+    hp_after: list = field(default_factory=list)   # (side, name, hp, max)
+    kos: list = field(default_factory=list)        # names that fainted here
 
     @property
     def severe(self) -> bool:
         return self.exploitability > SEVERE
 
+    @property
+    def has_punish(self) -> bool:
+        """Is there actually a play that hurts us here?
+
+        False means every reply is worth the same and the `punisher` field is a
+        tie-break. Reporting one anyway invents a read the opponent never had.
+        """
+        return self.exploitability > NO_PUNISH
+
 
 @dataclass
 class LineReport:
     turns: list = field(default_factory=list)
+    outcome: str = "unresolved"   # "win" | "loss" | "draw" | "unresolved"
+    final_margin: float = 0.0     # our leaf_value at the end of the line
+    length: int = 0               # turns actually played
+
+    @property
+    def won(self):
+        """Did this line WIN against an opponent that punished every turn?
+
+        `line_report` advances the game against their EQUILIBRIUM reply each
+        turn, so this is not "did we beat our own bot" -- it is "did we beat a
+        player choosing optimally without seeing our move". Measured, not
+        inferred from a points total.
+
+        Deliberately NOT the best response to our revealed move: that opponent
+        is clairvoyant, and iterating it for ten turns beat every team tested
+        (0 wins in 24 lines the same teams won 180/180 against the standard
+        model). Exploitability still scores each TURN against the best
+        response, which is what the definition requires.
+
+        "unresolved" (the turn cap hit with both sides alive) is NOT a win.
+        """
+        return self.outcome == "win"
 
     @property
     def mean_exploitability(self):
@@ -67,6 +130,15 @@ class LineReport:
     def worst_turn(self):
         """The turn a good opponent would punish hardest -- where to look first."""
         return max(self.turns, key=lambda t: t.exploitability) if self.turns else None
+
+    @property
+    def mean_expected_loss(self):
+        """Ground conceded per turn to an opponent who cannot read us.
+
+        The honest cost of a line. mean_exploitability is its worst case.
+        """
+        return (sum(t.expected_loss for t in self.turns) / len(self.turns)
+                if self.turns else 0.0)
 
     @property
     def severe_count(self):
@@ -108,19 +180,44 @@ def turn_robustness(battle, movesets, our_action, side_name="p1"):
             row.append(LOSS if nxt is None else leaf_value(nxt, side_name))
         A.append(row)
 
-    equilibrium, _p, _q = solve_matrix(A)
+    equilibrium, _p, q = solve_matrix(A)
     worst_per_row = [min(r) for r in A]
     maximin = max(worst_per_row)
-    worst_j = min(range(len(theirs)), key=lambda j: A[idx][j])
+    row_min = min(A[idx])
+    tied = [j for j in range(len(theirs)) if A[idx][j] <= row_min + 1e-9]
+    # Among equal-valued replies prefer one that actually commits to something:
+    # an attack reads as a punish, a switch or a Protect that scores the same is
+    # the tie-break talking. Without this the first-indexed action wins and the
+    # report claims the opponent "punished" by repositioning for no gain.
+    def _passivity(j):
+        acts = theirs[j]
+        return (any(a.kind == "switch" for a in acts),
+                any(a.kind == "protect" for a in acts), j)
+
+    worst_j = min(tied, key=_passivity)
+    # Their equilibrium play, taken as the highest-probability action in the
+    # equilibrium mixture. argmax rather than a sample so a line is
+    # reproducible -- the golden baseline and the parallel path both depend on
+    # the same inputs giving the same walk.
+    eq_j = max(range(len(theirs)), key=lambda j: q[j]) if q else worst_j
+    # Our play's value against their whole equilibrium mixture, not against
+    # the single reply that hurts most.
+    if q and len(q) == len(theirs):
+        against_mixture = sum(q[j] * A[idx][j] for j in range(len(theirs)))
+    else:
+        against_mixture = A[idx][eq_j]
 
     return TurnRobustness(
         turn=battle.turn_num + 1,
         exploitability=equilibrium - worst_per_row[idx],
+        expected_loss=equilibrium - against_mixture,
         regret=maximin - worst_per_row[idx],
         equilibrium=equilibrium,
         worst_case=worst_per_row[idx],
         punisher=theirs[worst_j],
+        tied_replies=len(tied),
         our_action=our_action,
+        equilibrium_reply=theirs[eq_j],
     )
 
 
@@ -141,12 +238,49 @@ def line_report(battle, movesets, choose, max_turns=8, side_name="p1"):
         rec = turn_robustness(battle, movesets, our_action, side_name)
         if rec is not None:
             report.turns.append(rec)
-        # Advance against their best reply -- auditing a line means asking how it
-        # holds up when the opponent is actually trying, not against a script.
-        nxt = step(battle, our_action, rec.punisher) if rec else None
+        # Advance against their EQUILIBRIUM reply, not against the best
+        # response to the move we just made. Those are different opponents:
+        # the best response knows our action before choosing, and iterating a
+        # clairvoyant opponent for ten turns beats every team ever built --
+        # measured, 0 wins in 24 audited lines that the same teams won 180/180
+        # against the standard model. Exploitability still scores the turn
+        # against the best response, which is what the definition requires;
+        # only the trajectory changes.
+        seen_before = len(battle.log.lines)
+        dead_before = {c.name for side in (battle.p1, battle.p2)
+                       for c in side.roster if c.fainted}
+        nxt = step(battle, our_action, rec.equilibrium_reply) if rec else None
         if nxt is None:
             break
+        if rec is not None:
+            # Only the lines THIS turn produced: step deepcopies, so the copy
+            # carries the whole history and the tail is what is new.
+            rec.events = list(nxt.log.lines[seen_before:])
+            rec.hp_after = [
+                (side_key, c.name, int(c.current_hp), int(c.max_hp()))
+                for side_key, s_ in (("us", nxt.p1), ("them", nxt.p2))
+                for c in s_.roster]
+            rec.kos = sorted({c.name for s_ in (nxt.p1, nxt.p2)
+                              for c in s_.roster if c.fainted} - dead_before)
         battle = nxt
+        report.length += 1
+
+    # Who actually won the punished line. Recorded here rather than inferred
+    # from the points total later: a caller cannot reconstruct it, and the
+    # walk above is the only place that knows.
+    winner = battle.winner() if battle.is_over() else None
+    if winner == "draw":
+        report.outcome = "draw"
+    elif winner is not None:
+        report.outcome = "win" if winner == side_name else "loss"
+    else:
+        report.outcome = "unresolved"
+    # Only meaningful once a turn has actually been played. A line that ended
+    # before its first step has no final position to score, and evaluating one
+    # anyway is how a caller that legitimately passes an unplayable position
+    # gets an exception instead of an empty report.
+    if report.length:
+        report.final_margin = leaf_value(battle, side_name)
     return report
 
 

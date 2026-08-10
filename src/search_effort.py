@@ -15,8 +15,21 @@ order they cost it:
 
     candidates   how many survivors get the expensive treatment
     leads        how many of their plausible leads each is audited against
-    turns        how deep each audit goes
+    all_configs  audit every enemy bring-4 (leads AND backs) instead of a
+                 sample of leads. Exhaustive only: it multiplies the audit by
+                 90/leads, but a lead pair says nothing about what comes in
+                 behind it, and a line that beats their lead and loses to their
+                 back has not beaten the team.
+    turns        the CAP on line length, not a fixed audit depth
     robustness   whether the exploitability rating runs at all
+
+`turns` is a cap rather than a budget for a specific reason. The rating is
+"does this line WIN against an opponent punishing every turn", and a line cut
+off at turn 4 has not won -- it is unresolved, which counts as a loss. Set the
+cap too low and every team scores zero wins and the ranking collapses to
+exploitability alone, which is the failure mode where a team that loses
+everything ranks first. So each tier's cap must be long enough for a game to
+actually finish.
 
 `nash` is NOT a tier setting: the audit is always piloted with the equilibrium
 solver, because rating a team while piloting it badly measures the pilot rather
@@ -39,29 +52,33 @@ TIERS = {
     "quick": dict(
         label="Quick",
         verify_top=3, robustness=False, leads=0, turns=0, prescreen=None,
+        all_configs=False,
         blurb="Screen plus win-count verification. The original behaviour: "
               "fast, and ranked by games won against a fixed opponent model.",
     ),
     "standard": dict(
         label="Standard",
-        verify_top=3, robustness=True, leads=2, turns=4, prescreen=None,
-        blurb="Adds an exploitability audit of the top few brings against their "
-              "two most plausible leads. Ranks by how punishable a team is "
-              "rather than by win count.",
+        verify_top=3, robustness=True, leads=2, turns=16, prescreen=None,
+        all_configs=False,
+        blurb="Audits the top 3 brings against their 2 most plausible leads, "
+              "playing each line to a finish against an opponent who punishes "
+              "every turn. Ranks by wins that hold up.",
     ),
     "thorough": dict(
         label="Thorough",
-        verify_top=6, robustness=True, leads=4, turns=6, prescreen=None,
-        blurb="More survivors, more of their plausible leads, deeper lines. "
-              "Minutes rather than seconds; the setting to trust before "
-              "committing to a team.",
+        verify_top=6, robustness=True, leads=4, turns=18, prescreen=None,
+        all_configs=False,
+        blurb="6 brings against 4 of their leads, longer lines. Minutes rather "
+              "than seconds; the setting to trust before committing to a team.",
     ),
     "exhaustive": dict(
         label="Exhaustive",
-        verify_top=20, robustness=True, leads=6, turns=8, prescreen=None,
-        blurb="Audits far more candidates deeply. Intended for finding a hidden "
-              "team with great lines, expected to take a long time, and "
-              "designed to be run in resumable batches.",
+        verify_top=8, robustness=True, leads=6, turns=20, prescreen=None,
+        all_configs=True,
+        blurb="8 brings against ALL 90 of their bring-4s -- leads and backs, "
+              "not a sample. For finding a hidden team with great lines; "
+              "expected to take a long time, and designed to be run in "
+              "resumable batches.",
     ),
 }
 
@@ -80,7 +97,8 @@ def relative_cost(name):
     t = tier(name)
     if not t["robustness"]:
         return 1.0
-    return 1.0 + (t["verify_top"] * t["leads"] * t["turns"]) / 6.0
+    audited = 90 if t.get("all_configs") else t["leads"]
+    return 1.0 + (t["verify_top"] * audited * t["turns"]) / 6.0
 
 
 class ResultCache:
