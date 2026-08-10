@@ -100,13 +100,16 @@ class Battle:
         for c in p1_roster + p2_roster:
             c.current_hp = c.max_hp()
 
-        # Opening switch-in triggers (Intimidate, weather setters, Hospitality), leads only.
+        # Opening switch-in triggers (Intimidate, weather setters, Hospitality),
+        # leads only. The ARRIVAL is announced first: an ability announcing
+        # itself above the line that says who is on the field reads as coming
+        # from nowhere, and it is not how the game presents it either.
+        self.log.add(f"Leads: {self.p1.active[0].name}/{self.p1.active[1].name} "
+                      f"vs {self.p2.active[0].name}/{self.p2.active[1].name}")
         on_switch_in(self.p1.active[0], self.p2.active, self.field, ally=self.p1.active[1], log=self.log)
         on_switch_in(self.p1.active[1], self.p2.active, self.field, ally=self.p1.active[0], log=self.log)
         on_switch_in(self.p2.active[0], self.p1.active, self.field, ally=self.p2.active[1], log=self.log)
         on_switch_in(self.p2.active[1], self.p1.active, self.field, ally=self.p2.active[0], log=self.log)
-        self.log.add(f"Leads: {self.p1.active[0].name}/{self.p1.active[1].name} "
-                      f"vs {self.p2.active[0].name}/{self.p2.active[1].name}")
         self._emit(event="leads", p1=[c.name for c in self.p1.active],
                    p2=[c.name for c in self.p2.active], weather_after=self.field.weather)
 
@@ -365,9 +368,14 @@ class Battle:
             # this turn hit whatever now stands in that slot -- not the other slot.
             self._departed_slots[id(a.combatant)] = (side.name, slot)
             ally = side.active[1 - slot] if len(side.active) == 2 else None
-            on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
             incoming.choice_locked_move = None
+            # Announce the switch BEFORE its abilities fire. A voluntary switch
+            # applies to whatever is on the field right now, so the ability
+            # message belongs immediately after the arrival that caused it --
+            # not above it, where it reads as coming from nobody.
             self.log.add(f"{a.side} switches {self.tag(a.combatant)} -> {self.tag(incoming)}")
+            on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
+            # Emitted after, so weather_after is the weather the switch produced.
             self._emit(event="switch", side=a.side, out=a.combatant.name, incoming=incoming.name,
                        ability_after=incoming.ability, weather_after=self.field.weather)
 
@@ -1018,9 +1026,11 @@ class Battle:
         # aimed at `outgoing` should follow the SLOT and hit `incoming` instead.
         self._departed_slots[id(outgoing)] = (side.name, slot)
         ally = side.active[1 - slot] if len(side.active) == 2 else None
-        on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
         incoming.choice_locked_move = None
+        # The pivot is announced before its abilities fire, same as a voluntary
+        # switch -- see the note there.
         self.log.add(f"{self.tag(outgoing)} pivots out -> {self.tag(incoming)}")
+        on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
         self._emit(event="switch", side=action_side, out=outgoing.name, incoming=incoming.name,
                    ability_after=incoming.ability, weather_after=self.field.weather)
 

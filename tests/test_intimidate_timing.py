@@ -1,4 +1,4 @@
-"""When Intimidate resolves after a KO, and who it hits.
+"""When Intimidate resolves after a KO, who it hits, and when it is announced.
 
 The rule, as the user stated it: replacements for fainted Pokemon are sent in
 together, and Intimidate takes effect AFTER all of them are on the field. So in
@@ -145,6 +145,21 @@ class TestIntimidateOnReplacement(unittest.TestCase):
                         speeds.append(effective_speed(c, self.b.field, side.name))
         self.assertEqual(speeds, sorted(speeds, reverse=True))
 
+    def test_the_message_comes_after_the_replacements_are_in(self):
+        """Ordering, not just effect. A switch-in ability announcing itself
+        above the line that says who arrived reads as coming from nowhere."""
+        self._faint(self.b.p1, 0)
+        self._faint(self.b.p2, 0)
+        self.b.log.lines.clear()
+        self.b._replace_fainted()
+        lines = self.b.log.lines
+        sends = [i for i, l in enumerate(lines) if "sends in" in l]
+        intimidate = next(i for i, l in enumerate(lines) if "Intimidate" in l)
+        self.assertEqual(len(sends), 2)
+        self.assertGreater(intimidate, max(sends),
+                           f"Intimidate announced before both replacements "
+                           f"were in:\n" + "\n".join(lines))
+
     def test_a_replacement_does_not_act_on_the_turn_it_arrives(self):
         """Unchanged behaviour, pinned because the two-phase rewrite touches the
         code that decides it: replacements land at the end of the turn and get
@@ -152,6 +167,53 @@ class TestIntimidateOnReplacement(unittest.TestCase):
         self._faint(self.b.p1, 0)
         self.b._replace_fainted()
         self.assertEqual(self.b.p1.active[0].active_turn_count, 0)
+
+
+class TestAnnouncementOrder(unittest.TestCase):
+    """A switch-in ability is announced AFTER the Pokemon it belongs to has
+    arrived, on every path. Three of the four used to print it first, so the log
+    read "Incineroar's Intimidate! / p1 switches Gallade -> Incineroar" -- the
+    ability firing a line before anyone could see who had come in.
+
+    Weather is the same story and the reason this is worth pinning: "Tyranitar
+    does not set sand" was reported once already when the message was missing
+    entirely, and a message in the wrong place is the next-best way to hide it.
+    """
+
+    @staticmethod
+    def index_of(lines, needle):
+        return next(i for i, line in enumerate(lines) if needle in line)
+
+    def test_leads_are_named_before_their_abilities_fire(self):
+        b = battle_with(["Incineroar", "Gallade", "Hydreigon"],
+                        ["Garchomp", "Pelipper", "Archaludon"])
+        lines = b.log.lines
+        self.assertLess(self.index_of(lines, "Leads:"),
+                        self.index_of(lines, "Intimidate"),
+                        "\n".join(lines))
+
+    def test_a_weather_setter_announces_after_it_is_on_the_field(self):
+        """Pelipper's Drizzle, as a lead."""
+        b = battle_with(["Gallade", "Hydreigon", "Incineroar"],
+                        ["Pelipper", "Garchomp", "Archaludon"])
+        lines = b.log.lines
+        self.assertLess(self.index_of(lines, "Leads:"),
+                        self.index_of(lines, "Drizzle"), "\n".join(lines))
+
+    def test_a_voluntary_switch_announces_before_its_ability(self):
+        """Start-of-turn switch: the ability applies immediately to whatever is
+        on the field, and is reported immediately after the switch."""
+        from engine import Action
+        b = battle_with(["Gallade", "Hydreigon", "Incineroar"],
+                        ["Garchomp", "Pelipper", "Archaludon"])
+        b.log.lines.clear()
+        incoming = next(c for c in b.p1.bench if c.name == "Incineroar")
+        switch = Action(kind="switch", combatant=b.p1.active[0], side="p1",
+                        move=None, targets=[incoming])
+        b.run_turn([switch], [])
+        lines = b.log.lines
+        self.assertLess(self.index_of(lines, "switches"),
+                        self.index_of(lines, "Intimidate"), "\n".join(lines))
 
 
 if __name__ == "__main__":
