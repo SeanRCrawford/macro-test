@@ -43,6 +43,7 @@ import _harness  # noqa: E402,F401  (adds ../src to sys.path)
 
 sys.path.insert(0, "../src")
 import generate_team as gt  # noqa: E402
+import punish_screen  # noqa: E402
 import roster_rating  # noqa: E402
 from search_effort import TIER_ORDER, ResultCache, relative_cost, tier  # noqa: E402
 from species_data import load_preferences  # noqa: E402
@@ -60,7 +61,8 @@ def _stage1_settings(args):
             "effort": args.effort, "turns": args.turns,
             "optimise_sets": bool(args.optimise_sets),
             "min_winrate": args.min_winrate,
-            "script_screen": bool(args.script_screen)}
+            "script_screen": bool(args.script_screen),
+            "punish_screen": args.punish_screen}
 
 
 def _warn_if_renumbering(args):
@@ -155,8 +157,25 @@ def _beam_finalists(args, world):
                 pickle.dump({"pool": pool, "enemy_pairs": enemy_pairs,
                              "matrix": matrix}, fh)
 
+    # preferences.csv, in full. The pool above honours EXCLUDE (an excluded
+    # Pokemon is never eligible), but include/prefer live in the beam, and this
+    # pipeline was not passing them: an "Include" entry was merely allowed into
+    # the pool rather than required in every team, and "Prefer" did nothing at
+    # all. generate_team.py has always passed both, so the two entry points
+    # disagreed about what the file means.
+    include = [n for n in prefs["include"] if n in pool]
+    prefer = [n for n in prefs["prefer"] if n in pool]
+    dropped = sorted(set(prefs["include"]) - set(include))
+    if include or prefer or prefs["exclude"]:
+        print(f"prefs    : exclude {prefs['exclude'] or '-'} | "
+              f"include {include or '-'} (in EVERY team) | "
+              f"prefer {prefer or '-'} (tiebreak)")
+    if dropped:
+        print(f"WARNING  : include {dropped} not in the pool -- excluded, or "
+              f"outside --generations. They will NOT be in the teams.")
     finals = beam_search_teams(pool, matrix, enemy_pairs, world["merged"],
-                               beam_width=max(args.beam_width, args.candidates))
+                               beam_width=max(args.beam_width, args.candidates),
+                               must_include=include, prefer=prefer)
     finals = [(score["total"], team) for score, team in finals][:args.candidates]
     print(f"beam     : {len(finals)} candidate teams to rate\n")
     return finals
@@ -202,6 +221,18 @@ def main():
                          "battles) and it changes what is simulated, so the "
                          "sets are part of the cache key and appear in the "
                          "Team sheets tab.")
+    ap.add_argument("--punish-screen", nargs="?", type=float, const=True,
+                    default=None, metavar="FLOOR",
+                    help="throw out a team whose OPENING is already lost, "
+                         "before spending the audit on it. Solves turn 1 as a "
+                         "matrix game against the leads they would pick -- "
+                         "seconds per team against minutes for the audit -- and "
+                         "rejects the team if the best it can guarantee is "
+                         "below FLOOR (default "
+                         f"{punish_screen.DEFAULT_FLOOR:.0f}). Screens on the "
+                         "guaranteed value, not the punish: a team with no "
+                         "threats has nothing to punish and would otherwise "
+                         "screen best of all.")
     ap.add_argument("--script-screen", action="store_true",
                     help="drop a team that loses to EVERY scripted opening "
                          "(King / Hard Trick Room / Perish Trap) before the "
@@ -226,6 +257,13 @@ def main():
     settings = tier(args.effort)
     print(f"effort   : {settings['label']} (~{relative_cost(args.effort):.0f}x quick)")
     print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
+
+    # `--punish-screen` with no number means "use the default floor".
+    punish_floor = (punish_screen.DEFAULT_FLOOR if args.punish_screen is True
+                    else args.punish_screen)
+    if punish_floor is not None:
+        print(f"screen   : rejecting teams whose opening cannot guarantee "
+              f"{punish_floor:.0f}")
 
     # Before anything expensive: is this run about to renumber a shortlist the
     # user is already referring to by number?
@@ -275,6 +313,7 @@ def main():
                          "turns": args.turns, "our_sets": our_sets,
                          "jobs": 1, "min_winrate": args.min_winrate,
                          "script_screen": args.script_screen,
+                         "punish_floor": punish_floor,
                          "beam_score": beam_score})
 
     started = time.time()

@@ -1015,14 +1015,33 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
 
     rated = [r for r in verified if "exploitability" in r]
     unrated = [r for r in verified if "exploitability" not in r]
-    # Rank by WINS THAT HOLD UP, not by punishability alone. Sorting on
-    # exploitability by itself puts a team that loses everything at the top,
-    # because a lost position has nothing left to punish; sorting on wins alone
-    # is the biased measure this whole redesign replaced. adjusted_win_rate is
-    # wins against a punishing opponent, discounted by how punishable the
-    # winning line was, so it needs both to be good. Exploitability breaks ties.
-    rated.sort(key=lambda d: (-(d.get("adjusted_win_rate") or 0.0),
-                              d["exploitability"]))
+    # THE RECORD FIRST, then wins that hold up, then punish.
+    #
+    # This used to sort on adjusted_win_rate alone, and it committed to brings
+    # that beat FEWER of their configurations. Observed, NAIC vs Big 6 with all
+    # 90 audited:
+    #
+    #     bring                          record   lines won   adjusted
+    #     .../Farigiraf                   89/90      61/90       0.527  <- chosen
+    #     .../Mega Charizard Y            90/90      68/90       0.405
+    #
+    # The second beats every one of their brings and wins seven more audited
+    # lines, and was passed over because its wins were rated more punishable.
+    # That is backwards from WORKFLOW.md §1 -- "punish alone is a trap ... always
+    # read the record first" -- and it is what "it does not seem to be picking
+    # good lines" looks like from the outside.
+    #
+    # Record is compared as a RATE and rounded to whole percent, so it decides
+    # only when it is meaningfully different; inside a band, adjusted wins (and
+    # then punish) still pick the sounder line. A bring that beats 90/90 is not
+    # separated from one that beats 89/90 by luck, but 90/90 does beat 61/90.
+    def _order(d):
+        total = d.get("solver_total") or 0
+        record = round((d.get("solver_wins") or 0) / total, 2) if total else 0.0
+        return (-record, -(d.get("adjusted_win_rate") or 0.0),
+                d["exploitability"])
+
+    rated.sort(key=_order)
     return rated + unrated
 
 

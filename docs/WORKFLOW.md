@@ -56,6 +56,7 @@ Options worth knowing:
 | `--keep N` | 6 | how many reach the deep search |
 | `--optimise-sets` | off | optimise item + 4 moves against the real metagame. **Use it** |
 | `--min-winrate F` | 0.80 | skip auditing a team that cannot win |
+| `--punish-screen` | off | throw out a team whose OPENING is already lost, before the audit. Seconds per team |
 | `--generations SPEC` | all | e.g. `1-5` |
 | `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
@@ -343,6 +344,13 @@ a documented negative result.
 3. **Two ranking numbers can disagree.** The **Teams** sheet averages across
    all audited candidates; the **Plan** sheet reports the one committed choice.
    Trust Plan.
+
+   The committed choice now reads the **record first**, then adjusted wins,
+   then punish. It used to rank on adjusted wins alone, and that committed to
+   brings beating fewer of their configurations — measured, NAIC vs Big 6: a
+   bring going 89/90 with 61 audited lines won was chosen over one going 90/90
+   with 68, because its wins were rated less punishable. Records are compared
+   to the nearest whole percent, so inside a band the sounder line still wins.
 4. **Wins and punish still come from different pilots — now measured, and
    selectable.** The win count is played by the greedy solver against
    `greedy_opponent_joint_action`; the audit is played by the equilibrium

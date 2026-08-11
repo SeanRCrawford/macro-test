@@ -24,6 +24,12 @@ rem                      the actual metagame before rating. Cheap, and it
 rem                      changes what is simulated -- strongly recommended.
 rem   --script-screen    drop teams with no plan against King / Hard Trick
 rem                      Room / Perish Trap before the audit.
+rem   --punish-screen    drop a team whose OPENING is already lost before
+rem                      spending the audit on it. Solves turn 1 as a matrix
+rem                      game -- seconds per team against minutes for the
+rem                      audit -- so the night is spent on plausible teams.
+rem                      Optionally takes a floor: --punish-screen -200 is
+rem                      stricter than the default -250.
 rem   --min-winrate F    skip a generated team whose win rate is below this
 rem                      before spending the audit on it. Default 0.80.
 rem   --vs "Big 6"       deep-search against ONLY these opponents instead of
@@ -84,6 +90,7 @@ set AUDITALL=--audit-all
 set MINWR=0.80
 set OPTSETS=
 set SCRIPTSCR=
+set PUNISHSCR=
 set PICK=
 set LISTONLY=
 set STAGE2ONLY=
@@ -115,6 +122,8 @@ if /i "%~1"=="--sample-leads" (set AUDITALL=& shift & goto parse)
 if /i "%~1"=="--min-winrate"  (set MINWR=%~2& shift & shift & goto parse)
 if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& set GENFLAGS=1& shift & goto parse)
 if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& set GENFLAGS=1& shift & goto parse)
+if /i "%~1"=="--punish-screen" (set PUNISHSCR=--punish-screen& set GENFLAGS=1& shift & goto parse)
+if /i "%~1"=="--punish-floor"  (set PUNISHSCR=--punish-screen %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
 if /i "%~1"=="--stage2-only"  (set STAGE2ONLY=1& shift & goto parse)
@@ -192,7 +201,7 @@ echo STAGE 1 of 2 -- rating %CANDIDATES% teams from a pool of %POOL%
 echo ============================================================
 python generate_overnight.py --pool-size %POOL% --candidates %CANDIDATES% ^
     --keep %KEEP% %GENS% --effort %GENEFFORT% --jobs %JOBS% ^
-    --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% ^
+    --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% %PUNISHSCR% ^
     --cache overnight_gen.json --out shortlist.json
 if errorlevel 1 (
     echo.

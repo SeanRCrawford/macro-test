@@ -82,7 +82,7 @@ def _skipped(team, our_sets, beam_score, reason, wins=0, total=0):
 
 def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
               min_winrate=0.0, script_screen=False, beam_score=None,
-              opponents=None, pilot=None):
+              opponents=None, pilot=None, punish_floor=None):
     """Rate one roster. Returns the record stage 1 writes to its cache.
 
     `opponents` restricts which of the library's teams it is rated against --
@@ -98,6 +98,24 @@ def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
     natures, typechart = world["natures"], world["typechart"]
     teams = ({n: world["teams"][n] for n in opponents} if opponents
              else world["teams"])
+
+    # CHEAPEST SCREEN FIRST: is the opening already lost? Seconds per team
+    # against minutes for the audit, so this runs before everything else. It
+    # screens on the guaranteed value of the opening, NOT on the punish -- see
+    # punish_screen for the measurement showing why the obvious version ranks a
+    # team with no threats first.
+    if punish_floor is not None:
+        from punish_screen import is_hopeless, screen_team
+        verdict = screen_team(team, teams, merged, moves, natures, typechart,
+                              our_sets=our_sets)
+        if is_hopeless(verdict, floor=punish_floor):
+            worst = verdict.get("worst_vs") or (None, [], None)
+            rec = _skipped(team, our_sets, beam_score,
+                           f"opening already lost ({verdict['guaranteed']:.0f} "
+                           f"guaranteed vs {worst[0]} "
+                           f"{'/'.join(worst[1] or [])})")
+            rec["opening_guaranteed"] = verdict["guaranteed"]
+            return rec
 
     if script_screen:
         # One sampled config per scripted opponent, so this is cheap next to

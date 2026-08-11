@@ -38,7 +38,8 @@ BAT = os.path.join(os.path.dirname(__file__), "..", "overnight.bat")
 def args(**kw):
     base = dict(pool_size=50, candidates=60, generations=None, beam_width=30,
                 effort="standard", turns=10, optimise_sets=True,
-                min_winrate=0.8, script_screen=False, out="shortlist.json")
+                min_winrate=0.8, script_screen=False, punish_screen=None,
+                out="shortlist.json")
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -90,7 +91,7 @@ class TestRenumberWarning(unittest.TestCase):
                              ("generations", "1-5"), ("beam_width", 60),
                              ("effort", "thorough"), ("turns", 12),
                              ("optimise_sets", False), ("min_winrate", 0.5),
-                             ("script_screen", True)):
+                             ("script_screen", True), ("punish_screen", -200.0)):
             self.assertNotEqual(base, go._stage1_settings(args(**{field: value})),
                                 f"{field} does not reach the fingerprint")
 
