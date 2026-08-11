@@ -1001,9 +1001,21 @@ def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, move
         # replacements after a faint. Pivoting is a core doubles resource: it resets a
         # Choice lock, escapes accumulated stat drops, and lets a resist absorb a hit
         # that would otherwise lose the board.
+        # ...unless it is TRAPPED. Shadow Tag (and the rest of Battle.is_trapped)
+        # was enforced only when the turn was executed, so the search offered
+        # switches that would be refused at run_turn -- and worse, offered them
+        # to the OPPONENT, so every payoff matrix against a Shadow Tag user
+        # contained columns they cannot legally play.
+        #
+        # That is not a small error: trapping is the whole point of Mega Gengar,
+        # and pricing their escape as available both overstates their options
+        # and hides the value of taking it away. It also cost us turns directly
+        # -- the solver could choose a switch that simply failed.
+        trapped = battle.is_trapped(c)
         cands = candidate_actions(c, side.name, side.active, opp_side.active,
                                    movesets[c.name], battle.typechart, battle.field, turn_num,
-                                   bench=[b for b in side.bench if not b.fainted])
+                                   bench=None if trapped else
+                                   [b for b in side.bench if not b.fainted])
         per_mon_options.append(cands)
     if not per_mon_options:
         return [[]]

@@ -247,6 +247,14 @@ that matter:
   Viewer, where the punish check, path explorer and per-matchup salvage then
   act on that exact matchup instead of one rebuilt by hand from dropdowns.
 
+**Generate Team — screening before reporting.** The *"give up on a team as soon
+as ANY single matchup drops below X%"* slider drops a team from the report
+entirely, rather than annotating it after the fact, and promotes the next
+candidate in its place. It checks one opponent at a time and abandons on the
+first failure, so a team with a hole costs one matchup instead of eight, and the
+rejects are listed with the opponent that ended each of them. The aggregate win
+rate cannot express this: 90/90 seven times and 20/90 once averages 88%.
+
 **Team Builder — what you can set by hand.** Items, stat points and moves are
 all overrides that travel together and are read by *every* simulation the app
 runs, not just the tab you set them in. Items can be picked one at a time

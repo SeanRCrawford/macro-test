@@ -1184,6 +1184,50 @@ with tab_gen:
                 st.warning("Every finalist always loses a scripted opening -- keeping the "
                            "original list rather than showing nothing.")
 
+        # SCREEN BEFORE REPORTING, not after. The floor used to gate only the
+        # top --verify N, so teams that win 50-60 of 90 still took report slots
+        # and had to be read and dismissed by hand. Applied here it drops them
+        # and promotes the next candidate, which is what "screened out early"
+        # has to mean. One matchup per bad team, because it abandons on the
+        # first opponent under the bar.
+        if finals and floor_pct:
+            from generate_team import verify_with_solver
+            kept, rejected = [], []
+            bar = st.progress(0.0, text="Screening finalists...")
+            try:
+                for i, (sc, t) in enumerate(finals):
+                    if len(kept) >= top_n:
+                        break
+                    bar.progress(min(1.0, i / max(1, len(finals))),
+                                 text=f"Screening #{i + 1}: {', '.join(t[:3])}...")
+                    verdict = None
+                    for opp_name, opp_roster in teams.items():
+                        r_ = verify_with_solver(
+                            t, {opp_name: opp_roster}, merged, moves, natures,
+                            typechart, matrix, eps, 12, all_backs=deep).get(opp_name)
+                        if r_ and r_.get("total"):
+                            rate = r_["wins"] / r_["total"]
+                            if rate < floor_pct / 100:
+                                verdict = (opp_name, r_["wins"], r_["total"])
+                                break
+                    if verdict:
+                        rejected.append((t, verdict))
+                    else:
+                        kept.append((sc, t))
+            finally:
+                bar.empty()
+            if rejected:
+                st.warning(f"Screened out {len(rejected)} team(s) below the "
+                           f"{floor_pct}% floor:")
+                st.dataframe(pd.DataFrame(
+                    [{"Team": ", ".join(t),
+                      "Failed against": f"{v[0]} ({v[1]}/{v[2]})"}
+                     for t, v in rejected]), hide_index=True, width='stretch')
+            finals = kept
+            if not finals:
+                st.error(f"Every finalist failed the {floor_pct}% floor. Lower "
+                         f"it, or widen the pool.")
+
         if not finals:
             st.error("No valid teams found -- try a larger pool size.")
         else:
