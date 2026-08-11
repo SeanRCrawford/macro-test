@@ -298,7 +298,8 @@ a documented negative result.
 
 ## 4. Known gaps — read before trusting a number
 
-1. **The beam still ranks on coverage, but the search no longer ends there.**
+1. **The beam still ranks on coverage, and a better objective did not beat it
+   (yet).**
    `team_search.py` has zero knowledge of exploitability; the beam ranks on
    coverage and synergy, and `generate_overnight` only widens the funnel (rate
    40 finalists, not 3). What is new is `--substitute` (§2): it takes the rated
@@ -308,6 +309,27 @@ a documented negative result.
    refined against the real objective. The generator's own objective is still
    coverage, and a local search around a coverage-picked team cannot reach a
    great team that the beam never proposed.
+
+   The objective itself was rewritten once and **measured**, because that is the
+   only way to tell: score the WORST third of threats instead of the mean,
+   require a real margin before calling a threat answered, and credit a second
+   independent answering pair. Then play the top 4 teams each objective proposes
+   against the whole preset library with the real engine
+   (`tools/measure_objective.py`):
+
+   | objective | record across its 4 teams | best single team |
+   |---|---|---|
+   | old (mean coverage) | 1927/2208 (87.3%) | 92% |
+   | new (worst third + answer depth) | 1885/2208 (85.4%) | 89% |
+
+   So it lost, and the terms ship at zero rather than being deleted. The likely
+   reason is worth knowing before trying again: **the objective can only be as
+   good as its input**, and the input is a greedy 2v2 playout margin. "Average
+   margin" tracks "average wins" well; the tail and the redundancy the new terms
+   score are real properties the screener margin barely sees. In order of
+   promise: a better screener margin, then scoring against the leads they would
+   *plausibly* bring rather than all C(6,2) uniformly, and measure every
+   candidate the same way — intuition lost here.
 2. **Depth-1 horizon — now addressed, at a measured cost.** The solver sees one
    turn ahead, so a turn that gains nothing looks free. This caused the Protect
    spam, and it made setting Tailwind score as a wasted turn.
