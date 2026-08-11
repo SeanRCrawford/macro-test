@@ -24,6 +24,11 @@ rem                      the actual metagame before rating. Cheap, and it
 rem                      changes what is simulated -- strongly recommended.
 rem   --script-screen    drop teams with no plan against King / Hard Trick
 rem                      Room / Perish Trap before the audit.
+rem   --worst-matchup F  reject a team whose WORST single matchup wins less
+rem                      than F of that opponent's 90 brings, e.g. 0.89 for
+rem                      80/90. Checked one opponent at a time and abandoned on
+rem                      the first failure, so a team with a hole costs one
+rem                      matchup instead of eight.
 rem   --punish-screen    drop a team whose OPENING is already lost before
 rem                      spending the audit on it. Solves turn 1 as a matrix
 rem                      game -- seconds per team against minutes for the
@@ -91,6 +96,7 @@ set MINWR=0.80
 set OPTSETS=
 set SCRIPTSCR=
 set PUNISHSCR=
+set WORSTMU=
 set PICK=
 set LISTONLY=
 set STAGE2ONLY=
@@ -122,6 +128,7 @@ if /i "%~1"=="--sample-leads" (set AUDITALL=& shift & goto parse)
 if /i "%~1"=="--min-winrate"  (set MINWR=%~2& shift & shift & goto parse)
 if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& set GENFLAGS=1& shift & goto parse)
 if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& set GENFLAGS=1& shift & goto parse)
+if /i "%~1"=="--worst-matchup" (set WORSTMU=--worst-matchup %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--punish-screen" (set PUNISHSCR=--punish-screen& set GENFLAGS=1& shift & goto parse)
 if /i "%~1"=="--punish-floor"  (set PUNISHSCR=--punish-screen %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
@@ -201,7 +208,7 @@ echo STAGE 1 of 2 -- rating %CANDIDATES% teams from a pool of %POOL%
 echo ============================================================
 python generate_overnight.py --pool-size %POOL% --candidates %CANDIDATES% ^
     --keep %KEEP% %GENS% --effort %GENEFFORT% --jobs %JOBS% ^
-    --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% %PUNISHSCR% ^
+    --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% %PUNISHSCR% %WORSTMU% ^
     --cache overnight_gen.json --out shortlist.json
 if errorlevel 1 (
     echo.

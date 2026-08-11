@@ -50,22 +50,22 @@ def top_teams(objective):
     """Beam finalists under one objective. The OLD one is restored by making
     `answered` behave like pairs_won (any margin counts) and removing the
     downside/depth terms in favour of the old mean-coverage weight."""
-    if objective == "old":
-        team_search.SAFE_MARGIN = 0.0
-        team_search.W_DOWNSIDE = 0.0
-        team_search.W_DEPTH = 0.0
-        team_search._OLD_MEAN = True
-    else:
+    team_search.SAFE_MARGIN, team_search.W_DOWNSIDE, team_search.W_DEPTH = (
+        0.0, 0.0, 0.0)
+    team_search.PLAUSIBILITY_WEIGHTED = False
+    if objective == "shaped":
         team_search.SAFE_MARGIN = 20.0
         team_search.W_DOWNSIDE, team_search.W_DEPTH = NEW[1], NEW[2]
-        team_search._OLD_MEAN = False
+    elif objective == "plausible":
+        team_search.PLAUSIBILITY_WEIGHTED = True
+    elif objective == "both":
+        team_search.SAFE_MARGIN = 20.0
+        team_search.W_DOWNSIDE, team_search.W_DEPTH = NEW[1], NEW[2]
+        team_search.PLAUSIBILITY_WEIGHTED = True
     original = team_search.score_team
 
     def scored(team, mtx, eps, merged, **kw):
         out = original(team, mtx, eps, merged, **kw)
-        if objective == "old":     # old total: pairs_won * W + 3.0 * mean cov
-            out["total"] = (out["pairs_won"] * team_search.MATCHUP_WEIGHT
-                            + 3.0 * out["coverage"] + out["synergy"])
         return out
 
     team_search.score_team = scored
@@ -81,7 +81,8 @@ def top_teams(objective):
     return [t for _s, t in finals[:TOP_N]]
 
 
-picks = {name: top_teams(name) for name in ("old", "new")}
+OBJECTIVES = sys.argv[3].split(",") if len(sys.argv) > 3 else ["old", "plausible"]
+picks = {name: top_teams(name) for name in OBJECTIVES}
 for name, teams in picks.items():
     print(f"{name}: {len(teams)} teams")
     for t in teams:
@@ -108,7 +109,7 @@ for key, record in roster_rating.rate_many(jobs, os.cpu_count()):
           f"{', '.join(team)}", flush=True)
 
 print()
-for name in ("old", "new"):
+for name in OBJECTIVES:
     rows = [r for k, r in results.items() if k.startswith(name)]
     wins = sum(r["wins"] for r in rows)
     of = sum(r["total"] for r in rows)

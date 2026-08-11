@@ -108,6 +108,41 @@ class TestTheParkedTerms(unittest.TestCase):
             0.0)
 
 
+class TestPlausibilityWeighting(unittest.TestCase):
+    """Also parked, and for a different reason: it measured as a dead heat
+    (1928/2208 against 1927/2208), so it is not wrong -- it is not what limits
+    the search."""
+
+    def test_it_ships_off(self):
+        self.assertFalse(team_search.PLAUSIBILITY_WEIGHTED)
+
+    def test_switched_on_it_leans_on_the_leads_they_would_pick(self):
+        """Uniform averaging and plausibility weighting must differ on a team
+        that is lopsided -- great against one lead, poor against another --
+        because a good player brings the one we are poor against."""
+        mtx = matrix({("A", "B"): {K1: 100.0, K2: 100.0, K3: -20.0}})
+        uniform, _ = team_search.team_coverage(TEAM, mtx, KEYS)
+        team_search.PLAUSIBILITY_WEIGHTED = True
+        try:
+            weighted, _ = team_search.team_coverage(TEAM, mtx, KEYS)
+        finally:
+            team_search.PLAUSIBILITY_WEIGHTED = False
+        self.assertLess(weighted, uniform)
+
+    def test_it_normalises_within_each_opponent(self):
+        """Weighting across the whole library would let a team with more
+        plausible leads count for more than another team."""
+        keys = [("A_team", ("p", "q")), ("B_team", ("r", "s"))]
+        mtx = {p: {k: 10.0 for k in keys}
+               for p in itertools.combinations(TEAM, 2)}
+        team_search.PLAUSIBILITY_WEIGHTED = True
+        try:
+            value, _ = team_search.team_coverage(TEAM, mtx, keys)
+        finally:
+            team_search.PLAUSIBILITY_WEIGHTED = False
+        self.assertAlmostEqual(value, 10.0)
+
+
 class TestWorstThird(unittest.TestCase):
 
     def test_it_reads_the_bottom_third(self):

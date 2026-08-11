@@ -57,6 +57,7 @@ Options worth knowing:
 | `--optimise-sets` | off | optimise item + 4 moves against the real metagame. **Use it** |
 | `--min-winrate F` | 0.80 | skip auditing a team that cannot win |
 | `--punish-screen` | off | throw out a team whose OPENING is already lost, before the audit. Seconds per team |
+| `--worst-matchup F` | off | reject a team whose WORST single matchup wins less than F, e.g. `0.89` for 80/90. Abandons on the first failing opponent |
 | `--generations SPEC` | all | e.g. `1-5` |
 | `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
@@ -330,6 +331,13 @@ a documented negative result.
    promise: a better screener margin, then scoring against the leads they would
    *plausibly* bring rather than all C(6,2) uniformly, and measure every
    candidate the same way — intuition lost here.
+
+   The second of those was then tried, and it is a **dead heat**:
+   plausibility-weighting the enemy leads scores 1928/2208 against the uniform
+   1927/2208, picking almost the same teams. Both attempts now point the same
+   way: what limits the search is the **screener margin underneath it** — a
+   greedy 2v2 playout — not the shape of the function applied to it. That is
+   the one worth attacking next, and it is not a quick change.
 2. **Depth-1 horizon — now addressed, at a measured cost.** The solver sees one
    turn ahead, so a turn that gains nothing looks free. This caused the Protect
    spam, and it made setting Tailwind score as a wasted turn.

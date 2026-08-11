@@ -62,7 +62,8 @@ def _stage1_settings(args):
             "optimise_sets": bool(args.optimise_sets),
             "min_winrate": args.min_winrate,
             "script_screen": bool(args.script_screen),
-            "punish_screen": args.punish_screen}
+            "punish_screen": args.punish_screen,
+            "worst_matchup": args.worst_matchup}
 
 
 def _warn_if_renumbering(args):
@@ -221,6 +222,12 @@ def main():
                          "battles) and it changes what is simulated, so the "
                          "sets are part of the cache key and appear in the "
                          "Team sheets tab.")
+    ap.add_argument("--worst-matchup", type=float, default=0.0, metavar="F",
+                    help="reject a team whose WORST single matchup wins less "
+                         "than this share of that opponent's brings, e.g. 0.89 "
+                         "for 80/90. The aggregate --min-winrate cannot say "
+                         "this: 90/90 seven times and 20/90 once averages 88%% "
+                         "and is still a team with a hole.")
     ap.add_argument("--punish-screen", nargs="?", type=float, const=True,
                     default=None, metavar="FLOOR",
                     help="throw out a team whose OPENING is already lost, "
@@ -314,6 +321,7 @@ def main():
                          "jobs": 1, "min_winrate": args.min_winrate,
                          "script_screen": args.script_screen,
                          "punish_floor": punish_floor,
+                         "worst_matchup_floor": args.worst_matchup,
                          "beam_score": beam_score})
 
     started = time.time()

@@ -82,12 +82,17 @@ def _skipped(team, our_sets, beam_score, reason, wins=0, total=0):
 
 def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
               min_winrate=0.0, script_screen=False, beam_score=None,
-              opponents=None, pilot=None, punish_floor=None):
+              opponents=None, pilot=None, punish_floor=None,
+              worst_matchup_floor=0.0):
     """Rate one roster. Returns the record stage 1 writes to its cache.
 
     `opponents` restricts which of the library's teams it is rated against --
     used by the substitution loop, which spends its budget on the opponents a
     team is actually failing rather than on the whole library.
+
+    `worst_matchup_floor` rejects a team whose WORST single matchup wins less
+    than this share of that opponent's configurations -- the per-opponent floor
+    the aggregate `min_winrate` cannot express.
 
     `pilot` chooses who plays the games the win count comes from; None keeps
     the greedy default. See WORKFLOW.md §4.4 -- the record and the punish
@@ -127,14 +132,30 @@ def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
             return _skipped(team, our_sets, beam_score,
                             "loses every scripted opening")
 
-    if min_winrate > 0:
+    if min_winrate > 0 or worst_matchup_floor:
         screen = gt.verify_with_solver(
             team, teams, merged, moves, natures, typechart, {}, [],
             max_turns=turns, all_backs=True, effort="quick", jobs=jobs,
             our_sets=our_sets, pilot=pilot)
         s_wins = sum((r.get("wins") or 0) for r in screen.values() if r)
         s_total = sum((r.get("total") or 0) for r in screen.values() if r)
-        if s_total and s_wins / s_total < min_winrate:
+        # PER-OPPONENT FLOOR, which the aggregate rate cannot express: a team
+        # that goes 90/90 against seven opponents and 20/90 against the eighth
+        # averages 88% and is still a team with a matchup that loses. The
+        # aggregate hides exactly the hole you would lose to.
+        if worst_matchup_floor:
+            worst = min(((r.get("wins") or 0) / r["total"], name)
+                        for name, r in screen.items()
+                        if r and r.get("total"))
+            if worst[0] < worst_matchup_floor:
+                rec = _skipped(
+                    team, our_sets, beam_score,
+                    f"worst matchup {worst[0]:.0%} vs {worst[1]} "
+                    f"(floor {worst_matchup_floor:.0%})",
+                    wins=s_wins, total=s_total)
+                rec["worst_matchup"] = {"opponent": worst[1], "rate": worst[0]}
+                return rec
+        if min_winrate > 0 and s_total and s_wins / s_total < min_winrate:
             return _skipped(team, our_sets, beam_score, "below --min-winrate",
                             wins=s_wins, total=s_total)
 

@@ -197,6 +197,27 @@ def core_bonus(team, merged):
     return total, matched
 
 
+# Weight enemy leads by how plausible they are FOR THEM, instead of treating all
+# C(6,2) as equally likely. A good player does not lead with their worst pair, so
+# averaging over all fifteen lets openings nobody would choose drag the score
+# around -- the same argument section 6a makes for the audit, applied to the
+# screen. `preview.plausibility_weights` already does the weighting.
+#
+# OFF: measured, and it changed nothing. Same harness as the shaped objective
+# (tools/measure_objective.py, pool 34, top 4 each, played against the whole
+# preset library with the real engine):
+#
+#     old (uniform)                  1927/2208  87.3%   best team 92%
+#     plausibility-weighted          1928/2208  87.3%   best team 92%
+#     plausibility + shaped          1928/2208  87.3%   best team 92%
+#
+# One game in two thousand, and it picks almost the same teams. So the more
+# principled formulation is not wrong -- it is simply not what is limiting the
+# search, which is the same conclusion the shaped objective reached from the
+# other direction: both point at the screener margin underneath.
+PLAUSIBILITY_WEIGHTED = False
+
+
 def team_coverage(team, matrix, enemy_pairs):
     """Mean over enemy pairs of the best margin any of our pairs achieves.
     Models team preview: we choose our lead after seeing their team."""
@@ -208,7 +229,20 @@ def team_coverage(team, matrix, enemy_pairs):
         key = (team_name, ep)
         best = max((matrix[p][key] if p in matrix else matrix[p[::-1]][key]) for p in our_pairs)
         per_enemy[key] = best
-    return sum(per_enemy.values()) / len(per_enemy), per_enemy
+    if not PLAUSIBILITY_WEIGHTED:
+        return sum(per_enemy.values()) / len(per_enemy), per_enemy
+    # Weighted WITHIN each opponent: plausibility is a choice they make between
+    # their own leads, so normalising across the whole library would let a team
+    # with more plausible leads count for more than another team.
+    from preview import plausibility_weights
+    by_team = {}
+    for (team_name, ep), margin in per_enemy.items():
+        by_team.setdefault(team_name, []).append(margin)
+    total = 0.0
+    for margins in by_team.values():
+        weights = plausibility_weights(margins)
+        total += sum(w * m for w, m in zip(weights, margins))
+    return total / len(by_team), per_enemy
 
 
 # --------------------------------------------------------------- the objective

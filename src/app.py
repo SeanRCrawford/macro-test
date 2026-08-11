@@ -1086,6 +1086,22 @@ with tab_gen:
                          help="Verify against every enemy bring-4 -- all C(6,2) leads x "
                               "C(4,2) backs = 90 configurations per opponent -- instead of "
                               "one sampled back pair. Slower but the only trustworthy check.")
+    # A per-matchup floor, checked opponent by opponent and abandoned on the
+    # first failure. The aggregate win rate cannot express this: a team that
+    # goes 90/90 against seven opponents and 20/90 against the eighth averages
+    # 88% and still has a matchup that loses. Stopping AS SOON as one opponent
+    # fails is also where the time is saved -- the remaining opponents are never
+    # played.
+    floor_pct = st.slider(
+        "Give up on a team as soon as ANY single matchup drops below", 0, 100, 0,
+        step=5, format="%d%%",
+        help="Checked one opponent at a time, in the order they appear in "
+             "teams.csv, and abandoned the moment one comes in under the bar -- "
+             "so a team with a hole costs one matchup of verification instead "
+             "of eight. 0 turns it off. 89%% is 80/90.")
+    if floor_pct:
+        st.caption(f"A team must beat at least {floor_pct}% of EVERY opponent's "
+                   f"brings ({round(floor_pct * 90 / 100)}/90) to be reported.")
     script_screen = st.checkbox(
         "Early-disqualify finalists that always lose a scripted opening", value=False,
         help="Before ranking/reporting, cheaply check EVERY beam-search finalist (not just "
@@ -1224,10 +1240,31 @@ with tab_gen:
 
                     if verify_n and rank <= verify_n:
                         from generate_team import verify_with_solver
+                        v, gave_up = {}, None
                         with st.spinner("Verifying with the real solver..."):
-                            v = verify_with_solver(t, teams, merged, moves, natures, typechart,
-                                                    matrix, eps, 12, all_backs=deep,
-                                                    our_sets=sets)
+                            # One opponent at a time, so the floor can stop the
+                            # run instead of merely reporting afterwards.
+                            for opp_name, opp_roster in teams.items():
+                                part = verify_with_solver(
+                                    t, {opp_name: opp_roster}, merged, moves,
+                                    natures, typechart, matrix, eps, 12,
+                                    all_backs=deep, our_sets=sets)
+                                v.update(part)
+                                rec_ = part.get(opp_name)
+                                if not (floor_pct and rec_ and rec_.get("total")):
+                                    continue
+                                rate = rec_["wins"] / rec_["total"]
+                                if rate < floor_pct / 100:
+                                    gave_up = (opp_name, rec_["wins"],
+                                               rec_["total"], rate)
+                                    break
+                        if gave_up:
+                            name_, w_, tot_, rate_ = gave_up
+                            st.error(
+                                f"Gave up: only {w_}/{tot_} ({rate_:.0%}) "
+                                f"against {name_}, below the {floor_pct}% "
+                                f"floor. {len(teams) - len(v)} opponent(s) not "
+                                f"played.")
                         vr = []
                         for k, r in v.items():
                             if not r:
