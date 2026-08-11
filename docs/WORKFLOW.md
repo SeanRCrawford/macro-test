@@ -307,28 +307,39 @@ a documented negative result.
    refined against the real objective. The generator's own objective is still
    coverage, and a local search around a coverage-picked team cannot reach a
    great team that the beam never proposed.
-2. **Depth-1 horizon — real, fixable, and the fix is parked.** The solver sees
-   one turn ahead, so a turn that gains nothing looks free. This caused the
-   Protect spam; the pointless double-Protect case is filtered, and setting
-   Tailwind still scores as a wasted turn.
+2. **Depth-1 horizon — now addressed, at a measured cost.** The solver sees one
+   turn ahead, so a turn that gains nothing looks free. This caused the Protect
+   spam, and it made setting Tailwind score as a wasted turn.
 
-   `solver.SPEED_CONTROL_WEIGHT` closes it, and demonstrably: switched on, 11
-   of the golden baseline's 33 pinned turns change and 5 of them are
-   `Farigiraf: Protect` becoming `Farigiraf: Trick Room`. A companion term,
-   `solver.FRAGILE_HP`, stops the evaluation paying a full threat credit for a
-   Pokémon that is one hit from gone and outsped — the "why did it switch out
-   instead of sacrificing that mon" case (192 points of phantom value, down to
-   61).
+   Two terms are now **on**:
 
-   **Both ship at 0.** Measured three ways: head to head they are neutral
-   (46–53%, every CI spanning 50); per-decision exploitability improves a lot
-   (nash-mixed 44.8 → 21.9); and the whole-team audit — the number teams are
-   ranked by — gains 0.435 → 0.487 mean adjusted wins while *losing* six points
-   of record, with each term alone scoring worse than neither. That
-   non-monotonicity says the sample cannot resolve the effect. No measurable
-   gain on the ranking metric plus a consistent record cost is not enough to
-   move the default. The constants, the evidence and the switch-on checklist
-   are in the comment blocks above each one in `src/solver.py`.
+   * `solver.SPEED_CONTROL_WEIGHT` scores who moves first under the current
+     field. Switched on, 11 of the golden baseline's 33 pinned turns change,
+     and several are `Farigiraf: Protect` becoming `Farigiraf: Trick Room` —
+     the wasted turn becoming a real play.
+   * `solver.FRAGILE_HP` stops paying a full threat credit for a Pokémon that
+     is one hit from gone and outsped. On the reported position, the cost of
+     sacrificing it drops from 192 points to 37, against 50 for feeding a
+     healthy team-mate half its HP — so the solver now sacrifices instead of
+     switching out and losing something better.
+
+   **What it costs, measured over 9 pairings (3 teams × Rain / Sand / King,
+   standard tier):** mean adjusted wins `0.518 → 0.444`, record `80% → 74%`.
+   That is a real cost, and it is on anyway: the behaviour was reported twice
+   from real games as a direct cause of losses, and a nine-pairing sweep whose
+   per-pairing numbers swing by 30 points from a 25% change in one constant
+   cannot resolve an effect this size. Watch the record on your own runs;
+   setting both back to `0.0` restores the previous evaluation exactly (and
+   means bumping the two cache schemas — see the comments in `src/solver.py`).
+
+   A third term, `UNSPENT_MEGA_PREMIUM`, was written for the other half of that
+   report — the Pokémon that came in to cover the spent one was a Mega that had
+   not transformed, so it took the hits in its frailer base form. It is **off**:
+   measured, it is inert for the Megas people actually bring (a level-50 Mega
+   Metagross is already at the value clamp) and it does not move the reported
+   decision, because being chipped is not a KO and depth 1 cannot see the faint
+   it leads to. Pricing that properly needs the Mega's post-transform stats,
+   and probably depth 2.
 3. **Two ranking numbers can disagree.** The **Teams** sheet averages across
    all audited candidates; the **Plan** sheet reports the one committed choice.
    Trust Plan.
@@ -363,7 +374,33 @@ a documented negative result.
 ## 5. Speed
 
 `--jobs N` is parallel across whole pairings, verified bit-identical to serial.
-Measured **3.1× on 4 cores**. Memory, not CPU, is the limit.
+Measured **3.1× on 4 cores**. Memory, not CPU, is the limit — roughly 1 GB per
+worker, since each holds its own copy of the dataset.
+
+### If it is slower than the core count suggests
+
+**Stage 1 used to cap itself at eight workers**, whatever you passed. It rated
+teams one at a time and split each rating across the eight opponents, so `--jobs
+16` left half the machine idle and `--jobs 32` left three quarters. Worse, the
+opponents are wildly unequal — a scripted team like King measured 3–6× a plain
+one — so the makespan was the slowest opponent even below eight: measured, 8
+opponents on 4 cores took 81 s against 126 s serial, a 1.56× return on 4×.
+
+Stage 1 now hands each worker a **whole team**, which is a unit there are dozens
+of. Measured on the same work, 4 teams × 8 opponents on 4 cores: **485 s → 248 s,
+1.95×**, and it keeps scaling — the ceiling is now the number of teams left to
+rate, which is `--candidates`. It says so at startup, and tells you when
+`--jobs` exceeds what it has to hand out.
+
+Stage 2 parallelises across pairings (teams × opponents), which was already
+wide, but it rebuilt its worker pool once per `--batch` and waited for every
+pairing in a batch before starting the next. With unequal pairings that idled
+cores at every batch boundary and re-loaded the dataset in each worker. It is
+now one pool for the whole run; `--batch` only controls how often results are
+written to disk.
+
+So: give it `--jobs <cores>`, and raise `--candidates` if you want stage 1 to
+use more of them.
 
 The equilibrium solver's inner loop is vectorised. Profiling put **69 % of an
 audited line inside `solve_matrix`** — two matrix-vector products written as

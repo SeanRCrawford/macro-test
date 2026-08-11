@@ -23,8 +23,9 @@ from _harness import enemy_bring, load_world, setup_battle  # noqa: E402
 
 OUR_TEAM = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon"]
 FRAGILE_HP = 0.25    # the threshold the measurements in solver.py were taken at
-# Read at import, before any test can touch it.
+# Read at import, before any test can touch them.
 SHIPPED_DEFAULT = solver.FRAGILE_HP
+SHIPPED_MEGA_PREMIUM = solver.UNSPENT_MEGA_PREMIUM
 
 _WORLD = None
 
@@ -42,10 +43,9 @@ def fresh():
 
 
 def setUpModule():
-    """The discount SHIPS OFF -- it fixes the reported behaviour but costs more
-    on the whole-team audit than it gains (see the measurement block in
-    solver.py). Every test here turns it on for itself, so the file keeps
-    testing the mechanism rather than silently passing on a disabled one."""
+    """The discount ships ON now, at this threshold. Pinned locally anyway so
+    the file keeps testing the mechanism at a known setting rather than
+    silently re-tuning itself if the default is ever changed."""
     global _patch
     _patch = unittest.mock.patch.object(solver, "FRAGILE_HP", FRAGILE_HP)
     _patch.start()
@@ -57,10 +57,10 @@ def tearDownModule():
 
 class TestTheDefault(unittest.TestCase):
 
-    def test_it_ships_off(self):
-        """Turning it on means bumping the two cache schemas and re-recording
-        the golden baseline, so the default must not drift by accident."""
-        self.assertEqual(SHIPPED_DEFAULT, 0.0)
+    def test_it_ships_on(self):
+        """Changing it means bumping the two cache schemas and re-recording the
+        golden baseline, so the default must not drift by accident."""
+        self.assertEqual(SHIPPED_DEFAULT, FRAGILE_HP)
 
     def test_zero_is_a_true_no_op(self):
         b, _ms = fresh()
@@ -146,17 +146,23 @@ class TestTheDecisionItChanges(unittest.TestCase):
         self.assertLess(with_discount, solver.KO_WEIGHT * 0.35,
                         "still priced above the cheapest possible KO")
 
-    def test_the_switch_only_flips_with_the_speed_term_as_well(self):
+    def test_with_the_shipped_settings_the_solver_sacrifices(self):
+        """THE REPORTED LOSS, as the decision it now makes."""
+        sacrifice, rescue = self._costs()
+        self.assertLess(sacrifice, rescue,
+                        "the spent mon is still worth rescuing at a healthy "
+                        "Pokemon's expense")
+
+    def test_it_takes_BOTH_terms_to_flip_it(self):
         """Honest about what one term does on its own. The discount alone takes
-        the sacrifice from 192 to 61 against a rescue costing 50 -- a big move,
-        but the solver still rescues. It is with SPEED_CONTROL_WEIGHT on too
-        (a slow spent mon is also a positional liability) that the cost drops
-        to 37 and the decision actually changes. Both are parked; this records
-        what turning them on would buy."""
-        alone_sac, rescue = self._costs()
+        the cost of sacrificing from 192 to 61, against a rescue costing 50 -- a
+        big move, but not enough on its own. The flip needs the speed term too,
+        because a slow spent Pokemon is a positional liability as well as a
+        spent one."""
+        with unittest.mock.patch.object(solver, "SPEED_CONTROL_WEIGHT", 0.0):
+            alone_sac, rescue = self._costs()
         self.assertGreater(alone_sac, rescue)
-        with unittest.mock.patch.object(solver, "SPEED_CONTROL_WEIGHT", 12.0):
-            both_sac, both_rescue = self._costs()
+        both_sac, both_rescue = self._costs()      # shipped: both on
         self.assertLess(both_sac, both_rescue)
 
     def test_a_HEALTHY_pokemon_is_still_worth_saving(self):
@@ -187,6 +193,69 @@ def _copy_with(battle, kill=None, damage=None):
         target, frac = damage
         twin(target).apply_damage(target.max_hp() * frac)
     return nxt
+
+
+class TestUnspentMega(unittest.TestCase):
+    """The second half of the report: the Pokemon that came in to cover the
+    spent one "was a Mega which had not mega'd", so it took the hits in its
+    frailer base form and fainted -- costing the team the Mega slot as well as
+    the Pokemon.
+
+    The premium that prices that is PARKED AT 1.0 (see the comment above the
+    constant: inert at the clamp for real attackers, and it does not move the
+    reported decision because being chipped is not a KO). These tests turn it
+    on to pin the mechanism for whoever picks it up next.
+    """
+
+    def setUp(self):
+        self._p = unittest.mock.patch.object(solver, "UNSPENT_MEGA_PREMIUM", 1.25)
+        self._p.start()
+        self.addCleanup(self._p.stop)
+
+    def test_it_ships_off(self):
+        self.assertEqual(SHIPPED_MEGA_PREMIUM, 1.0)
+
+    def test_an_untransformed_mega_is_worth_more_than_its_base_stats(self):
+        b, _ms = fresh()
+        mega = next(c for side in (b.p1, b.p2) for c in side.roster
+                    if c.is_mega_pick)
+        # Middling offence, so the 1.35 clamp is not already binding -- which is
+        # also the case that matters: the Mega brought in to EAT hits is the
+        # bulky one, and a maxed attacker sits at the clamp either way.
+        mega.stats["atk"], mega.stats["spa"] = 100, 100
+        mega.mega_evolved = False
+        unspent = solver._ko_threat_value(mega)
+        mega.mega_evolved = True
+        spent = solver._ko_threat_value(mega)
+        self.assertGreater(unspent, spent)
+        self.assertAlmostEqual(unspent, spent * solver.UNSPENT_MEGA_PREMIUM)
+
+    def test_a_pokemon_that_is_not_a_mega_pick_is_unaffected(self):
+        b, _ms = fresh()
+        plain = next(c for c in b.p1.roster if not c.is_mega_pick)
+        before = solver._ko_threat_value(plain)
+        with unittest.mock.patch.object(solver, "UNSPENT_MEGA_PREMIUM", 2.0):
+            self.assertEqual(solver._ko_threat_value(plain), before)
+
+    def test_the_premium_cannot_escape_the_clamp(self):
+        """_ko_threat_value is bounded so no single Pokemon outweighs the
+        board. A multiplier that broke that would make the KO term unstable."""
+        b, _ms = fresh()
+        mega = next(c for side in (b.p1, b.p2) for c in side.roster
+                    if c.is_mega_pick)
+        mega.mega_evolved = False
+        with unittest.mock.patch.object(solver, "UNSPENT_MEGA_PREMIUM", 10.0):
+            self.assertLessEqual(solver._ko_threat_value(mega), 1.35)
+
+    def test_turning_it_off_restores_the_old_value(self):
+        b, _ms = fresh()
+        mega = next(c for side in (b.p1, b.p2) for c in side.roster
+                    if c.is_mega_pick)
+        mega.mega_evolved = False
+        with unittest.mock.patch.object(solver, "UNSPENT_MEGA_PREMIUM", 1.0):
+            off = solver._ko_threat_value(mega)
+        mega.mega_evolved = True
+        self.assertEqual(off, solver._ko_threat_value(mega))
 
 
 class TestStillAntisymmetric(unittest.TestCase):

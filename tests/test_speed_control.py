@@ -53,12 +53,12 @@ def fresh():
     return setup_battle(OUR_TEAM, enemy_bring(list(w["teams"])[0], w), w)
 
 
-def test_the_default_is_off():
-    """Parked, not live -- it wins on per-decision exploitability and loses on
-    the whole-team audit. The measurement block above the constant has the
-    numbers. Turning it on means bumping the two cache schemas and re-recording
-    the golden baseline, so the default must not drift by accident."""
-    assert SHIPPED_DEFAULT == 0.0
+def test_it_ships_on():
+    """Live, at the weight the measurements were taken at. It was parked at 0
+    first; the behaviour it fixes was reported a second time from real games, so
+    the default moved. Changing it back means bumping the two cache schemas and
+    re-recording the golden baseline, so it must not drift by accident."""
+    assert SHIPPED_DEFAULT == WEIGHT
 
 
 def test_it_is_a_no_op_when_off():

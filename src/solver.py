@@ -356,7 +356,46 @@ def _ko_threat_value(c: Combatant) -> float:
     just not always worth forcing.
     """
     off = max(c.stats.get("atk", 0), c.stats.get("spa", 0))
-    return max(0.35, min(1.35, off / 130.0))  # ~130 is a typical Lv50 attacking stat
+    value = max(0.35, min(1.35, off / 130.0))  # ~130 is a typical Lv50 attacking stat
+    # A Mega pick that has not transformed yet is worth more than the base-form
+    # stats above say. Losing it costs the Pokemon AND the Mega slot it never
+    # got to spend -- and reported from real games, that is exactly what
+    # happened: a Pokemon that could no longer do anything was preserved by
+    # switching in "a Mega which had not mega'd", which was less bulky than its
+    # Mega form, ate the hits meant for the spent mon, and fainted.
+    #
+    # Pricing it at what it is about to become makes feeding it hits look as
+    # expensive as it is, in both directions: it discourages bringing it in as
+    # a wall, and it makes KOing THEIR unevolved Mega attractive.
+    if UNSPENT_MEGA_PREMIUM and c.is_mega_pick and not c.mega_evolved:
+        value = min(1.35, value * UNSPENT_MEGA_PREMIUM)
+    return value
+
+
+# How much more an un-transformed Mega pick is worth than its base form.
+#
+# PARKED AT 1.0 (no premium), because measuring it showed it does not do the job
+# it was written for:
+#
+#   * It is INERT for the Megas people actually bring. The value above divides a
+#     level-50 attacking stat by 130 and clamps at 1.35, so anything with an
+#     attacking stat of 175+ is already at the ceiling -- which a level-50 Mega
+#     Metagross or Charizard Y is, before transforming. Measured: the cost of
+#     losing an un-transformed Mega Metagross is 319.0 points either way.
+#   * It does not change the reported decision. On the exact position from the
+#     report -- spent mon slow and at 5% HP, an un-transformed Mega alongside it
+#     -- the cost of feeding the Mega half its HP is 49.7 with the premium and
+#     49.7 without, because the premium lives in the KO term and being chipped
+#     is not a KO. At depth 1 the solver never sees the faint it leads to.
+#   * On the 9-pairing audit it made things slightly worse rather than better
+#     (mean adjusted wins 0.444 -> 0.423, record 74% -> 72%).
+#
+# The observation behind it is still right -- losing an un-transformed Mega
+# costs the Pokemon AND the Mega slot -- but pricing it needs the Mega's actual
+# post-transform stats rather than a multiplier on a clamped base value, and
+# probably needs depth 2 to connect "it takes this hit" to "it faints". Left
+# implemented, off, and tested so the next attempt starts from something.
+UNSPENT_MEGA_PREMIUM = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -414,9 +453,21 @@ def _ko_threat_value(c: Combatant) -> float:
 # worse, and that is the gate. See the block above for the table and for what
 # turning either term on requires.
 #
+# ON, AND WHY THE DEFAULT MOVED. This shipped at 0 first time round, on the
+# reasoning below: the whole-team audit could not show a gain, so the term had
+# not earned a change that moves every number in the tool.
+#
+# It was then reported a second time, from real games, with the mechanism spelt
+# out -- the spent Pokemon switched out, and the Pokemon that came in to cover
+# it was a Mega that had not transformed, so it took the hits in its frailer
+# base form and fainted for nothing. Two independent reports of the same losing
+# pattern outweigh a nine-pairing sweep that could not separate the
+# configurations, so the terms are on. The sweep's cost is stated in the block
+# above rather than buried: adjusted wins up, record down, high variance.
+#
 # Set FRAGILE_HP to 0 and the discount is skipped entirely, which is the
 # previous evaluation exactly.
-FRAGILE_HP = 0.0           # at or below this, one hit ends it (0 disables)
+FRAGILE_HP = 0.25          # at or below this, one hit ends it (0 disables)
 FRAGILE_FASTER_KEEP = 0.6  # threat credit kept when it still acts first
 FRAGILE_SLOWER_KEEP = 0.3  # ...and when it does not
 
@@ -607,22 +658,30 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
 # audits two lines), so the mean of nine of them is noisy, and 11 of 18 lines
 # against 9 of 18 is not a difference this sample can resolve.
 #
-# The honest summary: no measurable gain on the ranking metric, a consistent
-# loss on the record. That is not enough to move the default -- and the earlier
-# partial run of this same sweep pointed the other way at 6 pairings, which is
-# its own warning about stopping a measurement early.
+# The honest summary of that sweep: no measurable gain on the ranking metric, a
+# consistent loss on the record -- and an earlier partial run of the SAME sweep
+# pointed the other way at 6 pairings, which is its own warning about reading a
+# measurement before it finishes.
 #
 # What it does fix, demonstrably, is the blind spot it was written for. With it
 # on, the golden baseline changes on 11 of 33 pinned turns, and 5 of those are
 # `Farigiraf: Protect` becoming `Farigiraf: Trick Room` -- the wasted turn
-# becoming a real play. Three more are a chip attack becoming Trick Room. So
-# the hole is real, this closes it, and closing it this way costs more
-# elsewhere than it gains.
+# becoming a real play. Three more are a chip attack becoming Trick Room.
 #
-# To turn it on: set the weight, bump roster_rating.RATING_SCHEMA and
-# search_teams.SCHEMA (every cached rating was produced by the old evaluation),
-# and re-record tools/golden_baseline.py.
-SPEED_CONTROL_WEIGHT = 0.0
+# IT IS ON, and that is a judgement call worth stating plainly. It shipped at 0
+# first, on the grounds that the audit could not show a gain. The behaviour it
+# fixes was then reported a SECOND time from real games, with the mechanism
+# spelt out (see FRAGILE_HP above). A sweep that cannot resolve a difference is
+# not evidence that the reported losses are not happening, and between "the
+# measurement is neutral" and "this keeps costing me games", the games win.
+#
+# What that costs, so it is not a surprise later: the record -- `Wins / Of` --
+# came out about six points lower across the sweep, while adjusted wins came out
+# higher. Watch the record on your own runs. Setting this back to 0.0 (with
+# FRAGILE_HP) restores the previous evaluation exactly; changing either means
+# bumping roster_rating.RATING_SCHEMA and search_teams.SCHEMA, since every
+# cached rating was produced by the evaluation in force when it ran.
+SPEED_CONTROL_WEIGHT = 12.0
 
 
 def _moves_first(mine, theirs, field, my_side, their_side) -> bool:

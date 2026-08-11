@@ -177,7 +177,9 @@ def main():
     ap.add_argument("--effort", choices=TIER_ORDER, default="standard")
     ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
-                    help="opponents rated in parallel (0 = one per core)")
+                    help="candidate rosters rated in parallel (0 = one per "
+                         "core). Capped by --per-round: that is how many "
+                         "candidates a round has to hand out.")
     ap.add_argument("--vs", default=None,
                     help="rate against ONLY these opponents (comma-separated). "
                          "Applies to the incumbent too, so the comparison stays "
@@ -324,9 +326,33 @@ def main():
 
         best, best_record, best_sets = None, current, sets
         benched = []
+        # The round's candidates are independent, so rate them all at once
+        # rather than one after another. Each worker takes a whole candidate
+        # roster, which is the granularity that keeps a big machine busy: the
+        # opponent-level split inside a single rating tops out at eight.
+        cand_sets_by_i = {i: (_optimise(p["team"], world, enemies)
+                              if args.optimise_sets else None)
+                          for i, p in enumerate(proposals)}
+        pending = [{"key": roster_rating.rating_key(
+                        p["team"], args.effort, args.turns, cand_sets_by_i[i],
+                        opponents=opponents, pilot=pilot),
+                    "team": list(p["team"]), "effort": args.effort,
+                    "turns": args.turns, "our_sets": cand_sets_by_i[i],
+                    "jobs": 1, "min_winrate": args.min_winrate,
+                    "opponents": opponents, "pilot": pilot}
+                   for i, p in enumerate(proposals)
+                   if cache.get(roster_rating.rating_key(
+                       p["team"], args.effort, args.turns, cand_sets_by_i[i],
+                       opponents=opponents, pilot=pilot)) is None]
+        if pending:
+            print(f"  rating {len(pending)} candidate(s) on "
+                  f"{min(args.jobs, len(pending))} worker(s)...", flush=True)
+            for key, record in roster_rating.rate_many(pending, args.jobs):
+                cache.put(key, record)
+                cache.save()
+
         for i, proposal in enumerate(proposals, start=1):
-            cand_sets = (_optimise(proposal["team"], world, enemies)
-                         if args.optimise_sets else None)
+            cand_sets = cand_sets_by_i[i - 1]
             record = rate(proposal["team"], cand_sets)
             # THE RECORD COMES FIRST. Adjusted wins and the win count are
             # produced by different pilots (WORKFLOW.md §4.4), and they can

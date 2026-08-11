@@ -180,7 +180,12 @@ def main():
     ap.add_argument("--effort", choices=TIER_ORDER, default="standard")
     ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
-                    help="opponents verified in parallel (0 = one per core)")
+                    help="TEAMS rated in parallel (0 = one per core). Each "
+                         "worker rates a whole team against every opponent, so "
+                         "this scales past the eight the old opponent-level "
+                         "split was capped at -- but it can never exceed the "
+                         "number of teams left to rate, which is what "
+                         "--candidates controls.")
     ap.add_argument("--cache", default=DEFAULT_CACHE)
     ap.add_argument("--matrix-cache", default="matrix_cache.pkl",
                     help="pickled pair matrix, reused across runs with the "
@@ -248,37 +253,65 @@ def main():
     cache = ResultCache(None if args.fresh else args.cache)
     print(f"resuming : {len(cache)} already rated\n")
 
-    rated, started = [], time.time()
-    for i, (beam_score, team) in enumerate(finals, start=1):
+    # ONE TEAM PER WORKER, many teams at once. The old loop rated teams
+    # sequentially and split each one across the eight opponents inside
+    # verify_with_solver, so --jobs above 8 bought nothing at all and even below
+    # it the split was poor (measured: 1.56x on 4 cores, because the opponents
+    # are unequal and the makespan is the slowest one). Teams are the unit with
+    # enough tasks to keep any number of cores busy.
+    keys, todo = [], []
+    for beam_score, team in finals:
         our_sets = sets_by_team.get(tuple(sorted(team)))
         # The sets change what is simulated, so they belong in the key: an
         # optimised run must never be served a usage-default result.
         key = roster_rating.rating_key(team, args.effort, args.turns, our_sets)
-        record = cache.get(key)
-        if record is None:
+        keys.append(key)
+        if cache.get(key) is None and not any(j["key"] == key for j in todo):
             # SCREEN FIRST, then audit -- see roster_rating.rate_team. A team
             # losing its games is not a team whose lines are worth measuring: a
             # lost position rates as unpunishable, so auditing it produces a
             # flattering number for a bad team.
-            record = roster_rating.rate_team(
-                team, world, effort=args.effort, turns=args.turns,
-                our_sets=our_sets, jobs=args.jobs,
-                min_winrate=args.min_winrate, script_screen=args.script_screen,
-                beam_score=beam_score)
+            todo.append({"key": key, "team": list(team), "effort": args.effort,
+                         "turns": args.turns, "our_sets": our_sets,
+                         "jobs": 1, "min_winrate": args.min_winrate,
+                         "script_screen": args.script_screen,
+                         "beam_score": beam_score})
+
+    started = time.time()
+    if todo:
+        workers = min(args.jobs, len(todo))
+        print(f"rating   : {len(todo)} teams on {workers} worker(s)"
+              + (f"  ({len(finals) - len(todo)} already cached)"
+                 if len(todo) < len(finals) else ""))
+        if args.jobs > len(todo):
+            print(f"           --jobs {args.jobs} exceeds the {len(todo)} teams "
+                  f"left to rate, so {args.jobs - len(todo)} core(s) idle. "
+                  f"Raise --candidates to use them.")
+        print(flush=True)
+
+        done = 0
+        for key, record in roster_rating.rate_many(todo, workers):
             cache.put(key, record)
-            cache.save()          # every team is a save point: teams are slow
-        rated.append(record)
-        elapsed = time.time() - started
-        adj = record.get("adjusted_win_rate")
-        if record.get("skipped"):
-            print(f"  [{i}/{len(finals)}] skipped: {record['skipped']} "
-                  f"({record['wins']}/{record['total']} won)", flush=True)
-            continue
-        print(f"  [{i}/{len(finals)}] "
-              f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
-              f"punish {record['exploitability'] or float('nan'):6.1f}   "
-              f"{record['wins']}/{record['total']} won   "
-              f"~{elapsed / i * (len(finals) - i) / 60:.0f} min left", flush=True)
+            cache.save()      # every team is a save point: teams are slow
+            done += 1
+            elapsed = time.time() - started
+            left = elapsed / done * (len(todo) - done) / 60
+            if record.get("skipped"):
+                print(f"  [{done}/{len(todo)}] skipped: {record['skipped']} "
+                      f"({record['wins']}/{record['total']} won)   "
+                      f"~{left:.0f} min left", flush=True)
+                continue
+            adj = record.get("adjusted_win_rate")
+            print(f"  [{done}/{len(todo)}] "
+                  f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
+                  f"punish {record['exploitability'] or float('nan'):6.1f}   "
+                  f"{record['wins']}/{record['total']} won   "
+                  f"~{left:.0f} min left", flush=True)
+
+    # Back into beam order. Results arrive out of order -- that is what keeps
+    # the pool full -- so the ranking is rebuilt from the cache, not from the
+    # order they finished in.
+    rated = [cache.get(k) for k in keys if cache.get(k) is not None]
 
     # Rank by wins that hold up. Ranking on exploitability alone puts a team
     # that loses everything first, because a lost position has nothing left to

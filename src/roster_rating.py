@@ -31,10 +31,12 @@ from search_effort import ResultCache
 # because the cache is the whole reason an overnight run can be interrupted.
 # Changing the EVALUATION is such a change: every rating is a number the
 # evaluation produced, so a cache written before it moved cannot be compared
-# with one written after. Turning on solver.SPEED_CONTROL_WEIGHT or
-# solver.FRAGILE_HP (both ship at 0, see WORKFLOW.md §4.2) means bumping this,
-# and tools/search_teams.py's SCHEMA with it.
-RATING_SCHEMA = 1
+# with one written after. Touching solver.SPEED_CONTROL_WEIGHT, FRAGILE_HP or
+# UNSPENT_MEGA_PREMIUM means bumping this, and tools/search_teams.py's SCHEMA
+# with it.
+#   1 -> 2  speed control, the spent-Pokemon discount and the unspent-Mega
+#           premium all switched on (WORKFLOW.md §4.2)
+RATING_SCHEMA = 2
 
 
 def rating_key(team, effort, turns, our_sets, opponents=None, pilot=None):
@@ -165,6 +167,65 @@ def summarise(team, verdict, our_sets=None, beam_score=None):
                              "our_bring4": r.get("our_bring4")}
                          for n, r in verdict.items() if r},
     }
+
+
+# --------------------------------------------------------------- in parallel
+#
+# WHY TEAMS ARE THE PARALLEL UNIT HERE. `verify_with_solver` parallelises across
+# OPPONENTS, which caps concurrency at the size of the library -- eight. Beyond
+# eight cores, `--jobs` stopped buying anything, and even below it the split is
+# poor: the opponents are wildly unequal (a scripted team like King measured 3-6x
+# a plain one), so the makespan is the slowest opponent no matter how many
+# workers are free. Measured on 4 cores: 8 opponents at --jobs 4 took 81s against
+# 126s serial -- 1.56x, not 3.5x.
+#
+# Stage 1 rates dozens of teams, so the team is the better unit: many more tasks
+# than workers, each self-contained, so the pool stays full and one slow pairing
+# cannot stall the run. Each worker loads the dataset once and then keeps it.
+_WORKER_WORLD = None
+
+
+def worker_init():
+    """Build this worker's dataset once, not once per task."""
+    global _WORKER_WORLD
+    _WORKER_WORLD = load_world()
+
+
+def rate_team_job(job):
+    """Rate one roster inside a pool worker. Top-level and plain-typed: on
+    Windows the pool uses spawn and both ends cross a pickle boundary."""
+    global _WORKER_WORLD
+    if _WORKER_WORLD is None:
+        worker_init()
+    job = dict(job)
+    key, team = job.pop("key"), job.pop("team")
+    return key, rate_team(team, _WORKER_WORLD, **job)
+
+
+def rate_many(jobs_list, workers, on_done=None):
+    """Rate many rosters, `workers` at a time. Yields (key, record) as they
+    finish -- out of order, which is what keeps every worker busy.
+
+    Falls back to running in this process when there is nothing to gain, so a
+    one-team run does not pay for a process pool.
+    """
+    if workers <= 1 or len(jobs_list) <= 1:
+        for job in jobs_list:
+            key, record = rate_team_job(job)
+            if on_done:
+                on_done(key, record)
+            yield key, record
+        return
+
+    import concurrent.futures as cf
+    with cf.ProcessPoolExecutor(max_workers=min(workers, len(jobs_list)),
+                                initializer=worker_init) as pool:
+        futures = [pool.submit(rate_team_job, job) for job in jobs_list]
+        for future in cf.as_completed(futures):
+            key, record = future.result()
+            if on_done:
+                on_done(key, record)
+            yield key, record
 
 
 def rank_key(record):
