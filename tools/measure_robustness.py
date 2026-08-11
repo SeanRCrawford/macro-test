@@ -172,16 +172,25 @@ def analyse_point(battle, assumed, wide, configs):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--brings", type=int, default=4)
+    ap.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                    help="override a solver tunable for this run, e.g. "
+                         "--set SPEED_CONTROL_WEIGHT=12. Exploitability, not "
+                         "win rate, is the gate a new evaluation term has to "
+                         "pass -- see the module docstring -- so any term added "
+                         "to heuristic_eval should be swept here as well as "
+                         "through measure_headtohead.py.")
     args = ap.parse_args()
+
+    for override in args.set:
+        name, _, value = override.partition("=")
+        if not hasattr(solver, name):
+            raise SystemExit(f"solver has no setting called {name!r}")
+        setattr(solver, name, float(value))
+        print(f"override : solver.{name} = {value}")
 
     world = load_world()
     configs = {"greedy": dict(nash=False),
                "nash-d1": dict(nash=True, depth=1)}
-    # Compare the deployed solver with and without the widened opponent move
-    # space, which is the whole point of the change.
-    if args.narrow:
-        for _t, _e in []:
-            pass
     rows = {k: [] for k in list(configs) + ["nash-mixed", "nash-maximin"]}
 
     for team_name, enemy4 in matchups(world, args.brings):

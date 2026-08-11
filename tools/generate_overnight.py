@@ -43,13 +43,73 @@ import _harness  # noqa: E402,F401  (adds ../src to sys.path)
 
 sys.path.insert(0, "../src")
 import generate_team as gt  # noqa: E402
+import punish_screen  # noqa: E402
+import roster_rating  # noqa: E402
 from search_effort import TIER_ORDER, ResultCache, relative_cost, tier  # noqa: E402
-from species_data import build_merged_dataset, load_preferences  # noqa: E402
+from species_data import load_preferences  # noqa: E402
 from team_search import (beam_search_teams, build_candidate_pool,  # noqa: E402
                          build_pair_matrix, enemy_pairs_from_teams)
 
 DEFAULT_CACHE = "generate_cache.json"
-SCHEMA = 1
+
+
+def _stage1_settings(args):
+    """The arguments that decide WHICH teams stage 1 produces, and in what
+    order. Not the ones that only decide how long it takes."""
+    return {"pool_size": args.pool_size, "candidates": args.candidates,
+            "generations": args.generations, "beam_width": args.beam_width,
+            "effort": args.effort, "turns": args.turns,
+            "optimise_sets": bool(args.optimise_sets),
+            "min_winrate": args.min_winrate,
+            "script_screen": bool(args.script_screen),
+            "punish_screen": args.punish_screen,
+            "worst_matchup": args.worst_matchup}
+
+
+def _warn_if_renumbering(args):
+    """Shout if this run will rewrite an existing shortlist under different
+    settings.
+
+    THE TRAP THIS CATCHES, reported from real use: you generate 60 teams from a
+    pool of 50, look at the ranking, and come back with
+
+        overnight.bat --deep-effort thorough --pick "5" --vs "Big 6"
+
+    The stage 1 flags are gone from that command, so it silently falls back to
+    the defaults (34 / 40), generates a DIFFERENT set of teams -- hours of
+    re-rating, since none of them are in the cache -- and rewrites shortlist
+    .json. `--pick "5"` then means a team you have never seen. The numbering is
+    only stable across runs that generate the same teams, and nothing said so.
+    """
+    path = args.out
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            previous = (json.load(fh) or {}).get("settings")
+    except (OSError, ValueError):
+        return
+    if not previous:
+        return
+    now = _stage1_settings(args)
+    differing = {k: (previous.get(k), now[k]) for k in now
+                 if previous.get(k) != now[k]}
+    if not differing:
+        return
+    print("=" * 78)
+    print("WARNING: this run does NOT match the one that wrote "
+          f"{os.path.basename(path)}.")
+    for key, (was, now_v) in sorted(differing.items()):
+        print(f"    {key:<14} was {was!r}, now {now_v!r}")
+    print("It will therefore generate a different set of teams and RENUMBER "
+          "the shortlist,\nso a --pick number will not mean what it meant "
+          "before -- and none of the new\nteams are in the cache, so nothing "
+          "resumes.")
+    print("\nIf you meant to deep-search what you already have, stop this and "
+          "run:")
+    print('    overnight.bat --stage2-only --pick "N" [--vs "Big 6"]')
+    print("If you meant to generate again, repeat the original stage 1 flags.")
+    print("=" * 78 + "\n", flush=True)
 
 
 def _beam_finalists(args, world):
@@ -98,8 +158,25 @@ def _beam_finalists(args, world):
                 pickle.dump({"pool": pool, "enemy_pairs": enemy_pairs,
                              "matrix": matrix}, fh)
 
+    # preferences.csv, in full. The pool above honours EXCLUDE (an excluded
+    # Pokemon is never eligible), but include/prefer live in the beam, and this
+    # pipeline was not passing them: an "Include" entry was merely allowed into
+    # the pool rather than required in every team, and "Prefer" did nothing at
+    # all. generate_team.py has always passed both, so the two entry points
+    # disagreed about what the file means.
+    include = [n for n in prefs["include"] if n in pool]
+    prefer = [n for n in prefs["prefer"] if n in pool]
+    dropped = sorted(set(prefs["include"]) - set(include))
+    if include or prefer or prefs["exclude"]:
+        print(f"prefs    : exclude {prefs['exclude'] or '-'} | "
+              f"include {include or '-'} (in EVERY team) | "
+              f"prefer {prefer or '-'} (tiebreak)")
+    if dropped:
+        print(f"WARNING  : include {dropped} not in the pool -- excluded, or "
+              f"outside --generations. They will NOT be in the teams.")
     finals = beam_search_teams(pool, matrix, enemy_pairs, world["merged"],
-                               beam_width=max(args.beam_width, args.candidates))
+                               beam_width=max(args.beam_width, args.candidates),
+                               must_include=include, prefer=prefer)
     finals = [(score["total"], team) for score, team in finals][:args.candidates]
     print(f"beam     : {len(finals)} candidate teams to rate\n")
     return finals
@@ -123,7 +200,12 @@ def main():
     ap.add_argument("--effort", choices=TIER_ORDER, default="standard")
     ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
-                    help="opponents verified in parallel (0 = one per core)")
+                    help="TEAMS rated in parallel (0 = one per core). Each "
+                         "worker rates a whole team against every opponent, so "
+                         "this scales past the eight the old opponent-level "
+                         "split was capped at -- but it can never exceed the "
+                         "number of teams left to rate, which is what "
+                         "--candidates controls.")
     ap.add_argument("--cache", default=DEFAULT_CACHE)
     ap.add_argument("--matrix-cache", default="matrix_cache.pkl",
                     help="pickled pair matrix, reused across runs with the "
@@ -140,6 +222,24 @@ def main():
                          "battles) and it changes what is simulated, so the "
                          "sets are part of the cache key and appear in the "
                          "Team sheets tab.")
+    ap.add_argument("--worst-matchup", type=float, default=0.0, metavar="F",
+                    help="reject a team whose WORST single matchup wins less "
+                         "than this share of that opponent's brings, e.g. 0.89 "
+                         "for 80/90. The aggregate --min-winrate cannot say "
+                         "this: 90/90 seven times and 20/90 once averages 88%% "
+                         "and is still a team with a hole.")
+    ap.add_argument("--punish-screen", nargs="?", type=float, const=True,
+                    default=None, metavar="FLOOR",
+                    help="throw out a team whose OPENING is already lost, "
+                         "before spending the audit on it. Solves turn 1 as a "
+                         "matrix game against the leads they would pick -- "
+                         "seconds per team against minutes for the audit -- and "
+                         "rejects the team if the best it can guarantee is "
+                         "below FLOOR (default "
+                         f"{punish_screen.DEFAULT_FLOOR:.0f}). Screens on the "
+                         "guaranteed value, not the punish: a team with no "
+                         "threats has nothing to punish and would otherwise "
+                         "screen best of all.")
     ap.add_argument("--script-screen", action="store_true",
                     help="drop a team that loses to EVERY scripted opening "
                          "(King / Hard Trick Room / Perish Trap) before the "
@@ -156,14 +256,25 @@ def main():
     if _warning:
         print(f"WARNING  : {_warning}")
 
-    merged, _usage, moves, natures, typechart = build_merged_dataset()
-    teams = gt.load_teams(merged=merged)
-    world = dict(merged=merged, moves=moves, natures=natures,
-                 typechart=typechart, teams=teams)
+    world = roster_rating.load_world()
+    merged, moves = world["merged"], world["moves"]
+    natures, typechart, teams = (world["natures"], world["typechart"],
+                                 world["teams"])
 
     settings = tier(args.effort)
     print(f"effort   : {settings['label']} (~{relative_cost(args.effort):.0f}x quick)")
     print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
+
+    # `--punish-screen` with no number means "use the default floor".
+    punish_floor = (punish_screen.DEFAULT_FLOOR if args.punish_screen is True
+                    else args.punish_screen)
+    if punish_floor is not None:
+        print(f"screen   : rejecting teams whose opening cannot guarantee "
+              f"{punish_floor:.0f}")
+
+    # Before anything expensive: is this run about to renumber a shortlist the
+    # user is already referring to by number?
+    _warn_if_renumbering(args)
 
     finals = _beam_finalists(args, world)
 
@@ -184,117 +295,94 @@ def main():
                 for n in team}
         print(f"sets     : {len(sets_by_team)} teams optimised\n")
 
+    # A set pinned in preferences.csv -- "Mamoswine (Life Orb)", "Mega Gengar
+    # (Substitute, Protect, Shadow Ball, Sludge Bomb)" -- WINS over the
+    # optimiser. It is a statement about what you are bringing, so applying it
+    # after optimisation is the only order that respects it, and it applies
+    # whether or not --optimise-sets ran at all.
+    pinned = load_preferences().get("sets") or {}
+    if pinned:
+        print(f"pinned   : {', '.join(f'{n} {v}' for n, v in pinned.items())}")
+        for _score, team in finals:
+            key = tuple(sorted(team))
+            spec = dict(sets_by_team.get(key) or {})
+            for name in team:
+                if name in pinned:
+                    spec[name] = {**(spec.get(name) or {}), **pinned[name]}
+            if spec:
+                sets_by_team[key] = spec
+        print()
+
     cache = ResultCache(None if args.fresh else args.cache)
     print(f"resuming : {len(cache)} already rated\n")
 
-    rated, started = [], time.time()
-    for i, (beam_score, team) in enumerate(finals, start=1):
+    # ONE TEAM PER WORKER, many teams at once. The old loop rated teams
+    # sequentially and split each one across the eight opponents inside
+    # verify_with_solver, so --jobs above 8 bought nothing at all and even below
+    # it the split was poor (measured: 1.56x on 4 cores, because the opponents
+    # are unequal and the makespan is the slowest one). Teams are the unit with
+    # enough tasks to keep any number of cores busy.
+    keys, todo = [], []
+    for beam_score, team in finals:
         our_sets = sets_by_team.get(tuple(sorted(team)))
         # The sets change what is simulated, so they belong in the key: an
         # optimised run must never be served a usage-default result.
-        key = ResultCache.key("team", SCHEMA, sorted(team), args.effort,
-                              args.turns, our_sets)
-        record = cache.get(key)
-        if record is None:
-            # SCREEN FIRST. The win check is cheap next to the audit, and a
-            # team losing its games is not a team whose lines are worth
-            # measuring -- a lost position rates as unpunishable, so auditing
-            # it produces a flattering number for a bad team. Rate only what
-            # already wins, then rank those by punishability.
-            if args.script_screen:
-                # A team with no plan against a rehearsed opening is not worth
-                # auditing. One sampled config per scripted opponent, so this
-                # is cheap next to the audit it protects.
-                screened = gt.quick_script_screen(
-                    [(beam_score, list(team))], teams, {}, merged, moves,
-                    natures, typechart, max_turns=args.turns,
-                    our_sets=our_sets)
-                if screened and screened[0][2]:
-                    record = {"team": list(team), "beam_score": beam_score,
-                              "sets": our_sets, "exploitability": None,
-                              "adjusted_win_rate": None, "robust_win_rate": None,
-                              "severe_turns": 0, "wins": 0, "total": 0,
-                              "skipped": "loses every scripted opening"}
-                    cache.put(key, record)
-                    cache.save()
-                    rated.append(record)
-                    print(f"  [{i}/{len(finals)}] skipped: no plan vs any "
-                          f"scripted opening", flush=True)
-                    continue
-            if args.min_winrate > 0:
-                screen = gt.verify_with_solver(
-                    team, teams, merged, moves, natures, typechart, {}, [],
-                    max_turns=args.turns, all_backs=True, effort="quick",
-                    jobs=args.jobs, our_sets=our_sets)
-                s_wins = sum((r.get("wins") or 0) for r in screen.values() if r)
-                s_total = sum((r.get("total") or 0) for r in screen.values() if r)
-                if s_total and s_wins / s_total < args.min_winrate:
-                    record = {"team": list(team), "beam_score": beam_score,
-                              "exploitability": None, "adjusted_win_rate": None,
-                              "robust_win_rate": None, "severe_turns": 0,
-                              "wins": s_wins, "total": s_total,
-                              "skipped": "below --min-winrate"}
-                    cache.put(key, record)
-                    cache.save()
-                    rated.append(record)
-                    print(f"  [{i}/{len(finals)}] skipped: "
-                          f"{s_wins}/{s_total} won "
-                          f"({s_wins / s_total:.0%} < {args.min_winrate:.0%})",
-                          flush=True)
-                    continue
-            verdict = gt.verify_with_solver(
-                team, teams, merged, moves, natures, typechart, {}, [],
-                max_turns=args.turns, all_backs=True, effort=args.effort,
-                jobs=args.jobs, our_sets=our_sets)
-            scores = [r["exploitability"] for r in verdict.values()
-                      if r and r.get("exploitability") is not None]
-            adj = [r["adjusted_win_rate"] for r in verdict.values()
-                   if r and r.get("adjusted_win_rate") is not None]
-            rob = [r["robust_win_rate"] for r in verdict.values()
-                   if r and r.get("robust_win_rate") is not None]
-            wins = sum((r.get("wins") or 0) for r in verdict.values() if r)
-            total = sum((r.get("total") or 0) for r in verdict.values() if r)
-            worst = max((r for r in verdict.values()
-                         if r and r.get("exploitability") is not None),
-                        key=lambda r: r["exploitability"], default=None)
-            record = {
-                "team": list(team),
-                "sets": our_sets,
-                "beam_score": beam_score,
-                "exploitability": (sum(scores) / len(scores)) if scores else None,
-                "adjusted_win_rate": (sum(adj) / len(adj)) if adj else None,
-                "robust_win_rate": (sum(rob) / len(rob)) if rob else None,
-                "severe_turns": sum((r.get("severe_turns") or 0)
-                                    for r in verdict.values() if r),
-                "wins": wins, "total": total,
-                "worst_opponent": next((n for n, r in verdict.items()
-                                        if r is worst), None),
-                "worst_value": worst["exploitability"] if worst else None,
-                "worst_turn": worst.get("worst_turn") if worst else None,
-                "per_opponent": {n: {"wins": r.get("wins"), "total": r.get("total"),
-                                     "exploitability": r.get("exploitability"),
-                                     "adjusted_win_rate": r.get("adjusted_win_rate"),
-                                     "robust_win_rate": r.get("robust_win_rate"),
-                                     "severe_turns": r.get("severe_turns")}
-                                 for n, r in verdict.items() if r},
-            }
+        key = roster_rating.rating_key(team, args.effort, args.turns, our_sets)
+        keys.append(key)
+        if cache.get(key) is None and not any(j["key"] == key for j in todo):
+            # SCREEN FIRST, then audit -- see roster_rating.rate_team. A team
+            # losing its games is not a team whose lines are worth measuring: a
+            # lost position rates as unpunishable, so auditing it produces a
+            # flattering number for a bad team.
+            todo.append({"key": key, "team": list(team), "effort": args.effort,
+                         "turns": args.turns, "our_sets": our_sets,
+                         "jobs": 1, "min_winrate": args.min_winrate,
+                         "script_screen": args.script_screen,
+                         "punish_floor": punish_floor,
+                         "worst_matchup_floor": args.worst_matchup,
+                         "beam_score": beam_score})
+
+    started = time.time()
+    if todo:
+        workers = min(args.jobs, len(todo))
+        print(f"rating   : {len(todo)} teams on {workers} worker(s)"
+              + (f"  ({len(finals) - len(todo)} already cached)"
+                 if len(todo) < len(finals) else ""))
+        if args.jobs > len(todo):
+            print(f"           --jobs {args.jobs} exceeds the {len(todo)} teams "
+                  f"left to rate, so {args.jobs - len(todo)} core(s) idle. "
+                  f"Raise --candidates to use them.")
+        print(flush=True)
+
+        done = 0
+        for key, record in roster_rating.rate_many(todo, workers):
             cache.put(key, record)
-            cache.save()          # every team is a save point: teams are slow
-        rated.append(record)
-        elapsed = time.time() - started
-        adj = record.get("adjusted_win_rate")
-        print(f"  [{i}/{len(finals)}] "
-              f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
-              f"punish {record['exploitability'] or float('nan'):6.1f}   "
-              f"{record['wins']}/{record['total']} won   "
-              f"~{elapsed / i * (len(finals) - i) / 60:.0f} min left", flush=True)
+            cache.save()      # every team is a save point: teams are slow
+            done += 1
+            elapsed = time.time() - started
+            left = elapsed / done * (len(todo) - done) / 60
+            if record.get("skipped"):
+                print(f"  [{done}/{len(todo)}] skipped: {record['skipped']} "
+                      f"({record['wins']}/{record['total']} won)   "
+                      f"~{left:.0f} min left", flush=True)
+                continue
+            adj = record.get("adjusted_win_rate")
+            print(f"  [{done}/{len(todo)}] "
+                  f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
+                  f"punish {record['exploitability'] or float('nan'):6.1f}   "
+                  f"{record['wins']}/{record['total']} won   "
+                  f"~{left:.0f} min left", flush=True)
+
+    # Back into beam order. Results arrive out of order -- that is what keeps
+    # the pool full -- so the ranking is rebuilt from the cache, not from the
+    # order they finished in.
+    rated = [cache.get(k) for k in keys if cache.get(k) is not None]
 
     # Rank by wins that hold up. Ranking on exploitability alone puts a team
     # that loses everything first, because a lost position has nothing left to
     # punish -- observed live before this was changed.
     ranked = sorted([r for r in rated if r.get("exploitability") is not None],
-                    key=lambda r: (-(r.get("adjusted_win_rate") or 0.0),
-                                   r["exploitability"]))
+                    key=roster_rating.rank_key)
     if not ranked:
         print("\nNo ratings produced (quick tier does not compute them).")
         return
@@ -323,7 +411,11 @@ def main():
     # the one generation ranked, silently.
     payload = {"teams": shortlist,
                "sets": {f"gen{i:02d}": (r.get("sets") or {})
-                        for i, r in enumerate(ranked, 1)}}
+                        for i, r in enumerate(ranked, 1)},
+               # What produced this numbering. Read back by _warn_if_renumbering
+               # on the next run, so re-running with different stage 1 flags
+               # cannot quietly change what "gen05" refers to.
+               "settings": _stage1_settings(args)}
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
 

@@ -56,7 +56,11 @@ TYPICAL_LINE_TURNS = 8
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 7   # --brings is part of what was computed
+SCHEMA = 8   # 8: the evaluation moved -- speed control, the spent-Pokemon
+             #    discount and the unspent-Mega premium are all on now
+             #    (WORKFLOW.md §4.2), and every cached number was produced by
+             #    the evaluation in force when it ran. 7: --brings became part
+             #    of what was computed.
 
 
 _WORLD = None       # per-process dataset, loaded once (13-14s) and reused
@@ -378,21 +382,33 @@ def main():
         # Pairings are independent, so the whole pairing is the parallel unit --
         # coarse enough that the 14s dataset load per worker is amortised away
         # and no shared state has to cross a process boundary.
+        #
+        # ONE POOL FOR THE WHOLE RUN, not one per batch. Batching the pool as
+        # well as the saves put a barrier at every batch boundary: the batch
+        # could not finish until its slowest pairing did, and the pairings are
+        # wildly unequal (a scripted opponent measured 3-6x a plain one), so
+        # cores sat idle at the tail of every batch and every worker re-loaded
+        # the dataset for the next one. `--batch` now means only what it says
+        # it means -- how often results are written to disk.
         import concurrent.futures as cf
-        for batch in batches(todo, max(args.batch, args.jobs)):
-            with cf.ProcessPoolExecutor(max_workers=args.jobs,
-                                        initializer=_worker_init,
-                                        initargs=(extra, extra_sets)) as pool:
-                futures = {pool.submit(_run_pairing,
-                                       (a, b, args.effort, args.turns, prescreen,
-                                        args.audit_all, args.brings)): (k, a, b)
-                           for k, a, b in batch}
-                for future in cf.as_completed(futures):
-                    k, a, b = futures[future]
-                    cache.put(k, future.result())
-                    done += 1
-                    _progress(a, b)
-            cache.save()   # save point: killing now costs at most this batch
+        with cf.ProcessPoolExecutor(max_workers=args.jobs,
+                                    initializer=_worker_init,
+                                    initargs=(extra, extra_sets)) as pool:
+            futures = {pool.submit(_run_pairing,
+                                   (a, b, args.effort, args.turns, prescreen,
+                                    args.audit_all, args.brings)): (k, a, b)
+                       for k, a, b in todo}
+            since_save = 0
+            for future in cf.as_completed(futures):
+                k, a, b = futures[future]
+                cache.put(k, future.result())
+                done += 1
+                since_save += 1
+                _progress(a, b)
+                if since_save >= max(1, args.batch):
+                    cache.save()   # killing now costs at most --batch pairings
+                    since_save = 0
+        cache.save()
     else:
         for batch in batches(todo, args.batch):
             for k, ours, theirs in batch:

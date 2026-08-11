@@ -100,13 +100,16 @@ class Battle:
         for c in p1_roster + p2_roster:
             c.current_hp = c.max_hp()
 
-        # Opening switch-in triggers (Intimidate, weather setters, Hospitality), leads only.
+        # Opening switch-in triggers (Intimidate, weather setters, Hospitality),
+        # leads only. The ARRIVAL is announced first: an ability announcing
+        # itself above the line that says who is on the field reads as coming
+        # from nowhere, and it is not how the game presents it either.
+        self.log.add(f"Leads: {self.p1.active[0].name}/{self.p1.active[1].name} "
+                      f"vs {self.p2.active[0].name}/{self.p2.active[1].name}")
         on_switch_in(self.p1.active[0], self.p2.active, self.field, ally=self.p1.active[1], log=self.log)
         on_switch_in(self.p1.active[1], self.p2.active, self.field, ally=self.p1.active[0], log=self.log)
         on_switch_in(self.p2.active[0], self.p1.active, self.field, ally=self.p2.active[1], log=self.log)
         on_switch_in(self.p2.active[1], self.p1.active, self.field, ally=self.p2.active[0], log=self.log)
-        self.log.add(f"Leads: {self.p1.active[0].name}/{self.p1.active[1].name} "
-                      f"vs {self.p2.active[0].name}/{self.p2.active[1].name}")
         self._emit(event="leads", p1=[c.name for c in self.p1.active],
                    p2=[c.name for c in self.p2.active], weather_after=self.field.weather)
 
@@ -365,9 +368,14 @@ class Battle:
             # this turn hit whatever now stands in that slot -- not the other slot.
             self._departed_slots[id(a.combatant)] = (side.name, slot)
             ally = side.active[1 - slot] if len(side.active) == 2 else None
-            on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
             incoming.choice_locked_move = None
+            # Announce the switch BEFORE its abilities fire. A voluntary switch
+            # applies to whatever is on the field right now, so the ability
+            # message belongs immediately after the arrival that caused it --
+            # not above it, where it reads as coming from nobody.
             self.log.add(f"{a.side} switches {self.tag(a.combatant)} -> {self.tag(incoming)}")
+            on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
+            # Emitted after, so weather_after is the weather the switch produced.
             self._emit(event="switch", side=a.side, out=a.combatant.name, incoming=incoming.name,
                        ability_after=incoming.ability, weather_after=self.field.weather)
 
@@ -1018,9 +1026,11 @@ class Battle:
         # aimed at `outgoing` should follow the SLOT and hit `incoming` instead.
         self._departed_slots[id(outgoing)] = (side.name, slot)
         ally = side.active[1 - slot] if len(side.active) == 2 else None
-        on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
         incoming.choice_locked_move = None
+        # The pivot is announced before its abilities fire, same as a voluntary
+        # switch -- see the note there.
         self.log.add(f"{self.tag(outgoing)} pivots out -> {self.tag(incoming)}")
+        on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
         self._emit(event="switch", side=action_side, out=outgoing.name, incoming=incoming.name,
                    ability_after=incoming.ability, weather_after=self.field.weather)
 
@@ -1065,9 +1075,27 @@ class Battle:
     def _replace_fainted(self):
         """Send in replacements for fainted actives at the END of the turn, so
         they are on the field ready to act on the NEXT turn (they do not get an
-        action on the turn they came in). Switch-in abilities fire now; Mega
-        Evolution does not -- that is resolved at the start of the next turn,
-        after any voluntary switches, by _resolve_mega_evolutions()."""
+        action on the turn they came in). Mega Evolution is NOT resolved here --
+        that happens at the start of the next turn, after any voluntary
+        switches, in _resolve_mega_evolutions().
+
+        TWO PHASES, and the split is the whole point. Everything is sent in
+        first; only then do switch-in abilities fire. Doing both in one pass
+        (which is what this used to do) gets Intimidate wrong in the common
+        double-KO case, because the first side's replacement resolves against a
+        field where the other side's fainted Pokemon is still standing in its
+        slot:
+
+            p1's Intimidate dropped the Attack of a FAINTED Pokemon -- an
+            effect that goes nowhere -- and then p2's replacement came in
+            afterwards and was never intimidated at all.
+
+        A fainted Pokemon cannot be intimidated; its replacement can, and is.
+        The second phase also runs in SPEED ORDER, which is how simultaneous
+        switch-in abilities resolve -- it decides which of two weather setters
+        ends up owning the weather.
+        """
+        arrivals = []
         for side in (self.p1, self.p2):
             opp = self.p2 if side is self.p1 else self.p1
             for slot, c in enumerate(side.active):
@@ -1079,11 +1107,63 @@ class Battle:
                 incoming = self._best_replacement(alive_bench, opp.active)
                 side.bench[:] = [b for b in side.bench if b is not incoming]
                 side.active[slot] = incoming
-                ally = side.active[1 - slot] if len(side.active) == 2 else None
-                on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
-                self.log.add(f"{side.name} sends in {self.tag(incoming)} (replacing fainted {self.tag(c)})")
-                self._emit(event="replacement", side=side.name, out=c.name,
-                           incoming=incoming.name, weather_after=self.field.weather)
+                arrivals.append((side, slot, incoming, c))
+                self.log.add(f"{side.name} sends in {self.tag(incoming)} "
+                             f"(replacing fainted {self.tag(c)})")
+
+        arrivals.sort(key=lambda a: -effective_speed(a[2], self.field, a[0].name))
+        for side, slot, incoming, replaced in arrivals:
+            opp = self.p2 if side is self.p1 else self.p1
+            ally = side.active[1 - slot] if len(side.active) == 2 else None
+            on_switch_in(incoming, opp.active, self.field, ally=ally, log=self.log)
+            self._emit(event="replacement", side=side.name, out=replaced.name,
+                       incoming=incoming.name, weather_after=self.field.weather)
+
+    # Sandstorm chips everything that is not Ground, Rock or Steel for 1/16 of
+    # its max HP at the end of every turn. Nothing implemented it: weather only
+    # ever counted down, so a sand team's central pressure -- the reason to run
+    # it at all -- was worth exactly zero, and any line that stalled under sand
+    # was scored as free.
+    #
+    # The type list is the rule as stated. The abilities and the item are the
+    # standard exemptions on top of it: without them Excadrill and friends take
+    # damage from their own team's weather, which is the opposite of why they
+    # are on it. Sand Veil / Sand Rush / Sand Force are the sand-synergy
+    # abilities, Overcoat and Safety Goggles are the general weather-immunity
+    # pair, and Magic Guard blocks all indirect damage.
+    SAND_IMMUNE_TYPES = {"Ground", "Rock", "Steel"}
+    SAND_IMMUNE_ABILITIES = {"Sand Veil", "Sand Rush", "Sand Force", "Overcoat",
+                             "Magic Guard"}
+    SAND_IMMUNE_ITEMS = {"Safety Goggles"}
+
+    def _sand_immune(self, c) -> bool:
+        return (bool(self.SAND_IMMUNE_TYPES.intersection(c.types))
+                or c.ability in self.SAND_IMMUNE_ABILITIES
+                or c.item in self.SAND_IMMUNE_ITEMS)
+
+    def _sandstorm_damage(self):
+        """1/16 max HP to every ACTIVE Pokemon the sand can touch.
+
+        Active only: a Pokemon on the bench is not in the weather. (Burn and
+        poison above do run over the whole roster, which is a separate and
+        older discrepancy -- left alone here rather than folded into a weather
+        change.)
+
+        Runs before the burn/poison block, matching the real residual order --
+        weather resolves first -- and before `_check_berry` in that same loop,
+        so a Sitrus triggered by sand damage fires on the turn it happens.
+        """
+        if self.field.weather != "sand":
+            return
+        for side in (self.p1, self.p2):
+            for c in side.active:
+                if c is None or c.fainted or self._sand_immune(c):
+                    continue
+                c.apply_damage(c.max_hp() / 16)
+                self.log.add(f"{self.tag(c)} is buffeted by the sandstorm!"
+                             + (" [FAINTED]" if c.fainted else ""))
+                self._emit(event="weather_damage", side=side.name, actor=c.name,
+                           detail="sandstorm", fainted=c.fainted)
 
     def _end_of_turn(self):
         # Carry this turn's successful Protect into next turn's "no double Protect" check.
@@ -1105,6 +1185,8 @@ class Battle:
                     self.log.add(f"{self.tag(c)}'s {self._fmt_boosts(changed)} (Speed Boost)")
                     self._emit(event="stat_change", side=self.side_of(c).name, actor=c.name,
                                detail=self._fmt_boosts(changed), source="Speed Boost")
+        self._sandstorm_damage()
+
         for c in self.p1.roster + self.p2.roster:
             if c.fainted:
                 continue

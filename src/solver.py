@@ -356,7 +356,134 @@ def _ko_threat_value(c: Combatant) -> float:
     just not always worth forcing.
     """
     off = max(c.stats.get("atk", 0), c.stats.get("spa", 0))
-    return max(0.35, min(1.35, off / 130.0))  # ~130 is a typical Lv50 attacking stat
+    value = max(0.35, min(1.35, off / 130.0))  # ~130 is a typical Lv50 attacking stat
+    # A Mega pick that has not transformed yet is worth more than the base-form
+    # stats above say. Losing it costs the Pokemon AND the Mega slot it never
+    # got to spend -- and reported from real games, that is exactly what
+    # happened: a Pokemon that could no longer do anything was preserved by
+    # switching in "a Mega which had not mega'd", which was less bulky than its
+    # Mega form, ate the hits meant for the spent mon, and fainted.
+    #
+    # Pricing it at what it is about to become makes feeding it hits look as
+    # expensive as it is, in both directions: it discourages bringing it in as
+    # a wall, and it makes KOing THEIR unevolved Mega attractive.
+    if UNSPENT_MEGA_PREMIUM and c.is_mega_pick and not c.mega_evolved:
+        value = min(1.35, value * UNSPENT_MEGA_PREMIUM)
+    return value
+
+
+# How much more an un-transformed Mega pick is worth than its base form.
+#
+# PARKED AT 1.0 (no premium), because measuring it showed it does not do the job
+# it was written for:
+#
+#   * It is INERT for the Megas people actually bring. The value above divides a
+#     level-50 attacking stat by 130 and clamps at 1.35, so anything with an
+#     attacking stat of 175+ is already at the ceiling -- which a level-50 Mega
+#     Metagross or Charizard Y is, before transforming. Measured: the cost of
+#     losing an un-transformed Mega Metagross is 319.0 points either way.
+#   * It does not change the reported decision. On the exact position from the
+#     report -- spent mon slow and at 5% HP, an un-transformed Mega alongside it
+#     -- the cost of feeding the Mega half its HP is 49.7 with the premium and
+#     49.7 without, because the premium lives in the KO term and being chipped
+#     is not a KO. At depth 1 the solver never sees the faint it leads to.
+#   * On the 9-pairing audit it made things slightly worse rather than better
+#     (mean adjusted wins 0.444 -> 0.423, record 74% -> 72%).
+#
+# The observation behind it is still right -- losing an un-transformed Mega
+# costs the Pokemon AND the Mega slot -- but pricing it needs the Mega's actual
+# post-transform stats rather than a multiplier on a clamped base value, and
+# probably needs depth 2 to connect "it takes this hit" to "it faints". Left
+# implemented, off, and tested so the next attempt starts from something.
+UNSPENT_MEGA_PREMIUM = 1.0
+
+
+# ---------------------------------------------------------------------------
+# Preserving a Pokemon that can no longer do anything
+# ---------------------------------------------------------------------------
+# Reported from real games: "several losses induced by not sacrificing a Pokemon
+# that could no longer do much -- it was slower than threats and on low health,
+# but it switched out, causing another mon to take the hits and needlessly
+# faint."
+#
+# The cause is in the KO term above, not in the search. `_ko_threat_value` pays
+# a Pokemon its FULL threat value for merely not being fainted, so a mon at 5%
+# HP that is outsped and dies to the next hit is priced at 63-243 points --
+# exactly the same as at full health. Losing it therefore looks like a
+# catastrophe worth paying a healthy Pokemon's HP to avoid, and the switch that
+# "saves" it wins the comparison. It is the HP term (0-100 points, linear) that
+# carries the damage, and it is much the smaller of the two.
+#
+# What the player's rule actually says: a low-HP Pokemon is worth preserving
+# only if it can DO something in a future gamestate. So discount the threat
+# credit by how much action it has left:
+#
+#   healthy, or benched      full value -- nothing is threatening it right now
+#   fragile but faster       it still gets one more turn, and can act first
+#   fragile and outsped      it likely never acts again; it is already spent
+#
+# Deliberately cheap and state-based: HP fraction and the speed comparison the
+# speed-control term already makes. Asking "does their best move actually KO it"
+# would be the exact question, and it costs a damage calculation per foe per
+# leaf -- the measured 25x that keeps COVERAGE_WEIGHT switched off.
+#
+# Priority moves are the reason FRAGILE_HP is not tuned tighter: being faster is
+# not safety when Extreme Speed or Sucker Punch is on the field, so "fragile but
+# faster" keeps a real discount rather than full value.
+#
+# OFF BY DEFAULT, on the same evidence as SPEED_CONTROL_WEIGHT above, measured
+# the same three ways.
+#
+# It does move the reported decision, and by a lot. On that position -- our mon
+# at 5% HP and outsped, against feeding a healthy one half its HP, which costs
+# 50.0 points:
+#
+#     nothing on (shipped)    sacrificing costs 191.9   -> solver rescues
+#     this discount           sacrificing costs  61.0   -> solver rescues
+#     + SPEED_CONTROL_WEIGHT  sacrificing costs  37.0   -> solver SACRIFICES
+#
+# So the discount is most of the correction (192 -> 61: from "worth more than a
+# whole Pokemon" to "worth a third of one") but on its own it does not flip this
+# particular choice; the flip needs the speed term too, because a slow spent mon
+# is a positional liability as well as a dead weight.
+#
+# Head to head it is neutral (53% over 96 games, CI [43, 63]) and per-decision
+# exploitability improves further (nash-mixed 31.5 -> 21.9, regret 9.8 -> 0.4).
+# The whole-team audit -- the number teams are ranked on -- comes out slightly
+# worse, and that is the gate. See the block above for the table and for what
+# turning either term on requires.
+#
+# ON, AND WHY THE DEFAULT MOVED. This shipped at 0 first time round, on the
+# reasoning below: the whole-team audit could not show a gain, so the term had
+# not earned a change that moves every number in the tool.
+#
+# It was then reported a second time, from real games, with the mechanism spelt
+# out -- the spent Pokemon switched out, and the Pokemon that came in to cover
+# it was a Mega that had not transformed, so it took the hits in its frailer
+# base form and fainted for nothing. Two independent reports of the same losing
+# pattern outweigh a nine-pairing sweep that could not separate the
+# configurations, so the terms are on. The sweep's cost is stated in the block
+# above rather than buried: adjusted wins up, record down, high variance.
+#
+# Set FRAGILE_HP to 0 and the discount is skipped entirely, which is the
+# previous evaluation exactly.
+FRAGILE_HP = 0.25          # at or below this, one hit ends it (0 disables)
+FRAGILE_FASTER_KEEP = 0.6  # threat credit kept when it still acts first
+FRAGILE_SLOWER_KEEP = 0.3  # ...and when it does not
+
+
+def _spent_discount(battle: Battle, c: Combatant, side, foe_side) -> float:
+    """How much of `c`'s threat credit survives its current position."""
+    if FRAGILE_HP <= 0 or c not in side.active:
+        return 1.0                      # benched: nothing is threatening it
+    if c.current_hp_frac > FRAGILE_HP:
+        return 1.0
+    live_foes = [f for f in foe_side.active if f is not None and not f.fainted]
+    if not live_foes:
+        return 1.0
+    faster = all(_moves_first(c, f, battle.field, side.name, foe_side.name)
+                 for f in live_foes)
+    return FRAGILE_FASTER_KEEP if faster else FRAGILE_SLOWER_KEEP
 
 
 def heuristic_eval(battle: Battle, my_side_name: str) -> float:
@@ -425,8 +552,14 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     # one. Within a hypothesis the species are known, and _ko_threat_value is a
     # coarse clamp on attacking stats that discloses nothing about the things
     # that actually stay hidden: moves, items and EV spreads.
-    my_value = sum(_ko_threat_value(c) for c in my.roster if not c.fainted)
-    opp_value = sum(_ko_threat_value(c) for c in opp.roster if not c.fainted)
+    # Scaled by how much action each Pokemon has left (_spent_discount): a mon
+    # that is one hit from gone and moves second is not worth a healthy
+    # Pokemon's HP to rescue. Applied identically to both rosters, so the term
+    # stays antisymmetric.
+    my_value = sum(_ko_threat_value(c) * _spent_discount(battle, c, my, opp)
+                   for c in my.roster if not c.fainted)
+    opp_value = sum(_ko_threat_value(c) * _spent_discount(battle, c, opp, my)
+                    for c in opp.roster if not c.fainted)
     score = (my_value - opp_value) * KO_WEIGHT
     score += (my_hp - opp_hp) * 100
 
@@ -437,6 +570,13 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     score += _positional_score(my, opp, battle.typechart)
     score -= _positional_score(opp, my, battle.typechart)
 
+    # Who moves first, given the field as it stands (WORKFLOW.md §4.2). Like
+    # the positional terms above, computed for both rosters and subtracted, so
+    # it cannot break antisymmetry.
+    if SPEED_CONTROL_WEIGHT:
+        score += _speed_control_score(battle, my, opp)
+        score -= _speed_control_score(battle, opp, my)
+
     # Answer preservation (design doc 4b). Off unless the caller has attached
     # movesets to the battle, because the threat matrix needs to know what each
     # Pokemon can actually do and Combatant does not carry its moves. Callers
@@ -444,6 +584,133 @@ def heuristic_eval(battle: Battle, my_side_name: str) -> float:
     if COVERAGE_WEIGHT:
         score += COVERAGE_WEIGHT * _coverage_term(battle, my_side_name)
     return score
+
+
+# ---------------------------------------------------------------------------
+# Speed control (WORKFLOW.md §4.2: the depth-1 horizon)
+# ---------------------------------------------------------------------------
+# The solver sees one turn ahead, so a turn that changes no HP looks free -- and
+# setting Tailwind changes no HP. At depth 1 the state after Tailwind evaluates
+# identically to the state after doing nothing, so the search reads a genuine
+# four-turn speed advantage as a wasted turn. Same blind spot as the Protect
+# spam: not a bug in the search, a term missing from the evaluation.
+#
+# What is valued is the BOARD, not the move: how many of the opposing actives
+# each of ours moves before, under the field as it currently stands. That
+# framing does three things a "credit for using Tailwind" bonus would not:
+#
+#   * it is state-based, so re-setting Tailwind while it is already up gains
+#     nothing -- the spam this would otherwise cause is impossible by
+#     construction (compare ALLOW_DOUBLE_PROTECT, which needed a filter);
+#   * it handles Trick Room, which the engine does NOT attribute to a side. The
+#     effect is scored, not its ownership, so a Trick Room that helps the slower
+#     side is credited to that side whoever set it;
+#   * it picks up everything else that moves the speed order for free --
+#     paralysis, Choice Scarf, Swift Swim in rain, a Speed drop.
+#
+# effective_speed already knows about Tailwind, weather abilities, Scarf and
+# paralysis, so this is the same comparison turn_order makes.
+#
+# WEIGHT, and the evidence for it. 2v2 gives four ordered pairs, so a weight of
+# w moves the differential by at most 4w -- at 12 that is 48 points, comfortably
+# below _ko_threat_value's 63-243, so speed control can never outbid a KO.
+#
+# MEASURED TWO WAYS, because they disagree and only one of them is the right
+# gate. Win rate is the wrong gate here and this project has said so since the
+# redesign: it rewards beating a bot we wrote ourselves. Reported anyway, since
+# a term that helped punishability while losing games would need explaining:
+#
+#   head to head vs weight 0 (tools/measure_headtohead.py --setting
+#   SPEED_CONTROL_WEIGHT)
+#     w=6   53% over 96 games   95% CI [43, 63]
+#     w=12  46% over 64 games   95% CI [34, 58]
+#     w=25  50% over 96 games   95% CI [40, 60]
+#     -- indistinguishable from baseline at every weight tried: no harm.
+#
+#   exploitability (tools/measure_robustness.py --brings 6, 192 decision
+#   points, --set SPEED_CONTROL_WEIGHT=12 against 0)
+#     nash-mixed    44.8 -> 31.5   regret 28.0 -> 9.8   severe 21% -> 14%
+#     nash-d1       78.9 -> 67.5   regret 62.1 -> 45.8  severe 35% -> 30%
+#     nash-maximin  51.1 -> 50.2   regret 34.2 -> 28.6  severe 22% -> 22%
+#     -- a 30% improvement on the configuration the audit pilots with, and no
+#        row got worse. On this evidence the term looked like a clear win.
+#
+# IT IS OFF ANYWAY, and the third measurement is why. Per-decision
+# exploitability is not the number teams are ranked on: `adjusted_win_rate` is
+# (see team_rating), and a line that concedes nothing because it never
+# threatens anything scores well on the first and zero on the second -- the
+# trap WORKFLOW.md §1 warns about. So the terms were also run through the real
+# audit, 9 pairings per configuration (3 of our teams x Rain / Sand / King,
+# standard tier), which is what a team is actually ranked by:
+#
+#     configuration     mean adjusted wins    record        audited lines won
+#     both off             0.435             660/810 (81%)        9/18
+#     both on              0.487             605/810 (75%)       11/18
+#     speed only           0.285             645/810 (80%)        6/18
+#     fragile only         0.332             626/810 (77%)        7/18
+#
+# Read that carefully, because it does not say what either side wants. Both
+# terms together score BEST on adjusted wins and win two more audited lines --
+# and cost six points of record, which WORKFLOW.md §1 says to read first. Each
+# term ALONE scores worse than having neither, which is the tell: if these were
+# real effects of the size they look, they would not be non-monotone. The
+# per-pairing adjusted wins are bimodal (mostly 0.0 or 0.8+, since a pairing
+# audits two lines), so the mean of nine of them is noisy, and 11 of 18 lines
+# against 9 of 18 is not a difference this sample can resolve.
+#
+# The honest summary of that sweep: no measurable gain on the ranking metric, a
+# consistent loss on the record -- and an earlier partial run of the SAME sweep
+# pointed the other way at 6 pairings, which is its own warning about reading a
+# measurement before it finishes.
+#
+# What it does fix, demonstrably, is the blind spot it was written for. With it
+# on, the golden baseline changes on 11 of 33 pinned turns, and 5 of those are
+# `Farigiraf: Protect` becoming `Farigiraf: Trick Room` -- the wasted turn
+# becoming a real play. Three more are a chip attack becoming Trick Room.
+#
+# IT IS ON, and that is a judgement call worth stating plainly. It shipped at 0
+# first, on the grounds that the audit could not show a gain. The behaviour it
+# fixes was then reported a SECOND time from real games, with the mechanism
+# spelt out (see FRAGILE_HP above). A sweep that cannot resolve a difference is
+# not evidence that the reported losses are not happening, and between "the
+# measurement is neutral" and "this keeps costing me games", the games win.
+#
+# What that costs, so it is not a surprise later: the record -- `Wins / Of` --
+# came out about six points lower across the sweep, while adjusted wins came out
+# higher. Watch the record on your own runs. Setting this back to 0.0 (with
+# FRAGILE_HP) restores the previous evaluation exactly; changing either means
+# bumping roster_rating.RATING_SCHEMA and search_teams.SCHEMA, since every
+# cached rating was produced by the evaluation in force when it ran.
+SPEED_CONTROL_WEIGHT = 12.0
+
+
+def _moves_first(mine, theirs, field, my_side, their_side) -> bool:
+    """Does `mine` act before `theirs` on speed alone, under this field?
+
+    Priority brackets are deliberately excluded: they belong to a MOVE, and this
+    term scores a position, not a choice. Ties count for neither side, which is
+    what keeps the two directions exactly antisymmetric.
+    """
+    from engine import effective_speed
+    mine_spe = effective_speed(mine, field, my_side)
+    theirs_spe = effective_speed(theirs, field, their_side)
+    if field.trick_room:
+        return mine_spe < theirs_spe
+    return mine_spe > theirs_spe
+
+
+def _speed_control_score(battle, side, foe_side) -> float:
+    """SPEED_CONTROL_WEIGHT per opposing active that `side` moves before."""
+    ahead = 0
+    for c in side.active:
+        if c is None or c.fainted:
+            continue
+        for f in foe_side.active:
+            if f is None or f.fainted:
+                continue
+            if _moves_first(c, f, battle.field, side.name, foe_side.name):
+                ahead += 1
+    return SPEED_CONTROL_WEIGHT * ahead
 
 
 # Scale for the answer-preservation term (design doc 4b).
@@ -734,9 +1001,21 @@ def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, move
         # replacements after a faint. Pivoting is a core doubles resource: it resets a
         # Choice lock, escapes accumulated stat drops, and lets a resist absorb a hit
         # that would otherwise lose the board.
+        # ...unless it is TRAPPED. Shadow Tag (and the rest of Battle.is_trapped)
+        # was enforced only when the turn was executed, so the search offered
+        # switches that would be refused at run_turn -- and worse, offered them
+        # to the OPPONENT, so every payoff matrix against a Shadow Tag user
+        # contained columns they cannot legally play.
+        #
+        # That is not a small error: trapping is the whole point of Mega Gengar,
+        # and pricing their escape as available both overstates their options
+        # and hides the value of taking it away. It also cost us turns directly
+        # -- the solver could choose a switch that simply failed.
+        trapped = battle.is_trapped(c)
         cands = candidate_actions(c, side.name, side.active, opp_side.active,
                                    movesets[c.name], battle.typechart, battle.field, turn_num,
-                                   bench=[b for b in side.bench if not b.fainted])
+                                   bench=None if trapped else
+                                   [b for b in side.bench if not b.fainted])
         per_mon_options.append(cands)
     if not per_mon_options:
         return [[]]

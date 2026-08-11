@@ -197,6 +197,27 @@ def core_bonus(team, merged):
     return total, matched
 
 
+# Weight enemy leads by how plausible they are FOR THEM, instead of treating all
+# C(6,2) as equally likely. A good player does not lead with their worst pair, so
+# averaging over all fifteen lets openings nobody would choose drag the score
+# around -- the same argument section 6a makes for the audit, applied to the
+# screen. `preview.plausibility_weights` already does the weighting.
+#
+# OFF: measured, and it changed nothing. Same harness as the shaped objective
+# (tools/measure_objective.py, pool 34, top 4 each, played against the whole
+# preset library with the real engine):
+#
+#     old (uniform)                  1927/2208  87.3%   best team 92%
+#     plausibility-weighted          1928/2208  87.3%   best team 92%
+#     plausibility + shaped          1928/2208  87.3%   best team 92%
+#
+# One game in two thousand, and it picks almost the same teams. So the more
+# principled formulation is not wrong -- it is simply not what is limiting the
+# search, which is the same conclusion the shaped objective reached from the
+# other direction: both point at the screener margin underneath.
+PLAUSIBILITY_WEIGHTED = False
+
+
 def team_coverage(team, matrix, enemy_pairs):
     """Mean over enemy pairs of the best margin any of our pairs achieves.
     Models team preview: we choose our lead after seeing their team."""
@@ -208,7 +229,124 @@ def team_coverage(team, matrix, enemy_pairs):
         key = (team_name, ep)
         best = max((matrix[p][key] if p in matrix else matrix[p[::-1]][key]) for p in our_pairs)
         per_enemy[key] = best
-    return sum(per_enemy.values()) / len(per_enemy), per_enemy
+    if not PLAUSIBILITY_WEIGHTED:
+        return sum(per_enemy.values()) / len(per_enemy), per_enemy
+    # Weighted WITHIN each opponent: plausibility is a choice they make between
+    # their own leads, so normalising across the whole library would let a team
+    # with more plausible leads count for more than another team.
+    from preview import plausibility_weights
+    by_team = {}
+    for (team_name, ep), margin in per_enemy.items():
+        by_team.setdefault(team_name, []).append(margin)
+    total = 0.0
+    for margins in by_team.values():
+        weights = plausibility_weights(margins)
+        total += sum(w * m for w, m in zip(weights, margins))
+    return total / len(by_team), per_enemy
+
+
+# --------------------------------------------------------------- the objective
+#
+# WHAT WAS WRONG WITH THE OLD ONE. It ranked on `pairs_won` (threats where SOME
+# pair of ours scores a margin above zero) and then on the MEAN of those best
+# margins. Three separate ways that picks teams that lose:
+#
+#   1. MEAN hides the threats that matter. A team that crushes twelve of their
+#      leads and is crushed by three scores better than one that handles all
+#      fifteen solidly. The three are the ones you actually meet, because at
+#      preview THEY choose the lead -- so the mean rewards exactly the
+#      lopsidedness that loses games.
+#   2. A MARGIN OF +1 COUNTED AS AN ANSWER. `pairs_won` is a strict `> 0`
+#      threshold on a greedy 2v2 playout, so a coin-flip counts the same as a
+#      clean win, and a team could be credited with fifteen "answers" it would
+#      lose half of.
+#   3. NO CREDIT FOR A SECOND ANSWER. Coverage is a max over our pairs, so a
+#      team whose only answer to a threat is one specific pair scores exactly
+#      like a team with three answers -- until that pair is unavailable, which
+#      is most of the game.
+#
+# The replacement keeps the same cheap inputs (the screener margin matrix, no
+# extra simulation) and asks better questions of them:
+#
+#   answered    threats where some pair beats them by more than SAFE_MARGIN
+#   downside    the mean of the WORST THIRD of our best-answer margins, so the
+#               threats we handle badly are what the score is made of
+#   depth       the share of threats with a SECOND independent answering pair
+#
+# Ranked lexicographically the same way as before -- answers first, then how
+# convincing they are -- with synergy still a tiebreak that can never buy back
+# a matchup.
+# MEASURED, AND IT DID NOT WORK -- so all three ship neutral, and the terms are
+# left here with the numbers rather than deleted.
+#
+# The test is the only one that counts: take the top 4 teams each objective
+# proposes from the same pool and the same screener matrix, and play them
+# against the whole preset library with the real engine
+# (tools/measure_objective.py). Pool 34, quick tier, 8 opponents x 90 configs
+# each:
+#
+#     objective   record across its 4 teams   best single team
+#     old         1927/2208  (87.3%)                92%
+#     new         1885/2208  (85.4%)                89%
+#
+# So the reasoning above is sound about what the old objective IGNORES, and
+# fixing it still picked slightly worse teams. Worth being clear about why that
+# is possible: the screener margin is a greedy 2v2 playout and the record is a
+# greedy 4v4 count, so "average margin" tracks "average wins" quite well, while
+# the tail and the redundancy this scores are real properties that the record
+# does not reward. Optimising a better-shaped objective against the same crude
+# margin did not survive contact.
+#
+# What would actually move this, in the order worth trying: a screener margin
+# that is not a greedy 2v2 (the objective can only be as good as its input);
+# scoring against the leads they would PLAUSIBLY bring rather than all C(6,2)
+# uniformly (preview.plausibility_weights already exists); and validating any
+# candidate objective the way above, since intuition lost here.
+#
+# Set these to the commented values to switch the new objective back on.
+SAFE_MARGIN = 0.0      # 20.0: below this a screener "win" is a coin flip
+W_DOWNSIDE = 0.0       # 6.0: weight on the worst third of our best answers
+W_DEPTH = 0.0          # 120.0: weight on having a SECOND independent answer
+
+
+def _worst_third(values):
+    """Mean of the worst third. The whole objective in one line: a team is as
+    good as the threats it handles WORST, not as good as its average."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    cut = max(1, len(ordered) // 3)
+    return sum(ordered[:cut]) / cut
+
+
+def answer_depth(team, matrix, enemy_pairs):
+    """(answers with margin > SAFE_MARGIN, share of threats with two or more).
+
+    Two answers matter because one of them will not be available: your best
+    pair against their Rain lead is no use once half of it has fainted, or once
+    you have committed it elsewhere in the bring. A team with a single answer to
+    a threat is one KO away from having none.
+    """
+    our_pairs = [p for p in itertools.combinations(team, 2)
+                 if p in matrix or p[::-1] in matrix]
+    if not our_pairs:
+        return 0, 0.0
+
+    def val(p, key):
+        return matrix[p][key] if p in matrix else matrix[p[::-1]][key]
+
+    answered = deep = 0
+    for team_name, ep in enemy_pairs:
+        key = (team_name, ep)
+        good = [p for p in our_pairs if val(p, key) > SAFE_MARGIN]
+        if good:
+            answered += 1
+        # "Independent" means not sharing a Pokemon: two answers that both need
+        # the same Mega are one answer.
+        if len(good) >= 2 and any(not set(a) & set(b)
+                                  for a in good for b in good if a != b):
+            deep += 1
+    return answered, (deep / len(enemy_pairs) if enemy_pairs else 0.0)
 
 
 def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
@@ -231,15 +369,26 @@ def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
     avg_score = sum(merged[n]["score"] for n in team) / len(team)
 
     pairs_won = sum(1 for v in per_enemy.values() if v > 0)
+    answered, depth = answer_depth(team, matrix, enemy_pairs)
+    downside = _worst_third(list(per_enemy.values()))
 
     # Bounded well below MATCHUP_WEIGHT so it can never outrank a single extra
     # matchup won, but well above the synergy block so it dominates that tier.
     synergy = (W_CORE * cb) - (W_WEAKNESS * viol) + (W_SCORE * avg_score)
     synergy = max(-MATCHUP_WEIGHT * 0.2, min(MATCHUP_WEIGHT * 0.2, synergy))
 
-    total = pairs_won * MATCHUP_WEIGHT + MARGIN_WEIGHT * cov + synergy
+    # With the parked weights at 0 and SAFE_MARGIN at 0, `answered` IS
+    # pairs_won and this is exactly the original score -- asserted by
+    # tests/test_objective.py, so the parked terms cannot drift into changing
+    # the default behaviour.
+    total = (answered * MATCHUP_WEIGHT
+             + MARGIN_WEIGHT * cov
+             + W_DOWNSIDE * downside
+             + W_DEPTH * depth
+             + synergy)
     return {
         "total": total, "pairs_won": pairs_won, "pairs_total": len(per_enemy),
+        "answered": answered, "downside": downside, "answer_depth": depth,
         "coverage": cov, "synergy": synergy,
         "core_bonus": cb, "matched_cores": matched_cores,
         "weakness_violations": viol, "weakness_detail": viol_detail, "avg_score": avg_score,

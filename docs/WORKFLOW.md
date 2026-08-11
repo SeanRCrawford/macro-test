@@ -56,32 +56,109 @@ Options worth knowing:
 | `--keep N` | 6 | how many reach the deep search |
 | `--optimise-sets` | off | optimise item + 4 moves against the real metagame. **Use it** |
 | `--min-winrate F` | 0.80 | skip auditing a team that cannot win |
+| `--punish-screen` | off | throw out a team whose OPENING is already lost, before the audit. Seconds per team |
+| `--worst-matchup F` | off | reject a team whose WORST single matchup wins less than F, e.g. `0.89` for 80/90. Abandons on the first failing opponent |
 | `--generations SPEC` | all | e.g. `1-5` |
 | `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
 | `--vs "Big 6"` | all | deep-search only these opponents — the biggest single lever |
 | `--brings N` | tier default | audit only the N best of our brings per pairing |
-| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate |
+| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate. On its own it does NOT regenerate |
 | `--list` | off | stage 1 only — rate and rank, then stop |
+| `--stage2-only` | off | skip generation, deep-search the shortlist on disk |
+| `--regenerate` | off | force stage 1 even when `--pick` would have skipped it |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
+| `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
+
+### Pinning a set in `preferences.csv`
+
+`Include` / `Exclude` / `Prefer` take a bracket that pins what that Pokémon
+actually runs:
+
+```
+Include
+Mamoswine (Life Orb)
+Mega Gengar (Substitute, Protect, Shadow Ball, Sludge Bomb)
+```
+
+Each part inside the brackets is an **item** if the dataset has ever seen it as
+one, and a **move** otherwise, so both kinds go in the same list and neither
+needs a marker. A pinned set **overrides the optimiser** — it is a statement
+about what you are bringing, so it is applied after `--optimise-sets` has run,
+not before. A Mega keeps its stone regardless; a Mega without one is not a Mega.
+
+`Include` now means what it says: every generated team **contains** that
+Pokémon (it used to only make it eligible).
+
+### Swapping a team's worst member — `--substitute`
+
+```bat
+overnight.bat --substitute 3                :: hill-climb the top 3, then deep-search them
+tools\substitute.py --rosters shortlist.json --team 6 --rounds 3
+```
+
+Generation used to stop the moment a team was rated. This takes a rated team,
+works out which member is not earning its slot, tries better ones, and keeps a
+swap **only if the rating improves**:
+
+* **what to drop** — first, whether the member appears in the bring the audit
+  actually committed to against any opponent (a member on the bench in every
+  matchup is doing nothing); then how much the team's screened coverage
+  degrades without it. A member no pair can answer a threat without is a
+  keystone and is dropped last.
+* **what to bring in** — candidates are scored against the opponents the team
+  is *failing*, weighted by `1 - adjusted win rate`, not against the whole
+  field evenly.
+* **whether to keep it** — the candidate is rated by the same audit, at the
+  same effort, through the same cache as stage 1. The screener only proposes.
+
+**The record comes first.** A swap that beats fewer of their 90 is rejected
+however good its adjusted win rate looks — the first real run of this loop
+raised adjusted wins 0.426 → 0.467 while the record fell 75/90 → 56/90, which
+is not an improvement. `--max-record-loss` relaxes that if you mean to trade
+record for line quality.
+
+It is a local search: one member at a time, improvements only, so it finds the
+best team *near* the one it started from. When a round finds nothing it says
+so and stops rather than churning. The usual reason nothing changes is printed
+too — if the audit never brings the new member, the swap changed no audited
+line at all.
 
 ### Picking what is worth the night
 
 Stage 2 is the expensive half, so you do not have to spend it on everything.
 
 ```bat
-overnight.bat --list                     :: generate and rate, then STOP
-overnight.bat --pick "6"                 :: deep-search #6 only
+overnight.bat --pool-size 50 --candidates 60 --optimise-sets --list
+                                         :: generate and rate, then STOP
+overnight.bat --pick "6"                 :: deep-search #6 only, no regenerating
 overnight.bat --pick "4,10,12"           :: later -- #6 is NOT redone
+overnight.bat --stage2-only --keep 6     :: deep-search the top 6, same idea
 ```
 
 `--list` runs stage 1 and prints the ranked teams, so you can look before
 committing. `--pick` takes stage 1's **rank numbers**.
 
+**A `--pick` command does not regenerate.** If nothing on the command line asks
+for generation, `--pick` deep-searches the `shortlist.json` already on disk —
+which is the only reading that makes sense, since the number you are picking
+came from that file. `--stage2-only` says the same thing explicitly (and works
+without `--pick`), and `--regenerate` forces stage 1 back on.
+
+That matters more than it sounds, because **the numbering is only stable across
+runs that generate the same teams**. Stage 1's flags decide which teams exist:
+drop them and the defaults (34 / 40) take over. Measured on the real dataset,
+`--pool-size 50 --candidates 60` and the defaults share **none** of their top
+five teams — so a `--pick "5"` that quietly re-ran stage 1 was searching a team
+you had never seen, after hours of re-rating nothing in the cache. Stage 1 now
+records its settings in `shortlist.json` and warns loudly before renumbering
+one that does not match.
+
 Two things make coming back later work:
 
 * stage 1 writes **every** rated team to `shortlist.json` in rank order, so
-  `gen06` means the same team tomorrow as today — the numbering never shifts;
+  `gen06` means the same team tomorrow as today — *provided the same stage 1
+  flags*, which is what the warning above protects;
 * stage 2 shares one cache, so a later `--pick` **adds** to it and the workbook
   is rebuilt to include everything searched so far.
 
@@ -154,8 +231,57 @@ command resumes.
 | Panel | When | What it does |
 |---|---|---|
 | **Team preview** | you see their six, not their four | runs the advanced model on the bring/lead decision and returns ONE committed plan, its record, and what beats it |
-| **Deep dive** | both sides have led | the same model one notch deeper on that single position, ~5 s, and depth 2 is available here because one line can afford it |
+| **Deep dive** | you have led, and so have they | the same model one notch deeper on that position, ~5 s, and depth 2 is available here because one line can afford it |
 | **Load an overnight run** | after a batch run | browse any committed line turn by turn, from the cache. Instant |
+
+**Picking the opponent, in all three.** Every panel takes the enemy team the
+same way: a **preset** from `teams.csv` (Big 6, Rain, …), six hand-picked
+Pokémon, or a pokepaste. A preset brings its recorded sets with it, and fills
+in its fixed lead and its scripted opening where it has them — hand-typing the
+same six by name silently answers a slightly different question, because the
+script and the sets do not come along.
+
+**Deep dive assumes you cannot see their back.** You give their six and the two
+they led with; the back is what you do *not* know at that moment, so by default
+it audits **every back pair they could still be holding** behind that lead and
+reports how the answer varies. One winning line is not a plan if the other five
+lose. Pick a specific back only if you have actually scouted it.
+
+**Every match, in every panel, has its log.** Team preview lists the games
+behind its record, deep dive lists one per back, and the bottom section lists
+one per enemy bring-4 — each with the full battle log and the turn-by-turn
+punish analysis side by side.
+
+**Lead / Back → Battle Viewer.** The two tabs are connected, in both the ways
+that matter:
+
+* **Salvage all N losses together.** Expand an opponent you lose to and the
+  losing brings are solved *jointly*: every single change (EV spread, resist
+  berry, one support or setup move) is replayed against every one of them and
+  ranked by how many it fixes. One fix per loss is one team per loss, and the
+  fix for one matchup routinely breaks another — so changes that break a
+  matchup you already win are counted and shown. "Only show changes that fix
+  ALL of them" is much faster, since a candidate is abandoned on its first
+  miss.
+* **Open in Battle Viewer.** Any individual battle can be sent to the Battle
+  Viewer, where the punish check, path explorer and per-matchup salvage then
+  act on that exact matchup instead of one rebuilt by hand from dropdowns.
+
+**Generate Team — screening before reporting.** The *"give up on a team as soon
+as ANY single matchup drops below X%"* slider drops a team from the report
+entirely, rather than annotating it after the fact, and promotes the next
+candidate in its place. It checks one opponent at a time and abandons on the
+first failure, so a team with a hole costs one matchup instead of eight, and the
+rejects are listed with the opponent that ended each of them. The aggregate win
+rate cannot express this: 90/90 seven times and 20/90 once averages 88%.
+
+**Team Builder — what you can set by hand.** Items, stat points and moves are
+all overrides that travel together and are read by *every* simulation the app
+runs, not just the tab you set them in. Items can be picked one at a time
+(the optimiser decides all six at once, which is a different job); a
+Mega-capable pick is locked to its stone, since a Mega is a species choice
+here, and the "Any item…" option opens the full catalogue for something the
+usage data has never seen.
 
 **Where the advanced model is:** the *Advanced model strength* slider —
 Quick → Standard → Thorough → Exhaustive — with a tooltip explaining each, plus
@@ -172,17 +298,23 @@ the result here rather than waiting in the browser.
 ## 3. What is current, and what is not
 
 **The engine (all new, all live):** `matrix_game` · `turn_game` · `turn_step` ·
-`robustness` (exploitability lives here) · `team_rating` · `threat` ·
-`matching` · `rolls` · `preview` · `deep_dive` · `search_effort` ·
-`export_search` · `team_sheet_export` · `blas_limits`
+`robustness` (exploitability lives here) · `team_rating` · `roster_rating`
+(rates a whole six, shared by stage 1 and the substitution loop) ·
+`substitution` · `threat` · `matching` · `rolls` · `preview` · `deep_dive` ·
+`search_effort` · `export_search` · `team_sheet_export` · `blas_limits`
 
 **Tools you run:** `overnight.bat` (whole pipeline) · `generate.bat` (stage 1
-alone) · `search.bat` (stage 2, or library teams) · `run.bat` (app)
+alone) · `search.bat` (stage 2, or library teams) · `run.bat` (app) ·
+`tools/substitute.py` (swap a rated team's worst member — also reachable as
+`overnight.bat --substitute N`)
 
 **Regression guard:** `tools/golden_baseline.py` — run after any engine change.
 
-**Evidence, never run:** the eight `tools/measure_*.py` scripts. They produced
-the numbers this design rests on and are kept so the claims are checkable.
+**Evidence, never run:** the `tools/measure_*.py` scripts. They produced the
+numbers this design rests on and are kept so the claims are checkable.
+`measure_pilot_gap.py` is the newest: it replays the same configurations under
+both pilots and reports how often the winner changes. `measure_robustness.py`
+takes `--set NAME=VALUE` so any solver tunable can be swept through it.
 
 **Legacy but still used:** `team_search.py` (the beam search — see §4),
 `fast_eval.py` (the cheap screen), `optimize_sets.py` (now wired in),
@@ -195,31 +327,146 @@ a documented negative result.
 
 ## 4. Known gaps — read before trusting a number
 
-1. **Generation does not optimise for punishability.** `team_search.py` has
-   zero knowledge of exploitability; the beam ranks on coverage and synergy.
-   `generate_overnight` widens the funnel (rate 40 finalists, not 3) but does
-   not steer the search. The teams you get are *high-coverage teams that were
-   then measured*, not *teams found by looking for low punish*.
-2. **Depth-1 horizon.** The solver sees one turn ahead, so a turn that gains
-   nothing looks free. This caused the Protect spam you saw; the pointless
-   double-Protect case is now filtered, but the underlying blind spot is real —
-   setting Tailwind still scores as a wasted turn. Depth 2 fixes it and costs
-   ~48×, which only the app's Deep dive can afford.
+1. **The beam still ranks on coverage, and a better objective did not beat it
+   (yet).**
+   `team_search.py` has zero knowledge of exploitability; the beam ranks on
+   coverage and synergy, and `generate_overnight` only widens the funnel (rate
+   40 finalists, not 3). What is new is `--substitute` (§2): it takes the rated
+   teams and hill-climbs them on the **rating itself**, accepting a swap only
+   when the audit improves. So the shortlist is no longer purely
+   *high-coverage teams that were then measured* — its top entries have been
+   refined against the real objective. The generator's own objective is still
+   coverage, and a local search around a coverage-picked team cannot reach a
+   great team that the beam never proposed.
+
+   The objective itself was rewritten once and **measured**, because that is the
+   only way to tell: score the WORST third of threats instead of the mean,
+   require a real margin before calling a threat answered, and credit a second
+   independent answering pair. Then play the top 4 teams each objective proposes
+   against the whole preset library with the real engine
+   (`tools/measure_objective.py`):
+
+   | objective | record across its 4 teams | best single team |
+   |---|---|---|
+   | old (mean coverage) | 1927/2208 (87.3%) | 92% |
+   | new (worst third + answer depth) | 1885/2208 (85.4%) | 89% |
+
+   So it lost, and the terms ship at zero rather than being deleted. The likely
+   reason is worth knowing before trying again: **the objective can only be as
+   good as its input**, and the input is a greedy 2v2 playout margin. "Average
+   margin" tracks "average wins" well; the tail and the redundancy the new terms
+   score are real properties the screener margin barely sees. In order of
+   promise: a better screener margin, then scoring against the leads they would
+   *plausibly* bring rather than all C(6,2) uniformly, and measure every
+   candidate the same way — intuition lost here.
+
+   The second of those was then tried, and it is a **dead heat**:
+   plausibility-weighting the enemy leads scores 1928/2208 against the uniform
+   1927/2208, picking almost the same teams. Both attempts now point the same
+   way: what limits the search is the **screener margin underneath it** — a
+   greedy 2v2 playout — not the shape of the function applied to it. That is
+   the one worth attacking next, and it is not a quick change.
+2. **Depth-1 horizon — now addressed, at a measured cost.** The solver sees one
+   turn ahead, so a turn that gains nothing looks free. This caused the Protect
+   spam, and it made setting Tailwind score as a wasted turn.
+
+   Two terms are now **on**:
+
+   * `solver.SPEED_CONTROL_WEIGHT` scores who moves first under the current
+     field. Switched on, 11 of the golden baseline's 33 pinned turns change,
+     and several are `Farigiraf: Protect` becoming `Farigiraf: Trick Room` —
+     the wasted turn becoming a real play.
+   * `solver.FRAGILE_HP` stops paying a full threat credit for a Pokémon that
+     is one hit from gone and outsped. On the reported position, the cost of
+     sacrificing it drops from 192 points to 37, against 50 for feeding a
+     healthy team-mate half its HP — so the solver now sacrifices instead of
+     switching out and losing something better.
+
+   **What it costs, measured over 9 pairings (3 teams × Rain / Sand / King,
+   standard tier):** mean adjusted wins `0.518 → 0.444`, record `80% → 74%`.
+   That is a real cost, and it is on anyway: the behaviour was reported twice
+   from real games as a direct cause of losses, and a nine-pairing sweep whose
+   per-pairing numbers swing by 30 points from a 25% change in one constant
+   cannot resolve an effect this size. Watch the record on your own runs;
+   setting both back to `0.0` restores the previous evaluation exactly (and
+   means bumping the two cache schemas — see the comments in `src/solver.py`).
+
+   A third term, `UNSPENT_MEGA_PREMIUM`, was written for the other half of that
+   report — the Pokémon that came in to cover the spent one was a Mega that had
+   not transformed, so it took the hits in its frailer base form. It is **off**:
+   measured, it is inert for the Megas people actually bring (a level-50 Mega
+   Metagross is already at the value clamp) and it does not move the reported
+   decision, because being chipped is not a KO and depth 1 cannot see the faint
+   it leads to. Pricing that properly needs the Mega's post-transform stats,
+   and probably depth 2.
 3. **Two ranking numbers can disagree.** The **Teams** sheet averages across
    all audited candidates; the **Plan** sheet reports the one committed choice.
    Trust Plan.
-4. **Wins and punish come from different pilots.** The win count uses the
-   greedy solver; the audit uses the equilibrium solver. Not yet reconciled.
-5. **No substitution loop.** Nothing takes a rated team, swaps its worst
-   member, and re-rates. Given that Plan already names what beats each team,
-   this is the highest-value thing left to build.
+
+   The committed choice now reads the **record first**, then adjusted wins,
+   then punish. It used to rank on adjusted wins alone, and that committed to
+   brings beating fewer of their configurations — measured, NAIC vs Big 6: a
+   bring going 89/90 with 61 audited lines won was chosen over one going 90/90
+   with 68, because its wins were rated less punishable. Records are compared
+   to the nearest whole percent, so inside a band the sounder line still wins.
+4. **Wins and punish still come from different pilots — now measured, and
+   selectable.** The win count is played by the greedy solver against
+   `greedy_opponent_joint_action`; the audit is played by the equilibrium
+   solver against their equilibrium reply, with their *wider* six-move set. So
+   "beats 75 of their 90, concedes 56 points a turn" is two sentences about two
+   different pairs of players.
+
+   `tools/measure_pilot_gap.py` says how much that matters: replaying the same
+   40 configurations under both pilots (Rain and Big 6, turn cap 18), the
+   greedy pilot wins 23 and the equilibrium pilot 3 — and **the winner changes
+   on 50% of them**. The flip rate, not the difference in counts, is the
+   number: two pilots winning the same total is not agreement if they win
+   different games.
+
+   Any caller can now ask for either (`pilot="equilibrium"` through
+   `verify_with_solver` / `rate_team`, `--record-pilot` on `substitute.py`),
+   and a record carries the name of the pilot that played it. The default is
+   unchanged — greedy, as every workbook to date — because the equilibrium
+   pilot costs a payoff matrix per turn. Reconciled in the sense that the
+   disagreement is measured and switchable, not in the sense that one number
+   now covers both.
+5. ~~**No substitution loop.**~~ **Built** — `overnight.bat --substitute N`,
+   or `tools/substitute.py`. See §2 for what it drops, what it brings in, and
+   why a swap that gives up record is rejected however good its adjusted win
+   rate looks.
 
 ---
 
 ## 5. Speed
 
 `--jobs N` is parallel across whole pairings, verified bit-identical to serial.
-Measured **3.1× on 4 cores**. Memory, not CPU, is the limit.
+Measured **3.1× on 4 cores**. Memory, not CPU, is the limit — roughly 1 GB per
+worker, since each holds its own copy of the dataset.
+
+### If it is slower than the core count suggests
+
+**Stage 1 used to cap itself at eight workers**, whatever you passed. It rated
+teams one at a time and split each rating across the eight opponents, so `--jobs
+16` left half the machine idle and `--jobs 32` left three quarters. Worse, the
+opponents are wildly unequal — a scripted team like King measured 3–6× a plain
+one — so the makespan was the slowest opponent even below eight: measured, 8
+opponents on 4 cores took 81 s against 126 s serial, a 1.56× return on 4×.
+
+Stage 1 now hands each worker a **whole team**, which is a unit there are dozens
+of. Measured on the same work, 4 teams × 8 opponents on 4 cores: **485 s → 248 s,
+1.95×**, and it keeps scaling — the ceiling is now the number of teams left to
+rate, which is `--candidates`. It says so at startup, and tells you when
+`--jobs` exceeds what it has to hand out.
+
+Stage 2 parallelises across pairings (teams × opponents), which was already
+wide, but it rebuilt its worker pool once per `--batch` and waited for every
+pairing in a batch before starting the next. With unequal pairings that idled
+cores at every batch boundary and re-loaded the dataset in each worker. It is
+now one pool for the whole run; `--batch` only controls how often results are
+written to disk.
+
+So: give it `--jobs <cores>`, and raise `--candidates` if you want stage 1 to
+use more of them.
 
 The equilibrium solver's inner loop is vectorised. Profiling put **69 % of an
 audited line inside `solve_matrix`** — two matrix-vector products written as
