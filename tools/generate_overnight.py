@@ -295,6 +295,24 @@ def main():
                 for n in team}
         print(f"sets     : {len(sets_by_team)} teams optimised\n")
 
+    # A set pinned in preferences.csv -- "Mamoswine (Life Orb)", "Mega Gengar
+    # (Substitute, Protect, Shadow Ball, Sludge Bomb)" -- WINS over the
+    # optimiser. It is a statement about what you are bringing, so applying it
+    # after optimisation is the only order that respects it, and it applies
+    # whether or not --optimise-sets ran at all.
+    pinned = load_preferences().get("sets") or {}
+    if pinned:
+        print(f"pinned   : {', '.join(f'{n} {v}' for n, v in pinned.items())}")
+        for _score, team in finals:
+            key = tuple(sorted(team))
+            spec = dict(sets_by_team.get(key) or {})
+            for name in team:
+                if name in pinned:
+                    spec[name] = {**(spec.get(name) or {}), **pinned[name]}
+            if spec:
+                sets_by_team[key] = spec
+        print()
+
     cache = ResultCache(None if args.fresh else args.cache)
     print(f"resuming : {len(cache)} already rated\n")
 

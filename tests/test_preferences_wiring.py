@@ -89,11 +89,12 @@ class TestTheRealFile(unittest.TestCase):
         self.assertNotIn("Garchomp", pool)
         self.assertFalse([n for n in pool if n.startswith("Mega Garchomp")])
 
-    def test_the_shipped_file_parses_into_three_lists(self):
+    def test_the_shipped_file_parses_into_the_three_lists_plus_sets(self):
         prefs = load_preferences()
-        self.assertEqual(set(prefs), {"include", "exclude", "prefer"})
-        for key in prefs:
+        self.assertEqual(set(prefs), {"include", "exclude", "prefer", "sets"})
+        for key in ("include", "exclude", "prefer"):
             self.assertIsInstance(prefs[key], list)
+        self.assertIsInstance(prefs["sets"], dict)
 
 
 class TestTheBatchFilePassesTheScreens(unittest.TestCase):

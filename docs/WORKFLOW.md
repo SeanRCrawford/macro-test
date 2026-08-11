@@ -70,6 +70,26 @@ Options worth knowing:
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
 | `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
 
+### Pinning a set in `preferences.csv`
+
+`Include` / `Exclude` / `Prefer` take a bracket that pins what that Pokémon
+actually runs:
+
+```
+Include
+Mamoswine (Life Orb)
+Mega Gengar (Substitute, Protect, Shadow Ball, Sludge Bomb)
+```
+
+Each part inside the brackets is an **item** if the dataset has ever seen it as
+one, and a **move** otherwise, so both kinds go in the same list and neither
+needs a marker. A pinned set **overrides the optimiser** — it is a statement
+about what you are bringing, so it is applied after `--optimise-sets` has run,
+not before. A Mega keeps its stone regardless; a Mega without one is not a Mega.
+
+`Include` now means what it says: every generated team **contains** that
+Pokémon (it used to only make it eligible).
+
 ### Swapping a team's worst member — `--substitute`
 
 ```bat

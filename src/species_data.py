@@ -294,13 +294,80 @@ def fixed_lead(team_name, meta):
     return (meta.get(team_name) or {}).get("lead")
 
 
+_KNOWN_ITEMS = None
+
+
+def _known_items():
+    """Every item anything in the dataset is recorded holding, lowercased.
+
+    Used to tell an item from a move inside a preferences bracket, so the file
+    does not need two different syntaxes for the two things.
+    """
+    global _KNOWN_ITEMS
+    if _KNOWN_ITEMS is None:
+        mb, _dupes = load_mbsmogon()
+        _KNOWN_ITEMS = {i.lower() for rec in mb.values()
+                        for i, _pct in (rec.get("items_usage") or []) if i}
+        _KNOWN_ITEMS |= {"safety goggles", "life orb", "leftovers",
+                         "focus sash", "choice scarf", "choice band",
+                         "choice specs", "assault vest", "sitrus berry"}
+    return _KNOWN_ITEMS
+
+
+def parse_preference_entry(entry):
+    """"Mamoswine (Life Orb)" -> ("Mamoswine", {"item": "Life Orb"}).
+
+    A bracket pins what that Pokemon actually runs, so a preference can say
+    "this Pokemon, with THIS set" rather than only naming a species. Everything
+    in the brackets is comma-separated; each part is an ITEM if the dataset has
+    ever seen it as one, and a MOVE otherwise -- so both of these work and
+    neither needs a special marker:
+
+        Mamoswine (Life Orb)
+        Mega Gengar (Substitute, Protect, Shadow Ball, Sludge Bomb)
+        Mega Gengar (Life Orb, Substitute, Protect, Shadow Ball)
+
+    Returns (name, spec) where spec is {} for a plain entry, and carries "item"
+    and/or "moves" otherwise. A pinned set OVERRIDES the optimiser -- it is a
+    statement about what you are bringing, not a suggestion.
+    """
+    text = str(entry).strip()
+    if "(" not in text or not text.endswith(")"):
+        return text, {}
+    name, _, inside = text.partition("(")
+    name = name.strip()
+    parts = [p.strip() for p in inside[:-1].split(",") if p.strip()]
+    spec, moves = {}, []
+    for part in parts:
+        if part.lower() in _known_items():
+            spec["item"] = part
+        else:
+            moves.append(part)
+    if moves:
+        spec["moves"] = moves
+    return name, spec
+
+
 def load_preferences():
+    """include / exclude / prefer, plus the sets any of them pinned.
+
+    `sets` is {name: {"item":..., "moves":[...]}} in the same shape the rest of
+    the tool uses for set overrides, so a pinned preference travels exactly like
+    an optimised set does.
+    """
     df = pd.read_csv(DATA_DIR / "preferences.csv")
-    return {
-        "include": [x for x in df["Include"].dropna().tolist()],
-        "exclude": [x for x in df["Exclude"].dropna().tolist()],
-        "prefer": [x for x in df["Prefer"].dropna().tolist()],
-    }
+    out, sets = {}, {}
+    for column, key in (("Include", "include"), ("Exclude", "exclude"),
+                        ("Prefer", "prefer")):
+        names = []
+        for raw in df[column].dropna().tolist():
+            name, spec = parse_preference_entry(raw)
+            names.append(name)
+            if spec:
+                sets[name] = {**sets.get(name, {}), **spec}
+        out[key] = names
+    out["sets"] = sets
+    return out
 
 
 def build_merged_dataset():
