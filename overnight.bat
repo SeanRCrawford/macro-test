@@ -35,6 +35,11 @@ rem                      game -- seconds per team against minutes for the
 rem                      audit -- so the night is spent on plausible teams.
 rem                      Optionally takes a floor: --punish-screen -200 is
 rem                      stricter than the default -250.
+rem   --beam-width N     how wide the beam SEARCHES. --candidates already
+rem                      raises it to match (you cannot rate more teams than
+rem                      the beam emits), so set this only to search WIDER than
+rem                      you rate -- e.g. --beam-width 2000 --candidates 1000
+rem                      explores twice the space and rates the better half.
 rem   --screen-vs NAMES  rate STAGE 1 against only these opponents, comma-
 rem                      separated. THE lever for screening a large pool: cost
 rem                      is linear in opponents, so two instead of eight is 4x
@@ -119,6 +124,7 @@ set SCRIPTSCR=
 set PUNISHSCR=
 set PILOT=
 set SCREENVS=
+set BEAMW=
 set EVALN=
 set WORSTMU=
 set PICK=
@@ -141,6 +147,7 @@ rem `--pick "5"` on its own mean "deep-search what I already have" rather than
 rem "generate a fresh 40 teams and then pick the fifth of THOSE".
 if /i "%~1"=="--pool-size"    (set POOL=%~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--candidates"   (set CANDIDATES=%~2& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--beam-width"   (set BEAMW=--beam-width %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--keep"         (set KEEP=%~2& shift & shift & goto parse)
 if /i "%~1"=="--generations"  (set GENS=--generations %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--gen-effort"   (set GENEFFORT=%~2& set GENFLAGS=1& shift & shift & goto parse)
@@ -239,7 +246,7 @@ echo ============================================================
 python generate_overnight.py --pool-size %POOL% --candidates %CANDIDATES% ^
     --keep %KEEP% %GENS% --effort %GENEFFORT% --jobs %JOBS% ^
     --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% %PUNISHSCR% %WORSTMU% ^
-    %PILOT% %EVALN% %SCREENVS% ^
+    %PILOT% %EVALN% %SCREENVS% %BEAMW% ^
     --cache overnight_gen.json --out shortlist.json
 if errorlevel 1 (
     echo.
@@ -280,7 +287,7 @@ if defined SUBST (
         echo --- team %%i ---
         python substitute.py --rosters shortlist.json --team %%i --append ^
             --rounds %SUBROUNDS% --per-round %SUBPER% --pool-size %POOL% ^
-            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% %PILOT% %EVALN% %SCREENVS% ^
+            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% %PILOT% %EVALN% %SCREENVS% %BEAMW% ^
             --cache overnight_gen.json --out substituted.json
         if errorlevel 1 (
             echo.

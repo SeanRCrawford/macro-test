@@ -63,13 +63,14 @@ Options worth knowing:
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
 | `--vs "Big 6"` | all | deep-search only these opponents — the biggest single lever |
 | `--brings N` | tier default | audit only the N best of our brings per pairing |
-| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate. On its own it does NOT regenerate |
+| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers, **ranges allowed** (`"1-40"`, `"1-10,25"`); results accumulate. On its own it does NOT regenerate |
 | `--list` | off | stage 1 only — rate and rank, then stop |
 | `--stage2-only` | off | skip generation, deep-search the shortlist on disk |
 | `--regenerate` | off | force stage 1 even when `--pick` would have skipped it |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / **`thorough+`** / `exhaustive` — how many of OUR brings get audited. `thorough+` is thorough with the equilibrium pilot: the only tier whose record is not inflated |
 | `--pilot NAME` | tier default | **who plays the games the record comes from.** `greedy` is fast and inflated (see §4.0); `equilibrium` plays both sides as a matrix game, ~13× slower per game |
 | `--evaluation NAME` | `sacrifice` | `sacrifice` scores speed control and discounts a spent Pokémon (measured cost: record 80% → 74%); `legacy` restores the previous evaluation exactly |
+| `--beam-width N` | 30 | how wide the beam SEARCHES. `--candidates` already raises it to match; set this only to search wider than you rate |
 | `--screen-vs NAMES` | all | rate STAGE 1 against only these opponents. Cost is linear in opponents, so two instead of eight is 4× more teams per night |
 | `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
 
@@ -92,13 +93,18 @@ to ~100 and then rated properly is a 4–5 hour one. A worked recipe:
 
 ```bat
 :: 1. Screen wide and cheap, against TWO opponents rather than eight
-overnight.bat --list --beam-width 1000 --candidates 1000 --pool-size 50 ^
+overnight.bat --list --candidates 1000 --pool-size 50 ^
   --screen-vs "Big 6,Rain" --punish-screen --min-winrate 0.45 ^
   --pilot equilibrium --optimise-sets --jobs 8
 
-:: 2. Re-rate the survivors against EVERYONE, honestly
-overnight.bat --list --stage2-only --pick "1-40" --pilot equilibrium
+:: 2. Deep-search the survivors against EVERYONE
+overnight.bat --stage2-only --pick "1-40" --deep-effort thorough+
 ```
+
+`--candidates` already raises the beam width to match — you cannot rate more
+teams than the beam emits — so `--beam-width` is only for searching *wider*
+than you rate (`--beam-width 2000 --candidates 1000` explores twice the space
+and rates the better half).
 
 `--screen-vs` is the biggest lever: cost is linear in opponents, so two instead
 of eight is 4× more teams per night. The ranking it produces means "best

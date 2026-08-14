@@ -112,6 +112,45 @@ def load_roster_sets(path):
     return {}
 
 
+def parse_pick(spec, order):
+    """Turn a --pick spec into team names, or raise SystemExit explaining why.
+
+    Accepts numbers and RANGES: "4,10,12", "1-40", "1-10,25". Ranges exist
+    because the funnel produces them -- screening 1000 teams and deep-searching
+    the top 40 should not mean typing 40 numbers.
+
+    A named function rather than a block inside main() so the parsing can be
+    tested without starting a search; it now has enough cases (bad range,
+    backwards range, out of bounds, duplicate across a range and a single) that
+    reading it is not the same as knowing it works.
+    """
+    def at(idx):
+        if not 1 <= idx <= len(order):
+            raise SystemExit(f"--pick {idx} is out of range: the roster "
+                             f"file has {len(order)} teams (1-{len(order)})")
+        return order[idx - 1]
+
+    wanted = []
+    for token in spec.replace(" ", "").split(","):
+        if not token:
+            continue
+        if "-" in token[1:]:
+            lo_s, _, hi_s = token.partition("-")
+            if not (lo_s.isdigit() and hi_s.isdigit()):
+                raise SystemExit(f"--pick range must be N-M, got {token!r}")
+            lo, hi = int(lo_s), int(hi_s)
+            if lo > hi:
+                raise SystemExit(f"--pick range {token!r} runs backwards")
+            wanted.extend(at(i) for i in range(lo, hi + 1))
+            continue
+        if not token.lstrip("-").isdigit():
+            raise SystemExit(f"--pick takes rank NUMBERS, got {token!r}")
+        wanted.append(at(int(token)))
+    # A range crossing a single pick would otherwise deep-search a team twice,
+    # which is minutes each.
+    return list(dict.fromkeys(wanted)) or None
+
+
 def _run_pairing(job):
     """One pairing, start to finish. Must be top-level and return only plain
     types: on Windows the pool uses spawn, so both the function and its result
@@ -224,7 +263,8 @@ def main():
                          "appear in the workbook, which is the trade.")
     ap.add_argument("--pick", default="",
                     help="which of the roster file's teams to search, by RANK "
-                         "NUMBER: --pick \"4,10,12\". The numbering is stable "
+                         "NUMBER, with ranges: --pick \"4,10,12\" or "
+                         "--pick \"1-40\" or a mix, \"1-10,25\". The numbering is stable "
                          "across runs, and results accumulate in the cache, so "
                          "you can search #6 tonight and come back for #4 and "
                          "#10 tomorrow without redoing either.")
@@ -296,19 +336,7 @@ def main():
 
     picked = None
     if args.pick:
-        order = list(extra) if extra else names
-        wanted = []
-        for token in args.pick.replace(" ", "").split(","):
-            if not token:
-                continue
-            if not token.lstrip("-").isdigit():
-                raise SystemExit(f"--pick takes rank NUMBERS, got {token!r}")
-            idx = int(token)
-            if not 1 <= idx <= len(order):
-                raise SystemExit(f"--pick {idx} is out of range: the roster "
-                                 f"file has {len(order)} teams (1-{len(order)})")
-            wanted.append(order[idx - 1])
-        picked = wanted or None
+        picked = parse_pick(args.pick, list(extra) if extra else names)
         if picked:
             print(f"picked   : {', '.join(picked)}")
 
