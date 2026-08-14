@@ -396,6 +396,40 @@ a documented negative result.
 
 ## 4. Known gaps — read before trusting a number
 
+0. **THE RECORD IS MEASURED AGAINST AN OPPONENT WHO PLAYS BADLY. Read this
+   before any other number in this file.**
+
+   `play_out_pair` plays OUR side with the real solver and THEIR side with
+   `greedy_opponent_joint_action`, a policy this codebase wrote itself. That is
+   a systematic advantage for whichever side is passed as p1, and it is large.
+
+   `tools/measure_side_bias.py` plays the same two bring-4s twice with the
+   sides swapped. If a result is real, mirroring it flips the winner.
+
+   | pilot | contradictions | direction | cost |
+   |---|---|---|---|
+   | greedy (default) | **21 / 27 decided (78%)** | **all 21 are "p1 wins both"** | 3s |
+   | equilibrium | 9 / 22 decided (41%) | 3 p1 / 6 p2 — no side advantage | 40s (13×) |
+
+   The greedy figure is not noise: every single contradiction points the same
+   way. The visible symptom is that all eight teams in `teams.csv` score
+   83–99% against each other, which cannot be true — Rain and Big 6 both count
+   their head-to-head as a win.
+
+   **What this invalidates:** every `Wins / Of` in every sheet, the generator's
+   ratings, `--min-winrate`, `--worst-matchup`, and any comparison between two
+   teams that were each rated as p1. They measure "how does this team do
+   against a bad opponent", and a line that wins there can lose a real game —
+   which is what "a great number of losses were marked as wins" is.
+
+   **What it does not invalidate:** the punish/exploitability numbers, which
+   already run a best-responding opponent, and `heuristic_eval`, which is
+   perfectly antisymmetric over 8242 states (`measure_antisymmetry.py`).
+
+   The equilibrium pilot removes the *systematic* half at 13× the cost. The
+   residual 41% is near-ties and chaos, a different and smaller problem.
+
+
 1. **The beam still ranks on coverage, and a better objective did not beat it
    (yet).**
    `team_search.py` has zero knowledge of exploitability; the beam ranks on
