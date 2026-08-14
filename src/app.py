@@ -387,6 +387,59 @@ def report_as_line(report):
     }
 
 
+def render_model_settings():
+    """The two settings that change what EVERY number in this app means.
+
+    They live in the sidebar rather than in a panel because they are not a
+    property of one question -- a record produced by one pilot and a punish
+    figure produced by the other cannot be read side by side, so the choice has
+    to be visible while you are reading any of it.
+
+    The evaluation is applied process-wide here, at the top of the script run.
+    Streamlit re-executes the whole file on every interaction, so this runs
+    before anything simulates, and a profile chosen in one tab cannot leak into
+    another tab's cached module state.
+    """
+    import solver
+    with st.sidebar:
+        st.markdown("### Model settings")
+        st.caption("These change what every number below means.")
+        pilot = st.radio(
+            "Who plays the games", ["greedy (fast)", "equilibrium (honest)"],
+            index=0, key="model_pilot",
+            help="GREEDY plays OUR side with the real solver and THEIRS with a "
+                 "fixed policy this codebase wrote. That hands whichever side "
+                 "is p1 a systematic advantage: mirroring a matchup flips the "
+                 "winner in 78% of cases, which is why every preset team "
+                 "'beats' every other one. It is fast, and it is why a line "
+                 "can be recorded as a win and lose a real game.\n\n"
+                 "EQUILIBRIUM plays BOTH sides as a matrix game. When one side "
+                 "has a safe play and the other does not, the ground goes to "
+                 "the safe side -- the other has to make a read, and a read is "
+                 "an assumption that loses on average. ~13x slower per game.")
+        evaluation = st.radio(
+            "Evaluation", ["sacrifice (default)", "legacy"], index=0,
+            key="model_eval",
+            help="SACRIFICE scores speed control and discounts a Pokemon that "
+                 "is one hit from gone, so the solver sacrifices instead of "
+                 "preserving something it can no longer use. Measured cost: "
+                 "record 80% -> 74% over 9 pairings.\n\n"
+                 "LEGACY restores the previous evaluation exactly. Pick it if "
+                 "your winning lines got worse.")
+        p = "equilibrium" if pilot.startswith("equilibrium") else "greedy"
+        e = "legacy" if evaluation.startswith("legacy") else "sacrifice"
+        solver.apply_eval_profile(e)
+        if p == "greedy":
+            st.warning("Records are inflated: whoever is p1 wins 78% of "
+                       "mirrored matchups.", icon="⚠️")
+        else:
+            st.success("Both sides played properly.", icon="✅")
+        return p, e
+
+
+PILOT, EVALUATION = render_model_settings()
+
+
 def advanced_model_controls(key_prefix, default="standard"):
     """The one place the advanced model's strength is chosen.
 
@@ -420,7 +473,22 @@ def advanced_model_controls(key_prefix, default="standard"):
                f"{' + all 90 brings' if audit_all else ''} "
                f"— roughly {relative_cost(effort) * (22 if audit_all and not _t(effort).get('all_configs') else 1):.0f}x "
                f"the quick setting.")
+    if _t(effort).get("pilot") == "equilibrium" and PILOT != "equilibrium":
+        st.info("This tier plays both sides with the equilibrium solver, "
+                "overriding the sidebar's pilot for this panel.")
     return effort, audit_all
+
+
+def pilot_for(effort):
+    """The pilot this panel will actually use.
+
+    A tier that specifies `equilibrium` wins over the sidebar: picking
+    Thorough+ and silently getting a greedy record would defeat the only
+    reason to pick it.
+    """
+    from search_effort import tier as _t
+    return ("equilibrium" if _t(effort).get("pilot") == "equilibrium"
+            else PILOT)
 
 
 def render_line_result(lead, key):
@@ -1057,6 +1125,117 @@ with tab_build:
             if changed:
                 st.info("Edited but not applied — press Apply stat points.")
 
+        # --- Swap the worst member ---------------------------------------
+        # The `--substitute` loop, which was CLI-only. It is the only stage
+        # that steers the search by the RATING rather than by the beam's
+        # coverage score, so having it reachable only from a batch file meant
+        # the app could never improve a team, only measure one.
+        with st.expander("Improve this team — swap its worst member"):
+            st.caption("Works out which member is not earning its slot, tries "
+                       "better ones against the opponents this team is "
+                       "actually failing, and rates each candidate the same "
+                       "way a generated team is rated. A swap is only worth "
+                       "taking if the rating improves — and the RECORD comes "
+                       "first: a swap that beats fewer of their brings is "
+                       "rejected however good its adjusted win rate looks.")
+            sb1, sb2, sb3 = st.columns(3)
+            sub_vs = st.multiselect(
+                "Rate against", list(teams), default=list(teams)[:2],
+                key="sub_vs",
+                help="Fewer opponents is proportionally faster. Two is enough "
+                     "to see whether a swap is going anywhere.")
+            # Not "quick": that tier has robustness off, so it produces no
+            # adjusted win rate -- and the adjusted win rate is what a swap is
+            # accepted on. Offering it would make the panel fail every time
+            # with "the current team has no rating".
+            sub_effort = sb1.selectbox("Effort", ["standard", "thorough"],
+                                       index=0, key="sub_effort",
+                                       help="Quick is not offered: it does no "
+                                            "punish analysis, so there is no "
+                                            "rating to accept a swap on.")
+            sub_n = sb2.slider("Candidates to rate", 1, 6, 3, key="sub_n")
+            sub_pool = sb3.slider("Eligible pool", 20, 80, 40, key="sub_pool")
+            if st.button("Propose and rate swaps", key="sub_go") and sub_vs:
+                import substitution as _sub
+                import roster_rating as _rr
+                from team_search import (build_candidate_pool as _bcp,
+                                         enemy_pairs_from_teams as _epft)
+                _world = {"merged": merged, "moves": moves, "natures": natures,
+                          "typechart": typechart,
+                          "teams": {t: teams[t] for t in sub_vs}}
+                _prefs = dict(species_data.load_preferences())
+                _pool = sorted(set(_bcp(merged, top_n=sub_pool, prefs=_prefs))
+                               | set(team))
+                _eps = _epft(_world["teams"])
+                _pm = _sub.PairMatrix(merged, moves, natures, typechart)
+                sets_now = st.session_state.get("sets") or {}
+                with st.spinner("Rating the current team..."):
+                    base = _rr.rate_team(list(team), _world, effort=sub_effort,
+                                         turns=10, our_sets=sets_now,
+                                         opponents=list(sub_vs), pilot=PILOT,
+                                         eval_profile=EVALUATION)
+                if base.get("adjusted_win_rate") is None:
+                    st.error("The current team has no rating (a screen "
+                             "dropped it), so there is nothing to improve on.")
+                else:
+                    weights = _sub.opponent_weights(base, list(sub_vs))
+                    props = _sub.propose(list(team), _pool, _eps, _pm,
+                                         record=base, weights=weights,
+                                         limit=sub_n)
+                    rows = [{"Change": "(keep as is)",
+                             "Record": f"{base['wins']}/{base['total']}",
+                             "Adjusted": round(base["adjusted_win_rate"], 3),
+                             "Punish": round(base["exploitability"] or 0, 1),
+                             "Verdict": "incumbent", "Team": " / ".join(team)}]
+                    bar = st.progress(0.0)
+                    for i, p in enumerate(props):
+                        rec = _rr.rate_team(
+                            list(p["team"]), _world, effort=sub_effort,
+                            turns=10, our_sets=sets_now,
+                            opponents=list(sub_vs), pilot=PILOT,
+                            eval_profile=EVALUATION)
+                        # Record first, exactly as the CLI loop does: the win
+                        # count and the adjusted rate can move in opposite
+                        # directions, and the record is the number the plan is
+                        # committed on.
+                        lost = _sub.lost_record(base, rec)
+                        adj = rec.get("adjusted_win_rate")
+                        if lost is not None and lost > 0:
+                            verdict = f"rejected — record −{lost:.0%}"
+                        elif adj is None:
+                            verdict = "rejected — no rating"
+                        elif adj > (base["adjusted_win_rate"] or 0):
+                            verdict = "BETTER"
+                        else:
+                            verdict = "no gain"
+                        rows.append({
+                            "Change": f"−{p['drop']} +{p['candidate']}",
+                            "Record": f"{rec.get('wins')}/{rec.get('total')}",
+                            "Adjusted": round(adj, 3) if adj is not None else None,
+                            "Punish": round(rec.get("exploitability") or 0, 1),
+                            "Verdict": verdict,
+                            "Team": " / ".join(p["team"])})
+                        bar.progress((i + 1) / max(1, len(props)))
+                    bar.empty()
+                    st.session_state["sub_rows"] = rows
+            if st.session_state.get("sub_rows"):
+                rows = st.session_state["sub_rows"]
+                st.dataframe(pd.DataFrame(rows), width='stretch',
+                             hide_index=True)
+                better = [r for r in rows if r["Verdict"] == "BETTER"]
+                if better:
+                    pick = st.selectbox("Adopt a swap",
+                                        [r["Change"] for r in better],
+                                        key="sub_pick")
+                    if st.button("Adopt", key="sub_adopt"):
+                        chosen = next(r for r in better if r["Change"] == pick)
+                        st.session_state["team"] = chosen["Team"].split(" / ")
+                        st.session_state.pop("sub_rows", None)
+                        _defer_rerun()
+                else:
+                    st.info("No swap improved the rating — this team is a "
+                            "local optimum for these opponents.")
+
         cc1, cc2 = st.columns(2)
         with cc1:
             if st.button("Optimise items + movesets vs teams.csv", type="primary",
@@ -1259,6 +1438,28 @@ with tab_gen:
     if floor_pct:
         st.caption(f"A team must beat at least {floor_pct}% of EVERY opponent's "
                    f"brings ({round(floor_pct * 90 / 100)}/90) to be reported.")
+    # The CHEAPEST screen there is, and the only one that costs seconds rather
+    # than minutes per team. It was CLI-only (`--punish-screen`), which meant
+    # the app spent the whole run auditing teams whose opening was already lost.
+    import punish_screen as _ps
+    use_punish_screen = st.checkbox(
+        "Drop a team whose OPENING is already lost, before auditing it",
+        value=False, key="gen_punish_screen",
+        help="Solves turn 1 as a matrix game against the leads they would pick "
+             "-- seconds per team against minutes for the audit. It screens on "
+             "the GUARANTEED value of the opening, not the punish: a team with "
+             "no threats gives a best-responding opponent nothing to gain and "
+             "would otherwise screen best of all.")
+    punish_floor = None
+    if use_punish_screen:
+        punish_floor = st.slider(
+            "Reject if the opening cannot guarantee better than", -500, 0,
+            int(_ps.DEFAULT_FLOOR), step=10, key="gen_punish_floor",
+            help="heuristic_eval points; about 180 is one Pokemon. Negative is "
+                 "normal -- the opponent answers with a perfect read. Measured "
+                 "on real rosters: Big 6 -80, Sand -160, NAIC -208, a "
+                 "deliberately bad team -307. The run prints the value for "
+                 "every team it looks at so you can calibrate this.")
     script_screen = st.checkbox(
         "Early-disqualify finalists that always lose a scripted opening", value=False,
         help="Before ranking/reporting, cheaply check EVERY beam-search finalist (not just "
@@ -1323,6 +1524,50 @@ with tab_gen:
 
         finals = beam_search_teams(pool, matrix, eps, merged, beam_width=beam,
                                     must_include=run_prefs["include"], prefer=run_prefs["prefer"])
+
+        # BEFORE the script screen and the win-rate floor, because it is the
+        # cheapest of the three by an order of magnitude: one turn solved as a
+        # matrix game, against minutes of simulation for either of the others.
+        if punish_floor is not None and finals:
+            from punish_screen import is_hopeless, screen_team
+            kept_ps, dropped_ps, seen = [], [], []
+            bar_ps = st.progress(0.0, text="Screening openings...")
+            try:
+                for i, (sc, t) in enumerate(finals):
+                    verdict = screen_team(list(t), teams, merged, moves,
+                                          natures, typechart)
+                    seen.append(verdict.get("guaranteed"))
+                    if is_hopeless(verdict, floor=punish_floor):
+                        worst = verdict.get("worst_vs") or (None, [], None)
+                        dropped_ps.append((t, verdict.get("guaranteed"),
+                                           worst[0]))
+                    else:
+                        kept_ps.append((sc, t))
+                    bar_ps.progress((i + 1) / len(finals),
+                                    text=f"Screening openings... {i+1}/{len(finals)}")
+            finally:
+                bar_ps.empty()
+            live = [v for v in seen if v is not None]
+            if live:
+                # The distribution, not just the rejections: a floor you only
+                # see when it fires is one you cannot calibrate.
+                st.caption(
+                    f"Opening guaranteed across {len(live)} finalists: worst "
+                    f"{min(live):.0f}, median {sorted(live)[len(live)//2]:.0f}, "
+                    f"best {max(live):.0f} (floor {punish_floor:.0f}).")
+            if dropped_ps:
+                st.warning(f"Dropped {len(dropped_ps)}/{len(finals)} finalists "
+                           "whose opening is already lost.")
+                st.dataframe(pd.DataFrame(
+                    [{"Team": " / ".join(t), "Guaranteed": round(g or 0),
+                      "Worst vs": w} for t, g, w in dropped_ps]),
+                    width='stretch', hide_index=True)
+            if kept_ps:
+                finals = kept_ps
+            elif dropped_ps:
+                st.warning("Every finalist failed the opening screen — keeping "
+                           "the original list rather than showing nothing. "
+                           "Lower the floor.")
 
         if script_screen and finals:
             from generate_team import quick_script_screen
@@ -1697,7 +1942,8 @@ with tab_search:
                                                      fixed_lead=_fl,
                                                      enemy_script=_so.script_for(tname),
                                                      script_team=tname if tname in _so.SCRIPTS
-                                                     else None, enemy_sets=team_esets)
+                                                     else None, enemy_sets=team_esets,
+                                                     pilot=PILOT)
                     results[tname] = {"mode": "all", "robust": rob[0] if rob else None,
                                        "roster": roster}
                 else:
@@ -1773,7 +2019,7 @@ with tab_search:
                                 verify_top=1, fixed_lead=fl,
                                 enemy_script=_so_ab.script_for(tname),
                                 script_team=tname if tname in _so_ab.SCRIPTS
-                                else None, enemy_sets=te)
+                                else None, enemy_sets=te, pilot=PILOT)
                             out[label] = rr[0] if rr else None
                         a, b = out["A"], out["B"]
                         ab_rows.append({
@@ -2578,7 +2824,8 @@ with tab_vs:
                     st.session_state["pv_plan"] = plan_against(
                         pv_ours, pv_theirs, merged, moves, natures, typechart,
                         effort=pv_effort, audit_all=pv_all,
-                        our_sets=pv_our_sets, enemy_sets=pv_esets)
+                        our_sets=pv_our_sets, enemy_sets=pv_esets,
+                        pilot=pilot_for(pv_effort))
 
         plan = st.session_state.get("pv_plan")
         if plan:
@@ -2875,7 +3122,8 @@ with tab_vs:
                                 fixed_lead=fl,
                                 enemy_script=_so_vs.script_for(script_team_vs) if script_team_vs
                                 else None,
-                                script_team=script_team_vs)
+                                script_team=script_team_vs,
+                                pilot=pilot_for(effort_vs))
                             r = rob[0] if rob else None
                             eb4_tested = None
                     if r is None:

@@ -31,10 +31,22 @@ exploitability alone, which is the failure mode where a team that loses
 everything ranks first. So each tier's cap must be long enough for a game to
 actually finish.
 
-`nash` is NOT a tier setting: the audit is always piloted with the equilibrium
-solver, because rating a team while piloting it badly measures the pilot rather
-than the team. What varies is how much auditing happens, not how well it is
-done.
+`pilot` IS a tier setting, and it is the most important one. The AUDIT has
+always used the equilibrium solver; the WIN COUNT has always used the greedy
+one, where our side best-responds to a policy this codebase wrote itself and
+their side just runs it. That is a systematic advantage for whichever side is
+passed as p1: mirroring a matchup flips the winner in 78% of cases
+(tools/measure_side_bias.py), which is why all eight teams in teams.csv score
+83-99% against each other. `thorough+` runs BOTH sides through the matrix
+solver, which removes the systematic half (the residual 41% points both ways --
+near-ties, not bias) at roughly 13x the cost per game.
+
+Why equilibrium is the honest pilot, and not just a slower one: when one side
+has a safe play and the other does not -- a poor lead matchup it cannot
+reposition out of -- the equilibrium gives the ground to the safe side. The
+other side has to make a READ. A read can punish, but it is an assumption, and
+against a mixed strategy it loses ground on average. Greedy play never charges
+for that, so it hands the reading side its best case for free.
 
 `prescreen` is None on every tier by default, deliberately. A prescreen
 discards candidates before they are ever simulated, so if it is set too narrow
@@ -52,14 +64,14 @@ TIERS = {
     "quick": dict(
         label="Quick",
         verify_top=3, robustness=False, leads=0, turns=0, prescreen=None,
-        all_configs=False,
+        all_configs=False, pilot="greedy",
         blurb="Screen plus win-count verification. The original behaviour: "
               "fast, and ranked by games won against a fixed opponent model.",
     ),
     "standard": dict(
         label="Standard",
         verify_top=3, robustness=True, leads=2, turns=16, prescreen=None,
-        all_configs=False,
+        all_configs=False, pilot="greedy",
         blurb="Audits the top 3 brings against their 2 most plausible leads, "
               "playing each line to a finish against an opponent who punishes "
               "every turn. Ranks by wins that hold up.",
@@ -67,14 +79,24 @@ TIERS = {
     "thorough": dict(
         label="Thorough",
         verify_top=6, robustness=True, leads=4, turns=18, prescreen=None,
-        all_configs=False,
+        all_configs=False, pilot="greedy",
         blurb="6 brings against 4 of their leads, longer lines. Minutes rather "
               "than seconds; the setting to trust before committing to a team.",
+    ),
+    "thorough+": dict(
+        label="Thorough+ (both sides played properly)",
+        verify_top=6, robustness=True, leads=4, turns=18, prescreen=None,
+        all_configs=False, pilot="equilibrium",
+        blurb="Thorough, but the WIN COUNT is played with the equilibrium "
+              "solver on both sides instead of our solver against a scripted "
+              "greedy opponent. The only tier whose record is not inflated by "
+              "the side bias -- a safe play is worth what it is worth, and a "
+              "read is charged for being a read. ~13x the cost per game.",
     ),
     "exhaustive": dict(
         label="Exhaustive",
         verify_top=8, robustness=True, leads=6, turns=20, prescreen=None,
-        all_configs=True,
+        all_configs=True, pilot="greedy",
         blurb="8 brings against ALL 90 of their bring-4s -- leads and backs, "
               "not a sample. For finding a hidden team with great lines; "
               "expected to take a long time, and designed to be run in "
@@ -82,7 +104,7 @@ TIERS = {
     ),
 }
 
-TIER_ORDER = ["quick", "standard", "thorough", "exhaustive"]
+TIER_ORDER = ["quick", "standard", "thorough", "thorough+", "exhaustive"]
 
 
 def tier(name):
@@ -98,7 +120,11 @@ def relative_cost(name):
     if not t["robustness"]:
         return 1.0
     audited = 90 if t.get("all_configs") else t["leads"]
-    return 1.0 + (t["verify_top"] * audited * t["turns"]) / 6.0
+    base = 1.0 + (t["verify_top"] * audited * t["turns"]) / 6.0
+    # A full payoff matrix per turn for BOTH sides, measured at ~13x on the
+    # side-bias sweep (3s -> 40s). Without this the tier looks free next to
+    # thorough, which it very much is not.
+    return base * (13.0 if t.get("pilot") == "equilibrium" else 1.0)
 
 
 class ResultCache:

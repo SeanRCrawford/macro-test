@@ -36,10 +36,17 @@ BAT = os.path.join(os.path.dirname(__file__), "..", "overnight.bat")
 
 
 def args(**kw):
-    base = dict(pool_size=50, candidates=60, generations=None, beam_width=30,
-                effort="standard", turns=10, optimise_sets=True,
-                min_winrate=0.8, script_screen=False, punish_screen=None,
-                worst_matchup=0.0, out="shortlist.json")
+    """A Namespace carrying the REAL parser defaults, then the overrides.
+
+    Built from the shipped parser rather than a hand-written copy: this factory
+    fell out of step three times, once per new stage 1 flag, and each time it
+    failed the test instead of catching a bug. Anything `_stage1_settings`
+    reads now exists here automatically.
+    """
+    base = vars(go.build_parser().parse_args([]))
+    base.update(dict(pool_size=50, candidates=60, beam_width=30,
+                     effort="standard", turns=10, optimise_sets=True,
+                     out="shortlist.json"))
     base.update(kw)
     return argparse.Namespace(**base)
 

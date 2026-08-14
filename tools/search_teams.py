@@ -117,7 +117,10 @@ def _run_pairing(job):
     types: on Windows the pool uses spawn, so both the function and its result
     cross a pickle boundary.
     """
-    ours, theirs, effort, turns, prescreen, audit_all, brings = job
+    (ours, theirs, effort, turns, prescreen, audit_all, brings,
+     pilot, eval_profile) = job
+    import solver
+    solver.apply_eval_profile(eval_profile)
     global _WORLD
     if _WORLD is None:                       # serial path, or a pool without init
         _worker_init()
@@ -133,6 +136,7 @@ def _run_pairing(job):
         robustness_leads=settings["leads"] or 1,
         robustness_turns=settings["turns"] or 1,
         prescreen_top=prescreen,
+        pilot=pilot or settings.get("pilot", "greedy"),
         audit_all_configs=audit_all or settings.get("all_configs", False))
     top = results[0] if results else None
     return {
@@ -177,6 +181,13 @@ def _candidate_row(rec):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--effort", choices=TIER_ORDER, default="standard")
+    ap.add_argument("--pilot", default=None, choices=["greedy", "equilibrium"],
+                    help="who plays the games the record comes from; default "
+                         "follows the tier. See WORKFLOW.md section 4.0.")
+    ap.add_argument("--evaluation", default=None,
+                    choices=["sacrifice", "legacy"],
+                    help="which evaluation the solver uses; 'legacy' restores "
+                         "the pre-sacrifice behaviour exactly.")
     ap.add_argument("--batch", type=int, default=4,
                     help="pairings per save point")
     ap.add_argument("--cache", default=DEFAULT_CACHE)
@@ -356,10 +367,13 @@ def main():
     prescreen = args.prescreen or settings.get("prescreen")
     # A generated roster is part of what determines the answer, so it belongs
     # in the key: two teams sharing a name but not a roster must not collide.
+    # WHO PLAYED and WHICH EVALUATION are part of the answer, so they are part
+    # of the key -- a greedy record must never be served to an equilibrium run.
     keyed = [(ResultCache.key("bring", SCHEMA, a, b, args.effort, args.turns,
                               prescreen, args.audit_all, args.brings,
                               extra.get(a), extra.get(b),
-                              extra_sets.get(a), extra_sets.get(b)), a, b)
+                              extra_sets.get(a), extra_sets.get(b),
+                              args.pilot, args.evaluation), a, b)
              for a, b in jobs]
     todo = [(k, a, b) for k, a, b in keyed if cache.get(k) is None]
     skipped = len(keyed) - len(todo)
@@ -396,7 +410,8 @@ def main():
                                     initargs=(extra, extra_sets)) as pool:
             futures = {pool.submit(_run_pairing,
                                    (a, b, args.effort, args.turns, prescreen,
-                                    args.audit_all, args.brings)): (k, a, b)
+                                    args.audit_all, args.brings,
+                                    args.pilot, args.evaluation)): (k, a, b)
                        for k, a, b in todo}
             since_save = 0
             for future in cf.as_completed(futures):
@@ -414,7 +429,8 @@ def main():
             for k, ours, theirs in batch:
                 cache.put(k, _run_pairing((ours, theirs, args.effort,
                                            args.turns, prescreen,
-                                           args.audit_all, args.brings)))
+                                           args.audit_all, args.brings,
+                                           args.pilot, args.evaluation)))
                 done += 1
                 _progress(ours, theirs)
             cache.save()

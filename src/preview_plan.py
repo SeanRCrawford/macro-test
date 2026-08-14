@@ -19,7 +19,7 @@ from search_effort import tier
 
 def plan_against(our6, their6, merged, moves_db, natures, typechart,
                  effort="standard", our_sets=None, enemy_sets=None,
-                 max_turns=None, audit_all=None):
+                 max_turns=None, audit_all=None, pilot=None):
     """The committed plan against `their6`, and what beats it.
 
     `audit_all` defaults to whatever the tier says. Forcing it on makes the
@@ -28,6 +28,10 @@ def plan_against(our6, their6, merged, moves_db, natures, typechart,
     `of` says which you got, so the caller never has to guess.
     """
     settings = tier(effort)
+    # The tier carries a default pilot and the caller may override it. Who
+    # played the games is the difference between a record you can act on and
+    # one inflated by the side bias -- see WORKFLOW.md section 4.0.
+    pilot = pilot or settings.get("pilot", "greedy")
     all_configs = (settings.get("all_configs", False)
                    if audit_all is None else bool(audit_all))
     results = search_robust_composition(
@@ -38,6 +42,7 @@ def plan_against(our6, their6, merged, moves_db, natures, typechart,
         rate_robustness=settings["robustness"],
         robustness_leads=settings["leads"] or 1,
         robustness_turns=settings["turns"] or 1,
+        pilot=pilot,
         audit_all_configs=all_configs)
     return committed(results)
 

@@ -67,7 +67,9 @@ Options worth knowing:
 | `--list` | off | stage 1 only — rate and rank, then stop |
 | `--stage2-only` | off | skip generation, deep-search the shortlist on disk |
 | `--regenerate` | off | force stage 1 even when `--pick` would have skipped it |
-| `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
+| `--deep-effort TIER` | thorough | `standard` / `thorough` / **`thorough+`** / `exhaustive` — how many of OUR brings get audited. `thorough+` is thorough with the equilibrium pilot: the only tier whose record is not inflated |
+| `--pilot NAME` | tier default | **who plays the games the record comes from.** `greedy` is fast and inflated (see §4.0); `equilibrium` plays both sides as a matrix game, ~13× slower per game |
+| `--evaluation NAME` | `sacrifice` | `sacrifice` scores speed control and discounts a spent Pokémon (measured cost: record 80% → 74%); `legacy` restores the previous evaluation exactly |
 | `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
 
 ### Reading and calibrating `--punish-screen`
@@ -346,6 +348,20 @@ panel's *Our side* control offers the loaded team, a saved team, or any Pokémon
 — and each supplies its own overrides. Choosing a saved team used to keep
 applying the Team Builder's items and moves to somebody else's Pokémon.
 
+**Model settings — the sidebar.** Two controls, because they change what every
+other number means: **who plays the games** (greedy / equilibrium) and **which
+evaluation** (`sacrifice` / `legacy`). The greedy default carries a standing
+warning that records are inflated. `legacy` is the answer to "my winning lines
+got worse" — it turns off the speed-control and spent-Pokémon terms, restoring
+the pre-§4.2 evaluation exactly.
+
+**Everything the CLI can do, the app can now do.** `--punish-screen` (with its
+floor, and the distribution printed so it can be calibrated), the per-matchup
+floor, `--pilot`, `--evaluation`, and the `--substitute` hill-climb, which is
+in the Team Builder as *"Improve this team — swap its worst member"*. It
+proposes swaps, rates each one the same way a generated team is rated, and
+rejects any that loses record — record first, exactly as the CLI loop does.
+
 **A/B test one change — Lead / Back tab.** Two variants of the loaded team
 against the same opponents, same turn cap, same enemy overrides, with only one
 member's ability or moves different. Reports wins per opponent for each and the
@@ -428,6 +444,19 @@ a documented negative result.
 
    The equilibrium pilot removes the *systematic* half at 13× the cost. The
    residual 41% is near-ties and chaos, a different and smaller problem.
+
+   **How to get an honest number today:**
+
+   ```bat
+   overnight.bat --pilot equilibrium ...      :: any tier
+   overnight.bat --gen-effort thorough+ ...   :: the same thing, as a preset
+   ```
+
+   In the app it is the sidebar's **Model settings → Who plays the games**, and
+   the strength slider's **Thorough+** tier forces it for that panel regardless
+   of the sidebar. The greedy default is left in place because it is 13× faster
+   and still useful for ranking, but every panel now says which one produced
+   the number in front of you.
 
 
 1. **The beam still ranks on coverage, and a better objective did not beat it

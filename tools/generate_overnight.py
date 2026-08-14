@@ -63,7 +63,10 @@ def _stage1_settings(args):
             "min_winrate": args.min_winrate,
             "script_screen": bool(args.script_screen),
             "punish_screen": args.punish_screen,
-            "worst_matchup": args.worst_matchup}
+            "worst_matchup": args.worst_matchup,
+            # Both change WHICH teams come out and in what order, so a run that
+            # varies them is a different stage 1 and must renumber loudly.
+            "pilot": args.pilot, "evaluation": args.evaluation}
 
 
 def _warn_if_renumbering(args):
@@ -182,7 +185,14 @@ def _beam_finalists(args, world):
     return finals
 
 
-def main():
+def build_parser():
+    """The parser, separate from main().
+
+    So a test can ask what the real defaults are instead of keeping its own
+    copy of them. `_stage1_settings` reads attributes off the Namespace, and a
+    hand-maintained stand-in has now fallen out of step three times -- once per
+    new stage 1 flag -- failing the test rather than catching a bug.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidates", type=int, default=20,
                     help="how many beam finalists to RATE. The whole point of "
@@ -245,13 +255,37 @@ def main():
                          "(King / Hard Trick Room / Perish Trap) before the "
                          "audit. A team with no plan against a rehearsed line "
                          "is not worth auditing.")
+    ap.add_argument("--pilot", default=None,
+                    choices=["greedy", "equilibrium"],
+                    help="WHO PLAYS THE GAMES the record comes from. Default "
+                         "follows the effort tier (greedy everywhere except "
+                         "--effort thorough+). 'greedy' plays our side with "
+                         "the real solver and theirs with a fixed policy, "
+                         "which hands whichever side is p1 a systematic "
+                         "advantage -- 78%% of mirrored matchups flip "
+                         "(tools/measure_side_bias.py). 'equilibrium' plays "
+                         "both sides as a matrix game: a safe play is worth "
+                         "what it is worth and a read is charged for being a "
+                         "read. ~13x slower per game.")
+    ap.add_argument("--evaluation", default=None,
+                    choices=["sacrifice", "legacy"],
+                    help="Which EVALUATION the solver uses. 'sacrifice' "
+                         "(default) scores speed control and discounts a "
+                         "Pokemon that is one hit from gone, so the solver "
+                         "sacrifices instead of preserving something it cannot "
+                         "use -- measured cost, record 80%% -> 74%%. 'legacy' "
+                         "restores the previous evaluation exactly.")
     ap.add_argument("--min-winrate", type=float, default=0.80, metavar="F",
                     help="abandon a team as soon as its running win rate "
                          "against the opponents checked so far falls below "
                          "this (default 0.80). A team that cannot win is not "
                          "worth auditing for punishability, and the audit is "
                          "the expensive stage. Set 0 to rate everything.")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     args.jobs, _warning = blas_limits.workers_advice(args.jobs)
     if _warning:
         print(f"WARNING  : {_warning}")
@@ -266,6 +300,18 @@ def main():
     print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
 
     # `--punish-screen` with no number means "use the default floor".
+    # The tier carries a default pilot; --pilot overrides it. Resolved once,
+    # here, so the cache key, the workers and the printed banner cannot
+    # disagree about who played the games.
+    from search_effort import tier as _tier
+    from solver import DEFAULT_EVAL_PROFILE
+    args.pilot = args.pilot or _tier(args.effort).get("pilot", "greedy")
+    args.evaluation = args.evaluation or DEFAULT_EVAL_PROFILE
+    print(f"pilot    : {args.pilot}   evaluation: {args.evaluation}"
+          + ("   <-- record NOT inflated by the side bias"
+             if args.pilot == "equilibrium" else
+             "   <-- greedy: whoever is p1 has a systematic advantage "
+             "(see WORKFLOW.md section 4.0)"))
     punish_floor = (punish_screen.DEFAULT_FLOOR if args.punish_screen is True
                     else args.punish_screen)
     if punish_floor is not None:
@@ -327,7 +373,9 @@ def main():
         our_sets = sets_by_team.get(tuple(sorted(team)))
         # The sets change what is simulated, so they belong in the key: an
         # optimised run must never be served a usage-default result.
-        key = roster_rating.rating_key(team, args.effort, args.turns, our_sets)
+        key = roster_rating.rating_key(team, args.effort, args.turns, our_sets,
+                                       pilot=args.pilot,
+                                       eval_profile=args.evaluation)
         keys.append(key)
         if cache.get(key) is None and not any(j["key"] == key for j in todo):
             # SCREEN FIRST, then audit -- see roster_rating.rate_team. A team
@@ -340,6 +388,8 @@ def main():
                          "script_screen": args.script_screen,
                          "punish_floor": punish_floor,
                          "worst_matchup_floor": args.worst_matchup,
+                         "pilot": args.pilot,
+                         "eval_profile": args.evaluation,
                          "beam_score": beam_score})
 
     started = time.time()

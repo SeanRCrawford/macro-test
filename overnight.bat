@@ -35,6 +35,21 @@ rem                      game -- seconds per team against minutes for the
 rem                      audit -- so the night is spent on plausible teams.
 rem                      Optionally takes a floor: --punish-screen -200 is
 rem                      stricter than the default -250.
+rem   --pilot NAME       WHO PLAYS THE GAMES the record comes from.
+rem                      "greedy" (default) plays our side with the real solver
+rem                      and theirs with a fixed policy, which hands whichever
+rem                      side is p1 a systematic advantage -- 78%% of mirrored
+rem                      matchups flip (tools\measure_side_bias.py).
+rem                      "equilibrium" plays both sides as a matrix game, so a
+rem                      safe play is worth what it is worth and a read is
+rem                      charged for being a read. ~13x slower per game.
+rem                      --gen-effort thorough+ turns it on for stage 1.
+rem   --evaluation NAME  "sacrifice" (default) or "legacy". Sacrifice scores
+rem                      speed control and discounts a Pokemon that is one hit
+rem                      from gone, so the solver sacrifices instead of
+rem                      preserving something it cannot use. Measured cost:
+rem                      record 80%% -> 74%%. "legacy" restores the previous
+rem                      evaluation exactly.
 rem   --min-winrate F    skip a generated team whose win rate is below this
 rem                      before spending the audit on it. Default 0.80.
 rem   --vs "Big 6"       deep-search against ONLY these opponents instead of
@@ -96,6 +111,8 @@ set MINWR=0.80
 set OPTSETS=
 set SCRIPTSCR=
 set PUNISHSCR=
+set PILOT=
+set EVALN=
 set WORSTMU=
 set PICK=
 set LISTONLY=
@@ -130,6 +147,11 @@ if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& set GENFLAGS=1& shi
 if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& set GENFLAGS=1& shift & goto parse)
 if /i "%~1"=="--worst-matchup" (set WORSTMU=--worst-matchup %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--punish-screen" (set PUNISHSCR=--punish-screen& set GENFLAGS=1& shift & goto parse)
+rem WHO PLAYS THE GAMES, and WHICH EVALUATION. Both change the answer, so both
+rem reach stage 1 AND stage 2 -- a record played by one pilot and deep-searched
+rem by the other is two different numbers under one heading.
+if /i "%~1"=="--pilot"         (set PILOT=--pilot %~2& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--evaluation"    (set EVALN=--evaluation %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--punish-floor"  (set PUNISHSCR=--punish-screen %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
@@ -209,6 +231,7 @@ echo ============================================================
 python generate_overnight.py --pool-size %POOL% --candidates %CANDIDATES% ^
     --keep %KEEP% %GENS% --effort %GENEFFORT% --jobs %JOBS% ^
     --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% %PUNISHSCR% %WORSTMU% ^
+    %PILOT% %EVALN% ^
     --cache overnight_gen.json --out shortlist.json
 if errorlevel 1 (
     echo.
@@ -249,7 +272,7 @@ if defined SUBST (
         echo --- team %%i ---
         python substitute.py --rosters shortlist.json --team %%i --append ^
             --rounds %SUBROUNDS% --per-round %SUBPER% --pool-size %POOL% ^
-            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% ^
+            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% %PILOT% %EVALN% ^
             --cache overnight_gen.json --out substituted.json
         if errorlevel 1 (
             echo.
@@ -273,7 +296,7 @@ rem generated teams and theirs to the library. Parsing the shortlist here and
 rem passing the names back in is what broke stage 2 when the file grew a
 rem wrapper for the optimised sets.
 python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% ^
-    --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
+    --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% %PILOT% %EVALN% ^
     --sheets !SHEETS! ^
     --cache overnight_%DEEPEFFORT%.json --export
 set RC=%ERRORLEVEL%

@@ -874,6 +874,56 @@ def _pick_from_mixture(actions, probabilities):
     return actions[-1]
 
 
+# --------------------------------------------------------------- evaluation
+# The two depth-1 fixes of WORKFLOW.md §4.2 as ONE named switch, because they
+# were measured together and shipped together, and because "worse winning
+# lines" was reported the moment they went on.
+#
+# MEASURED COST of `sacrifice` over 9 pairings (3 teams x Rain/Sand/King,
+# standard tier): record 80% -> 74%, mean adjusted wins 0.518 -> 0.444. It is
+# still the default, because the behaviour it fixes was reported twice from
+# real games as a direct cause of losses -- but it is a trade, so it is a
+# setting rather than a constant, and `legacy` restores the previous
+# evaluation EXACTLY.
+EVAL_PROFILES = {
+    "sacrifice": {"SPEED_CONTROL_WEIGHT": 12.0, "FRAGILE_HP": 0.25},
+    "legacy": {"SPEED_CONTROL_WEIGHT": 0.0, "FRAGILE_HP": 0.0},
+}
+DEFAULT_EVAL_PROFILE = "sacrifice"
+
+
+def apply_eval_profile(name):
+    """Set the evaluation permanently in THIS process.
+
+    For pool workers, which never see the parent's context managers -- each job
+    carries the profile name and applies it on arrival. Returns the name that
+    was applied so a caller can record it.
+    """
+    global SPEED_CONTROL_WEIGHT, FRAGILE_HP
+    values = EVAL_PROFILES[name if name in EVAL_PROFILES else DEFAULT_EVAL_PROFILE]
+    SPEED_CONTROL_WEIGHT = values["SPEED_CONTROL_WEIGHT"]
+    FRAGILE_HP = values["FRAGILE_HP"]
+    return name if name in EVAL_PROFILES else DEFAULT_EVAL_PROFILE
+
+
+@contextmanager
+def evaluation(profile: str | None):
+    """Run a block under one evaluation profile, restoring it afterwards.
+
+    Same reason as `solver_mode`: Streamlit keeps module state alive across
+    reruns, so setting the globals directly would make the last-used profile
+    silently sticky for every other tab. `None` means "leave it alone".
+    """
+    global SPEED_CONTROL_WEIGHT, FRAGILE_HP
+    previous = (SPEED_CONTROL_WEIGHT, FRAGILE_HP)
+    if profile is not None:
+        apply_eval_profile(profile)
+    try:
+        yield
+    finally:
+        SPEED_CONTROL_WEIGHT, FRAGILE_HP = previous
+
+
 @contextmanager
 def solver_mode(nash: bool | None = None, depth: int | None = None):
     """Temporarily select the solver, restoring the previous setting after.

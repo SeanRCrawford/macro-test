@@ -39,21 +39,30 @@ from search_effort import ResultCache
 RATING_SCHEMA = 2
 
 
-def rating_key(team, effort, turns, our_sets, opponents=None, pilot=None):
+def rating_key(team, effort, turns, our_sets, opponents=None, pilot=None,
+               eval_profile=None):
     """The resumable-cache key for one team's rating.
 
-    `opponents` and `pilot` are appended only when they are set, so the default
-    full-library greedy-pilot rating keys exactly as it did before either
-    argument existed. Both change the answer, so neither may be served in place
-    of the other: a rating restricted to one opponent must not stand in for one
-    against eight, and a record played by the equilibrium pilot is a different
-    number from the same record played greedily.
+    `opponents`, `pilot` and `eval_profile` are appended only when they are
+    set, so the default full-library greedy-pilot rating keys exactly as it did
+    before any of them existed. All three change the answer, so none may be
+    served in place of another: a rating restricted to one opponent must not
+    stand in for one against eight, a record played by the equilibrium pilot is
+    a different number from the same record played greedily, and a rating
+    produced under the `legacy` evaluation is not the `sacrifice` one.
+
+    This is why the evaluation is a NAMED PROFILE rather than two loose floats.
+    A cache key can carry a name; it cannot notice that somebody edited a
+    module-level constant, which is exactly the silent-stale-reuse failure the
+    schema comment above warns about.
     """
     parts = ["team", RATING_SCHEMA, sorted(team), effort, turns, our_sets]
     if opponents is not None:
         parts.append(sorted(opponents))
     if pilot:
         parts.append(pilot)
+    if eval_profile:
+        parts.append(eval_profile)
     return ResultCache.key(*parts)
 
 
@@ -83,7 +92,7 @@ def _skipped(team, our_sets, beam_score, reason, wins=0, total=0):
 def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
               min_winrate=0.0, script_screen=False, beam_score=None,
               opponents=None, pilot=None, punish_floor=None,
-              worst_matchup_floor=0.0):
+              worst_matchup_floor=0.0, eval_profile=None):
     """Rate one roster. Returns the record stage 1 writes to its cache.
 
     `opponents` restricts which of the library's teams it is rated against --
@@ -95,9 +104,25 @@ def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
     the aggregate `min_winrate` cannot express.
 
     `pilot` chooses who plays the games the win count comes from; None keeps
-    the greedy default. See WORKFLOW.md §4.4 -- the record and the punish
-    numbers are otherwise played by different players.
+    the greedy default. See WORKFLOW.md §4.0 -- the greedy pilot gives whichever
+    side is passed as p1 a systematic advantage, measured at 78% of mirrored
+    matchups flipping.
+
+    `eval_profile` chooses the EVALUATION: "sacrifice" (default) or "legacy".
+    Applied here rather than by the caller because a pool worker never sees the
+    parent's context manager -- each job carries the name and applies it on
+    arrival.
     """
+    import solver
+    with solver.evaluation(eval_profile):
+        return _rate_team(team, world, effort, turns, our_sets, jobs,
+                          min_winrate, script_screen, beam_score, opponents,
+                          pilot, punish_floor, worst_matchup_floor)
+
+
+def _rate_team(team, world, effort, turns, our_sets, jobs, min_winrate,
+               script_screen, beam_score, opponents, pilot, punish_floor,
+               worst_matchup_floor):
     import generate_team as gt
     merged, moves = world["merged"], world["moves"]
     natures, typechart = world["natures"], world["typechart"]

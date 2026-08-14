@@ -28,7 +28,8 @@ def rate(team, world, opponents, args, label):
     t0 = time.time()
     rec = roster_rating.rate_team(
         list(team), world, effort=args.effort, turns=args.turns,
-        jobs=args.jobs, opponents=list(opponents))
+        jobs=args.jobs, opponents=list(opponents),
+        pilot=args.pilot, eval_profile=args.evaluation)
     rec["label"] = label
     rec["seconds"] = time.time() - t0
     return rec
@@ -63,18 +64,28 @@ def main():
     ap.add_argument("--pool-size", type=int, default=40)
     ap.add_argument("--beam-width", type=int, default=12)
     ap.add_argument("--control-only", action="store_true")
+    ap.add_argument("--pilot", default=None,
+                    choices=["greedy", "equilibrium"])
+    ap.add_argument("--evaluation", default=None,
+                    choices=["sacrifice", "legacy"])
+    ap.add_argument("--only", default=None,
+                    help="comma-separated control teams, for a quick sweep")
     ap.add_argument("--optimise-sets", action="store_true")
     args = ap.parse_args()
 
     world = roster_rating.load_world()
     names = list(world["teams"])
+    picked = ([n.strip() for n in args.only.split(",")] if args.only
+              else names)
     print(f"effort {args.effort}, {args.turns} turns, {args.jobs} jobs, "
+          f"pilot={args.pilot or 'tier default'}, "
+          f"eval={args.evaluation or 'default'}, "
           f"{len(names)} library teams\n")
 
     print("CONTROL -- the hand-built teams in teams.csv, each vs the other 7")
     print("-" * 100)
     control = []
-    for n in names:
+    for n in picked:
         rec = rate(world["teams"][n], world,
                    [m for m in names if m != n], args, n)
         control.append(rec)
@@ -117,7 +128,8 @@ def main():
         t1 = time.time()
         rec = roster_rating.rate_team(
             list(team), world, effort=args.effort, turns=args.turns,
-            jobs=args.jobs, our_sets=sets)
+            jobs=args.jobs, our_sets=sets, pilot=args.pilot,
+            eval_profile=args.evaluation)
         rec["label"] = f"gen{i:02d}"
         rec["seconds"] = time.time() - t1
         generated.append(rec)
