@@ -361,16 +361,25 @@ def main():
             done += 1
             elapsed = time.time() - started
             left = elapsed / done * (len(todo) - done) / 60
+            # The screen's number is printed for teams it ACCEPTED too, and for
+            # teams a LATER screen rejected. Seeing it only where it fires
+            # tells you nothing about where to put the floor; seeing the whole
+            # distribution does.
+            guar = record.get("opening_guaranteed")
             if record.get("skipped"):
+                # ...except where the reason already quotes it.
+                shown = ("" if record["skipped"].startswith("opening already")
+                         or guar is None else f"open {guar:.0f}   ")
                 print(f"  [{done}/{len(todo)}] skipped: {record['skipped']} "
                       f"({record['wins']}/{record['total']} won)   "
-                      f"~{left:.0f} min left", flush=True)
+                      f"{shown}~{left:.0f} min left", flush=True)
                 continue
             adj = record.get("adjusted_win_rate")
             print(f"  [{done}/{len(todo)}] "
                   f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
                   f"punish {record['exploitability'] or float('nan'):6.1f}   "
-                  f"{record['wins']}/{record['total']} won   "
+                  + (f"open {guar:6.0f}   " if guar is not None else "")
+                  + f"{record['wins']}/{record['total']} won   "
                   f"~{left:.0f} min left", flush=True)
 
     # Back into beam order. Results arrive out of order -- that is what keeps
@@ -383,8 +392,30 @@ def main():
     # punish -- observed live before this was changed.
     ranked = sorted([r for r in rated if r.get("exploitability") is not None],
                     key=roster_rating.rank_key)
+
+    def report_openings():
+        """WHERE TO PUT THE FLOOR NEXT TIME. Every team the screen looked at,
+        accepted or rejected, so the choice is made against a distribution
+        rather than against the one number a rejection happened to print. It
+        runs on the empty ranking too -- a run where nothing survived is
+        exactly the run where you need to know whether the floor was the
+        reason."""
+        openings = sorted(r["opening_guaranteed"] for r in rated
+                          if r.get("opening_guaranteed") is not None)
+        if not openings:
+            return
+        kept = [r["opening_guaranteed"] for r in ranked
+                if r.get("opening_guaranteed") is not None]
+        mid = openings[len(openings) // 2]
+        print(f"\nopening guaranteed across {len(openings)} teams: "
+              f"worst {openings[0]:.0f}, median {mid:.0f}, "
+              f"best {openings[-1]:.0f}"
+              + (f"; worst KEPT team {min(kept):.0f}" if kept else "")
+              + f"   (--punish-screen floor was {punish_floor:.0f})")
+
     if not ranked:
         print("\nNo ratings produced (quick tier does not compute them).")
+        report_openings()
         return
 
     print("\n" + "=" * 96)
@@ -401,6 +432,8 @@ def main():
         print(f"    {', '.join(r['team'])}")
         if r.get("worst_opponent"):
             print(f"    worst vs {r['worst_opponent']} ({r['worst_value']:.0f})")
+
+    report_openings()
 
     # EVERY rated team, not just the top --keep. The numbering is the ranking,
     # so gen06 means the same team tomorrow as it does today -- which is what

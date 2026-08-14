@@ -104,23 +104,36 @@ def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
     teams = ({n: world["teams"][n] for n in opponents} if opponents
              else world["teams"])
 
+    def stamp(rec):
+        """Every exit carries the screen's number, not just the exit the screen
+        owns. A team rejected two screens later is still evidence about where
+        the floor belongs, and dropping it there is how the distribution ends
+        up made entirely of the teams the floor already rejected."""
+        if opening_guaranteed is not None:
+            rec["opening_guaranteed"] = opening_guaranteed
+        return rec
+
     # CHEAPEST SCREEN FIRST: is the opening already lost? Seconds per team
     # against minutes for the audit, so this runs before everything else. It
     # screens on the guaranteed value of the opening, NOT on the punish -- see
     # punish_screen for the measurement showing why the obvious version ranks a
     # team with no threats first.
+    opening_guaranteed = None
     if punish_floor is not None:
         from punish_screen import is_hopeless, screen_team
         verdict = screen_team(team, teams, merged, moves, natures, typechart,
                               our_sets=our_sets)
+        # Kept on the record whether or not it rejects, so the distribution is
+        # visible and the floor can be calibrated against real numbers. A floor
+        # you only see when it fires is one you cannot set.
+        opening_guaranteed = verdict.get("guaranteed")
         if is_hopeless(verdict, floor=punish_floor):
             worst = verdict.get("worst_vs") or (None, [], None)
-            rec = _skipped(team, our_sets, beam_score,
-                           f"opening already lost ({verdict['guaranteed']:.0f} "
-                           f"guaranteed vs {worst[0]} "
-                           f"{'/'.join(worst[1] or [])})")
-            rec["opening_guaranteed"] = verdict["guaranteed"]
-            return rec
+            return stamp(_skipped(
+                team, our_sets, beam_score,
+                f"opening already lost ({verdict['guaranteed']:.0f} "
+                f"guaranteed vs {worst[0]} "
+                f"{'/'.join(worst[1] or [])})"))
 
     if script_screen:
         # One sampled config per scripted opponent, so this is cheap next to
@@ -129,8 +142,8 @@ def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
             [(beam_score, list(team))], teams, {}, merged, moves, natures,
             typechart, max_turns=turns, our_sets=our_sets)
         if screened and screened[0][2]:
-            return _skipped(team, our_sets, beam_score,
-                            "loses every scripted opening")
+            return stamp(_skipped(team, our_sets, beam_score,
+                                  "loses every scripted opening"))
 
     if min_winrate > 0 or worst_matchup_floor:
         screen = gt.verify_with_solver(
@@ -154,16 +167,18 @@ def rate_team(team, world, effort="standard", turns=10, our_sets=None, jobs=1,
                     f"(floor {worst_matchup_floor:.0%})",
                     wins=s_wins, total=s_total)
                 rec["worst_matchup"] = {"opponent": worst[1], "rate": worst[0]}
-                return rec
+                return stamp(rec)
         if min_winrate > 0 and s_total and s_wins / s_total < min_winrate:
-            return _skipped(team, our_sets, beam_score, "below --min-winrate",
-                            wins=s_wins, total=s_total)
+            return stamp(_skipped(team, our_sets, beam_score,
+                                  "below --min-winrate",
+                                  wins=s_wins, total=s_total))
 
     verdict = gt.verify_with_solver(
         team, teams, merged, moves, natures, typechart, {}, [],
         max_turns=turns, all_backs=True, effort=effort, jobs=jobs,
         our_sets=our_sets, pilot=pilot)
-    return summarise(team, verdict, our_sets=our_sets, beam_score=beam_score)
+    return stamp(summarise(team, verdict, our_sets=our_sets,
+                           beam_score=beam_score))
 
 
 def summarise(team, verdict, our_sets=None, beam_score=None):

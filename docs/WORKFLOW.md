@@ -56,7 +56,7 @@ Options worth knowing:
 | `--keep N` | 6 | how many reach the deep search |
 | `--optimise-sets` | off | optimise item + 4 moves against the real metagame. **Use it** |
 | `--min-winrate F` | 0.80 | skip auditing a team that cannot win |
-| `--punish-screen` | off | throw out a team whose OPENING is already lost, before the audit. Seconds per team |
+| `--punish-screen [F]` | off (floor −250) | throw out a team whose OPENING is already lost, before the audit. Seconds per team. **Prints the number for every team it looks at, not only the ones it rejects** — see below |
 | `--worst-matchup F` | off | reject a team whose WORST single matchup wins less than F, e.g. `0.89` for 80/90. Abandons on the first failing opponent |
 | `--generations SPEC` | all | e.g. `1-5` |
 | `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
@@ -69,6 +69,37 @@ Options worth knowing:
 | `--regenerate` | off | force stage 1 even when `--pick` would have skipped it |
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
 | `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
+
+### Reading and calibrating `--punish-screen`
+
+The number is in `heuristic_eval` points, the same scale the rest of the tool
+uses — **≈180 points is one Pokémon**. It is the value of the board after
+turn 1 that we can *guarantee*: we pick our best opening, they answer it with
+a perfect read of what we picked. Negative is normal and expected, because a
+perfect read is not a fair fight. Measured on real rosters: Big 6 **−80**,
+Sand **−160**, NAIC **−208**, a deliberately bad junk team **−307**.
+
+The default floor of −250 is calibrated on those few teams, so treat it as a
+starting point rather than a setting. Every stage 1 run now prints the number
+for teams the screen **accepted** and for teams a **later** screen rejected,
+plus a distribution line at the end:
+
+```
+  [2/4] skipped: below --min-winrate (396/552 won)   open -215   ~3 min left
+opening guaranteed across 4 teams: worst -239, median -215, best -180   (--punish-screen floor was -250)
+```
+
+Read that line as the answer to "where should the floor be?". If the worst
+*kept* team is far above the floor, the floor rejected nothing and cost you
+nothing; if the whole distribution sits just above it — as in the run above,
+where four teams between −180 and −239 all cleared the floor and then all
+failed `--min-winrate` — the floor is too permissive for that pool and the
+audit budget is being spent on teams that were never going to pass.
+
+It screens on the **guaranteed value, not the punish**. The obvious version is
+measurably backwards: a team with no threats gives a best-responding opponent
+nothing to gain, so turn-1 exploitability ranked the junk team *first* (3.5,
+against 49.5 and 66.6 for real teams).
 
 ### Pinning a set in `preferences.csv`
 

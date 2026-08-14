@@ -10,3 +10,6 @@ results.html
 # Overnight search output: caches are machine-local and workbooks are generated
 tools/*.json
 tools/*.xlsx
+
+# Screener margin cache: machine-local, rebuilt from the pool in ~30s
+matrix_cache.pkl
