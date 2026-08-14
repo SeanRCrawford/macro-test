@@ -501,6 +501,20 @@ def get_state_team():
     return st.session_state.get("team", [])
 
 
+def describe_action(a):
+    """One entry of a committed_plan.describe() tuple, in words.
+
+    (name, kind, label, target_names) -- 'switch' puts the label where the
+    move name would go, which reads as nonsense unless it is special-cased.
+    """
+    name, kind, label, targets = a
+    if kind == "switch":
+        return f"{name} switches to {label}"
+    if kind == "protect" or not targets or list(targets) == [name]:
+        return f"{name} {label}"
+    return f"{name} {label} -> {'/'.join(targets)}"
+
+
 def render_path_explorer(key_prefix, matchup, our_sets):
     """Shared 'does this hold up against the worst rolls AND losing every speed
     tie' panel -- used by both Battle Viewer and Vs Team. `matchup` is
@@ -1662,41 +1676,80 @@ with tab_search:
             import scripted_openings as _so2
             scripted_chosen = [tn for tn in res if tn in _so2.SCRIPTS and res[tn].get("robust")]
             if scripted_chosen:
-                st.markdown("### Full match breakdown by opening variant")
-                st.caption("Fixed-lead opponents run a scripted opening with several variants "
-                           "(which of your slots it targets), plus two practical T1 lines "
-                           "they could take INSTEAD of the script: their best unscripted "
-                           "attack+attack ('greedy'), and either of their two Pokemon "
-                           "Protecting while the other attacks ('protect'). Each variant is "
-                           "played to completion -- the opponent keeps running its script on "
-                           "every turn it still has one for (e.g. Perish Trap's turns 2-4), "
-                           "falling back to greedy once it's spent -- so you see the whole "
-                           "match, not just the opening, for every option side by side.")
+                st.markdown("### One committed opening, against everything it can meet")
+                st.caption("ONE turn-1 action, chosen from what you can actually see -- your "
+                           "four, your lead, their lead -- and then played against every "
+                           "opening they might run crossed with every back pair their lead "
+                           "could be hiding. The turn is simultaneous and their backs are "
+                           "face down, so a plan that answers each of those differently is "
+                           "not a plan you can execute. Each side brings four.")
                 t1_tname = st.selectbox("Opponent", scripted_chosen, key="t1bd_tname")
+                t1_lead = (team_meta.get(t1_tname, {}).get("lead")
+                           or list(teams[t1_tname])[:2])
+                t1_rest = [x for x in teams[t1_tname] if x not in t1_lead]
+                t1_backs = list(itertools.combinations(t1_rest, 2))
+                NO_BET = "No — must beat all of them"
+                t1_bet = st.selectbox(
+                    f"Their lead is {t1_lead[0]}/{t1_lead[1]}. Bet on a back pair?",
+                    [NO_BET] + [f"{a} / {b}" for a, b in t1_backs], key="t1bd_bet",
+                    help="Leave this alone and the opening is chosen to withstand any "
+                         "back pair. Pick one and the opening is chosen against THAT "
+                         "pair only -- it is still reported against all six, so you can "
+                         "see what the bet costs you against the other five.")
+                assumed = (None if t1_bet == NO_BET
+                           else t1_backs[[f"{a} / {b}" for a, b in t1_backs].index(t1_bet)])
                 if st.button("Show breakdown", key="t1bd_go"):
                     from committed_plan import turn1_breakdown
                     b4 = res[t1_tname]["robust"]["our_bring4"]
-                    er = teams[t1_tname]
                     t1_esets = {**(st.session_state.get("enemy_sets_override") or {}),
                                 **(team_meta.get(t1_tname, {}).get("sets") or {})}
-                    with st.spinner("Playing out every opening variant to completion..."):
-                        bd = turn1_breakdown(b4, er, merged, moves, natures, typechart, t1_tname,
-                                              our_sets=sets, enemy_sets=t1_esets,
-                                              max_turns=st.session_state.get("search_maxturns", 12))
+                    with st.spinner("Playing the committed opening against every "
+                                    "variant x back pair..."):
+                        bd = turn1_breakdown(
+                            b4, teams[t1_tname], merged, moves, natures, typechart, t1_tname,
+                            our_sets=sets, enemy_sets=t1_esets,
+                            enemy_lead=t1_lead, assumed_back=assumed,
+                            max_turns=st.session_state.get("search_maxturns", 12))
+                    st.success("COMMITTED TURN 1: "
+                               + "; ".join(describe_action(a)
+                                           for a in (bd["opening"] or [])))
+                    if assumed:
+                        st.info(f"Chosen against {assumed[0]}/{assumed[1]} specifically. "
+                                "The table below still plays it against all "
+                                f"{len(bd['brings'])} back pairs.")
+                    allg = [r for d in bd["variants"].values()
+                            for r in d["per_back"].values()]
+                    st.metric("Games this one action wins",
+                              f"{sum(1 for r in allg if r['winner'] == 'p1')} / {len(allg)}",
+                              help="Every opening variant x every back pair.")
                     labels = {"greedy": "Unscripted: their best attack+attack",
                               "protect0": "Unscripted: one Protects, the other attacks (choice A)",
                               "protect1": "Unscripted: one Protects, the other attacks (choice B)"}
-                    for key, d in bd.items():
+                    for key, d in bd["variants"].items():
                         title = labels.get(key, f"Scripted variant {key}")
-                        result = {"p1": "WIN", "p2": "LOSS"}.get(d["winner"], d["winner"].upper())
-                        with st.expander(f"{title} — {result} (turn {d['turns']})"):
-                            st.write("Our turn-1 action:",
-                                     [(a[0], a[2], list(a[3])) for a in d["our_t1_action"]])
+                        result = {"p1": "WIN", "p2": "LOSS"}.get(d["winner"],
+                                                                 d["winner"].upper())
+                        won = sum(1 for r in d["per_back"].values() if r["winner"] == "p1")
+                        with st.expander(f"{title} — worst back pair: {result} "
+                                         f"({won}/{len(d['per_back'])} back pairs won)"):
+                            st.caption("Their backs are face down at turn 1, so the same "
+                                       "action is played against each pair. The worst one "
+                                       "is what this line is actually worth.")
+                            st.dataframe(pd.DataFrame(
+                                [{"Their back": f"{b[2]} / {b[3]}",
+                                  "Result": {"p1": "WIN", "p2": "LOSS"}.get(
+                                      r["winner"], r["winner"].upper()),
+                                  "Turns": r["turns"]}
+                                 for b, r in d["per_back"].items()]),
+                                width='stretch', hide_index=True)
                             st.write("Their turn-1 action:", d["enemy_t1_action"])
-                            st.caption("HP shown is the FINAL state at the end of the match.")
+                            st.caption(f"Log below is the worst pair "
+                                       f"({d['worst_bring'][2]}/{d['worst_bring'][3]}); "
+                                       "HP is the FINAL state.")
                             hprows = [{"Pokemon": n, "HP": f"{hp}/{mx}"}
                                       for n, (hp, mx) in d["hp_after"].items()]
-                            st.dataframe(pd.DataFrame(hprows), width='stretch', hide_index=True)
+                            st.dataframe(pd.DataFrame(hprows), width='stretch',
+                                         hide_index=True)
                             st.code(d["log"])
 
             # Branching detail: opponent -> enemy bring -> turn-by-turn gameplan.

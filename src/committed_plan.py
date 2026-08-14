@@ -291,6 +291,77 @@ def _quick_turn1_outcome(desc, our_bring4, enemy_names, merged, moves_db, nature
     return sum(c.current_hp for c in b.p1.roster) - sum(c.current_hp for c in b.p2.roster)
 
 
+def enemy_brings(enemy_roster, enemy_lead=None, assumed_back=None):
+    """The bring-4s consistent with what we can SEE at turn 1.
+
+    Each side brings four. Handing a script their whole six is not a harder
+    version of the matchup, it is a different game -- reported as "the scripted
+    variants are WAY too tough, they have 6 pokemon always".
+
+    A roster of four is already a bring. A roster of six means we have seen the
+    lead and nothing else, so every C(4,2) back pair is still live; naming
+    `assumed_back` narrows that to the one you are betting on.
+    """
+    roster = list(enemy_roster)
+    if len(roster) <= 4:
+        return [roster]
+    lead = list(enemy_lead or roster[:2])
+    rest = [x for x in roster if x not in lead]
+    if assumed_back:
+        return [lead + list(assumed_back)]
+    return [lead + list(bp) for bp in itertools.combinations(rest, 2)]
+
+
+def rank_openings(our_bring4, brings, merged, moves_db, natures, typechart,
+                   team_name=None, our_sets=None, roll="min", aggregate="worst"):
+    """Every legal turn-1 action of ours, ranked at the information set.
+
+    THE information set is: our four, our lead, their lead. Not their backs
+    (they have not come out) and not their turn-1 action (the turn is
+    simultaneous). So each candidate is scored across every bring in `brings`
+    crossed with every opening variant they might run, and the score is the
+    aggregate -- `worst` for "must withstand anything", `sum` for "do best on
+    average across them".
+
+    Turn-1-only outcomes, which is what makes this affordable: the expensive
+    part is playing the remaining turns, and a candidate that is already losing
+    the opening exchange is not the answer to the lead.
+
+    Returns [(score, desc)] best first.
+    """
+    variants = (all_scripts(team_name) if team_name else []) + [(None, None)]
+    probe = _mk(our_bring4, brings[0], merged, moves_db, natures, typechart, our_sets, roll)
+    ms = _movesets(probe, merged, moves_db, our_sets)
+    probe._movesets = ms
+    combine = min if aggregate == "worst" else sum
+
+    ranked = []
+    for opt in our_candidate_joint_actions(probe, probe.p1, probe.p2, ms, 1):
+        desc = describe(opt)
+        outcomes = [_quick_turn1_outcome(desc, our_bring4, enemy, merged, moves_db,
+                                          natures, typechart, script, our_sets, roll)
+                    for enemy in brings for _idx, script in variants]
+        ranked.append((combine(outcomes), desc))
+    ranked.sort(key=lambda x: -x[0])
+    return ranked
+
+
+def choose_opening(our_bring4, enemy_roster, merged, moves_db, natures, typechart,
+                    team_name=None, enemy_lead=None, assumed_back=None,
+                    our_sets=None, roll="min"):
+    """The ONE turn-1 action to commit to, given only what we can see.
+
+    `assumed_back` is the judgement call: of the six back pairs their lead could
+    be hiding, bet on this one. The action is CHOSEN against it and should still
+    be REPORTED against all six, so the cost of the bet is visible rather than
+    assumed away.
+    """
+    brings = enemy_brings(enemy_roster, enemy_lead, assumed_back)
+    ranked = rank_openings(our_bring4, brings, merged, moves_db, natures, typechart,
+                            team_name=team_name, our_sets=our_sets, roll=roll)
+    return ranked[0][1] if ranked else None
+
+
 def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_db, natures,
                              typechart, team_name=None, max_turns=14, our_sets=None,
                              roll="min", screen_top=6):
@@ -361,85 +432,124 @@ def find_plan_unknown_backs(our_bring4, enemy_roster, enemy_lead, merged, moves_
     return (best[0], best[1], False) if best else (None, {}, False)
 
 
-def turn1_breakdown(our_names, enemy_names, merged, moves_db, natures, typechart, team_name,
+def turn1_breakdown(our_names, enemy_roster, merged, moves_db, natures, typechart, team_name,
                      desc=None, our_sets=None, enemy_sets=None, roll="avg",
-                     include_generic=True, max_turns=14):
-    """Per-opening-variant FULL GAME breakdown for a scripted/fixed-lead team,
-    instead of collapsing to only the worst-case result (play_scripted_worst_case
-    / worst_response report ONLY the worst variant). Each opening variant is
-    played out individually to completion -- not just turn 1 -- so a lead that
-    looks clean against one targeting choice but collapses against another is
-    visible rather than hidden behind the aggregate worst case, and "does this
-    actually win" is visible for the WHOLE match, not just the opening.
+                     include_generic=True, max_turns=14,
+                     enemy_lead=None, assumed_back=None):
+    """Play ONE committed opening against everything it might meet.
 
-    The opponent keeps running its script on every subsequent turn it still
-    has one for (e.g. Hard Trick Room's turn 2 Parting Shot, Perish Trap's
-    turns 2-4) -- see scripted_openings.py -- falling back to the greedy model
-    once the script is spent (returns None) or was never scripted to begin
-    with. Our side plays adaptively every turn via the real solver; only turn
-    1 is optionally pinned (see `desc`).
+    Three things this has to respect, all of which it previously broke:
 
-    desc: a fixed turn-1 action (e.g. from find_plan/find_plan_unknown_backs)
-    to pin for every variant's first turn, or None to let the solver pick our
-    best turn-1 response independently per variant instead. Turns after the
-    first always use the solver regardless.
+    1. EACH SIDE BRINGS FOUR. `enemy_roster` may be their whole six -- that is
+       what team preview shows you -- but the game is four against four, so the
+       six is expanded into the bring-4s their lead could be fronting rather
+       than being sent in as a six-Pokemon side.
 
-    include_generic: also include the plain greedy 2v2 fallback (both actives
-    attack, no Protect) as a "greedy" entry, alongside every variant
-    all_scripts() returns -- the rehearsed script (per targeting choice) AND
-    the generic "one Protects, the other attacks" alternative (see
-    scripted_openings._protect_and_attack_script) -- so the full realistic
-    option space is visible, not just the one scripted line.
+    2. OUR TURN 1 CANNOT DEPEND ON THEIR TURN 1. The turn is simultaneous. This
+       used to solve our response separately per variant, WITH that variant's
+       script handed to the solver, so Hard Trick Room got one answer if its
+       Incineroar faked out our left slot and a different answer if it faked out
+       our right -- a plan that reads their mind. One action is chosen and then
+       pinned everywhere.
 
-    Returns {variant_key: {"winner", "turns", "our_t1_action", "enemy_t1_action",
-    "hp_after", "log"}} -- variant_key is an int for scripted variants, a
-    string for the rest. hp_after/log reflect the FINAL state of the match.
+    3. OUR TURN 1 CANNOT DEPEND ON THEIR BACKS. You do not know what is behind
+       the lead until it comes out, so the same action is played against every
+       back pair.
+
+    Turns after the first DO use the solver, and that is correct: by then their
+    line is observed.
+
+    desc: pin this exact action instead of choosing one (e.g. from find_plan).
+    assumed_back: the judgement call -- choose the action against this back pair
+    only, while still reporting it against all of them, so the cost of the bet
+    is visible.
+
+    Returns {"opening", "assumed_back", "brings", "variants": {key: {...}}}.
+    Each variant entry is its WORST bring-4 (the one that hurts us most), with
+    every bring under "per_back".
     """
+    # The bet narrows what the action is CHOSEN against; it must not narrow what
+    # the action is REPORTED against, or backing a hunch would make the other
+    # five back pairs disappear instead of showing what the hunch costs.
+    brings = enemy_brings(enemy_roster, enemy_lead)
+    if desc is None:
+        desc = choose_opening(our_names, enemy_roster, merged, moves_db, natures,
+                              typechart, team_name=team_name, enemy_lead=enemy_lead,
+                              assumed_back=assumed_back, our_sets=our_sets, roll=roll)
     variants = all_scripts(team_name)
     if include_generic:
         variants = variants + [("greedy", None)]
+    if not variants:
+        variants = [("greedy", None)]
+
     out = {}
     for idx, script in variants:
-        b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll,
-                enemy_sets=enemy_sets)
-        ms = _movesets(b, merged, moves_db, our_sets, enemy_sets=enemy_sets)
-        b._movesets = ms  # scripted_openings.py's generic alternatives need real moves
-        our_t1_action = enemy_t1_action = None
-        for t in range(1, max_turns + 1):
-            if b.is_over():
+        per_back = {}
+        for enemy in brings:
+            played = _play_one(desc, our_names, enemy, merged, moves_db, natures, typechart,
+                               script, our_sets, enemy_sets, roll, max_turns)
+            if played is not None:
+                per_back[tuple(enemy)] = played
+        if not per_back:
+            continue
+        worst_key = max(per_back,
+                        key=lambda k: _loss_rank(per_back[k]["winner"], per_back[k]["turns"]))
+        out[idx] = {**per_back[worst_key], "worst_bring": list(worst_key),
+                    "per_back": per_back}
+    return {"opening": desc, "assumed_back": list(assumed_back) if assumed_back else None,
+            "brings": [list(b) for b in brings], "variants": out}
+
+
+def _loss_rank(winner, turns):
+    """Order outcomes worst-for-us first, so `max` picks the bring that hurts."""
+    return (2, -turns) if winner == "p2" else ((0, turns) if winner == "p1" else (1, 0))
+
+
+def _play_one(desc, our_names, enemy_names, merged, moves_db, natures, typechart,
+               script, our_sets, enemy_sets, roll, max_turns):
+    """One committed opening against one bring-4 and one opening variant,
+    played to completion. Returns None if turn 1 was never legal."""
+    b = _mk(our_names, enemy_names, merged, moves_db, natures, typechart, our_sets, roll,
+            enemy_sets=enemy_sets)
+    ms = _movesets(b, merged, moves_db, our_sets, enemy_sets=enemy_sets)
+    b._movesets = ms  # scripted_openings.py's generic alternatives need real moves
+    our_t1_action = enemy_t1_action = None
+    for t in range(1, max_turns + 1):
+        if b.is_over():
+            break
+        if t == 1:
+            fixed = rebind(desc, b)
+            if fixed is None:
+                return None
+        else:
+            # From turn 2 the solver may use the script: their line is observed
+            # by then, so this is knowledge, not clairvoyance.
+            fixed, _, _ = solve_best_action(b, "p1", ms, depth=1, enemy_script=script)
+            if not fixed:
                 break
-            if desc is not None and t == 1:
-                fixed = rebind(desc, b)
-                if fixed is None:
-                    break
-            else:
-                fixed, _, _ = solve_best_action(b, "p1", ms, depth=1, enemy_script=script)
-                if not fixed:
-                    break
-            opp = None
-            if script is not None:
-                try:
-                    opp = script(b, b.p2, b.p1, t)
-                except Exception:
-                    opp = None
-            if not opp:
-                opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, t)
-            if t == 1:
-                our_t1_action = describe(fixed)
-                enemy_t1_action = [(a.combatant.name, a.kind, a.move.name if a.move else "-")
-                                    for a in opp]
+        opp = None
+        if script is not None:
             try:
-                b.run_turn(list(fixed), opp)
-            except ValueError:
-                break
-        if our_t1_action is None:
-            continue  # never got a legal turn 1 -- nothing to report for this variant
-        out[idx] = {
-            "winner": b.winner() or "timeout",
-            "turns": b.turn_num,
-            "our_t1_action": our_t1_action,
-            "enemy_t1_action": enemy_t1_action,
-            "hp_after": {c.name: (c.current_hp, c.max_hp()) for c in b.p1.roster + b.p2.roster},
-            "log": b.log.dump(),
-        }
-    return out
+                opp = script(b, b.p2, b.p1, t)
+            except Exception:
+                opp = None
+        if not opp:
+            opp = greedy_opponent_joint_action(b, b.p2, b.p1, ms, t)
+        if t == 1:
+            our_t1_action = describe(fixed)
+            enemy_t1_action = [(a.combatant.name, a.kind, a.move.name if a.move else "-")
+                               for a in opp]
+        try:
+            b.run_turn(list(fixed), opp)
+        except ValueError:
+            break
+    if our_t1_action is None:
+        return None
+    return {
+        "winner": b.winner() or "timeout",
+        "turns": b.turn_num,
+        "our_t1_action": our_t1_action,
+        "enemy_t1_action": enemy_t1_action,
+        "hp_after": {c.name: (c.current_hp, c.max_hp()) for c in b.p1.roster + b.p2.roster},
+        "log": b.log.dump(),
+    }
