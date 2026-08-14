@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 import random
 
 from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
+                    defensive_stat, move_from_showdown,
                      apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS)
@@ -114,14 +115,7 @@ class Battle:
                    p2=[c.name for c in self.p2.active], weather_after=self.field.weather)
 
     def make_move(self, move_key: str) -> MoveInfo:
-        m = self.moves_db[move_key]
-        return MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
-                         priority=m.get("priority", 0), secondary=m.get("secondary"),
-                         self_effect=m.get("self"), boosts=m.get("boosts"),
-                         recoil=m.get("recoil"), drain=m.get("drain"),
-                         has_crash=bool(m.get("hasCrashDamage")),
-                         volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                         self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True))
+        return move_from_showdown(self.moves_db[move_key])
 
     def _roll(self, min_v, max_v, avg_v):
         # force_roll lets a caller demand worst-case ('min') or best-case ('max')
@@ -722,7 +716,7 @@ class Battle:
                 atk_stat *= 1.5
             if attacker.item == "Choice Specs" and atk_key == "spa":
                 atk_stat *= 1.5
-            def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
+            def_stat = defensive_stat(target, def_key, move)
 
             target_side = self.side_of(target)
             screens_active = target_side.screens_auroraveil > 0 or (

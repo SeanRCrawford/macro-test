@@ -29,7 +29,7 @@ literature says to ask first. `joint_kos()` answers it.
 import math
 from dataclasses import dataclass
 
-from damage import damage_roll, effective_stat
+from damage import damage_roll, defensive_stat, effective_stat
 from engine import effective_speed
 from matching import max_weight_matching
 from rolls import kill_probability
@@ -138,7 +138,7 @@ def _best_attack(attacker, defender, movesets, typechart, context):
             atk_stat *= 1.5
         if attacker.item == "Choice Specs" and not physical:
             atk_stat *= 1.5
-        def_stat = effective_stat(defender.stats[def_key], defender.stages[def_key])
+        def_stat = defensive_stat(defender, def_key, move)
         # Screens are per-category, matching battle.py: Aurora Veil covers both,
         # Reflect only physical, Light Screen only special.
         screens = auroraveil or (reflect if physical else lightscreen)

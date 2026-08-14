@@ -135,11 +135,34 @@ class MoveInfo:
                                             # stat stages/volatiles, 'shedtail' = Shed Tail leaves a
                                             # Substitute) -- only the switch itself is modeled here,
                                             # not those extra pass-along effects.
+    ignore_defensive: bool = False      # showdown 'ignoreDefensive': Sacred Sword, Chip Away and
+                                        # Darkest Lariat hit as if the target's Defence stage were 0.
+                                        # ('ignoreEvasion' rides along with it in the data and is a
+                                        # no-op here -- moves never miss in this simulation.)
     accuracy: bool | int = True            # raw showdown 'accuracy': True = never misses, else 1-100.
                                             # Battle resolution doesn't roll a miss chance (moves
                                             # always hit) -- this exists purely so the greedy/candidate
                                             # move-choice scoring can prefer a more reliable move when
                                             # two options are otherwise equally good.
+
+
+def move_from_showdown(m: dict) -> MoveInfo:
+    """Build a MoveInfo from a raw gen9moves.json entry.
+
+    THE one place that reads the raw dict. There were four hand-written copies
+    of this, and they had already drifted (one forgot `has_crash`); adding
+    `ignore_defensive` to all of them separately is how a move flag ends up
+    working in the simulator but not in the solver that chooses the move.
+    """
+    return MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
+                    priority=m.get("priority", 0), secondary=m.get("secondary"),
+                    self_effect=m.get("self"), boosts=m.get("boosts"),
+                    recoil=m.get("recoil"), drain=m.get("drain"),
+                    has_crash=bool(m.get("hasCrashDamage")),
+                    volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
+                    self_switch=m.get("selfSwitch"),
+                    ignore_defensive=bool(m.get("ignoreDefensive")),
+                    accuracy=m.get("accuracy", True))
 
 
 def is_spread_move(move_target: str) -> bool:
@@ -175,6 +198,22 @@ def type_multiplier(move_type: str, defender_types: list, typechart: dict) -> fl
 
 def effective_stat(base_val: int, stage: int, boost_mult: float = 1.0) -> float:
     return base_val * STAGE_MULT[stage] * boost_mult
+
+
+def defensive_stat(target: Combatant, def_key: str, move: "MoveInfo") -> float:
+    """The defence a move actually hits, honouring `ignoreDefensive`.
+
+    Sacred Sword, Chip Away and Darkest Lariat hit as though the target's
+    Defence stage were 0 -- so a +2 Iron Defence does not blunt them. Showdown
+    ignores the stage in BOTH directions, so an already-lowered target does not
+    take extra damage from them either.
+
+    Every damage site in the codebase goes through this, because four of them
+    computed the defence independently and only one of them would otherwise
+    have learned about the flag.
+    """
+    stage = 0 if getattr(move, "ignore_defensive", False) else target.stages[def_key]
+    return effective_stat(target.stats[def_key], stage)
 
 
 STAT_DROP_IMMUNE_ABILITIES = {"Clear Body", "Full Metal Body", "White Smoke"}

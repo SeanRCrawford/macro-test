@@ -16,7 +16,8 @@ no every-ability coverage) -- it's built to cover exactly what's needed for
 this format, and is meant to be extended incrementally.
 """
 from dataclasses import dataclass, field
-from damage import Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate, effective_stat
+from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
+                    effective_stat, defensive_stat)
 
 # Display names, so the log reads like the game rather than like the code.
 WEATHER_NAMES = {"rain": "a rainstorm", "sun": "harsh sunlight",
@@ -260,7 +261,7 @@ def resolve_damage_action(action: Action, field_state: FieldState, typechart: di
         if attacker.item == "Choice Specs" and atk_key == "spa":
             atk_stat *= 1.5
 
-        def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
+        def_stat = defensive_stat(target, def_key, action.move)
 
         # NOTE: this standalone demo function doesn't track which side is which
         # (no Battle/Side objects here), so screens are not modeled -- the real,

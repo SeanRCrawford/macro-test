@@ -19,7 +19,7 @@ Treat it as set selection, then let the real solver judge the team.
 """
 import itertools
 
-from damage import MoveInfo, effective_stat, damage_roll, hit_count_for
+from damage import MoveInfo, effective_stat, damage_roll, hit_count_for, move_from_showdown
 from combatants import make_combatant
 
 # NOTE: there is deliberately no hardcoded catalogue of "good items" here.
@@ -186,12 +186,7 @@ def legal_items(name, merged, min_usage=MIN_ITEM_USAGE, extra_items=None):
 
 
 def _mk_move(m):
-    return MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
-                     priority=m.get("priority", 0), secondary=m.get("secondary"),
-                     self_effect=m.get("self"), boosts=m.get("boosts"),
-                     recoil=m.get("recoil"), drain=m.get("drain"),
-                     volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                     self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True))
+    return move_from_showdown(m)
 
 
 NEVER_MISS_ABILITIES = {"No Guard"}

@@ -256,11 +256,11 @@
         "turn": 5
       },
       {
-        "chosen": "Hydreigon:move:Dark Pulse->Pelipper | Incineroar:move:Throat Chop->Pelipper",
-        "eval": -162.1915,
-        "eval_p2": 162.1915,
-        "n_our_actions": 8,
-        "score": -490.4696,
+        "chosen": "Gallade:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Mega Metagross",
+        "eval": 123.6328,
+        "eval_p2": -123.6328,
+        "n_our_actions": 14,
+        "score": 138.3971,
         "turn": 6
       }
     ]
@@ -314,11 +314,11 @@
         "turn": 5
       },
       {
-        "chosen": "Hydreigon:move:Dark Pulse->Pelipper | Incineroar:move:Throat Chop->Pelipper",
-        "eval": -95.0376,
-        "eval_p2": 95.0376,
-        "n_our_actions": 8,
-        "score": -423.3157,
+        "chosen": "Gallade:move:Psycho Cut->Mega Floette | Incineroar:move:Flare Blitz->Mega Floette",
+        "eval": 163.7866,
+        "eval_p2": -163.7866,
+        "n_our_actions": 14,
+        "score": 296.913,
         "turn": 6
       }
     ]

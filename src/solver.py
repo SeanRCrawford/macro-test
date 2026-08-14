@@ -30,7 +30,8 @@ import random
 from contextlib import contextmanager
 import itertools
 
-from damage import Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll, CHARGE_WEATHER_SKIP
+from damage import (Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll,
+                    defensive_stat, move_from_showdown, CHARGE_WEATHER_SKIP)
 from engine import FieldState, Action, on_switch_in, effective_speed
 from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS
 
@@ -49,14 +50,7 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
         key = mv_name.lower().replace(" ", "").replace("-", "").replace("'", "")
         if key not in moves_db:
             continue
-        m = moves_db[key]
-        out.append((MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
-                              priority=m.get("priority", 0), secondary=m.get("secondary"),
-                              self_effect=m.get("self"), boosts=m.get("boosts"),
-                              recoil=m.get("recoil"), drain=m.get("drain"),
-                              has_crash=bool(m.get("hasCrashDamage")),
-                              volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                              self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True)), pct))
+        out.append((move_from_showdown(moves_db[key]), pct))
     if only_moves:
         # Explicit set supplied (e.g. an optimised team sheet) -- use exactly these,
         # preserving the given order, ignoring usage ranking and top_k.
@@ -125,7 +119,7 @@ def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo
         atk_stat *= 1.5
     if attacker.item == "Choice Specs" and atk_key == "spa":
         atk_stat *= 1.5
-    def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
+    def_stat = defensive_stat(target, def_key, move)
     _, _, avg, _ = damage_roll(50, power, atk_stat, def_stat, attacker, target, move,
                                 typechart, weather=field.weather, num_targets_hit=num_hit)
     return avg
