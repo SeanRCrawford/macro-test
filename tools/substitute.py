@@ -180,6 +180,11 @@ def main():
                     help="candidate rosters rated in parallel (0 = one per "
                          "core). Capped by --per-round: that is how many "
                          "candidates a round has to hand out.")
+    ap.add_argument("--evaluation", default=None,
+                    choices=["sacrifice", "legacy"],
+                    help="which evaluation the solver uses; 'legacy' restores "
+                         "the pre-sacrifice behaviour exactly. Part of the "
+                         "cache key, so the two never mix.")
     ap.add_argument("--vs", default=None,
                     help="rate against ONLY these opponents (comma-separated). "
                          "Applies to the incumbent too, so the comparison stays "
@@ -190,7 +195,11 @@ def main():
                          "below this before auditing it. 0 (default) rates "
                          "every candidate: unlike generation, the loop is "
                          "already only looking at a handful.")
-    ap.add_argument("--record-pilot", choices=["greedy", "equilibrium"],
+    # --pilot is the name every other tool uses. --record-pilot is kept as an
+    # alias because it is what this tool shipped with, and a flag that silently
+    # stops being accepted breaks scripts rather than warning them.
+    ap.add_argument("--pilot", "--record-pilot", dest="pilot",
+                    choices=["greedy", "equilibrium"],
                     default="greedy",
                     help="who plays the games the RECORD is counted from. The "
                          "default greedy pilot is what the workbook has always "
@@ -270,19 +279,22 @@ def main():
     cache = ResultCache(None if args.fresh else args.cache)
     print(f"resuming : {len(cache)} team ratings already cached\n")
 
-    pilot = None if args.record_pilot == "greedy" else args.record_pilot
+    pilot = None if args.pilot == "greedy" else args.pilot
+    import solver
+    solver.apply_eval_profile(args.evaluation)
 
     def rate(roster, roster_sets):
         key = roster_rating.rating_key(roster, args.effort, args.turns,
                                        roster_sets, opponents=opponents,
-                                       pilot=pilot)
+                                       pilot=pilot,
+                                       eval_profile=args.evaluation)
         record = cache.get(key)
         if record is None:
             record = roster_rating.rate_team(
                 roster, world, effort=args.effort, turns=args.turns,
                 our_sets=roster_sets, jobs=args.jobs,
                 min_winrate=args.min_winrate, opponents=opponents,
-                pilot=pilot)
+                pilot=pilot, eval_profile=args.evaluation)
             cache.put(key, record)
             cache.save()
         return record
@@ -335,15 +347,20 @@ def main():
                           for i, p in enumerate(proposals)}
         pending = [{"key": roster_rating.rating_key(
                         p["team"], args.effort, args.turns, cand_sets_by_i[i],
-                        opponents=opponents, pilot=pilot),
+                        opponents=opponents, pilot=pilot,
+                        eval_profile=args.evaluation),
                     "team": list(p["team"]), "effort": args.effort,
                     "turns": args.turns, "our_sets": cand_sets_by_i[i],
                     "jobs": 1, "min_winrate": args.min_winrate,
-                    "opponents": opponents, "pilot": pilot}
+                    "opponents": opponents, "pilot": pilot,
+                    "eval_profile": args.evaluation}
                    for i, p in enumerate(proposals)
+                   # MUST match the key three lines above, or the cache never
+                   # hits and every round re-rates what it already rated.
                    if cache.get(roster_rating.rating_key(
                        p["team"], args.effort, args.turns, cand_sets_by_i[i],
-                       opponents=opponents, pilot=pilot)) is None]
+                       opponents=opponents, pilot=pilot,
+                       eval_profile=args.evaluation)) is None]
         if pending:
             print(f"  rating {len(pending)} candidate(s) on "
                   f"{min(args.jobs, len(pending))} worker(s)...", flush=True)

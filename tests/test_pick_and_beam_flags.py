@@ -15,6 +15,8 @@ WITHOUT `--beam-width` at all: `--candidates` raises the beam width to match,
 because you cannot rate more teams than the beam emits.
 """
 import os
+import re
+import subprocess
 import sys
 import unittest
 
@@ -125,6 +127,47 @@ class TestTheBatchFileAcceptsWhatTheDocsPromise(unittest.TestCase):
         stage1 = self.bat[self.bat.index("generate_overnight.py"):]
         for var in ("%BEAMW%", "%SCREENVS%", "%PILOT%"):
             self.assertIn(var, stage1[:900], var)
+
+
+class TestEveryVariableTheBatchSendsIsAccepted(unittest.TestCase):
+    """The batch file expands %VARS% into three different tools, and they do
+    not share a parser.
+
+    Found this way: adding --pilot/--evaluation/--screen-vs/--beam-width to the
+    substitute.py line broke it outright -- substitute.py accepts none of those
+    four; its equivalents are --record-pilot and --vs, and it has no beam at
+    all. Nothing failed until you combined --substitute with --pilot, which is
+    exactly what the funnel recipe tells you to do.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bat = open(os.path.join(ROOT, "overnight.bat"),
+                       encoding="utf-8").read()
+        cls.carried = dict(re.findall(r"set (\w+)=(--[a-z0-9-]+)", cls.bat))
+
+    def accepted(self, tool):
+        out = subprocess.run([sys.executable, os.path.join(ROOT, "tools", tool),
+                              "--help"], capture_output=True, text=True,
+                             timeout=180).stdout
+        return set(re.findall(r"(--[a-z0-9-]+)", out))
+
+    def check(self, tool):
+        segment = self.bat[self.bat.index(tool):][:600]
+        ok = self.accepted(tool)
+        sent = [v for v in self.carried if f"%{v}%" in segment]
+        self.assertTrue(sent, f"no variables reach {tool}")
+        bad = [(v, self.carried[v]) for v in sent if self.carried[v] not in ok]
+        self.assertEqual(bad, [], f"{tool} is sent flags it cannot parse: {bad}")
+
+    def test_generate_overnight(self):
+        self.check("generate_overnight.py")
+
+    def test_substitute(self):
+        self.check("substitute.py")
+
+    def test_search_teams(self):
+        self.check("search_teams.py")
 
 
 class TestCandidatesAlreadyWidensTheBeam(unittest.TestCase):

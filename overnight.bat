@@ -125,6 +125,7 @@ set PUNISHSCR=
 set PILOT=
 set SCREENVS=
 set BEAMW=
+set SUBVS=
 set EVALN=
 set WORSTMU=
 set PICK=
@@ -164,7 +165,7 @@ if /i "%~1"=="--punish-screen" (set PUNISHSCR=--punish-screen& set GENFLAGS=1& s
 rem WHO PLAYS THE GAMES, and WHICH EVALUATION. Both change the answer, so both
 rem reach stage 1 AND stage 2 -- a record played by one pilot and deep-searched
 rem by the other is two different numbers under one heading.
-if /i "%~1"=="--screen-vs"     (set SCREENVS=--screen-vs "%~2"& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--screen-vs"     (set SCREENVS=--screen-vs "%~2"& set SUBVS=--vs "%~2"& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--pilot"         (set PILOT=--pilot %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--evaluation"    (set EVALN=--evaluation %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--punish-floor"  (set PUNISHSCR=--punish-screen %~2& set GENFLAGS=1& shift & shift & goto parse)
@@ -287,7 +288,7 @@ if defined SUBST (
         echo --- team %%i ---
         python substitute.py --rosters shortlist.json --team %%i --append ^
             --rounds %SUBROUNDS% --per-round %SUBPER% --pool-size %POOL% ^
-            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% %PILOT% %EVALN% %SCREENVS% %BEAMW% ^
+            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% %PILOT% %EVALN% %SUBVS% ^
             --cache overnight_gen.json --out substituted.json
         if errorlevel 1 (
             echo.

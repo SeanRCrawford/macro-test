@@ -325,16 +325,23 @@ def main():
     # measured, Rain 97.2% -> 50.2%, Big 6 92.0% -> 60.6%, Hard Trick Room
     # 83.3% -> 33.9%. Leave --min-winrate at 0.80 under equilibrium and it
     # rejects teams better than anything in teams.csv, silently, all night.
-    if args.pilot == "equilibrium" and args.min_winrate > 0.55:
+    if args.pilot == "equilibrium" and (args.min_winrate > 0.55
+                                        or args.worst_matchup > 0.55):
         print("=" * 78)
-        print(f"WARNING: --min-winrate {args.min_winrate:.2f} with the "
-              "equilibrium pilot will reject almost everything.")
+        print("WARNING: these screen floors were calibrated on GREEDY "
+              "records, and the equilibrium")
+        print("         pilot roughly halves them. They will reject almost "
+              "everything.")
         print("  Equilibrium records are about HALF the greedy ones the "
               "default was set for:")
         print("  the best hand-built team in teams.csv scores 60.6% under this "
               "pilot, so a")
         print("  0.80 floor throws away teams better than anything you own.")
-        print("  Try --min-winrate 0.45, and --worst-matchup accordingly.")
+        print(f"  You have --min-winrate {args.min_winrate:.2f}"
+              + (f" and --worst-matchup {args.worst_matchup:.2f}"
+                 if args.worst_matchup else "") + ".")
+        print("  Try --min-winrate 0.45; --worst-matchup wants the same "
+              "halving (0.89 -> ~0.45).")
         print("=" * 78, flush=True)
     screen_opponents = None
     if args.screen_vs:
