@@ -445,6 +445,27 @@ a documented negative result.
    The equilibrium pilot removes the *systematic* half at 13× the cost. The
    residual 41% is near-ties and chaos, a different and smaller problem.
 
+   **What the fix is worth, measured.** Same three teams, same opponents, same
+   effort, same evaluation — only the pilot differs
+   (`tools/measure_generator.py --control-only --pilot equilibrium`):
+
+   | team | greedy | equilibrium |
+   |---|---|---|
+   | Rain | 449/462 **97.2%** | 232/462 **50.2%** |
+   | Big 6 | 425/462 **92.0%** | 280/462 **60.6%** |
+   | Hard Trick Room | 455/546 **83.3%** | 185/546 **33.9%** |
+
+   Records roughly halve. The greedy column is the one that claimed every team
+   in the library beats every other one; the equilibrium column is teams
+   beating a third to two thirds of their opponents' configurations, which is
+   what a field of comparable teams should look like. Cost was ~600s per team
+   against ~150s — about 4×, not the 13× the single-playout sweep suggested,
+   because the audit is unchanged and is a large share of the total.
+
+   Adjusted wins and punish move slightly too (Big 6 0.71 → 0.60; Rain
+   unchanged), because the pilot also decides which brings are selected for
+   auditing. The audit itself was always equilibrium-piloted.
+
    **How to get an honest number today:**
 
    ```bat
