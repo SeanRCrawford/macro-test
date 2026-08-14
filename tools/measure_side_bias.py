@@ -45,10 +45,19 @@ def main():
     ap.add_argument("--pilot", default=matchup_search.GREEDY_PILOT,
                     choices=[matchup_search.GREEDY_PILOT,
                              matchup_search.EQUILIBRIUM_PILOT])
+    ap.add_argument("--symmetric-info", action="store_true",
+                    help="strip the deliberately WIDER opponent move space "
+                         "(matchup_search._attach_movesets). The model gives "
+                         "whoever sits in p2 six plausible moves per Pokemon "
+                         "against our known four, which is correct modelling "
+                         "and rides with the SEAT -- so it shows up here as a "
+                         "p2 bias that is not a bug. This isolates the rest.")
     ap.add_argument("--brings", type=int, default=1,
                     help="how many bring-4s per team to mirror (1 = roster[:4])")
     args = ap.parse_args()
 
+    if args.symmetric_info:
+        matchup_search.build_wide_movesets = lambda *a, **k: {}
     world = roster_rating.load_world()
     names = list(world["teams"])
     print(f"pilot={args.pilot}  turns={args.turns}\n")

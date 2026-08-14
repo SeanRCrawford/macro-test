@@ -124,9 +124,18 @@ def _equilibrium_joint_actions(battle, movesets, enemy_script=None):
     """Both sides' plays for one turn, from the SAME equilibrium solve.
 
     The pilot the audit uses (`matchup_search._rate_and_rerank`,
-    `robustness.line_report`): we play the equilibrium MIXTURE, they play their
-    equilibrium reply. Deliberately not the best response to our revealed move
-    -- that opponent is clairvoyant and beats every team ever built.
+    `robustness.line_report`): BOTH sides play their equilibrium mixture.
+    Deliberately not the best response to our revealed move -- that opponent is
+    clairvoyant and beats every team ever built.
+
+    Playing the two seats by the same rule is what makes a record mirror-
+    consistent; see WORKFLOW.md section 4.0 for the ladder of measurements. What
+    remains asymmetric after this is the OPPONENT'S WIDER MOVE SPACE
+    (`_attach_movesets`), and that one is deliberate: we know our own four
+    moves and we do not know theirs. It is correct modelling that happens to
+    ride with the seat, so a mirror test has to strip it
+    (`measure_side_bias.py --symmetric-info`) before its direction means
+    anything.
 
     Returns (ours, theirs), either of which may be None when the position has
     no legal action left to solve.
@@ -143,13 +152,21 @@ def _equilibrium_joint_actions(battle, movesets, enemy_script=None):
                               enemy_script=enemy_script)
     if not solution.our_actions:
         return None, None
-    ours = (_solver._pick_from_mixture(solution.our_actions, solution.p)
-            if _solver.NASH_SAMPLE else solution.best_action)
-    theirs = None
-    if solution.their_actions:
-        theirs = solution.their_actions[
-            max(range(len(solution.q)), key=lambda j: solution.q[j])]
-    return ours, theirs
+    # BOTH SEATS BY THE SAME RULE. This used to sample our action from the
+    # mixture `p` and take their single MODAL action from `q`, which is two
+    # different players wearing one name: the modal action is a pure strategy,
+    # and a pure strategy is not what the equilibrium prescribes. Measured on
+    # 28 mirrored matchups at 24 turns, that mismatch alone was worth 15 points
+    # of self-contradiction (43% -> 29% once both seats sample).
+    def _play(actions, dist):
+        if not actions:
+            return None
+        if _solver.NASH_SAMPLE:
+            return _solver._pick_from_mixture(actions, dist)
+        return actions[max(range(len(dist)), key=lambda j: dist[j])]
+
+    return _play(solution.our_actions, solution.p), _play(solution.their_actions,
+                                                          solution.q)
 
 
 def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,

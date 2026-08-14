@@ -452,24 +452,42 @@ a documented negative result.
      same matchup, same sides, run 8 times, gives the same winner 8 times under
      both pilots — the mixture draw is seeded per decision.
 
-   What IS real: the two seats are played by **different rules**. In
-   `_equilibrium_joint_actions`, our side samples from mixture `p` while their
-   side takes the single modal action of `q`. Measured on the same 28 matchups
-   at `--turns 24`:
+   The residual turned out to be **two separate things, and only one of them
+   was a bug.** 28 mirrored matchups at `--turns 24`:
 
-   | how the two seats are played | contradictions | direction |
+   | pilot / seat rule / info | contradictions | direction |
    |---|---|---|
-   | ours samples, theirs modal (shipped) | 43% | 3 p1 / 9 p2 |
-   | both modal | **29%** | 2 p1 / 6 p2 |
-   | both sample | **29%** | 0 p1 / **8 p2** |
+   | greedy | 78% | **21 p1 / 0 p2** |
+   | equilibrium, ours samples + theirs modal | 43% | 3 p1 / 9 p2 |
+   | equilibrium, both seats sample | 29% | 0 p1 / 8 p2 |
+   | equilibrium, old rule, `--symmetric-info` | 29% | 4 p1 / 4 p2 |
+   | **equilibrium, both sample + `--symmetric-info`** | **14%** | **2 p1 / 2 p2** |
 
-   So the mismatched rule is worth about a third of the residual, and something
-   else — a p2 lean that survives every symmetric variant and goes
-   *one-directional* under both-sample — is still unlocated. The next place to
-   look is `turn_game.solve_turn`, which is always solved from `"p1"`'s
-   perspective: if `q` is a best response rather than a true equilibrium
-   mixture, p2 gets exactly this kind of edge. **Nothing was changed on the
-   strength of a 28-matchup sample with an unexplained residual.**
+   **The seat rule was a bug, and is fixed.** `_equilibrium_joint_actions`
+   sampled OUR action from mixture `p` but took THEIR single modal action from
+   `q` — a pure strategy, which is not what the equilibrium prescribes. Two
+   different players wearing one name. Both seats now sample. Worth ~15 points.
+
+   **The wider opponent move space is not a bug.** `_attach_movesets`
+   deliberately gives the opponent six plausible moves per Pokémon against our
+   known four, because assuming they run the usage-standard four is
+   self-fulfilling and measured at 10 points of win rate. It is correct
+   modelling that rides with the *seat*, so it shows up in a mirror test as a
+   p2 lean — strip it with `measure_side_bias.py --symmetric-info` and the
+   direction balances exactly (4/4, then 2/2). Do not "fix" it.
+
+   **What is left: 14%, pointing both ways.** Genuine near-ties, now measured
+   rather than assumed. `q` was also checked and is a real equilibrium mixture
+   from `solve_matrix`, not a best response — that hypothesis was wrong too.
+
+   ### The trap the honest pilot sets
+
+   **Every screen threshold in this repo was calibrated against greedy
+   records, and those are roughly double.** Leave `--min-winrate` at its 0.80
+   default under `--pilot equilibrium` and it rejects teams better than
+   anything in `teams.csv` — the best hand-built team scores **60.6%** under
+   this pilot. Use `--min-winrate 0.45` and scale `--worst-matchup` the same
+   way. Stage 1 now prints a warning if you forget.
 
    **What the fix is worth, measured.** Same three teams, same opponents, same
    effort, same evaluation — only the pilot differs

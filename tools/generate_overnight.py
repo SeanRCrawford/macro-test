@@ -312,6 +312,22 @@ def main():
              if args.pilot == "equilibrium" else
              "   <-- greedy: whoever is p1 has a systematic advantage "
              "(see WORKFLOW.md section 4.0)"))
+    # THE TRAP THE HONEST PILOT SETS. Every screen threshold in this tool was
+    # calibrated against greedy records, and greedy records are roughly double:
+    # measured, Rain 97.2% -> 50.2%, Big 6 92.0% -> 60.6%, Hard Trick Room
+    # 83.3% -> 33.9%. Leave --min-winrate at 0.80 under equilibrium and it
+    # rejects teams better than anything in teams.csv, silently, all night.
+    if args.pilot == "equilibrium" and args.min_winrate > 0.55:
+        print("=" * 78)
+        print(f"WARNING: --min-winrate {args.min_winrate:.2f} with the "
+              "equilibrium pilot will reject almost everything.")
+        print("  Equilibrium records are about HALF the greedy ones the "
+              "default was set for:")
+        print("  the best hand-built team in teams.csv scores 60.6% under this "
+              "pilot, so a")
+        print("  0.80 floor throws away teams better than anything you own.")
+        print("  Try --min-winrate 0.45, and --worst-matchup accordingly.")
+        print("=" * 78, flush=True)
     punish_floor = (punish_screen.DEFAULT_FLOOR if args.punish_screen is True
                     else args.punish_screen)
     if punish_floor is not None:
