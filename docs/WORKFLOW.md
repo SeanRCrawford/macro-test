@@ -70,7 +70,56 @@ Options worth knowing:
 | `--deep-effort TIER` | thorough | `standard` / `thorough` / **`thorough+`** / `exhaustive` — how many of OUR brings get audited. `thorough+` is thorough with the equilibrium pilot: the only tier whose record is not inflated |
 | `--pilot NAME` | tier default | **who plays the games the record comes from.** `greedy` is fast and inflated (see §4.0); `equilibrium` plays both sides as a matrix game, ~13× slower per game |
 | `--evaluation NAME` | `sacrifice` | `sacrifice` scores speed control and discounts a spent Pokémon (measured cost: record 80% → 74%); `legacy` restores the previous evaluation exactly |
+| `--screen-vs NAMES` | all | rate STAGE 1 against only these opponents. Cost is linear in opponents, so two instead of eight is 4× more teams per night |
 | `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
+
+### Screening a large pool — the funnel, with its measured costs
+
+`rate_team` already IS a funnel: cheapest screen first, and every stage
+abandons the team before the next one runs.
+
+| stage | s/team | 1000 teams, 8 workers | what it costs you |
+|---|---|---|---|
+| screener matrix | — | **112 s once** | shared by every team |
+| beam → 1000 finalists | — | **77 s** | free, effectively |
+| `--punish-screen` | 18 | **0.6 h** | opening only |
+| `--min-winrate` (quick verify) | 94 | **3.3 h** | win count, greedy pilot |
+| standard rating, greedy | 150 | 5.2 h | |
+| standard rating, equilibrium | 600 | **20.8 h** | the honest one |
+
+So 1000 teams rated properly is a 20-hour job, and 1000 teams *screened* down
+to ~100 and then rated properly is a 4–5 hour one. A worked recipe:
+
+```bat
+:: 1. Screen wide and cheap, against TWO opponents rather than eight
+overnight.bat --list --beam-width 1000 --candidates 1000 --pool-size 50 ^
+  --screen-vs "Big 6,Rain" --punish-screen --min-winrate 0.45 ^
+  --pilot equilibrium --optimise-sets --jobs 8
+
+:: 2. Re-rate the survivors against EVERYONE, honestly
+overnight.bat --list --stage2-only --pick "1-40" --pilot equilibrium
+```
+
+`--screen-vs` is the biggest lever: cost is linear in opponents, so two instead
+of eight is 4× more teams per night. The ranking it produces means "best
+against these two", which is why the survivors are re-rated against the whole
+library before you trust the order.
+
+**Is 1000 actually 1000 teams?** Measured on a 50-pool: the beam's finalists get
+*more* diverse as you widen it, not less — 29 distinct Pokémon and mean pairwise
+overlap 3.06/6 at width 40, against 49 distinct and 2.23/6 at width 1000. The
+most common 4-Pokémon core appears in 35% of the top 40 but only 10% of the top
+1000. So widening genuinely searches, it does not just permute. It is still one
+beam around one objective — see gap 1.
+
+**The recall of these screens is NOT measured.** That is the real risk, and this
+repo has been bitten by it before: `prescreen.py` measured 4–15% recall and is
+dead. A screen that discards the eventual winner is worse than no screen,
+because the team never appears in the output to be missed. Two mitigations that
+cost nothing: the punish screen prints its value for *every* team it looks at,
+so after a night you can check where the winners actually sat in that
+distribution; and every rating is cached by key, so raising a floor and re-running
+only re-rates what the old floor rejected.
 
 ### Reading and calibrating `--punish-screen`
 

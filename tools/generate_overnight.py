@@ -66,7 +66,8 @@ def _stage1_settings(args):
             "worst_matchup": args.worst_matchup,
             # Both change WHICH teams come out and in what order, so a run that
             # varies them is a different stage 1 and must renumber loudly.
-            "pilot": args.pilot, "evaluation": args.evaluation}
+            "pilot": args.pilot, "evaluation": args.evaluation,
+            "screen_vs": args.screen_vs}
 
 
 def _warn_if_renumbering(args):
@@ -255,6 +256,13 @@ def build_parser():
                          "(King / Hard Trick Room / Perish Trap) before the "
                          "audit. A team with no plan against a rehearsed line "
                          "is not worth auditing.")
+    ap.add_argument("--screen-vs", default=None, metavar="NAMES",
+                    help="rate stage 1 against ONLY these opponents, "
+                         "comma-separated. THE lever for screening a large "
+                         "pool: cost is linear in opponents, so two instead of "
+                         "eight is 4x more teams per night. The ranking is "
+                         "then 'best against these two', so use it to shortlist "
+                         "and re-rate the survivors against everyone.")
     ap.add_argument("--pilot", default=None,
                     choices=["greedy", "equilibrium"],
                     help="WHO PLAYS THE GAMES the record comes from. Default "
@@ -328,6 +336,17 @@ def main():
         print("  0.80 floor throws away teams better than anything you own.")
         print("  Try --min-winrate 0.45, and --worst-matchup accordingly.")
         print("=" * 78, flush=True)
+    screen_opponents = None
+    if args.screen_vs:
+        wanted = [t.strip() for t in args.screen_vs.split(",") if t.strip()]
+        unknown = [t for t in wanted if t not in world["teams"]]
+        if unknown:
+            raise SystemExit(f"--screen-vs: no such team(s) {unknown}. "
+                             f"Known: {', '.join(world['teams'])}")
+        screen_opponents = wanted
+        print(f"screen-vs: {', '.join(wanted)} only "
+              f"({len(world['teams'])} in the library) -- the ranking is "
+              f"'best against these', not 'best overall'")
     punish_floor = (punish_screen.DEFAULT_FLOOR if args.punish_screen is True
                     else args.punish_screen)
     if punish_floor is not None:
@@ -390,6 +409,7 @@ def main():
         # The sets change what is simulated, so they belong in the key: an
         # optimised run must never be served a usage-default result.
         key = roster_rating.rating_key(team, args.effort, args.turns, our_sets,
+                                       opponents=screen_opponents,
                                        pilot=args.pilot,
                                        eval_profile=args.evaluation)
         keys.append(key)
@@ -406,6 +426,7 @@ def main():
                          "worst_matchup_floor": args.worst_matchup,
                          "pilot": args.pilot,
                          "eval_profile": args.evaluation,
+                         "opponents": screen_opponents,
                          "beam_score": beam_score})
 
     started = time.time()
