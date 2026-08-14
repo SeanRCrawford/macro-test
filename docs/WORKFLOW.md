@@ -442,8 +442,34 @@ a documented negative result.
    already run a best-responding opponent, and `heuristic_eval`, which is
    perfectly antisymmetric over 8242 states (`measure_antisymmetry.py`).
 
-   The equilibrium pilot removes the *systematic* half at 13× the cost. The
-   residual 41% is near-ties and chaos, a different and smaller problem.
+   The equilibrium pilot removes the *greedy* bias. **A smaller, opposite one
+   remains, and it is not yet fixed.** Two obvious explanations were tested and
+   both are wrong:
+
+   * *"It is unresolved games."* No. At `--turns 24` every matchup decides
+     (undecided 6 → 0) and contradictions do not fall: 41% → 43%.
+   * *"A mixed equilibrium is sampled, so one playout is a coin flip."* No. The
+     same matchup, same sides, run 8 times, gives the same winner 8 times under
+     both pilots — the mixture draw is seeded per decision.
+
+   What IS real: the two seats are played by **different rules**. In
+   `_equilibrium_joint_actions`, our side samples from mixture `p` while their
+   side takes the single modal action of `q`. Measured on the same 28 matchups
+   at `--turns 24`:
+
+   | how the two seats are played | contradictions | direction |
+   |---|---|---|
+   | ours samples, theirs modal (shipped) | 43% | 3 p1 / 9 p2 |
+   | both modal | **29%** | 2 p1 / 6 p2 |
+   | both sample | **29%** | 0 p1 / **8 p2** |
+
+   So the mismatched rule is worth about a third of the residual, and something
+   else — a p2 lean that survives every symmetric variant and goes
+   *one-directional* under both-sample — is still unlocated. The next place to
+   look is `turn_game.solve_turn`, which is always solved from `"p1"`'s
+   perspective: if `q` is a best response rather than a true equilibrium
+   mixture, p2 gets exactly this kind of edge. **Nothing was changed on the
+   strength of a 28-matchup sample with an unexplained residual.**
 
    **What the fix is worth, measured.** Same three teams, same opponents, same
    effort, same evaluation — only the pilot differs
