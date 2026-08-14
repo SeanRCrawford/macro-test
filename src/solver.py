@@ -54,11 +54,23 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
     if only_moves:
         # Explicit set supplied (e.g. an optimised team sheet) -- use exactly these,
         # preserving the given order, ignoring usage ranking and top_k.
-        wanted = {m.lower() for m in only_moves}
-        chosen = [(mi, pct) for mi, pct in out if mi.name.lower() in wanted]
+        have = {mi.name.lower(): (mi, pct) for mi, pct in out}
+        chosen = []
+        for name in only_moves:
+            found = have.get(name.lower())
+            if found is not None:
+                chosen.append(found)
+                continue
+            # A move the usage data has never recorded for this Pokemon. It is
+            # still a move you can pick by hand, and dropping it silently was
+            # how a hand-built set could differ from the one being simulated
+            # with no indication that it had. 0% usage: it is a real choice,
+            # not a popular one. Learnset legality is NOT checked -- the
+            # dataset has no learnsets.
+            key = name.lower().replace(" ", "").replace("-", "").replace("'", "")
+            if key in moves_db:
+                chosen.append((move_from_showdown(moves_db[key]), 0.0))
         if chosen:
-            order = {m.lower(): i for i, m in enumerate(only_moves)}
-            chosen.sort(key=lambda x: order.get(x[0].name.lower(), 99))
             return chosen
     out.sort(key=lambda x: -x[1])
     return out[:top_k]

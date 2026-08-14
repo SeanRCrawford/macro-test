@@ -278,6 +278,21 @@ it audits **every back pair they could still be holding** behind that lead and
 reports how the answer varies. One winning line is not a plan if the other five
 lose. Pick a specific back only if you have actually scouted it.
 
+**The opening is chosen at the information set you actually have** — your four,
+your lead, their lead. Not their backs, which are face down, and not their
+turn-1 action, because the turn is simultaneous. So the *Lead / Back* tab's
+opening breakdown picks **one** turn-1 action and plays that same action against
+every opening variant crossed with every back pair, each side bringing four.
+Previously it solved our response separately per variant, with that variant's
+script handed to the solver — Hard Trick Room got one answer if its Incineroar
+faked out the left slot and a different one if it faked out the right, which is
+a plan that reads their mind. Turns after the first still use the solver,
+script included; by then their line is observed.
+
+**Betting on a back pair is allowed and priced.** Name the pair you think they
+brought and the opening is chosen against it alone — but it is still *reported*
+against all six, so you can see what the hunch costs against the other five.
+
 **Every match, in every panel, has its log.** Team preview lists the games
 behind its record, deep dive lists one per back, and the bottom section lists
 one per enemy bring-4 — each with the full battle log and the turn-by-turn
@@ -306,13 +321,36 @@ first failure, so a team with a hole costs one matchup instead of eight, and the
 rejects are listed with the opponent that ended each of them. The aggregate win
 rate cannot express this: 90/90 seven times and 20/90 once averages 88%.
 
-**Team Builder — what you can set by hand.** Items, stat points and moves are
-all overrides that travel together and are read by *every* simulation the app
-runs, not just the tab you set them in. Items can be picked one at a time
-(the optimiser decides all six at once, which is a different job); a
-Mega-capable pick is locked to its stone, since a Mega is a species choice
-here, and the "Any item…" option opens the full catalogue for something the
-usage data has never seen.
+**Team Builder — what you can set by hand.** Items, **abilities**, **moves**
+and stat points are all overrides that travel together and are read by *every*
+simulation the app runs, not just the tab you set them in.
+
+* **Abilities.** Arcanine-Hisui is 68% Rock Head / 32% Intimidate, and which one
+  you run changes the matchup. A Mega pick's Mega-form ability is fixed by the
+  species; the override sets its **base** form's, which is what it has on the
+  turn it comes in.
+* **Moves.** Up to four, from what it is recorded using — or from every move in
+  the game with the tick-box, which does **not** check learnset legality
+  (the dataset has none). A move the usage data has never seen is built anyway
+  and reported at 0% usage.
+* **Items** can be picked one at a time (the optimiser decides all six at once,
+  which is a different job); a Mega-capable pick is locked to its stone, since a
+  Mega is a species choice here, and "Any item…" opens the full catalogue.
+* **Apply is per-editor and no longer destructive.** Each Apply merges into the
+  same override dict, and the optimiser merges rather than replacing, so
+  optimising items+moves keeps a hand-set ability and stat spread. Applying one
+  editor also no longer discards a pending edit in another.
+
+**The sets travel with the team you picked, not with the Team Builder.** Every
+panel's *Our side* control offers the loaded team, a saved team, or any Pokémon
+— and each supplies its own overrides. Choosing a saved team used to keep
+applying the Team Builder's items and moves to somebody else's Pokémon.
+
+**A/B test one change — Lead / Back tab.** Two variants of the loaded team
+against the same opponents, same turn cap, same enemy overrides, with only one
+member's ability or moves different. Reports wins per opponent for each and the
+net games gained, so "is Intimidate better than Rock Head here" is one number
+instead of two runs compared by eye.
 
 **Where the advanced model is:** the *Advanced model strength* slider —
 Quick → Standard → Thorough → Exhaustive — with a tooltip explaining each, plus
