@@ -111,6 +111,53 @@ class TestTheScriptedBranchTakesAPilotToo(unittest.TestCase):
         self.assertIn("pilot=pilot", call.group(0))
 
 
+class TestTheLogIsTheGameTheMetricDescribes(unittest.TestCase):
+    """The expander prints `battle.log.dump()` under the Avg-roll metric. If the
+    returned battle were a different variant from the reported winner, the log
+    would be a turn-by-turn account of a game the metric is not about -- the
+    same contradiction one level down."""
+
+    def played(self, pilot):
+        w = world()
+        return play_scripted_worst_case(
+            list(OUR4), list(EB4), w["merged"], w["moves"], w["natures"],
+            w["typechart"], None, 12, pilot=pilot)
+
+    def test_the_returned_battle_agrees_with_the_reported_winner(self):
+        for pilot in (GREEDY_PILOT, EQUILIBRIUM_PILOT):
+            winner, _t, battle, _v = self.played(pilot)
+            if winner in ("p1", "p2"):
+                self.assertEqual(battle.winner(), winner, pilot)
+
+    def test_the_equilibrium_log_is_a_different_game(self):
+        """Not a cosmetic difference: greedy wins this in 4 turns, the
+        equilibrium pilot loses it in 12."""
+        _gw, gt, gb, _ = self.played(GREEDY_PILOT)
+        _ew, et, eb, _ = self.played(EQUILIBRIUM_PILOT)
+        self.assertNotEqual(gb.log.dump(), eb.log.dump())
+        self.assertGreater(et, gt)
+
+    def test_the_equilibrium_log_shows_the_pinning_move(self):
+        """Solar Beam firing immediately is the projection fix visible in the
+        log a player actually reads."""
+        _w, _t, battle, _v = self.played(EQUILIBRIUM_PILOT)
+        log = battle.log.dump()
+        self.assertIn("Solar Beam", log)
+        self.assertIn("strikes immediately", log)
+
+    def test_the_replay_is_reproducible(self):
+        """Mixture sampling is reseeded per decision
+        (matchup_search._equilibrium_joint_actions), so a replay does not depend
+        on how many games ran before it. Without that, the record and the replay
+        would share one global RNG walk at different positions and could
+        disagree at random -- which no amount of pilot-threading would fix."""
+        first = self.played(EQUILIBRIUM_PILOT)
+        second = self.played(EQUILIBRIUM_PILOT)
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(first[1], second[1])
+        self.assertEqual(first[2].log.dump(), second[2].log.dump())
+
+
 class TestTheAppReplayHelper(unittest.TestCase):
 
     def helper(self):

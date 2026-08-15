@@ -646,6 +646,25 @@ a documented negative result.
    config is one where the pilots genuinely differ — otherwise the agreement
    tests would pass on a position nobody could lose and prove nothing.
 
+   **The log under the metric is now the equilibrium game, turn by turn.** The
+   expander prints `battle.log.dump()`, and the battle returned is the one the
+   winner is reported from, so the two cannot describe different games. On the
+   reproduced config:
+
+   | pilot | winner | turns | turn 1 |
+   |---|---|---|---|
+   | greedy | p1 (WIN) | 4 | Earthquake + Heat Wave |
+   | equilibrium | p2 (LOSS) | 12 | Garchomp Protect + Solar Beam (immediate, sun) |
+
+   **Why it is reproducible at all**, which is the part that could easily not
+   have been: the equilibrium pilot SAMPLES from a mixture, so a record and a
+   replay sharing one global RNG walk at different positions could disagree at
+   random — and no amount of pilot-threading would have fixed that.
+   `matchup_search._equilibrium_joint_actions` reseeds per decision, so the
+   result is independent of how many games ran before it. Verified by advancing
+   the shared stream 0–35 draws before replaying: identical winner and turn
+   count every time.
+
 0c. **A TURN CAP IS A CLOCK, AND A CLOCK IS ADJUDICATED.** Capped games used to
    count as losses. That is not conservative, it is wrong: a 3-1 position with
    their last Pokemon on 8 HP is a won game, and calling it a loss discards
