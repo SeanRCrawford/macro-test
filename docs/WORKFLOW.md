@@ -608,6 +608,50 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0h. **THE GENERATION OBJECTIVE SATURATES.** The largest open problem, and the
+   one to read before planning a long run. Stated against the aim it fails:
+
+       "find a team that matches up very well into specified teams, by having a
+        gameplan, and a fixed lead vs each team that can withstand any of theirs"
+
+   The record generation ranks on is played by the GREEDY pilot. Measured over
+   eight of our brings against one real six, counting wins over their 15 leads
+   (`tools/measure_objective_saturation.py`):
+
+       greedy       spread 14-15 of 15,   2 distinct values
+       equilibrium  spread  3-7  of 15,   4 distinct values
+
+   The greedy record calls every bring a near-clean sweep, including the one
+   that wins 3 of 15 against a real opponent. **That is not a weak signal, it is
+   no signal** -- a beam, a floor or a `verify_top` cut driven by it is choosing
+   among ties, which is the same failure as the back-two tie-break in 0g but at
+   the top of the funnel where it costs the whole night.
+
+   The budget, measured (`tools/measure_funnel.py`, pool 40, 8 workers):
+
+   | stage | s/team | 1000 teams |
+   |---|---|---|
+   | punish screen (opening only) | 21 | 0.7 h |
+   | quick verify (win count, greedy) | 119 | 4.1 h |
+   | standard rating, greedy | 150 | 5.2 h |
+   | **standard rating, equilibrium** | **600** | **20.8 h** |
+
+   And 1000 teams are not 1000 ideas: at beam width 200 the finalists use 38
+   distinct Pokemon, mean pairwise overlap 2.68 of 6, and **52 of 200 share a
+   single four-Pokemon core**. Widening the beam buys near-duplicates.
+
+   So the two cheap stages that could narrow 1000 to 20 cannot rank, and the
+   stage that can costs 21 hours. That is the real constraint on aim 1, and
+   neither more pool nor more beam width addresses it.
+
+   What the evidence points at, none of it yet measured end to end: screen on
+   the OPENING MAXIMIN (21 s/team, and after 0g it is a sound statistic with a
+   -276 to +92 range on real positions) rather than on a greedy win count; and
+   prune THEIR configurations rather than ours, which is the lever
+   `prescreen.py`'s own post-mortem identifies and which nothing has yet tried.
+   Note the standing caution on the screen: it sees turn 1 only and says nothing
+   about a team that opens cleanly and collapses on turn five.
+
 0g. **THE SHORTLIST WAS BLIND TO THE BACK TWO, AND THE SCREEN REJECTED WINNING
    OPENINGS.** From "is the lead/back generation really robust — I feel as
    though I can see better ones" and "how does 'opening already lost' work".
@@ -672,6 +716,21 @@ a documented negative result.
    `leads_per_opponent` and `our_brings` default to 2, and those are the FIRST
    two combinations in team order, not the two most threatening. A team can be
    screened on a bring it would never make. Now stated in the module docstring.
+
+   **The same fix was needed in the one-minute preview.** `preview_lead.rank_leads`
+   ranked our leads on `rec.worst_case` too, which is why "the leads don't seem
+   good" was a fair report. Before and after, same six, same 90 s budget:
+
+   | lead | before | after |
+   |---|---|---|
+   | Mega Charizard Y / Farigiraf | −187.2 proven (top pick) | −112.2 proven (top pick) |
+   | **Mega Charizard Y / Garchomp** | **−278.0, ABANDONED** | **−113.3, proven (2nd)** |
+
+   The abandoned one is the lead that wins 100% against Pelipper/Swampert. The
+   prune was throwing it away on a number that did not mean what the ranking
+   thought it meant. `tests/test_preview_lead.py`'s stub now sets `worst_case`
+   to a deliberately wrong value, so reading that field again fails the tests
+   rather than quietly passing.
 
    One test rotted on this fix rather than failing honestly:
    `test_crippling_a_member_costs_real_games` named Gallade, and once the back

@@ -33,11 +33,27 @@ import preview_lead  # noqa: E402
 
 
 class FakeRec:
-    """A turn_robustness stand-in: only worst_case, exploitability, our_action
-    are read."""
+    """A turn_robustness stand-in: only maximin, exploitability, our_action are
+    read.
 
-    def __init__(self, worst_case, kinds=("move",), punish=0.0):
-        self.worst_case = worst_case
+    `worst_case` is deliberately set to a WRONG value rather than the same one.
+    The ranking has to use `maximin` -- the best guarantee available in the
+    position -- and not `worst_case`, which is the worst case of the single row
+    sampled from our equilibrium mixture and can be dreadful in exactly the
+    positions worth playing. Ranking on it made rank_leads abandon
+    Charizard-Y/Garchomp at -278.0 (maximin +20.1) against Pelipper/Swampert, a
+    lead that goes on to win 100% of the time.
+
+    Making the decoy differ by a constant means these tests fail if the ranking
+    ever reads that field again, instead of quietly still passing.
+    """
+
+    DECOY = -1000.0
+
+    def __init__(self, maximin, kinds=("move",), punish=0.0):
+        self.maximin = maximin
+        self.worst_case = maximin + self.DECOY
+        self.regret = -self.DECOY
         self.exploitability = punish
         self.our_action = [type("A", (), {"kind": k})() for k in kinds]
 

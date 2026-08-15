@@ -115,7 +115,7 @@ def rank_leads(our6, their6, world, budget=60.0, our_sets=None, enemy_sets=None,
             order.extend((None, l) for l in ours[len(order):])
             break
         rec = solve(our_lead, probe_lead)
-        order.append((rec.worst_case if rec else None, our_lead))
+        order.append((rec.maximin if rec else None, our_lead))
     order.sort(key=lambda x: -(x[0] if x[0] is not None else -1e9))
 
     # --- maximin with pruning -------------------------------------------
@@ -132,8 +132,16 @@ def rank_leads(our6, their6, world, budget=60.0, our_sets=None, enemy_sets=None,
             rec = solve(our_lead, their_lead)
             if rec is None:
                 continue
-            if worst is None or rec.worst_case < worst:
-                worst = rec.worst_case
+            # `maximin`, not `worst_case`. `worst_case` is the worst case of the
+            # ONE row sampled from our equilibrium mixture, and the pure rows of
+            # a mixture can each look dreadful -- that is what mixing is for. It
+            # made this ranking reject its own best lead: Charizard-Y/Garchomp
+            # into Pelipper/Swampert scored -278.0 sampled against +20.1 maximin,
+            # so a lead that wins 100% of the time was ranked below, and pruned
+            # in favour of, leads that do not. See punish_screen for the same
+            # mistake and the same fix.
+            if worst is None or rec.maximin < worst:
+                worst = rec.maximin
                 worst_vs = list(their_lead)
                 worst_answer = _action_kind(rec)
                 worst_punish = rec.exploitability
