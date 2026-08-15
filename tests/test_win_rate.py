@@ -142,6 +142,120 @@ class TestTheEstimate(unittest.TestCase):
         self.assertEqual(win_rate.Estimate().p, 0.0)
 
 
+class TestQuadrature(unittest.TestCase):
+    """The speed-up: weighted deterministic scenarios instead of sampling.
+
+    Suggested directly -- "with 16 damage rolls, could instead use 3 - worst,
+    lower third, upper third". rolls.py already brackets the 16 that way and
+    carries the share of the distribution each stands in for; crossing them
+    with the two speed-tie branches gives six games instead of twenty-four.
+    """
+
+    def test_the_weights_are_a_distribution_over_the_sixteen_rolls(self):
+        """If they do not sum to 1 the 'probability' is scaled by an arbitrary
+        constant, and every comparison silently inherits it."""
+        self.assertAlmostEqual(sum(w for _i, w in win_rate.ROLL_SCENARIOS), 1.0)
+        self.assertAlmostEqual(sum(w for _t, w in win_rate.TIE_SCENARIOS), 1.0)
+
+    def test_the_scenarios_bracket_the_range(self):
+        indices = [i for i, _w in win_rate.ROLL_SCENARIOS]
+        self.assertEqual(min(indices), 0)     # every roll low
+        self.assertEqual(max(indices), 15)    # every roll high
+
+    def test_all_scenarios_won_is_one_and_none_is_zero(self):
+        won = win_rate.Quadrature([(True, False, 0.5), (True, False, 0.5)])
+        lost = win_rate.Quadrature([(False, False, 0.5), (False, False, 0.5)])
+        self.assertEqual(won.p, 1.0)
+        self.assertEqual(lost.p, 0.0)
+
+    def test_the_weights_actually_weight(self):
+        """A win on the 7/16 mid scenario is worth more than one on the 4/16
+        high scenario. Counting scenarios instead of weighting them would make
+        this 50%."""
+        q = win_rate.Quadrature([(True, False, 7 / 16), (False, False, 4 / 16)])
+        self.assertAlmostEqual(q.p, 7 / 11)
+
+    def test_the_spread_says_when_the_dice_decide(self):
+        """The honest uncertainty for a deterministic method: not a confidence
+        interval, but 'does this line depend on the roll'."""
+        split = win_rate.Quadrature([(True, False, 0.5), (False, False, 0.5)])
+        firm = win_rate.Quadrature([(True, False, 0.5), (True, False, 0.5)])
+        self.assertEqual(split.spread, 1.0)
+        self.assertEqual(firm.spread, 0.0)
+
+    def test_it_walks_and_quacks_like_an_estimate(self):
+        """aggregate() and evaluate() read `.p` off whatever they are given, so
+        the two estimators have to be interchangeable."""
+        q = win_rate.Quadrature([(True, False, 0.5), (False, False, 0.5)])
+        for attr in ("p", "n", "wins", "losses", "timeouts", "interval",
+                     "timeout_rate"):
+            self.assertTrue(hasattr(q, attr), attr)
+        self.assertAlmostEqual(win_rate.aggregate([[q]])["game_value"], q.p,
+                               places=2)
+
+    def test_an_unknown_method_is_refused(self):
+        with self.assertRaises(ValueError):
+            win_rate.cell_estimator("vibes")
+
+
+class TestLazyEvaluation(unittest.TestCase):
+    """Double oracle over the bring matrix: correct, and MEASURED NOT TO HELP.
+
+    The idea was that the equilibrium is supported on a handful of brings, so
+    most cells need never be simulated. Measured on the shapes the pipeline
+    actually has (matrix_game.double_oracle, counting distinct payoff calls):
+
+        random    6x20    107/120   89%
+        random    8x90    720/720  100%
+        random    8x360  2880/2880 100%
+        clustered 8x90    556/720   77%   (their brings in 6 archetypes)
+
+    Nothing, or nearly nothing. The reason is structural: finding the column
+    player's best response to a mixture requires SCANNING every column, so with
+    few rows the oracle touches the whole matrix on its first iteration. Real
+    matrices cluster (many of their brings share a lead) and that buys 23%,
+    which is not a speed-up worth a second code path.
+
+    It is kept because it is correct and because a much wider matrix -- every
+    lead ORDERING, not just every bring -- may change the arithmetic. It is not
+    the answer to "how do I make this fast"; quadrature is.
+    """
+
+    def fake_matrix(self, A):
+        def fake(our4, their4, world, **kw):
+            p = A[our4[0]][their4[0]]
+            return win_rate.Quadrature([(True, False, p), (False, False, 1 - p)])
+        return fake
+
+    def test_it_agrees_with_the_full_matrix_on_the_value(self):
+        """The only claim it makes: laziness changes the cost, not the answer."""
+        A = [[0.9, 0.1, 0.5], [0.2, 0.8, 0.5], [0.4, 0.4, 0.4]]
+        real = win_rate.matchup_win_prob_quadrature
+        win_rate.matchup_win_prob_quadrature = self.fake_matrix(A)
+        try:
+            lazy = win_rate.evaluate_lazily([[0], [1], [2]], [[0], [1], [2]],
+                                            {}, method="quadrature")
+        finally:
+            win_rate.matchup_win_prob_quadrature = real
+        full = win_rate.aggregate(A, iters=5000)
+        self.assertAlmostEqual(lazy["game_value"], full["game_value"], places=2)
+
+    def test_it_reports_what_it_actually_evaluated(self):
+        """So the negative result above stays visible instead of being assumed
+        away by whoever reads the function name."""
+        A = [[0.9, 0.1, 0.5], [0.2, 0.8, 0.5], [0.4, 0.4, 0.4]]
+        real = win_rate.matchup_win_prob_quadrature
+        win_rate.matchup_win_prob_quadrature = self.fake_matrix(A)
+        try:
+            res = win_rate.evaluate_lazily([[0], [1], [2]], [[0], [1], [2]],
+                                           {}, method="quadrature")
+        finally:
+            win_rate.matchup_win_prob_quadrature = real
+        self.assertEqual(res["n_cells"], 9)
+        self.assertLessEqual(res["n_cells_evaluated"], 9)
+        self.assertGreater(res["n_cells_evaluated"], 0)
+
+
 class TestAgainstTheEngine(unittest.TestCase):
     """P1, end to end: the cells have to come from real games, and the whole
     point is that a single deterministic playout does not tell you the rate."""
@@ -207,7 +321,7 @@ class TestAgainstTheEngine(unittest.TestCase):
 
     def test_evaluate_reports_what_it_cost(self):
         res = win_rate.evaluate([self.ours], [self.theirs], self.w,
-                                n_samples=4, turns=12)
+                                method="sample", n_samples=4, turns=12)
         self.assertEqual(res["n_cells"], 1)
         self.assertEqual(res["n_games"], 4)
         self.assertIn("game_value", res)
@@ -216,7 +330,7 @@ class TestAgainstTheEngine(unittest.TestCase):
         """A sanity anchor: with a single bring each there is nothing to choose
         and nothing to mix, so the three readings must coincide."""
         res = win_rate.evaluate([self.ours], [self.theirs], self.w,
-                                n_samples=4, turns=12)
+                                method="sample", n_samples=4, turns=12)
         self.assertAlmostEqual(res["uniform"], res["worst_case"], places=6)
         self.assertAlmostEqual(res["uniform"], res["game_value"], places=2)
 
