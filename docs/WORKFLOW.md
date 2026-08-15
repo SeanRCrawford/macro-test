@@ -608,6 +608,44 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0f. **THE HEADER AND THE REPLAY PLAYED DIFFERENT OPPONENTS.** Reported as
+   "many wins falsely recorded as losses" — a battle headed `LOSS — vs lead …`
+   with `Avg-roll result: WIN` inside it.
+
+   **The header was right.** That is the part worth stating, because the report
+   assumed the opposite and acting on the wrong half would have thrown away
+   real losses. The header comes from the stored search; the metric comes from
+   replaying the config live. `play_scripted_worst_case` took no `pilot`
+   argument, so every replay ran the **greedy** pilot while a Thorough+ record
+   had been made by the **equilibrium** one — a genuinely stronger opponent. The
+   replay was winning games the record lost because it faced someone easier.
+
+   Reproduced on Pelipper/Archaludon + Mega Swampert/Garchomp: record `p2`,
+   replay `p1`. Both now return `p2` under equilibrium and `p1` under greedy.
+
+   Second half of the same bug: the search's own scripted branch never passed
+   `pilot` either, so picking Thorough+ against a **scripted** opponent produced
+   a greedy record that the record then labelled `"pilot": "equilibrium"`. Any
+   saved run against a scripted team from before this fix is mislabelled and
+   should be re-run.
+
+   `app.replay_config` now reads the pilot from the record rather than the
+   sidebar — the sidebar can have changed since, and a replay is meant to
+   reproduce a past result, not the current setting. `vs_result` also stores
+   `script_team`, which the second expander had been dropping, so its replay
+   faced a plain greedy 2v2 where the record faced the rehearsed script.
+
+   Where a record still disagrees — an older run, or one from before an engine
+   fix — `app.replay_mismatch_note` says so on screen and tells you to trust the
+   replay. Two contradictory numbers with nothing between them teach the reader
+   to distrust whichever they like less.
+
+   Same class as 0d, one layer up. Worth a standing check: **when two panels
+   report the same game, verify they are running the same opponent.** Pinned by
+   `tests/test_replay_matches_record.py`, including a test that the chosen
+   config is one where the pilots genuinely differ — otherwise the agreement
+   tests would pass on a position nobody could lose and prove nothing.
+
 0c. **A TURN CAP IS A CLOCK, AND A CLOCK IS ADJUDICATED.** Capped games used to
    count as losses. That is not conservative, it is wrong: a 3-1 position with
    their last Pokemon on 8 HP is a won game, and calling it a loss discards

@@ -491,6 +491,55 @@ def pilot_for(effort):
             else PILOT)
 
 
+def replay_config(our4, enemy4, record, max_turns, our_sets, enemy_sets,
+                  script_team=None):
+    """Re-play one enemy config the way the RECORD played it.
+
+    The header on each battle ("LOSS — vs lead ...") comes from the stored
+    search; the "Avg-roll result" beneath it comes from replaying the config
+    live. If those two play different opponents they disagree, and the screen
+    shows a LOSS header above a WIN result with nothing to explain it.
+
+    They did. `play_scripted_worst_case` had no `pilot` argument, so every
+    replay ran the GREEDY pilot while a Thorough+ record had been made by the
+    EQUILIBRIUM one -- a genuinely weaker opponent, so the replay won games the
+    record lost. Reproduced on Pelipper/Archaludon + Mega Swampert/Garchomp:
+    record p2, replay p1.
+
+    The record stores which pilot made it, so replay reads it from there rather
+    than from the sidebar -- the sidebar can have been changed since, and a
+    replay is supposed to reproduce a specific past result, not the current
+    setting.
+    """
+    from matchup_search import GREEDY_PILOT, play_scripted_worst_case
+    return play_scripted_worst_case(
+        our4, enemy4, merged, moves, natures, typechart, script_team, max_turns,
+        our_sets=our_sets, enemy_sets=enemy_sets,
+        pilot=(record or {}).get("pilot") or GREEDY_PILOT)
+
+
+def replay_mismatch_note(winner, recorded_loss, record):
+    """Say it out loud when the replay disagrees with the header.
+
+    Once the pilot is threaded through, a live replay should reproduce the
+    recorded result. It can still diverge for one honest reason: the record was
+    saved by an older build, or before an engine fix, so it is describing a
+    game this code no longer plays. That is worth knowing and worth acting on
+    (re-run the search) -- but only if it is stated. Printing "LOSS" in the
+    header and "WIN" in the metric with nothing between them taught the reader
+    to distrust whichever of the two they liked less.
+    """
+    if (winner == "p1") == (not recorded_loss):
+        return
+    st.warning(
+        f"This replay disagrees with the saved record "
+        f"(record: {'loss' if recorded_loss else 'win'}, replay: "
+        f"{'win' if winner == 'p1' else winner}). Both now use the "
+        f"**{(record or {}).get('pilot') or 'greedy'}** pilot, so the likely "
+        f"cause is that the record predates an engine change — re-run the "
+        f"search to refresh it. Trust the replay, not the header.")
+
+
 def render_pins(our_bring, their_bring, our_sets=None, enemy_sets=None):
     """The board before a move is made, in the language of pins.
 
@@ -2334,15 +2383,15 @@ with tab_search:
                             # its real scripted line playing out turn by turn, not an
                             # unscripted approximation. Degrades to plain greedy for any
                             # opponent with no script.
-                            from matchup_search import play_scripted_worst_case
-                            w, t, btl, variant_idx = play_scripted_worst_case(
-                                b4, list(lead) + list(back), merged, moves, natures, typechart,
-                                tname, st.session_state.get("search_maxturns", 12),
-                                our_sets=sets, enemy_sets=_repl_esets)
+                            w, t, btl, variant_idx = replay_config(
+                                b4, list(lead) + list(back), r,
+                                st.session_state.get("search_maxturns", 12),
+                                sets, _repl_esets, script_team=tname)
                             om = next((c.name for c in btl.p1.roster
                                        if c.is_mega_pick and c.mega_evolved), None)
                             tm = next((c.name for c in btl.p2.roster
                                        if c.is_mega_pick and c.mega_evolved), None)
+                            replay_mismatch_note(w, lost, r)
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric("Avg-roll result",
                                       {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()))
@@ -3393,6 +3442,11 @@ with tab_vs:
                             else None,
                             "fixed_lead": fixed_lead_vs
                             if vs_search_mode == "Assume a guaranteed enemy lead (6 configs)" else None,
+                            # Needed to REPLAY a config the way the record played
+                            # it. Without it the replay faced a plain greedy 2v2
+                            # while the record faced the rehearsed script, and
+                            # the two printed different winners for one battle.
+                            "script_team": script_team_vs,
                         }
 
         vres = st.session_state.get("vs_result")
@@ -3522,15 +3576,15 @@ with tab_vs:
                     label_vs = (f"{'LOSS' if lost_vs else 'win '} — vs lead "
                                 f"{lead[0]}/{lead[1]} + back {back[0]}/{back[1]}")
                     with st.expander(label_vs):
-                        from matchup_search import play_out_worst_case
-                        w_vs, t_vs, btl_vs = play_out_worst_case(
-                            b4, list(lead) + list(back), merged, moves, natures, typechart,
-                            vres["max_turns"], our_sets=st.session_state.get("sets", {}),
-                            enemy_sets=vres["enemy_sets"])
+                        w_vs, t_vs, btl_vs, _v_vs = replay_config(
+                            b4, list(lead) + list(back), r, vres["max_turns"],
+                            st.session_state.get("sets", {}), vres["enemy_sets"],
+                            script_team=vres.get("script_team"))
                         om_vs = next((c.name for c in btl_vs.p1.roster
                                       if c.is_mega_pick and c.mega_evolved), None)
                         tm_vs = next((c.name for c in btl_vs.p2.roster
                                       if c.is_mega_pick and c.mega_evolved), None)
+                        replay_mismatch_note(w_vs, lost_vs, r)
                         vc1_, vc2_, vc3_ = st.columns(3)
                         vc1_.metric("Avg-roll result",
                                     {"p1": "WIN", "p2": "LOSS"}.get(w_vs, w_vs.upper()))

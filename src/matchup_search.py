@@ -802,9 +802,15 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
         for lead, back in configs:
             eb4 = list(lead) + list(back)
             if script_team:
+                # `pilot` matters here as much as on the unscripted branch. It
+                # used not to be passed, so picking Thorough+ against a scripted
+                # opponent produced a GREEDY record that the rec below then
+                # labelled "equilibrium" -- a number that could not be compared
+                # with any other number in the app, including its own label.
                 w, t, _, _v, all_res = play_scripted_worst_case(
                     cand["our_bring4"], eb4, merged, moves_db, natures, typechart, script_team,
-                    max_turns, our_sets=our_sets, enemy_sets=enemy_sets, return_all=True)
+                    max_turns, our_sets=our_sets, enemy_sets=enemy_sets, return_all=True,
+                    pilot=pilot)
                 # Split the SAME already-played games (no extra simulation) into
                 # "beats their script (+ generic near-script deviations)" vs "beats
                 # plain conventional play" -- idx=None is specifically the plain
@@ -1064,9 +1070,18 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
 
 def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
                               team_name, max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
-                              return_all=False):
+                              return_all=False, pilot=GREEDY_PILOT):
     """Play a scripted opponent, trying EVERY opening variant and returning the
     worst outcome for us.
+
+    `pilot` is WHO PLAYS OUR SIDE, and it has to be passed in rather than
+    defaulted, because a record and a replay that disagree about it disagree
+    about the result. This function used not to take it at all: the Lead/Back
+    search would record a config as a loss under the equilibrium pilot, and the
+    app's per-battle replay would re-play the same config under the greedy one
+    and print "Avg-roll result: WIN" directly beneath a header reading "LOSS".
+    Same defect as WORKFLOW 0d, one layer up -- the two numbers were never
+    playing the same game.
 
     A forced-lead team has a tiny decision space -- mainly which of our two slots
     to Fake Out -- so it should be searched exhaustively rather than assuming it
@@ -1090,7 +1105,8 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
     variants = all_scripts(team_name) + [(None, None)]
     if not variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
-                                       typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
+                                       typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
+                                       pilot=pilot)
         return (w, t, b, None, {None: (w, t, b)}) if return_all else (w, t, b, None)
 
     worst = None
@@ -1098,7 +1114,8 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
     for idx, script in variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
                                        typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
-                                       enemy_script=script)   # script=None -> greedy 2v2
+                                       enemy_script=script,   # script=None -> greedy 2v2
+                                       pilot=pilot)
         all_results[idx] = (w, t, b)
         rank = (2, -t) if w == "p2" else ((0, t) if w == "p1" else (1, 0))
         if worst is None or rank > worst[0]:
