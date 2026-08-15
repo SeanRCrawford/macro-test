@@ -54,7 +54,24 @@ class TurnRobustness:
     exploitability: float      # what a PERFECTLY READING opponent gains
     regret: float              # how far short of the safest available play
     equilibrium: float         # value of the turn played out properly
-    worst_case: float          # value of our play against their best reply
+    worst_case: float          # value of THE PLAY WE MADE against their best reply
+    # The best guarantee available in this position: max over our rows of that
+    # row's worst case. Distinct from `worst_case`, and the distinction is the
+    # whole reason this field exists.
+    #
+    # `worst_case` belongs to ONE row -- the action we sampled from the
+    # equilibrium mixture. In a heavily mixed position (the docs put it at 83%
+    # of turns) the individual pure actions in that mixture can each have a
+    # dreadful worst case; that is what mixing is FOR. So `worst_case` says how
+    # exposed one sampled choice was, and says nothing about how good the
+    # position is.
+    #
+    # Screening a position on `worst_case` therefore punishes exactly the
+    # positions that hold strong, readable threats. Measured on Charizard-Y +
+    # Garchomp into Pelipper + Mega Swampert -- a position that goes on to win
+    # 100% of the time -- `worst_case` is -278.0 while `maximin` is +20.1. The
+    # gap is `regret`, and here it is 298.1 points.
+    maximin: float = 0.0
     # What a strong opponent actually takes when it CANNOT see our move: the
     # equilibrium value minus our play's value against their equilibrium
     # mixture. Exploitability is the worst case and assumes they guess right
@@ -232,6 +249,7 @@ def turn_robustness(battle, movesets, our_action, side_name="p1"):
         regret=maximin - worst_per_row[idx],
         equilibrium=equilibrium,
         worst_case=worst_per_row[idx],
+        maximin=maximin,
         punisher=theirs[worst_j],
         tied_replies=len(tied),
         our_action=our_action,

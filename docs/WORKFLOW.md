@@ -608,6 +608,77 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0g. **THE SHORTLIST WAS BLIND TO THE BACK TWO, AND THE SCREEN REJECTED WINNING
+   OPENINGS.** From "is the lead/back generation really robust — I feel as
+   though I can see better ones" and "how does 'opening already lost' work".
+
+   **How to read the numbers.** Both the screen floor and the opening values are
+   in `heuristic_eval` points. Measured, not assumed
+   (`tools/measure_pin.py`-style probe, 4v4 openings):
+
+   | change from an even opening | points |
+   |---|---|
+   | even 4v4 opening | ~0 |
+   | our lead at 50% HP | −50 |
+   | our whole side at 50% HP | −201 |
+   | **one Pokémon down** | **−280** |
+   | two down | −597 |
+
+   So the −250 floor is a bit under one Pokémon. `KO_WEIGHT = 180` is the
+   KO-CREDIT term alone, not the total swing — losing a Pokémon also loses its
+   HP contribution, hence −280. The stage-1 screener margin is a DIFFERENT
+   scale (`(alive difference) * 100 + (HP difference) * 20`) and the two must
+   not be compared.
+
+   Three defects, all the same shape — a number standing in for a different one:
+
+   1. **The screener could not see the back two.** It scored `oc[:2]` only, so
+      all six configs sharing a lead scored identically and the back was decided
+      by `itertools` emission order. Measured on one real six: the six backs
+      behind the best lead all screened at 107.46 and played out at **4/15 to
+      8/15** under the equilibrium pilot. Now tie-broken on the back pair scored
+      the same way, which moves the pick from 4/15 to 6/15 and — the part that
+      matters — puts the true best (8/15) *inside* the verify_top=3 set, where
+      stage 2 finds it. Free, because the screener is now memoised: 8,100 calls
+      collapse to 225 distinct playouts, **34x faster**.
+
+   2. **`punish_screen` read `worst_case` while its docstring said MAXIMIN.**
+      `worst_case` is the worst case of the ONE row sampled from our equilibrium
+      mixture; the individual pure rows of a mixture can each look dreadful,
+      which is what mixing is for. The gap is `regret`. On Charizard-Y/Garchomp
+      into Pelipper/Swampert — a position that wins 100% — sampled was **−278.0**
+      and maximin **+20.1**, so the screen threw it out while keeping a weak
+      bring at −92. `TurnRobustness.maximin` is now exposed and used. This is
+      not a looser floor: the opening that loses in five turns still screens at
+      −276.4 and is still rejected.
+
+   3. **Stage 1 ignored the edited sets entirely.** `fast_playout` called
+      `make_team` with no `sets=` and built movesets with no `only_moves`, so
+      changing an ability or hand-picking four moves changed nothing about which
+      candidates were SHORTLISTED — only about how the shortlist then scored.
+      Fixed, with the moveset cache keyed by `(name, chosen moves)` so a mirror
+      cannot hand one side's set to the other.
+
+   **What is still bounded, honestly.** The candidate space itself is complete —
+   all 90 (bring-4, lead-2) combinations are enumerated — but only `verify_top`
+   of them are played out, and the back tie-break is a weak proxy (its ranking
+   of the six tied backs was 6, 5, 8, 4, 4, 4 against a true 8, 6, 5, 4, 4, 4).
+   It reliably sinks the worst backs and reliably lifts a good one into the
+   verified set; it is not a ranking you should trust on its own. The 34x
+   screener speedup is the argument for raising `verify_top` rather than
+   trusting the order.
+
+   `punish_screen.screen_team` is bounded too, and was not documented as such:
+   `leads_per_opponent` and `our_brings` default to 2, and those are the FIRST
+   two combinations in team order, not the two most threatening. A team can be
+   screened on a bring it would never make. Now stated in the module docstring.
+
+   One test rotted on this fix rather than failing honestly:
+   `test_crippling_a_member_costs_real_games` named Gallade, and once the back
+   tie-break changed the chosen bring, Gallade was no longer brought — so
+   crippling it correctly cost nothing. It now derives its victim from the bring
+   the search actually chose.
+
 0f. **THE HEADER AND THE REPLAY PLAYED DIFFERENT OPPONENTS.** Reported as
    "many wins falsely recorded as losses" — a battle headed `LOSS — vs lead …`
    with `Avg-roll result: WIN` inside it.

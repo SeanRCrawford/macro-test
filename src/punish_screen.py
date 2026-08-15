@@ -23,21 +23,47 @@ A team with no threats gives a best-responding opponent nothing to gain, so the
 worst team scores first. It is §1 of WORKFLOW.md in miniature: punish alone is a
 trap, because a lost position has nothing left to punish.
 
-So the screen is the MAXIMIN VALUE of the opening instead -- the value we can
-guarantee against their best reply, which is `equilibrium - exploitability` and
-is what `robustness.turn_robustness` calls `worst_case`. It prices threat and
-punishability together, and on the same three teams it orders them the way a
-player would:
+So the screen is the MAXIMIN VALUE of the opening instead -- the best guarantee
+available in the position, `max` over our rows of that row's worst case. It
+prices threat and punishability together, and on the same three teams it orders
+them the way a player would:
 
     Big 6              -80.1
     NAIC              -208.3
     junk team         -306.5
+
+MAXIMIN, NOT THE ROW WE HAPPENED TO PLAY. This paragraph is here because the
+screen used to read `worst_case` and call it the maximin, and the two are not
+the same number. `worst_case` is the worst case of ONE row -- the action sampled
+from our equilibrium mixture -- and in a mixed position the individual pure
+actions can each look terrible; that is what mixing is for. The maximin is the
+best guarantee ANY of our rows offers. The gap between them is `regret`.
+
+Screening on the sampled row rejects exactly the openings that hold strong,
+readable threats, because a strong threat is a big target for a best-responding
+opponent. Measured, all four against the same -250 floor:
+
+    Charizard-Y/Garchomp vs Pelipper/Swampert   sampled -278.0   maximin  +20.1
+    Charizard-Y/Garchomp vs Grimmsnarl/Archaludon        +91.9            +91.9
+    weak bring vs rain                                   -92.1            -71.9
+    Garchomp/Aerodactyl vs Pelipper/Swampert            -322.2           -276.4
+
+The first of those goes on to WIN 100% of the time and was being thrown out,
+while the weak bring on line three was kept. The fourth loses in five turns and
+is correctly rejected either way -- so this is not a looser floor, it is a
+different and better-behaved statistic.
 
 WHAT IT CANNOT SAY. Nothing about a team that opens cleanly and falls apart on
 turn five -- only the full audit sees that. This is a SCREEN: it rejects the
 hopeless so the night is spent on the plausible, and it must never be used to
 RANK teams. Both sides choose the way they really would: they pick the lead that
 hurts us most, we pick the best answer we have.
+
+AND IT IS BOUNDED. `leads_per_opponent` and `our_brings` default to 2, and those
+are the FIRST two combinations in team order -- not the two most threatening. A
+team can therefore be screened on a bring it would never make. That is a real
+limit on how much a rejection means, and it is why the floor is deliberately
+generous.
 """
 import itertools
 
@@ -119,8 +145,10 @@ def screen_team(team, opponents, merged, moves_db, natures, typechart,
                                    enemy_sets=enemy_sets, depth=depth)
                 if rec is None:
                     continue
-                if best_answer is None or rec.worst_case > best_answer:
-                    best_answer = rec.worst_case
+                # `maximin`, not `worst_case` -- see the module docstring. The
+                # sampled row's worst case rejects strong, readable openings.
+                if best_answer is None or rec.maximin > best_answer:
+                    best_answer = rec.maximin
                     best_bring, best_punish = our4, rec.exploitability
             if best_answer is None:
                 continue

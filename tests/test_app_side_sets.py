@@ -145,17 +145,31 @@ class TestTheRealSearchSeesTheChange(unittest.TestCase):
     engine. Slow, so it is one opponent and one deliberately crippling change."""
 
     def test_crippling_a_member_costs_real_games(self):
+        """Cripple a Pokemon the search ACTUALLY BRINGS.
+
+        This used to name Gallade outright, and quietly stopped testing
+        anything: once the screener's back tie-break was fixed, the best bring
+        no longer contained Gallade, so crippling it cost nothing and the
+        assertion failed for a reason that had nothing to do with the wiring.
+        Deriving the victim from the chosen bring cannot rot that way -- and if
+        the search routes around the damage by bringing someone else, that shows
+        up as a smaller drop rather than a broken test.
+        """
         import matchup_search
         from _harness import load_world
         w = load_world()
-        base = matchup_search.search_robust_composition(
-            TEAM, w["teams"]["Rain"], w["merged"], w["moves"], w["natures"],
-            w["typechart"], 12, our_sets={}, verify_top=1)
-        crippled = matchup_search.search_robust_composition(
-            TEAM, w["teams"]["Rain"], w["merged"], w["moves"], w["natures"],
-            w["typechart"], 12, our_sets={"Gallade": {"moves": ["Protect"]}},
-            verify_top=1)
-        self.assertLess(crippled[0]["solver_wins"], base[0]["solver_wins"])
+
+        def search(sets):
+            return matchup_search.search_robust_composition(
+                TEAM, w["teams"]["Rain"], w["merged"], w["moves"], w["natures"],
+                w["typechart"], 12, our_sets=sets, verify_top=1)[0]
+
+        base = search({})
+        victim = base["our_bring4"][0]
+        crippled = search({victim: {"moves": ["Protect"]}})
+        self.assertLess(crippled["solver_wins"], base["solver_wins"],
+                        f"crippling {victim} (in the bring {base['our_bring4']}) "
+                        f"cost nothing")
 
 
 if __name__ == "__main__":

@@ -160,19 +160,37 @@ def _side_actions(battle: Battle, side, foe_side, movesets):
 
 
 def fast_playout(our_names, enemy_names, merged, moves_db, natures, typechart,
-                  max_turns=FAST_MAX_TURNS, our_mega=None, enemy_mega=None, movesets=None):
+                  max_turns=FAST_MAX_TURNS, our_mega=None, enemy_mega=None, movesets=None,
+                  our_sets=None, enemy_sets=None):
     """Greedy-vs-greedy playout. Returns dict with winner, turns, and the
     end-state HP fractions (which give a much finer-grained signal than
-    win/loss alone when screening)."""
+    win/loss alone when screening).
+
+    `our_sets` / `enemy_sets` are the edited sets -- ability, item, EVs, and the
+    four moves actually chosen. They used not to be accepted here at all, so the
+    screener ranked every candidate on DEFAULT USAGE SETS while the verification
+    stage played the real ones. An Arcanine-Hisui switched to Intimidate, or a
+    Pokemon whose four moves were hand-picked, changed nothing about which
+    candidates were shortlisted -- only about how the shortlist then scored.
+    """
     from combatants import make_team
-    oc = make_team(our_names, merged, natures, mega_transforms=our_mega)
-    ec = make_team(enemy_names, merged, natures, mega_transforms=enemy_mega)
+    oc = make_team(our_names, merged, natures, mega_transforms=our_mega, sets=our_sets)
+    ec = make_team(enemy_names, merged, natures, mega_transforms=enemy_mega, sets=enemy_sets)
 
     if movesets is None:
         movesets = {}
     for c in oc + ec:
-        if c.name not in movesets:
-            movesets[c.name] = build_moveset(merged[c.name], moves_db, top_k=4)
+        spec = (our_sets or {}).get(c.name) or (enemy_sets or {}).get(c.name) or {}
+        only = tuple(spec.get("moves") or ())
+        # Keyed by the CHOSEN MOVES as well as the name: a bare name key returns
+        # the default four for a Pokemon whose moves were edited, and would also
+        # hand one side's edited set to the other side's mon of the same name in
+        # a mirror.
+        key = (c.name, only)
+        if key not in movesets:
+            movesets[key] = build_moveset(merged[c.name], moves_db, top_k=4,
+                                          only_moves=spec.get("moves"))
+        movesets[c.name] = movesets[key]
 
     battle = Battle(oc, ec, typechart, moves_db)
     for _ in range(max_turns):
@@ -201,7 +219,8 @@ def fast_playout(our_names, enemy_names, merged, moves_db, natures, typechart,
             "our_hp": our_hp, "opp_hp": opp_hp, "battle": battle}
 
 
-def fast_pair_score(our_pair, enemy_pair, merged, moves_db, natures, typechart, movesets=None):
+def fast_pair_score(our_pair, enemy_pair, merged, moves_db, natures, typechart, movesets=None,
+                     our_sets=None, enemy_sets=None):
     """Screening score for one of our lead pairs vs one enemy lead pair.
 
     Minimax over Mega choices: WE pick whichever of our Megas is best for us,
@@ -218,7 +237,8 @@ def fast_pair_score(our_pair, enemy_pair, merged, moves_db, natures, typechart, 
         worst_vs_this = None
         for ev in enemy_variants:
             r = fast_playout(list(our_pair), list(enemy_pair), merged, moves_db, natures, typechart,
-                              our_mega=ov, enemy_mega=ev, movesets=movesets)
+                              our_mega=ov, enemy_mega=ev, movesets=movesets,
+                              our_sets=our_sets, enemy_sets=enemy_sets)
             if worst_vs_this is None or r["margin"] < worst_vs_this["margin"]:
                 worst_vs_this = r
         if best_for_us is None or worst_vs_this["margin"] > best_for_us["margin"]:

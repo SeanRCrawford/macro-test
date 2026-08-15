@@ -763,14 +763,45 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                our_sets=our_sets, enemy_sets=enemy_sets)
 
     movesets_cache = {}
+    # Result memo for the screener. fast_pair_score depends only on the two
+    # PAIRS, so the 90x90 loop below asks it 8,100 questions with at most 15x15
+    # distinct answers. Memoising is worth ~36x on this stage by itself, and it
+    # is what makes scoring the back pair as well (see below) cost nothing.
+    pair_memo = {}
+
+    def pair_margin(our_pair, enemy_pair):
+        key = (our_pair, enemy_pair)
+        if key not in pair_memo:
+            pair_memo[key] = fast_pair_score(our_pair, enemy_pair, merged, moves_db,
+                                             natures, typechart, movesets_cache,
+                                             our_sets=our_sets,
+                                             enemy_sets=enemy_sets)["margin"]
+        return pair_memo[key]
+
     scored = []
     for i, oc in enumerate(our_configs):
         worst, worst_cfg, wins = None, None, 0
         margins = []
+        # THE BACK PAIR, SCORED THE SAME WAY. The screener only ever looked at
+        # `oc[:2]`, so all six configs sharing a lead scored IDENTICALLY and the
+        # back two was decided by whatever order itertools.combinations happened
+        # to emit. Measured on one real six against one real six: the six backs
+        # behind the best lead all screened at 107.46, and when actually played
+        # out under the equilibrium pilot they ranged from 4/15 to 8/15. The
+        # best available back was twice the worst, and which one you got was an
+        # accident of enumeration order.
+        #
+        # Scoring the back as if it led is not a claim that it will lead. It is
+        # the cheapest honest proxy for what a back is FOR -- it is what you
+        # pivot into, so how it fares against their leads is exactly the
+        # question -- and with the memo above it is free, because every pair of
+        # ours is already scored against every lead of theirs.
+        back_worst = None
         for lead, back in configs:
-            r = fast_pair_score(tuple(oc[:2]), tuple(lead), merged, moves_db, natures,
-                                 typechart, movesets_cache)
-            margin = r["margin"]
+            margin = pair_margin(tuple(oc[:2]), tuple(lead))
+            bm = pair_margin(tuple(oc[2:]), tuple(lead))
+            if back_worst is None or bm < back_worst:
+                back_worst = bm
             margins.append(margin)
             if margin > 0:
                 wins += 1
@@ -788,11 +819,18 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                         "screen_wins": wins, "screen_total": len(configs),
                         "downside": downside_score(margins, tau=preview_tau,
                                                    alpha=preview_alpha),
+                        "screen_back_margin": back_worst,
                         "screen_margins": margins})
         if progress and (i + 1) % max(1, len(our_configs) // 10) == 0:
             progress(i + 1, len(our_configs))
 
-    scored.sort(key=lambda d: -d["worst_margin"])
+    # Lead first, back as the tie-break. The primary key is unchanged, so this
+    # cannot reorder two candidates the screener could genuinely distinguish --
+    # it only decides the ties it used to leave to enumeration order, and those
+    # were most of them (90 candidates, 14 distinct lead scores).
+    scored.sort(key=lambda d: (-d["worst_margin"],
+                               -(d["screen_back_margin"]
+                                 if d["screen_back_margin"] is not None else 0.0)))
 
     # Verify the survivors properly against EVERY enemy config.
     verified = []
