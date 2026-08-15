@@ -491,6 +491,32 @@ def pilot_for(effort):
             else PILOT)
 
 
+def render_pins(our_bring, their_bring, our_sets=None, enemy_sets=None):
+    """The board before a move is made, in the language of pins.
+
+    Only called where the SETS for both sides are genuinely in scope. A pin is
+    a claim about a specific guaranteed OHKO, so computing one from default
+    usage sets and showing it next to a line that was played with different
+    ones would be confidently wrong -- which is worse than silent. That is why
+    the saved-run "best line" panel does not call this: its sets live in the
+    run blob, not in the page.
+    """
+    if not our_bring or not their_bring:
+        return
+    from preview_lead import opening_pins
+    texts = opening_pins(list(our_bring), list(their_bring),
+                         {"merged": merged, "moves": moves,
+                          "natures": natures, "typechart": typechart},
+                         our_sets=our_sets, enemy_sets=enemy_sets)
+    if not texts:
+        return
+    for text in texts:
+        st.markdown(f"- {text}")
+    st.caption("A pin is a guaranteed OHKO from something that moves first, so "
+               "the target cannot profitably stay in and attack. A 'safe play' "
+               "collects value on every reply — unlike a Protect that is a read.")
+
+
 def render_line_result(lead, key):
     """A whole audited line as one battle, the way the Lead/Back tab shows one.
 
@@ -3102,6 +3128,10 @@ with tab_vs:
                                 f"vs {theirs}   punish "
                                 f"{ln.get('mean_exploitability') or 0:.0f}")
                         with st.expander(head):
+                            render_pins(plan.get("bring"),
+                                        ln.get("enemy_bring") or ln.get("lead"),
+                                        our_sets=pv_our_sets,
+                                        enemy_sets=pv_esets)
                             lt1, lt2 = st.tabs(["Battle result + log",
                                                 "Turn-by-turn analysis"])
                             with lt1:

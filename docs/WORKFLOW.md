@@ -586,8 +586,22 @@ a documented negative result.
    calling it safe would lie exactly where it costs a Pokémon.
 
    Both are reported: `preview_lead.line_for` attaches `pins`, `describe_line`
-   prints them, and the Team Preview line expander shows them. Run
+   prints them, and two app panels show them — Team Preview → "The line from
+   that lead", and the full model's "The games behind that record". Run
    `python tools/measure_pin.py --all` to see the shape of the lines.
+
+   **In the app.** The projection is in candidate generation, so it reaches
+   every panel that solves a turn, whether or not that panel mentions pins —
+   nothing needs enabling. The whole Team Preview flow was driven headless to
+   check it: "Find my lead now" (45 s) returns LEAD Mega Charizard Y / Garchomp,
+   and "Show me the line" (61 s) prints the pins per enemy lead.
+   `tests/test_app_pin.py` holds that, and was checked against a build with the
+   rendering removed so it fails when the wiring breaks.
+
+   The one panel that deliberately does NOT show pins is the saved-run "Best
+   line against a specific opponent" in the Lead/Back tab: its sets live in the
+   run blob rather than on the page, and a pin computed from default usage sets
+   next to a line played with different ones would be confidently wrong.
 
    What the fix does *not* claim: the three leads without Charizard Y still lose
    in 5 turns, and the module now says why — **Mega Swampert pins them**, because
