@@ -18,6 +18,10 @@ bring and lead per opponent, and how many of their 90 brings it beats.
 
 ## 1. The question the system answers
 
+> **`X / 90` IS NOT A WIN RATE.** It breaks three things at once, and
+> `src/win_rate.py` is the sound version. Read §4.0b before quoting any record.
+
+
 **Commit to one bring-4 and one lead-2 against an opponent, before seeing what
 they bring. How many of their 90 possible bring-4s does that beat, and how much
 does a good player gain along the way?**
@@ -466,6 +470,56 @@ a documented negative result.
 ---
 
 ## 4. Known gaps — read before trusting a number
+
+0b. **THE RECORD IS NOT A PROBABILITY, AND ITS AGGREGATE ASSUMES THEY CHOOSE AT
+   RANDOM.** Reported as "these winrates are not sound". They are not.
+
+   `wins / 90` plays ONE game per enemy bring, on the average damage roll, with
+   ties broken deterministically, scores it 1 or 0, and takes the uniform mean.
+   Three separate errors:
+
+   **P1 — a matchup's value is a probability, not a boolean.** Damage varies
+   over a 16-step range, speed ties are coin flips, secondaries fire or do not.
+   Measured on NAIC vs Hard Trick Room: **39 of 48 cells (81%) were genuinely
+   uncertain, averaging 46%** — near coin flips, each recorded as a clean win
+   or loss.
+
+   **P2 — their bring is chosen, not drawn from a hat.** At preview both sides
+   see the other's six and pick four *simultaneously*. That is a matrix game
+   and it has a value. The uniform mean is the number you would want if they
+   picked by lottery.
+
+   **P3 — a proportion without its interval is not a measurement.** Wilson, not
+   the normal approximation, because these numbers live near 0 and 1.
+
+   Measured, NAIC vs Hard Trick Room, 4 of our brings × 12 of theirs × 8
+   samples:
+
+   | reading | value | what it assumes |
+   |---|---|---|
+   | uniform (today's `X / 90`) | **41.1%** | they choose at random |
+   | **game value** | **30.6%** | both sides choose well — *the answer* |
+   | worst case | **0.0%** | they counter and we cannot mix |
+
+   The worst case being **zero** is the finding that matters: every one of our
+   brings loses to something they can bring, so **mixing is worth the entire
+   30.6%**. "Commit to ONE bring" — §1's framing — is itself unsound against
+   that opponent. `game_value` always sits between the other two, and the test
+   suite pins that ordering.
+
+   **What this costs, and the cheap half.** The full version is
+   `samples × our brings × their brings`; measured at 0.8 s/game, a proper
+   8 × 90 × 24 audit is ~4 hours for ONE pairing. That is affordable at the
+   decision point (team preview), not for screening.
+
+   **But P2 is nearly free.** `win_rate.aggregate()` takes floats, so the
+   existing deterministic 0/1 matrix can be run through it at zero extra
+   simulation cost and gives the game value instead of the uniform mean. That
+   fixes the largest of the three errors everywhere, today.
+
+   **Not yet wired into the pipeline.** `X / 90` is still what the workbook and
+   the app report.
+
 
 0. **THE RECORD IS MEASURED AGAINST AN OPPONENT WHO PLAYS BADLY. Read this
    before any other number in this file.**
