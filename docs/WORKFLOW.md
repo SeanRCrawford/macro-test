@@ -322,7 +322,8 @@ command resumes.
 
 | Panel | When | What it does |
 |---|---|---|
-| **Team preview** | you see their six, not their four | runs the advanced model on the bring/lead decision and returns ONE committed plan, its record, and what beats it |
+| **Team preview — fast** | you have about a minute | **`preview_lead.rank_leads`**: solves TURN 1 as a matrix game for each of your 15 lead pairs against each of their 15, and ranks your leads by the value you can GUARANTEE against their best reply. Measured **26 s** on a real preview |
+| **Team preview — full** | you have minutes to hours | runs the advanced model on the bring/lead decision and returns ONE committed plan, its record, and what beats it |
 | **Deep dive** | you have led, and so have they | the same model one notch deeper on that position, ~5 s, and depth 2 is available here because one line can afford it |
 | **Load an overnight run** | after a batch run | browse any committed line turn by turn, from the cache. Instant |
 
@@ -332,6 +333,24 @@ Pokémon, or a pokepaste. A preset brings its recorded sets with it, and fills
 in its fixed lead and its scripted opening where it has them — hand-typing the
 same six by name silently answers a slightly different question, because the
 script and the sets do not come along.
+
+**The one-minute answer: which lead is not already lost?** The full model
+cannot serve team preview — it takes minutes to hours and you have a minute.
+What *is* answerable in that time is the opening: one matrix solve is ~0.5 s, so
+your 15 lead pairs against their 15 is 225 solves ≈ 112 s — and **maximin
+prunes**. A lead is worth its WORST case over their leads, and a minimum only
+falls, so once a lead is behind a fully-checked one nothing can rescue it.
+Measured: **58 solves, 26 s** on a real preview instead of 225.
+
+It reports, per lead: the guaranteed turn-1 value, WHICH of their leads is the
+one that hurts, and whether your answer to it is to **attack, protect or
+pivot** — the last being the "I can switch out to create a winning position"
+case, named rather than buried in a log. A lead abandoned by pruning shows its
+number as `<= N`, an upper bound, because on a real preview a pruned lead read
+81 against a proven 73 and that ordering is backwards.
+
+What it does **not** know is everything after turn 1. A lead that opens cleanly
+and collapses on turn five looks fine here; that is what the deep search is for.
 
 **Deep dive assumes you cannot see their back.** You give their six and the two
 they led with; the back is what you do *not* know at that moment, so by default

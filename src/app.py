@@ -2813,6 +2813,91 @@ with tab_vs:
         pv_theirs, pv_esets, _pv_meta = enemy_side_input(
             "pv", teams, team_meta, all_names, merged,
             label="Their six (from team preview)")
+        # --- THE ONE-MINUTE ANSWER ----------------------------------------
+        # The full model takes minutes to hours; at preview you have about a
+        # minute. This is the question that IS answerable in that time: which
+        # of my leads is not already lost against their best reply, and if the
+        # answer to their worst lead is to pivot, say so.
+        st.markdown("#### Fast: which lead is not already lost?")
+        st.caption("Solves TURN 1 as a matrix game for each of your lead pairs "
+                   "against every one of theirs, and reports the value you can "
+                   "GUARANTEE against their best reply. Maximin, so a lead is "
+                   "worth its worst case — and that prunes hard, which is what "
+                   "makes it fit in the time you have. It knows nothing about "
+                   "turn 5; use the full model below for that.")
+        fb1, fb2 = st.columns([1, 2])
+        pv_budget = fb1.slider("Seconds", 15, 180, 60, step=15,
+                               key="pv_budget",
+                               help="Wall clock. The search is ordered so "
+                                    "stopping early still returns the best "
+                                    "leads it finished.")
+        if fb2.button("Find my lead now", key="pv_fast", type="primary"):
+            if len(pv_ours) != 6 or len(pv_theirs) != 6:
+                st.warning("Both sides need six Pokemon.")
+            else:
+                import preview_lead
+                bar = st.progress(0.0, text="Solving openings...")
+                try:
+                    def _tick(entry, elapsed):
+                        bar.progress(min(1.0, elapsed / pv_budget),
+                                     text=f"{entry['lead'][0]}/{entry['lead'][1]}"
+                                          f"  {elapsed:.0f}s")
+                    ranked, meta = preview_lead.rank_leads(
+                        pv_ours, pv_theirs,
+                        {"merged": merged, "moves": moves, "natures": natures,
+                         "typechart": typechart},
+                        budget=float(pv_budget), our_sets=pv_our_sets,
+                        enemy_sets=pv_esets, on_progress=_tick)
+                finally:
+                    bar.empty()
+                st.session_state["pv_fast_result"] = (ranked, meta)
+
+        if st.session_state.get("pv_fast_result"):
+            ranked, meta = st.session_state["pv_fast_result"]
+            proven = [e for e in ranked if e["complete"]]
+            if proven:
+                best = proven[0]
+                st.success("LEAD  " + " / ".join(best["lead"]))
+                st.caption("BRING " + " / ".join(best["bring"]))
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Guaranteed turn-1 value",
+                          f"{best['guaranteed']:+.0f}",
+                          help="heuristic_eval points; ~180 is a Pokemon. "
+                               "This is what you can force against their BEST "
+                               "reply. Negative is normal — they get a perfect "
+                               "read — but a large negative is a lead that "
+                               "loses on the spot.")
+                m2.metric("Their worst lead for you",
+                          " / ".join(best["worst_vs"] or []))
+                m3.metric("Your answer to it", best["answer"].upper(),
+                          help="PIVOT means the plan is to switch, not to "
+                               "attack: the lead buys the switch.")
+                if best["answer"] == "pivot":
+                    st.info("Against their worst lead this plan SWITCHES rather "
+                            "than attacking — that is the lead earning its "
+                            "place, not a failure.")
+            else:
+                st.warning("No lead was fully checked in the time given. "
+                           "Raise the budget.")
+            st.dataframe(pd.DataFrame([{
+                "Lead": " / ".join(e["lead"]),
+                # One dtype for the column: mixing int and str makes Arrow
+                # guess, and it guessed wrong (int64) on the "<= N" rows.
+                "Guaranteed": (f"{round(e['guaranteed']):+d}" if e["complete"]
+                               else f"<= {round(e['guaranteed']):+d}"),
+                "Proven": "yes" if e["complete"] else "abandoned (worse)",
+                "Worst enemy lead": " / ".join(e["worst_vs"] or []),
+                "Answer": e["answer"],
+                "Punish": round(e["punish"]),
+            } for e in ranked]), width='stretch', hide_index=True)
+            st.caption(f"{meta['solves']} opening solves in "
+                       f"{meta['seconds']:.0f}s — {meta['complete']} of "
+                       f"{meta['our_leads']} leads fully checked against all "
+                       f"{meta['their_leads']} of theirs. A lead marked "
+                       f"'abandoned' is only known to be WORSE than a proven "
+                       f"one; its number is an upper bound.")
+
+        st.markdown("#### Full model (minutes to hours)")
         pv_effort, pv_all = advanced_model_controls("pv")
 
         if st.button("Find my bring and lead", key="pv_run"):
