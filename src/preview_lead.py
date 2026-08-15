@@ -177,3 +177,119 @@ def describe(ranked, meta, top=5):
             lines.append("Against their worst lead the plan is to SWITCH, not "
                          "to attack -- the lead buys the pivot.")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- the line
+# Ranking leads answers "what do I send out". It does not answer "and then
+# what", which is the half you actually play. These take the chosen lead and
+# produce the SEQUENCE -- what to do on each turn, against their equilibrium
+# reply -- plus how likely that line is to win, because "wins on the average
+# roll" and "probably wins" are different claims (WORKFLOW.md 4.0b).
+
+
+def _say(actions):
+    """A joint action in words: 'Incineroar Fake Out -> Pelipper'."""
+    out = []
+    for a in actions or []:
+        who = getattr(getattr(a, "combatant", None), "name", "?")
+        if getattr(a, "kind", None) == "switch":
+            target = getattr(a, "targets", None) or []
+            name = getattr(target[0], "name", "?") if target else "?"
+            out.append(f"{who} -> {name}")
+            continue
+        move = getattr(getattr(a, "move", None), "name", None) or a.kind
+        targets = [getattr(t, "name", "?") for t in (getattr(a, "targets", None) or [])
+                   if getattr(t, "name", None) != who]
+        out.append(f"{who} {move}" + (f" -> {'/'.join(targets)}" if targets else ""))
+    return "; ".join(out)
+
+
+def line_for(bring, their_bring, world, our_sets=None, enemy_sets=None,
+             max_turns=16, depth=1, win_samples=8, pilot=None):
+    """The turn-by-turn plan from this position, and how likely it wins.
+
+    The line is played against their EQUILIBRIUM reply each turn -- not against
+    a best response to the move we just made, which is a clairvoyant opponent
+    that beats every team ever built (see robustness.LineReport.won).
+
+    `win_samples` buys the probability separately, by replaying the position
+    over real damage rolls and speed ties. The line tells you what to do; the
+    probability tells you how much to trust it. A line can be the best
+    available and still be a coin flip, and both facts are worth having.
+    """
+    from deep_dive import audit_position
+
+    report = audit_position(list(bring), list(their_bring), world["merged"],
+                            world["moves"], world["natures"], world["typechart"],
+                            our_sets=our_sets, enemy_sets=enemy_sets,
+                            max_turns=max_turns, depth=depth)
+    turns = []
+    for rec in report.turns:
+        turns.append({
+            "turn": rec.turn,
+            "play": _say(rec.our_action),
+            "their_reply": _say(rec.equilibrium_reply),
+            "punish": rec.exploitability,
+            "kos": list(rec.kos or []),
+            "events": list(rec.events or []),
+        })
+    out = {"their_bring": list(their_bring), "outcome": report.outcome,
+           "turns": turns, "length": report.length,
+           "final_margin": report.final_margin,
+           "win_prob": None, "win_interval": None, "win_games": 0}
+    if win_samples:
+        from win_rate import matchup_win_prob_adaptive
+        import matchup_search as _ms
+        est = matchup_win_prob_adaptive(
+            list(bring), list(their_bring), world, n_max=win_samples,
+            turns=max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
+            pilot=pilot or _ms.EQUILIBRIUM_PILOT)
+        out["win_prob"] = est.p
+        out["win_interval"] = est.interval
+        out["win_games"] = est.n
+    return out
+
+
+def lines_for_lead(entry, their6, world, their_leads=None, budget=45.0,
+                   our_sets=None, enemy_sets=None, max_turns=16,
+                   win_samples=8, on_progress=None):
+    """One line per enemy lead, hardest first.
+
+    Hardest first because that is the one you need to have thought about: the
+    lead ranking already told you which of theirs hurts most, so it is played
+    before the budget can run out on the easy ones.
+    """
+    theirs = list(their_leads or itertools.combinations(their6, 2))
+    worst = tuple(entry.get("worst_vs") or ())
+    theirs.sort(key=lambda t: 0 if tuple(t) == worst else 1)
+    started, out = time.time(), []
+    for their_lead in theirs:
+        if time.time() - started > budget:
+            break
+        line = line_for(entry["bring"], _bring(their6, their_lead), world,
+                        our_sets=our_sets, enemy_sets=enemy_sets,
+                        max_turns=max_turns, win_samples=win_samples)
+        line["their_lead"] = list(their_lead)
+        out.append(line)
+        if on_progress:
+            on_progress(line, time.time() - started)
+    return out, {"seconds": time.time() - started, "played": len(out),
+                 "of": len(theirs)}
+
+
+def describe_line(line, max_turns=8):
+    """One line, as something you could read while the clock runs."""
+    head = f"vs {line['their_lead'][0]} / {line['their_lead'][1]}"
+    if line.get("win_prob") is not None:
+        lo, hi = line["win_interval"]
+        head += (f"   {line['win_prob']:.0%} win [{lo:.0%}-{hi:.0%}]"
+                 f" over {line['win_games']} games")
+    head += f"   ({line['outcome']} in {line['length']} turns)"
+    rows = [head]
+    for t in line["turns"][:max_turns]:
+        rows.append(f"  T{t['turn']}: {t['play']}")
+        if t["their_reply"]:
+            rows.append(f"        they: {t['their_reply']}")
+        if t["kos"]:
+            rows.append(f"        KO: {', '.join(t['kos'])}")
+    return "\n".join(rows)

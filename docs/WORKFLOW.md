@@ -349,8 +349,25 @@ case, named rather than buried in a log. A lead abandoned by pruning shows its
 number as `<= N`, an upper bound, because on a real preview a pruned lead read
 81 against a proven 73 and that ordering is backwards.
 
-What it does **not** know is everything after turn 1. A lead that opens cleanly
-and collapses on turn five looks fine here; that is what the deep search is for.
+**And then what — the line.** Ranking leads says what to send out; it does not
+say what to play. `preview_lead.lines_for_lead` takes the chosen lead and
+returns the turn-by-turn plan against each of their leads: your joint action
+each turn, their equilibrium reply, the KOs, and **the probability that line
+wins**, sampled over real damage rolls and speed ties with an interval on it.
+
+Played against their **equilibrium reply**, not against a best response to the
+move you just made — that opponent is clairvoyant and beat every team tested
+(0 wins in 24 lines the same teams won 180/180 against the standard model).
+
+Hardest enemy lead **first**, so the budget can only ever cut the easy ones.
+Measured end to end: **30 s for the lead + 34 s for the lines**, and it is
+honest about bad news — on the sample preview the best lead still returns a 0%
+loss against Pelipper/Mega Swampert, which is the thing you want to know before
+you sit down rather than after.
+
+What it does **not** know is everything after turn 1 *for the lead ranking*. A
+lead that opens cleanly and collapses on turn five ranks fine; the line is what
+tells you it collapses.
 
 **Deep dive assumes you cannot see their back.** You give their six and the two
 they led with; the back is what you do *not* know at that moment, so by default

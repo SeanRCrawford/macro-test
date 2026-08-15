@@ -204,6 +204,108 @@ class TestTheWriteUp(Harness):
         self.assertIn("LEAD", text)
 
 
+class TestTheLine(unittest.TestCase):
+    """Ranking leads says what to SEND OUT. This is the half you play."""
+
+    def make_report(self, outcome="win", n=3):
+        class Rec:
+            def __init__(self, turn):
+                self.turn = turn
+                self.exploitability = 10.0 * turn
+                self.kos = ["Torkoal"] if turn == 2 else []
+                self.events = [f"turn {turn} happened"]
+                self.our_action = [type("A", (), {
+                    "combatant": type("C", (), {"name": "Charizard"})(),
+                    "kind": "move",
+                    "move": type("M", (), {"name": "Heat Wave"})(),
+                    "targets": [type("C", (), {"name": "Incineroar"})()]})()]
+                self.equilibrium_reply = [type("A", (), {
+                    "combatant": type("C", (), {"name": "Incineroar"})(),
+                    "kind": "move",
+                    "move": type("M", (), {"name": "Fake Out"})(),
+                    "targets": [type("C", (), {"name": "Charizard"})()]})()]
+        return type("R", (), {"turns": [Rec(i) for i in range(1, n + 1)],
+                              "outcome": outcome, "length": n,
+                              "final_margin": 120.0})()
+
+    # line_for unpacks the dataset before calling audit_position, which is
+    # stubbed here -- the values are unused, the keys are not.
+    WORLD = {"merged": {}, "moves": {}, "natures": {}, "typechart": {}}
+
+    def patched(self, **kw):
+        import deep_dive
+        real_audit = deep_dive.audit_position
+        deep_dive.audit_position = lambda *a, **k: self.make_report(**kw)
+        self.addCleanup(setattr, deep_dive, "audit_position", real_audit)
+
+    def test_it_returns_a_playable_sequence(self):
+        self.patched()
+        line = preview_lead.line_for(["A", "B", "C", "D"], ["u", "v", "w", "x"],
+                                     self.WORLD, win_samples=0)
+        self.assertEqual(line["outcome"], "win")
+        self.assertEqual(len(line["turns"]), 3)
+        self.assertEqual(line["turns"][0]["turn"], 1)
+        self.assertIn("Charizard Heat Wave", line["turns"][0]["play"])
+        self.assertIn("Incineroar", line["turns"][0]["play"])
+
+    def test_it_records_their_reply_and_the_kos(self):
+        self.patched()
+        line = preview_lead.line_for(["A", "B", "C", "D"], ["u", "v", "w", "x"],
+                                     self.WORLD, win_samples=0)
+        self.assertIn("Incineroar Fake Out", line["turns"][0]["their_reply"])
+        self.assertEqual(line["turns"][1]["kos"], ["Torkoal"])
+
+    def test_a_switch_reads_as_an_arrow(self):
+        actions = [type("A", (), {
+            "combatant": type("C", (), {"name": "Garchomp"})(),
+            "kind": "switch", "move": None,
+            "targets": [type("C", (), {"name": "Farigiraf"})()]})()]
+        self.assertEqual(preview_lead._say(actions), "Garchomp -> Farigiraf")
+
+    def test_no_win_samples_means_no_invented_probability(self):
+        """A line with no games behind it must not report a win rate; that is
+        exactly the 'wins on the average roll' claim 4.0b is about."""
+        self.patched()
+        line = preview_lead.line_for(["A", "B", "C", "D"], ["u", "v", "w", "x"],
+                                     self.WORLD, win_samples=0)
+        self.assertIsNone(line["win_prob"])
+        self.assertEqual(line["win_games"], 0)
+
+    def test_the_hardest_enemy_lead_is_played_first(self):
+        """The budget can cut the list short, so the lead that hurts most must
+        never be the one that gets cut."""
+        self.patched()
+        real = preview_lead.line_for
+        seen = []
+
+        def spy(bring, their_bring, world, **kw):
+            seen.append(tuple(their_bring[:2]))
+            return {"their_bring": list(their_bring), "outcome": "win",
+                    "turns": [], "length": 0, "final_margin": 0.0,
+                    "win_prob": None, "win_interval": None, "win_games": 0}
+
+        preview_lead.line_for = spy
+        try:
+            entry = {"bring": ["A", "B", "C", "D"], "worst_vs": ["y", "z"]}
+            lines, _meta = preview_lead.lines_for_lead(
+                entry, ["u", "v", "w", "x", "y", "z"], {}, budget=1e6,
+                win_samples=0)
+        finally:
+            preview_lead.line_for = real
+        self.assertEqual(seen[0], ("y", "z"))
+        self.assertEqual(lines[0]["their_lead"], ["y", "z"])
+
+    def test_the_write_up_leads_with_the_probability(self):
+        line = {"their_lead": ["u", "v"], "win_prob": 0.75,
+                "win_interval": (0.5, 0.9), "win_games": 8, "outcome": "win",
+                "length": 5, "turns": [{"turn": 1, "play": "X Move",
+                                        "their_reply": "", "kos": []}]}
+        text = preview_lead.describe_line(line)
+        self.assertIn("75%", text)
+        self.assertIn("8 games", text)
+        self.assertIn("T1", text)
+
+
 class TestTheBringIsFour(Harness):
 
     def test_the_lead_pair_comes_first(self):

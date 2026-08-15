@@ -2897,6 +2897,77 @@ with tab_vs:
                        f"'abandoned' is only known to be WORSE than a proven "
                        f"one; its number is an upper bound.")
 
+            # --- AND THEN WHAT. The lead ranking says what to send out; this
+            # says what to play, turn by turn, against their equilibrium reply
+            # -- with the probability attached, because "wins on the average
+            # roll" and "probably wins" are different claims.
+            if proven:
+                st.markdown("##### The line from that lead")
+                lb1, lb2 = st.columns([1, 2])
+                pv_line_budget = lb1.slider("Seconds for lines", 15, 180, 45,
+                                            step=15, key="pv_line_budget")
+                pv_line_games = lb1.slider("Games per win %", 4, 24, 8, step=4,
+                                           key="pv_line_games",
+                                           help="Replays the position over "
+                                                "real damage rolls and speed "
+                                                "ties. More games, narrower "
+                                                "interval.")
+                if lb2.button("Show me the line", key="pv_lines",
+                              type="primary"):
+                    import preview_lead as _pl
+                    bar2 = st.progress(0.0, text="Playing lines...")
+                    try:
+                        def _tick2(line, elapsed):
+                            bar2.progress(min(1.0, elapsed / pv_line_budget),
+                                          text=f"vs {'/'.join(line['their_lead'])}"
+                                               f"  {elapsed:.0f}s")
+                        lines, lmeta = _pl.lines_for_lead(
+                            proven[0], pv_theirs,
+                            {"merged": merged, "moves": moves,
+                             "natures": natures, "typechart": typechart},
+                            budget=float(pv_line_budget),
+                            our_sets=pv_our_sets, enemy_sets=pv_esets,
+                            win_samples=int(pv_line_games),
+                            on_progress=_tick2)
+                    finally:
+                        bar2.empty()
+                    st.session_state["pv_lines_result"] = (lines, lmeta)
+
+                if st.session_state.get("pv_lines_result"):
+                    lines, lmeta = st.session_state["pv_lines_result"]
+                    st.caption(f"{lmeta['played']} of {lmeta['of']} enemy leads "
+                               f"played in {lmeta['seconds']:.0f}s — hardest "
+                               f"first, so the one you most need is never the "
+                               f"one the budget cut.")
+                    st.dataframe(pd.DataFrame([{
+                        "Their lead": " / ".join(ln["their_lead"]),
+                        "Win %": (f"{ln['win_prob']:.0%}"
+                                  if ln["win_prob"] is not None else "-"),
+                        "Interval": (f"{ln['win_interval'][0]:.0%}–"
+                                     f"{ln['win_interval'][1]:.0%}"
+                                     if ln["win_interval"] else "-"),
+                        "Games": ln["win_games"],
+                        "Line result": ln["outcome"],
+                        "Turns": ln["length"],
+                    } for ln in lines]), width='stretch', hide_index=True)
+                    for ln in lines:
+                        pct = (f"{ln['win_prob']:.0%}"
+                               if ln["win_prob"] is not None else "?")
+                        with st.expander(
+                                f"vs {' / '.join(ln['their_lead'])} — {pct} win "
+                                f"({ln['outcome']} in {ln['length']} turns)"):
+                            for t in ln["turns"]:
+                                st.markdown(f"**T{t['turn']}** — {t['play']}")
+                                if t["their_reply"]:
+                                    st.caption(f"they: {t['their_reply']}")
+                                if t["kos"]:
+                                    st.caption("KO: " + ", ".join(t["kos"]))
+                            st.caption("Played against their EQUILIBRIUM reply "
+                                       "each turn — not against a best response "
+                                       "to the move you just made, which is a "
+                                       "clairvoyant opponent that beats every "
+                                       "team ever built.")
+
         st.markdown("#### Full model (minutes to hours)")
         pv_effort, pv_all = advanced_model_controls("pv")
 
