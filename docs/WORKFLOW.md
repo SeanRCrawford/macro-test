@@ -514,6 +514,34 @@ a documented negative result.
 
 ## 4. Known gaps — read before trusting a number
 
+0e. **OUR SIDE SWITCHES AND PROTECTS INSTEAD OF PLAYING.** The live defect, and
+   it is a PILOT problem, not a mechanics one.
+
+   Found while checking a reported "0% that seems winnable". The mechanics were
+   fine — Mega Charizard Y does get Drought on turn 1 and it does override
+   Pelipper's rain (`tests/test_mega_weather.py` pins it). What loses the game
+   is what our side *does*:
+
+   | line | result | OUR switches | THEIR switches | our Protects |
+   |---|---|---|---|---|
+   | Charizard/Garchomp vs Pelipper/Swampert | loss, 11 turns | **6** | 1 | **8** |
+   | Charizard/Garchomp vs Incineroar/Torkoal | win, 9 turns | 5 | 2 | 2 |
+   | Big 6 vs Sand | loss, 5 turns | 2 | 1 | 3 |
+
+   Fourteen non-attacking actions out of twenty-two slot-turns in the losing
+   line. It sets sun on turn 1 and then switches the Charizard out, spends the
+   five sun turns pivoting, and attacks twice.
+
+   **The likely mechanism is the information asymmetry.** `_attach_movesets`
+   gives THEM six plausible moves per Pokémon and US our known four (§4.0,
+   deliberately). In the payoff matrix that prices every aggressive option of
+   ours against a wider set of their threats, while their options are priced
+   against our narrow four — so passive play is systematically cheaper for us
+   than for them. That is a hypothesis with a mechanism, not a measurement;
+   the honest test is to re-run these lines with `--symmetric-info` and count
+   switches again.
+
+
 0c. **A TURN CAP IS A CLOCK, AND A CLOCK IS ADJUDICATED.** Capped games used to
    count as losses. That is not conservative, it is wrong: a 3-1 position with
    their last Pokemon on 8 HP is a won game, and calling it a loss discards
