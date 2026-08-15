@@ -1,12 +1,20 @@
 """Can the number generation RANKS ON tell two candidates apart?
 
 `measure_pilot_gap.py` asks whether the two pilots agree about a given
-configuration. This asks the harder and more consequential question: whether
-the cheap metric can ORDER candidates at all. Generation does not need the
-greedy record to be accurate in absolute terms -- it needs it to be monotone in
-the thing we actually care about. A metric that says 15/15 for every candidate
-is not a weak signal, it is no signal, and a beam search driven by it is
-choosing at random from its ties.
+configuration. This asks the harder question: whether the cheap metric can
+ORDER candidates at all. A metric that says 15/15 for every candidate is not a
+weak signal, it is no signal.
+
+WHAT THIS NUMBER GOVERNS, precisely -- worth stating, because it is easy to
+assume it drives the ranking and it does not. `roster_rating.rank_key` is
+`(-adjusted_win_rate, exploitability)`, and both come from the AUDIT, which runs
+`solver_mode(nash=True)` whatever `--pilot` says. The greedy win count feeds the
+`--min-winrate` and `--worst-matchup` FILTERS and the printed `X / 90`.
+
+So a saturated metric here does not corrupt the ranking. It makes the cheap
+filters no-ops -- they pass the whole field, so they neither save audit time nor
+exclude anything -- and it inflates the headline record. Saturated-high can only
+fail to exclude, never wrongly reject, so this costs time rather than teams.
 
 Measured on eight of our brings against one real six:
 

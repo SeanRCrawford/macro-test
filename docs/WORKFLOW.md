@@ -623,9 +623,30 @@ a documented negative result.
 
    The greedy record calls every bring a near-clean sweep, including the one
    that wins 3 of 15 against a real opponent. **That is not a weak signal, it is
-   no signal** -- a beam, a floor or a `verify_top` cut driven by it is choosing
-   among ties, which is the same failure as the back-two tie-break in 0g but at
-   the top of the funnel where it costs the whole night.
+   no signal.**
+
+   **WHAT IT DOES AND DOES NOT AFFECT — corrected.** I first wrote this entry
+   claiming generation *ranks* on that number. It does not, and the correction
+   matters because it changes what to do about it. Traced through:
+
+   | stage | pilot | what it feeds |
+   |---|---|---|
+   | beam search | no battles | which teams exist at all |
+   | `--punish-screen` / `--punish-floor` | **equilibrium** | reject or keep |
+   | the audit (`_rate_and_rerank`) | **equilibrium, always** — `solver_mode(nash=True)` regardless of `--pilot` | `adjusted_win_rate`, `exploitability` |
+   | the win count `X / 90` | **greedy**, unless the tier or `--pilot` says otherwise | `--min-winrate`, `--worst-matchup`, and the printed record |
+
+   `roster_rating.rank_key` is `(-adjusted_win_rate, exploitability)` — both from
+   the audit. So **the ranking was already equilibrium-based** and the saturation
+   does not corrupt it.
+
+   Where the saturation does bite: the two FILTERS and the headline. A
+   `--min-winrate 0.80` floor against a metric that scores 14-15 out of 15 for
+   everything passes the whole field, so it neither saves audit time nor
+   protects against anything; `--worst-matchup` is weak for the same reason.
+   Neither produces a false REJECTION -- a saturated-high metric only ever fails
+   to exclude -- so this wastes time rather than losing teams. And the `X / 90`
+   in the workbook is inflated: read `Adjusted` instead.
 
    The budget, measured (`tools/measure_funnel.py`, pool 40, 8 workers):
 
@@ -640,9 +661,9 @@ a documented negative result.
    distinct Pokemon, mean pairwise overlap 2.68 of 6, and **52 of 200 share a
    single four-Pokemon core**. Widening the beam buys near-duplicates.
 
-   So the two cheap stages that could narrow 1000 to 20 cannot rank, and the
-   stage that can costs 21 hours. That is the real constraint on aim 1, and
-   neither more pool nor more beam width addresses it.
+   So the constraint on aim 1 is not that the ranking is wrong -- it is that
+   the ranking costs an audit per team, and the cheap filters in front of it
+   pass everything. Neither more pool nor more beam width addresses that.
 
    What the evidence points at, none of it yet measured end to end: screen on
    the OPENING MAXIMIN (21 s/team, and after 0g it is a sound statistic with a
