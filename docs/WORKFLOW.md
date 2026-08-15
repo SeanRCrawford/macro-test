@@ -514,32 +514,84 @@ a documented negative result.
 
 ## 4. Known gaps — read before trusting a number
 
-0e. **OUR SIDE SWITCHES AND PROTECTS INSTEAD OF PLAYING.** The live defect, and
-   it is a PILOT problem, not a mechanics one.
+0e. **~~OUR SIDE SWITCHES AND PROTECTS INSTEAD OF PLAYING.~~ FIXED — and it was
+   neither the pilot nor the information asymmetry.**
 
-   Found while checking a reported "0% that seems winnable". The mechanics were
-   fine — Mega Charizard Y does get Drought on turn 1 and it does override
-   Pelipper's rain (`tests/test_mega_weather.py` pins it). What loses the game
-   is what our side *does*:
+   The symptom, reported as "far too many switches and protects into a winning
+   match up (too many predicts, not necessarily safe)":
 
-   | line | result | OUR switches | THEIR switches | our Protects |
+   | line | result | OUR switches | our Protects | our attacks |
    |---|---|---|---|---|
-   | Charizard/Garchomp vs Pelipper/Swampert | loss, 11 turns | **6** | 1 | **8** |
-   | Charizard/Garchomp vs Incineroar/Torkoal | win, 9 turns | 5 | 2 | 2 |
-   | Big 6 vs Sand | loss, 5 turns | 2 | 1 | 3 |
+   | before | loss, 11 turns | 6 | 8 | — |
+   | after | **win, 10 turns, 100%** | **3** | **3** | **14** |
 
-   Fourteen non-attacking actions out of twenty-two slot-turns in the losing
-   line. It sets sun on turn 1 and then switches the Charizard out, spends the
-   five sun turns pivoting, and attacks twice.
+   **I guessed wrong first.** The entry here used to blame the wide-moveset
+   asymmetry — that pricing our options against their six moves and theirs
+   against our four makes passive play systematically cheaper for us. That was
+   a mechanism without a measurement, and it was not the cause. Recorded rather
+   than deleted, because the wrong hypothesis is the reason the real one took
+   so long to find: it pointed at the evaluation, and the bug was in candidate
+   *generation*.
 
-   **The likely mechanism is the information asymmetry.** `_attach_movesets`
-   gives THEM six plausible moves per Pokémon and US our known four (§4.0,
-   deliberately). In the payoff matrix that prices every aggressive option of
-   ours against a wider set of their threats, while their options are priced
-   against our narrow four — so passive play is systematically cheaper for us
-   than for them. That is a hypothesis with a mechanism, not a measurement;
-   the honest test is to re-run these lines with `--symmetric-info` and count
-   switches again.
+   **The actual cause: the decision was made against a field that no longer
+   existed by the time the move fired.** Mega Evolution resolves after all
+   switches and before any move, so on the turn a Mega transforms,
+   `battle.field` at decision time is stale. `solver.candidate_actions` reads
+   it, and its charge-move filter drops a two-turn move unless the skip weather
+   is *already* up — so with Pelipper's rain showing and Charizard's Drought one
+   step away, **Solar Beam was never offered at all**. Weather Ball was typed
+   Water into a Water/Ground target, and every special attack was priced off
+   base-form stats.
+
+   The payoff matrix was never wrong: every cell comes from a real `run_turn`,
+   which resolves the mega properly. The winning ROW was simply missing from it,
+   so the equilibrium was solved over the wrong game — and protecting really
+   was the best of the options it could see. Turn-1 equilibrium value went from
+   **−58.5 to +55.3** with nothing changed but the candidate list.
+
+   `src/projection.py` answers "what will be true when I move?" without touching
+   the battle; `solver` and `threat` decide against that.
+   `tests/test_projection.py` pins it, including that the charge filter still
+   works when no Drought is pending.
+
+   **The Pin (`src/pin.py`).** The concept, as it was put to me: a faster
+   guaranteed OHKO does not merely damage a Pokémon, it removes its option to
+   stay in and attack — *"speed order 1234 ... reduced to 124, because Swampert
+   must switch or protect if Zard pins it"*. The equilibrium finds this by
+   itself once the state is right (turn 2 already had Swampert switching out
+   72% of the time), so `pin.py` does not override the solver. It earns its
+   place in two narrower spots:
+
+   - **The prefix cut.** `turn_game._enumerate` truncates each side to
+     `INNER_ACTION_CAP=8`, and the order is whatever `itertools.product` emits —
+     Protect first, because Protect is first in the moveset. On the reported
+     position the Solar Beam row sits at index **11** and the first five rows are
+     all "Charizard Protects", so the move that wins the game was cut and the
+     passive rows kept. Ordering by pressure fixes that. Measured at depth 2:
+     +4.5% time, values 138.0 → 197.4 and −118.3 → −102.3.
+   - **Seeding the double oracle**, which converges in the number of iterations
+     it takes to *find* the decisive action. +9% time at depth 1.
+
+   It orders and seeds; it never prunes. "Stay in and attack while pinned" is
+   not dominated — it is excellent on the columns where they hit the other slot
+   — so deleting it would change the equilibrium.
+
+   **The safe play** is the companion idea and the reason the module exists
+   rather than the pin alone: *"if someone outspeeds and OHKOs one of your guys
+   but its partner isn't threatened to be fainted this turn ... it is a safe
+   play to protect the threatened guy + attack with other"*. A payoff matrix
+   cannot tell that apart from protecting on a read. `pin.safe_plays()` names
+   it, and deliberately refuses to fire when *both* of ours are under a
+   guaranteed KO — at that point choosing which to save is a read again, and
+   calling it safe would lie exactly where it costs a Pokémon.
+
+   Both are reported: `preview_lead.line_for` attaches `pins`, `describe_line`
+   prints them, and the Team Preview line expander shows them. Run
+   `python tools/measure_pin.py --all` to see the shape of the lines.
+
+   What the fix does *not* claim: the three leads without Charizard Y still lose
+   in 5 turns, and the module now says why — **Mega Swampert pins them**, because
+   with no Drought the rain stands and Swift Swim makes it faster.
 
 
 0c. **A TURN CAP IS A CLOCK, AND A CLOCK IS ADJUDICATED.** Capped games used to

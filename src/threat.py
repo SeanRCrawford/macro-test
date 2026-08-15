@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from damage import damage_roll, defensive_stat, effective_stat
 from engine import effective_speed
 from matching import max_weight_matching
+from projection import mega_view, projected_field, projected_weather
 from rolls import kill_probability
 
 
@@ -155,9 +156,15 @@ def _best_attack(attacker, defender, movesets, typechart, context):
 
 
 def _damage_context(battle, defender):
-    """Field effects that affect damage but belong to either side, not a mon."""
+    """Field effects that affect damage but belong to either side, not a mon.
+
+    The weather is the PROJECTED one -- what will be up once this turn's pending
+    Mega Evolutions have fired, since they resolve before any move. Reading
+    `battle.field.weather` here prices a Charizard Y's Fire moves in the
+    opponent's rain on the very turn its own Drought replaces it.
+    """
     side = battle.side_of(defender)
-    return (battle.field.weather,
+    return (projected_weather(battle),
             tuple(sorted(battle._active_auras())),
             side.screens_reflect > 0,
             side.screens_lightscreen > 0,
@@ -171,15 +178,24 @@ def threat_between(attacker, defender, movesets, typechart, field, battle,
         return NO_THREAT
     if context is None:
         context = _damage_context(battle, defender)
-    best = _best_attack(attacker, defender, movesets, typechart, context)
+    # Both sides of the edge as they will be when the move fires. A pending mega
+    # brings its own stats, typing and ability with it, and all three change the
+    # number: Mega Charizard Y's Solar Beam is a 182% guaranteed OHKO on Mega
+    # Swampert, where base Charizard's is not close.
+    atk_view = mega_view(battle, attacker)
+    def_view = mega_view(battle, defender)
+    best = _best_attack(atk_view, def_view, movesets, typechart, context)
     if best is None:
         return NO_THREAT
     move, lo, hi, avg = best
 
     max_hp = defender.max_hp() or 1
     cur_hp = defender.current_hp
+    # side_of matches by identity against the roster, so it must be asked about
+    # the REAL Pokemon -- a projected view is not in any roster.
     atk_side = "p1" if battle.side_of(attacker) is battle.p1 else "p2"
     def_side = "p1" if battle.side_of(defender) is battle.p1 else "p2"
+    field = projected_field(battle)
 
     return Threat(
         move=move.name,
@@ -187,8 +203,11 @@ def threat_between(attacker, defender, movesets, typechart, field, battle,
         dmg_min=lo / max_hp,
         dmg_max=hi / max_hp,
         priority=move.priority,
-        outspeeds=(effective_speed(attacker, field, atk_side)
-                   > effective_speed(defender, field, def_side)),
+        # Post-mega stats in post-mega weather. Both halves matter here: Mega
+        # Swampert gains Swift Swim, but the sun its opponent's Drought puts up
+        # on the same turn is what decides whether Swift Swim does anything.
+        outspeeds=(effective_speed(atk_view, field, atk_side)
+                   > effective_speed(def_view, field, def_side)),
         ohko=(lo >= cur_hp),
         ohko_possible=(hi >= cur_hp),
         nhko=(math.ceil(cur_hp / avg) if avg > 0 else 99),

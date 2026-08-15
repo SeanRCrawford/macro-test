@@ -34,6 +34,7 @@ from damage import (Combatant, MoveInfo, is_spread_move, effective_stat, damage_
                     defensive_stat, move_from_showdown, CHARGE_WEATHER_SKIP)
 from engine import FieldState, Action, on_switch_in, effective_speed
 from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS
+from projection import mega_view, projected_field
 
 TOP_K_MOVES = 4   # real sets run 4 moves; 3 systematically under-armed the AI
 FIRST_TURN_ONLY_MOVES = {"Fake Out", "First Impression"}
@@ -139,9 +140,21 @@ def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo
 
 def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: list,
                        moveset, typechart: dict, field: FieldState, turn_num: int,
-                       bench: list | None = None):
-    """Returns a pruned list of Action objects worth considering for this mon."""
+                       bench: list | None = None, self_view: Combatant | None = None):
+    """Returns a pruned list of Action objects worth considering for this mon.
+
+    `field` must be the field the chosen move will RESOLVE in, and `self_view`
+    the form this Pokemon will be in when it moves -- see projection.py. On the
+    turn a Mega transforms those are not what `battle.field` and `combatant`
+    say, and the difference silently deletes candidates: the charge filter below
+    reads the weather, and a Solar Beam that skips its charge in sun is dropped
+    outright when the decision is made a moment before Drought fires.
+
+    `self_view` is for DAMAGE ESTIMATION only. Every Action is built from
+    `combatant`, the real object on the field.
+    """
     actions = []
+    attacker = self_view if self_view is not None else combatant
     live_foes = [f for f in foes if not f.fainted]
     # NOTE: do NOT early-return here even if live_foes is empty. That happens
     # legitimately when both opposing actives just fainted this turn and are
@@ -197,7 +210,7 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
             # single-target: only branch on the target that does more damage (prune to 1)
             best_target = max(
                 live_foes,
-                key=lambda f: quick_damage_estimate(combatant, f, move, typechart, field)
+                key=lambda f: quick_damage_estimate(attacker, f, move, typechart, field)
             )
             actions.append(Action(combatant, side_key, "move", move, [best_target]))
 
@@ -223,6 +236,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                                   turn_num: int):
     joint = []
     used_incoming = set()
+    # The turn resolves after pending Mega Evolutions, not before them.
+    decision_field = projected_field(battle)
     for c in side.active:
         if c.fainted:
             if side.bench:
@@ -233,7 +248,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                     joint.append(Action(c, side.name, "switch", None, [incoming]))
             continue
         cands = candidate_actions(c, side.name, side.active, opp_side.active,
-                                   movesets[c.name], battle.typechart, battle.field, turn_num)
+                                   movesets[c.name], battle.typechart, decision_field, turn_num,
+                                   self_view=mega_view(battle, c))
         # Greedy: prefer a status/setup move on turn 1 only if it's their known signature
         # (Trick Room / Tailwind), else take the highest total estimated damage option.
         def action_value(a: Action):
@@ -261,7 +277,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
             own_side = battle.side_of(c)
             total_dealt = 0.0
             for t in a.targets:
-                dmg = quick_damage_estimate(c, t, a.move, battle.typechart, battle.field,
+                dmg = quick_damage_estimate(mega_view(battle, c), t, a.move,
+                                             battle.typechart, decision_field,
                                              num_hit=len(a.targets) if is_spread_move(a.move.target) else 1,
                                              battle=battle)
                 pct = 100.0 * min(dmg, t.current_hp) / t.max_hp() if t.max_hp() else 0.0
@@ -1066,6 +1083,9 @@ def _is_pointless_double_protect(combo, battle: Battle, side: Side) -> bool:
 def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, movesets: dict,
                                  turn_num: int):
     per_mon_options = []
+    # Decide against the field the turn will resolve in, not the one showing
+    # now: a pending Mega Evolution lands before any move (see projection.py).
+    decision_field = projected_field(battle)
     for c in side.active:
         if c.fainted:
             if side.bench:
@@ -1088,9 +1108,10 @@ def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, move
         # -- the solver could choose a switch that simply failed.
         trapped = battle.is_trapped(c)
         cands = candidate_actions(c, side.name, side.active, opp_side.active,
-                                   movesets[c.name], battle.typechart, battle.field, turn_num,
+                                   movesets[c.name], battle.typechart, decision_field, turn_num,
                                    bench=None if trapped else
-                                   [b for b in side.bench if not b.fainted])
+                                   [b for b in side.bench if not b.fainted],
+                                   self_view=mega_view(battle, c))
         per_mon_options.append(cands)
     if not per_mon_options:
         return [[]]

@@ -3020,6 +3020,13 @@ with tab_vs:
                         with st.expander(
                                 f"vs {' / '.join(ln['their_lead'])} — {pct} win "
                                 f"({ln['outcome']} in {ln['length']} turns)"):
+                            if ln.get("pins"):
+                                # The board before a move is made: who cannot
+                                # stay in, and whether the Protect in this line
+                                # is safe or a read.
+                                for text in ln["pins"]:
+                                    st.markdown(f"- {text}")
+                                st.divider()
                             for t in ln["turns"]:
                                 st.markdown(f"**T{t['turn']}** — {t['play']}")
                                 if t["their_reply"]:

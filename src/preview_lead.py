@@ -200,6 +200,34 @@ def describe(ranked, meta, top=5):
 # roll" and "probably wins" are different claims (WORKFLOW.md 4.0b).
 
 
+def opening_pins(bring, their_bring, world, our_sets=None, enemy_sets=None):
+    """The pins on the board before a move is made, in plain sentences.
+
+    Costs one threat matrix -- about one simulated turn -- against a line that
+    plays out sixteen of them, so it is free in context. Never raises: a line
+    that cannot be explained is still a line worth reporting.
+    """
+    try:
+        import pin as _pin
+        from deep_dive import build_position
+        from threat import build_threat_matrix
+        battle, movesets = build_position(
+            list(bring), list(their_bring), world["merged"], world["moves"],
+            world["natures"], world["typechart"], our_sets, enemy_sets)
+        return _pin.describe(build_threat_matrix(battle, movesets), battle, "p1")
+    except Exception:
+        return []
+
+
+def _kinds(actions):
+    """One word per slot: "attack", "protect" or "switch"."""
+    out = []
+    for a in actions or []:
+        kind = getattr(a, "kind", None)
+        out.append(kind if kind in ("protect", "switch") else "attack")
+    return out
+
+
 def _say(actions):
     """A joint action in words: 'Incineroar Fake Out -> Pelipper'."""
     out = []
@@ -242,6 +270,12 @@ def line_for(bring, their_bring, world, our_sets=None, enemy_sets=None,
             "turn": rec.turn,
             "play": _say(rec.our_action),
             "their_reply": _say(rec.equilibrium_reply),
+            # Per-slot kinds, so "how passive is this line?" can be counted
+            # rather than guessed at from the prose. Reading it back out of
+            # `play` does not work: an attack and a switch both render with an
+            # arrow ("Solar Beam -> Swampert" vs "Garchomp -> Farigiraf").
+            "kinds": _kinds(rec.our_action),
+            "their_kinds": _kinds(rec.equilibrium_reply),
             "punish": rec.exploitability,
             "kos": list(rec.kos or []),
             "events": list(rec.events or []),
@@ -249,6 +283,11 @@ def line_for(bring, their_bring, world, our_sets=None, enemy_sets=None,
     out = {"their_bring": list(their_bring), "outcome": report.outcome,
            "turns": turns, "length": report.length,
            "final_margin": report.final_margin,
+           # What the opening board is, in the language of pins: who cannot
+           # stay in, whose turn is already spoken for, and whether there is a
+           # protect-and-attack here that is safe rather than a read.
+           "pins": opening_pins(bring, their_bring, world,
+                                our_sets=our_sets, enemy_sets=enemy_sets),
            "win_prob": None, "win_interval": None, "win_games": 0}
     if win_samples:
         from win_rate import matchup_win_prob_adaptive
@@ -299,6 +338,8 @@ def describe_line(line, max_turns=8):
                  f" over {line['win_games']} games")
     head += f"   ({line['outcome']} in {line['length']} turns)"
     rows = [head]
+    for text in line.get("pins") or []:
+        rows.append(f"  * {text}")
     for t in line["turns"][:max_turns]:
         rows.append(f"  T{t['turn']}: {t['play']}")
         if t["their_reply"]:
