@@ -13,10 +13,15 @@ The trade is sampling error for BIAS, and MEASURED, THE BIAS LOSES.
 NAIC vs Hard Trick Room, 10 real cells, ground truth 40 random games each:
 
     estimator            cost   mean |err|   worst cell   ranking agreement
-    old (1 game)         0.8s      0.25         0.78            96%
-    quadrature (6)       4.6s      0.17         0.78            91%
-    sample-8 (8)         6.2s      0.13         0.35             -
-    truth (40)          32.0s        -            -              -
+    old (1 game)         0.7s      0.25         0.78            96%
+    quadrature (6)       4.5s      0.17         0.78            91%
+    sample-8 (8)         6.1s      0.13         0.35             -
+    adaptive (15.2 avg) 11.4s      0.05         0.17             -
+    truth (40)          31.4s        -            -              -
+
+ADAPTIVE WINS: a fifth of the old method's error, a third of sample-8's, at
+2.7x cheaper than the ground truth. It spent 8 games on the cells that were
+already settled and 24 on the ones near a coin flip, which is the whole idea.
 
 Quadrature halves the mean error but keeps the same catastrophic worst cell --
 one where the truth is 78% and quadrature says 0% -- and ranks slightly WORSE

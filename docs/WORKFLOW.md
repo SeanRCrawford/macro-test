@@ -507,10 +507,41 @@ a documented negative result.
    that opponent. `game_value` always sits between the other two, and the test
    suite pins that ordering.
 
-   **What this costs, and the cheap half.** The full version is
-   `samples × our brings × their brings`; measured at 0.8 s/game, a proper
-   8 × 90 × 24 audit is ~4 hours for ONE pairing. That is affordable at the
-   decision point (team preview), not for screening.
+   **What this costs, and which estimator to use.** The full version is
+   `samples × our brings × their brings`, so the per-cell estimator decides
+   whether it is affordable. Measured on 10 real cells against a 40-game ground
+   truth (`tools/measure_estimator.py`):
+
+   | estimator | cost/cell | mean abs error | worst cell | ranking |
+   |---|---|---|---|---|
+   | old (1 game, avg roll) | 0.7 s | 0.25 | 0.78 | 96% |
+   | quadrature (3 rolls × 2 ties) | 4.5 s | 0.17 | 0.78 | 91% |
+   | sample-8 | 6.1 s | 0.13 | 0.35 | — |
+   | **adaptive** (8–24 games) | 11.4 s | **0.05** | **0.17** | — |
+   | truth (40 games) | 31.4 s | — | — | — |
+
+   **Adaptive is the one to use** — a fifth of the old method's error at 2.7×
+   cheaper than the ground truth. It samples in batches and stops once the
+   Wilson interval is narrow enough, so a settled cell costs 8 games and a
+   coin-flip cell costs 24. It cannot bias the estimate; it changes only how
+   many honest games get played.
+
+   **Quadrature — "use 3 damage rolls instead of 16" — was tried and LOSES.**
+   It halves the mean error but keeps the same catastrophic worst cell (truth
+   78%, estimate 0%) and *ranks worse* than the single playout it replaces.
+   The reason is structural: pinning every roll in a game to one index is a
+   **correlated** extreme, and real games roll independently. "All rolls low"
+   is a game nobody plays, and the mid scenario is not the median game but the
+   all-median-rolls game — a line needing one high roll somewhere in twelve
+   turns gets it almost always in reality and never under quadrature.
+
+   **Double oracle over the bring matrix also saves nothing**: 720/720 cells at
+   8 × 90 on random matrices, 556/720 (77%) when their brings cluster into
+   archetypes. Computing the column player's best response requires scanning
+   every column. Kept as correct-but-inert.
+
+   At 11.4 s/cell an 8 × 90 audit is **~2.3 hours for one pairing** — the
+   decision point (team preview), not screening.
 
    **But P2 is nearly free.** `win_rate.aggregate()` takes floats, so the
    existing deterministic 0/1 matrix can be run through it at zero extra

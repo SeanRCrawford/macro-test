@@ -47,10 +47,29 @@ rather than the normal approximation because these proportions live near 0 and
 1, where the normal interval runs past the ends and understates the width.
 
 --------------------------------------------------------------------------
-WHAT THIS COSTS. Honestly: a lot. `wins / 90` is 90 games. The sound version is
-`samples x our_brings x their_brings`. That is why `n_samples` and both bring
-lists are arguments rather than constants -- the caller decides how much
-soundness it can afford, and `estimate.n` records what it bought.
+--------------------------------------------------------------------------
+WHAT THIS COSTS, AND WHICH ESTIMATOR TO USE.
+
+`wins / 90` is 90 games. The sound version is `samples x our_brings x
+their_brings`, so the estimator matters. Measured on 10 real cells against a
+40-game ground truth (tools/measure_estimator.py):
+
+    estimator            cost   mean |err|   worst cell
+    old (1 game)         0.7s      0.25         0.78
+    quadrature (6)       4.5s      0.17         0.78
+    sample-8 (8)         6.1s      0.13         0.35
+    adaptive (15.2 avg) 11.4s      0.05         0.17     <- use this
+    truth (40)          31.4s
+
+`method="adaptive"` is the default worth using: it samples in batches and stops
+once the Wilson interval is narrow enough, so a settled cell costs 8 games and
+a coin-flip cell costs 24. It cannot bias the estimate -- it changes only how
+many honest games are played.
+
+`method="quadrature"` is kept and MEASURED TO LOSE. Pinning every roll in a
+game to one index is a correlated extreme; real games roll independently, so
+"all rolls low" is a game nobody plays, and it produced a cell where the truth
+is 78% and the estimate 0%.
 """
 import math
 
