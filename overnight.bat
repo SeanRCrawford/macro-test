@@ -33,8 +33,14 @@ rem   --punish-screen    drop a team whose OPENING is already lost before
 rem                      spending the audit on it. Solves turn 1 as a matrix
 rem                      game -- seconds per team against minutes for the
 rem                      audit -- so the night is spent on plausible teams.
-rem                      Optionally takes a floor: --punish-screen -200 is
-rem                      stricter than the default -250.
+rem                      Takes NO value here; use --punish-floor to change it.
+rem   --punish-floor N   the floor --punish-screen rejects below. Default -250,
+rem                      which is a bit under one Pokemon (one Pokemon down is
+rem                      about -280 heuristic_eval points). -150 is stricter,
+rem                      -350 barely screens. Implies --punish-screen, so
+rem                      --punish-floor -150 on its own is enough.
+rem                      NOTE: "--punish-screen -150" does NOT work -- the -150
+rem                      is read as a separate argument and the run exits.
 rem   --beam-width N     how wide the beam SEARCHES. --candidates already
 rem                      raises it to match (you cannot rate more teams than
 rem                      the beam emits), so set this only to search WIDER than

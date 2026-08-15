@@ -123,6 +123,36 @@ class TestTheBatchFileAcceptsWhatTheDocsPromise(unittest.TestCase):
         missing = sorted(documented - self.parsed_flags())
         self.assertEqual(missing, [], f"documented but not parsed: {missing}")
 
+    def test_a_flag_that_takes_a_value_is_documented_as_taking_one(self):
+        """The other direction of the same failure, and it bit for real.
+
+        The header used to say `--punish-screen -200`, but that flag consumes no
+        value in the parser -- so the -200 fell through to "Unknown argument"
+        and the whole night exited before starting. The flag that does take a
+        floor, --punish-floor, was not in the header at all.
+        """
+        header = self.bat[:self.bat.index(":parse")]
+        documented = set(re.findall(r"^rem   (--[a-z0-9-]+)", header, re.M))
+        takes_value = set(re.findall(
+            r'if /i "%~1"=="(--[a-z0-9-]+)"\s*\(set \w+=[^&]*%~2', self.bat))
+        # Every flag that consumes a value must be documented, or the only way
+        # to discover it is to read the parser.
+        self.assertEqual(sorted(takes_value - documented), [],
+                         "takes a value but is undocumented")
+
+    def test_punish_floor_is_the_documented_way_to_set_a_floor(self):
+        header = self.bat[:self.bat.index(":parse")]
+        self.assertIn("--punish-floor", header)
+
+    def test_the_header_warns_that_punish_screen_takes_no_value(self):
+        """It used to recommend the broken form outright. A warning is the
+        thing that stops someone typing it from memory -- so assert the warning
+        rather than merely the absence of the bad example, which any rewording
+        would satisfy."""
+        header = self.bat[:self.bat.index(":parse")]
+        self.assertIn("does NOT work", header)
+        self.assertIn("Takes NO value here", header)
+
     def test_the_new_flags_reach_stage_1(self):
         stage1 = self.bat[self.bat.index("generate_overnight.py"):]
         for var in ("%BEAMW%", "%SCREENVS%", "%PILOT%"):
