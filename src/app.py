@@ -2897,6 +2897,62 @@ with tab_vs:
                        f"'abandoned' is only known to be WORSE than a proven "
                        f"one; its number is an upper bound.")
 
+            # --- THE BACK TWO. rank_leads solves turn 1, where the back is
+            # off the field and barely matters, so it used a placeholder. The
+            # back decides what you pivot INTO and whether the endgame is 2v2
+            # or 2v1, so it is played out rather than assumed.
+            if proven:
+                st.markdown("##### Now the back two")
+                st.caption("The lead search only sees turn 1, where your back "
+                           "is off the field. This plays each of the six "
+                           "possible back pairs out against their leads and "
+                           "keeps the one with the best WORST case.")
+                bk1, bk2 = st.columns([1, 2])
+                pv_back_budget = bk1.slider("Seconds for backs", 15, 240, 60,
+                                            step=15, key="pv_back_budget")
+                pv_back_games = bk1.slider("Games per pairing", 4, 16, 4,
+                                           step=4, key="pv_back_games")
+                if bk2.button("Choose my back two", key="pv_backs",
+                              type="primary"):
+                    import preview_lead as _pl2
+                    bar3 = st.progress(0.0, text="Playing back pairs...")
+                    try:
+                        def _tick3(e, elapsed):
+                            bar3.progress(min(1.0, elapsed / pv_back_budget),
+                                          text=f"{'/'.join(e['back'])}  "
+                                               f"{elapsed:.0f}s")
+                        backs, bmeta = _pl2.rank_brings(
+                            proven[0], pv_ours, pv_theirs,
+                            {"merged": merged, "moves": moves,
+                             "natures": natures, "typechart": typechart},
+                            budget=float(pv_back_budget),
+                            our_sets=pv_our_sets, enemy_sets=pv_esets,
+                            win_samples=int(pv_back_games), on_progress=_tick3)
+                    finally:
+                        bar3.empty()
+                    st.session_state["pv_backs_result"] = (backs, bmeta)
+
+                if st.session_state.get("pv_backs_result"):
+                    backs, bmeta = st.session_state["pv_backs_result"]
+                    solid = [b for b in backs if b["complete"]]
+                    if solid:
+                        st.success("BRING " + " / ".join(solid[0]["bring"]))
+                        st.caption(f"Worst case {solid[0]['worst_win']:.0%} "
+                                   f"against their "
+                                   f"{'/'.join(solid[0]['worst_vs'] or [])}")
+                    st.dataframe(pd.DataFrame([{
+                        "Back two": " / ".join(b["back"]),
+                        "Worst win %": (f"{b['worst_win']:.0%}" if b["complete"]
+                                        else f"<= {b['worst_win']:.0%}"),
+                        "Proven": "yes" if b["complete"] else "partial",
+                        "Their lead": " / ".join(b["worst_vs"] or []),
+                        "Checked": f"{b['checked']}/{b['of']}",
+                    } for b in backs]), width='stretch', hide_index=True)
+                    st.caption(f"{bmeta['backs']} of {bmeta['of']} back pairs "
+                               f"in {bmeta['seconds']:.0f}s. A 'partial' row's "
+                               f"number is an UPPER bound — it was abandoned "
+                               f"once it fell behind a proven one.")
+
             # --- AND THEN WHAT. The lead ranking says what to send out; this
             # says what to play, turn by turn, against their equilibrium reply
             # -- with the probability attached, because "wins on the average
@@ -2921,8 +2977,16 @@ with tab_vs:
                             bar2.progress(min(1.0, elapsed / pv_line_budget),
                                           text=f"vs {'/'.join(line['their_lead'])}"
                                                f"  {elapsed:.0f}s")
+                        _entry = dict(proven[0])
+                        _chosen = [b for b in
+                                   (st.session_state.get("pv_backs_result")
+                                    or ([], {}))[0] if b["complete"]]
+                        if _chosen:
+                            # Play the line from the bring we actually chose,
+                            # not the placeholder back the lead search assumed.
+                            _entry["bring"] = _chosen[0]["bring"]
                         lines, lmeta = _pl.lines_for_lead(
-                            proven[0], pv_theirs,
+                            _entry, pv_theirs,
                             {"merged": merged, "moves": moves,
                              "natures": natures, "typechart": typechart},
                             budget=float(pv_line_budget),

@@ -1244,6 +1244,38 @@ class Battle:
             return "p1"
         return None
 
+    def adjudicate(self):
+        """Who is winning if the clock runs out. Never None.
+
+        THE REAL RULE, not an invention: VGC decides a timed-out game on the
+        number of Pokemon remaining, and then on the percentage of HP left. A
+        turn cap is exactly a clock running out, so it is scored the same way.
+
+        Why this matters: counting a capped game as a LOSS is not conservative,
+        it is wrong. A position where we are 3-1 up with the opponent's last
+        Pokemon at 8 HP is a won game, and calling it a loss because the
+        simulation ran out of turns discards precisely the lines that grind out
+        wins -- which is the shape of most real VGC games.
+
+        Returns "p1" | "p2" | "draw".
+        """
+        decided = self.winner()
+        if decided is not None:
+            return decided
+        alive = [sum(1 for c in side.roster if not c.fainted)
+                 for side in (self.p1, self.p2)]
+        if alive[0] != alive[1]:
+            return "p1" if alive[0] > alive[1] else "p2"
+        # Same count: total remaining HP as a FRACTION of maximum, so a bulky
+        # survivor does not outweigh a healthy frail one by raw hit points.
+        share = []
+        for side in (self.p1, self.p2):
+            total = sum(c.max_hp() for c in side.roster) or 1
+            share.append(sum(c.current_hp for c in side.roster) / total)
+        if abs(share[0] - share[1]) < 1e-9:
+            return "draw"
+        return "p1" if share[0] > share[1] else "p2"
+
 
 if __name__ == "__main__":
     from species_data import build_merged_dataset

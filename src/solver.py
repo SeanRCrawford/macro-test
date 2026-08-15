@@ -874,6 +874,25 @@ def _pick_from_mixture(actions, probabilities):
     return actions[-1]
 
 
+def _pick_index_from_mixture(probabilities):
+    """The same draw as `_pick_from_mixture`, returning the INDEX.
+
+    Two callers need different things from one draw -- robustness reports
+    `theirs[j]` and also uses `j` to index its payoff row -- and having two
+    samplers would mean two different opponents again.
+    """
+    total = sum(probabilities)
+    if total <= 0:
+        return 0
+    threshold = _NASH_RNG.random() * total
+    cumulative = 0.0
+    for j, weight in enumerate(probabilities):
+        cumulative += weight
+        if cumulative >= threshold:
+            return j
+    return len(probabilities) - 1
+
+
 # --------------------------------------------------------------- evaluation
 # The two depth-1 fixes of WORKFLOW.md §4.2 as ONE named switch, because they
 # were measured together and shipped together, and because "worse winning

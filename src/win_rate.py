@@ -91,10 +91,11 @@ from rolls import DEFAULT_SCENARIO_WEIGHTS, DEFAULT_SCENARIOS
 ROLL_SCENARIOS = tuple(zip(DEFAULT_SCENARIOS, DEFAULT_SCENARIO_WEIGHTS))
 TIE_SCENARIOS = (("p1", 0.5), ("p2", 0.5))
 
-# A timeout is not a win. It is also not evidence of a loss, so it is counted
-# against us (the conservative reading, matching search_robust_composition)
-# AND reported separately -- a matchup that times out half the time is telling
-# you something the win rate alone cannot.
+# A capped game is ADJUDICATED on the board, not written off. VGC decides a
+# timed-out game on Pokemon remaining and then HP percentage, and a turn cap is
+# a clock; calling a 3-1 position with their last mon at 8 HP a "loss" is not
+# conservative, it is wrong, and it discards exactly the grind-out lines that
+# most real games are. `timeouts` still records how many games needed it.
 WIN, LOSS = "p1", "p2"
 
 
@@ -207,20 +208,36 @@ def matchup_win_prob_quadrature(our4, their4, world, turns=18,
     outcomes = []
     for roll_index, roll_w in rolls:
         for tie, tie_w in ties:
-            winner, _t, _b = play_out_pair(
+            winner, _t, battle = play_out_pair(
                 list(our4), list(their4), world["merged"], world["moves"],
                 world["natures"], world["typechart"], max_turns=turns,
                 our_sets=our_sets, enemy_sets=enemy_sets,
                 roll_index=roll_index, tie_bias=tie, pilot=pilot)
-            outcomes.append((winner == WIN, winner not in (WIN, LOSS),
-                             roll_w * tie_w))
+            won, capped = _score(winner, battle, True)
+            outcomes.append((won, capped, roll_w * tie_w))
     return Quadrature(outcomes)
+
+
+def _score(winner, battle, adjudicate):
+    """(won, timed_out) for one finished playout.
+
+    A capped game is adjudicated on the board rather than written off, because
+    a turn cap is a clock and VGC decides a clock on Pokemon remaining then HP
+    -- see Battle.adjudicate. `timed_out` stays true either way, so the share
+    of games that needed adjudicating is still visible.
+    """
+    if winner in (WIN, LOSS):
+        return winner == WIN, False
+    if adjudicate and battle is not None:
+        return battle.adjudicate() == WIN, True
+    return False, True
 
 
 def matchup_win_prob_adaptive(our4, their4, world, precision=0.35, n_min=4,
                               n_max=24, batch=4, turns=18,
                               pilot=EQUILIBRIUM_PILOT, our_sets=None,
-                              enemy_sets=None, seed=0, tie_bias=None):
+                              enemy_sets=None, seed=0, tie_bias=None,
+                              adjudicate=True):
     """P1, with the samples spent where they are needed.
 
     THE OBSERVATION. Most cells are not close: a matchup that wins 40 out of 40
@@ -240,18 +257,25 @@ def matchup_win_prob_adaptive(our4, their4, world, precision=0.35, n_min=4,
     tally = Estimate()
     while tally.n < n_max:
         for i in range(batch):
-            winner, _t, _b = play_out_pair(
+            winner, _t, battle = play_out_pair(
                 list(our4), list(their4), world["merged"], world["moves"],
                 world["natures"], world["typechart"], max_turns=turns,
                 our_sets=our_sets, enemy_sets=enemy_sets,
                 rng_seed=seed + tally.n + i, tie_bias=tie_bias, pilot=pilot)
-            if winner == WIN:
-                tally.wins += 1
-            elif winner == LOSS:
-                tally.losses += 1
-            else:
+            won, capped = _score(winner, battle, adjudicate)
+            if capped:
                 tally.timeouts += 1
-        tally.n = tally.wins + tally.losses + tally.timeouts
+                # Adjudicated games still count toward the record; `timeouts`
+                # records how many needed it.
+                if won:
+                    tally.wins += 1
+                else:
+                    tally.losses += 1
+            elif won:
+                tally.wins += 1
+            else:
+                tally.losses += 1
+        tally.n = tally.wins + tally.losses
         if tally.n >= n_min:
             lo, hi = tally.interval
             if hi - lo <= precision:
@@ -261,7 +285,7 @@ def matchup_win_prob_adaptive(our4, their4, world, precision=0.35, n_min=4,
 
 def matchup_win_prob(our4, their4, world, n_samples=24, turns=18,
                      pilot=EQUILIBRIUM_PILOT, our_sets=None, enemy_sets=None,
-                     seed=0, tie_bias=None):
+                     seed=0, tie_bias=None, adjudicate=True):
     """P1: replay one matchup over the game's randomness and count.
 
     `seed` makes the estimate REPRODUCIBLE: the same call gives the same
@@ -276,18 +300,19 @@ def matchup_win_prob(our4, their4, world, n_samples=24, turns=18,
     """
     tally = Estimate()
     for i in range(n_samples):
-        winner, _t, _b = play_out_pair(
+        winner, _t, battle = play_out_pair(
             list(our4), list(their4), world["merged"], world["moves"],
             world["natures"], world["typechart"], max_turns=turns,
             our_sets=our_sets, enemy_sets=enemy_sets,
             rng_seed=seed + i, tie_bias=tie_bias, pilot=pilot)
-        if winner == WIN:
-            tally.wins += 1
-        elif winner == LOSS:
-            tally.losses += 1
-        else:
+        won, capped = _score(winner, battle, adjudicate)
+        if capped:
             tally.timeouts += 1
-    tally.n = tally.wins + tally.losses + tally.timeouts
+        if won:
+            tally.wins += 1
+        else:
+            tally.losses += 1
+    tally.n = tally.wins + tally.losses
     return tally
 
 

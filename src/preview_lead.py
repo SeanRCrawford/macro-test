@@ -46,9 +46,22 @@ from punish_screen import opening_turn
 ORDERING_SAMPLE = 1
 
 
-def _bring(six, lead):
-    """Lead pair plus the two best remaining, as the bring-4."""
+def _bring(six, lead, back=None):
+    """The bring-4: lead pair first, then the back pair.
+
+    `back=None` takes the two best remaining, which is only a placeholder --
+    the back is a real choice and `rank_brings` searches it. Reported as a
+    defect: "Optimise the back two also, it is critical."
+    """
+    if back is not None:
+        return list(lead) + list(back)
     return list(lead) + [x for x in six if x not in lead][:2]
+
+
+def backs_for(six, lead):
+    """Every back pair that can sit behind this lead: C(4,2) = 6 of them."""
+    rest = [x for x in six if x not in lead]
+    return list(itertools.combinations(rest, 2))
 
 
 def _action_kind(rec):
@@ -293,3 +306,61 @@ def describe_line(line, max_turns=8):
         if t["kos"]:
             rows.append(f"        KO: {', '.join(t['kos'])}")
     return "\n".join(rows)
+
+
+def rank_brings(entry, our6, their6, world, budget=45.0, our_sets=None,
+                enemy_sets=None, their_leads=None, max_turns=16,
+                win_samples=8, on_progress=None):
+    """Now choose the BACK TWO, by playing them out rather than assuming them.
+
+    THE GAP THIS CLOSES. `rank_leads` solves turn 1, where the back pair is off
+    the field and barely matters -- so it used a placeholder. But the back is
+    most of the game: it decides what you pivot INTO, what covers the lead's
+    weakness, and whether the endgame is 2v2 or 2v1. Optimising the lead and
+    then assuming the back is not the same as optimising the bring.
+
+    Six back pairs per lead, scored by the WORST win probability across their
+    leads -- maximin again, because they still choose. Hardest of their leads
+    first, so an exhausted budget costs the easy information rather than the
+    important information.
+    """
+    lead = tuple(entry["lead"])
+    theirs = list(their_leads or itertools.combinations(their6, 2))
+    worst_first = tuple(entry.get("worst_vs") or ())
+    theirs.sort(key=lambda t: 0 if tuple(t) == worst_first else 1)
+
+    started, out = time.time(), []
+    for back in backs_for(our6, lead):
+        if time.time() - started > budget:
+            break
+        bring = _bring(our6, lead, back)
+        worst_p, worst_vs, played = None, None, 0
+        for their_lead in theirs:
+            if time.time() - started > budget:
+                break
+            from win_rate import matchup_win_prob_adaptive
+            est = matchup_win_prob_adaptive(
+                bring, _bring(their6, their_lead), world, n_max=win_samples,
+                turns=max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
+            played += 1
+            if worst_p is None or est.p < worst_p:
+                worst_p, worst_vs = est.p, list(their_lead)
+            # Same prune as the lead search: a minimum only falls.
+            if out and worst_p < max(o["worst_win"] for o in out):
+                break
+        if worst_p is None:
+            continue
+        entry_out = {"back": list(back), "bring": bring,
+                     "worst_win": worst_p, "worst_vs": worst_vs,
+                     "checked": played, "of": len(theirs),
+                     # A back checked against 6 of their 15 leads has an UPPER
+                     # BOUND of worst_win, not a proven one -- the same trap as
+                     # the lead pruning, and it showed up the same way: a
+                     # 6-of-15 "100%" sorted above a 15-of-15 75%.
+                     "complete": played >= len(theirs)}
+        out.append(entry_out)
+        if on_progress:
+            on_progress(entry_out, time.time() - started)
+    out.sort(key=lambda e: (not e["complete"], -e["worst_win"]))
+    return out, {"seconds": time.time() - started, "backs": len(out),
+                 "of": len(backs_for(our6, lead))}

@@ -306,6 +306,136 @@ class TestTheLine(unittest.TestCase):
         self.assertIn("T1", text)
 
 
+class TestAdjudicatingTheClock(unittest.TestCase):
+    """A turn cap is a clock, and VGC decides a clock on the board.
+
+    Reported: "for a timeout, maybe make the winner the one with the best
+    simple matchup with remaining board state". That is the actual tournament
+    rule -- Pokemon remaining first, then HP percentage -- and counting a capped
+    game as a LOSS is not conservative, it is wrong: it discards the grind-out
+    lines that most real games are.
+    """
+
+    def battle(self, ours, theirs):
+        from _harness import load_world
+        from battle import Battle
+        from combatants import make_team
+        w = load_world()
+        return Battle(make_team(list(ours), w["merged"], w["natures"]),
+                      make_team(list(theirs), w["merged"], w["natures"]),
+                      w["typechart"], w["moves"])
+
+    def test_more_pokemon_left_wins(self):
+        b = self.battle(["Incineroar", "Gallade"], ["Hydreigon", "Gholdengo"])
+        b.p2.roster[1].apply_damage(b.p2.roster[1].max_hp())
+        self.assertEqual(b.adjudicate(), "p1")
+
+    def test_equal_count_falls_through_to_hp_share(self):
+        b = self.battle(["Incineroar", "Gallade"], ["Hydreigon", "Gholdengo"])
+        b.p2.roster[0].apply_damage(b.p2.roster[0].max_hp() // 2)
+        self.assertEqual(b.adjudicate(), "p1")
+
+    def test_hp_is_a_FRACTION_not_raw_points(self):
+        """Otherwise a bulky survivor beats a healthy frail one for free."""
+        b = self.battle(["Incineroar", "Gallade"], ["Hydreigon", "Gholdengo"])
+        for c in b.p1.roster:              # us: everyone at 60%
+            c.apply_damage(c.max_hp() * 0.4)
+        for c in b.p2.roster:              # them: everyone at 50%
+            c.apply_damage(c.max_hp() * 0.5)
+        self.assertEqual(b.adjudicate(), "p1")
+
+    def test_a_decided_game_is_not_re_adjudicated(self):
+        b = self.battle(["Incineroar", "Gallade"], ["Hydreigon", "Gholdengo"])
+        for c in b.p2.roster:
+            c.apply_damage(c.max_hp())
+        self.assertEqual(b.winner(), "p1")
+        self.assertEqual(b.adjudicate(), "p1")
+
+    def test_it_never_returns_none(self):
+        """The whole point: a caller can always ask who is ahead."""
+        b = self.battle(["Incineroar", "Gallade"], ["Hydreigon", "Gholdengo"])
+        self.assertIn(b.adjudicate(), ("p1", "p2", "draw"))
+        self.assertIsNone(b.winner())
+
+
+class TestOptimisingTheBackTwo(unittest.TestCase):
+    """Reported: "Optimise the back two also, it is critical."
+
+    rank_leads solves turn 1, where the back is off the field -- so it used a
+    placeholder. The back decides what you pivot INTO and whether the endgame
+    is 2v2 or 2v1, so it has to be played out, not assumed.
+    """
+
+    OURS = ["A", "B", "C", "D", "E", "F"]
+    THEIRS = ["u", "v", "w", "x", "y", "z"]
+    WORLD = {"merged": {}, "moves": {}, "natures": {}, "typechart": {}}
+
+    def patch(self, table):
+        import win_rate
+
+        class E:
+            def __init__(self, p):
+                self.p = p
+                self.n = 4
+
+        real = win_rate.matchup_win_prob_adaptive
+        win_rate.matchup_win_prob_adaptive = (
+            lambda our4, their4, world, **kw: E(
+                table.get((tuple(our4[2:]), their4[0]), 0.5)))
+        self.addCleanup(setattr, win_rate, "matchup_win_prob_adaptive", real)
+
+    def test_every_back_pair_is_considered(self):
+        self.patch({})
+        entry = {"lead": ["A", "B"], "worst_vs": ["u", "v"],
+                 "bring": ["A", "B", "C", "D"]}
+        out, meta = preview_lead.rank_brings(entry, self.OURS, self.THEIRS,
+                                             self.WORLD, budget=1e6)
+        self.assertEqual(meta["of"], 6)              # C(4,2)
+        self.assertEqual(len(out), 6)
+
+    def test_the_back_is_chosen_on_its_WORST_enemy_lead(self):
+        table = {}
+        for their in self.THEIRS:
+            table[(("C", "D"), their)] = 0.9
+        table[(("C", "D"), "u")] = 0.1               # one disaster
+        for their in self.THEIRS:
+            table[(("E", "F"), their)] = 0.6
+        self.patch(table)
+        entry = {"lead": ["A", "B"], "worst_vs": ["u", "v"],
+                 "bring": ["A", "B", "C", "D"]}
+        out, _ = preview_lead.rank_brings(entry, self.OURS, self.THEIRS,
+                                          self.WORLD, budget=1e6)
+        best = out[0]
+        self.assertEqual(best["back"], ["E", "F"])
+
+    def test_the_bring_puts_the_lead_first(self):
+        self.patch({})
+        entry = {"lead": ["A", "B"], "worst_vs": ["u", "v"],
+                 "bring": ["A", "B", "C", "D"]}
+        out, _ = preview_lead.rank_brings(entry, self.OURS, self.THEIRS,
+                                          self.WORLD, budget=1e6)
+        for e in out:
+            self.assertEqual(e["bring"][:2], ["A", "B"])
+            self.assertEqual(e["bring"][2:], e["back"])
+
+    def test_an_unfinished_back_is_an_upper_bound_and_ranks_below(self):
+        """The same trap as the lead prune, and it bit the same way: a 6-of-15
+        '100%' sorted above a 15-of-15 75%."""
+        out = [{"back": ["C", "D"], "worst_win": 0.5, "complete": False,
+                "checked": 2, "of": 15},
+               {"back": ["E", "F"], "worst_win": 0.25, "complete": True,
+                "checked": 15, "of": 15}]
+        out.sort(key=lambda e: (not e["complete"], -e["worst_win"]))
+        self.assertEqual(out[0]["back"], ["E", "F"])
+
+    def test_backs_for_excludes_the_lead(self):
+        backs = preview_lead.backs_for(self.OURS, ("A", "B"))
+        self.assertEqual(len(backs), 6)
+        for b in backs:
+            self.assertNotIn("A", b)
+            self.assertNotIn("B", b)
+
+
 class TestTheBringIsFour(Harness):
 
     def test_the_lead_pair_comes_first(self):

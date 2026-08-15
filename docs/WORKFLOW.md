@@ -349,6 +349,13 @@ case, named rather than buried in a log. A lead abandoned by pruning shows its
 number as `<= N`, an upper bound, because on a real preview a pruned lead read
 81 against a proven 73 and that ordering is backwards.
 
+**Then the back two, which is a separate search.** The lead ranking solves
+turn 1, where your back is off the field and barely matters — so it uses a
+placeholder. The back decides what you pivot *into* and whether the endgame is
+2v2 or 2v1, so `preview_lead.rank_brings` plays all six possible back pairs out
+against their leads and keeps the best WORST case. On a real preview it moved
+the answer: the assumed back scored 25%, a searched one 50%.
+
 **And then what — the line.** Ranking leads says what to send out; it does not
 say what to play. `preview_lead.lines_for_lead` takes the chosen lead and
 returns the turn-by-turn plan against each of their leads: your joint action
@@ -506,6 +513,31 @@ a documented negative result.
 ---
 
 ## 4. Known gaps — read before trusting a number
+
+0c. **A TURN CAP IS A CLOCK, AND A CLOCK IS ADJUDICATED.** Capped games used to
+   count as losses. That is not conservative, it is wrong: a 3-1 position with
+   their last Pokemon on 8 HP is a won game, and calling it a loss discards
+   exactly the grind-out lines most real games are.
+
+   `Battle.adjudicate()` applies the real VGC rule — **Pokemon remaining, then
+   HP percentage** (a fraction, so a bulky survivor does not beat a healthy
+   frail one for free). All three `win_rate` estimators use it; `timeouts`
+   still records how many games needed adjudicating.
+
+0d. **THE LINE AND THE WIN RATE USED TO PLAY DIFFERENT OPPONENTS.** Found while
+   chasing a reported "0% that seems winnable": `robustness.turn_robustness`
+   advanced the line against their **modal** action (`argmax(q)`) while
+   `matchup_search` sampled their mixture. A mode is a pure strategy and the
+   equilibrium does not prescribe one — it is a systematically weaker opponent.
+
+   Measured on Charizard-Y + Garchomp into Pelipper + Mega Swampert: the LINE
+   reported a **win in 15**, the same position played out **0-4 against us in
+   11**. Both now sample, and both say loss in 11.
+
+   So the 0% was right and the *line* was wrong. Every "line to a win" this
+   system produced before this fix was generated against a weaker opponent than
+   the probability beside it was measured against.
+
 
 0b. **THE RECORD IS NOT A PROBABILITY, AND ITS AGGREGATE ASSUMES THEY CHOOSE AT
    RANDOM.** Reported as "these winrates are not sound". They are not.

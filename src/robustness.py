@@ -29,6 +29,7 @@ gets punished?" -- has an answer.
 from dataclasses import dataclass, field
 
 from matrix_game import solve_matrix
+import solver as _solver
 from solver import leaf_value, our_candidate_joint_actions
 from turn_step import step
 
@@ -199,7 +200,24 @@ def turn_robustness(battle, movesets, our_action, side_name="p1"):
     # equilibrium mixture. argmax rather than a sample so a line is
     # reproducible -- the golden baseline and the parallel path both depend on
     # the same inputs giving the same walk.
-    eq_j = max(range(len(theirs)), key=lambda j: q[j]) if q else worst_j
+    # SAMPLE their reply from the equilibrium mixture, do not take its mode.
+    # The mode is a PURE strategy, and a pure strategy is not what the
+    # equilibrium prescribes -- it is a systematically weaker opponent. That
+    # made line_report and play_out_pair play two different opponents for the
+    # same position: measured on Charizard/Garchomp into Pelipper/Swampert,
+    # the line reported a WIN while the same position played out 0-4 against
+    # us. A "line to a likely win" generated against a weaker opponent than the
+    # probability is measured against is worse than no line.
+    #
+    # Reproducibility comes from seeding the sampler per decision (as
+    # matchup_search._equilibrium_joint_actions does), not from collapsing the
+    # mixture.
+    if q:
+        eq_j = (_solver._pick_index_from_mixture(q)
+                if _solver.NASH_SAMPLE
+                else max(range(len(theirs)), key=lambda j: q[j]))
+    else:
+        eq_j = worst_j
     # Our play's value against their whole equilibrium mixture, not against
     # the single reply that hurts most.
     if q and len(q) == len(theirs):
