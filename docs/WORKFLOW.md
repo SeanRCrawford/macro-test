@@ -608,6 +608,55 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0j. **`--brings 3` AUDITS ONE LEAD, AND MISSES THE BEST BRING.** From "am I
+   really going to get any good lines with --brings 3 — how are those 3
+   selected?"
+
+   `--brings N` sets `verify_top`: audit the N best of our **90** (bring-4,
+   lead-2) configurations, chosen by the stage-1 screener. The defaults are
+   already small — 3 at standard, 6 at thorough, 8 at exhaustive.
+
+   **It misses.** Ground truth = wins over their three hardest leads under the
+   equilibrium pilot (`tools/measure_brings_recall.py`). Exactly 1 of 90
+   configurations beats all three, and it sits at **screen rank 18**:
+
+   | `--brings` | best found | |
+   |---|---|---|
+   | 3, 6, 8, 12 | 2 of 3 | **misses the winner** |
+   | 20, 45, 90 | 3 of 3 | finds it |
+
+   **And the shortlist is narrower than the number suggests.** The screener
+   yields ~14 distinct lead scores over 90 configurations, so its top is one
+   large tie. Distinct LEADS actually audited, consistent across three pairings:
+
+   | `--brings` | 3 | 6 | 8 | 12 | 20 |
+   |---|---|---|---|---|---|
+   | leads audited | **1** | **1** | 2 | 2 | 4 |
+
+   At the default, every audited configuration shares ONE lead and differs only
+   in the back pair. For "a fixed lead per opponent that withstands any of
+   theirs" that is the wrong shape: the search never compares leads. Use
+   `preview_lead.rank_leads` (the one-minute preview) for lead choice — it does
+   sweep all 15 — and treat `--brings` as a back-and-verification setting.
+
+   **A NEGATIVE RESULT, so it is not retried.** The obvious fix is a lead-diverse
+   shortlist: best configuration of each lead first, then the second of each.
+   Measured, it is WORSE. The winner's lead scores -214.3 and it is not the best
+   back within that lead, so round-robin moves it from rank 18 to **rank 78** and
+   misses at every N tested — where the plain order finds it at 20. The screen's
+   lead ranking is coarse but not worthless, and that is the evidence for it.
+
+   The working answer is to raise `--brings`; the cost is linear.
+
+   | per pairing | brings 3 | brings 20 | brings 90 |
+   |---|---|---|---|
+   | standard | ~40 s | ~2 min | ~8 min |
+   | thorough | ~1 min | ~4 min | ~17 min |
+
+   Recommendation: `--brings 20` against a shortlist, `--brings 90` when
+   committing to one opponent. `--brings 90 --audit-all` at thorough is ~6.3 h
+   per pairing — a night for one opponent, and the only truly complete answer.
+
 0i. **"HOW LONG WILL THIS TAKE" HAD NO HONEST ANSWER.** The app said "minutes
    to hours" in prose and, where it gave a number, quoted
    `search_effort.relative_cost` as a multiple of the quick tier. That number is

@@ -42,8 +42,11 @@ SCREEN_SECONDS = 25.0
 PER_AUDIT_UNIT = 0.1542
 
 # Both sides solved as a payoff matrix every turn, rather than our solver
-# against a fixed policy. Measured at ~13x on the side-bias sweep.
-EQUILIBRIUM_MULTIPLIER = 13.0
+# against a fixed policy. The side-bias sweep put this at ~13x; measured HERE,
+# on a thorough+ pairing, it is 11.7 -- 804.8 s against the 891 s that 13x
+# predicts. The measured value is used, so thorough+ is now an anchor rather
+# than an extrapolation.
+EQUILIBRIUM_MULTIPLIER = 11.7
 
 # Panels that are not tier-driven, measured directly. Seconds.
 FIXED = {

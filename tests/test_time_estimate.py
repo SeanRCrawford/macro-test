@@ -27,7 +27,8 @@ import time_estimate as te  # noqa: E402
 
 # The measurements the constants were fitted to, kept here so a change to the
 # constants that breaks them fails loudly.
-MEASURED = {"quick": 25.0, "standard": 39.8, "thorough": 94.8}
+MEASURED = {"quick": 25.0, "standard": 39.8, "thorough": 94.8,
+            "thorough+": 804.8}
 
 
 class TestItReproducesTheMeasurements(unittest.TestCase):
@@ -45,6 +46,13 @@ class TestItReproducesTheMeasurements(unittest.TestCase):
         predicted = te.tier_seconds("thorough")
         error = abs(predicted - MEASURED["thorough"]) / MEASURED["thorough"]
         self.assertLess(error, 0.05, f"predicted {predicted:.1f}s")
+
+    def test_thorough_plus(self):
+        """Measured after the fact: 804.8 s, against the 891 s that the
+        side-bias sweep's 13x multiplier predicted. The multiplier was corrected
+        to the value measured here, so this tier is an anchor now."""
+        self.assertAlmostEqual(te.tier_seconds("thorough+"),
+                               MEASURED["thorough+"], delta=25.0)
 
 
 class TestItBeatsRelativeCost(unittest.TestCase):
