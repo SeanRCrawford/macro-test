@@ -639,6 +639,26 @@ a documented negative result.
    `preview_lead.rank_leads` (the one-minute preview) for lead choice — it does
    sweep all 15 — and treat `--brings` as a back-and-verification setting.
 
+   **ONE LEAD PER OPPONENT, A DIFFERENT LEAD PER OPPONENT.** Reported as "it
+   didn't seem to use the same lead for the first N, so it didn't seem to
+   prerank". Both halves of that are right, and they are about different
+   scopes — the screen runs once per PAIRING. Measured, `--brings 3`, one six
+   against three opponents:
+
+   | opponent | the three audited configurations | distinct leads |
+   |---|---|---|
+   | Rain | Charizard-Y/Pelipper + three backs | 1 |
+   | Big 6 | Garchomp/Farigiraf + three backs | 1 |
+   | Sand | Charizard-Y/Garchomp + three backs | 1 |
+
+   So it IS preranked, and within any one opponent the first N always share a
+   lead — structurally, since `worst_margin` reads `oc[:2]` alone, so the six
+   configurations behind a lead are exactly equal and a stable sort keeps them
+   together. Reading the workbook's Candidates or Lines sheet across opponents
+   shows three different leads, which looks unranked and is not. This was true
+   before the back tie-break too: the pre-existing sort was `-worst_margin`
+   alone, and the tie group was already one lead.
+
    **A NEGATIVE RESULT, so it is not retried.** The obvious fix is a lead-diverse
    shortlist: best configuration of each lead first, then the second of each.
    Measured, it is WORSE. The winner's lead scores -214.3 and it is not the best
