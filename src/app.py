@@ -440,7 +440,32 @@ def render_model_settings():
 PILOT, EVALUATION = render_model_settings()
 
 
-def advanced_model_controls(key_prefix, default="standard"):
+def estimate_caption(effort, pairings=1, audit_all=False, jobs=1):
+    """"about 7 min" under a button, corrected by what earlier runs took.
+
+    The session factor is what makes this honest on a machine that is not the
+    one the constants were measured on: every panel that finishes a timed run
+    calls `note_actual`, and the next estimate is scaled by what it learned.
+    """
+    import time_estimate as _te
+    factor = st.session_state.get("time_factor", 1.0)
+    seconds = _te.tier_seconds(effort, pairings, audit_all, jobs) * factor
+    return (f"Estimated {_te.humanise(seconds)}"
+            + (f" for {pairings} pairings" if pairings > 1 else "")
+            + (f" across {jobs} workers" if jobs and jobs > 1 else "")
+            + ". An estimate, not a promise — a warm cache makes it instant, "
+              "and the first run of a session pays ~15s to load the dataset.")
+
+
+def note_actual(effort, pairings, audit_all, jobs, actual_seconds):
+    """Teach the estimator what this machine actually does."""
+    import time_estimate as _te
+    predicted = _te.tier_seconds(effort, pairings, audit_all, jobs)
+    st.session_state["time_factor"] = _te.calibrate(
+        st.session_state.get("time_factor", 1.0), predicted, actual_seconds)
+
+
+def advanced_model_controls(key_prefix, default="standard", pairings=1, jobs=1):
     """The one place the advanced model's strength is chosen.
 
     Returns (effort_name, audit_all). Used by every panel that runs the new
@@ -469,10 +494,13 @@ def advanced_model_controls(key_prefix, default="standard"):
              "their back still counts as a win. On, the record is a true "
              "X of 90. Costs about 90/leads times as much: this is the "
              "difference between a fast read and a number you can commit to.")
+    # Wall clock, not a multiple of "quick". relative_cost models the audit and
+    # treats the screen as free, so read as a time it is out by ~10x: it calls
+    # standard 17x quick where the measured ratio is 1.6x (25.0s -> 39.8s per
+    # pairing). See time_estimate.py.
     st.caption(f"{_t(effort)['label']}"
-               f"{' + all 90 brings' if audit_all else ''} "
-               f"— roughly {relative_cost(effort) * (22 if audit_all and not _t(effort).get('all_configs') else 1):.0f}x "
-               f"the quick setting.")
+               f"{' + all 90 brings' if audit_all else ''} — "
+               + estimate_caption(effort, pairings, audit_all, jobs))
     if _t(effort).get("pilot") == "equilibrium" and PILOT != "equilibrium":
         st.info("This tier plays both sides with the equilibrium solver, "
                 "overriding the sidebar's pilot for this panel.")
@@ -1530,11 +1558,21 @@ with tab_gen:
         punish_floor = st.slider(
             "Reject if the opening cannot guarantee better than", -500, 0,
             int(_ps.DEFAULT_FLOOR), step=10, key="gen_punish_floor",
-            help="heuristic_eval points; about 180 is one Pokemon. Negative is "
-                 "normal -- the opponent answers with a perfect read. Measured "
-                 "on real rosters: Big 6 -80, Sand -160, NAIC -208, a "
-                 "deliberately bad team -307. The run prints the value for "
-                 "every team it looks at so you can calibrate this.")
+            help="heuristic_eval points. MEASURED: one Pokemon down is about "
+                 "-280, not the 180 of KO_WEIGHT (that is the KO credit alone; "
+                 "the lost HP is the rest). Half your side at 50% HP is about "
+                 "-200. Negative is normal -- they answer with a perfect read.\n\n"
+                 "Re-measured on the library after the screen moved to the "
+                 "maximin: Sand -160, NAIC -208, Big 6 -221, Rain -235. The "
+                 "default -250 keeps all four, but not by much, so raising it "
+                 "much above -200 starts rejecting real teams. The run prints "
+                 "the distribution below so you can calibrate against it.")
+        import time_estimate as _te
+        st.caption(f"Screening cost: {_te.humanise(_te.FIXED['punish_screen_per_team'] * beam)}"
+                   f" for {beam} finalists "
+                   f"(~{_te.FIXED['punish_screen_per_team']:.0f}s each, against "
+                   f"every team in the library). Still far cheaper than "
+                   f"auditing them.")
     script_screen = st.checkbox(
         "Early-disqualify finalists that always lose a scripted opening", value=False,
         help="Before ranking/reporting, cheaply check EVERY beam-search finalist (not just "
@@ -2906,6 +2944,13 @@ with tab_vs:
                                help="Wall clock. The search is ordered so "
                                     "stopping early still returns the best "
                                     "leads it finished.")
+        # These three panels are BUDGETED, so the estimate is exact: the budget
+        # is the answer. Said explicitly because a slider labelled "Seconds"
+        # reads as a tuning knob rather than as the time you will wait.
+        fb1.caption(f"Takes {pv_budget}s — the budget IS the time. It stops "
+                    f"there and returns the leads it finished; each opening "
+                    f"solve is ~0.75s, and 15 of our leads x 15 of theirs is "
+                    f"225 of them, so a full sweep needs ~170s.")
         if fb2.button("Find my lead now", key="pv_fast", type="primary"):
             if len(pv_ours) != 6 or len(pv_theirs) != 6:
                 st.warning("Both sides need six Pokemon.")
@@ -2987,6 +3032,10 @@ with tab_vs:
                                             step=15, key="pv_back_budget")
                 pv_back_games = bk1.slider("Games per pairing", 4, 16, 4,
                                            step=4, key="pv_back_games")
+                bk1.caption(f"Takes {pv_back_budget}s — the budget IS the time. "
+                            f"Six back pairs; more games per pairing means "
+                            f"fewer pairs finished inside it, so a 'partial' "
+                            f"row is the budget talking, not the team.")
                 if bk2.button("Choose my back two", key="pv_backs",
                               type="primary"):
                     import preview_lead as _pl2
@@ -3042,7 +3091,15 @@ with tab_vs:
                                            help="Replays the position over "
                                                 "real damage rolls and speed "
                                                 "ties. More games, narrower "
-                                                "interval.")
+                                                "interval, fewer enemy leads "
+                                                "reached inside the budget.")
+                import time_estimate as _tel
+                lb1.caption(
+                    f"Takes {pv_line_budget}s — the budget IS the time. "
+                    f"~{_tel.line_seconds(pv_line_games):.0f}s per enemy lead at "
+                    f"{pv_line_games} games, so about "
+                    f"{_tel.leads_in_budget(pv_line_budget, pv_line_games)} of "
+                    f"their 15. Hardest first, so the budget cuts the easy ones.")
                 if lb2.button("Show me the line", key="pv_lines",
                               type="primary"):
                     import preview_lead as _pl
@@ -3115,19 +3172,25 @@ with tab_vs:
                                        "team ever built.")
 
         st.markdown("#### Full model (minutes to hours)")
-        pv_effort, pv_all = advanced_model_controls("pv")
+        # One pairing: our six against the one enemy six on this page.
+        pv_effort, pv_all = advanced_model_controls("pv", pairings=1)
 
         if st.button("Find my bring and lead", key="pv_run"):
             if len(pv_ours) != 6 or len(pv_theirs) != 6:
                 st.warning("Both sides need six Pokemon.")
             else:
+                import time as _time
                 from preview_plan import plan_against
-                with st.spinner("Running the advanced model on this preview..."):
+                _t0 = _time.time()
+                with st.spinner(f"Running the advanced model on this preview "
+                                f"({estimate_caption(pv_effort, 1, pv_all)})..."):
                     st.session_state["pv_plan"] = plan_against(
                         pv_ours, pv_theirs, merged, moves, natures, typechart,
                         effort=pv_effort, audit_all=pv_all,
                         our_sets=pv_our_sets, enemy_sets=pv_esets,
                         pilot=pilot_for(pv_effort))
+                # What it really took, so the next estimate is this machine's.
+                note_actual(pv_effort, 1, pv_all, 1, _time.time() - _t0)
 
         plan = st.session_state.get("pv_plan")
         if plan:
@@ -3228,6 +3291,16 @@ with tab_vs:
             st.warning(f"Depth 2 costs ~48x per line, and this is "
                        f"{len(dd_backs)} lines. Pick one back pair above, or "
                        f"expect minutes.")
+
+        if dd_backs:
+            import time_estimate as _te
+            _per = _te.FIXED["deep_dive_depth2" if dd_depth >= 2
+                             else "deep_dive_depth1"]
+            st.caption(f"Estimated "
+                       f"{_te.humanise(_per * len(dd_backs) * st.session_state.get('time_factor', 1.0))}"
+                       f" — {len(dd_backs)} line"
+                       f"{'s' if len(dd_backs) != 1 else ''} at depth {dd_depth}"
+                       f" (~{_te.humanise(_per)} each).")
 
         if st.button("Analyse this position", key="dd_run"):
             if len(our_bring) != 4:
@@ -3379,8 +3452,12 @@ with tab_vs:
                      "is the original behaviour; the dear end audits far more "
                      "candidates against far more of their plausible leads.")
             _st = _tier(effort_vs)
-            st.caption(f"{_st['blurb']}  (~{relative_cost(effort_vs):.0f}x the "
-                       f"quick setting)")
+            # One pairing: this panel searches our team against ONE enemy
+            # roster. verify_top is divided by 3 below, so the estimate would
+            # otherwise overstate by that factor.
+            st.caption(f"{_st['blurb']}")
+            st.caption(estimate_caption(effort_vs, pairings=1,
+                                        audit_all=_st.get("all_configs", False)))
 
             vs_nash, vs_depth = solver_controls("vs")
             if vs_nash:

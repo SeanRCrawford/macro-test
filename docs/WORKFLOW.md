@@ -608,6 +608,45 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0i. **"HOW LONG WILL THIS TAKE" HAD NO HONEST ANSWER.** The app said "minutes
+   to hours" in prose and, where it gave a number, quoted
+   `search_effort.relative_cost` as a multiple of the quick tier. That number is
+   not a wall-clock predictor and is wrong by about an order of magnitude when
+   read as one. Measured, one (our team x one opponent) pairing:
+
+   | tier | relative_cost | MEASURED | real ratio |
+   |---|---|---|---|
+   | quick | 1.0 | 25.0 s | 1.0x |
+   | standard | 17.0 | 39.8 s | **1.6x** |
+   | thorough | 73.0 | 94.8 s | **3.8x** |
+
+   `relative_cost` models the AUDIT and treats the screen as free. The screen
+   plays 90 of our configurations against 90 of theirs and is most of the wall
+   clock at the cheap tiers. Told "17x", you budget a night for forty minutes.
+
+   `src/time_estimate.py` replaces it with two constants fitted to quick and
+   standard, which predict thorough to **within 3.4%** — an out-of-sample point
+   being the only reason to trust a two-constant fit:
+
+       seconds = 25.0 + 0.1542 * (verify_top * configs * turns) * pilot
+
+   Panels that are BUDGETED report the budget as the answer, because a slider
+   labelled "Seconds" reads as a tuning knob rather than as the wait. The line
+   panel now also says how much of the question the budget actually answers:
+   at 45 s and 8 games it reaches about **5 of their 15 leads**, which the panel
+   previously left the reader to assume was all of them.
+
+   One thing measurement caught that a guess would not: line cost is SUB-LINEAR
+   in `win_samples`, because that is a CAP -- adaptive sampling stops once the
+   Wilson interval is tight. Measured 3.1 s / 6.6 s / 10.0 s at 0 / 4 / 12
+   games; a linear fit through the endpoints missed the middle by 18%, sqrt fits
+   all three within 0.9 s.
+
+   The constants were measured on one machine, so every finished run calls
+   `note_actual` and rescales a session factor. Bounded to [0.2, 5.0] blending
+   at 0.4, so a warm cache that returns instantly nudges the estimate instead of
+   convincing it that everything is free.
+
 0h. **THE GENERATION OBJECTIVE SATURATES.** The largest open problem, and the
    one to read before planning a long run. Stated against the aim it fails:
 
