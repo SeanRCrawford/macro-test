@@ -31,6 +31,8 @@ WHAT WAS TRIED AND REJECTED, so neither is retried:
     team hopeless" and the wrong one for "which of our brings should be
     audited".
 """
+import collections
+import itertools
 import os
 import sys
 import unittest
@@ -130,6 +132,61 @@ class TestItIsWiredUp(unittest.TestCase):
         bat = open(os.path.join(ROOT, "overnight.bat"), encoding="utf-8").read()
         header = bat[:bat.index(":parse")]
         self.assertIn("--top-leads", header)
+
+
+class TestTheCutIsDeterministic(unittest.TestCase):
+    """"Does --brings 30 search the 30 best, or is it random?"
+
+    Neither random nor arbitrary: `scored[:N]` after a sort on
+    (-lead margin, -back margin). Measured on three pairings, that key has
+    13-14 distinct LEAD values over 90 configurations and 78-87 distinct
+    (lead, back) pairs -- so 6 to 24 configurations still tie exactly and fall
+    back to enumeration order.
+
+    Which raises the question this class exists to answer: enumeration order
+    comes from `itertools.combinations` over the pool, so does reordering the
+    same six change what gets audited? It does NOT. Each unordered lead pair is
+    generated exactly once whatever the pool order; only its spelling changes,
+    (A,B) against (B,A). Comparing raw tuples suggests the sets are completely
+    different, which is how this nearly got reported as a reproducibility bug.
+    """
+
+    def configs(self, pool):
+        out, seen = [], set()
+        for bring4 in itertools.combinations(pool, 4):
+            for lead2 in itertools.combinations(bring4, 2):
+                key = tuple(list(lead2)
+                            + [x for x in bring4 if x not in lead2])
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        return out
+
+    def canonical(self, configs):
+        return {(frozenset(c[:2]), frozenset(c[2:])) for c in configs}
+
+    POOL = ["A", "B", "C", "D", "E", "F"]
+
+    def test_the_same_ninety_are_generated_whatever_the_order(self):
+        forward = self.canonical(self.configs(self.POOL))
+        backward = self.canonical(self.configs(list(reversed(self.POOL))))
+        self.assertEqual(len(forward), 90)
+        self.assertEqual(forward, backward)
+
+    def test_each_unordered_lead_pair_appears_once_per_bring(self):
+        """The property that makes the above true: no pair is generated twice
+        under one spelling and once under another."""
+        seen = collections.Counter(
+            (frozenset(c[:2]), frozenset(c[2:])) for c in self.configs(self.POOL))
+        self.assertEqual(set(seen.values()), {1})
+
+    def test_raw_tuples_are_what_mislead(self):
+        """Kept as the reason the canonical comparison is the right one."""
+        forward = set(self.configs(self.POOL))
+        backward = set(self.configs(list(reversed(self.POOL))))
+        self.assertNotEqual(forward, backward)          # spelling differs
+        self.assertEqual(self.canonical(forward),
+                         self.canonical(backward))      # content does not
 
 
 class TestTheCost(unittest.TestCase):

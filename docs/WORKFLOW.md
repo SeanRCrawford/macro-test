@@ -678,6 +678,22 @@ a documented negative result.
    committing to a single opponent. `--brings 90 --audit-all` at thorough is a
    night for one opponent, and the only complete answer.
 
+   **Is `--brings 30` the 30 best, or random?** The 30 best, deterministically:
+   `scored[:N]` after sorting on (-lead margin, -back margin). Measured on three
+   pairings, that key has **13–14 distinct LEAD values** over 90 configurations
+   and **78–87 distinct (lead, back) pairs** — so 6 to 24 configurations tie
+   exactly and their relative order falls back to enumeration order.
+
+   Reordering the same six does NOT change which configurations are audited.
+   Each unordered lead pair is generated exactly once whatever the pool order;
+   only its spelling changes, (A,B) against (B,A). Comparing raw tuples makes
+   the two look completely disjoint, which is how this nearly got written up as
+   a reproducibility bug — the canonical comparison shows the sets identical.
+
+   In practice `--brings 30` landed exactly on 5 leads in all three pairings, so
+   it is equivalent to `--top-leads 5` there. That is the tie structure being
+   convenient, not a guarantee; `--top-leads` guarantees it.
+
    **TWO MORE NEGATIVE RESULTS**, both from trying to be cleverer than counting:
 
    - *A viability band on the screen score.* The distribution is bimodal — one
