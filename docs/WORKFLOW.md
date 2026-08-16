@@ -646,16 +646,41 @@ a documented negative result.
    misses at every N tested — where the plain order finds it at 20. The screen's
    lead ranking is coarse but not worthless, and that is the evidence for it.
 
-   The working answer is to raise `--brings`; the cost is linear.
+   The working answer is to raise `--brings`. It is linear, but in TWO terms --
+   verification plays `brings x their configs` full games before the audit even
+   starts (see 0i), so it costs rather more than the audit term alone suggests:
 
    | per pairing | brings 3 | brings 20 | brings 90 |
    |---|---|---|---|
-   | standard | ~40 s | ~2 min | ~8 min |
-   | thorough | ~1 min | ~4 min | ~17 min |
+   | standard | ~35 s | ~3 min | ~11 min |
+   | thorough | ~55 s | ~5 min | ~21 min |
+   | thorough + `--audit-all` | ~14 min | ~89 min | ~6.7 h |
 
    Recommendation: `--brings 20` against a shortlist, `--brings 90` when
-   committing to one opponent. `--brings 90 --audit-all` at thorough is ~6.3 h
-   per pairing — a night for one opponent, and the only truly complete answer.
+   committing to one opponent. `--brings 90 --audit-all` at thorough is a night
+   for one opponent, and the only complete answer.
+
+   **Why `--audit-all` is the expensive one.** It is not a deeper search; it
+   changes how many of THEIR configurations each audited bring is played
+   against, from the tier's `leads` to all 90:
+
+   | tier | without | with | multiplier |
+   |---|---|---|---|
+   | standard | 2 | 90 | **45x** |
+   | thorough | 4 | 90 | **22.5x** |
+   | exhaustive | 6 | 90 | 15x (already on) |
+
+   Measured in isolation at `verify_top=1`, standard: 16.5 s against 252.8 s,
+   a 15x jump from that one flag.
+
+   And what the extra buys is mostly not backs. Their 90 configurations are 15
+   leads x 6 backs, so at thorough the 86 added configurations split as **24
+   backs of leads already tested** and **66 leads that were skipped as
+   implausible**. The documented reason for the flag is the first group -- "a
+   plan that beats their lead and loses to their back still counts as a win" --
+   and three quarters of the cost goes on the second. A middle setting that
+   resolved backs for the plausible leads only would be ~6x rather than 22.5x;
+   there is no flag for it today.
 
 0i. **"HOW LONG WILL THIS TAKE" HAD NO HONEST ANSWER.** The app said "minutes
    to hours" in prose and, where it gave a number, quoted
@@ -673,11 +698,21 @@ a documented negative result.
    plays 90 of our configurations against 90 of theirs and is most of the wall
    clock at the cheap tiers. Told "17x", you budget a night for forty minutes.
 
-   `src/time_estimate.py` replaces it with two constants fitted to quick and
-   standard, which predict thorough to **within 3.4%** — an out-of-sample point
-   being the only reason to trust a two-constant fit:
+   `src/time_estimate.py` replaces it with a measured model:
 
-       seconds = 25.0 + 0.1542 * (verify_top * configs * turns) * pilot
+       seconds = 14.4
+               + 0.0236 * (verify_top * their configs)     <- VERIFICATION
+               + 0.1635 * (verify_top * audited * turns) * pilot
+
+   **The middle term was missing from the first version**, which treated
+   everything before the audit as a constant 25 s. It survived the three
+   measurements it was fitted to and then failed the first test outside that
+   range: a `verify_top=1` pairing measured at **16.5 s**, below the supposed
+   constant. Verification plays `verify_top x their configs` full games, so
+   `--brings` appears in two terms, not one — which is why the first `--brings`
+   cost table understated the large settings. Refitted over five measurements
+   spanning verify_top 1–6 and audited 0–90; the large observations land within
+   3%, worst error +32% on the 16.5 s one (5 s absolute).
 
    Panels that are BUDGETED report the budget as the answer, because a slider
    labelled "Seconds" reads as a tuning knob rather than as the wait. The line

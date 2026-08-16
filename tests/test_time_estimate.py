@@ -27,49 +27,91 @@ import time_estimate as te  # noqa: E402
 
 # The measurements the constants were fitted to, kept here so a change to the
 # constants that breaks them fails loudly.
-MEASURED = {"quick": 25.0, "standard": 39.8, "thorough": 94.8,
-            "thorough+": 804.8}
+# (tier, brings override, audit_all, measured seconds) -- every real
+# observation the constants are fitted to, so changing them fails loudly.
+MEASURED = [
+    ("quick", None, False, 25.0),
+    ("standard", None, False, 39.8),
+    ("thorough", None, False, 94.8),
+    ("standard", 1, False, 16.5),      # the one that broke the 2-term model
+    ("standard", 1, True, 252.8),
+    ("thorough+", None, False, 804.8),
+]
 
 
 class TestItReproducesTheMeasurements(unittest.TestCase):
 
-    def test_quick(self):
-        self.assertAlmostEqual(te.tier_seconds("quick"), MEASURED["quick"],
-                               delta=1.0)
+    def test_every_measurement_is_within_tolerance(self):
+        """Absolute OR relative: the worst relative error is +32% on a 16.5 s
+        observation, which is 5 s. An estimate that is 5 s out on a 16 s job is
+        fine; one that is 32% out on an hour is not, so both are allowed and
+        the large observations are held to the tighter bound."""
+        for tier, brings, audit_all, measured in MEASURED:
+            predicted = te.tier_seconds(tier, brings=brings,
+                                        audit_all=audit_all)
+            close = (abs(predicted - measured) < 6.0
+                     or abs(predicted - measured) / measured < 0.20)
+            self.assertTrue(close, f"{tier} brings={brings} all={audit_all}: "
+                                   f"predicted {predicted:.1f}s against "
+                                   f"{measured:.1f}s")
 
-    def test_standard(self):
-        self.assertAlmostEqual(te.tier_seconds("standard"),
-                               MEASURED["standard"], delta=1.0)
-
-    def test_thorough_is_predicted_not_fitted(self):
-        """The out-of-sample check. Fitted on the other two, within 5%."""
-        predicted = te.tier_seconds("thorough")
-        error = abs(predicted - MEASURED["thorough"]) / MEASURED["thorough"]
-        self.assertLess(error, 0.05, f"predicted {predicted:.1f}s")
-
-    def test_thorough_plus(self):
-        """Measured after the fact: 804.8 s, against the 891 s that the
-        side-bias sweep's 13x multiplier predicted. The multiplier was corrected
-        to the value measured here, so this tier is an anchor now."""
-        self.assertAlmostEqual(te.tier_seconds("thorough+"),
-                               MEASURED["thorough+"], delta=25.0)
+    def test_the_big_observations_are_tight(self):
+        for tier, brings, audit_all, measured in MEASURED:
+            if measured < 100:
+                continue
+            predicted = te.tier_seconds(tier, brings=brings,
+                                        audit_all=audit_all)
+            self.assertLess(abs(predicted - measured) / measured, 0.05, tier)
 
 
 class TestItBeatsRelativeCost(unittest.TestCase):
     """The reason this module exists rather than a one-line multiplication."""
 
-    def ratio(self, name):
-        return MEASURED[name] / MEASURED["quick"]
-
     def test_relative_cost_is_wildly_wrong_as_a_time_ratio(self):
         from search_effort import relative_cost
-        self.assertGreater(relative_cost("standard") / self.ratio("standard"),
-                           8.0)
+        real = 39.8 / 25.0                       # standard against quick
+        self.assertGreater(relative_cost("standard") / real, 8.0)
 
-    def test_this_model_is_close(self):
-        for name in MEASURED:
-            modelled = te.tier_seconds(name) / te.tier_seconds("quick")
-            self.assertLess(abs(modelled - self.ratio(name)), 0.3, name)
+    def test_this_model_is_far_closer_than_scaling_relative_cost(self):
+        """Compared head to head on absolute error, which is what a caption
+        promising "about 7 min" is actually claiming. A ratio comparison was
+        tried first and is the wrong test: it compounds the error on quick with
+        the error on the tier and fails on arithmetic rather than on accuracy.
+        """
+        from search_effort import relative_cost
+        for tier, measured in (("standard", 39.8), ("thorough", 94.8)):
+            model = abs(te.tier_seconds(tier) - measured) / measured
+            naive = abs(25.0 * relative_cost(tier) - measured) / measured
+            self.assertLess(model, 0.20, tier)
+            self.assertGreater(naive, 3.0, tier)
+            self.assertLess(model, naive / 10, tier)
+
+
+class TestBringsCostsTwice(unittest.TestCase):
+    """The flaw the refit fixed, pinned so it cannot come back.
+
+    The first model treated everything before the audit as a constant, and a
+    verify_top=1 pairing then measured at 16.5 s -- below that "constant" 25 s.
+    Verification plays verify_top x their configs full games, so `--brings`
+    appears in TWO terms, not one.
+    """
+
+    def test_raising_brings_costs_more_than_the_audit_term_alone(self):
+        audit_only = te.PER_AUDIT_UNIT * (90 - 3) * 2 * 16
+        real = (te.tier_seconds("standard", brings=90)
+                - te.tier_seconds("standard", brings=3))
+        self.assertGreater(real, audit_only * 1.1)
+
+    def test_verification_scales_with_brings_even_at_quick(self):
+        """Quick does no audit at all, so any growth here is verification."""
+        self.assertGreater(te.tier_seconds("quick", brings=90),
+                           2 * te.tier_seconds("quick", brings=3))
+
+    def test_a_fixed_enemy_lead_is_much_cheaper(self):
+        """Six of their configs instead of 90 -- the 'guaranteed enemy lead'
+        mode, which shrinks verification and the audit together."""
+        self.assertLess(te.tier_seconds("standard", enemy_configs=6),
+                        te.tier_seconds("standard"))
 
 
 class TestTheKnobsMoveItTheRightWay(unittest.TestCase):

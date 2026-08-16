@@ -15,15 +15,27 @@ not free -- it plays 90 of our configurations against 90 of theirs -- and at the
 cheaper tiers it is most of the wall clock. Told "17x", you budget a night for
 something that takes forty minutes, or the reverse.
 
-THE MODEL. Two terms, two constants, fitted to the measurements above:
+THE MODEL. Three stages, because the first version of this module had two and
+was wrong in a way that only showed up when it was tested outside the range it
+was fitted on. It treated everything before the audit as a constant "screen".
+Measured at verify_top=1, a whole pairing came in at 16.5 s -- BELOW that
+supposedly constant 25 s. The pre-audit cost is not constant: VERIFICATION
+plays `verify_top x their configs` full games, so it scales with `--brings`
+exactly like the audit does.
 
-    seconds = SCREEN + PER_AUDIT_UNIT * (verify_top * configs * turns) * pilot
+    seconds = MATRIX
+            + PER_VERIFY_GAME * (verify_top * enemy_configs)
+            + PER_AUDIT_UNIT  * (verify_top * audited * turns) * pilot
 
-where `configs` is 90 when all the enemy's brings are audited and the tier's
-`leads` otherwise, and `pilot` is 13 for the equilibrium tiers (a full payoff
-matrix per turn for both sides). Fitted on quick and standard, it predicts
-thorough to within 3.4% -- which is the only reason to trust it at all, since a
-two-point fit through two points is not evidence of anything.
+`audited` is 90 when all their brings are audited and the tier's `leads`
+otherwise. Least-squares over five measurements spanning verify_top 1-6 and
+audited 0-90; the two largest observations land within 3%, and the worst error
+is +32% on the smallest (21.8 s predicted against 16.5 s measured, so 5 s in
+absolute terms). Good enough to plan a night by, not good enough to bill for.
+
+The equilibrium multiplier is measured on a thorough+ pairing rather than
+carried over from the side-bias sweep: 11.0x, against the 13x that sweep
+suggested.
 
 WHAT IT IS NOT. An estimate, not a guarantee. It does not know about your
 machine, the enemy roster's size, or a cache that makes the run instant. Every
@@ -32,21 +44,26 @@ happened (`record_actual`) and rescales, so the second estimate in a session is
 better than the first.
 """
 
-# Seconds for the screen stage of one (our team x one opponent) pairing:
-# every one of our 90 bring/lead configurations against every one of their 90.
-# Tier-independent -- every tier pays it, which is exactly what relative_cost
-# misses.
-SCREEN_SECONDS = 25.0
+# Stage 1, the pair matrix: our 90 configurations against their 90, memoised to
+# 225 distinct playouts. Genuinely constant -- it is what relative_cost misses.
+MATRIX_SECONDS = 14.4
 
-# Seconds per audit unit, where one unit is one (bring x enemy config x turn).
-PER_AUDIT_UNIT = 0.1542
+# Verification: one full game per (kept bring x enemy config). This is the term
+# the first version of this module did not have, and it is why `--brings 90`
+# costs far more than "the audit is linear in brings" suggests -- brings pays
+# here TWICE, once for verification and once for the audit.
+PER_VERIFY_GAME = 0.0236
+
+# Seconds per audit unit, where one unit is one (bring x audited config x turn).
+PER_AUDIT_UNIT = 0.1635
 
 # Both sides solved as a payoff matrix every turn, rather than our solver
-# against a fixed policy. The side-bias sweep put this at ~13x; measured HERE,
-# on a thorough+ pairing, it is 11.7 -- 804.8 s against the 891 s that 13x
-# predicts. The measured value is used, so thorough+ is now an anchor rather
-# than an extrapolation.
-EQUILIBRIUM_MULTIPLIER = 11.7
+# against a fixed policy. Measured on a thorough+ pairing (804.8 s), not carried
+# over from the side-bias sweep, which suggested 13x.
+EQUILIBRIUM_MULTIPLIER = 11.0
+
+# Their bring-4s. 90 for a free lead; 6 when their lead is fixed.
+ENEMY_CONFIGS = 90
 
 # Panels that are not tier-driven, measured directly. Seconds.
 FIXED = {
@@ -85,18 +102,25 @@ def leads_in_budget(budget, win_games):
     return max(1, int(budget / line_seconds(win_games)))
 
 
-def tier_seconds(effort, pairings=1, audit_all=False, jobs=1):
+def tier_seconds(effort, pairings=1, audit_all=False, jobs=1, brings=None,
+                 enemy_configs=ENEMY_CONFIGS):
     """Estimated wall clock for `pairings` (our team x one opponent) pairings.
+
+    `brings` overrides the tier's `verify_top` -- the `--brings N` flag. It
+    appears in BOTH the verification and audit terms, which is why raising it is
+    dearer than the audit term alone suggests.
 
     `jobs` divides, but never below one pairing's worth: eight workers cannot
     make a single pairing finish in an eighth of the time.
     """
     from search_effort import tier as _tier
     t = _tier(effort)
-    per = SCREEN_SECONDS
+    verify_top = brings or t["verify_top"]
+    per = MATRIX_SECONDS + PER_VERIFY_GAME * verify_top * enemy_configs
     if t["robustness"]:
-        configs = 90 if (audit_all or t.get("all_configs")) else max(1, t["leads"])
-        units = t["verify_top"] * configs * max(1, t["turns"])
+        audited = (enemy_configs if (audit_all or t.get("all_configs"))
+                   else max(1, t["leads"]))
+        units = verify_top * audited * max(1, t["turns"])
         per += PER_AUDIT_UNIT * units * (
             EQUILIBRIUM_MULTIPLIER if t.get("pilot") == "equilibrium" else 1.0)
     total = per * max(1, pairings)
