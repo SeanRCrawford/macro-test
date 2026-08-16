@@ -2636,7 +2636,12 @@ with tab_battle:
         from robustness import describe_action, line_report
         oc = make_team(our4, merged, natures, sets=bv_our_sets)
         ec = make_team(their4, merged, natures)
-        ms = {c.name: build_moveset(merged[c.name], moves) for c in oc + ec}
+        # The SET's four moves, not the usage-standard four -- make_team applies
+        # the item and ability from bv_our_sets and this used to drop the moves.
+        ms = {c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((bv_our_sets or {}).get(c.name) or {}).get("moves"))
+              for c in oc + ec}
         btl3 = Battle(oc, ec, typechart, moves)
         btl3.movesets = ms
         btl3.wide_movesets = {**ms, **build_wide_movesets(
@@ -2696,7 +2701,10 @@ with tab_battle:
         our_sets = bv_our_sets
         oc = make_team(our4, merged, natures, sets=our_sets)
         ec = make_team(their4, merged, natures)
-        ms = {c.name: build_moveset(merged[c.name], moves) for c in oc + ec}
+        ms = {c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((our_sets or {}).get(c.name) or {}).get("moves"))
+              for c in oc + ec}
         btl2 = Battle(oc, ec, typechart, moves)
         btl2.movesets = ms
         with st.spinner(f"Solving (depth {bv_depth})..."):

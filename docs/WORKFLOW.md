@@ -608,6 +608,40 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0m. **THE AUDITED LINE PLAYED A DIFFERENT TEAM FROM THE ONE IT RATED.**
+   Reported as "best lines use moves not in the teamsheet; Scizor using Bug Bite
+   when it doesn't have it, and when Bullet Punch would have KO'd".
+
+   `_rate_and_rerank.build` — the closure that stands up the battle EVERY
+   audited line is played on — did this:
+
+       oc = make_team(our_names, merged, natures, sets=our_sets)   # item, ability, EVs
+       ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)}
+
+   `make_team` applied the item, ability and EVs from the set; the next line
+   dropped the MOVES and fell back to the four most-used. So the audit rated,
+   and the reported line played, a Pokémon holding the right item with somebody
+   else's attacks. Every other build site — `play_out_pair`, `deep_dive`,
+   `committed_plan`, `punish_screen`, `fast_eval` — already passed `only_moves`.
+   This one did not, so the RECORD and the LINE disagreed about what the team
+   was. Two app sites (Battle Viewer's audit and its turn solve) had the same
+   omission.
+
+   **The second half needs no separate explanation**, and that is worth saying
+   because "it picked the worse move" sounds like a solver bug. Scizor's usage
+   four are Bullet Punch, Protect, Bug Bite and Swords Dance. Both are
+   Technician-boosted; Bug Bite is 60 BP against Bullet Punch's 40, so
+   preferring it is *correct play given an illegal move to prefer*. Technician,
+   priority and the KO bonus were all working. One defect, two symptoms.
+
+   The regression test took two attempts to be worth anything. The first used a
+   six-Pokémon pool, the screen did not bring Scizor, and it passed with the bug
+   still in — asserting that a Pokémon which never took the field did not use a
+   move. With a four-Pokémon pool (one possible bring) the bug reproduces as
+   **16 turns of "Scizor Bug Bite"**, and the fix takes it to zero.
+   `tests/test_line_uses_the_sheet.py` now also asserts Scizor was brought and
+   acted, and scans EVERY build site rather than the one that was reported.
+
 0l. **CAN THE SEARCH BE MADE DRAMATICALLY FASTER? PROFILED: NO, NOT BY
    MICRO-OPTIMISATION.** `cProfile` over one standard pairing (172 s, 231 M
    calls), by cumulative share:

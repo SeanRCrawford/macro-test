@@ -1027,8 +1027,23 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             enemy4 = _enemy4(enemy_spec)
             oc = make_team(list(our_names), merged, natures, sets=our_sets)
             ec = make_team(enemy4, merged, natures, sets=enemy_sets)
-            ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)
-                  for c in oc + ec}
+            # THE SET'S FOUR MOVES, not the usage-standard four. `make_team`
+            # above already applies the item, ability and EVs from `our_sets`,
+            # and this line used to drop the MOVES on the floor -- so the audit
+            # rated, and the reported line played, a Pokemon holding the right
+            # item with somebody else's attacks. Reported as "best lines use
+            # moves not in the teamsheet: Scizor using Bug Bite when it doesn't
+            # have it". Every other build site (play_out_pair, deep_dive,
+            # committed_plan, punish_screen) already passed only_moves; this one
+            # did not, which is why the RECORD and the LINE disagreed about what
+            # the team was.
+            ms = {}
+            for c in oc + ec:
+                spec = ((our_sets or {}).get(c.name)
+                        or (enemy_sets or {}).get(c.name) or {})
+                ms[c.name] = build_moveset(merged[c.name], moves_db,
+                                           top_k=TOP_K_MOVES,
+                                           only_moves=spec.get("moves"))
             battle = Battle(oc, ec, typechart, moves_db)
             _attach_movesets(battle, ms, ec, merged, moves_db, enemy_sets)
             return battle, ms
