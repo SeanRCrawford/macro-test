@@ -608,6 +608,41 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0k. **STAGE 2's RUNTIME SHAPE: A BURST, NOT A BOTTLENECK.** Reported as "the
+   1st team took 120 minutes, the next 3 took 10 minutes, then it takes a while
+   to finish — is there a bottleneck writing to disk?"
+
+   **Disk is not it**, and neither are the two other obvious candidates. All
+   measured rather than argued:
+
+   | hypothesis | measurement | verdict |
+   |---|---|---|
+   | cache writes | 32 entries = 8 MB, **0.24 s** per save; ~2 s across a run at `--batch 4` | not it |
+   | process warm-up | same pairing twice in one process: **0.99x**; the threat damage cache carries across pairings and buys nothing | not it |
+   | teams differ in cost | six teams at one tier: 22 s to 52 s, **2.4x** spread | not 12x |
+
+   **What it actually is: the parallel pool.** All pairings are submitted at
+   once (`ProcessPoolExecutor`, one pool for the whole run) and `jobs` is
+   ordered `[(team, opponent) for team in ours for opponent in theirs]`, so
+   every worker starts together on the first team's pairings. Nothing completes
+   until a whole pairing does — then results land in a burst. The progress line
+   made this worse by reporting `elapsed / completed` as "min/pairing": on the
+   FIRST completion that is the full duration of one pairing presented as the
+   per-pairing cost, and it collapses as the burst arrives. It now says
+   "throughput", prints how many are still running, and warns up front that the
+   first result takes as long as one whole pairing.
+
+   Worth checking in your own output before assuming a hang: the header prints
+   how many pairings were **skipped** because they were already cached, and a
+   run that skips most of its work looks instant for reasons that have nothing
+   to do with speed.
+
+   **The wait at the end is the workbook**, and it is by design: it is rebuilt
+   from the WHOLE accumulated cache, not just this run, so it grows every night
+   even when tonight computed almost nothing. Measured 0.2 s at 8 pairings,
+   1.9 s at 32, 7.0 s at 64 — faster than linear. Now announced with the
+   pairing count and timed, instead of being an unexplained pause.
+
 0j. **`--brings 3` AUDITS ONE LEAD, AND MISSES THE BEST BRING.** From "am I
    really going to get any good lines with --brings 3 — how are those 3
    selected?"

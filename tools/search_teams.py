@@ -422,15 +422,28 @@ def main():
     done, computed = skipped, 0
     started = time.time()
 
-    def _progress(ours, theirs):
+    def _progress(ours, theirs, in_flight=0):
+        """One line per completed pairing.
+
+        The rate is THROUGHPUT -- wall seconds divided by pairings finished --
+        not the time one pairing takes. In parallel mode those are very
+        different numbers and the difference is confusing rather than subtle:
+        every worker starts at once, so nothing completes for the length of a
+        whole pairing and then results arrive in a burst. The first line of a
+        parallel run therefore reports the full duration of one pairing as if
+        it were the per-pairing cost, and the figure collapses as the burst
+        lands. Reported as throughput, and with the number still running, so a
+        long silence at the start reads as "8 in flight" rather than as a hang.
+        """
         nonlocal computed
         computed += 1
         elapsed = time.time() - started
-        rate = elapsed / computed                  # seconds per pairing, real
-        left = (len(keyed) - done) * rate
+        per = elapsed / computed          # wall seconds per COMPLETED pairing
+        left = (len(keyed) - done) * per
         eta = time.strftime("%H:%M", time.localtime(time.time() + left))
         print(f"  [{done}/{len(keyed)}] {ours} vs {theirs}"
-              f"   {rate / 60:.0f} min/pairing"
+              + (f"   {in_flight} still running" if in_flight else "")
+              + f"   {per / 60:.1f} min/pairing throughput"
               f"   elapsed {elapsed / 60:.0f} min"
               f"   left ~{left / 3600:.1f} h (done ~{eta})", flush=True)
 
@@ -457,12 +470,16 @@ def main():
                                     args.top_leads)): (k, a, b)
                        for k, a, b in todo}
             since_save = 0
+            print(f"  {len(todo)} pairings submitted to {args.jobs} workers. "
+                  f"They all start together, so the first result takes as long "
+                  f"as one whole pairing -- expect silence, then a burst.",
+                  flush=True)
             for future in cf.as_completed(futures):
                 k, a, b = futures[future]
                 cache.put(k, future.result())
                 done += 1
                 since_save += 1
-                _progress(a, b)
+                _progress(a, b, in_flight=len(todo) - (done - skipped))
                 if since_save >= max(1, args.batch):
                     cache.save()   # killing now costs at most --batch pairings
                     since_save = 0
@@ -493,8 +510,20 @@ def main():
         if sheets_path and os.path.exists(sheets_path):
             with open(sheets_path, encoding="utf-8") as fh:
                 sheets = json.load(fh)
+        # Rebuilt from the WHOLE cache, not just this run -- that is the point
+        # (results accumulate, so the workbook always shows everything searched
+        # so far), and it is also why the wait at the end grows run after run
+        # even when this run computed almost nothing. Measured: 0.2s at 8
+        # pairings, 1.9s at 32, 7.0s at 64, so it climbs faster than the pairing
+        # count. Announced rather than left as an unexplained pause.
+        cached_pairings = sum(1 for v in cache.data.values()
+                              if isinstance(v, dict) and v.get("ours"))
+        print(f"\nBuilding the workbook from all {cached_pairings} cached "
+              f"pairings (not just this run's)...", flush=True)
+        _t0 = time.time()
         n = build_workbook(cache.data, path, team_sheets=sheets)
-        print(f"\nWorkbook: {os.path.abspath(path)}  ({n} pairings)")
+        print(f"Workbook: {os.path.abspath(path)}  ({n} pairings, "
+              f"{time.time() - _t0:.0f}s)")
 
     rows = [v for v in cache.data.values() if isinstance(v, dict) and v.get("ours")]
     by_team = {}
