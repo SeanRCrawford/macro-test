@@ -656,9 +656,41 @@ a documented negative result.
    | thorough | ~55 s | ~5 min | ~21 min |
    | thorough + `--audit-all` | ~14 min | ~89 min | ~6.7 h |
 
-   Recommendation: `--brings 20` against a shortlist, `--brings 90` when
-   committing to one opponent. `--brings 90 --audit-all` at thorough is a night
-   for one opponent, and the only complete answer.
+   **`--top-leads N` is the flag that fits.** Asked for "viable leads/backs
+   rather than all 90, whether there are 12 to check or 24". A flat count cannot
+   express that over a ranking that is not flat — but counting LEADS can, because
+   the tie groups are exactly one lead each:
+
+   | | `--brings 3` | `--brings 12` | `--top-leads 3` | `--top-leads 4` |
+   |---|---|---|---|---|
+   | configurations | 3 | 12 | **18** | **24** |
+   | distinct leads | **1** | 2 | **3** | **4** |
+
+   Measured end to end. It lands on a lead boundary every time, and on the
+   reference pairing three leads (18 configurations) contains the winner at rank
+   17 where `--brings 12` misses it — for ~2.5 min a pairing at standard against
+   ~11 min for all 90.
+
+       overnight.bat --stage2-only --pick "1-6" --vs "Rain,Big 6" ^
+                     --deep-effort thorough --top-leads 3 --jobs 0
+
+   Recommendation: `--top-leads 3` or `4` for stage 2, `--brings 90` only when
+   committing to a single opponent. `--brings 90 --audit-all` at thorough is a
+   night for one opponent, and the only complete answer.
+
+   **TWO MORE NEGATIVE RESULTS**, both from trying to be cleverer than counting:
+
+   - *A viability band on the screen score.* The distribution is bimodal — one
+     tie group at +107, then a dense cluster from -212 to -240 — and the winner
+     sits in the LOWER mode. The band needed to include it is 322 points wide
+     and admits 18 of 90: the same 18 that three leads gives, but only knowable
+     after you already know the answer.
+   - *Ranking our brings by the OPENING MAXIMIN* — the lever 0h flagged as
+     promising. It puts the winner at **rank 60** against 17 for the plain screen
+     margin, and misses at every setting tested. The opening maximin is the
+     right statistic for "is this team hopeless" (0g) and the wrong one for
+     "which of our brings deserve the audit". Two different questions; the same
+     number does not answer both.
 
    **Why `--audit-all` is the expensive one.** It is not a deeper search; it
    changes how many of THEIR configurations each audited bring is played

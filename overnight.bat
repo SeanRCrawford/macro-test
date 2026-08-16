@@ -72,6 +72,16 @@ rem                      before spending the audit on it. Default 0.80.
 rem   --vs "Big 6"       deep-search against ONLY these opponents instead of
 rem                      the whole library. THE biggest lever: 1 opponent
 rem                      instead of 7 is 7x less work. Comma-separated.
+rem   --top-leads N      audit the N best of OUR LEADS and EVERY back behind
+rem                      each -- 6 configurations per lead, so 3 is 18. This is
+rem                      the unit --brings should have been: the screener ranks
+rem                      the LEAD pair, so the six configurations sharing a lead
+rem                      tie exactly, and --brings 3 audits ONE lead with an
+rem                      arbitrary three of its six backs. Measured on a real
+rem                      pairing, the bring that beats all three of their
+rem                      hardest leads is at rank 17: --brings 12 misses it,
+rem                      --top-leads 3 finds it, ~2.5 min a pairing at standard.
+rem                      Use this instead of --brings for stage 2.
 rem   --brings N         audit only the N best of OUR brings per pairing
 rem                      instead of the tier's default (6 at thorough). The
 rem                      cheap screen has already ranked them, so this keeps
@@ -141,6 +151,7 @@ set GENFLAGS=
 set REGEN=
 set VS=
 set BRINGS=
+set TOPLEADS=
 set SUBST=
 set SUBROUNDS=2
 set SUBPER=4
@@ -182,6 +193,7 @@ if /i "%~1"=="--stage2"       (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--skip-stage1"  (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--vs"           (set VS=--vs "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--brings"       (set BRINGS=--brings %~2& shift & shift & goto parse)
+if /i "%~1"=="--top-leads"    (set TOPLEADS=--top-leads %~2& shift & shift & goto parse)
 if /i "%~1"=="--substitute"   (set SUBST=%~2& shift & shift & goto parse)
 if /i "%~1"=="--sub-rounds"   (set SUBROUNDS=%~2& shift & shift & goto parse)
 if /i "%~1"=="--sub-per-round" (set SUBPER=%~2& shift & shift & goto parse)
@@ -317,7 +329,7 @@ rem No --teams: with a roster file, search_teams defaults OUR side to the
 rem generated teams and theirs to the library. Parsing the shortlist here and
 rem passing the names back in is what broke stage 2 when the file grew a
 rem wrapper for the optimised sets.
-python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% ^
+python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% %TOPLEADS% ^
     --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% %PILOT% %EVALN% ^
     --sheets !SHEETS! ^
     --cache overnight_%DEEPEFFORT%.json --export

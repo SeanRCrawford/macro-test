@@ -157,7 +157,7 @@ def _run_pairing(job):
     cross a pickle boundary.
     """
     (ours, theirs, effort, turns, prescreen, audit_all, brings,
-     pilot, eval_profile) = job
+     pilot, eval_profile, top_leads) = job
     import solver
     solver.apply_eval_profile(eval_profile)
     global _WORLD
@@ -176,7 +176,8 @@ def _run_pairing(job):
         robustness_turns=settings["turns"] or 1,
         prescreen_top=prescreen,
         pilot=pilot or settings.get("pilot", "greedy"),
-        audit_all_configs=audit_all or settings.get("all_configs", False))
+        audit_all_configs=audit_all or settings.get("all_configs", False),
+        top_leads=top_leads)
     top = results[0] if results else None
     return {
         "ours": ours, "theirs": theirs,
@@ -253,6 +254,18 @@ def main():
                          "teams that are not in teams.csv can be searched by "
                          "name. This is how generate_overnight.py feeds this "
                          "tool. Roster contents are part of the cache key.")
+    ap.add_argument("--top-leads", type=int, default=0, metavar="N",
+                    help="audit the N best of OUR LEADS and every back pair "
+                         "behind each -- 6 configurations per lead, so N=3 is "
+                         "18. The unit --brings should have been: the screener "
+                         "ranks the LEAD pair, so the six configurations "
+                         "sharing a lead tie exactly and --brings 3 audits ONE "
+                         "lead with an arbitrary three of its six backs. "
+                         "Measured on one real pairing, the bring that beats "
+                         "all three of their hardest leads sits at rank 17, so "
+                         "--brings 12 misses it and --top-leads 3 finds it, "
+                         "for about 2.5 min a pairing at standard. Overrides "
+                         "--brings when it asks for more.")
     ap.add_argument("--brings", type=int, default=0, metavar="N",
                     help="audit only the N best of OUR brings instead of the "
                          "tier's default. The cheap screen has already ranked "
@@ -401,7 +414,8 @@ def main():
                               prescreen, args.audit_all, args.brings,
                               extra.get(a), extra.get(b),
                               extra_sets.get(a), extra_sets.get(b),
-                              args.pilot, args.evaluation), a, b)
+                              args.pilot, args.evaluation,
+                              args.top_leads), a, b)
              for a, b in jobs]
     todo = [(k, a, b) for k, a, b in keyed if cache.get(k) is None]
     skipped = len(keyed) - len(todo)
@@ -439,7 +453,8 @@ def main():
             futures = {pool.submit(_run_pairing,
                                    (a, b, args.effort, args.turns, prescreen,
                                     args.audit_all, args.brings,
-                                    args.pilot, args.evaluation)): (k, a, b)
+                                    args.pilot, args.evaluation,
+                                    args.top_leads)): (k, a, b)
                        for k, a, b in todo}
             since_save = 0
             for future in cf.as_completed(futures):
@@ -458,7 +473,8 @@ def main():
                 cache.put(k, _run_pairing((ours, theirs, args.effort,
                                            args.turns, prescreen,
                                            args.audit_all, args.brings,
-                                           args.pilot, args.evaluation)))
+                                           args.pilot, args.evaluation,
+                                           args.top_leads)))
                 done += 1
                 _progress(ours, theirs)
             cache.save()

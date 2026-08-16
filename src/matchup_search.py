@@ -721,7 +721,8 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                preview_tau=None, preview_alpha=None,
                                rate_robustness=False, robustness_leads=3,
                                robustness_turns=5, prescreen_top=None,
-                               audit_all_configs=False, pilot=GREEDY_PILOT):
+                               audit_all_configs=False, pilot=GREEDY_PILOT,
+                               top_leads=None):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -831,6 +832,31 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
     scored.sort(key=lambda d: (-d["worst_margin"],
                                -(d["screen_back_margin"]
                                  if d["screen_back_margin"] is not None else 0.0)))
+
+    # TOP-N LEADS, WITH EVERY BACK BEHIND THEM. `verify_top` is a flat count,
+    # and a flat count is the wrong unit for this screener: it ranks on the LEAD
+    # pair, so the six configurations sharing a lead tie exactly and a count of
+    # 3 or 6 audits ONE lead with an arbitrary subset of its backs. Measured
+    # over three pairings, the tie groups are 6, 6, 6, 6 -- one per lead -- so
+    # counting leads instead gives 6, 12, 18, 24 configurations and always ends
+    # on a lead boundary.
+    #
+    # It is also the cut that stops the audit missing the answer. On the
+    # reference pairing the configuration that beats all three of their hardest
+    # leads sits at rank 17, so `--brings 12` misses it and three leads (18
+    # configurations) finds it -- for about 2.5 minutes a pairing at standard.
+    if top_leads:
+        order, seen_leads = [], []
+        for d in scored:
+            lead = tuple(d["our_bring4"][:2])
+            if lead not in seen_leads:
+                if len(seen_leads) >= top_leads:
+                    break
+                seen_leads.append(lead)
+            order.append(d)
+        # Never fewer than the tier asked for: this is meant to widen the audit,
+        # and a roster with very few distinct leads should not silently narrow it.
+        verify_top = max(verify_top, len(order))
 
     # Verify the survivors properly against EVERY enemy config.
     verified = []
