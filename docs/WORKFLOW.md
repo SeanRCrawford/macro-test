@@ -608,6 +608,32 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0l. **CAN THE SEARCH BE MADE DRAMATICALLY FASTER? PROFILED: NO, NOT BY
+   MICRO-OPTIMISATION.** `cProfile` over one standard pairing (172 s, 231 M
+   calls), by cumulative share:
+
+   | | share | note |
+   |---|---|---|
+   | `copy.deepcopy` (11.4 M calls) | **24%** | already optimised once — `Battle.__deepcopy__` shares the typechart and move DB, `Combatant.__deepcopy__` is hand-written |
+   | `damage_roll` (1.1 M calls) | 13% self | the actual work |
+   | `type_multiplier` (3.6 M calls) | 5% self | **memoised, measured 1.09x** |
+   | `effective_speed` (4.1 M calls) | 3% self | memoisable per turn |
+
+   So the whole micro-optimisation budget is roughly **1.5x**, and eliminating
+   deepcopy entirely — which is not possible, the search has to explore on
+   copies — would be 1.3x. `type_multiplier` is now cached (348 distinct
+   answers for millions of calls); the A/B alternated cached and uncached in one
+   process across three rounds, because the machine drifted 57→64 s over the run
+   and a straight before/after would have read that drift as the result.
+
+   **Dramatic means fewer games, not faster games**, and those levers are
+   already measured and exposed: `--vs` (one opponent instead of eight, 8x),
+   `--screen-vs` for stage 1, `--top-leads` instead of `--brings 90` (18
+   configurations instead of 90, 5x), and NOT passing `--audit-all` (22x at
+   thorough, see 0j). The pin-driven action ordering in 0e is the one place a
+   real algorithmic saving has been found, and it went to accuracy rather than
+   speed.
+
 0k. **STAGE 2's RUNTIME SHAPE: A BURST, NOT A BOTTLENECK.** Reported as "the
    1st team took 120 minutes, the next 3 took 10 minutes, then it takes a while
    to finish — is there a bottleneck writing to disk?"

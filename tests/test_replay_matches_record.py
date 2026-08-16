@@ -61,24 +61,63 @@ def replay(pilot, our4=OUR4, eb4=EB4, script_team=None):
     return winner
 
 
+# Enemy configurations to look through for one the two pilots disagree about.
+# The first entry is the configuration the bug was originally reproduced on.
+CANDIDATE_EB4 = [
+    ["Pelipper", "Archaludon", "Mega Swampert", "Garchomp"],
+    ["Pelipper", "Mega Swampert", "Archaludon", "Grimmsnarl"],
+    ["Mega Swampert", "Garchomp", "Pelipper", "Archaludon"],
+    ["Archaludon", "Grimmsnarl", "Pelipper", "Mega Swampert"],
+    ["Grimmsnarl", "Garchomp", "Pelipper", "Archaludon"],
+    ["Pelipper", "Garchomp", "Mega Swampert", "Grimmsnarl"],
+]
+
+_DIVERGENT = None
+
+
+def divergent_config():
+    """A configuration the two pilots genuinely disagree about.
+
+    DISCOVERED rather than named. This file used to hard-code one, and three
+    tests broke the day an unrelated mechanics fix (Parting Shot, self-switch
+    on a blocked hit) changed that game's outcome -- failing for a reason that
+    had nothing to do with what they test. The property under test is "record
+    and replay agree", and it is only meaningful on a position where the pilots
+    differ; which position that is, is not the point.
+    """
+    global _DIVERGENT
+    if _DIVERGENT is None:
+        for eb4 in CANDIDATE_EB4:
+            if record(GREEDY_PILOT, eb4=eb4) != record(EQUILIBRIUM_PILOT, eb4=eb4):
+                _DIVERGENT = eb4
+                break
+    return _DIVERGENT
+
+
 class TestTheReplayReproducesTheRecord(unittest.TestCase):
 
+    def test_a_divergent_configuration_exists(self):
+        """The premise of the rest. If no configuration divides the pilots then
+        the agreement tests below prove nothing, and that is worth failing on
+        rather than passing quietly."""
+        self.assertIsNotNone(divergent_config(),
+                             "no candidate configuration divides the pilots")
+
     def test_they_agree_under_the_greedy_pilot(self):
-        self.assertEqual(record(GREEDY_PILOT), replay(GREEDY_PILOT))
+        eb4 = divergent_config() or CANDIDATE_EB4[0]
+        self.assertEqual(record(GREEDY_PILOT, eb4=eb4),
+                         replay(GREEDY_PILOT, eb4=eb4))
 
     def test_they_agree_under_the_equilibrium_pilot(self):
-        self.assertEqual(record(EQUILIBRIUM_PILOT), replay(EQUILIBRIUM_PILOT))
+        eb4 = divergent_config() or CANDIDATE_EB4[0]
+        self.assertEqual(record(EQUILIBRIUM_PILOT, eb4=eb4),
+                         replay(EQUILIBRIUM_PILOT, eb4=eb4))
 
-    def test_this_config_is_one_where_the_pilots_genuinely_differ(self):
-        """Without this the two tests above could pass on a position where every
-        pilot wins, and would prove nothing at all."""
-        self.assertNotEqual(record(GREEDY_PILOT), record(EQUILIBRIUM_PILOT))
-
-    def test_the_equilibrium_pilot_is_the_one_that_loses_here(self):
-        """Naming the direction: the header said LOSS and was right; the replay
-        said WIN because it faced a weaker opponent."""
-        self.assertEqual(record(EQUILIBRIUM_PILOT), "p2")
-        self.assertEqual(record(GREEDY_PILOT), "p1")
+    def test_the_two_pilots_reach_different_winners_there(self):
+        eb4 = divergent_config()
+        self.assertIsNotNone(eb4)
+        self.assertNotEqual(record(GREEDY_PILOT, eb4=eb4),
+                            record(EQUILIBRIUM_PILOT, eb4=eb4))
 
 
 class TestTheScriptedBranchTakesAPilotToo(unittest.TestCase):
@@ -96,7 +135,10 @@ class TestTheScriptedBranchTakesAPilotToo(unittest.TestCase):
     def test_the_pilot_actually_changes_the_result(self):
         """Guards against the argument being accepted and then dropped on the
         floor -- which is exactly what the bug looked like from outside."""
-        self.assertNotEqual(replay(GREEDY_PILOT), replay(EQUILIBRIUM_PILOT))
+        eb4 = divergent_config()
+        self.assertIsNotNone(eb4)
+        self.assertNotEqual(replay(GREEDY_PILOT, eb4=eb4),
+                            replay(EQUILIBRIUM_PILOT, eb4=eb4))
 
     def test_the_search_passes_its_pilot_to_the_scripted_branch(self):
         """Read from the source, because reaching this branch needs a scripted

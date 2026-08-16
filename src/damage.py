@@ -187,12 +187,41 @@ def spread_targets(move_target: str, live_foes: list, allies: list, user) -> lis
     return targets
 
 
-def type_multiplier(move_type: str, defender_types: list, typechart: dict) -> float:
-    mapping = {0: 1.0, 1: 2.0, 2: 0.5, 3: 0.0}
+# Moves whose effectiveness against one type is not what their own type says.
+# Freeze-Dry is the only one in this format: an Ice move that is SUPER effective
+# on Water, rather than resisted by it. The multiplier is replaced, not
+# multiplied, so Water/Ground takes 2x (Water) x 2x (Ground) = 4x.
+TYPE_OVERRIDE_MOVES = {"Freeze-Dry": {"water": 2.0}}
+
+
+_TYPE_MULT_CACHE = {}
+_TYPE_MAPPING = {0: 1.0, 1: 2.0, 2: 0.5, 3: 0.0}
+
+
+def type_multiplier(move_type: str, defender_types: list, typechart: dict,
+                    move_name: str | None = None) -> float:
+    """Type effectiveness, memoised.
+
+    A pure function of (move type, defender types, move name) for a fixed
+    typechart, and profiling a standard pairing found 3.6 MILLION calls costing
+    8.2 s of self time -- there are only a few thousand distinct answers, so
+    almost all of that was recomputing the same dictionary lookups. The
+    typechart's identity is part of the key so a caller holding a different
+    chart cannot be served another one's answers.
+    """
+    key = (id(typechart), move_type, tuple(defender_types), move_name)
+    hit = _TYPE_MULT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    override = TYPE_OVERRIDE_MOVES.get(move_name or "", {})
     mult = 1.0
     for dtype in defender_types:
-        entry = typechart[dtype.lower()]["damageTaken"].get(move_type, 0)
-        mult *= mapping[entry]
+        dkey = dtype.lower()
+        if dkey in override:
+            mult *= override[dkey]
+            continue
+        mult *= _TYPE_MAPPING[typechart[dkey]["damageTaken"].get(move_type, 0)]
+    _TYPE_MULT_CACHE[key] = mult
     return mult
 
 
@@ -280,6 +309,23 @@ def apply_intimidate(target: Combatant):
 
 
 SLICING_BOOST_ABILITY = "Sharpness"
+
+# Abilities that DRAW single-target moves of a type onto themselves from
+# anywhere on the opposing side -- the same redirection Follow Me performs, but
+# permanent and type-specific -- and take a stat boost instead of damage.
+#
+# The immunity below already made them take 0; what was missing is that the
+# move is pulled off the ally it was aimed at in the first place. That is most
+# of what the ability is for: it is not "my Electric resistance", it is "your
+# single-target Electric moves do not get to choose a target".
+#
+# Deliberately just these two. Motor Drive, Volt Absorb, Sap Sipper and the
+# Water absorbers are immunities that do NOT redirect, and they keep the
+# existing behaviour.
+DRAW_ABILITIES = {
+    "Lightning Rod": ("Electric", "spa"),
+    "Storm Drain": ("Water", "spa"),
+}
 
 # Defender abilities that grant a full immunity to a whole type.
 TYPE_IMMUNITY_ABILITIES = {
@@ -485,7 +531,9 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
 
     # Type effectiveness
     def_types = defender.types
-    type_eff = type_multiplier(move.move_type, def_types, typechart)
+    # `move.name` matters here, not just its type: Freeze-Dry is an Ice move
+    # that is super effective on Water (TYPE_OVERRIDE_MOVES).
+    type_eff = type_multiplier(move.move_type, def_types, typechart, move.name)
     modifier *= type_eff
 
     # Ability damage modifiers (Sheer Force, Sharpness, Thick Fat, Filter, ...)
