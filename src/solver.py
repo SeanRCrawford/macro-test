@@ -207,12 +207,30 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
             tgts = spread_targets(move.target, live_foes, allies, combatant)
             actions.append(Action(combatant, side_key, "move", move, tgts))
         else:
-            # single-target: only branch on the target that does more damage (prune to 1)
-            best_target = max(
-                live_foes,
-                key=lambda f: quick_damage_estimate(attacker, f, move, typechart, field)
-            )
-            actions.append(Action(combatant, side_key, "move", move, [best_target]))
+            # Single-target. The hardest-hitting target, PLUS any other target
+            # this move would remove outright.
+            #
+            # Pruning to raw damage alone was measured wrong on a reported turn:
+            # Mega Scizor's Bullet Punch does 206-242 to Mega Floette and
+            # 134-158 to a 137 HP Whimsicott, so only the Floette version was
+            # ever offered -- and "kill the faster attacker before it moves with
+            # a +1 priority move" was not an option the search could see. That
+            # is not a subtle line, it is the first thing a player checks.
+            #
+            # A KO is the right second criterion rather than "damage is close":
+            # what makes the other target worth hitting is that the move
+            # FINISHES it, which is a different kind of value from chip and is
+            # exactly what raw damage cannot express. Costs at most one extra
+            # action per move, and only where a KO is actually on.
+            scored = [(quick_damage_estimate(attacker, f, move, typechart, field), f)
+                      for f in live_foes]
+            best_target = max(scored, key=lambda pair: pair[0])[1]
+            chosen = [best_target]
+            for estimate, foe in scored:
+                if foe is not best_target and estimate >= foe.current_hp:
+                    chosen.append(foe)
+            for target in chosen:
+                actions.append(Action(combatant, side_key, "move", move, [target]))
 
     if not actions:
         # No damaging move had a legal target (e.g. both opposing actives just fainted

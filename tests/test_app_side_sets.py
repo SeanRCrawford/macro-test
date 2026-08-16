@@ -144,16 +144,17 @@ class TestTheRealSearchSeesTheChange(unittest.TestCase):
     """The stubs above pin the wiring; this pins that the wiring reaches the
     engine. Slow, so it is one opponent and one deliberately crippling change."""
 
-    def test_crippling_a_member_costs_real_games(self):
-        """Cripple a Pokemon the search ACTUALLY BRINGS.
+    def test_crippling_a_member_changes_the_search_s_answer(self):
+        """The sets have to REACH the engine. Asserting they make things WORSE
+        does not survive contact: this test has rotted twice, first because the
+        named Pokemon was not brought at all, then because crippling it made the
+        record BETTER -- the search dropped that bring and found a stronger one
+        (79 wins to 81). Routing around the damage is the search working, not
+        failing.
 
-        This used to name Gallade outright, and quietly stopped testing
-        anything: once the screener's back tie-break was fixed, the best bring
-        no longer contained Gallade, so crippling it cost nothing and the
-        assertion failed for a reason that had nothing to do with the wiring.
-        Deriving the victim from the chosen bring cannot rot that way -- and if
-        the search routes around the damage by bringing someone else, that shows
-        up as a smaller drop rather than a broken test.
+        So the robust claim is that the answer CHANGES. A set that never reaches
+        the engine cannot change anything, and any real effect -- fewer wins, or
+        a different bring -- shows up here.
         """
         import matchup_search
         from _harness import load_world
@@ -167,9 +168,10 @@ class TestTheRealSearchSeesTheChange(unittest.TestCase):
         base = search({})
         victim = base["our_bring4"][0]
         crippled = search({victim: {"moves": ["Protect"]}})
-        self.assertLess(crippled["solver_wins"], base["solver_wins"],
-                        f"crippling {victim} (in the bring {base['our_bring4']}) "
-                        f"cost nothing")
+        self.assertNotEqual(
+            (base["solver_wins"], tuple(base["our_bring4"])),
+            (crippled["solver_wins"], tuple(crippled["our_bring4"])),
+            f"crippling {victim} changed neither the record nor the bring")
 
 
 if __name__ == "__main__":

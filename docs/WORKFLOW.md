@@ -608,6 +608,45 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0n. **A SINGLE-TARGET MOVE COULD ONLY EVER AIM AT ONE POKÉMON.** Reported with
+   a turn log: *"a scizor bullet punch … would have outsped and KO'd the Mega
+   Floette … and even ignoring the target selection, bug bite after whimsicott
+   has already moved when bullet punch would go first makes no sense"*.
+
+   `candidate_actions` pruned every single-target move to the target that took
+   the most damage — the comment said "prune to 1". Measured on that position,
+   Mega Scizor's Bullet Punch does
+
+   | | damage | |
+   |---|---|---|
+   | → Mega Floette | 206–242 | 2x, guaranteed OHKO |
+   | → Whimsicott | 134–158 | 2x, OHKO on most rolls of 137 HP |
+   | Bug Bite → Whimsicott | 99–116 | what was played |
+
+   so only the Floette version existed, and **"remove the faster attacker before
+   it moves with a +1 priority move" was not an option the search could see**.
+
+   A KO is the right second criterion rather than "the damage is close": what
+   makes the other target worth hitting is that the move FINISHES it, which is a
+   different kind of value from chip and exactly what raw damage cannot express.
+   The move now offers its best-damage target plus any other target it would
+   remove outright.
+
+   Effect on the reported position: the equilibrium goes from Bullet
+   Punch/Bug Bite/switch to **Bullet Punch only**, 44.5% at Floette and 55.5% at
+   Whimsicott, with **Bug Bite at zero**. Cost is small because the extra action
+   only appears where a KO is on — 39 joint actions against 33 there, and no
+   change at all on two other boards.
+
+   Golden baseline re-recorded: 8 differences, all explicable. Action counts
+   rose (16→20, 18→22, 16→24, 4→12) and both changed plays score BETTER
+   (−21.1 → **+83.0**, −312.3 → −300.0).
+
+   **The move choice itself was never the bug**, which is worth separating from
+   0m: Technician, priority and the KO bonus were all working, and preferring
+   60 BP Bug Bite to 40 BP Bullet Punch is correct arithmetic. What was wrong
+   was the option set it chose from.
+
 0m. **THE AUDITED LINE PLAYED A DIFFERENT TEAM FROM THE ONE IT RATED.**
    Reported as "best lines use moves not in the teamsheet; Scizor using Bug Bite
    when it doesn't have it, and when Bullet Punch would have KO'd".
