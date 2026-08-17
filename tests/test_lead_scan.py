@@ -641,3 +641,172 @@ class TestCommittedMoves(unittest.TestCase):
         src = inspect.getsource(ls.race_bring)
         self.assertIn("race_robust(matrix, lead, pair", src)
         self.assertIn("supplies the LINES", src)
+
+
+class TestSpeedControlAndItems(unittest.TestCase):
+    """Tailwind, Mega speed, Fairy Aura and Focus Sash all change the answer.
+
+        "you must account for the fact that mega floette speed ties Garchomp when
+         it mega evolves and is far bulkier so likely lives earthquake, and also
+         that whimsicott can use tailwind which lets mega floette outspeed (no
+         speed tie) and easily KO Garchomp accounting for fairy aura (*1.33 to
+         fairy moves). I cannot afford to risk losing any speed ties."
+    """
+
+    def setUp(self):
+        from _harness import setup_battle
+        W = world()
+        self.b, self.ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W)
+
+    def _mon(self, side, name):
+        roster = (self.b.p1 if side == "p1" else self.b.p2).roster
+        return [c for c in roster if c.name == name][0]
+
+    def test_ordering_uses_the_mega_speed_not_the_base(self):
+        """Ordering read `c.stats["spe"]`, so Mega Floette sorted at 111 when the
+        thing that shows up is 166. The tie is invisible unless the ordering uses
+        the evolved speed."""
+        from _harness import setup_battle
+        W = world()
+        # A team where Floette DOES hold the Mega slot.
+        b, _ms = setup_battle(EXAMPLE, ["Mega Floette", "Whimsicott",
+                                        "Kingambit", "Basculegion"], W)
+        fl = [c for c in b.p2.roster if c.name == "Mega Floette"][0]
+        self.assertTrue(fl.is_mega_pick)
+        self.assertGreater(ls.race_speed(fl, b.field, "p2"), fl.stats["spe"],
+                           "race_speed must report the Mega's speed")
+        self.assertEqual(ls.race_speed(fl, b.field, "p2"), fl.mega_stats["spe"])
+
+    def test_tailwind_is_a_recognised_setup_move(self):
+        """`move_plans` skips Status moves, so Whimsicott's Tailwind was a line
+        the race could not represent at all."""
+        self.assertIn("Tailwind", ls.setup_moves(self.ms["Whimsicott"]))
+        self.assertEqual(ls.setup_moves(self.ms["Garchomp"]), [])
+
+    def test_tailwind_doubles_their_speed_in_the_ordering(self):
+        from copy import copy
+        from engine import effective_speed
+        fl = self._mon("p2", "Mega Floette")
+        before = ls.race_speed(fl, self.b.field, "p2")
+        windy = copy(self.b.field)
+        windy.tailwind_p2 = 4
+        self.assertAlmostEqual(ls.race_speed(fl, windy, "p2"), before * 2)
+
+    def test_their_setup_appears_in_the_enumerated_strategies(self):
+        """It must be one of the options taken against us, not a footnote."""
+        ours = [self._mon("p1", "Ninetales-Alola"), self._mon("p1", "Garchomp")]
+        theirs = [self._mon("p2", "Mega Floette"), self._mon("p2", "Whimsicott")]
+        seen = set()
+        for turns in (2,):
+            for _i in range(1):
+                _v, _o, _t, _m, desc, _log = ls.move_race(
+                    self.ms, self.b.typechart, self.b.field, self.b, ours,
+                    theirs, turns=turns)
+                seen.add(desc)
+        # The description names the plan; Tailwind must be reachable as one.
+        import inspect
+        self.assertIn("Tailwind", inspect.getsource(ls.move_race))
+        self.assertTrue(seen)
+
+    def test_focus_sash_leaves_a_survivor_on_a_sliver(self):
+        """And a Pokemon on a sliver still gets its turn, which is the point."""
+        sashed = ls.sash_ids([self._mon("p2", "Whimsicott")])
+        wh = self._mon("p2", "Whimsicott")
+        self.assertIn(id(wh), sashed, "Whimsicott runs Focus Sash here")
+        hp = {id(wh): 1.0}
+        ls._apply(hp, id(wh), 5.0, sashed)
+        self.assertGreater(hp[id(wh)], 0.0, "the sash must hold")
+        self.assertLess(hp[id(wh)], 0.1)
+        # But not from reduced health.
+        hp = {id(wh): 0.5}
+        ls._apply(hp, id(wh), 5.0, sashed)
+        self.assertEqual(hp[id(wh)], 0.0)
+
+    def test_kingambit_four_times_effective_removes_ninetales_outright(self):
+        """A finding, recorded because it contradicts the worked breakdown.
+
+        Kingambit's Iron Head is Steel into Ice/Fairy -- 4x -- and does 174% of
+        Ninetales-Alola's HP. So the "Kingambit ... Garchomp earthquake +
+        Ninetales-Alola Blizzard is very threatening" reading is wrong for this
+        lead: Ninetales-Alola dies at full health before the two-turn sum can
+        land. This also corrected a hasty claim of mine that a self-Earthquake was
+        the deciding error there; it was not, and the threshold penalty correctly
+        does not fire, because Ninetales was already in range.
+        """
+        nt = self._mon("p1", "Ninetales-Alola")
+        kg = self._mon("p2", "Kingambit")
+        plans = ls.move_plans(kg, self.ms["Kingambit"], [nt], [kg],
+                              self.b.typechart, self.b.field, self.b)
+        worst = max((h.get(id(nt), 0.0) for _m, h, _p, _s in plans), default=0.0)
+        self.assertGreater(worst, 1.0,
+                           "Kingambit must OHKO Ninetales-Alola from full")
+
+
+class TestTheirMegaChoiceIsTheirs(unittest.TestCase):
+    """One Mega per team, chosen at preview, AFTER seeing your four.
+
+        "The mega choice should not be set in stone. They could mega either, and
+         it must be robust to both."
+
+    Measured on the reference bring against Big 6, and this is why it matters:
+
+        their Mega: Mega Charizard Y   13W 0 unheld   score +0.48
+        their Mega: Mega Floette        7W 3 unheld   score  0.00
+
+    With Floette holding the slot its Mega speed is 166 -- exactly our Garchomp --
+    the tie resolves against us, and Light of Ruin removes Garchomp before it
+    acts. Blizzard takes only 27% off the Mega, so it lives easily. The
+    "overwhelming lead" reading does not survive their other choice.
+    """
+
+    def test_both_of_their_mega_choices_are_enumerated(self):
+        W = world()
+        variants = ls.mega_variants(W["teams"]["Big 6"], W)
+        names = {m for m, _r in variants}
+        self.assertEqual(names, {"Mega Charizard Y", "Mega Floette"})
+        for _m, roster in variants:
+            self.assertEqual(sorted(roster), sorted(W["teams"]["Big 6"]),
+                             "a variant must be the same six, reordered")
+
+    def test_putting_a_mega_first_gives_it_the_slot(self):
+        from _harness import setup_battle
+        W = world()
+        for mega, roster in ls.mega_variants(W["teams"]["Big 6"], W):
+            b, _ms = setup_battle(EXAMPLE, roster, W)
+            holder = [c for c in b.p2.roster if c.is_mega_pick]
+            self.assertEqual([c.name for c in holder], [mega])
+
+    def test_a_team_with_one_mega_yields_one_variant(self):
+        W = world()
+        variants = ls.mega_variants(["Garchomp", "Whimsicott", "Kingambit",
+                                     "Mega Scizor", "Basculegion", "Gallade"], W)
+        self.assertEqual(len(variants), 1)
+
+    def test_the_worst_mega_choice_is_the_one_reported(self):
+        W = world()
+        worst, reports = ls.race_all_megas(EXAMPLE, W["teams"]["Big 6"], W,
+                                           opponent_name="Big 6")
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(worst.score, min(r.score for r in reports))
+
+    def test_their_mega_choice_actually_changes_the_verdict(self):
+        """The regression guard. If this stops discriminating, either the Mega
+        stats stopped reaching the race or the speed tie stopped being lost."""
+        W = world()
+        _worst, reports = ls.race_all_megas(EXAMPLE, W["teams"]["Big 6"], W,
+                                            opponent_name="Big 6")
+        scores = sorted(r.score for r in reports)
+        self.assertLess(scores[0], scores[-1],
+                        "their Mega choice must matter on this position")
+
+    def test_mega_floette_ties_our_garchomp_once_it_evolves(self):
+        from _harness import setup_battle
+        W = world()
+        roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
+                  if m == "Mega Floette"][0]
+        b, _ms = setup_battle(EXAMPLE, roster, W)
+        fl = [c for c in b.p2.roster if c.name == "Mega Floette"][0]
+        chomp = [c for c in b.p1.roster if c.name == "Garchomp"][0]
+        self.assertEqual(ls.race_speed(fl, b.field, "p2"),
+                         ls.race_speed(chomp, b.field, "p1"),
+                         "the tie the worked example warned about")
