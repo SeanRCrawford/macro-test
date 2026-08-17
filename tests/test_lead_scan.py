@@ -1061,3 +1061,98 @@ class TestTheDefaultLoadout(unittest.TestCase):
         self.assertEqual(sash_v, ls.LOSS,
                          "if the sash starts saving this, update the docstring")
         self.assertLessEqual(sash_m, bare_m + 0.01)
+
+
+class TestTheSimulatorIsTheDamageModel(unittest.TestCase):
+    """`lead_sim` plays `Battle.run_turn`. There is no second damage model.
+
+        "finish lead_sim so the race is Battle.run_turn end to end. Avoid having
+         two damage models. ... it is imperative that you use the full simulator."
+
+    These tests assert the MECHANICS APPEAR, which is the only way to check that
+    the engine is really being used: a hand-rolled calculation cannot produce a
+    Mega Evolution announcement or a Life Orb recoil line.
+    """
+
+    OURS = ["Mega Scizor", "Arcanine-Hisui", "Gyarados", "Hydreigon"]
+    THEIRS = ["Basculegion", "Garchomp", "Kingambit", "Whimsicott"]
+
+    def setUp(self):
+        import lead_sim
+        self.sim = lead_sim
+        self.b, self.ms, self.sets = lead_sim.build_position(
+            self.OURS, self.THEIRS, world())
+
+    def test_movesets_are_optimised_not_usage_defaults(self):
+        """The named case: "Scizor for instance should use Knock Off, Close
+        Combat, Bullet Punch". The old race gave it Bug Bite and Swords Dance."""
+        moves = [m.name for m, _ in self.ms["Mega Scizor"]]
+        for want in ("Knock Off", "Close Combat", "Bullet Punch"):
+            self.assertIn(want, moves, f"Mega Scizor lacks {want}: {moves}")
+        self.assertNotIn("Bug Bite", moves)
+
+    def test_gyarados_gets_ice_fang_for_garchomp(self):
+        self.assertIn("Ice Fang", [m.name for m, _ in self.ms["Gyarados"]])
+
+    def test_items_are_optimised_and_the_unpack_bug_stays_fixed(self):
+        """`best_item` returns THREE values. My first call unpacked two, raised
+        ValueError, and a bare `except` hid it -- so every item came back None and
+        item optimisation was silently a no-op."""
+        chosen = {n: s.get("item") for n, s in self.sets.items()}
+        self.assertTrue(any(chosen.values()),
+                        f"no item was optimised at all: {chosen}")
+
+    def test_no_banned_item_reaches_the_field(self):
+        """Regulation MB. And the usage DEFAULT can itself be banned -- Hydreigon's
+        most-used item is Choice Scarf, so leaving it alone put an illegal item on
+        the field even after the candidate list was cleaned."""
+        for c in self.b.p1.roster:
+            self.assertNotIn(c.item, self.sim.BANNED_ITEMS,
+                             f"{c.name} is holding {c.item}")
+
+    def test_a_mega_actually_evolves(self):
+        """`mega_evolved` was False for every Pokemon in every old race, so Mega
+        stats, typing and ability never applied."""
+        verdict, _od, _td, _m, log, end = self.sim.play(
+            self.b, self.ms, turns=1, want_log=True)
+        text = "\n".join(log)
+        self.assertIn("Mega Evolved", text, f"no Mega Evolution in:\n{text}")
+        self.assertTrue(any(c.mega_evolved for c in end.p1.roster))
+
+    def test_engine_only_mechanics_show_up_in_the_line(self):
+        """Each of these lives in battle.py and CANNOT be produced by a damage
+        formula, so their presence is the proof the simulator ran."""
+        _v, _od, _td, _m, log, _end = self.sim.play(
+            self.b, self.ms, turns=2, want_log=True)
+        text = "\n".join(log)
+        found = [k for k in ("Life Orb", "Focus Sash", "recoil", "fell",
+                             "sends in", "FAINTED")
+                 if k in text]
+        self.assertGreaterEqual(len(found), 3,
+                                f"too few engine-only effects in:\n{text}")
+
+    def test_effectiveness_comes_from_the_engine(self):
+        """The log carries the multiplier the ENGINE computed, e.g. '(4.0x eff)'
+        for Garchomp's Earthquake into Arcanine-Hisui."""
+        _v, _od, _td, _m, log, _end = self.sim.play(
+            self.b, self.ms, turns=1, want_log=True)
+        self.assertIn("x eff", "\n".join(log))
+
+    def test_the_race_takes_their_best_strategy(self):
+        got = self.sim.race(self.b, self.ms, turns=2, breadth="cheap")
+        verdict, _od, _td, _margin, desc, _log = got
+        self.assertIn(verdict, (self.sim.WIN, self.sim.EVEN, self.sim.LOSS))
+        self.assertIn("then", desc, "a per-turn plan must be described")
+
+    def test_nobody_protects_twice_in_a_row(self):
+        for seq in self.sim.their_strategies(self.b, self.ms, turns=2):
+            plans = [p for p, _f in seq]
+            if plans[0] != "both attack" and plans[1] != "both attack":
+                self.assertNotEqual(plans[0], plans[1])
+
+    def test_flinch_and_intimidate_proof_abilities_are_listed(self):
+        """"A pokemon with the move inner focus cannot be faked out or
+        intimidated" -- so the report can name why a lead is script-proof."""
+        self.assertIn("Inner Focus", self.sim.FLINCH_PROOF)
+        self.assertIn("Inner Focus", self.sim.INTIMIDATE_PROOF)
+        self.assertIn("Fake Out", self.sim.SETUP_MOVES)

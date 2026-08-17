@@ -182,9 +182,13 @@ def build(records, path):
     _wrap(ws, 11)
 
     # --- Lines --------------------------------------------------------------
+    # "for each line in the Lines sheet, I want to see if its a win or not" --
+    # the result belongs on every row, not only the first, because the sheet is
+    # read filtered and a merged-looking first-row-only value disappears the
+    # moment you filter on anything.
     ws = _sheet(wb, "Lines",
-                ["Our 4", "Opponent", "Their lead pair", "Our play", "Turn",
-                 "What happens (with damage)"],
+                ["Result", "Our 4", "Opponent", "Their lead pair", "Our play",
+                 "Turn", "What happens (with damage)"],
                 {"Our 4": 34, "Their lead pair": 30, "Our play": 40,
                  "What happens (with damage)": 96})
     truncated = 0
@@ -203,15 +207,18 @@ def build(records, path):
                 if stripped.startswith("Turn "):
                     turn = stripped
                     continue
-                ws.append([" / ".join(r["bring"]) if first else None,
+                ws.append([x.verdict.upper(),
+                           " / ".join(r["bring"]) if first else None,
                            r["opponent"] if first else None,
                            " + ".join(x.enemy_lead) if first else None,
                            play.label if first else None, turn, stripped])
+                ws.cell(ws.max_row, 1).fill = FILL.get(x.verdict, WARN)
                 first = False
     if truncated:
         ws.append([f"... {truncated} more rows not written (capped at "
                    f"{MAX_ROWS:,})"])
-    _wrap(ws, 6)
+    ws.auto_filter.ref = ws.dimensions
+    _wrap(ws, 7)
 
     # --- Switch-ins ---------------------------------------------------------
     ws = _sheet(wb, "Switch-ins",
