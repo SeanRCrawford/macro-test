@@ -307,27 +307,42 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestASwitchCanBreakThePin(unittest.TestCase):
-    """A pin is a claim about the whole SIDE, not about the Pokemon in front.
+class TestThisTurnPlusNextTurn(unittest.TestCase):
+    """A pin is a claim about the whole SIDE, over TWO turns.
 
-    The correction that produced `escape_from`, in the user's words:
+    Two corrections built this, and the second overturned the first.
+
+    What breaks a pin -- a switch, not a stall:
 
         "Favourable repositioning requires them to switch. A double protect is
          fine as long as the enemy can't favourably reposition or set up ...
-         but doesn't achieve anything unless there is fake out or stalling
-         tailwind/trick room/weather. If there is no-one in the back who can
-         resist the incoming hit, or survive this turn+next turn (i.e. I go
-         first, I hit them on switch, then outspeed and KO next turn, that's a
-         pin). But if they take the hit well, e.g. resisted, then can KO me
-         next turn, either by outspeeding or by being slower and not getting
-         KOd by either of mine, then that is not a pin and is a risk and a good
-         play for them."
+         If there is no-one in the back who can resist the incoming hit, or
+         survive this turn+next turn ... that's a pin. But if they take the hit
+         well, e.g. resisted, then can KO me next turn, either by outspeeding or
+         by being slower and not getting KOd by either of mine, then that is not
+         a pin and is a risk and a good play for them."
+
+    And then the sum that matters:
+
+        "Really, this turn + next turn (very quick and simple arithmetic) is all
+         that matters. ... if Charizard switches in, it will take bullet punch +
+         blizzard, then next turn another blizzard (outsped) + bullet punch
+         (priority) which might kill, so could be a genuine full pin."
 
     The reference position is the one that was reported. Scizor's Bullet Punch
-    guarantee-OHKOs both of their actives and moves first, so on the board
-    alone it is a double pin. It is not one: Mega Charizard Y is Fire/Flying,
-    takes Bullet Punch at 0.25x, and KOs Scizor back. Their switch is a good
-    play and our "pin" is a risk.
+    guarantee-OHKOs both of their actives and moves first. Mega Charizard Y is
+    Fire/Flying, resists Bullet Punch at 0.25x, and KOs Scizor back with Heat
+    Wave -- so against the PINNER alone it looks like a clean escape, which is
+    what the first version of `escape_from` concluded.
+
+    It is not. Measured on this position:
+
+        Bullet Punch alone           21.2% of Charizard's max
+        Bullet Punch + Blizzard      78.6%  guaranteed, on the switch-in turn
+        the same again on turn 2     78.6%  (Blizzard outspeeds, BP has priority)
+        two-turn total              157.1%  -- dead without ever acting
+
+    So it is a COMPLETE pin: their best answer to it dies on the way to firing.
     """
 
     OURS = ["Scizor", "Ninetales-Alola", "Garchomp", "Kingambit"]
@@ -336,67 +351,109 @@ class TestASwitchCanBreakThePin(unittest.TestCase):
     def setUp(self):
         self.b, self.ms, self.tm = position(self.OURS, self.THEIRS)
         self.scizor = named(self.b, "Scizor")
+        self.ninetales = named(self.b, "Ninetales-Alola")
         self.floette = named(self.b, "Mega Floette")
         self.zard = named(self.b, "Mega Charizard Y")
 
-    def test_it_looks_like_a_pin_on_the_board_alone(self):
-        """Without the bench there is nothing to see: guaranteed OHKO, first."""
-        p = pin.pin_between(self.tm, self.scizor, self.floette)
-        self.assertIsNotNone(p)
-        self.assertTrue(p.first)
-        self.assertTrue(p.secure)
-        self.assertIsNone(p.escape)
-        self.assertTrue(p.real)
+    # --- the arithmetic itself -------------------------------------------
 
-    def test_the_bench_breaks_it(self):
+    def test_the_pinner_alone_does_not_threaten_the_switch_in(self):
+        """The premise of the wrong answer, kept so the fix cannot silently
+        regress into being right for the wrong reason."""
+        t = self.tm.threat(self.scizor, self.zard)
+        self.assertFalse(t.ohko_possible)
+        self.assertLess(t.dmg_min, 0.30)
+
+    def test_the_switch_in_turn_counts_both_of_our_attacks(self):
+        """It switched, so everything we aim at that slot lands."""
+        ours = [self.scizor, self.ninetales]
+        alone = pin._incoming(self.tm, [self.scizor], self.zard)
+        both = pin._incoming(self.tm, ours, self.zard)
+        self.assertGreater(both, alone * 2)
+        self.assertGreater(both, 0.70)
+        self.assertLess(both, 1.0, "it must SURVIVE the switch-in turn, or "
+                                   "this position tests nothing about turn 2")
+
+    def test_turn_two_counts_only_what_lands_before_it_acts(self):
+        """Damage after it has fired does not stop it firing. Here both of ours
+        are ahead of it -- Blizzard outspeeds, Bullet Punch has priority -- so
+        the whole round counts."""
+        ours = [self.scizor, self.ninetales]
+        before = pin._incoming(self.tm, ours, self.zard, only_before_it_acts=True)
+        self.assertAlmostEqual(before, pin._incoming(self.tm, ours, self.zard))
+
+    def test_two_turns_kill_it(self):
+        ours = [self.scizor, self.ninetales]
+        two = (pin._incoming(self.tm, ours, self.zard)
+               + pin._incoming(self.tm, ours, self.zard, only_before_it_acts=True))
+        self.assertGreaterEqual(two, 1.0)
+
+    # --- and therefore ---------------------------------------------------
+
+    def test_the_pin_holds_through_the_switch(self):
         p = pin.pin_between(self.tm, self.scizor, self.floette, self.b)
+        self.assertIsNone(p.escape, "Charizard Y survives Bullet Punch but not "
+                                    "Bullet Punch + Blizzard, twice")
+        self.assertTrue(p.real)
+        self.assertTrue(pin.is_pinned(self.tm, self.floette, self.b))
+
+    def test_it_is_reported_as_complete_and_names_who_tried(self):
+        """`complete` is a stronger claim than `real`: their answer was played
+        out and lost, rather than never existing."""
+        p = pin.pin_between(self.tm, self.scizor, self.floette, self.b)
+        self.assertTrue(p.complete)
+        self.assertIn("Mega Charizard Y", p.through)
+        text = " ".join(pin.describe(self.tm, self.b, "p1"))
+        self.assertIn("Complete pin", text)
+        self.assertIn("Mega Charizard Y", text)
+
+    def test_a_lone_pinner_cannot_claim_a_complete_pin(self):
+        """Take the partner off the field and the arithmetic changes sides:
+        Bullet Punch alone is 21% a turn, so Charizard lives, KOs back, and the
+        pin becomes a risk. Same board, same bench -- the difference is entirely
+        the second attacker, which is what the two-turn sum is for."""
+        self.ninetales.fainted = True
+        self.ninetales.current_hp = 0
+        b, ms, tm = self.b, self.ms, build_threat_matrix(self.b, self.ms)
+        p = pin.pin_between(tm, self.scizor, self.floette, b)
         self.assertIs(p.escape, self.zard)
         self.assertFalse(p.real)
-        self.assertFalse(pin.is_pinned(self.tm, self.floette, self.b))
+        self.assertFalse(p.complete)
+        text = " ".join(pin.describe(tm, b, "p1"))
+        self.assertIn("risk, not a threat", text)
 
-    def test_the_escape_satisfies_all_three_conditions(self):
-        """Not just "some bench Pokemon". It must live the hit AND answer it."""
-        self.assertFalse(self.tm.threat(self.scizor, self.zard).ohko_possible,
-                         "Charizard Y must survive Bullet Punch even on the "
-                         "best roll, or it is not an escape")
-        self.assertTrue(self.tm.threat(self.zard, self.scizor).ohko,
-                        "Charizard Y must guarantee the KO back, or the switch "
-                        "only absorbs a hit and the pin stands next turn")
+    # --- what is not an escape -------------------------------------------
 
     def test_protect_is_never_an_escape(self):
-        """The board is unchanged after a stall, so the pin must survive it.
+        """A null turn leaves the board as it was, so the pin must survive it.
 
-        This is the half of the correction that is about what a null turn is
-        worth: "next turn I can do the same thing". A Protect defers a pin, it
-        does not answer one, and no amount of Protecting turns a risk into a
-        threat or back.
+        "next turn I can do the same thing". No amount of Protecting turns a
+        threat into a risk or back.
         """
         before = pin.pin_between(self.tm, self.scizor, self.floette, self.b)
         self.floette.protecting = True
         self.floette.protected_last_turn = True
         after = pin.pin_between(self.tm, self.scizor, self.floette, self.b)
         self.assertEqual(before.real, after.real)
-        self.assertIs(after.escape, before.escape)
+        self.assertEqual(before.through, after.through)
 
-    def test_a_pin_with_no_answer_in_the_back_stays_real(self):
-        """The control. Charizard's Solar Beam on Swampert has nothing behind
-        it that both lives and answers, so it survives the new check."""
+    def test_a_pin_with_no_answer_in_the_back_stays_real_but_not_complete(self):
+        """The control. Charizard's Solar Beam on Swampert: nothing behind it
+        threatens Charizard back, so the pin is real and UNCONTESTED -- there is
+        no `through` list because nobody tried."""
         b, _ms, tm = position()
         p = pin.pin_between(tm, named(b, "Mega Charizard Y"),
                             named(b, "Mega Swampert"), b)
         self.assertIsNone(p.escape)
         self.assertTrue(p.real)
-
-    def test_it_is_downgraded_not_deleted(self):
-        """`describe` still names the threat, and names the piece that answers
-        it -- that piece is the whole reason it is only a risk."""
-        text = " ".join(pin.describe(self.tm, self.b, "p1"))
-        self.assertIn("Scizor would pin Mega Floette", text)
-        self.assertIn("Mega Charizard Y", text)
-        self.assertIn("risk, not a threat", text)
+        self.assertEqual(p.through, ())
+        self.assertFalse(p.complete)
 
     def test_battle_is_optional(self):
-        """Callers without a battle keep working; the escape check is skipped
+        """Callers without a battle keep working; the two-turn check is skipped
         rather than crashing, and the pin is reported on the board alone."""
-        self.assertIsNotNone(pin.pin_between(self.tm, self.scizor, self.floette))
+        p = pin.pin_between(self.tm, self.scizor, self.floette)
+        self.assertIsNotNone(p)
+        self.assertTrue(p.real)
+        self.assertEqual(p.through, ())
         self.assertTrue(pin.is_pinned(self.tm, self.floette))

@@ -648,20 +648,58 @@ a documented negative result.
    > either of mine, then that is not a pin and is a risk and a good play for
    > them."*
 
-   `escape_from()` implements exactly that. A benched **B** breaks the pin when
-   all three hold: B survives the switch-in hit (on their best roll, since this
-   *removes* a threat); B then guarantees the KO back on the pinner; and B gets
-   to fire it — either it outspeeds, or it is slower and neither of our actives
-   removes it, checked singly and jointly. Anything less is still a pin: hit it
-   on the switch, outspeed and KO next turn.
+   And then the sum that actually decides it:
 
+   > *"Really, this turn + next turn (very quick and simple arithmetic) is all
+   > that matters. ... there is even potentially a complete pin; if Charizard
+   > switches in, it will take bullet punch + blizzard, then next turn another
+   > blizzard (outsped) + bullet punch (priority) which might kill, so could be
+   > a genuine full pin."*
+
+   `escape_from()` implements both. A benched **B** breaks the pin only when all
+   three hold: B survives the switch-in turn against **our whole side's**
+   guaranteed damage — it switched, so everything we aim there lands; B then
+   guarantees the KO back on the pinner; and B lives long enough to fire it,
+   meaning turn 1's damage plus everything resolving *before it acts* on turn 2
+   still leaves it up. Anything less is still a pin.
+
+   **The first version got this wrong, and the way it was wrong is instructive.**
+   It asked "does B survive the *pinner's* hit", which is the wrong sum.
    Measured on the reported position — Scizor + Ninetales-Alola vs Mega Floette
-   + Whimsicott — Scizor's Bullet Punch guarantee-OHKOs **both** of their
-   actives and moves first, so on the board alone it is a double pin. With the
-   bench read it is neither: **Mega Charizard Y** is Fire/Flying, takes Bullet
-   Punch at 0.25×, and KOs Scizor back. Their switch is the good play and our
-   "pin" is a risk. A pin with an escape is *downgraded, not deleted* —
-   `describe` still reports it, and names the piece that answers it.
+   + Whimsicott, with Mega Charizard Y in the back:
+
+   | | damage |
+   |---|---|
+   | Bullet Punch alone | 21.2% of Charizard's max |
+   | **Bullet Punch + Blizzard**, switch-in turn | **78.6% guaranteed** |
+   | the same again on turn 2 (Blizzard outspeeds, BP has priority) | **78.6%** |
+   | **two-turn total** | **157.1% — dead without ever acting** |
+
+   Charizard resists Bullet Punch at 0.25× and KOs Scizor back with Heat Wave,
+   so against the pinner alone it read as a clean escape and the pin was called
+   off. Against both attackers, twice, it dies on the way to firing. It is a
+   **complete pin** — the strongest version of the claim, and the one worth
+   committing a lead to.
+
+   `Pin.complete` names that case specifically: `real` *and* some bench Pokémon
+   threatened the KO back and still lost. A pin over a side whose bench simply
+   cannot threaten the pinner is uncontested; a pin that survives a Pokémon
+   switching in **specifically to answer it** is a different and much stronger
+   statement, so `describe` names who tried. A pin with a genuine escape is
+   *downgraded, not deleted* — still reported, with the piece that answers it.
+
+   The regression guard for this is `test_a_lone_pinner_cannot_claim_a_complete_pin`:
+   faint Ninetales on the same board and the verdict flips back to a risk,
+   because Bullet Punch alone is 21% a turn. Same position, same bench — the
+   difference is entirely the second attacker, which is what the two-turn sum is
+   for.
+
+   **Known approximation.** Their other active is still on the field while this
+   plays out; if it removes one of ours on turn 1, the second round is smaller
+   than the sum assumes. `secure` covers something pre-empting and killing the
+   *pinner*, but a partner traded off mid-sequence is not modelled, so a
+   two-turn pin is slightly optimistic when their other slot threatens our
+   second attacker.
 
    **Protect is never an escape, and that is the other half.** A null turn
    leaves the board exactly as it was and the same pin applies next turn — the

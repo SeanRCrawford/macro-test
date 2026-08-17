@@ -62,11 +62,27 @@ class Pin:
     first: bool          # attacker moves first, so the KO actually lands
     secure: bool         # nothing on the defender's side pre-empts the pinner
     escape: object = None  # a benched Pokemon the defender can switch to and win
+    # Bench Pokemon that DO threaten a KO back, and still die before firing it:
+    # they eat both our attacks on the way in and both again next turn. Names,
+    # not objects, so a Pin stays cheap to carry around and to print.
+    through: tuple = ()
 
     @property
     def real(self) -> bool:
         """A pin the defender must actually respect."""
         return self.first and self.secure and self.escape is None
+
+    @property
+    def complete(self) -> bool:
+        """Nothing in the back answers this, and their best try was TESTED.
+
+        The distinction is worth having. A pin over a side whose bench simply
+        cannot threaten the pinner is uncontested; a pin that survives a
+        Pokemon switching in specifically to answer it, because that Pokemon
+        dies across the two turns before it acts, is a stronger claim and the
+        one worth committing to.
+        """
+        return self.real and bool(self.through)
 
 
 def _moves_first(matrix, attacker, defender) -> bool:
@@ -99,61 +115,83 @@ def _bench_of(battle, combatant):
     return []
 
 
-def _survives(matrix, attacker, defender) -> bool:
-    """`defender` lives through `attacker`'s best move even on the best roll.
+def _incoming(matrix, attackers, target, only_before_it_acts=False) -> float:
+    """Fraction of `target`'s MAX hp our side strips in one turn, worst rolls.
 
-    Strict on purpose. This is used to REMOVE a pin, and removing one on a
-    maybe means talking ourselves out of a threat that was real.
+    A sum over both actives, because a switch-in eats whatever we aim at that
+    slot -- and focus fire is always available to us. Worst rolls throughout:
+    this decides whether a pin holds, and a pin that needs a high roll is not
+    one.
+
+    `only_before_it_acts` drops the attackers `target` moves ahead of, which is
+    what makes the second turn of the arithmetic honest -- damage that lands
+    after it has already fired does not stop it firing.
     """
-    return not matrix.threat(attacker, defender).ohko_possible
+    return sum(matrix.threat(a, target).dmg_min for a in attackers
+               if not only_before_it_acts or _moves_first(matrix, a, target))
 
 
 def escape_from(matrix, battle, attacker, defender):
     """A switch-in that turns this pin from a threat into a risk, or None.
 
-    The correction that produced this function, in the user's words:
+    Also returns, as the second element, the names of bench Pokemon that DID
+    threaten a KO back and still died before firing it.
 
-        "Favourable repositioning requires them to switch. If there is no-one
-         in the back who can resist the incoming hit, or survive this turn +
-         next turn (i.e. I go first, I hit them on switch, then outspeed and KO
-         next turn, that's a pin). But if they take the hit well, e.g.
-         resisted, then can KO me next turn, either by outspeeding or by being
-         slower and not getting KOd by either of mine, then that is not a pin
-         and is a risk and a good play for them."
+    THIS TURN + NEXT TURN, and nothing else. In the user's words:
 
-    So a benched B escapes when all three hold:
+        "Really, this turn + next turn (very quick and simple arithmetic) is all
+         that matters. ... there is even potentially a complete pin; if
+         Charizard switches in, it will take bullet punch + blizzard, then next
+         turn another blizzard (outsped) + bullet punch (priority) which might
+         kill, so could be a genuine full pin."
 
-      1. B survives the switch-in hit. Being resisted is the usual reason, but
-         what matters is only that it lives.
+    The first version of this function asked "does B survive the PINNER's hit",
+    and that is the wrong sum. Measured on the reference position: Charizard Y
+    takes Bullet Punch at 0.25x for 21.2% and survives it easily -- so the pin
+    was called off -- but it switches into Bullet Punch AND Blizzard for 78.6%
+    guaranteed, and then eats both again next turn, since Blizzard outspeeds it
+    and Bullet Punch has priority. 157.1% over two turns: it dies without ever
+    acting, and the pin was complete all along.
+
+    So a benched B escapes only when all three hold:
+
+      1. B survives the switch-in turn -- OUR WHOLE SIDE's guaranteed damage,
+         not the pinner's alone. It switched, so everything we aim there lands.
       2. B then threatens a guaranteed KO back on the pinner. Without this the
-         switch merely absorbs a hit; the pin still stands next turn.
-      3. B gets to fire that KO -- either it outspeeds the pinner, or it is
-         slower and neither of our actives removes it first. "Either of mine"
-         is checked both singly and together, since focus fire is available to
-         us whether or not it is available to them.
+         switch merely absorbs a hit and the pin stands again next turn.
+      3. B lives long enough to fire it: turn 1's damage plus everything that
+         resolves before it acts on turn 2 still leaves it alive. If it
+         outspeeds both of ours that second term is zero and it simply fires;
+         if it is slower than both, it eats a second full round first.
 
     Note what is NOT an escape: Protect. A null turn leaves the board exactly
     as it was and the pin re-applies next turn, so a stall is only worth
     something when the stalled turns themselves pay -- Fake Out, or Tailwind /
     Trick Room / weather / screens ticking down. That is a reason to price
     Protect properly at the horizon, not a reason to call the pin off.
+
+    KNOWN APPROXIMATION. Their other active is still on the field while this
+    plays out, and if it removes one of ours on turn 1 the second round is
+    smaller than the sum above assumes. `secure` already covers the case where
+    something pre-empts and kills the PINNER; a partner traded off mid-sequence
+    is not modelled, so a two-turn pin is slightly optimistic when their other
+    slot threatens our second attacker.
     """
+    ours = [c for c in (matrix.ours if defender in matrix.theirs else matrix.theirs)
+            if not c.fainted and _on_field(battle, c)]
+    through = []
     for b in _bench_of(battle, defender):
-        if not _survives(matrix, attacker, b):
-            continue                                   # (1) dies on the way in
+        if _incoming(matrix, ours, b) >= 1.0:
+            continue                          # (1) dies on the way in
         if not _kills_outright(matrix, b, attacker):
-            continue                                   # (2) no answer back
-        if _moves_first(matrix, b, attacker):
-            return b                                   # (3a) it simply outspeeds
-        ours = [c for c in (matrix.ours if defender in matrix.theirs
-                            else matrix.theirs)
-                if not c.fainted and _on_field(battle, c)]
-        removed = any(_kills_outright(matrix, o, b) for o in ours)
-        if not removed and len(ours) >= 2:
-            removed = matrix.joint_kos(ours[0], ours[1], b, guaranteed=True)
-        if not removed:
-            return b                                   # (3b) slower, but lives
-    return None
+            continue                          # (2) no answer back
+        two_turns = (_incoming(matrix, ours, b)
+                     + _incoming(matrix, ours, b, only_before_it_acts=True))
+        if two_turns >= 1.0:
+            through.append(b.name)            # dead before it fires: still pinned
+            continue
+        return b, tuple(through)              # (3) it lives, and it answers
+    return None, tuple(through)
 
 
 def pin_between(matrix, attacker, defender, battle=None) -> Pin | None:
@@ -176,10 +214,10 @@ def pin_between(matrix, attacker, defender, battle=None) -> Pin | None:
     secure = not any(_kills_outright(matrix, e, attacker)
                      and _moves_first(matrix, e, attacker)
                      for e in allies_of_defender if not e.fainted)
-    escape = (escape_from(matrix, battle, attacker, defender)
-              if battle is not None else None)
+    escape, through = ((None, ()) if battle is None
+                       else escape_from(matrix, battle, attacker, defender))
     return Pin(attacker=attacker, defender=defender, move=threat.move,
-               first=first, secure=secure, escape=escape)
+               first=first, secure=secure, escape=escape, through=through)
 
 
 def pins_on(matrix, defender, battle=None):
@@ -339,9 +377,18 @@ def describe(matrix, battle, side_name="p1") -> list[str]:
     """Plain sentences, for the line explanation and the app."""
     lines = []
     for p in all_pins(matrix, battle):
-        lines.append(f"{p.attacker.name} pins {p.defender.name} with {p.move} "
-                     f"(guaranteed OHKO, moves first) -- {p.defender.name} has "
-                     f"no switch that answers it, so Protect only defers")
+        text = (f"{p.attacker.name} pins {p.defender.name} with {p.move} "
+                f"(guaranteed OHKO, moves first) -- {p.defender.name} has "
+                f"no switch that answers it, so Protect only defers")
+        if p.complete:
+            # Name the Pokemon that TRIED. "Nothing in the back answers this"
+            # is much stronger when their answer was played out and lost, and
+            # this is the line worth committing a lead to.
+            text += (f". Complete pin: "
+                     + ", ".join(p.through)
+                     + " threatens the KO back and still dies before firing it "
+                       "(both our attacks on the way in, both again next turn)")
+        lines.append(text)
     # A near-pin is worth saying out loud: it is the same threat, and the piece
     # in the back is the entire reason it is not one.
     for side_a, side_b in ((matrix.ours, matrix.theirs), (matrix.theirs, matrix.ours)):
