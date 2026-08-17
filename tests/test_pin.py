@@ -457,3 +457,72 @@ class TestThisTurnPlusNextTurn(unittest.TestCase):
         self.assertTrue(p.real)
         self.assertEqual(p.through, ())
         self.assertTrue(pin.is_pinned(self.tm, self.floette))
+
+
+class TestASwitchInThatMegaEvolves(unittest.TestCase):
+    """The switch-in is measured as what it BECOMES, not what it is on the bench.
+
+        "I would note Mega Charizard Y could mega evolve the next turn which
+         would make it bulkier."
+
+    Correct, and the two-turn sum was blind to it -- the ThreatMatrix is built
+    against base forms. Measured on the reference position with Charizard Y as
+    their only Mega: 157.1% over two turns against base bulk, 122.2% against
+    Mega bulk. Still a pin, but 35 points of that margin was phantom, and on a
+    closer call it flips the verdict.
+    """
+
+    # Charizard Y is their ONLY Mega here, so it can still evolve. In the
+    # earlier fixture Mega Floette holds the slot, `is_mega_pick` is False on
+    # Charizard, and the factor correctly does nothing.
+    OURS = ["Scizor", "Ninetales-Alola", "Garchomp", "Kingambit"]
+    THEIRS = ["Whimsicott", "Basculegion", "Mega Charizard Y", "Garchomp"]
+
+    def setUp(self):
+        self.b, self.ms, self.tm = position(self.OURS, self.THEIRS)
+        self.zard = named(self.b, "Mega Charizard Y")
+
+    def test_the_bench_mega_is_still_in_base_form(self):
+        """The premise: this is why the correction is needed at all."""
+        self.assertTrue(self.zard.is_mega_pick)
+        self.assertFalse(self.zard.mega_evolved)
+        self.assertIsNotNone(self.zard.mega_stats)
+
+    def test_the_factor_discounts_our_damage(self):
+        f = pin.mega_bulk_factor(self.zard)
+        self.assertLess(f, 1.0)
+        self.assertGreater(f, 0.5)
+
+    def test_it_takes_the_ratio_most_generous_to_them(self):
+        """Which defence applies depends on the move's category, which a Threat
+        does not keep. Understating a pin is the safe error."""
+        base, mega = self.zard.stats, self.zard.mega_stats
+        ratios = [(base["hp"] * base[k]) / (mega["hp"] * mega[k])
+                  for k in ("def", "spd")]
+        self.assertAlmostEqual(pin.mega_bulk_factor(self.zard), min(ratios))
+
+    def test_incoming_is_scaled_by_it(self):
+        ours = [named(self.b, "Scizor"), named(self.b, "Ninetales-Alola")]
+        scaled = pin._incoming(self.tm, ours, self.zard)
+        raw = sum(self.tm.threat(a, self.zard).dmg_min for a in ours)
+        self.assertAlmostEqual(scaled,
+                               raw * pin.mega_bulk_factor(self.zard))
+        self.assertLess(scaled, raw)
+
+    def test_a_pokemon_that_cannot_mega_is_untouched(self):
+        for name in ("Whimsicott", "Basculegion", "Garchomp"):
+            self.assertEqual(pin.mega_bulk_factor(named(self.b, name)), 1.0)
+
+    def test_an_already_evolved_mega_is_untouched(self):
+        """It is already the bulkier thing; discounting again would double-count."""
+        self.zard.mega_evolved = True
+        self.assertEqual(pin.mega_bulk_factor(self.zard), 1.0)
+
+    def test_the_slot_is_taken_when_another_mega_is_on_the_team(self):
+        """One Mega per team. With Floette holding the slot, Charizard cannot
+        evolve and the factor must not pretend it can."""
+        b, _ms, _tm = position(
+            self.OURS, ["Mega Floette", "Whimsicott", "Mega Charizard Y",
+                        "Basculegion"])
+        self.assertFalse(named(b, "Mega Charizard Y").is_mega_pick)
+        self.assertEqual(pin.mega_bulk_factor(named(b, "Mega Charizard Y")), 1.0)

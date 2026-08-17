@@ -361,6 +361,67 @@ trimmed lines are the wins, so the plan's record read as nothing but losses.
 `--detail` recomputes rather than being served a record with less detail than
 it asked for. Existing stage-2 caches are invalidated by the bump.
 
+### Who wins the damageslop war — `tools\spread_table.py`
+
+    python spread_table.py --top 20 --foes-only
+    python spread_table.py --team "Big 6"
+    python spread_table.py --csv spread.csv
+
+> *"Spread damage appears to be highly valuable, as this game is what I like to
+> call a 'damageslop' format. Spread damage, given it attacks two enemies at
+> 0.75x, is a way to maximise damage output, and chip enemies into kills by
+> partner. If your spread attacker is bulky and not threatened by
+> supereffective damage, it can stay on the field and trade favourably vs the
+> enemy (they cannot match its output). It also is simple because there is no
+> target selection, so is harder to punish and harder to switch in on."*
+
+Two halves, and the **product** is the point. A spread move hits both foes at
+0.75×, so its turn total is **1.5× a single-target hit** of the same power —
+before the multipliers that make the good ones absurd, all of which are switched
+on here: self-generated weather (Drought sun on Heat Wave), the -ate abilities
+(Pixilate makes Hyper Voice a Fairy move, which *also* gains it STAB), Liquid
+Voice, Sheer Force, Aura. And output you don't get to repeat is worth one turn,
+so the score multiplies by `hits_to_ko = 1 / mean(incoming physical, special)`
+from a generic 125-stat, 100 BP attacker.
+
+Everything is **neutral in both directions** — the actual type multiplier is
+divided out — so the table ranks the Pokémon, not the matchup.
+
+```
+  # Pokemon                spread move      BP weather  1 tgt  2 tgt  taken  hits  SCORE
+  1 Torkoal                Eruption        150 sun      88.7% 177.4%  25.6%  3.90   6.91  full-hp only
+  2 Aurorus                Blizzard        110 snow     52.1% 104.1%  18.4%  5.43   5.65
+  3 Mega Charizard Y       Heat Wave        95 sun      67.0% 134.1%  27.1%  3.69   4.95
+  4 Gholdengo              Make It Rain    120 -        69.6% 139.1%  28.6%  3.50   4.87
+  5 Mega Blastoise         Water Spout     150 -        67.3% 134.5%  27.8%  3.59   4.84  full-hp only
+  6 Mega Tyranitar         Rock Slide       75 sand     39.5%  78.9%  16.9%  5.91   4.67
+ 30 Ninetales-Alola        Blizzard        110 snow     79.4% total   ...           2.93
+ 37 Sylveon                Hyper Voice      90 -        63.7% total   ...           2.68
+```
+
+**Two flags, and each is a bug this table had first.** Both produced a ranking
+that looked plausible and put the wrong Pokémon on top:
+
+* **Suicide moves are excluded.** The first run gave Metagross Explosion #1 and
+  Snorlax Self-Destruct #2 — 250 and 200 BP multiplied by four to six turns of
+  survivability, for a move that faints the user. The score's premise is
+  *repeatable* output; `selfdestruct` is its exact negation.
+* **The benchmark defender is typeless.** It was Normal-typed, and so was the
+  incoming probe — which does **0 damage to Ghosts**. All thirteen Ghost-types
+  came out with infinite survivability and swept the table. An empty type list
+  makes the multiplier 1.0 by construction, in both directions, and
+  `neutral_probe_type` picks a per-defender probe for the incoming half.
+
+Rows still carry two honest caveats rather than being dropped: `hits ally`
+(`allAdjacent` — Earthquake and Sludge Wave hit your partner too; `--foes-only`
+excludes them) and `full-hp only` (Eruption and Water Spout scale with current
+HP, so the row decays — the opposite of what the score rewards).
+
+**It is a screen, not a verdict.** It does not know about Wide Guard, that the
+opponent has a Fairy for your Dragon, or that Prankster Tailwind changes who
+repeats first. Read it as "who is worth building around", then let the search
+argue.
+
 ### Reading the output — `tools\overnight_thorough.xlsx`
 
 1. **Plan** — the answer. One committed bring/lead per opponent, `Wins / Of`,

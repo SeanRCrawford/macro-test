@@ -115,6 +115,38 @@ def _bench_of(battle, combatant):
     return []
 
 
+def mega_bulk_factor(target) -> float:
+    """How much of our damage survives `target` Mega Evolving. 1.0 if it cannot.
+
+    A Pokemon that switches in and Megas is a DIFFERENT defensive object, and
+    the ThreatMatrix was built against its base form: *"I would note Mega
+    Charizard Y could mega evolve the next turn which would make it bulkier."*
+
+    Damage as a fraction of max HP scales as `hp x defence`, so the factor is
+    `(base_hp x base_def) / (mega_hp x mega_def)`. Which defence applies depends
+    on the category of each incoming move, which a Threat does not retain -- so
+    this takes the ratio MOST GENEROUS TO THEM (their better defensive gain).
+    Understating a pin is the safe error; overstating one commits a lead to a
+    threat that is not there.
+
+    Measured on the reference position: Charizard Y in the back as their only
+    Mega takes 157.1% over two turns against its base bulk and 122.2% against
+    its Mega bulk. Still a pin, but 35 points of that margin was phantom.
+    """
+    if not getattr(target, "is_mega_pick", False) or target.mega_evolved:
+        return 1.0
+    mega = target.mega_stats
+    if not mega:
+        return 1.0
+    base_hp = target.stats.get("hp") or 1
+    mega_hp = mega.get("hp") or base_hp
+    ratios = []
+    for key in ("def", "spd"):
+        b, mg = target.stats.get(key) or 1, mega.get(key) or 1
+        ratios.append((base_hp * b) / (mega_hp * mg))
+    return min(1.0, min(ratios))
+
+
 def _incoming(matrix, attackers, target, only_before_it_acts=False) -> float:
     """Fraction of `target`'s MAX hp our side strips in one turn, worst rolls.
 
@@ -126,9 +158,13 @@ def _incoming(matrix, attackers, target, only_before_it_acts=False) -> float:
     `only_before_it_acts` drops the attackers `target` moves ahead of, which is
     what makes the second turn of the arithmetic honest -- damage that lands
     after it has already fired does not stop it firing.
+
+    Discounted by `mega_bulk_factor`, so a switch-in that Megas is measured as
+    the thing it will be rather than the thing it is on the bench.
     """
-    return sum(matrix.threat(a, target).dmg_min for a in attackers
-               if not only_before_it_acts or _moves_first(matrix, a, target))
+    raw = sum(matrix.threat(a, target).dmg_min for a in attackers
+              if not only_before_it_acts or _moves_first(matrix, a, target))
+    return raw * mega_bulk_factor(target)
 
 
 def escape_from(matrix, battle, attacker, defender):
@@ -170,12 +206,23 @@ def escape_from(matrix, battle, attacker, defender):
     Trick Room / weather / screens ticking down. That is a reason to price
     Protect properly at the horizon, not a reason to call the pin off.
 
-    KNOWN APPROXIMATION. Their other active is still on the field while this
-    plays out, and if it removes one of ours on turn 1 the second round is
-    smaller than the sum above assumes. `secure` already covers the case where
-    something pre-empts and kills the PINNER; a partner traded off mid-sequence
-    is not modelled, so a two-turn pin is slightly optimistic when their other
-    slot threatens our second attacker.
+    A switch-in that MEGA EVOLVES is measured as its Mega -- see
+    `mega_bulk_factor`. It is a different defensive object the moment it lands,
+    and the matrix was built against its base form.
+
+    KNOWN APPROXIMATIONS, both in the direction of claiming a pin too readily:
+
+      * Their other active is still on the field while this plays out, and if it
+        removes one of ours on turn 1 the second round is smaller than the sum
+        assumes. `secure` covers something pre-empting and killing the PINNER; a
+        partner traded off mid-sequence is not modelled.
+      * A switch-in can bring WEATHER, and weather changes our damage as well as
+        its bulk. The reference case is stark: Charizard Y Megas into Drought,
+        which replaces Ninetales' snow with sun, and Blizzard is 100% accurate in
+        snow and 70% in sun. The sum treats `dmg_min` as guaranteed and so does
+        not see that at all. `mega_bulk_factor` corrects the bulk half of the
+        problem; the weather half needs the damage recomputed under the field the
+        switch-in creates, which is more than this module is allowed to do.
     """
     ours = [c for c in (matrix.ours if defender in matrix.theirs else matrix.theirs)
             if not c.fainted and _on_field(battle, c)]
