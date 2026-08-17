@@ -955,15 +955,29 @@ class TestItemsActuallyDoSomething(unittest.TestCase):
     def test_assault_vest_reduces_special_damage(self):
         self.assertLess(self._hit("Assault Vest"), self._hit(None))
 
-    def test_the_item_search_finds_a_conversion(self):
+    def test_no_illegal_item_is_ever_offered(self):
+        """Assault Vest, Choice Band and Choice Specs are NOT legal in Regulation
+        MB, and they were in the candidate list.
+
+        This is not a cosmetic fix. The one conversion the search reported for the
+        Mega Floette opening was ASSAULT VEST on Ninetales-Alola -- so the answer
+        that was handed over was illegal, and removing the item removes the fix.
+        The opening has no single-item answer, which is the true and less
+        comfortable result.
+        """
+        banned = {"Assault Vest", "Choice Band", "Choice Specs"}
+        self.assertEqual(set(ls.ITEM_CANDIDATES) & banned, set())
+
+    def test_the_item_search_reports_only_legal_conversions(self):
         W = world()
         roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
                   if m == "Mega Floette"][0]
         fixes = ls.item_fixes(EXAMPLE, roster, W,
                               ("Mega Floette", "Whimsicott"))
-        self.assertTrue(fixes, "no single item change salvages this opening")
+        banned = {"Assault Vest", "Choice Band", "Choice Specs"}
         for mon, item, play in fixes:
             self.assertIn(mon, EXAMPLE)
+            self.assertNotIn(item, banned)
             self.assertNotEqual(play.verdict, ls.LOSS)
 
 

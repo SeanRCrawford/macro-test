@@ -587,6 +587,9 @@ class RaceReport:
     back: tuple
     opponent: str
     results: list = field(default_factory=list)
+    # True when --max-losses stopped the scan early. The score is already zero in
+    # that case, but a reader needs to know the wins count is a partial tally.
+    abandoned: bool = False
 
     @property
     def losses(self):
@@ -1621,8 +1624,12 @@ def switch_in_table(ms, typechart, field, battle, ours_out, their_bench,
 # Offence, survival, and the type-resist berry for the type that is killing us.
 # Deliberately short: the point is to find the ONE item that converts a losing
 # opening, not to re-run set optimisation.
-ITEM_CANDIDATES = ("Life Orb", "Focus Sash", "Assault Vest", "Choice Band",
-                   "Choice Specs", "Leftovers")
+# NOT LEGAL IN REGULATION MB, and they were in here: Assault Vest, Choice Band
+# and Choice Specs. An item search that proposes an illegal item is worse than no
+# item search, because its answer looks actionable. Removed, and the Assault Vest
+# damage reduction added to damage.py alongside the resist berries stays only
+# because a berry needed the same code path -- nothing offers the Vest now.
+ITEM_CANDIDATES = ("Life Orb", "Focus Sash", "Leftovers", "Sitrus Berry")
 
 
 def killing_types(ms, typechart, field, battle, ours, theirs):
@@ -1687,7 +1694,7 @@ def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
 
 
 def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
-                want_logs=True, mega_name=None, plays=True):
+                want_logs=True, mega_name=None, plays=True, max_losses=0):
     """One bring against one opponent (one Mega choice), with everything.
 
     For each of their fifteen openings: the best PLAY we have (stay, switch,
@@ -1711,6 +1718,12 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
                         back=tuple(c.name for c in back), opponent=label)
 
     for pair in itertools.combinations(theirs, 2):
+        # EARLY EXIT. The score is zeroed by a single unheld opening, so a bring
+        # already five down is not a candidate and finishing the other ten tells
+        # us nothing we will act on. Much the cheapest speed-up available.
+        if max_losses and len(report.losses) >= max_losses:
+            report.abandoned = True
+            break
         if plays:
             options = plays_for(ms, b.typechart, b.field, b, lead, back,
                                 list(pair), turns=turns, want_log=want_logs,

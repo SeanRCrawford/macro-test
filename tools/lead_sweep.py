@@ -48,13 +48,42 @@ import _harness  # noqa: E402,F401
 import lead_scan as ls  # noqa: E402
 
 
+def read_preferences():
+    """(exclude, prefer) name sets from data/preferences.csv.
+
+    The real columns are `Include, Exclude, Prefer` -- one name per cell, blanks
+    everywhere else. My first reader looked for a `pokemon`/`name` column and a
+    "no"-ish flag, found neither, and silently excluded nothing, which is the
+    quiet kind of wrong: the run looked like it had honoured the file.
+
+    EXCLUDE is honoured by default -- an entry there is a standing judgement that
+    a Pokemon is not wanted, which is exactly the "obviously terrible pairs" the
+    sweep should not be spending time on. PREFER is returned so the pool can be
+    ordered by it rather than filtered, since preferring something is not a claim
+    that everything else is unusable.
+    """
+    import csv
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                        "data", "preferences.csv")
+    exclude, prefer = set(), set()
+    if not os.path.exists(path):
+        return exclude, prefer
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            for key, bucket in (("Exclude", exclude), ("Prefer", prefer)):
+                name = (row.get(key) or "").strip()
+                if name:
+                    bucket.add(name)
+    return exclude, prefer
+
+
 def _opponents(world, spec):
     if not spec:
         return list(world["teams"])
     return [n.strip() for n in spec.split(",") if n.strip()]
 
 
-def _score_pair(lead, backs, opponents, world, top_backs=3):
+def _score_pair(lead, backs, opponents, world, top_backs=3, max_losses=0):
     """Best (score, reports) for this lead over a few plausible back pairs.
 
     The back two are chosen, not swept: sweeping them multiplies the work by
@@ -82,7 +111,8 @@ def _score_pair(lead, backs, opponents, world, top_backs=3):
                                                            world):
                     rep, _ms, _b = ls.full_report(
                         our4, variant, world, opponent_name=opp,
-                        want_logs=False, mega_name=mega_name, plays=False)
+                        want_logs=False, mega_name=mega_name, plays=False,
+                        max_losses=max_losses)
                     reports.append(rep)
             except Exception:                          # noqa: BLE001
                 return None
@@ -113,6 +143,18 @@ def main():
     ap.add_argument("--xlsx", default="", metavar="PATH",
                     help="write the workbook: brings, teams of 6, openings, "
                          "lines with damage, switch-ins and item fixes")
+    ap.add_argument("--max-losses", type=int, default=0, metavar="N",
+                    help="abandon a bring as soon as it has lost N of their "
+                         "openings, instead of scoring all fifteen. The score is "
+                         "zeroed by a single unheld opening anyway, so a bring "
+                         "with five is not a candidate -- N=5 is the usual "
+                         "setting and it is much the cheapest speed-up "
+                         "available. 0 (default) scores everything.")
+    ap.add_argument("--ignore-preferences", action="store_true",
+                    help="do NOT exclude the names listed in "
+                         "data/preferences.csv. By default they are dropped from "
+                         "the pool, since a preferences entry is a standing "
+                         "judgement that a Pokemon is not wanted.")
     ap.add_argument("--detail-top", type=int, default=8, metavar="N",
                     help="how many of the best brings get the full treatment in "
                          "the workbook (default 8). Lines and item search are "
@@ -157,10 +199,32 @@ def main():
                 print(f"\n  NOTE: they can Mega any of {', '.join(slots)} and "
                       f"pick AFTER seeing your four; this reflects one choice.")
             print()
+        # --check used to `return` here, so passing --xlsx alongside it silently
+        # produced no file. The single-bring case is exactly where the lines are
+        # most worth having, so it writes the same workbook the sweep does.
+        if args.xlsx:
+            records = _records_for(our4, opponents, world)
+            import lead_book
+            n = lead_book.build(records, args.xlsx)
+            print(f"Workbook ({n} records): {os.path.abspath(args.xlsx)}")
         return
 
     from generate_team import build_candidate_pool
     pool = list(build_candidate_pool(world["merged"], top_n=args.pool_size))
+    exclude, prefer = ((set(), set()) if args.ignore_preferences
+                       else read_preferences())
+    if exclude:
+        before = len(pool)
+        pool = [n for n in pool
+                if n not in exclude and ls.species_of(n) not in exclude]
+        print(f"\npreferences.csv Exclude drops {sorted(exclude)}: pool "
+              f"{before} -> {len(pool)}.")
+    if prefer:
+        # Preferred names sort FIRST, so a truncated pool keeps them. Not a
+        # filter: preferring something says nothing about the rest.
+        pool.sort(key=lambda n: (0 if (n in prefer
+                                      or ls.species_of(n) in prefer) else 1))
+        print(f"preferences.csv Prefer puts {sorted(prefer)} first.")
     pairs = [p for p in itertools.combinations(pool, 2) if ls.legal_bring(p)]
     # Back pairs are sampled from the same pool rather than swept: the lead is
     # the question, and sweeping backs multiplies the work by hundreds.
@@ -172,7 +236,8 @@ def main():
     t0 = time.time()
     rows = []
     for i, lead in enumerate(pairs, start=1):
-        got = _score_pair(lead, backs, opponents, world)
+        got = _score_pair(lead, backs, opponents, world,
+                          max_losses=args.max_losses)
         if got is None:
             continue
         (score, _neg_losses), back, reports, worst = got
