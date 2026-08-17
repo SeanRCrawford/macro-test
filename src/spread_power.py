@@ -64,15 +64,6 @@ INCOMING_POWER = 100
 MIN_SPREAD_POWER = 70
 
 
-def _stat_at_50(base, evs=0, boost=1.0):
-    """Showdown's level-50 stat formula, neutral nature."""
-    return int((((2 * base + 31 + evs // 4) * BENCH_LEVEL) // 100 + 5) * boost)
-
-
-def _bench_hp():
-    return int(((2 * BENCH_BASE + 31) * BENCH_LEVEL) // 100 + BENCH_LEVEL + 10)
-
-
 def benchmark_defender():
     """A neutral 100/100/100 target, and deliberately TYPELESS.
 
@@ -83,9 +74,20 @@ def benchmark_defender():
     ranking. An empty type list makes `type_multiplier` return 1.0 by
     construction, in both directions, which is what "neutral" was supposed to
     mean. STAB is unaffected -- that reads the ATTACKER's types.
+
+    Stats come from `stats.calc_stat`, THE formula the rest of the engine uses --
+    not a second copy. A hand-rolled version lived here until it was checked
+    against a real Pokemon (Garchomp, hand-verified in stats.py against the
+    documented Level-50 numbers) and found to agree only by coincidence: at 0 EVs,
+    vanilla `evs//4` and this codebase's flat "Champions M-B" EV rule both add
+    zero, so the two formulas cannot be told apart at the one input this module
+    ever used them at. Asked elsewhere in this project to have exactly one damage
+    model; this was a second stat model hiding behind a benchmark that never
+    exercised the difference.
     """
-    hp = _bench_hp()
-    stat = _stat_at_50(BENCH_BASE)
+    from stats import calc_stat
+    hp = calc_stat(BENCH_BASE, 31, 0, BENCH_LEVEL, True, 1.0)
+    stat = calc_stat(BENCH_BASE, 31, 0, BENCH_LEVEL, False, 1.0)
     return Combatant(
         name="Benchmark", types=[], ability="", item="",
         stats={"hp": hp, "atk": stat, "def": stat, "spa": stat, "spd": stat,
