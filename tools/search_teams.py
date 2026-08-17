@@ -56,7 +56,11 @@ TYPICAL_LINE_TURNS = 8
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 8   # 8: the evaluation moved -- speed control, the spent-Pokemon
+SCHEMA = 9   # 9: --detail. Stored records may now omit turn-by-turn for lines
+             #    that won cleanly, so a record is no longer interchangeable
+             #    with one written before the flag existed. --detail is in the
+             #    key too, so light and full runs never serve each other.
+             # 8: the evaluation moved -- speed control, the spent-Pokemon
              #    discount and the unspent-Mega premium are all on now
              #    (WORKFLOW.md §4.2), and every cached number was produced by
              #    the evaluation in force when it ran. 7: --brings became part
@@ -157,7 +161,7 @@ def _run_pairing(job):
     cross a pickle boundary.
     """
     (ours, theirs, effort, turns, prescreen, audit_all, brings,
-     pilot, eval_profile, top_leads) = job
+     pilot, eval_profile, top_leads, detail) = job
     import solver
     solver.apply_eval_profile(eval_profile)
     global _WORLD
@@ -177,7 +181,7 @@ def _run_pairing(job):
         prescreen_top=prescreen,
         pilot=pilot or settings.get("pilot", "greedy"),
         audit_all_configs=audit_all or settings.get("all_configs", False),
-        top_leads=top_leads)
+        top_leads=top_leads, detail=detail)
     top = results[0] if results else None
     return {
         "ours": ours, "theirs": theirs,
@@ -254,6 +258,33 @@ def main():
                          "teams that are not in teams.csv can be searched by "
                          "name. This is how generate_overnight.py feeds this "
                          "tool. Roster contents are part of the cache key.")
+    ap.add_argument("--detail", choices=("full", "light", "summary"),
+                    default="light", metavar="LEVEL",
+                    help="how much turn-by-turn detail to STORE. The per-turn "
+                         "record is essentially the whole cache -- ~890 bytes a "
+                         "turn, 10.6 kB an audited line -- so at --audit-all "
+                         "--brings 90 that is ~86 MB a pairing and ~690 MB "
+                         "across eight opponents, which no workbook can be "
+                         "built from. 'light' (default) keeps turn-by-turn for "
+                         "the worst 6 lines per audited bring -- a BUDGET, not "
+                         "a filter, because the first version filtered on "
+                         "'lost or went severe' and measured 0%% saving: an "
+                         "exhaustive run on a bad matchup is exactly where "
+                         "every line qualifies. 'summary' keeps none; 'full' "
+                         "is the old behaviour. Every line keeps its summary "
+                         "either way, so the workbook's rows are complete at "
+                         "all three.")
+    ap.add_argument("--workbook", choices=("auto", "full", "light"),
+                    default="auto", metavar="LEVEL",
+                    help="how many SHEETS --export writes. 'light' writes "
+                         "Teams, Plan, Matchups, Best lines, Team sheets and "
+                         "the legend, dropping Lines, Candidates and Turns -- "
+                         "the three whose row count scales with brings x their "
+                         "configs, and which at --audit-all --brings 90 "
+                         "project to a Turns sheet above Excel's 1,048,576-row "
+                         "limit. 'auto' (default) picks light past 20,000 "
+                         "audited lines and full below it. Every sheet is also "
+                         "capped at 100,000 rows and says so where it stopped.")
     ap.add_argument("--top-leads", type=int, default=0, metavar="N",
                     help="audit the N best of OUR LEADS and every back pair "
                          "behind each -- 6 configurations per lead, so N=3 is "
@@ -415,7 +446,7 @@ def main():
                               extra.get(a), extra.get(b),
                               extra_sets.get(a), extra_sets.get(b),
                               args.pilot, args.evaluation,
-                              args.top_leads), a, b)
+                              args.top_leads, args.detail), a, b)
              for a, b in jobs]
     todo = [(k, a, b) for k, a, b in keyed if cache.get(k) is None]
     skipped = len(keyed) - len(todo)
@@ -467,7 +498,7 @@ def main():
                                    (a, b, args.effort, args.turns, prescreen,
                                     args.audit_all, args.brings,
                                     args.pilot, args.evaluation,
-                                    args.top_leads)): (k, a, b)
+                                    args.top_leads, args.detail)): (k, a, b)
                        for k, a, b in todo}
             since_save = 0
             print(f"  {len(todo)} pairings submitted to {args.jobs} workers. "
@@ -491,7 +522,7 @@ def main():
                                            args.turns, prescreen,
                                            args.audit_all, args.brings,
                                            args.pilot, args.evaluation,
-                                           args.top_leads)))
+                                           args.top_leads, args.detail)))
                 done += 1
                 _progress(ours, theirs)
             cache.save()
@@ -518,10 +549,21 @@ def main():
         # count. Announced rather than left as an unexplained pause.
         cached_pairings = sum(1 for v in cache.data.values()
                               if isinstance(v, dict) and v.get("ours"))
-        print(f"\nBuilding the workbook from all {cached_pairings} cached "
-              f"pairings (not just this run's)...", flush=True)
+        from export_search import audited_line_count, AUTO_LIGHT_LINES
+        n_lines = audited_line_count(cache.data)
+        level = args.workbook
+        if level == "auto":
+            level = "light" if n_lines > AUTO_LIGHT_LINES else "full"
+        print(f"\nBuilding the {level} workbook from all {cached_pairings} "
+              f"cached pairings ({n_lines:,} audited lines, not just this "
+              f"run's)...", flush=True)
+        if level == "light" and args.workbook == "auto":
+            print(f"  ({n_lines:,} lines is past {AUTO_LIGHT_LINES:,}, so the "
+                  f"Lines / Candidates / Turns sheets are skipped. "
+                  f"--workbook full forces them.)", flush=True)
         _t0 = time.time()
-        n = build_workbook(cache.data, path, team_sheets=sheets)
+        n = build_workbook(cache.data, path, team_sheets=sheets,
+                           workbook=level)
         print(f"Workbook: {os.path.abspath(path)}  ({n} pairings, "
               f"{time.time() - _t0:.0f}s)")
 

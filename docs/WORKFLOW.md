@@ -305,6 +305,62 @@ progress line reports the real rate and a clock time:
 Kill it whenever you like -- every batch is saved, and re-running the identical
 command resumes.
 
+### How big the cache gets — `--detail` and `--workbook`
+
+Reported: a stage-2-only run producing **200 MB to 1.5 GB** of JSON, and no
+workbook buildable from it. Both are real, and they are two problems.
+
+**The cache.** The per-turn record measures ~890 bytes -- `events` is 479 of
+them and `hp_after` 187 -- so an 18-turn line is 10.6 kB. That is invisible at
+4 leads x 6 brings (0.3 MB a pairing) and ruinous at `--audit-all --brings 90`,
+which audits 90 x 90 = 8100 lines: **86 MB a pairing, ~690 MB across eight
+opponents.** `--detail` bounds it:
+
+| level | keeps turn-by-turn for |
+|---|---|
+| `full` | every audited line (the old behaviour) |
+| `light` **(default)** | the worst 6 lines per audited bring |
+| `summary` | none |
+
+Every line keeps its **summary** at all three levels -- outcome, margin, mean
+and worst punish, adjusted value -- so Plan, Matchups, Lines and Best lines are
+complete whichever you pick. What `summary` costs you is the damage log.
+
+**`light` is a BUDGET, not a filter, and that distinction was measured.** The
+first version was the predicate "keep it if the line lost or had a severe
+turn": reasonable-sounding, since turn-by-turn exists to answer *why did this
+go wrong* and a clean win has no answer to give. On a real thorough pairing it
+saved **0%** -- all 24 lines lost or went severe, so every one qualified. Of
+course it did: the runs whose caches blow up are the exhaustive ones, and an
+exhaustive run against a bad matchup is precisely where every line is worth
+explaining. A predicate cannot bound anything when the expensive case is the
+case that satisfies it. The budget keeps the worst six per bring -- losses
+first, then most-punished -- so the size is `brings x 6 x turns` regardless of
+how the matchup goes.
+
+**The workbook.** Those same 8100 lines a pairing give a **Turns sheet of
+roughly 1.2 million rows** across eight opponents, above Excel's 1,048,576
+limit -- so the export did not merely take a long time, it raised, after the
+search had spent the night. Two guards:
+
+* `--workbook light` writes Teams, Plan, Matchups, Best lines, Team sheets and
+  the legend, and drops **Lines, Candidates and Turns** -- exactly the three
+  whose row count scales with `brings x their configs`. `--workbook auto`
+  (default) picks it past 20,000 audited lines.
+* Every sheet is capped at 100,000 rows and ends with a line saying how many it
+  dropped, so a too-large cache produces a truncated workbook rather than a
+  traceback.
+
+A related bug worth knowing about, because it made `--detail` unusable on
+first landing: Best lines built its rows with `for i, t in enumerate(turns) or
+[(0, None)]`, and a generator is always truthy, so the fallback never fired and
+a line with no stored turns **vanished from the sheet**. Under `light` the
+trimmed lines are the wins, so the plan's record read as nothing but losses.
+
+**These flags are part of the cache key** (`SCHEMA` 8 -> 9), so a run at a new
+`--detail` recomputes rather than being served a record with less detail than
+it asked for. Existing stage-2 caches are invalidated by the bump.
+
 ### Reading the output — `tools\overnight_thorough.xlsx`
 
 1. **Plan** — the answer. One committed bring/lead per opponent, `Wins / Of`,

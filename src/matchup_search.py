@@ -722,7 +722,7 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                rate_robustness=False, robustness_leads=3,
                                robustness_turns=5, prescreen_top=None,
                                audit_all_configs=False, pilot=GREEDY_PILOT,
-                               top_leads=None):
+                               top_leads=None, detail="full"):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -947,7 +947,8 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
         verified = _rate_and_rerank(verified, enemy_roster, merged, moves_db,
                                      natures, typechart, configs, our_sets,
                                      enemy_sets, preview_tau, robustness_leads,
-                                     robustness_turns, audit_all_configs)
+                                     robustness_turns, audit_all_configs,
+                                     detail=detail)
     return verified
 
 
@@ -968,9 +969,61 @@ def _line_value(report):
     return max(0.0, 1.0 - max(0.0, charged) / KO_WEIGHT)
 
 
+DETAIL_LEVELS = ("full", "light", "summary")
+
+# How many lines per audited bring keep their turn-by-turn record at "light".
+# Six because that is the size the payload had at the settings nobody
+# complained about (thorough --audit-all --brings 6, 5.7 MB a pairing); the
+# lines kept are the worst six, so the diagnosis you would actually open is
+# still there.
+LIGHT_LINE_BUDGET = 6
+
+
+def _detailed_lines(per_lead, detail):
+    """Which audited lines keep their turn-by-turn record. Returns a set of
+    indices into `per_lead`.
+
+    The per-turn payload is essentially the whole cache: measured at ~890 bytes
+    a turn, of which `events` is 479 and `hp_after` 187, and one audited line at
+    18 turns is 10.6 kB. That is fine at 4 leads x 6 brings (0.3 MB a pairing)
+    and ruinous at `--audit-all --brings 90`, which is 90 x 90 lines -- 86 MB a
+    pairing, ~690 MB across eight opponents, and reported in the field at
+    200 MB to 1.5 GB. A workbook cannot be built from that.
+
+    A BUDGET, NOT A FILTER, and that distinction is the whole point. The first
+    version of "light" was the predicate "keep it if the line lost or had a
+    severe turn" -- reasonable-sounding, since turn-by-turn exists to answer
+    "why did this go wrong" and a clean win has no answer to give. Measured on
+    a real thorough pairing it saved 0%: all 24 lines lost or went severe, so
+    the predicate kept every one. Of course it did. The runs whose caches blow
+    up are the exhaustive ones, and an exhaustive run against a bad matchup is
+    precisely where every line is a line worth explaining. A predicate cannot
+    bound anything, because the case that makes the file big is the case that
+    satisfies it.
+
+    So: keep at most LIGHT_LINE_BUDGET per bring, worst first (losses ahead of
+    wins, then by mean punish). The cache size is then bounded by
+    `brings x budget x turns` no matter how the matchup goes, and the lines
+    dropped are the ones nobody scrolls to.
+    """
+    if detail == "full":
+        return set(range(len(per_lead)))
+    if detail == "summary":
+        return set()
+
+    def rank(pair):
+        _i, (_lead, _prob, report) = pair
+        return ((report.outcome or "").lower() == "win",
+                -(report.mean_exploitability or 0.0))
+
+    ordered = sorted(enumerate(per_lead), key=rank)
+    return {i for i, _ in ordered[:LIGHT_LINE_BUDGET]}
+
+
 def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechart,
                       configs, our_sets, enemy_sets, preview_tau,
-                      leads_per_candidate, turns, audit_all_configs=False):
+                      leads_per_candidate, turns, audit_all_configs=False,
+                      detail="full"):
     """Attach an exploitability rating to each survivor and sort by it.
 
     Piloted with the least-exploitable solver configuration available: rating a
@@ -1060,6 +1113,7 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
         rec["robust_win_rate"] = rating.robust_win_rate
         rec["reliable_wins"] = rating.reliable_wins
         rec["outcomes"] = rating.outcomes
+        detailed = _detailed_lines(rating.per_lead, detail)
         rec["audit"] = [{
             "lead": list(lead)[:2],
             # The bring they ACTUALLY played in this line, backs resolved the
@@ -1078,7 +1132,10 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             "outcome": report.outcome,
             "final_margin": report.final_margin,
             "line_turns": report.length,
-            "turns": [{
+            # Empty when this line is not one the detail level keeps -- the
+            # summary fields above still describe it, so a row in the workbook
+            # is complete even when its turn-by-turn is not stored.
+            "turns": [] if _i not in detailed else [{
                 "turn": t.turn,
                 "exploitability": t.exploitability,
                 "expected_loss": t.expected_loss,
@@ -1099,7 +1156,7 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
                                 if (t.punisher and t.has_punish) else None),
                 "no_punish": not t.has_punish,
             } for t in report.turns],
-        } for lead, probability, report in rating.per_lead]
+        } for _i, (lead, probability, report) in enumerate(rating.per_lead)]
         worst = rating.worst_lead
         if worst:
             lead, _p, report = worst

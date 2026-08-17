@@ -39,6 +39,71 @@ except ImportError:                                   # pragma: no cover
 
 MILD = SEVERE / 2.0
 
+# Excel's hard limit is 1,048,576 rows; openpyxl raises above it and the run
+# dies AFTER the search, which is the worst possible time. `--audit-all
+# --brings 90` across eight opponents is 8100 audited lines a pairing, so the
+# Turns sheet projects to ~1.2M rows -- over the limit -- and the Lines sheet to
+# 65k, which fits but takes minutes to autosize. Cap well below the limit: a
+# sheet nobody can scroll is not more useful than a sheet that says where it
+# stopped.
+MAX_SHEET_ROWS = 100_000
+
+# Sheets that survive `--workbook light`. The three omitted ones (Lines,
+# Candidates, Turns) are the diagnosis sheets, and they are exactly the three
+# whose row count scales with `brings x their configs`.
+LIGHT_SHEETS = ("Teams", "Plan", "Matchups", "Best lines", "Team sheets",
+                "How to read this")
+
+
+class _Discarded:
+    """Absorbs `.fill = ...` / `.alignment = ...` on a row that was not written."""
+    __slots__ = ("fill", "alignment", "value", "font")
+
+
+class _Capped:
+    """A worksheet that stops appending at MAX_SHEET_ROWS and says so.
+
+    Wrapping rather than checking at each call site: the four exploding sheets
+    append from three levels of nested loop, and a `break` deep inside one of
+    them is easy to get subtly wrong (and easy to forget in the next sheet).
+    """
+
+    def __init__(self, ws, limit=None):
+        self._ws = ws
+        # Read at construction, not bound as a default argument: a test that
+        # lowers the cap to check the truncation note would otherwise be
+        # silently ignored, and pass by building the whole sheet.
+        self._limit = limit or MAX_SHEET_ROWS
+        self.truncated = 0
+
+    def __getattr__(self, name):
+        return getattr(self._ws, name)
+
+    def __getitem__(self, key):
+        return self._ws[key]
+
+    def append(self, row):
+        if self._ws.max_row >= self._limit:
+            self.truncated += 1
+            return
+        self._ws.append(row)
+
+    def cell(self, *a, **kw):
+        # Once truncated, callers are still styling "the row I just appended",
+        # which no longer exists. Hand back a scratch object so the fill lands
+        # nowhere instead of recolouring the last row that did get written.
+        if self.truncated:
+            return _Discarded()
+        return self._ws.cell(*a, **kw)
+
+    def finish(self):
+        if self.truncated:
+            self._ws.append([f"... and {self.truncated} more rows, not written: "
+                             f"this sheet is capped at {self._limit:,} rows. "
+                             f"Re-run the export with a narrower cache, or use "
+                             f"--workbook light and read the Best lines sheet."])
+        return self._ws
+
 
 def _style_header(ws):
     for cell in ws[1]:
@@ -318,7 +383,7 @@ def _best_lines_sheet(wb, rows):
     sheet that switched lead depending on what they brought would be showing a
     plan nobody can play.
     """
-    ws = wb.create_sheet("Best lines")
+    ws = _Capped(wb.create_sheet("Best lines"))
     ws.append(["Opponent", "Team", "COMMIT: bring (lead first)", "Record",
                "Adjusted", "Their bring", "Result", "Worst punish", "Turn",
                "Play this", "If they answer with", "What happens", "KOs",
@@ -344,8 +409,16 @@ def _best_lines_sheet(wb, rows):
         for ln in lines:
             outcome = (ln.get("outcome") or "").lower()
             worst = ln.get("worst_exploitability")
-            turns = ln.get("turns") or []
-            for i, t in enumerate(turns) or [(0, None)]:
+            # One row per turn, and ONE row when there are no turns to show.
+            # `enumerate(x) or [...]` never fell through -- a generator is
+            # always truthy -- so a line with no stored turns silently vanished
+            # from this sheet. That was invisible while every line carried its
+            # turns and became the whole sheet the moment --detail started
+            # trimming them: under `light` the winning lines are exactly the
+            # ones without turns, so the plan's wins disappeared and only its
+            # losses were listed.
+            turns = list(enumerate(ln.get("turns") or [])) or [(0, {})]
+            for i, t in turns:
                 ws.append([
                     r["theirs"] if not header_done else None,
                     r["ours"] if not header_done else None,
@@ -373,7 +446,7 @@ def _best_lines_sheet(wb, rows):
     if not any_rows:
         ws.append(["No audited lines in this cache "
                    "(the quick tier does not audit lines)."])
-    _autosize(ws)
+    _autosize(ws.finish())
 
 
 def _lines_sheet(wb, rows):
@@ -389,7 +462,7 @@ def _lines_sheet(wb, rows):
     number, on the same 0-1 scale, so a team total can be traced back to the
     lines that produced it.
     """
-    ws = wb.create_sheet("Lines")
+    ws = _Capped(wb.create_sheet("Lines"))
     ws.append(["Team", "Opponent", "Our bring (lead first)",
                "Their bring (lead first)", "Lead likelihood", "Result",
                "Adjusted value", "Mean punish", "Worst punish",
@@ -426,12 +499,12 @@ def _lines_sheet(wb, rows):
     if not any_rows:
         ws.append(["No audited lines in this cache "
                    "(the quick tier does not audit lines)."])
-    _autosize(ws)
+    _autosize(ws.finish())
 
 
 def _turns_sheet(wb, rows):
     """Every audited turn. The evidence behind every number in the other sheets."""
-    ws = wb.create_sheet("Turns")
+    ws = _Capped(wb.create_sheet("Turns"))
     ws.append(["Team", "Opponent", "Bring (lead first)", "Their bring",
                "Lead likelihood", "Line result", "Turn", "Exploitability",
                "Expected loss", "Regret", "Equilibrium", "Our worst case",
@@ -476,7 +549,7 @@ def _turns_sheet(wb, rows):
     if not any_rows:
         ws.append(["No per-turn detail in this cache "
                    "(the quick tier does not audit lines)."])
-    _autosize(ws)
+    _autosize(ws.finish())
 
 
 def _legend_sheet(wb):
@@ -610,18 +683,68 @@ def _team_sheets_sheet(wb, sheets):
     _autosize(ws)
 
 
-def build_workbook(cache_data, out_path, team_sheets=None):
-    """Write the workbook. Returns the number of pairing rows exported."""
+def audited_line_count(cache_data):
+    """How many audited lines the cache holds, across every pairing.
+
+    The one number that predicts whether a full workbook is buildable: Lines
+    gets a row each, and Turns gets `line_turns` rows each.
+    """
+    return sum(len(cand.get("audit") or [])
+               for row in rows_of(cache_data)
+               for cand in row.get("candidates") or [])
+
+
+# Above this many audited lines the diagnosis sheets stop being readable and
+# start being slow: 20k lines is already a 20k-row Lines sheet and a Turns sheet
+# in the high hundreds of thousands. `--workbook auto` drops to the light set
+# here rather than spending twenty minutes producing something unopenable.
+AUTO_LIGHT_LINES = 20_000
+
+
+def build_workbook(cache_data, out_path, team_sheets=None, workbook="full"):
+    """Write the workbook. Returns the number of pairing rows exported.
+
+    `workbook` is "full", "light", or "auto":
+
+      full   every sheet (subject to the per-sheet row cap)
+      light  LIGHT_SHEETS only -- the plan and the committed lines, without the
+             three sheets whose size scales with `brings x their configs`
+      auto   light when the cache holds more than AUTO_LIGHT_LINES audited
+             lines, full otherwise
+
+    Reported as: an exhaustive run's cache "will be absolutely impossible to
+    generate an xlsx based on". The Best lines sheet is the deliverable; Lines,
+    Candidates and Turns are the evidence behind it, and at exhaustive settings
+    the evidence is larger than any spreadsheet can hold.
+    """
     rows = rows_of(cache_data)
+    if workbook == "auto":
+        workbook = ("light" if audited_line_count(cache_data) > AUTO_LIGHT_LINES
+                    else "full")
+    wanted = set(LIGHT_SHEETS) if workbook == "light" else None
+
+    def want(name):
+        return wanted is None or name in wanted
+
     wb = Workbook()
+    # Teams always runs: it owns the default sheet, and leaving that untitled
+    # sheet behind would put an empty "Sheet" first in every light workbook.
     _teams_sheet(wb, rows)
-    _plan_sheet(wb, rows)
-    _matchups_sheet(wb, rows)
-    _best_lines_sheet(wb, rows)
-    _lines_sheet(wb, rows)
-    _candidates_sheet(wb, rows)
-    _turns_sheet(wb, rows)
-    _team_sheets_sheet(wb, team_sheets)
-    _legend_sheet(wb)
+    if want("Plan"):
+        _plan_sheet(wb, rows)
+    if want("Matchups"):
+        _matchups_sheet(wb, rows)
+    if want("Best lines"):
+        _best_lines_sheet(wb, rows)
+    if want("Lines"):
+        _lines_sheet(wb, rows)
+    if want("Candidates"):
+        _candidates_sheet(wb, rows)
+    if want("Turns"):
+        _turns_sheet(wb, rows)
+    if want("Team sheets"):
+        _team_sheets_sheet(wb, team_sheets)
+    if want("How to read this"):
+        _legend_sheet(wb)
     wb.save(out_path)
     return len(rows)

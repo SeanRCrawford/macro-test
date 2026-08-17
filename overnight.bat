@@ -72,6 +72,29 @@ rem                      before spending the audit on it. Default 0.80.
 rem   --vs "Big 6"       deep-search against ONLY these opponents instead of
 rem                      the whole library. THE biggest lever: 1 opponent
 rem                      instead of 7 is 7x less work. Comma-separated.
+rem   --detail LEVEL     how much turn-by-turn detail is STORED in the cache.
+rem                      "light" (default) keeps it for the worst 6 lines per
+rem                      audited bring; "summary" keeps none; "full" is the old
+rem                      behaviour. This is the fix for a stage 2 cache running
+rem                      to hundreds of MB or more: the per-turn record is ~890
+rem                      bytes, an audited line is 10.6 kB, and at
+rem                      --audit-all --brings 90 that is ~86 MB per pairing
+rem                      (~690 MB over eight opponents) -- which no workbook
+rem                      can be built from. Note it is a BUDGET, not a filter:
+rem                      "keep the lines that lost or went severe" sounds
+rem                      right and measured ZERO saving, because an
+rem                      exhaustive run on a bad matchup is exactly where
+rem                      every line qualifies. Every line keeps its
+rem                      SUMMARY at all three levels, so the workbook's rows
+rem                      stay complete.
+rem   --workbook LEVEL   how many SHEETS --export writes. "light" keeps Teams,
+rem                      Plan, Matchups, Best lines, Team sheets and the
+rem                      legend, and drops Lines / Candidates / Turns -- the
+rem                      three that scale with brings x their configs, and
+rem                      which at --audit-all --brings 90 project a Turns sheet
+rem                      past Excel's 1,048,576-row limit. "auto" (default)
+rem                      picks light past 20,000 audited lines. Every sheet is
+rem                      capped at 100,000 rows and says where it stopped.
 rem   --top-leads N      audit the N best of OUR LEADS and EVERY back behind
 rem                      each -- 6 configurations per lead, so 3 is 18. This is
 rem                      the unit --brings should have been: the screener ranks
@@ -152,6 +175,8 @@ set REGEN=
 set VS=
 set BRINGS=
 set TOPLEADS=
+set DETAIL=
+set WORKBOOK=
 set SUBST=
 set SUBROUNDS=2
 set SUBPER=4
@@ -194,6 +219,8 @@ if /i "%~1"=="--skip-stage1"  (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--vs"           (set VS=--vs "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--brings"       (set BRINGS=--brings %~2& shift & shift & goto parse)
 if /i "%~1"=="--top-leads"    (set TOPLEADS=--top-leads %~2& shift & shift & goto parse)
+if /i "%~1"=="--detail"       (set DETAIL=--detail %~2& shift & shift & goto parse)
+if /i "%~1"=="--workbook"     (set WORKBOOK=--workbook %~2& shift & shift & goto parse)
 if /i "%~1"=="--substitute"   (set SUBST=%~2& shift & shift & goto parse)
 if /i "%~1"=="--sub-rounds"   (set SUBROUNDS=%~2& shift & shift & goto parse)
 if /i "%~1"=="--sub-per-round" (set SUBPER=%~2& shift & shift & goto parse)
@@ -329,7 +356,7 @@ rem No --teams: with a roster file, search_teams defaults OUR side to the
 rem generated teams and theirs to the library. Parsing the shortlist here and
 rem passing the names back in is what broke stage 2 when the file grew a
 rem wrapper for the optimised sets.
-python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% %TOPLEADS% ^
+python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% %TOPLEADS% %DETAIL% %WORKBOOK% ^
     --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% %PILOT% %EVALN% ^
     --sheets !SHEETS! ^
     --cache overnight_%DEEPEFFORT%.json --export
