@@ -198,6 +198,20 @@ _TYPE_MULT_CACHE = {}
 _TYPE_MAPPING = {0: 1.0, 1: 2.0, 2: 0.5, 3: 0.0}
 
 
+# Defender-side type-resist berries: {item: the move type it halves}. Inverted
+# from optimize_sets.TYPE_RESIST_BERRY rather than restated, so the two cannot
+# drift -- the salvage flow picks the berry from that table and this is what makes
+# the pick mean something.
+BERRY_RESIST_TYPE = {
+    "Chilan Berry": "Normal", "Occa Berry": "Fire", "Passho Berry": "Water",
+    "Wacan Berry": "Electric", "Rindo Berry": "Grass", "Yache Berry": "Ice",
+    "Chople Berry": "Fighting", "Kebia Berry": "Poison", "Shuca Berry": "Ground",
+    "Coba Berry": "Flying", "Payapa Berry": "Psychic", "Tanga Berry": "Bug",
+    "Charti Berry": "Rock", "Kasib Berry": "Ghost", "Haban Berry": "Dragon",
+    "Colbur Berry": "Dark", "Babiri Berry": "Steel", "Roseli Berry": "Fairy",
+}
+
+
 def type_multiplier(move_type: str, defender_types: list, typechart: dict,
                     move_name: str | None = None) -> float:
     """Type effectiveness, memoised.
@@ -559,6 +573,23 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     # Item: Expert Belt (super-effective boost)
     if attacker.item == "Expert Belt" and type_eff > 1.0:
         modifier *= 1.2
+
+    # DEFENDER'S item. Type-resist berries halve a SUPER-EFFECTIVE hit of their
+    # type -- Chilan Berry is the exception and halves any Normal hit. The berry
+    # TABLE has existed in optimize_sets since the salvage flow was written, and
+    # the salvage flow has been handing them out, but the halving was never
+    # implemented here: measured, a Roseli Berry changed Light of Ruin's damage by
+    # exactly nothing. So every "give it a resist berry" suggestion the system has
+    # ever made was cosmetic.
+    berry_type = BERRY_RESIST_TYPE.get(defender.item)
+    if berry_type and berry_type == move.move_type and (
+            type_eff > 1.0 or berry_type == "Normal"):
+        modifier *= 0.5
+
+    # Assault Vest: 1.5x SpD, so 1/1.5 damage from special moves. Same story --
+    # it was in item lists and did nothing.
+    if defender.item == "Assault Vest" and move.category == "Special":
+        modifier /= 1.5
 
     rolls = [base * modifier * (0.85 + 0.01 * i) for i in range(16)]
     avg_or_indexed = rolls[roll_index] if roll_index is not None else sum(rolls) / len(rolls)

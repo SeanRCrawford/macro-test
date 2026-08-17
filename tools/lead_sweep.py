@@ -48,11 +48,19 @@ def _score_pair(lead, backs, opponents, world, top_backs=3):
         # counts the base form; a Mega is that Pokemon holding a stone.
         if not ls.legal_bring(our4):
             continue
+        # ONE ENGINE. The sweep used to score on the threat-matrix race while the
+        # workbook rendered committed-move lines, so the console said "12 wins, 0
+        # unheld" and the workbook said "loss" for the same openings. A workbook
+        # that contradicts the run that produced it is worse than no workbook.
         reports = []
         for opp in opponents:
             try:
-                reports.append(ls.race_bring(our4, world["teams"][opp], world,
-                                             opponent_name=opp))
+                for mega_name, variant in ls.mega_variants(world["teams"][opp],
+                                                           world):
+                    rep, _ms, _b = ls.full_report(
+                        our4, variant, world, opponent_name=opp,
+                        want_logs=False, mega_name=mega_name, plays=False)
+                    reports.append(rep)
             except Exception:                          # noqa: BLE001
                 return None
         # Their WORST for us: they choose their four and their lead after seeing
@@ -80,7 +88,13 @@ def main():
                     help="skip the sweep and report ONE bring, lead first: "
                          "--check \"Ninetales-Alola,Garchomp,Mega Scizor,Rotom-Wash\"")
     ap.add_argument("--xlsx", default="", metavar="PATH",
-                    help="write the full sweep as a workbook")
+                    help="write the workbook: brings, teams of 6, openings, "
+                         "lines with damage, switch-ins and item fixes")
+    ap.add_argument("--detail-top", type=int, default=8, metavar="N",
+                    help="how many of the best brings get the full treatment in "
+                         "the workbook (default 8). Lines and item search are "
+                         "much dearer than the screen, so this is deliberately "
+                         "a handful rather than all of them.")
     args = ap.parse_args()
 
     from _harness import load_world
@@ -165,11 +179,55 @@ def main():
             print("  " + line)
 
     if args.xlsx:
-        from lead_scan import write_workbook
-        write_workbook(rows, args.xlsx, opponents=opponents,
-                       pool_size=args.pool_size)
-        print(f"\nWorkbook ({len(rows)} rows): {os.path.abspath(args.xlsx)}")
+        _build_book(rows, opponents, args, world)
 
+
+
+def _records_for(bring, opponents, world, want_items=True):
+    """Full records for one bring: every opponent x every Mega they could pick.
+
+    A bring does NOT have to beat every opponent -- "a given 4 doesn't need to
+    beat every enemy team" -- so this returns one record per (opponent, Mega) and
+    lets the workbook be the catalogue.
+    """
+    out = []
+    for opp in opponents:
+        roster = world["teams"][opp]
+        for mega_name, variant in ls.mega_variants(roster, world):
+            report, ms, b = ls.full_report(bring, variant, world,
+                                           opponent_name=opp, mega_name=mega_name)
+            ours = [c for c in b.p1.roster if not c.fainted]
+            their_bench = [c for c in b.p2.roster if not c.fainted][2:]
+            switch_ins = ls.switch_in_table(ms, b.typechart, b.field, b,
+                                            ours[:2], their_bench)
+            fixes = []
+            if want_items:
+                for x in report.results:
+                    if x.verdict == ls.LOSS:
+                        for mon, item, play in ls.item_fixes(
+                                bring, variant, world, x.enemy_lead):
+                            fixes.append((x.enemy_lead, mon, item, play))
+                        break     # the worst opening only; one fix is the point
+            out.append({"bring": tuple(bring), "opponent": opp,
+                        "mega": mega_name, "score": report.score,
+                        "report": report, "switch_ins": switch_ins,
+                        "item_fixes": fixes})
+    return out
+
+
+def _build_book(rows, opponents, args, world):
+    """Re-run the top brings at full detail and write the workbook."""
+    import lead_book
+    keep = [r for r in rows[:args.detail_top]]
+    print(f"\nBuilding the workbook: re-running the top {len(keep)} brings at "
+          f"full detail (plays, mop-up, lines, switch-ins, items)...", flush=True)
+    records = []
+    for i, r in enumerate(keep, start=1):
+        bring = list(r["lead"]) + list(r["back"])
+        records.extend(_records_for(bring, opponents, world))
+        print(f"  [{i}/{len(keep)}] {' / '.join(bring)}", flush=True)
+    n = lead_book.build(records, args.xlsx)
+    print(f"\nWorkbook ({n} records): {os.path.abspath(args.xlsx)}")
 
 if __name__ == "__main__":
     main()

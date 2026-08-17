@@ -810,3 +810,158 @@ class TestTheirMegaChoiceIsTheirs(unittest.TestCase):
         self.assertEqual(ls.race_speed(fl, b.field, "p2"),
                          ls.race_speed(chomp, b.field, "p1"),
                          "the tie the worked example warned about")
+
+
+class TestThePlaysAndTheMopUp(unittest.TestCase):
+    """Four plays, a mop-up, and the items that convert an opening.
+
+        "your play needs to be e.g., to switch in something on Garchomp's slot
+         that can help KO Mega Floette or just let Garchomp faint to get the new
+         pokemon in at 100% HP, assuming its still a winning line afterwards (3v4
+         for instance)"
+
+        "It's also important that your backs can mop up and win vs remaining
+         pokemon after the 2 turn sequences."
+    """
+
+    def setUp(self):
+        from _harness import setup_battle
+        W = world()
+        roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
+                  if m == "Mega Floette"][0]
+        self.b, self.ms = setup_battle(EXAMPLE, roster, W)
+        ours = [c for c in self.b.p1.roster if not c.fainted]
+        self.lead, self.back = ours[:2], ours[2:]
+        self.theirs = [c for c in self.b.p2.roster
+                       if c.name in ("Mega Floette", "Whimsicott")][:2]
+
+    def _plays(self):
+        return ls.plays_for(self.ms, self.b.typechart, self.b.field, self.b,
+                            self.lead, self.back, self.theirs)
+
+    def test_all_four_kinds_are_offered(self):
+        kinds = {p.kind for p in self._plays()}
+        for kind in (ls.STAY, ls.SWITCH, ls.SWITCH_PROTECT, ls.SACRIFICE):
+            self.assertIn(kind, kinds, f"{kind} was not among the plays")
+
+    def test_sacrifice_brings_the_replacement_in_at_full_health(self):
+        """The point of the play: a switch-in arrives having eaten both attacks,
+        a replacement after a faint arrives at 100%."""
+        sacs = [p for p in self._plays() if p.kind == ls.SACRIFICE]
+        self.assertTrue(sacs)
+        for p in sacs:
+            self.assertTrue(p.leaving and p.arriving)
+            self.assertNotEqual(p.leaving, p.arriving)
+
+    def test_plays_are_ranked_with_guaranteed_wins_first(self):
+        plays = self._plays()
+        rank = {ls.WIN: 0, ls.EVEN: 1, ls.LOSS: 2}
+        keys = [(rank[p.verdict], -p.margin) for p in plays]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_guaranteed_means_it_does_not_need_a_coin_flip(self):
+        """`move_race` resolves ties against us and takes their best plan, so a
+        WIN is a guarantee in the only sense that matters here."""
+        for p in self._plays():
+            self.assertEqual(p.guaranteed, p.verdict == ls.WIN)
+
+    def test_a_losing_switch_is_not_counted_as_a_patch(self):
+        """It read "5 patched, 0 unheld" beside five LOSS rows, because `patch`
+        was set whenever the best play was a switch rather than when the switch
+        actually salvaged anything."""
+        W = world()
+        roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
+                  if m == "Mega Floette"][0]
+        report, _ms, _b = ls.full_report(EXAMPLE, roster, W,
+                                         opponent_name="Big 6",
+                                         want_logs=False,
+                                         mega_name="Mega Floette")
+        for x in report.results:
+            if x.verdict == ls.LOSS:
+                self.assertIsNone(x.patch, f"{x.enemy_lead} counted as patched")
+                self.assertFalse(x.held, f"{x.enemy_lead} counted as held")
+        # And the two categories cannot overlap: an opening is either a hole or
+        # it is held, never both.
+        self.assertEqual(set(id(x) for x in report.patched)
+                         & set(id(x) for x in report.losses), set())
+
+    def test_the_mop_up_is_attached_to_every_opening(self):
+        W = world()
+        roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
+                  if m == "Mega Floette"][0]
+        report, _ms, _b = ls.full_report(EXAMPLE, roster, W,
+                                         opponent_name="Big 6",
+                                         want_logs=False,
+                                         mega_name="Mega Floette")
+        for x in report.results:
+            self.assertIsNotNone(x.play)
+            self.assertTrue(x.play.mopped,
+                            "every opening needs a mop-up verdict")
+
+
+class TestItemsActuallyDoSomething(unittest.TestCase):
+    """Type-resist berries and Assault Vest were TABLES ONLY.
+
+        "you could use a roseli berry (makes one incoming fairy attack damage
+         halved) which could allow Garchomp+Ninetales-Alola to win the
+         aforementioned Whimsicott+Mega Floette lead."
+
+    `optimize_sets.TYPE_RESIST_BERRY` has existed for as long as the salvage flow,
+    and the salvage flow has been handing berries out -- but `damage.py` never
+    halved anything for them. Measured before the fix, a Roseli Berry changed
+    Light of Ruin by exactly zero, so every "give it a resist berry" suggestion the
+    system ever made was cosmetic.
+    """
+
+    def _hit(self, item, defender="Garchomp", move="lightofruin",
+             attacker="Mega Floette"):
+        from combatants import make_combatant
+        from damage import (damage_roll, defensive_stat, effective_stat,
+                            move_from_showdown)
+        W = world()
+        mi = move_from_showdown(W["moves"][move])
+        atk = make_combatant(attacker, W["merged"], W["natures"])
+        dfn = make_combatant(defender, W["merged"], W["natures"], item=item)
+        key = "def" if mi.category == "Physical" else "spd"
+        astat = "atk" if mi.category == "Physical" else "spa"
+        lo, _hi, _avg, _eff = damage_roll(
+            50, mi.power, effective_stat(atk.stats[astat], 0),
+            defensive_stat(dfn, key, mi), atk, dfn, mi, W["typechart"])
+        return lo / dfn.max_hp()
+
+    def test_the_berry_table_is_inverted_not_restated(self):
+        from damage import BERRY_RESIST_TYPE
+        from optimize_sets import TYPE_RESIST_BERRY
+        for move_type, berry in TYPE_RESIST_BERRY.items():
+            self.assertEqual(BERRY_RESIST_TYPE.get(berry), move_type,
+                             f"{berry} drifted between the two tables")
+
+    def test_roseli_turns_a_guaranteed_ohko_into_a_survival(self):
+        """The exact case: Light of Ruin into Garchomp, Fairy into Dragon, 2x."""
+        bare = self._hit(None)
+        berry = self._hit("Roseli Berry")
+        self.assertGreaterEqual(bare, 1.0, "it must be a guaranteed OHKO bare")
+        self.assertLess(berry, 1.0, "and a survival with the berry")
+        self.assertAlmostEqual(berry, bare / 2, places=2)
+
+    def test_a_resist_berry_does_nothing_against_a_neutral_hit(self):
+        """They halve SUPER-EFFECTIVE hits. Fairy into Ice/Fairy is 1x, so a
+        Roseli Berry on Ninetales-Alola is not the answer to Light of Ruin."""
+        self.assertAlmostEqual(self._hit(None, defender="Ninetales-Alola"),
+                               self._hit("Roseli Berry",
+                                         defender="Ninetales-Alola"),
+                               places=4)
+
+    def test_assault_vest_reduces_special_damage(self):
+        self.assertLess(self._hit("Assault Vest"), self._hit(None))
+
+    def test_the_item_search_finds_a_conversion(self):
+        W = world()
+        roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
+                  if m == "Mega Floette"][0]
+        fixes = ls.item_fixes(EXAMPLE, roster, W,
+                              ("Mega Floette", "Whimsicott"))
+        self.assertTrue(fixes, "no single item change salvages this opening")
+        for mon, item, play in fixes:
+            self.assertIn(mon, EXAMPLE)
+            self.assertNotEqual(play.verdict, ls.LOSS)
