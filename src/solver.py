@@ -132,7 +132,8 @@ def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo
         atk_stat *= 1.5
     if attacker.item == "Choice Specs" and atk_key == "spa":
         atk_stat *= 1.5
-    def_stat = defensive_stat(target, def_key, move)
+    def_stat = defensive_stat(target, def_key, move,
+                              weather=field.weather)
     _, _, avg, _ = damage_roll(50, power, atk_stat, def_stat, attacker, target, move,
                                 typechart, weather=field.weather, num_targets_hit=num_hit)
     return avg

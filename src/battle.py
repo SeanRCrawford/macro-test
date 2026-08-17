@@ -783,7 +783,8 @@ class Battle:
                 atk_stat *= 1.5
             if attacker.item == "Choice Specs" and atk_key == "spa":
                 atk_stat *= 1.5
-            def_stat = defensive_stat(target, def_key, move)
+            def_stat = defensive_stat(target, def_key, move,
+                                      weather=self.field.weather)
 
             target_side = self.side_of(target)
             screens_active = target_side.screens_auroraveil > 0 or (

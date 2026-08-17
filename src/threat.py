@@ -139,7 +139,7 @@ def _best_attack(attacker, defender, movesets, typechart, context):
             atk_stat *= 1.5
         if attacker.item == "Choice Specs" and not physical:
             atk_stat *= 1.5
-        def_stat = defensive_stat(defender, def_key, move)
+        def_stat = defensive_stat(defender, def_key, move, weather=weather)
         # Screens are per-category, matching battle.py: Aurora Veil covers both,
         # Reflect only physical, Light Screen only special.
         screens = auroraveil or (reflect if physical else lightscreen)

@@ -70,21 +70,21 @@ def main():
                  min_power=args.min_power, foes_only=args.foes_only)
     print(f"\nSpread attackers in {scope}: {len(rows)} of {len(names)} run a "
           f"spread move of {args.min_power}+ BP.\n")
-    print(f"{'#':>3} {'Pokemon':22s} {'spread move':15s} {'BP':>3} "
-          f"{'weather':7s} {'1 tgt':>6} {'2 tgt':>6} {'taken':>6} "
-          f"{'hits':>5} {'SCORE':>6}  flags")
-    print("-" * 104)
+    print(f"{'#':>3} {'Pokemon':20s} {'ability':15s} {'spread move':14s} "
+          f"{'type':8s} {'BP':>3} {'base':>4} {'off':>4} {'hp':>4} {'def':>4} "
+          f"{'spd':>4} {'spe':>4} {'wx':6s} {'2 tgt':>6} {'taken':>6} "
+          f"{'hits':>5} {'SCORE':>6}")
+    print("-" * 146)
     for i, r in enumerate(rows[:args.top], start=1):
-        flags = []
-        if r["hits_ally"]:
-            flags.append("hits ally")
-        if r["hp_scaled"]:
-            flags.append("full-hp only")
-        print(f"{i:>3} {r['name'][:22]:22s} {r['move'][:15]:15s} "
-              f"{r['power']:>3} {(r['weather'] or '-'):7s} "
-              f"{r['per_target']*100:>5.1f}% {r['two_target']*100:>5.1f}% "
+        f = r["final"]
+        print(f"{i:>3} {r['name'][:20]:20s} {(r['ability'] or '-')[:15]:15s} "
+              f"{r['move'][:14]:14s} {r['type'][:8]:8s} {r['power']:>3} "
+              f"{(r['base_off'] or 0):>4} {(f.get(r['off_key']) or 0):>4} "
+              f"{(f.get('hp') or 0):>4} {(f.get('def') or 0):>4} "
+              f"{(f.get('spd') or 0):>4} {(f.get('spe') or 0):>4} "
+              f"{(r['weather'] or '-')[:6]:6s} {r['two_target']*100:>5.1f}% "
               f"{r['incoming']*100:>5.1f}% {r['hits_to_ko']:>5.2f} "
-              f"{r['score']:>6.2f}  {', '.join(flags)}")
+              f"{r['score']:>6.2f}" + ("  hits ally" if r["hits_ally"] else ""))
     print()
     print("1 tgt / 2 tgt  neutral damage as % of a base-100/100/100 target's HP,")
     print("               one target and both (0.75x spread penalty applied).")
@@ -92,8 +92,9 @@ def main():
     print("hits           1 / taken: how many of those it survives.")
     print("SCORE          2 tgt x hits. Repeatable, untargetable damage.")
     print("hits ally      allAdjacent: it hits your partner too.")
-    print("full-hp only   Eruption / Water Spout scale with current HP, so the")
-    print("               row is a full-health number and decays as you take hits.")
+    print("base / off     relevant BASE offensive stat, then the FINAL one -- the")
+    print("               gap is investment, nature and a Mega form.")
+    print("Eruption and Water Spout are excluded: their power decays with HP.")
     print("Self-destruct moves are excluded: Explosion is not repeatable output.")
 
     if args.csv:

@@ -152,6 +152,12 @@ def spread_moves(record, moves_db, min_power=MIN_SPREAD_POWER,
         raw = moves_db[key]
         if raw.get("selfdestruct"):
             continue
+        # Eruption and Water Spout scale with the user's CURRENT hp, so a
+        # full-health number flatters them and decays the moment anything lands --
+        # the opposite of the repeatability this score is meant to reward. Flagging
+        # them was not enough; they are excluded.
+        if raw.get("basePowerCallback"):
+            continue
         move = move_from_showdown(raw)
         if move.category == "Status" or (move.power or 0) < min_power:
             continue
@@ -177,7 +183,7 @@ def _neutral_damage(attacker, defender, move, typechart, weather, targets):
         atk_stat *= 1.5
     if attacker.item == "Choice Specs" and not physical:
         atk_stat *= 1.5
-    def_stat = defensive_stat(defender, def_key, move)
+    def_stat = defensive_stat(defender, def_key, move, weather=weather)
     _lo, _hi, avg, eff = damage_roll(
         BENCH_LEVEL, move.power, atk_stat, def_stat, attacker, defender, move,
         typechart, weather=weather, num_targets_hit=targets)
@@ -212,7 +218,7 @@ def incoming_per_hit(combatant, typechart, weather=None):
     for category, key in (("Physical", "def"), ("Special", "spd")):
         move = MoveInfo(name=f"Benchmark {category}", power=INCOMING_POWER,
                         move_type=probe_type, category=category, target="normal")
-        def_stat = defensive_stat(combatant, key, move)
+        def_stat = defensive_stat(combatant, key, move, weather=weather)
         attacker = benchmark_defender()
         attacker.stats[("atk" if key == "def" else "spa")] = INCOMING_STAT
         _lo, _hi, avg, eff = damage_roll(
@@ -262,10 +268,35 @@ def rate(name, merged, natures, moves_db, typechart, item=None,
     hits = incoming_per_hit(attacker, typechart, weather)
     hits_to_ko = (1.0 / hits) if hits > 0 else float("inf")
     two_target = per_target * 2.0
+    # The type AFTER an -ate or Liquid Voice conversion. The raw move type read
+    # "Normal" for Sylveon's Hyper Voice, which is the one thing about that row a
+    # reader most needs to be told is wrong.
+    shown_type = move.move_type
+    ate = {"Pixilate": "Fairy", "Aerilate": "Flying", "Refrigerate": "Ice",
+           "Galvanize": "Electric"}
+    if view.ability in ate and move.move_type == "Normal":
+        shown_type = ate[view.ability]
+    elif view.ability == "Liquid Voice" and (move.flags or {}).get("sound"):
+        shown_type = "Water"
+    physical = move.category == "Physical"
+    off_key = "atk" if physical else "spa"
+    base = (merged.get(name) or {}).get("base_stats") or {}
     return {
         "name": name,
         "move": move.name,
-        "type": move.move_type,
+        "type": shown_type,
+        # Asked for: "give the ability, relevant base atk/spatk, then final
+        # hp/def/spdef/relevant atk/spatk, speed". These three columns are what
+        # make the ranking auditable -- Mudsdale out-damaging Mega Swampert off 25
+        # less base Attack is Life Orb plus investment against a Mega locked to
+        # its stone, and no reader can see that without the numbers.
+        "category": move.category,
+        "base_off": base.get(off_key),
+        "item": view.item or attacker.item,
+        "final": {"hp": view.stats.get("hp"), "def": view.stats.get("def"),
+                  "spd": view.stats.get("spd"), off_key: view.stats.get(off_key),
+                  "spe": view.stats.get("spe")},
+        "off_key": off_key,
         "power": move.power,
         "weather": weather,
         "ability": view.ability,

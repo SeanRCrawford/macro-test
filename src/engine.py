@@ -282,7 +282,8 @@ def resolve_damage_action(action: Action, field_state: FieldState, typechart: di
         if attacker.item == "Choice Specs" and atk_key == "spa":
             atk_stat *= 1.5
 
-        def_stat = defensive_stat(target, def_key, action.move)
+        def_stat = defensive_stat(target, def_key, action.move,
+                                  weather=field.weather)
 
         # NOTE: this standalone demo function doesn't track which side is which
         # (no Battle/Side objects here), so screens are not modeled -- the real,

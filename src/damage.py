@@ -243,7 +243,8 @@ def effective_stat(base_val: int, stage: int, boost_mult: float = 1.0) -> float:
     return base_val * STAGE_MULT[stage] * boost_mult
 
 
-def defensive_stat(target: Combatant, def_key: str, move: "MoveInfo") -> float:
+def defensive_stat(target: Combatant, def_key: str, move: "MoveInfo",
+                    weather=None) -> float:
     """The defence a move actually hits, honouring `ignoreDefensive`.
 
     Sacred Sword, Chip Away and Darkest Lariat hit as though the target's
@@ -256,7 +257,28 @@ def defensive_stat(target: Combatant, def_key: str, move: "MoveInfo") -> float:
     have learned about the flag.
     """
     stage = 0 if getattr(move, "ignore_defensive", False) else target.stages[def_key]
-    return effective_stat(target.stats[def_key], stage)
+    stat = effective_stat(target.stats[def_key], stage)
+    if weather:
+        stat *= weather_defence_boost(target, def_key, weather)
+    return stat
+
+
+# Weather boosts a defence for one type, and neither was modelled: reported as
+# "Ninetales-Alola doesn't get the defence boost from its snow". Sand's Rock
+# Special Defence boost had the same gap. {weather: (type, stat)}.
+WEATHER_DEFENCE = {"snow": ("ice", "def"), "hail": ("ice", "def"),
+                   "sand": ("rock", "spd"), "sandstorm": ("rock", "spd")}
+
+
+def weather_defence_boost(target: Combatant, def_key: str, weather) -> float:
+    """1.5x when the weather protects this type's relevant defence, else 1.0."""
+    entry = WEATHER_DEFENCE.get((weather or "").lower())
+    if not entry:
+        return 1.0
+    want_type, want_stat = entry
+    if want_stat != def_key:
+        return 1.0
+    return 1.5 if any(t.lower() == want_type for t in target.types) else 1.0
 
 
 STAT_DROP_IMMUNE_ABILITIES = {"Clear Body", "Full Metal Body", "White Smoke"}
@@ -508,11 +530,34 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
 
     # Pixilate / Aerilate / Refrigerate / Galvanize: Normal moves become the
     # ability's type and gain 1.2x.
+    #
+    # NOTE the ORDER. STAB is applied above, on the move's ORIGINAL type, which is
+    # wrong for a converted move: Sylveon's Hyper Voice becomes Fairy and should
+    # get Fairy STAB. Corrected below by re-applying the difference, rather than
+    # moving the STAB block, because several callers depend on `move` still being
+    # the original object at that point.
     ATE = {"Pixilate": "Fairy", "Aerilate": "Flying", "Refrigerate": "Ice",
            "Galvanize": "Electric"}
+    # LIQUID VOICE was missing entirely, and the consequence was visible in the
+    # output: Primarina's best spread move came out as Dazzling Gleam, because its
+    # Hyper Voice stayed Normal-typed and so had no STAB and no Water boost. Sound
+    # moves only, and NO 1.2x -- Liquid Voice is a type conversion, not an -ate.
+    converted = None
     if attacker.ability in ATE and move.move_type == "Normal":
-        move = MoveInfo(**{**move.__dict__, "move_type": ATE[attacker.ability]})
+        converted = ATE[attacker.ability]
         modifier *= 1.2
+    elif (attacker.ability == "Liquid Voice"
+          and (move.flags or {}).get("sound")):
+        converted = "Water"
+    if converted:
+        was_stab = move.move_type in atk_types
+        now_stab = converted in atk_types
+        stab = 2.0 if attacker.ability == "Adaptability" else 1.5
+        if now_stab and not was_stab:
+            modifier *= stab
+        elif was_stab and not now_stab:
+            modifier /= stab
+        move = MoveInfo(**{**move.__dict__, "move_type": converted})
 
     # Knock Off: 1.5x if the target holds a removable item. Not a Mega Stone it needs
     # this battle (Showdown's real exemption list also covers Z-crystals/plates/primal
