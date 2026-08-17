@@ -965,3 +965,85 @@ class TestItemsActuallyDoSomething(unittest.TestCase):
         for mon, item, play in fixes:
             self.assertIn(mon, EXAMPLE)
             self.assertNotEqual(play.verdict, ls.LOSS)
+
+
+class TestTheDefaultLoadout(unittest.TestCase):
+    """Most popular item by default; a swap has to earn its place.
+
+        "By default give every pokemon their most popular item, assuming no better
+         item for a specific case (e.g. Ninetales-Alola focus sash to win vs
+         incoming enemy Kingambit iron head while enemy Garchomp protects)"
+
+    The default half was already true -- `make_team` reads the usage table -- so
+    this pins it rather than implements it. Measured: Ninetales-Alola gets
+    Never-Melt Ice (29% usage), Garchomp Life Orb (61%), Rotom-Wash Sitrus Berry
+    (31%).
+    """
+
+    def test_the_default_is_the_most_used_item(self):
+        from _harness import setup_battle
+        W = world()
+        b, _ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W)
+        for c in b.p1.roster:
+            self.assertEqual(c.item, ls.default_item(c.name, W),
+                             f"{c.name} did not get its most-used item")
+
+    def test_default_item_reads_the_usage_table(self):
+        W = world()
+        for name in EXAMPLE:
+            usage = [i for i, _p in
+                     (W["merged"][name].get("items_usage") or [])
+                     if i and i != "Other"]
+            if usage:
+                self.assertEqual(ls.default_item(name, W), usage[0])
+
+    def test_a_swap_is_only_reported_when_it_holds_more_openings(self):
+        W = world()
+        roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
+                  if m == "Mega Charizard Y"][0]
+        swaps = ls.recommended_items(EXAMPLE, roster, W,
+                                     mega_name="Mega Charizard Y")
+        for mon, frm, to, before, after in swaps:
+            self.assertIn(mon, EXAMPLE)
+            self.assertNotEqual(frm, to)
+            self.assertGreater(after, before,
+                               f"{mon} -> {to} was reported without gaining")
+
+    def test_a_mega_stone_is_never_swapped(self):
+        """A Mega is locked to its stone; suggesting otherwise is not legal."""
+        W = world()
+        roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
+                  if m == "Mega Charizard Y"][0]
+        swaps = ls.recommended_items(EXAMPLE, roster, W,
+                                     mega_name="Mega Charizard Y")
+        self.assertNotIn("Mega Scizor", [s[0] for s in swaps])
+
+    def test_focus_sash_does_not_save_the_kingambit_case(self):
+        """RECORDED BECAUSE THE SUGGESTION DOES NOT WORK, and quietly shipping a
+        sheet that implied it did would be worse than saying so.
+
+        Kingambit's Iron Head is Steel into Ice/Fairy -- 4x -- so a Focus Sash
+        keeps Ninetales-Alola alive at 1 HP and it dies on turn 2 anyway. And the
+        swap COSTS Never-Melt Ice's 1.2x on Blizzard, so the margin gets slightly
+        worse: -1.12 bare, -1.15 with the sash.
+        """
+        from _harness import setup_battle
+        W = world()
+
+        def margin(item):
+            sets = {"Ninetales-Alola": {"item": item}} if item else None
+            b, ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W, sets=sets)
+            ours = [c for c in b.p1.roster
+                    if c.name in ("Ninetales-Alola", "Garchomp")]
+            theirs = [c for c in b.p2.roster
+                      if c.name in ("Garchomp", "Kingambit")]
+            v, _o, _t, m, _p, _l = ls.move_race(ms, b.typechart, b.field, b,
+                                                ours, theirs)
+            return v, m
+
+        bare_v, bare_m = margin(None)
+        sash_v, sash_m = margin("Focus Sash")
+        self.assertEqual(bare_v, ls.LOSS)
+        self.assertEqual(sash_v, ls.LOSS,
+                         "if the sash starts saving this, update the docstring")
+        self.assertLessEqual(sash_m, bare_m + 0.01)

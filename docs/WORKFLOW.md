@@ -364,7 +364,40 @@ it asked for. Existing stage-2 caches are invalidated by the bump.
 ### The cheap screen — `tools\lead_sweep.py`
 
     python lead_sweep.py --check "Ninetales-Alola,Garchomp,Mega Scizor,Rotom-Wash"
-    python lead_sweep.py --vs "Big 6,Rain" --pool-size 24 --xlsx lead_sweep.xlsx
+    python lead_sweep.py --vs "Big 6,Rain" --pool-size 16 --detail-top 6 ^
+        --xlsx lead_book.xlsx
+
+**Getting the workbook.** `--xlsx` takes a **path** and writes nothing unless you
+pass one. Two stages, costing very different amounts:
+
+| flag | what it drives | cost |
+|---|---|---|
+| `--pool-size N` | how many Pokémon are eligible for a lead; pairs grow as N²/2 | seconds to minutes |
+| `--detail-top N` | how many of the **best** brings get the full treatment | **minutes each** |
+
+The full treatment is every play (stay / switch / switch+Protect / sacrifice),
+the mop-up, turn-by-turn lines with damage, the switch-in table, and the item
+search. `--detail-top 6` is a sensible evening; 40 is a night. The path is
+relative to where you run it, so `--xlsx book.xlsx` from `tools` lands in
+`tools\book.xlsx`, and generated workbooks are gitignored.
+
+Eight sheets: **Brings**, **Teams of 6**, **Openings** (their best plan, our
+play, guaranteed?, the mop-up), **Lines** (damage on every hit, `PINNED` where
+something is removed before it acts), **Switch-ins**, **Loadout**, **Item
+fixes**, and the legend.
+
+**Items: the most popular one, by default.** Every Pokémon already holds its
+most-used item — `make_team` reads the usage table, so this needs no flag
+(measured: Ninetales-Alola Never-Melt Ice 29%, Garchomp Life Orb 61%, Rotom-Wash
+Sitrus Berry 31%). The **Loadout** sheet shows that baseline and names the one
+swap, if any, that *strictly increases* the number of openings held; "keep it" is
+the usual answer. **Item fixes** is the narrower per-opening question.
+
+A suggestion that did **not** survive measurement, recorded so it is not retried:
+Focus Sash on Ninetales-Alola against Kingambit + Garchomp. Kingambit's Iron Head
+is Steel into Ice/Fairy — **4×** — so the sash keeps it alive at 1 HP and it dies
+on turn 2 regardless, while the swap gives up Never-Melt Ice's 1.2× on Blizzard.
+Margin goes **−1.12 → −1.15**: slightly worse.
 
 **No games are played.** Every number is arithmetic on a threat matrix, so 276
 lead pairs against two opponents takes **10 seconds** — against minutes per

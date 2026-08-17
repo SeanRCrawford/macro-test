@@ -1,9 +1,32 @@
 """Sweep lead pairs by the pin arithmetic, ranked on their WORST opponent.
 
-    python lead_sweep.py --vs "Big 6"
-    python lead_sweep.py --vs "Big 6,Rain,King" --pool-size 34 --top 25
+HOW TO GET THE WORKBOOK. `--xlsx` takes a PATH and is off unless you pass one:
+
+    cd tools
+    python lead_sweep.py --vs "Big 6,Rain" --pool-size 16 --detail-top 6 ^
+        --xlsx lead_book.xlsx
+
+Two stages, and they cost very different amounts. The SWEEP scores every legal
+lead pair from the pool -- cheap, and `--pool-size` drives it, pairs growing as
+N^2/2. Then `--detail-top N` re-runs only the best N brings with the full
+treatment: every play (stay / switch / switch+Protect / sacrifice), the mop-up,
+the turn-by-turn lines with damage, the switch-in table, and the item search.
+That second stage is minutes per bring, so 6-8 is a sensible number and 40 is a
+night.
+
+    python lead_sweep.py --vs "Big 6"                    console only, no file
+    python lead_sweep.py --xlsx book.xlsx                every library team
+    python lead_sweep.py --vs "Big 6" --pool-size 30 --detail-top 12 ^
+        --xlsx book.xlsx                                 a serious run
     python lead_sweep.py --check "Ninetales-Alola,Garchomp,Mega Scizor,Rotom-Wash"
-    python lead_sweep.py --vs "Big 6" --xlsx lead_sweep.xlsx
+                                                         one bring, console
+
+The path is relative to wherever you run it, so `--xlsx book.xlsx` from `tools`
+lands in `tools\book.xlsx`. Generated workbooks are gitignored.
+
+ITEMS. Every Pokemon holds its MOST POPULAR item by usage already -- that is what
+`make_team` does and it needs no flag. The Loadout sheet shows that baseline and
+names the one swap, if any, that strictly increases the number of openings held.
 
 No games are played. Every verdict is a sum -- see src/lead_scan.py for what
 that buys and what it cannot see. This is the narrowing step BEFORE the overnight
@@ -202,16 +225,22 @@ def _records_for(bring, opponents, world, want_items=True):
                                             ours[:2], their_bench)
             fixes = []
             if want_items:
+                # EVERY losing opening, not just the worst. The first version
+                # broke after one, which meant a bring with three different holes
+                # was only ever offered a fix for one of them.
                 for x in report.results:
                     if x.verdict == ls.LOSS:
                         for mon, item, play in ls.item_fixes(
                                 bring, variant, world, x.enemy_lead):
                             fixes.append((x.enemy_lead, mon, item, play))
-                        break     # the worst opening only; one fix is the point
             out.append({"bring": tuple(bring), "opponent": opp,
                         "mega": mega_name, "score": report.score,
                         "report": report, "switch_ins": switch_ins,
-                        "item_fixes": fixes})
+                        "item_fixes": fixes,
+                        "loadout": [(m, ls.default_item(m, world))
+                                    for m in bring],
+                        "item_swaps": ls.recommended_items(
+                            bring, variant, world, mega_name=mega_name)})
     return out
 
 

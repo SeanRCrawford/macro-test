@@ -29,7 +29,9 @@ the code:
   Switch-ins      why their backs cannot come in, and which one can: the damage we
                   put on it arriving, how much HP it could afford to lose, and
                   what it does back.
-  Items           single item changes that convert a losing opening.
+  Loadout         what everyone holds (the most popular item by usage, which is
+                  the default) and the one swap that earns its place.
+  Item fixes      per-opening item changes that convert a specific losing lead.
 
 Nothing here computes; it renders what `lead_scan` produced. The legend sheet
 states every assumption, because a spreadsheet detached from its assumptions is a
@@ -231,7 +233,30 @@ def build(records, path):
     _wrap(ws, 8)
 
     # --- Items --------------------------------------------------------------
-    ws = _sheet(wb, "Items",
+    # Two questions, so two sheets. "What is everyone holding, and should any of
+    # it change" is a team-building question; "this one opening loses, is there an
+    # item that saves it" is a matchup question.
+    ws = _sheet(wb, "Loadout",
+                ["Our 4", "Opponent", "Their Mega", "Pokemon",
+                 "Most popular item (the default)", "Swap to",
+                 "Openings held before", "Openings held after"],
+                {"Our 4": 34, "Pokemon": 20,
+                 "Most popular item (the default)": 28, "Swap to": 20})
+    for r in sorted(records, key=lambda r: (r["opponent"], -r["score"])):
+        swaps = {m: (frm, to, a, bb)
+                 for m, frm, to, a, bb in (r.get("item_swaps") or [])}
+        for mon, item in r.get("loadout") or []:
+            swap = swaps.get(mon)
+            ws.append([" / ".join(r["bring"]), r["opponent"],
+                       r.get("mega") or "-", mon, item or "-",
+                       swap[1] if swap else "keep it",
+                       swap[2] if swap else None,
+                       swap[3] if swap else None])
+            if swap:
+                ws.cell(ws.max_row, 6).fill = GOOD
+    ws.auto_filter.ref = ws.dimensions
+
+    ws = _sheet(wb, "Item fixes",
                 ["Our 4", "Opponent", "Their lead pair", "Give this Pokemon",
                  "This item", "Turns the opening into", "Margin", "The play"],
                 {"Our 4": 34, "Their lead pair": 30, "The play": 46})
@@ -269,7 +294,13 @@ def _legend(wb):
         ["Lines", "The turn-by-turn with damage on every hit. 'PINNED' marks a "
                   "Pokemon removed before it acted."],
         ["Switch-ins", "Why their backs cannot come in, and which one can."],
-        ["Items", "Single item changes that convert a losing opening."],
+        ["Loadout", "What each Pokemon holds -- its MOST POPULAR item by usage, "
+                    "which is the default everywhere -- and the one swap, if "
+                    "any, that strictly increases the openings we hold. A swap "
+                    "has to earn its place; 'keep it' is the usual answer."],
+        ["Item fixes", "Per-opening: an item change that converts a specific "
+                       "losing lead. Narrower than Loadout and answers a "
+                       "matchup question rather than a team-building one."],
         [],
         ["The plays", ""],
         [ls.STAY, "Both leads attack."],

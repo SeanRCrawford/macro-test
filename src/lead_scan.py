@@ -1754,3 +1754,79 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
             log=best.log, play=best))
     report.results.sort(key=lambda r: r.margin)
     return report, ms, b
+
+
+def default_item(name, world):
+    """The most-used item for this Pokemon, which is already what it gets.
+
+    Stated as a function so the workbook can SHOW the baseline it is deviating
+    from. `make_team` reads the usage table, so "give every Pokemon their most
+    popular item" is the existing behaviour, not a change: measured, Ninetales-
+    Alola gets Never-Melt Ice (29%), Garchomp Life Orb (61%), Rotom-Wash Sitrus
+    Berry (31%).
+    """
+    usage = (world["merged"].get(name) or {}).get("items_usage") or []
+    for item, _pct in usage:
+        if item and item != "Other":
+            return item
+    return None
+
+
+def recommended_items(our4, enemy_roster, world, turns=2, mega_name=None):
+    """Per Pokemon: keep the popular item, or the one that holds more openings.
+
+        "By default give every pokemon their most popular item, assuming no
+         better item for a specific case."
+
+    So the baseline is the usage item and a swap has to EARN its place: it is only
+    reported when it strictly increases the number of openings we hold across all
+    fifteen of theirs. One change at a time, so the answer stays actionable.
+
+    Returns [(mon, from_item, to_item, held_before, held_after)] for the swaps
+    worth making, best first. An empty list means the popular items are right.
+    """
+    from optimize_sets import TYPE_RESIST_BERRY
+
+    from _harness import setup_battle
+
+    def held_count(sets):
+        rep, _ms, _b = full_report(our4, enemy_roster, world, want_logs=False,
+                                   mega_name=mega_name, turns=turns)
+        return rep.wins + len(rep.patched)
+
+    def held_with(sets):
+        b, ms = setup_battle(list(our4), list(enemy_roster), world, sets=sets)
+        ours = [c for c in b.p1.roster if not c.fainted]
+        lead, back = ours[:2], ours[2:]
+        theirs = [c for c in b.p2.roster if not c.fainted]
+        import itertools
+        n = 0
+        for pair in itertools.combinations(theirs, 2):
+            best = plays_for(ms, b.typechart, b.field, b, lead, back, list(pair),
+                             turns=turns, want_log=False)[0]
+            if best.verdict != LOSS:
+                n += 1
+        return n
+
+    base = held_with({})
+    b0, ms0 = setup_battle(list(our4), list(enemy_roster), world)
+    ours0 = [c for c in b0.p1.roster if not c.fainted]
+    theirs0 = [c for c in b0.p2.roster if not c.fainted][:2]
+    berries = [TYPE_RESIST_BERRY[t] for t in
+               killing_types(ms0, b0.typechart, b0.field, b0, ours0[:2], theirs0)
+               if t in TYPE_RESIST_BERRY][:2]
+
+    out = []
+    for mon in our4:
+        current = default_item(mon, world)
+        # A Mega is locked to its stone; swapping it is not a legal suggestion.
+        if current and current.endswith("ite"):
+            continue
+        for item in list(ITEM_CANDIDATES) + berries:
+            if item == current:
+                continue
+            got = held_with({mon: {"item": item}})
+            if got > base:
+                out.append((mon, current, item, base, got))
+    out.sort(key=lambda t: -t[4])
+    return out
