@@ -632,6 +632,60 @@ a documented negative result.
    not dominated — it is excellent on the columns where they hit the other slot
    — so deleting it would change the equilibrium.
 
+   **A pin is a claim about the whole side, not about the Pokémon in front.**
+   The first version tested only the board, and described a pin as *"must
+   switch or Protect"*. Both halves of that are wrong, per the correction:
+
+   > *"Favourable repositioning requires them to switch. A double protect is
+   > fine as long as the enemy can't favourably reposition or set up (though
+   > protecting one + switching or attacking almost always gains more
+   > MOMENTUM), but doesn't achieve anything unless there is fake out or
+   > stalling tailwind/trick room/weather. If there is no-one in the back who
+   > can resist the incoming hit, or survive this turn+next turn (i.e. I go
+   > first, I hit them on switch, then outspeed and KO next turn, that's a
+   > pin). But if they take the hit well, e.g. resisted, then can KO me next
+   > turn, either by outspeeding or by being slower and not getting KOd by
+   > either of mine, then that is not a pin and is a risk and a good play for
+   > them."*
+
+   `escape_from()` implements exactly that. A benched **B** breaks the pin when
+   all three hold: B survives the switch-in hit (on their best roll, since this
+   *removes* a threat); B then guarantees the KO back on the pinner; and B gets
+   to fire it — either it outspeeds, or it is slower and neither of our actives
+   removes it, checked singly and jointly. Anything less is still a pin: hit it
+   on the switch, outspeed and KO next turn.
+
+   Measured on the reported position — Scizor + Ninetales-Alola vs Mega Floette
+   + Whimsicott — Scizor's Bullet Punch guarantee-OHKOs **both** of their
+   actives and moves first, so on the board alone it is a double pin. With the
+   bench read it is neither: **Mega Charizard Y** is Fire/Flying, takes Bullet
+   Punch at 0.25×, and KOs Scizor back. Their switch is the good play and our
+   "pin" is a risk. A pin with an escape is *downgraded, not deleted* —
+   `describe` still reports it, and names the piece that answers it.
+
+   **Protect is never an escape, and that is the other half.** A null turn
+   leaves the board exactly as it was and the same pin applies next turn — the
+   pinned side gains only if the stalled turns themselves pay (Fake Out, or
+   Tailwind / Trick Room / weather / screens running down). This matters
+   because the horizon currently says otherwise. On the reported position,
+   evaluating each of their replies at the horizon and again one turn later:
+
+   | their reply | value at the horizon | one turn later | deferred |
+   |---|---|---|---|
+   | **Protect + Protect** | **78.2** | 469.3 | **+391** |
+   | Protect + Moonblast | 220.1 | 483.8 | +264 |
+   | Light of Ruin + Moonblast | 491.2 | 491.2 | **0** |
+
+   Double Protect is their best reply *only* because the evaluator stops before
+   the pin re-applies. The reply where they actually act has **zero** deferred
+   value — the turn resolved, nothing is outstanding. Every stall defers, and
+   depth-1 reads "nothing happened" as neutral when for the pinned side it
+   means "still pinned". **This is not yet fixed**, and it is the likeliest
+   remaining cause of the original complaint (*"far too many switches and
+   protects into a winning match up"*). It is also why maximin cannot pick a
+   Bullet Punch target: both targets tie at 78.2 because the worst column is
+   Double Protect, identical for both.
+
    **The safe play** is the companion idea and the reason the module exists
    rather than the pin alone: *"if someone outspeeds and OHKOs one of your guys
    but its partner isn't threatened to be fainted this turn ... it is a safe

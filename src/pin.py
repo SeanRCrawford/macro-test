@@ -61,11 +61,12 @@ class Pin:
     move: str | None
     first: bool          # attacker moves first, so the KO actually lands
     secure: bool         # nothing on the defender's side pre-empts the pinner
+    escape: object = None  # a benched Pokemon the defender can switch to and win
 
     @property
     def real(self) -> bool:
         """A pin the defender must actually respect."""
-        return self.first and self.secure
+        return self.first and self.secure and self.escape is None
 
 
 def _moves_first(matrix, attacker, defender) -> bool:
@@ -88,8 +89,80 @@ def _kills_outright(matrix, attacker, defender) -> bool:
     return matrix.threat(attacker, defender).ohko
 
 
-def pin_between(matrix, attacker, defender) -> Pin | None:
-    """The pin `attacker` holds over `defender`, if there is one."""
+def _bench_of(battle, combatant):
+    """The Pokemon on `combatant`'s side that are not currently out."""
+    for side in (battle.p1, battle.p2):
+        if any(c is combatant for c in side.roster):
+            active = [c for c in side.active if c is not None]
+            return [c for c in side.roster
+                    if not c.fainted and not any(c is a for a in active)]
+    return []
+
+
+def _survives(matrix, attacker, defender) -> bool:
+    """`defender` lives through `attacker`'s best move even on the best roll.
+
+    Strict on purpose. This is used to REMOVE a pin, and removing one on a
+    maybe means talking ourselves out of a threat that was real.
+    """
+    return not matrix.threat(attacker, defender).ohko_possible
+
+
+def escape_from(matrix, battle, attacker, defender):
+    """A switch-in that turns this pin from a threat into a risk, or None.
+
+    The correction that produced this function, in the user's words:
+
+        "Favourable repositioning requires them to switch. If there is no-one
+         in the back who can resist the incoming hit, or survive this turn +
+         next turn (i.e. I go first, I hit them on switch, then outspeed and KO
+         next turn, that's a pin). But if they take the hit well, e.g.
+         resisted, then can KO me next turn, either by outspeeding or by being
+         slower and not getting KOd by either of mine, then that is not a pin
+         and is a risk and a good play for them."
+
+    So a benched B escapes when all three hold:
+
+      1. B survives the switch-in hit. Being resisted is the usual reason, but
+         what matters is only that it lives.
+      2. B then threatens a guaranteed KO back on the pinner. Without this the
+         switch merely absorbs a hit; the pin still stands next turn.
+      3. B gets to fire that KO -- either it outspeeds the pinner, or it is
+         slower and neither of our actives removes it first. "Either of mine"
+         is checked both singly and together, since focus fire is available to
+         us whether or not it is available to them.
+
+    Note what is NOT an escape: Protect. A null turn leaves the board exactly
+    as it was and the pin re-applies next turn, so a stall is only worth
+    something when the stalled turns themselves pay -- Fake Out, or Tailwind /
+    Trick Room / weather / screens ticking down. That is a reason to price
+    Protect properly at the horizon, not a reason to call the pin off.
+    """
+    for b in _bench_of(battle, defender):
+        if not _survives(matrix, attacker, b):
+            continue                                   # (1) dies on the way in
+        if not _kills_outright(matrix, b, attacker):
+            continue                                   # (2) no answer back
+        if _moves_first(matrix, b, attacker):
+            return b                                   # (3a) it simply outspeeds
+        ours = [c for c in (matrix.ours if defender in matrix.theirs
+                            else matrix.theirs)
+                if not c.fainted and _on_field(battle, c)]
+        removed = any(_kills_outright(matrix, o, b) for o in ours)
+        if not removed and len(ours) >= 2:
+            removed = matrix.joint_kos(ours[0], ours[1], b, guaranteed=True)
+        if not removed:
+            return b                                   # (3b) slower, but lives
+    return None
+
+
+def pin_between(matrix, attacker, defender, battle=None) -> Pin | None:
+    """The pin `attacker` holds over `defender`, if there is one.
+
+    `battle` is optional only so the pairwise callers that do not have one keep
+    working; without it the escape check is skipped and the pin is reported on
+    the board position alone.
+    """
     if attacker.fainted or defender.fainted:
         return None
     if not _kills_outright(matrix, attacker, defender):
@@ -103,25 +176,27 @@ def pin_between(matrix, attacker, defender) -> Pin | None:
     secure = not any(_kills_outright(matrix, e, attacker)
                      and _moves_first(matrix, e, attacker)
                      for e in allies_of_defender if not e.fainted)
+    escape = (escape_from(matrix, battle, attacker, defender)
+              if battle is not None else None)
     return Pin(attacker=attacker, defender=defender, move=threat.move,
-               first=first, secure=secure)
+               first=first, secure=secure, escape=escape)
 
 
-def pins_on(matrix, defender):
+def pins_on(matrix, defender, battle=None):
     """Every pin held over `defender`, hardest first."""
     pool = matrix.theirs if defender in matrix.ours else matrix.ours
     found = []
     for a in pool:
         if a.fainted:
             continue
-        p = pin_between(matrix, a, defender)
+        p = pin_between(matrix, a, defender, battle)
         if p is not None and p.real:
             found.append(p)
     return found
 
 
-def is_pinned(matrix, defender) -> bool:
-    return bool(pins_on(matrix, defender))
+def is_pinned(matrix, defender, battle=None) -> bool:
+    return bool(pins_on(matrix, defender, battle))
 
 
 def all_pins(matrix, battle):
@@ -134,7 +209,7 @@ def all_pins(matrix, battle):
             for d in side_b:
                 if d.fainted or not _on_field(battle, d):
                     continue
-                p = pin_between(matrix, a, d)
+                p = pin_between(matrix, a, d, battle)
                 if p is not None and p.real:
                     out.append(p)
     return out
@@ -159,7 +234,7 @@ def acting_order(battle, matrix):
                                                       field, pair[0]))
     order, dropped = [], []
     for _side, c in ranked:
-        (dropped if is_pinned(matrix, c) else order).append(c)
+        (dropped if is_pinned(matrix, c, battle) else order).append(c)
     return order, dropped
 
 
@@ -190,11 +265,11 @@ def safe_plays(matrix, battle, side_name="p1"):
         return []
     out = []
     for threatened in ours:
-        pins = pins_on(matrix, threatened)
+        pins = pins_on(matrix, threatened, battle)
         if not pins:
             continue
         for partner in ours:
-            if partner is threatened or is_pinned(matrix, partner):
+            if partner is threatened or is_pinned(matrix, partner, battle):
                 continue
             if partner.protected_last_turn:
                 continue
@@ -219,12 +294,12 @@ def joint_action_score(matrix, battle, joint) -> float:
         actor = a.combatant
         if actor is None or actor.fainted:
             continue
-        pinned_here = is_pinned(matrix, actor)
+        pinned_here = is_pinned(matrix, actor, battle)
 
         if a.kind == "move" and a.move is not None and a.targets:
             # Firing a pin: the Pokemon that holds the guaranteed KO uses it.
             for t in a.targets:
-                p = pin_between(matrix, actor, t)
+                p = pin_between(matrix, actor, t, battle)
                 if p is not None and p.real and p.move == a.move.name:
                     score += 3.0
             if pinned_here:
@@ -240,11 +315,13 @@ def joint_action_score(matrix, battle, joint) -> float:
     # a pin, the other attacks free of one. Scored on top of the parts because
     # it is the combination that carries the guarantee.
     protects_pinned = any(a.kind in ("protect", "switch") and a.combatant is not None
-                          and is_pinned(matrix, a.combatant) for a in joint)
+                          and is_pinned(matrix, a.combatant, battle)
+                          for a in joint)
     free_attacker = any(a.kind == "move" and a.move is not None
                         and a.move.category != "Status"
                         and a.combatant is not None and not a.combatant.fainted
-                        and not is_pinned(matrix, a.combatant) for a in joint)
+                        and not is_pinned(matrix, a.combatant, battle)
+                        for a in joint)
     if protects_pinned and free_attacker:
         score += 2.0
     return score
@@ -263,8 +340,23 @@ def describe(matrix, battle, side_name="p1") -> list[str]:
     lines = []
     for p in all_pins(matrix, battle):
         lines.append(f"{p.attacker.name} pins {p.defender.name} with {p.move} "
-                     f"(guaranteed OHKO, moves first) -- {p.defender.name} must "
-                     f"switch or Protect")
+                     f"(guaranteed OHKO, moves first) -- {p.defender.name} has "
+                     f"no switch that answers it, so Protect only defers")
+    # A near-pin is worth saying out loud: it is the same threat, and the piece
+    # in the back is the entire reason it is not one.
+    for side_a, side_b in ((matrix.ours, matrix.theirs), (matrix.theirs, matrix.ours)):
+        for a in side_a:
+            if a.fainted or not _on_field(battle, a):
+                continue
+            for d in side_b:
+                if d.fainted or not _on_field(battle, d):
+                    continue
+                p = pin_between(matrix, a, d, battle)
+                if p is not None and p.first and p.secure and p.escape is not None:
+                    lines.append(
+                        f"{a.name} would pin {d.name} with {p.move}, but "
+                        f"{p.escape.name} switches in, lives it and KOs back "
+                        f"-- a risk, not a threat")
     order, dropped = acting_order(battle, matrix)
     if dropped:
         lines.append("Speed order "
