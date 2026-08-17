@@ -608,6 +608,34 @@ a documented negative result.
    with no Drought the rain stands and Swift Swim makes it faster.
 
 
+0o. **THE SET OPTIMISER'S WEATHER ESCAPE HATCH WAS DEAD CODE.** Reported: "on
+   the teamsheet ninetales-alola doesn't even have blizzard which is crazy as it
+   is its best move by far".
+
+   It is a **95.7%-usage** move. `optimize_sets._accuracy_ok` drops anything
+   under 80% accuracy unless something guarantees it, and the guarantee it
+   should have found — "perfectly accurate in a weather the team itself sets" —
+   read a `team_weather` argument that **no caller ever passed**. Every call
+   took the default `None`, so the branch could not fire, and the one Pokémon in
+   the game that guarantees Blizzard for itself had it removed.
+
+   Fixed twice over, deliberately:
+
+   - the USER'S OWN ability is now checked directly (`WEATHER_SETTERS[ability]`),
+     which needs no plumbing and cannot be forgotten by a caller;
+   - `team_weather_for()` derives the team's weather and is threaded from both
+     team entry points, so a partner's weather counts too — Hurricane under a
+     Pelipper.
+
+   Ninetales-Alola now optimises to Protect / **Blizzard** / Freeze-Dry /
+   Moonblast, and Mega Scizor to Protect / Bullet Punch / Close Combat /
+   Dual Wingbeat (the report's own preferred set is Protect / Knock Off /
+   Close Combat / Bullet Punch — three of four, with Dual Wingbeat over Knock
+   Off the remaining judgement call).
+
+   The filter still does its job: Blizzard on a Pokémon that sets no snow is a
+   70% move and stays dropped.
+
 0n. **A SINGLE-TARGET MOVE COULD ONLY EVER AIM AT ONE POKÉMON.** Reported with
    a turn log: *"a scizor bullet punch … would have outsped and KO'd the Mega
    Floette … and even ignoring the target selection, bug bite after whimsicott

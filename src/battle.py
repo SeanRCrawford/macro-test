@@ -49,6 +49,36 @@ class Side:
     screens_lightscreen: int = 0     # turns remaining
     screens_auroraveil: int = 0      # turns remaining -- blocks BOTH categories, snow-only
 
+    def __deepcopy__(self, memo):
+        """Hand-written for the same reason Battle and Combatant are: the
+        reflective path costs more than the copy.
+
+        The subtlety is IDENTITY. `active` and `bench` hold the very same
+        Combatant objects as `roster`, and `follow_me_target` points at one of
+        them; the copy has to preserve that or a Pokemon can be damaged in one
+        list and healthy in another. Everything therefore goes through the
+        shared `memo`, which is what makes `copy.deepcopy(c, memo)` hand back
+        the SAME copy for the same original rather than a second one.
+        """
+        cls = self.__class__
+        new = cls.__new__(cls)
+        memo[id(self)] = new
+        new.name = self.name
+        new.roster = [copy.deepcopy(c, memo) for c in self.roster]
+        # Not re-copied: looked up in the memo, so they stay the same objects.
+        new.active = [None if c is None else copy.deepcopy(c, memo)
+                      for c in self.active]
+        new.bench = [copy.deepcopy(c, memo) for c in self.bench]
+        new.wide_guard = self.wide_guard
+        new.quick_guard = self.quick_guard
+        new.mega_used = self.mega_used
+        new.follow_me_target = (None if self.follow_me_target is None
+                                else copy.deepcopy(self.follow_me_target, memo))
+        new.screens_reflect = self.screens_reflect
+        new.screens_lightscreen = self.screens_lightscreen
+        new.screens_auroraveil = self.screens_auroraveil
+        return new
+
     def alive_roster(self):
         return [c for c in self.roster if not c.fainted]
 
