@@ -727,6 +727,19 @@ a documented negative result.
    process across three rounds, because the machine drifted 57→64 s over the run
    and a straight before/after would have read that drift as the result.
 
+   **Implemented since, both measured by same-process A/B:** `type_multiplier`
+   memoised (**1.09x**) and hand-written `__deepcopy__` for `Side` and
+   `FieldState` (**1.13x**), which were the two structures still going through
+   the reflective copy path while `Battle` and `Combatant` already had their
+   own. Together ~1.23x, and the budget above is spent.
+
+   The anchors were re-measured afterwards on a different, slower container:
+   absolute times rose ~1.37x but the ratios to quick barely moved
+   (1.59/3.79/10.11 → 1.56/3.95/9.12). So the model's terms are right and only
+   its scale is machine-specific — which is what the session calibration factor
+   absorbs. The constants were deliberately NOT refitted to the slower host,
+   since that would encode it as everyone's reference.
+
    **Dramatic means fewer games, not faster games**, and those levers are
    already measured and exposed: `--vs` (one opponent instead of eight, 8x),
    `--screen-vs` for stage 1, `--top-leads` instead of `--brings 90` (18

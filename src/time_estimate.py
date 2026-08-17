@@ -37,6 +37,25 @@ The equilibrium multiplier is measured on a thorough+ pairing rather than
 carried over from the side-bias sweep: 11.0x, against the 13x that sweep
 suggested.
 
+VALIDATED ACROSS TWO HOSTS, AND DELIBERATELY NOT REFITTED TO THE SECOND. The
+five measurements were repeated on a different (slower) container after the
+copy and type-cache speedups landed. Absolute times rose ~1.37x, but the SHAPE
+barely moved -- ratios to the quick tier were
+
+    host 1   1.00  1.59  3.79  0.66  10.11
+    host 2   1.00  1.56  3.95  0.58   9.12
+
+so the model's terms are right and only its scale is machine-specific. Refitting
+to host 2 would have quietly encoded "slow container" as the reference for
+everyone. Scale is what the session calibration factor exists to absorb
+(`calibrate`), and it corrects a uniform error in one observation; a wrong
+SHAPE it could never fix. Hence: constants stay, calibration adapts.
+
+A consequence worth stating plainly: the speedups do NOT show up as smaller
+numbers here, because the host changed underneath them at the same time. The
+1.09x and 1.13x are from same-process A/B runs, which is the only way either
+could be measured on a machine that drifts this much.
+
 WHAT IT IS NOT. An estimate, not a guarantee. It does not know about your
 machine, the enemy roster's size, or a cache that makes the run instant. Every
 number it produces should be shown as "about", and the app records what actually
