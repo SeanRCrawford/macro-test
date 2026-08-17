@@ -515,3 +515,129 @@ class TestRobustToAProtectSplit(unittest.TestCase):
         ls._turn_with(self.tm, self.lead, theirs, hp, plan="left protects")
         self.assertEqual(hp[id(theirs[0])], 1.0,
                          "the protecting Pokemon took damage")
+
+
+class TestCommittedMoves(unittest.TestCase):
+    """The race must commit to a MOVE, and a spread move must hit both.
+
+        "the idea was ideally exerting spread damage (e.g. Garchomp Rock Slide +
+         Ninetales-Alola Blizzard) which is the ideal way to maximise our damage
+         output (damageslop) and pin; if we focus one of theirs we can be punished
+         and it's no longer a solved lead. I don't know if this is robust to the
+         simulator; I don't see how Garchomp+Dragonite can beat Whimsicott+Mega
+         Floette."
+
+    That doubt was correct, and the flaw was deeper than the verdict.
+    `matrix.threat(a, d)` is "a's best move against d" computed independently per
+    target, so one attacker could be credited with Earthquake on one foe AND Rock
+    Slide on the other in the same turn -- and a spread move could never hit two
+    Pokemon, because the matrix has no concept of a move at all.
+    """
+
+    def setUp(self):
+        from _harness import setup_battle
+        W = world()
+        self.b, self.ms = setup_battle(
+            ["Garchomp", "Dragonite", "Gallade", "Basculegion"],
+            list(W["teams"]["Big 6"]), W)
+
+    def _mon(self, side, name):
+        roster = (self.b.p1 if side == "p1" else self.b.p2).roster
+        return [c for c in roster if c.name == name][0]
+
+    def test_a_spread_move_hits_both_foes_in_one_plan(self):
+        chomp = self._mon("p1", "Garchomp")
+        wh, fl = self._mon("p2", "Whimsicott"), self._mon("p2", "Mega Floette")
+        plans = ls.move_plans(chomp, self.ms["Garchomp"], [wh, fl],
+                              [chomp, self._mon("p1", "Dragonite")],
+                              self.b.typechart, self.b.field, self.b)
+        quake = [p for p in plans if p[0].name == "Earthquake"]
+        self.assertTrue(quake, "Garchomp must have Earthquake here")
+        move, hits, _prio, spread = quake[0]
+        self.assertTrue(spread)
+        self.assertIn(id(wh), hits)
+        self.assertIn(id(fl), hits)
+        self.assertGreater(hits[id(fl)], 1.0, "Earthquake should remove Mega "
+                                              "Floette outright")
+
+    def test_a_single_target_move_is_one_plan_per_aim(self):
+        """Choosing a target is the punishable thing a spread move is not, so
+        each aim has to be a separate plan the search can pick between."""
+        dnite = self._mon("p1", "Dragonite")
+        wh, fl = self._mon("p2", "Whimsicott"), self._mon("p2", "Mega Floette")
+        plans = ls.move_plans(dnite, self.ms["Dragonite"], [wh, fl], [dnite],
+                              self.b.typechart, self.b.field, self.b)
+        espeed = [p for p in plans if p[0].name == "Extreme Speed"]
+        self.assertEqual(len(espeed), 2, "one plan per target")
+        for _m, hits, _p, spread in espeed:
+            self.assertFalse(spread)
+            self.assertEqual(len(hits), 1)
+
+    def test_an_all_adjacent_move_hits_our_own_partner(self):
+        """And a Ground-immune partner is why the reference bring works:
+        "a flying/levitate pokemon in the back to ignore garchomp partner
+        earthquake dmg." Dragonite is Dragon/Flying, so Earthquake is free."""
+        chomp, dnite = self._mon("p1", "Garchomp"), self._mon("p1", "Dragonite")
+        ninetales = self._mon("p1", "Gallade")   # a grounded partner, for contrast
+        wh, fl = self._mon("p2", "Whimsicott"), self._mon("p2", "Mega Floette")
+        free = [p for p in ls.move_plans(chomp, self.ms["Garchomp"], [wh, fl],
+                                         [chomp, dnite], self.b.typechart,
+                                         self.b.field, self.b)
+                if p[0].name == "Earthquake"][0]
+        costly = [p for p in ls.move_plans(chomp, self.ms["Garchomp"], [wh, fl],
+                                           [chomp, ninetales], self.b.typechart,
+                                           self.b.field, self.b)
+                  if p[0].name == "Earthquake"][0]
+        self.assertEqual(free[1].get(id(dnite), 0.0), 0.0,
+                         "Dragonite is Flying: Earthquake must cost nothing")
+        self.assertGreater(costly[1].get(id(ninetales), 0.0), 0.0,
+                           "a grounded partner must be charged for it")
+
+    def test_the_lines_are_readable_and_show_the_pin(self):
+        """The turn-by-turn is the deliverable here: "I also need to see the
+        actual lines/moves and the logic as to why it is sound"."""
+        ours = [self._mon("p1", "Garchomp"), self._mon("p1", "Dragonite")]
+        theirs = [self._mon("p2", "Whimsicott"), self._mon("p2", "Mega Floette")]
+        _v, _od, _td, _m, _plan, log = ls.move_race(
+            self.ms, self.b.typechart, self.b.field, self.b, ours, theirs,
+            want_log=True)
+        text = "\n".join(log)
+        self.assertIn("Turn 1", text)
+        self.assertIn("Turn 2", text)
+        self.assertIn("(spread)", text)
+        self.assertIn("Earthquake", text)
+        self.assertIn("removed before it acted", text,
+                      "the pin has to be visible in the line")
+
+    def test_nobody_protects_twice_in_a_row(self):
+        """The first version fixed one plan across both turns, so Mega Floette
+        Protected twice -- illegal, and it meant the Earthquake that was supposed
+        to remove it never landed."""
+        ours = [self._mon("p1", "Garchomp"), self._mon("p1", "Dragonite")]
+        theirs = [self._mon("p2", "Whimsicott"), self._mon("p2", "Mega Floette")]
+        _v, _od, _td, _m, plan, log = ls.move_race(
+            self.ms, self.b.typechart, self.b.field, self.b, ours, theirs,
+            want_log=True)
+        first, _sep, second = plan.partition(" then ")
+        if first != "both attack":
+            self.assertNotEqual(first, second, f"double Protect: {plan}")
+
+    def test_the_move_choice_is_known_bad_and_is_not_the_scorer(self):
+        """RECORDED AS A DEFECT, not asserted as correct.
+
+        `_best_joint` maximises net HP, and measured on Ninetales-Alola +
+        Garchomp against their Garchomp + Kingambit it plays Garchomp Earthquake
+        -- 71% onto Kingambit and 48% onto OUR OWN Ninetales -- because +23% net
+        beats Rock Slide's Rock-into-Dark/Steel. Kingambit then removes the
+        Ninetales it damaged. A net-HP objective cannot see that crossing a KO
+        threshold on your own side is categorically worse than the HP it costs.
+
+        So `race_bring` scores on the calibrated threat-matrix race and uses
+        `move_race` only for the turn-by-turn. This test pins that separation: if
+        the scorer ever starts coming from move_race, this fails until the move
+        choice is fixed.
+        """
+        import inspect
+        src = inspect.getsource(ls.race_bring)
+        self.assertIn("race_robust(matrix, lead, pair", src)
+        self.assertIn("supplies the LINES", src)

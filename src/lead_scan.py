@@ -67,6 +67,7 @@ cheap thing proposes, the expensive thing decides.
 """
 from dataclasses import dataclass, field
 
+from damage import hits_ally, is_spread_move
 from pin import _incoming, _kills_outright, _moves_first, mega_bulk_factor
 from species_data import base_form_name
 
@@ -564,6 +565,7 @@ class PairResult:
     # The nested answer: if we do not win outright, which back converts it.
     # (leaving, arriving, margin) or None.
     patch: tuple | None = None
+    log: list = field(default_factory=list)   # the turn-by-turn, when asked for
 
     @property
     def held(self) -> bool:
@@ -620,8 +622,15 @@ class RaceReport:
         return sum(r.margin for r in self.results) / len(self.results)
 
 
-def race_bring(our4, enemy_roster, world, opponent_name="", turns=2):
-    """Our bring-4, lead first, against all 15 of their lead pairs."""
+def race_bring(our4, enemy_roster, world, opponent_name="", turns=2,
+               want_logs=False):
+    """Our bring-4, lead first, against all 15 of their lead pairs.
+
+    On COMMITTED MOVES (`move_race`), so a spread move hits both of theirs and
+    an `allAdjacent` one hits our own partner. The threat matrix is still built,
+    but only for the questions that genuinely are per-pair: speed ties, and the
+    HP budget behind them.
+    """
     import itertools
 
     from _harness import setup_battle
@@ -635,10 +644,20 @@ def race_bring(our4, enemy_roster, world, opponent_name="", turns=2):
                         back=tuple(c.name for c in back),
                         opponent=opponent_name)
     for pair in itertools.combinations(theirs, 2):
-        # Their BEST plan, not the obliging one: both attack, or either Protects
-        # to whittle us while keeping a Pokemon whole.
+        # SCORED on the threat-matrix race, which is calibrated (31 of 275 pass).
+        # NOT scored on `move_race`, even though its model is the better one --
+        # see the warning on `_best_joint`: its move choice will Earthquake its
+        # own partner for half its HP to gain 23% net on a foe, and a scorer that
+        # plays like that is not a scorer. `move_race` supplies the LINES, which
+        # is what it is trustworthy for.
         verdict, od, td, margin, plan = race_robust(matrix, lead, pair,
-                                                    turns=turns)
+                                                   turns=turns)
+        log = []
+        if want_logs:
+            _v, _o, _t, _m, _p, log = move_race(
+                ms, b.typechart, b.field, b, lead, list(pair), turns=turns,
+                want_log=True)
+            log = log or []
         tie = bool(speed_ties(matrix, lead, pair))
         patch = None
         if verdict == LOSS or tie:
@@ -650,9 +669,24 @@ def race_bring(our4, enemy_roster, world, opponent_name="", turns=2):
         report.results.append(PairResult(
             enemy_lead=tuple(c.name for c in pair), verdict=verdict,
             our_dead=od, their_dead=td, margin=margin, plan=plan, tie=tie,
-            patch=patch))
+            patch=patch, log=log or []))
     report.results.sort(key=lambda r: r.margin)
     return report
+
+
+def move_salvage(ms, typechart, field, battle, lead, back, theirs, turns=3):
+    """`salvage`, on committed moves. (leaving, arriving, margin) or None."""
+    best = None
+    for leaving in lead:
+        stayer = [c for c in lead if c is not leaving]
+        for arriving in back:
+            ours = stayer + [arriving]
+            verdict, _od, _td, margin, _plan, _log = move_race(
+                ms, typechart, field, battle, ours, theirs, turns=turns,
+                not_acting_turn1=(arriving,))
+            if verdict == WIN and (best is None or margin > best[2]):
+                best = (leaving, arriving, margin)
+    return best
 
 
 def describe_race(report, limit=6):
@@ -901,3 +935,216 @@ def enemy_hp_budget(our4, enemy_roster, world, turns=2):
     established = [ours[0], ours[2]] if len(ours) > 2 else ours
     bench = [c for c in b.p2.roster if not c.fainted][2:]
     return hp_budget(matrix, established, bench, turns=turns)
+
+
+# --- committing to a MOVE ----------------------------------------------------
+#
+#     "the idea was ideally exerting spread damage (e.g. Garchomp Rock Slide +
+#      Ninetales-Alola Blizzard) which is the ideal way to maximise our damage
+#      output (damageslop) and pin; if we focus one of theirs we can be punished
+#      and it's no longer a solved lead. I don't know if this is robust to the
+#      simulator; I don't see how Garchomp+Dragonite can beat Whimsicott+Mega
+#      Floette."
+#
+# That doubt was correct, and the flaw was deeper than the verdict. Everything
+# above reads `matrix.threat(a, d)`, which is "a's BEST MOVE against d", computed
+# independently per target. So a single attacker could be credited with Earthquake
+# on one foe and Rock Slide on the other IN THE SAME TURN, and a spread move --
+# the whole point -- could never hit two Pokemon, because the matrix has no
+# concept of a move at all, only of a per-target damage number.
+#
+# Measured on exactly the position that was doubted, Garchomp against
+# Whimsicott + Mega Floette:
+#
+#     Rock Slide   SPREAD   Whimsicott  35.8%   Floette  58.0%
+#     Earthquake   SPREAD   Whimsicott  35.5%   Floette 115.3%
+#
+# One committed move removes Mega Floette before it acts and chips Whimsicott by
+# a third. And Earthquake is `allAdjacent`, so it hits our own partner -- except
+# Dragonite is Dragon/Flying and immune, which is the "flying/levitate pokemon in
+# the back to ignore garchomp partner earthquake dmg" principle, priced. The old
+# model reached the right verdict for the wrong reason: its focus heuristic had
+# Garchomp using Rock Slide on Whimsicott, so Floette lived and Light of Ruin
+# killed Garchomp.
+
+def move_plans(actor, moveset, foes, allies, typechart, field, battle):
+    """Every damaging move `actor` has, with what it does to EVERYONE it hits.
+
+    Returns [(move, {id: damage_fraction}, priority)] where the dict covers both
+    foes for a spread move and the ALLY too for an `allAdjacent` one. Worst-roll
+    damage, as a fraction of each target's max HP.
+    """
+    from damage import damage_roll, defensive_stat, effective_stat
+
+    def dmg(move, defender, n_targets):
+        physical = move.category == "Physical"
+        ak, dk = ("atk", "def") if physical else ("spa", "spd")
+        atk = effective_stat(actor.stats[ak], actor.stages[ak])
+        if actor.item == "Choice Band" and physical:
+            atk *= 1.5
+        if actor.item == "Choice Specs" and not physical:
+            atk *= 1.5
+        lo, _hi, _avg, _eff = damage_roll(
+            50, move.power, atk, defensive_stat(defender, dk, move), actor,
+            defender, move, typechart, weather=field.weather,
+            num_targets_hit=n_targets)
+        return (lo / (defender.max_hp() or 1)) * mega_bulk_factor(defender)
+
+    out = []
+    for move, _usage in moveset:
+        if move.category == "Status" or not move.power:
+            continue
+        spread = is_spread_move(move.target)
+        live_foes = [f for f in foes if not f.fainted]
+        if spread:
+            targets = list(live_foes)
+            if hits_ally(move.target):
+                targets += [a for a in allies if a is not actor and not a.fainted]
+            n = max(1, len(targets))
+            hits = {id(t): dmg(move, t, n) for t in targets}
+            out.append((move, hits, move.priority, True))
+        else:
+            # A single-target move is a CHOICE of target, so each aim is its own
+            # plan -- which is exactly the punishable thing a spread move is not.
+            for t in live_foes:
+                out.append((move, {id(t): dmg(move, t, 1)}, move.priority, False))
+    return out
+
+
+def _best_joint(plans_by_actor, hp, foe_ids, ally_ids):
+    """Greedily pick one plan per actor, maximising removal minus self-harm.
+
+    KNOWN BAD, AND THIS IS WHY `move_race` DOES NOT SCORE ANYTHING. Measured on
+    Ninetales-Alola + Garchomp against their Garchomp + Kingambit: it chooses
+    Garchomp Earthquake, which hits Kingambit for 71% AND OUR OWN NINETALES FOR
+    48%, because the net is +23% and Rock Slide's Rock-into-Dark/Steel is worth
+    less than that. Kingambit then removes the Ninetales it damaged. A net-HP
+    objective cannot see that crossing a KO THRESHOLD on your own side is
+    categorically worse than the HP it costs, and until it can, these choices
+    are not playable lines -- they are an upper bound on damage with no sense of
+    self-preservation.
+
+    The mechanism around it is right: committed moves, real spread targeting,
+    ally hits priced at all, priority order, ties against us, no double Protect.
+    That is why `move_race` is used for the TURN-BY-TURN and not for the verdict.
+
+    Value counts damage only up to what a target has LEFT -- overkill is not
+    output -- and subtracts damage dealt to our own side at full weight, which is
+    what makes an Earthquake beside a Flying partner score differently from an
+    Earthquake beside a Ground one.
+    """
+    import itertools
+    actors = list(plans_by_actor)
+    best = None
+    for combo in itertools.product(*(plans_by_actor[a] for a in actors)):
+        gain = 0.0
+        pool = dict(hp)
+        for _move, hits, _prio, _spread in combo:
+            for tid, d in hits.items():
+                take = min(d, pool.get(tid, 0.0))
+                pool[tid] = pool.get(tid, 0.0) - take
+                gain += take if tid in foe_ids else -take
+        if best is None or gain > best[0]:
+            best = (gain, combo)
+    return dict(zip(actors, best[1])) if best else {}
+
+
+def move_turn(ms, typechart, field, battle, ours, theirs, hp, plan="both attack",
+              not_acting=(), log=None):
+    """One turn on COMMITTED MOVES. Mutates `hp`; appends lines to `log`.
+
+    The order of business, and every clause of it is load-bearing:
+      * each side picks ONE move per Pokemon, jointly, by `_best_joint`
+      * a spread move hits both foes -- and our own partner when it is
+        `allAdjacent`, which is what makes a Flying or Levitate partner worth
+        something next to Earthquake
+      * order is by move PRIORITY then speed, with ties broken against us
+      * a Pokemon whose HP has reached zero does not act: the pin
+      * a Protecting Pokemon neither takes damage nor deals it
+    """
+    live_ours = [c for c in ours if hp[id(c)] > 0]
+    live_theirs = [c for c in theirs if hp[id(c)] > 0]
+    if not live_ours or not live_theirs:
+        return
+    protecting = set()
+    if plan == "left protects" and live_theirs:
+        protecting.add(id(live_theirs[0]))
+    elif plan == "right protects" and len(live_theirs) > 1:
+        protecting.add(id(live_theirs[1]))
+
+    our_ids = {id(c) for c in ours}
+    their_ids = {id(c) for c in theirs}
+
+    our_plans = {c: move_plans(c, ms.get(c.name) or [], live_theirs, live_ours,
+                               typechart, field, battle)
+                 for c in live_ours if not any(c is x for x in not_acting)}
+    our_plans = {c: p for c, p in our_plans.items() if p}
+    their_plans = {c: move_plans(c, ms.get(c.name) or [], live_ours, live_theirs,
+                                 typechart, field, battle)
+                   for c in live_theirs if id(c) not in protecting}
+    their_plans = {c: p for c, p in their_plans.items() if p}
+
+    chosen = {}
+    if our_plans:
+        chosen.update(_best_joint(our_plans, hp, their_ids, our_ids))
+    if their_plans:
+        chosen.update(_best_joint(their_plans, hp, our_ids, their_ids))
+
+    order = sorted(chosen.items(),
+                   key=lambda kv: (-kv[1][2], -kv[0].stats.get("spe", 0),
+                                   0 if id(kv[0]) in their_ids else 1))
+    for actor, (move, hits, _prio, spread) in order:
+        if hp[id(actor)] <= 0:
+            if log is not None:
+                log.append(f"    {actor.name} was removed before it acted "
+                           f"(it would have used {move.name})")
+            continue
+        landed = []
+        for tid, d in hits.items():
+            if tid in protecting:
+                landed.append("blocked by Protect")
+                continue
+            if hp.get(tid, 0.0) <= 0:
+                continue
+            before = hp[tid]
+            hp[tid] = max(0.0, before - d)
+            name = next((c.name for c in list(ours) + list(theirs)
+                         if id(c) == tid), "?")
+            landed.append(f"{name} {before * 100:.0f}->{hp[tid] * 100:.0f}%"
+                          + (" [FAINTS]" if hp[tid] <= 0 else ""))
+        if log is not None:
+            log.append(f"    {actor.name} {move.name}"
+                       f"{' (spread)' if spread else ''}: "
+                       + ", ".join(landed or ["nothing to hit"]))
+    if log is not None:
+        for c in live_theirs:
+            if id(c) in protecting:
+                log.append(f"    {c.name} Protects")
+
+
+def move_race(ms, typechart, field, battle, ours, theirs, turns=2,
+              not_acting_turn1=(), want_log=False):
+    """`race`, on committed moves. Returns (verdict, od, td, margin, plan, log)
+    for THEIR best plan."""
+    worst = None
+    # A PLAN PER TURN, not one plan for the whole race. The first version fixed
+    # the plan across both turns, so "right protects" had Mega Floette Protecting
+    # twice -- which is illegal, and it never ate the Earthquake that was supposed
+    # to remove it. Enumerating (turn 1 plan, turn 2 plan) and forbidding the same
+    # Pokemon Protecting twice in a row is the fix; it also lets them Protect on
+    # the turn that actually suits them rather than only on the first.
+    schedules = [(a, b) for a in ENEMY_PLANS for b in ENEMY_PLANS
+                 if a == "both attack" or b == "both attack" or a != b]
+    for schedule in schedules:
+        hp = {id(c): 1.0 for c in list(ours) + list(theirs)}
+        log = [] if want_log else None
+        for i in range(max(1, turns)):
+            plan = schedule[min(i, len(schedule) - 1)]
+            if log is not None:
+                log.append(f"  Turn {i + 1}  (their plan: {plan})")
+            move_turn(ms, typechart, field, battle, ours, theirs, hp, plan=plan,
+                      not_acting=not_acting_turn1 if i == 0 else (), log=log)
+        verdict, od, td, margin = _outcome(hp, ours, theirs)
+        if worst is None or margin < worst[3]:
+            worst = (verdict, od, td, margin, " then ".join(schedule), log)
+    return worst
