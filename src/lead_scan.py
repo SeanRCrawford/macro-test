@@ -331,30 +331,37 @@ def write_workbook(rows, path, opponents=(), pool_size=0):
     ws = wb.active
     ws.title = "Lead pairs"
     _header(ws, ["#", "Lead A", "Lead B", "Back A", "Back B", "Worst opponent",
-                 "Wins", "Losses", "Of their leads", "Score",
-                 "Their leads that beat us"])
+                 "Wins", "Patched", "Unheld", "Ties", "Of their leads",
+                 "Score", "Their leads we cannot hold"])
     for i, r in enumerate(rows, start=1):
         worst = r["worst"]
         ws.append([i, r["lead"][0], r["lead"][1], r["back"][0], r["back"][1],
-                   worst.opponent, worst.wins, len(worst.losses),
-                   len(worst.results), round(r["score"], 3),
+                   worst.opponent, worst.wins, len(worst.patched),
+                   len(worst.losses), len(worst.ties), len(worst.results),
+                   round(r["score"], 3),
                    "; ".join(" + ".join(x.enemy_lead) for x in worst.losses)])
-        ws.cell(ws.max_row, 10).fill = good if r["score"] > 0 else bad
+        ws.cell(ws.max_row, 12).fill = good if r["score"] > 0 else bad
     ws.column_dimensions["B"].width = 22
     ws.column_dimensions["C"].width = 22
     ws.auto_filter.ref = ws.dimensions
 
     det = wb.create_sheet("Their lead pairs")
     _header(det, ["Our lead", "Our back", "Opponent", "Their lead pair",
-                  "Result", "We lose", "They lose", "Margin"])
+                  "Result", "Their best plan", "Speed tie", "We lose",
+                  "They lose", "Margin", "Patch: switch", "Patch: to",
+                  "Patch margin"])
     for r in rows:
         for rep in r["reports"]:
             for n, x in enumerate(rep.results, start=1):
                 det.append([" + ".join(r["lead"]) if n == 1 else None,
                             " + ".join(r["back"]) if n == 1 else None,
                             rep.opponent if n == 1 else None,
-                            " + ".join(x.enemy_lead), x.verdict,
-                            x.our_dead, x.their_dead, round(x.margin, 3)])
+                            " + ".join(x.enemy_lead), x.verdict, x.plan,
+                            "yes" if x.tie else "", x.our_dead, x.their_dead,
+                            round(x.margin, 3),
+                            x.patch[0] if x.patch else None,
+                            x.patch[1] if x.patch else None,
+                            round(x.patch[2], 3) if x.patch else None])
                 det.cell(det.max_row, 5).fill = fill_for.get(x.verdict, warn)
     det.column_dimensions["A"].width = 36
     det.column_dimensions["B"].width = 36
@@ -390,6 +397,27 @@ def write_workbook(rows, path, opponents=(), pool_size=0):
                            "sweep's top answer was once Garchomp + Mega "
                            "Garchomp. A screen that recommends an illegal team "
                            "is worse than no screen."],
+        [],
+        ["Speed ties"],
+        ["", "A tie is a coin flip and is NEVER counted as a win. The race "
+             "resolves every tie AGAINST us, and a tied opening is sent to the "
+             "patch search exactly as a loss is: a plan that needs to win a "
+             "flip is a plan with a hole."],
+        [],
+        ["The patch (nested)"],
+        ["", "An opening we do not win is not automatically a hole. If a BACK "
+             "Pokemon converts it -- switch in turn 1 eating the damage, deal "
+             "nothing, then attack from turn 2 -- the opening is HELD and the "
+             "back slot has a job. That is the same two-turn pin question one "
+             "level down, which is what makes the method recursive."],
+        ["Unheld", "Openings we neither win nor patch. These are the holes, and "
+                   "any one of them zeroes the score."],
+        [],
+        ["Their plan"],
+        ["", "Their side may split: one attacks while the other Protects, "
+             "chipping us while keeping a Pokemon whole. Every result takes "
+             "THEIR BEST plan of {both attack, left protects, right protects}, "
+             "so a claim that survives only the obliging column is not counted."],
         ["Ranked on the worst", "They choose their Mega, their four and their "
                                "lead AFTER seeing your four, so a pair is worth "
                                "what its worst case is worth."],
@@ -473,14 +501,21 @@ def _turn(matrix, ours, theirs, hp):
     for side, mine, foes, target in (("us", live_ours, live_theirs, our_target),
                                      ("them", live_theirs, live_ours, their_target)):
         for c in mine:
-            # Sort key: priority first, then speed. `_moves_first` is pairwise;
-            # for a four-way order the underlying numbers are what is needed.
+            # Sort key: priority first, then speed, then SIDE -- and the side
+            # tiebreak resolves against us on purpose.
+            #
+            #     "Ideally your strategy does not rely on winning speed ties."
+            #
+            # A raw (priority, speed) sort leaves ties to list order, which put
+            # our Pokemon first and quietly handed us every coin flip. Sorting
+            # "them" ahead of "us" at equal priority and speed means a plan is
+            # only credited for what it wins without the flip. 0 sorts before 1.
             t = matrix.threat(c, target) if target is not None else None
-            order.append((t.priority if t else 0, c.stats.get("spe", 0), side,
-                          c, target))
-    order.sort(key=lambda row: (-row[0], -row[1]))
+            order.append((t.priority if t else 0, c.stats.get("spe", 0),
+                          0 if side == "them" else 1, side, c, target))
+    order.sort(key=lambda row: (-row[0], -row[1], row[2]))
 
-    for _prio, _spe, _side, actor, target in order:
+    for _prio, _spe, _tie, _side, actor, target in order:
         if hp[id(actor)] <= 0 or target is None:
             continue                      # removed before it acted: the pin
         if hp[id(target)] <= 0:
@@ -524,6 +559,22 @@ class PairResult:
     our_dead: int
     their_dead: int
     margin: float
+    plan: str = "both attack"       # THEIR best plan, Protect split included
+    tie: bool = False               # the opening hinges on a speed tie
+    # The nested answer: if we do not win outright, which back converts it.
+    # (leaving, arriving, margin) or None.
+    patch: tuple | None = None
+
+    @property
+    def held(self) -> bool:
+        """We win it outright, or a back Pokemon converts it.
+
+        The distinction the whole approach turns on: *"see if way to patch up
+        losing case, which turns into a nested 2 turn pin question."* An opening
+        we lose but can switch out of is not a hole -- it is a back slot with a
+        job.
+        """
+        return self.verdict != LOSS or self.patch is not None
 
 
 @dataclass
@@ -536,7 +587,17 @@ class RaceReport:
 
     @property
     def losses(self):
-        return [r for r in self.results if r.verdict == LOSS]
+        """Openings we neither win nor patch. A patched loss is not a hole."""
+        return [r for r in self.results if not r.held]
+
+    @property
+    def patched(self):
+        return [r for r in self.results if r.verdict == LOSS and r.patch]
+
+    @property
+    def ties(self):
+        """Openings that hinge on a coin flip. Never counted as wins."""
+        return [r for r in self.results if r.tie]
 
     @property
     def wins(self):
@@ -574,10 +635,22 @@ def race_bring(our4, enemy_roster, world, opponent_name="", turns=2):
                         back=tuple(c.name for c in back),
                         opponent=opponent_name)
     for pair in itertools.combinations(theirs, 2):
-        verdict, od, td, margin = race(matrix, lead, pair, turns=turns)
+        # Their BEST plan, not the obliging one: both attack, or either Protects
+        # to whittle us while keeping a Pokemon whole.
+        verdict, od, td, margin, plan = race_robust(matrix, lead, pair,
+                                                    turns=turns)
+        tie = bool(speed_ties(matrix, lead, pair))
+        patch = None
+        if verdict == LOSS or tie:
+            # The nested question. A tie is patched for the same reason a loss
+            # is: a plan that needs to win a coin flip is a plan with a hole.
+            got = salvage(matrix, lead, back, pair)
+            if got is not None:
+                patch = (got[0].name, got[1].name, got[3])
         report.results.append(PairResult(
             enemy_lead=tuple(c.name for c in pair), verdict=verdict,
-            our_dead=od, their_dead=td, margin=margin))
+            our_dead=od, their_dead=td, margin=margin, plan=plan, tie=tie,
+            patch=patch))
     report.results.sort(key=lambda r: r.margin)
     return report
 
@@ -585,13 +658,23 @@ def race_bring(our4, enemy_roster, world, opponent_name="", turns=2):
 def describe_race(report, limit=6):
     lines = [f"{' + '.join(report.lead)}  (back: {', '.join(report.back)})"
              f"  vs {report.opponent}",
-             f"  {report.wins} wins, {len(report.losses)} losses of "
-             f"{len(report.results)} of their lead pairs   "
-             f"score {report.score:+.2f}"]
+             f"  {report.wins} wins, {len(report.patched)} patched, "
+             f"{len(report.losses)} unheld of {len(report.results)} of their "
+             f"lead pairs   score {report.score:+.2f}"]
+    if report.ties:
+        lines.append(f"  speed ties (never counted as wins): "
+                     + "; ".join(" + ".join(r.enemy_lead) for r in report.ties))
     for r in report.results[:limit]:
-        lines.append(f"    {r.verdict.upper():5s} {' + '.join(r.enemy_lead):40s} "
-                     f"margin {r.margin:+.2f}  (we lose {r.our_dead}, "
-                     f"they lose {r.their_dead})")
+        bits = [f"    {r.verdict.upper():5s} {' + '.join(r.enemy_lead):40s} "
+                f"margin {r.margin:+.2f}"]
+        if r.plan != "both attack":
+            bits.append(f"[{r.plan}]")
+        if r.tie:
+            bits.append("TIE")
+        if r.patch:
+            bits.append(f"-> switch {r.patch[0]} to {r.patch[1]} "
+                        f"({r.patch[2]:+.2f})")
+        lines.append("  ".join(bits))
     return lines
 
 
@@ -613,3 +696,208 @@ def legal_bring(names) -> bool:
     if len(set(species)) != len(species):
         return False
     return sum(1 for n in names if n.startswith("Mega ")) <= 1
+
+
+# --- speed ties, the nested salvage, and the HP budget -----------------------
+#
+#     "Ideally your strategy does not rely on winning speed ties. Such as,
+#      Garchomp+Ninetales-Alola is good because Ninetales-Alola beats enemy
+#      Garchomp first to avoid speed tie, and if the enemy Mega Floette is led and
+#      speed ties, you can switch Garchomp into the back pokemon *specifically
+#      prepared for that special case to make that rare tied/losing lead a win*,
+#      who resists floette's attacks, and beats floette even after that damage
+#      ... ninetales-alola blizzards twice t1/t2, scizor is switched in t1, then
+#      t2 bullet punch threatens kill on them; sequence starting t2 is even if
+#      they attack they are pinned, as nothing else can come in to survive and
+#      then win (not enough HP after switch damage)"
+#
+# Three separate mechanisms in that paragraph, and the recursion is the point:
+#
+#   1. A tie is not a win. `speed_ties` names the openings that hinge on a flip
+#      so they can be treated as losses and PATCHED rather than counted.
+#   2. `salvage` is the patch: for an opening we do not win outright, is there a
+#      back Pokemon that converts it -- switch in turn 1 eating the damage,
+#      attack from turn 2? A back slot spent on exactly one bad opening is a
+#      deliberate, cheap insurance policy.
+#   3. Which is itself the same two-turn pin question one level down, and
+#      `hp_budget` is the form it takes: for each of THEIR four possible
+#      switch-ins, how much HP can it afford to lose and still win? If none can
+#      afford the switch-in damage, the sequence is a pin. That is the "not
+#      enough HP after switch damage" clause, made into a number.
+
+# Their side may split: one attacks, one Protects, chipping us while keeping a
+# Pokemon in reserve. A claim that survives only the both-attack column is not a
+# claim -- "is this robust to one enemy attacking and one protecting to whittle
+# down".
+ENEMY_PLANS = ("both attack", "left protects", "right protects")
+
+
+def speed_ties(matrix, ours, theirs):
+    """(ours, theirs) pairs at EXACTLY equal effective speed. A coin flip.
+
+    Read off the matrix rather than the raw stat, so Tailwind, Choice Scarf,
+    paralysis and a Mega's post-transformation speed are all included: two
+    Pokemon "tie" when neither `outspeeds` the other and neither has priority.
+    """
+    out = []
+    for o in ours:
+        for e in theirs:
+            a, b = matrix.threat(o, e), matrix.threat(e, o)
+            if a.priority == b.priority and not a.outspeeds and not b.outspeeds:
+                out.append((o, e))
+    return out
+
+
+def _turn_with(matrix, ours, theirs, hp, plan="both attack", not_acting=()):
+    """One turn, with an enemy plan and a set of Pokemon that cannot attack.
+
+    `not_acting` is how a switch is modelled: the slot spent its turn coming in,
+    so it takes damage and deals none. `plan` lets one of theirs Protect, which
+    means it neither takes damage nor deals it.
+    """
+    live_ours = [c for c in ours if hp[id(c)] > 0]
+    live_theirs = [c for c in theirs if hp[id(c)] > 0]
+    if not live_ours or not live_theirs:
+        return
+    protecting = set()
+    if plan == "left protects" and live_theirs:
+        protecting.add(id(live_theirs[0]))
+    elif plan == "right protects" and len(live_theirs) > 1:
+        protecting.add(id(live_theirs[1]))
+
+    attackable = [c for c in live_theirs if id(c) not in protecting]
+    our_target = _focus_target(matrix, live_ours, attackable or live_theirs)
+    their_target = _focus_target(matrix, live_theirs, live_ours)
+
+    order = []
+    for side, mine, target in (("us", live_ours, our_target),
+                               ("them", live_theirs, their_target)):
+        for c in mine:
+            t = matrix.threat(c, target) if target is not None else None
+            order.append((t.priority if t else 0, c.stats.get("spe", 0),
+                          0 if side == "them" else 1, side, c, target))
+    order.sort(key=lambda row: (-row[0], -row[1], row[2]))
+
+    for _p, _s, _tie, side, actor, target in order:
+        if hp[id(actor)] <= 0 or target is None:
+            continue
+        if any(actor is x for x in not_acting):
+            continue                       # switched in this turn
+        if id(actor) in protecting:
+            continue                       # spent its turn Protecting
+        if side == "us" and id(target) in protecting:
+            continue                       # the attack is denied
+        if hp[id(target)] <= 0:
+            continue
+        hp[id(target)] = max(0.0, hp[id(target)]
+                             - matrix.threat(actor, target).dmg_min
+                             * mega_bulk_factor(target))
+
+
+def _outcome(hp, ours, theirs):
+    our_dead = sum(1 for c in ours if hp[id(c)] <= 0)
+    their_dead = sum(1 for c in theirs if hp[id(c)] <= 0)
+    margin = (sum(1.0 - hp[id(c)] for c in theirs)
+              - sum(1.0 - hp[id(c)] for c in ours))
+    if their_dead > our_dead or (their_dead == our_dead and margin > 0.25):
+        return WIN, our_dead, their_dead, margin
+    if our_dead > their_dead or margin < -0.25:
+        return LOSS, our_dead, their_dead, margin
+    return EVEN, our_dead, their_dead, margin
+
+
+def race_robust(matrix, ours, theirs, turns=2):
+    """The race, taking their BEST plan against us -- including a Protect split.
+
+    Returns (verdict, our_dead, their_dead, margin, plan) for their best plan.
+    """
+    worst = None
+    for plan in ENEMY_PLANS:
+        hp = {id(c): 1.0 for c in list(ours) + list(theirs)}
+        for _ in range(max(1, turns)):
+            _turn_with(matrix, ours, theirs, hp, plan=plan)
+        verdict, od, td, margin = _outcome(hp, ours, theirs)
+        if worst is None or margin < worst[3]:
+            worst = (verdict, od, td, margin, plan)
+    return worst
+
+
+def salvage(matrix, lead, back, theirs, turns=3):
+    """Can a BACK Pokemon convert an opening we do not win? The nested question.
+
+    For each (which of our leads leaves, which back replaces it): the switch-in
+    eats turn 1's damage and deals none, the stayer attacks, and from turn 2 both
+    attack. Three turns, because the switch spends one -- *"ninetales-alola
+    blizzards twice t1/t2, scizor is switched in t1, then t2 bullet punch
+    threatens kill"*.
+
+    Returns (leaving, arriving, verdict, margin, plan) for the best patch found,
+    or None. Their best plan is used throughout, Protect split included.
+    """
+    best = None
+    for leaving in lead:
+        stayer = [c for c in lead if c is not leaving]
+        for arriving in back:
+            ours = stayer + [arriving]
+            worst = None
+            for plan in ENEMY_PLANS:
+                hp = {id(c): 1.0 for c in ours + list(theirs)}
+                for i in range(max(1, turns)):
+                    _turn_with(matrix, ours, theirs, hp, plan=plan,
+                               not_acting=(arriving,) if i == 0 else ())
+                verdict, _od, _td, margin = _outcome(hp, ours, theirs)
+                if worst is None or margin < worst[1]:
+                    worst = (verdict, margin, plan)
+            verdict, margin, plan = worst
+            if verdict == WIN and (best is None or margin > best[3]):
+                best = (leaving, arriving, verdict, margin, plan)
+    return best
+
+
+def hp_budget(matrix, ours, theirs_bench, turns=2):
+    """For each of their possible switch-ins: how much HP can it afford to lose?
+
+    *"it may be helpful to think in terms of how much HP can each given potential
+    back pokemon out of 4 afford to lose and still win vs yours, i.e., can they
+    switch in, take damage and win, if not then it is a pin."*
+
+    Returns [(name, afford, verdict)] where `afford` is the fraction of its max
+    HP it can arrive already missing and still not lose the exchange. A negative
+    number means it cannot switch in at all: even at full health our two turns
+    remove it, which is the "not enough HP after switch damage" pin.
+    """
+    rows = []
+    for b in theirs_bench:
+        # What we strip while it comes in and before it can answer.
+        cost = (_incoming(matrix, ours, b)
+                + _incoming(matrix, ours, b, only_before_it_acts=True))
+        answers = _kills_outright(matrix, b, ours[0]) if ours else False
+        for o in ours[1:]:
+            answers = answers or _kills_outright(matrix, b, o)
+        afford = 1.0 - cost
+        if afford <= 0:
+            verdict = "cannot switch in"
+        elif not answers:
+            verdict = "survives but cannot win"
+        else:
+            verdict = "can switch in and win"
+        rows.append((b.name, afford, verdict))
+    rows.sort(key=lambda r: -r[1])
+    return rows
+
+
+def enemy_hp_budget(our4, enemy_roster, world, turns=2):
+    """`hp_budget` for a whole bring: their bench against OUR back two.
+
+    The back two, not the lead, because the question this answers arrives after
+    the patch has been made -- Scizor is in, and now what of theirs can come in
+    against it. Convenience wrapper so a CLI does not have to build a battle.
+    """
+    from _harness import setup_battle
+    from threat import build_threat_matrix
+    b, ms = setup_battle(list(our4), list(enemy_roster), world)
+    matrix = build_threat_matrix(b, ms)
+    ours = [c for c in b.p1.roster if not c.fainted]
+    established = [ours[0], ours[2]] if len(ours) > 2 else ours
+    bench = [c for c in b.p2.roster if not c.fainted][2:]
+    return hp_budget(matrix, established, bench, turns=turns)

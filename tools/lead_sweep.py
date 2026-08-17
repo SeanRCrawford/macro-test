@@ -97,14 +97,28 @@ def main():
             raise SystemExit("--check needs exactly 4 Pokemon, lead first")
         print()
         for opp in opponents:
-            report = ls.scan_bring(our4, world["teams"][opp], world,
-                                   opponent_name=opp)
-            for line in ls.describe(report):
+            # Both views: the per-enemy breakdown (the EXPLANATION, in the shape
+            # the idea was expressed in) and the race over their 15 openings
+            # (the VERDICT, which is what a screen can act on).
+            for line in ls.describe(ls.scan_bring(our4, world["teams"][opp],
+                                                  world, opponent_name=opp)):
                 print(line)
+            print()
+            race = ls.race_bring(our4, world["teams"][opp], world,
+                                 opponent_name=opp)
+            for line in ls.describe_race(race, limit=args.top):
+                print(line)
+            print()
+            print(f"  Their HP budget -- what can switch in against our back "
+                  f"two, and afford it:")
+            for name, afford, verdict in ls.enemy_hp_budget(
+                    our4, world["teams"][opp], world):
+                print(f"    {name:20s} can afford to lose {afford * 100:+7.1f}%"
+                      f"   {verdict}")
             slots = ls.mega_slots(world["teams"][opp], world)
             if len(slots) > 1:
-                print(f"  NOTE: they can Mega any of {', '.join(slots)} and pick "
-                      f"AFTER seeing your four; this scan reflects one choice.")
+                print(f"\n  NOTE: they can Mega any of {', '.join(slots)} and "
+                      f"pick AFTER seeing your four; this reflects one choice.")
             print()
         return
 

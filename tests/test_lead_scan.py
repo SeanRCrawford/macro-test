@@ -295,3 +295,223 @@ class TestCalibration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNeverRelyOnASpeedTie(unittest.TestCase):
+    """A coin flip is not a plan.
+
+        "Ideally your strategy does not rely on winning speed ties. Such as,
+         Garchomp+Ninetales-Alola is good because Ninetales-Alola beats enemy
+         Garchomp first to avoid speed tie, and if the enemy Mega Floette is led
+         and speed ties, you can switch Garchomp into the back pokemon
+         *specifically prepared for that special case to make that rare
+         tied/losing lead a win*."
+
+    Two mechanisms. The race resolves every tie AGAINST us, and a tied opening is
+    sent to the patch search exactly as a loss is.
+    """
+
+    def setUp(self):
+        from _harness import setup_battle
+        from threat import build_threat_matrix
+        W = world()
+        self.b, self.ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W)
+        self.tm = build_threat_matrix(self.b, self.ms)
+        ours = [c for c in self.b.p1.roster if not c.fainted]
+        self.lead, self.back = ours[:2], ours[2:]
+
+    def test_the_mirror_garchomp_is_found_as_a_tie(self):
+        ties = ls.speed_ties(self.tm, self.lead,
+                             [c for c in self.b.p2.roster])
+        pairs = {(o.name, e.name) for o, e in ties}
+        self.assertIn(("Garchomp", "Garchomp"), pairs)
+
+    def test_a_tie_is_never_what_wins_the_opening(self):
+        """The property that matters is not "a tied opening cannot be a win" --
+        it is "the win does not DEPEND on the flip". An opening containing a tie
+        that we win even after losing the flip is genuinely won, and downgrading
+        it would throw away a real advantage.
+
+        So: every tie is resolved against us, and any tie opening we do NOT win
+        outright goes to the patch search exactly as a loss does.
+        """
+        W = world()
+        report = ls.race_bring(EXAMPLE, W["teams"]["Big 6"], W,
+                               opponent_name="Big 6")
+        self.assertTrue(report.ties, "this position has ties to test")
+        for r in report.ties:
+            if r.verdict != ls.WIN:
+                self.assertIsNotNone(
+                    r.patch,
+                    f"{r.enemy_lead} hinges on a flip and no patch was sought")
+
+    def test_the_race_resolves_ties_against_us(self):
+        """A raw (priority, speed) sort left ties to list order, which put our
+        Pokemon first and quietly handed us every flip. Their side must sort
+        ahead of ours at equal priority and speed."""
+        import inspect
+        src = inspect.getsource(ls._turn_with)
+        self.assertIn('0 if side == "them" else 1', src)
+
+
+class TestTheNestedPatch(unittest.TestCase):
+    """A losing opening is not automatically a hole.
+
+        "...ninetales-alola blizzards twice t1/t2, scizor is switched in t1, then
+         t2 bullet punch threatens kill on them; sequence starting t2 is even if
+         they attack they are pinned, as nothing else can come in to survive and
+         then win (not enough HP after switch damage)"
+
+    That is the same two-turn pin question one level down, which is what makes
+    the method recursive.
+    """
+
+    def setUp(self):
+        from _harness import setup_battle
+        from threat import build_threat_matrix
+        W = world()
+        self.b, self.ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W)
+        self.tm = build_threat_matrix(self.b, self.ms)
+        ours = [c for c in self.b.p1.roster if not c.fainted]
+        self.lead, self.back = ours[:2], ours[2:]
+
+    def _enemy(self, *names):
+        return [c for c in self.b.p2.roster if c.name in names]
+
+    def test_the_described_switch_is_the_one_found(self):
+        """Garchomp leaves, Scizor arrives. The exact patch from the example."""
+        got = ls.salvage(self.tm, self.lead, self.back,
+                         self._enemy("Mega Floette", "Whimsicott"))
+        self.assertIsNotNone(got, "no back converts the Floette lead")
+        leaving, arriving, verdict, _margin, _plan = got
+        self.assertEqual(leaving.name, "Garchomp")
+        self.assertEqual(arriving.name, "Mega Scizor")
+        self.assertEqual(verdict, ls.WIN)
+
+    def test_the_switch_in_deals_no_damage_on_the_turn_it_arrives(self):
+        """It spent its turn coming in. A patch that has the arriving Pokemon
+        attacking on turn 1 is measuring a game nobody can play.
+
+        Tested with the arriving Pokemon ALONE, because alongside a partner the
+        effect is masked -- Ninetales' Blizzard already removes the focus target,
+        so both versions strip exactly 1.0 and the test passes vacuously either
+        way. That is what the first version of this test did.
+        """
+        arriving = self.back[0]
+        theirs = self._enemy("Mega Floette", "Whimsicott")
+        ours = [arriving]
+        quiet = {id(c): 1.0 for c in ours + theirs}
+        ls._turn_with(self.tm, ours, theirs, quiet, not_acting=(arriving,))
+        loud = {id(c): 1.0 for c in ours + theirs}
+        ls._turn_with(self.tm, ours, theirs, loud)
+        self.assertEqual(sum(1.0 - quiet[id(c)] for c in theirs), 0.0,
+                         "the arriving Pokemon attacked on the turn it switched")
+        self.assertGreater(sum(1.0 - loud[id(c)] for c in theirs), 0.0)
+
+    def test_a_patched_opening_is_held_not_a_hole(self):
+        held = ls.PairResult(("a", "b"), ls.LOSS, 2, 0, -1.0,
+                             patch=("Garchomp", "Mega Scizor", 0.6))
+        hole = ls.PairResult(("c", "d"), ls.LOSS, 2, 0, -1.0)
+        self.assertTrue(held.held)
+        self.assertFalse(hole.held)
+
+    def test_the_report_separates_patched_from_unheld(self):
+        W = world()
+        report = ls.race_bring(EXAMPLE, W["teams"]["Big 6"], W,
+                               opponent_name="Big 6")
+        for r in report.patched:
+            self.assertEqual(r.verdict, ls.LOSS)
+            self.assertIsNotNone(r.patch)
+        for r in report.losses:
+            self.assertIsNone(r.patch)
+
+
+class TestTheHpBudget(unittest.TestCase):
+    """"how much HP can each given potential back pokemon out of 4 afford to lose
+    and still win vs yours, i.e., can they switch in, take damage and win, if not
+    then it is a pin."
+
+    Measured on the reference sequence, once Ninetales-Alola + Mega Scizor is
+    established against Big 6:
+
+        Mega Charizard Y   +4.6%   can switch in and win
+        Basculegion        -0.8%   cannot switch in
+        Kingambit         -18.3%   cannot switch in
+        Garchomp         -367.7%   cannot switch in
+
+    Which is the "nothing else can come in to survive and then win" clause as a
+    number -- and it shows how thin the one exception is.
+    """
+
+    def setUp(self):
+        from _harness import setup_battle
+        from threat import build_threat_matrix
+        W = world()
+        self.b, self.ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W)
+        self.tm = build_threat_matrix(self.b, self.ms)
+        self.ours = [c for c in self.b.p1.roster
+                     if c.name in ("Ninetales-Alola", "Mega Scizor")]
+        self.bench = [c for c in self.b.p2.roster
+                      if c.name not in ("Mega Floette", "Whimsicott")]
+
+    def test_most_of_their_bench_cannot_switch_in_at_all(self):
+        rows = ls.hp_budget(self.tm, self.ours, self.bench)
+        cannot = [n for n, afford, _v in rows if afford <= 0]
+        self.assertGreaterEqual(len(cannot), 3,
+                                f"expected most of the bench walled out: {rows}")
+
+    def test_a_negative_budget_means_it_dies_arriving_at_full_health(self):
+        rows = ls.hp_budget(self.tm, self.ours, self.bench)
+        for name, afford, verdict in rows:
+            if afford <= 0:
+                self.assertEqual(verdict, "cannot switch in", name)
+            else:
+                self.assertIn(verdict, ("can switch in and win",
+                                        "survives but cannot win"), name)
+
+    def test_it_is_sorted_by_who_can_best_afford_it(self):
+        rows = ls.hp_budget(self.tm, self.ours, self.bench)
+        self.assertEqual([r[1] for r in rows],
+                         sorted((r[1] for r in rows), reverse=True))
+
+
+class TestRobustToAProtectSplit(unittest.TestCase):
+    """"is this robust to one enemy attacking and one protecting to whittle down"
+
+    Every race result takes THEIR best plan. A claim that survives only the
+    both-attack column is not a claim.
+    """
+
+    def setUp(self):
+        from _harness import setup_battle
+        from threat import build_threat_matrix
+        W = world()
+        self.b, self.ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W)
+        self.tm = build_threat_matrix(self.b, self.ms)
+        self.lead = [c for c in self.b.p1.roster if not c.fainted][:2]
+
+    def test_all_three_plans_are_considered(self):
+        self.assertEqual(len(ls.ENEMY_PLANS), 3)
+        self.assertIn("both attack", ls.ENEMY_PLANS)
+
+    def test_the_worst_plan_for_us_is_the_one_reported(self):
+        theirs = [c for c in self.b.p2.roster
+                  if c.name in ("Mega Floette", "Whimsicott")]
+        _v, _od, _td, robust_margin, plan = ls.race_robust(self.tm, self.lead,
+                                                           theirs)
+        margins = []
+        for p in ls.ENEMY_PLANS:
+            hp = {id(c): 1.0 for c in self.lead + theirs}
+            for _ in range(2):
+                ls._turn_with(self.tm, self.lead, theirs, hp, plan=p)
+            margins.append(ls._outcome(hp, self.lead, theirs)[3])
+        self.assertAlmostEqual(robust_margin, min(margins))
+        self.assertIn(plan, ls.ENEMY_PLANS)
+
+    def test_a_protecting_pokemon_neither_takes_nor_deals_damage(self):
+        theirs = [c for c in self.b.p2.roster
+                  if c.name in ("Mega Floette", "Whimsicott")]
+        hp = {id(c): 1.0 for c in self.lead + theirs}
+        ls._turn_with(self.tm, self.lead, theirs, hp, plan="left protects")
+        self.assertEqual(hp[id(theirs[0])], 1.0,
+                         "the protecting Pokemon took damage")

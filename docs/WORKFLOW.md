@@ -418,6 +418,52 @@ us**, because the requirement is a lead that withstands *any* of theirs.
   without exclusion, so `Garchomp + Sneasler, back: Gallade, Garchomp` was a
   bring of three.
 
+**A speed tie is never a win.** *"Ideally your strategy does not rely on winning
+speed ties."* The race resolves **every tie against us** — the first version
+sorted by `(priority, speed)` and left ties to list order, which put our Pokémon
+first and quietly handed us every coin flip. Tied openings are named in the
+report, and any one we do not win outright goes to the patch search exactly as a
+loss does.
+
+**The patch is the same question one level down, and that recursion is the
+method.** An opening we lose is not automatically a hole:
+
+> *"if the enemy Mega Floette is led and speed ties, you can switch Garchomp into
+> the back pokemon specifically prepared for that special case to make that rare
+> tied/losing lead a win ... ninetales-alola blizzards twice t1/t2, scizor is
+> switched in t1, then t2 bullet punch threatens kill on them; sequence starting
+> t2 is even if they attack they are pinned, as nothing else can come in to
+> survive and then win (not enough HP after switch damage)"*
+
+`salvage()` searches (which of ours leaves × which back arrives): the switch-in
+eats turn 1's damage and **deals none** — it spent its turn coming in — then both
+attack from turn 2. On the reference position it finds exactly the described
+switch, **Garchomp → Mega Scizor**, and the report marks the opening *held* with
+a back slot that has a job rather than *unheld*.
+
+**Their side may split, and every result takes their best plan.** *"is this
+robust to one enemy attacking and one protecting to whittle down"* — so each race
+is run over `{both attack, left protects, right protects}` and scored on the
+worst. On the reference position their best plan is frequently a Protect split,
+which the first version never saw.
+
+**The HP budget is the pin, as a number.** *"how much HP can each given potential
+back pokemon out of 4 afford to lose and still win vs yours ... if not then it is
+a pin."* Once Ninetales-Alola + Mega Scizor is established against Big 6:
+
+| their switch-in | can afford to lose | |
+|---|---|---|
+| Mega Charizard Y | **+4.6%** | can switch in and win |
+| Basculegion | −0.8% | cannot switch in |
+| Kingambit | −18.3% | cannot switch in |
+| Garchomp | −367.7% | cannot switch in |
+
+A negative budget means it dies arriving at **full health** — that is the "not
+enough HP after switch damage" clause. Three of their four are walled out
+outright, and the one exception has a 4.6% margin, which is also where the
+mega-bulk correction matters most: if Charizard holds their mega slot it is
+bulkier and that margin grows.
+
 **The sharpest known limitation: which of their Pokémon holds the Mega slot.**
 One Mega per team, chosen at preview *after* seeing your four. Base Mega Floette
 is speed **111** and its Mega is **166 — exactly Garchomp**. On Big 6 as loaded
