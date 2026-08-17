@@ -124,8 +124,11 @@ rem                      accumulate, so you can run --pick "6" tonight and
 rem                      --pick "4,10,12" tomorrow without redoing #6. The
 rem                      workbook is rebuilt each time to include everything
 rem                      searched so far. Omit to search the top --keep.
-rem   --list             run stage 1 only, print the ranked teams, and stop --
-rem                      so you can look before spending the night on stage 2.
+rem   --stage1-only      run stage 1 only, print the ranked teams, and stop --
+rem   (--list, --stage1)  so you can look before spending the night on stage 2.
+rem                      It writes shortlist.json, which --stage2-only reads,
+rem                      and stops before --substitute as well as before the
+rem                      deep search.
 rem   --stage2-only      SKIP stage 1 entirely and deep-search the shortlist
 rem                      that is already on disk. This is the flag for coming
 rem                      back later: pair it with --pick to spend the night on
@@ -213,6 +216,13 @@ if /i "%~1"=="--evaluation"    (set EVALN=--evaluation %~2& set GENFLAGS=1& shif
 if /i "%~1"=="--punish-floor"  (set PUNISHSCR=--punish-screen %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
+rem Same thing under the name that matches --stage2-only. "--list" reads as
+rem "print something", but it is the stage-1-only switch: it runs the whole
+rem generation and screen, writes shortlist.json, and stops before the deep
+rem search (and before --substitute).
+if /i "%~1"=="--stage1-only" (set LISTONLY=1& shift & goto parse)
+if /i "%~1"=="--stage1"      (set LISTONLY=1& shift & goto parse)
+if /i "%~1"=="--skip-stage2" (set LISTONLY=1& shift & goto parse)
 if /i "%~1"=="--stage2-only"  (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--stage2"       (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--skip-stage1"  (set STAGE2ONLY=1& shift & goto parse)
