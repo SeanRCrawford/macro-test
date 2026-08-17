@@ -65,6 +65,7 @@ enemy's own attacks may deny. Every verdict here is a HYPOTHESIS the audit
 should be pointed at -- which is the division of labour, not a shortcoming: the
 cheap thing proposes, the expensive thing decides.
 """
+import re
 from dataclasses import dataclass, field
 
 from damage import hits_ally, is_spread_move
@@ -242,6 +243,19 @@ def scan(matrix, battle, lead, back, opponent_name=""):
     return report
 
 
+def _legal_default_sets(our4, world):
+    """{name: {"item": ...}} pinning OUR bring to its most-used LEGAL item.
+
+    `_harness.setup_battle` reads `make_team`'s raw usage default when no
+    `sets` override is given, which does not filter Regulation MB's banned
+    items (Assault Vest, the three Choice items) -- so a Pokemon whose #1
+    recorded item happens to be one of those would otherwise field it in
+    every cheap-stage call below. `default_item` already skips them; this
+    just turns that into an override for every member of the bring.
+    """
+    return {name: {"item": default_item(name, world)} for name in our4}
+
+
 def scan_bring(our4, enemy_roster, world, lead_index=(0, 1), opponent_name=""):
     """Convenience wrapper: build the position, scan it, return the report.
 
@@ -250,7 +264,8 @@ def scan_bring(our4, enemy_roster, world, lead_index=(0, 1), opponent_name=""):
     """
     from _harness import setup_battle
     from threat import build_threat_matrix
-    b, ms = setup_battle(list(our4), list(enemy_roster), world)
+    b, ms = setup_battle(list(our4), list(enemy_roster), world,
+                         sets=_legal_default_sets(our4, world))
     matrix = build_threat_matrix(b, ms)
     ours = [c for c in b.p1.roster if not c.fainted]
     lead = [ours[i] for i in lead_index]
@@ -823,7 +838,8 @@ def enemy_hp_budget(our4, enemy_roster, world, turns=2):
     """
     from _harness import setup_battle
     from threat import build_threat_matrix
-    b, ms = setup_battle(list(our4), list(enemy_roster), world)
+    b, ms = setup_battle(list(our4), list(enemy_roster), world,
+                         sets=_legal_default_sets(our4, world))
     matrix = build_threat_matrix(b, ms)
     ours = [c for c in b.p1.roster if not c.fainted]
     established = [ours[0], ours[2]] if len(ours) > 2 else ours
@@ -905,18 +921,6 @@ def move_plans(actor, moveset, foes, allies, typechart, field, battle):
     return out
 
 
-# A removal is worth far more than the HP it costs, in both directions. The
-# first objective was plain net HP, and measured on Ninetales-Alola + Garchomp
-# against their Garchomp + Kingambit it chose Garchomp Earthquake -- 71% onto
-# Kingambit and 48% onto OUR OWN NINETALES -- because +23% net beat Rock Slide's
-# Rock-into-Dark/Steel. Kingambit then removed the Ninetales it had damaged. A
-# net-HP objective cannot see that crossing a KO threshold is categorically
-# different from the HP it costs.
-KO_VALUE = 2.0          # removing one of theirs
-SELF_KO_COST = 4.0      # losing one of ours, weighted harder: it forfeits every
-                        # future turn that Pokemon would have acted on
-
-
 def _apply(hp, tid, dealt, sashed):
     """Damage one target, honouring Focus Sash / Sturdy. Returns HP removed.
 
@@ -932,44 +936,6 @@ def _apply(hp, tid, dealt, sashed):
         after = 0.01
     hp[tid] = max(0.0, after)
     return before - hp[tid]
-
-
-def _best_joint(plans_by_actor, hp, foe_ids, ally_ids, sashed=frozenset(),
-                danger=None):
-    """Pick one plan per actor, valuing REMOVALS rather than raw HP.
-
-    `danger` maps an ally's id to the largest fraction a live foe can take off it
-    this turn -- the HP budget question, pointed at our own side. Charging a plan
-    that pushes an ally INTO that range is what finally stops the
-    Earthquake-into-our-own-partner choice: the KO penalty alone did not, because
-    Earthquake left Ninetales-Alola on 52% rather than killing it, and Kingambit
-    did the killing on the same turn.
-    """
-    import itertools
-    actors = list(plans_by_actor)
-    best = None
-    for combo in itertools.product(*(plans_by_actor[a] for a in actors)):
-        pool = dict(hp)
-        value = 0.0
-        for _move, hits, _prio, _spread in combo:
-            for tid, d in hits.items():
-                took = _apply(pool, tid, d, sashed)
-                if tid in foe_ids:
-                    value += took
-                    if pool[tid] <= 0 < hp.get(tid, 0.0):
-                        value += KO_VALUE
-                else:
-                    value -= took
-                    if pool[tid] <= 0 < hp.get(tid, 0.0):
-                        value -= SELF_KO_COST
-                    elif danger:
-                        # Did we hand a foe the KO it did not have?
-                        threat_to = danger.get(tid, 0.0)
-                        if pool[tid] <= threat_to < hp.get(tid, 0.0):
-                            value -= SELF_KO_COST
-        if best is None or value > best[0]:
-            best = (value, combo)
-    return dict(zip(actors, best[1])) if best else {}
 
 
 def race_speed(c, field, side):
@@ -1014,199 +980,27 @@ def setup_moves(moveset):
     return found
 
 
-def move_turn(ms, typechart, field, battle, ours, theirs, hp, plan="both attack",
-              not_acting=(), log=None, their_setup=None, sashed=frozenset()):
-    """One turn on COMMITTED MOVES. Mutates `hp`; appends lines to `log`.
-
-    Every clause is load-bearing:
-      * each side picks ONE move per Pokemon, jointly, valuing REMOVALS
-      * a spread move hits both foes -- and our own partner when `allAdjacent`,
-        which is what makes a Flying or Levitate partner worth something next to
-        Earthquake
-      * order is by move PRIORITY then EFFECTIVE speed (Mega stats, weather,
-        Tailwind, Scarf), with ties broken against us
-      * `their_setup` spends one of their turns on Tailwind or Trick Room instead
-        of attacking, which is a real and often better use of it
-      * a Pokemon whose HP reached zero does not act: the pin
-      * Focus Sash and Sturdy leave a survivor on a sliver, and a Pokemon on a
-        sliver still gets its turn
-    """
-    live_ours = [c for c in ours if hp[id(c)] > 0]
-    live_theirs = [c for c in theirs if hp[id(c)] > 0]
-    if not live_ours or not live_theirs:
-        return
-    protecting = set()
-    if plan == "left protects" and live_theirs:
-        protecting.add(id(live_theirs[0]))
-    elif plan == "right protects" and len(live_theirs) > 1:
-        protecting.add(id(live_theirs[1]))
-
-    setter = None
-    if their_setup:
-        name, mon = their_setup
-        if hp.get(id(mon), 0.0) > 0 and id(mon) not in protecting:
-            setter = (name, mon)
-
-    our_ids = {id(c) for c in ours}
-    their_ids = {id(c) for c in theirs}
-
-    our_plans = {c: move_plans(c, ms.get(c.name) or [], live_theirs, live_ours,
-                               typechart, field, battle)
-                 for c in live_ours if not any(c is x for x in not_acting)}
-    our_plans = {c: p for c, p in our_plans.items() if p}
-    their_plans = {c: move_plans(c, ms.get(c.name) or [], live_ours, live_theirs,
-                                 typechart, field, battle)
-                   for c in live_theirs
-                   if id(c) not in protecting
-                   and not (setter and c is setter[1])}
-    their_plans = {c: p for c, p in their_plans.items() if p}
-
-    # What each side's Pokemon is already in danger from THIS TURN, so neither
-    # side chooses a move that walks its own partner into a KO it was not in.
-    def _danger_on(victims, attackers_plans):
-        out = {}
-        for _actor, plans in attackers_plans.items():
-            for _m, hits, _p, _sp in plans:
-                for v in victims:
-                    d = hits.get(id(v), 0.0)
-                    if d > out.get(id(v), 0.0):
-                        out[id(v)] = d
-        return out
-
-    our_danger = _danger_on(live_ours, their_plans)
-    their_danger = _danger_on(live_theirs, our_plans)
-
-    chosen = {}
-    if our_plans:
-        chosen.update(_best_joint(our_plans, hp, their_ids, our_ids, sashed,
-                                  danger=our_danger))
-    if their_plans:
-        chosen.update(_best_joint(their_plans, hp, our_ids, their_ids, sashed,
-                                  danger=their_danger))
-
-    def key(actor, prio):
-        side = "p2" if id(actor) in their_ids else "p1"
-        return (-prio, -race_speed(actor, field, side),
-                0 if side == "p2" else 1)
-
-    order = sorted(chosen.items(), key=lambda kv: key(kv[0], kv[1][2]))
-    for actor, (move, hits, _prio, spread) in order:
-        if hp[id(actor)] <= 0:
-            if log is not None:
-                log.append(f"    {actor.name} was removed before it acted "
-                           f"(it would have used {move.name}) -- PINNED")
-            continue
-        landed = []
-        for tid, d in hits.items():
-            if tid in protecting:
-                landed.append("blocked by Protect")
-                continue
-            if hp.get(tid, 0.0) <= 0:
-                continue
-            before = hp[tid]
-            took = _apply(hp, tid, d, sashed)
-            name = next((c.name for c in list(ours) + list(theirs)
-                         if id(c) == tid), "?")
-            note = ""
-            if hp[tid] <= 0:
-                note = " [FAINTS]"
-            elif before >= 1.0 and before - d <= 0 < hp[tid]:
-                note = " [held on -- Focus Sash/Sturdy]"
-            landed.append(f"{name} {before * 100:.0f}->{hp[tid] * 100:.0f}%"
-                          f" (-{took * 100:.0f}%){note}")
-        if log is not None:
-            log.append(f"    {actor.name} {move.name}"
-                       f"{' (spread)' if spread else ''}: "
-                       + ", ".join(landed or ["nothing to hit"]))
-    if setter and log is not None:
-        log.append(f"    {setter[1].name} {setter[0]} -- speed control, "
-                   f"no damage")
-    if log is not None:
-        for c in live_theirs:
-            if id(c) in protecting:
-                log.append(f"    {c.name} Protects")
-
-
-def move_race(ms, typechart, field, battle, ours, theirs, turns=2,
-              not_acting_turn1=(), want_log=False):
-    """`race`, on committed moves, over THEIR whole strategy space.
-
-    Enumerated for them, and the worst for us is what is reported:
-
-      * a Protect plan PER TURN, with nobody Protecting twice in a row -- the
-        first version fixed one plan across both turns, so Mega Floette Protected
-        twice, which is illegal and meant the Earthquake meant to remove it never
-        landed
-      * Tailwind (or Trick Room) on either turn instead of attacking, which is
-        the line that makes *"mega floette outspeed (no speed tie) and easily KO
-        Garchomp"* -- previously unrepresentable, since Status moves are not in
-        `move_plans` at all
-
-    Returns (verdict, our_dead, their_dead, margin, description, log).
-    """
-    from copy import copy
-
-    sashed = sash_ids(list(ours) + list(theirs))
-    schedules = [(a, b) for a in ENEMY_PLANS for b in ENEMY_PLANS
-                 if a == "both attack" or b == "both attack" or a != b]
-    # Their setup options: (move name, user, which turn they spend on it).
-    setups = [None]
-    for c in theirs:
-        for name in setup_moves(ms.get(c.name)):
-            for turn in range(max(1, turns)):
-                setups.append((name, c, turn))
-
-    worst = None
-    for schedule in schedules:
-        for setup in setups:
-            hp = {id(c): 1.0 for c in list(ours) + list(theirs)}
-            log = [] if want_log else None
-            # Their Tailwind is a real field change, so it has to be applied to a
-            # COPY of the field and then seen by the speed ordering.
-            live_field = copy(field)
-            for i in range(max(1, turns)):
-                plan = schedule[min(i, len(schedule) - 1)]
-                this_setup = None
-                if setup and setup[2] == i:
-                    this_setup = (setup[0], setup[1])
-                if log is not None:
-                    bits = [f"  Turn {i + 1}", f"their plan: {plan}"]
-                    if this_setup:
-                        bits.append(f"{this_setup[1].name} sets {this_setup[0]}")
-                    log.append("  ".join(bits))
-                move_turn(ms, typechart, live_field, battle, ours, theirs, hp,
-                          plan=plan,
-                          not_acting=not_acting_turn1 if i == 0 else (),
-                          log=log, their_setup=this_setup, sashed=sashed)
-                if this_setup and this_setup[0] == "Tailwind":
-                    live_field = copy(live_field)
-                    live_field.tailwind_p2 = 4
-                elif this_setup and this_setup[0] == "Trick Room":
-                    live_field = copy(live_field)
-                    live_field.trick_room = 5
-            verdict, od, td, margin = _outcome(hp, ours, theirs)
-            if worst is None or margin < worst[3]:
-                desc = " then ".join(schedule)
-                if setup:
-                    desc += f" (+{setup[1].name} {setup[0]} turn {setup[2] + 1})"
-                worst = (verdict, od, td, margin, desc, log)
-    return worst
-
-
 def race_bring(our4, enemy_roster, world, opponent_name="", turns=2,
                want_logs=False):
     """Our bring-4, lead first, against all 15 of their lead pairs.
 
-    On COMMITTED MOVES (`move_race`), so a spread move hits both of theirs and
-    an `allAdjacent` one hits our own partner. The threat matrix is still built,
-    but only for the questions that genuinely are per-pair: speed ties, and the
-    HP budget behind them.
+    Still scored on the calibrated threat-matrix race (`race_robust`) -- this is
+    the CHEAP narrowing stage the module's own docstring describes, and it stays
+    arithmetic on purpose. What changed: the turn-by-turn LINES, when asked for,
+    used to come from `move_race` -- a second, hand-rolled damage/turn-resolution
+    model with its own move-selection heuristic (see the warning that used to sit
+    on `_best_joint`: it would Earthquake its own partner for 48% to gain 23% net
+    on a foe). Now the lines are read off an actual `Battle.run_turn`, played
+    through `lead_sim`, so what you see explaining the score is the same engine
+    the detailed report and the workbook use -- one damage model, not two.
     """
     import itertools
 
+    import lead_sim as sim
     from _harness import setup_battle
     from threat import build_threat_matrix
-    b, ms = setup_battle(list(our4), list(enemy_roster), world)
+    our_sets = _legal_default_sets(our4, world)
+    b, ms = setup_battle(list(our4), list(enemy_roster), world, sets=our_sets)
     matrix = build_threat_matrix(b, ms)
     ours = [c for c in b.p1.roster if not c.fainted]
     lead, back = ours[:2], ours[2:]
@@ -1215,19 +1009,17 @@ def race_bring(our4, enemy_roster, world, opponent_name="", turns=2,
                         back=tuple(c.name for c in back),
                         opponent=opponent_name)
     for pair in itertools.combinations(theirs, 2):
-        # SCORED on the threat-matrix race, which is calibrated (31 of 275 pass).
-        # NOT scored on `move_race`, even though its model is the better one --
-        # see the warning on `_best_joint`: its move choice will Earthquake its
-        # own partner for half its HP to gain 23% net on a foe, and a scorer that
-        # plays like that is not a scorer. `move_race` supplies the LINES, which
-        # is what it is trustworthy for.
         verdict, od, td, margin, plan = race_robust(matrix, lead, pair,
                                                    turns=turns)
         log = []
         if want_logs:
-            _v, _o, _t, _m, _p, log = move_race(
-                ms, b.typechart, b.field, b, lead, list(pair), turns=turns,
-                want_log=True)
+            enemy4 = [c.name for c in pair] + [c.name for c in theirs
+                                               if c not in pair]
+            battle, movesets, _s = sim.build_position(
+                [c.name for c in ours], enemy4, world, our_sets=our_sets,
+                optimise=False)
+            _v, _o, _t, _m, _d, log = sim.race(
+                battle, movesets, turns=turns, breadth="cheap", want_log=True)
             log = log or []
         tie = bool(speed_ties(matrix, lead, pair))
         patch = None
@@ -1243,21 +1035,6 @@ def race_bring(our4, enemy_roster, world, opponent_name="", turns=2,
             patch=patch, log=log or []))
     report.results.sort(key=lambda r: r.margin)
     return report
-
-
-def move_salvage(ms, typechart, field, battle, lead, back, theirs, turns=3):
-    """`salvage`, on committed moves. (leaving, arriving, margin) or None."""
-    best = None
-    for leaving in lead:
-        stayer = [c for c in lead if c is not leaving]
-        for arriving in back:
-            ours = stayer + [arriving]
-            verdict, _od, _td, margin, _plan, _log = move_race(
-                ms, typechart, field, battle, ours, theirs, turns=turns,
-                not_acting_turn1=(arriving,))
-            if verdict == WIN and (best is None or margin > best[2]):
-                best = (leaving, arriving, margin)
-    return best
 
 
 def describe_race(report, limit=6):
@@ -1355,15 +1132,35 @@ def race_all_megas(our4, enemy_roster, world, opponent_name="", turns=2,
 #      get the new pokemon in at 100% HP, assuming its still a winning line
 #      afterwards (3v4 for instance)"
 #
-# Four plays, and the last two were missing entirely. SACRIFICE is the one worth
-# spelling out: deliberately losing the pinned Pokemon buys a replacement that
-# arrives at FULL health and un-chipped, which is often a better turn 2 than a
-# switch that arrives having eaten both attacks. A 3v4 you win is a win.
+#     "I don't think this uses the full simulator logic ... It MUST be properly
+#      linked. This is meant to be a useful and accurate tool, and there is no
+#      room for a redundant, useless simulation - use the full battle simulator
+#      logic."
+#
+# The four plays used to be four hand-rolled search branches, because the old
+# turn resolver (`move_turn`, since removed) never itself considered Protect as
+# an option and had no idea what a fainted Pokemon's replacement should be --
+# so SWITCH+PROTECT and SACRIFICE had to be special-cased from outside. Neither
+# needs a special case against a real `Battle`: `lead_sim.candidate_joints`
+# always offers Protect as one of the stayer's options and picks it when it
+# scores best, and `Battle._replace_fainted` sends in the strategically-best
+# bench Pokemon (not just "next in the list") the instant a lead faints. So
+# STAY already covers "stay and attack" AND "stay, and one Protects" AND "one
+# faints, the best replacement arrives at 100% next turn" -- whichever of those
+# the engine finds is actually best -- and SWITCH covers "switch, and the
+# stayer either attacks or Protects, whichever is better". Two searches, not
+# four, and both are searches the simulator itself runs rather than arithmetic
+# guessing what a real turn would do.
+#
+# The kind label is still detected from what actually happened -- SWITCH_PROTECT
+# and SACRIFICE are not distinct SEARCHES anymore, but they are still distinct
+# OUTCOMES worth naming in a report, and the played-out log says which one
+# occurred.
 
-STAY = "stay"                     # both leads attack
+STAY = "stay"                     # both leads attack (Protect is one of their options)
 SWITCH = "switch"                 # one leaves, a back arrives and eats the turn
-SWITCH_PROTECT = "switch+protect"  # and the staying slot Protects, so it is free
-SACRIFICE = "sacrifice"           # let it faint; the replacement arrives at 100%
+SWITCH_PROTECT = "switch+protect"  # ...and the staying slot Protected, so it was free
+SACRIFICE = "sacrifice"           # a lead fainted; the best replacement arrived at 100%
 
 PLAYS = (STAY, SWITCH, SWITCH_PROTECT, SACRIFICE)
 
@@ -1382,179 +1179,123 @@ class Play:
 
     @property
     def label(self):
-        if self.kind == STAY:
-            return "stay in and attack"
         if self.kind == SACRIFICE:
             return f"let {self.leaving} faint, bring {self.arriving} in at 100%"
         if self.kind == SWITCH_PROTECT:
             return (f"switch {self.leaving} -> {self.arriving}, "
                     f"Protect the other slot")
-        return f"switch {self.leaving} -> {self.arriving}"
+        if self.kind == SWITCH:
+            return f"switch {self.leaving} -> {self.arriving}"
+        return "stay in and attack"
 
     @property
     def guaranteed(self):
         """It wins whatever they do, INCLUDING losing every speed tie.
 
-        `move_race` already resolves ties against us and takes their best plan
-        over Protect splits and setup, so a WIN here is a guarantee in the sense
-        that matters: it does not need a coin flip to land.
+        `lead_sim.race` takes their best strategy over the whole enumeration and
+        `Battle` resolves every exact speed tie against us on its own rule, so a
+        WIN here is a guarantee in the sense that matters: it does not need a
+        coin flip to land.
         """
         return self.verdict == WIN
 
 
-def _protect_plan(ms, typechart, field, battle, staying, arriving, theirs,
-                  turns, sashed, want_log):
-    """Turn 1: `arriving` switches in, `staying` Protects. Turn 2: both attack.
+def _refine_play_kind(kind, leaving, arriving, log):
+    """Read what ACTUALLY happened off the played-out log, so a Play is labelled
+    by its real outcome rather than by which search produced it.
 
-    Protecting the slot that stays is the other half of the salvage, and it is
-    often what makes the switch free: the arriving Pokemon eats the turn anyway,
-    so the only thing left to lose is the stayer, and Protect takes it off the
-    table. Modelled by having the stayer do nothing on turn 1 and be untargetable.
+    A SWITCH whose stayer Protected turn 1 is reported as SWITCH_PROTECT; a STAY
+    (or SWITCH) during which one of our leads fainted and was replaced is
+    reported as SACRIFICE, with `leaving`/`arriving` filled in from the
+    replacement line Battle itself writes. Best-effort text matching against the
+    engine's own log lines -- if nothing matches, the original kind stands.
     """
-    ours = [staying, arriving]
-    hp = {id(c): 1.0 for c in ours + list(theirs)}
-    log = [] if want_log else None
-    worst = None
-    schedules = [(a, b) for a in ENEMY_PLANS for b in ENEMY_PLANS
-                 if a == "both attack" or b == "both attack" or a != b]
-    for schedule in schedules:
-        hp = {id(c): 1.0 for c in ours + list(theirs)}
-        log = [] if want_log else None
-        for i in range(max(1, turns)):
-            plan = schedule[min(i, len(schedule) - 1)]
-            if log is not None:
-                log.append(f"  Turn {i + 1}  their plan: {plan}")
-            if i == 0:
-                if log is not None:
-                    log.append(f"    {staying.name} Protects")
-                    log.append(f"    {arriving.name} switches in")
-                # Both of ours are untouchable this turn: one Protects, the other
-                # is arriving into a slot whose damage it absorbs -- so model it
-                # as the stayer taking nothing and the arriving taking the hits
-                # aimed at that slot.
-                move_turn(ms, typechart, field, battle, [arriving], theirs, hp,
-                          plan=plan, not_acting=(arriving,), log=log,
-                          sashed=sashed)
-            else:
-                move_turn(ms, typechart, field, battle, ours, theirs, hp,
-                          plan=plan, log=log, sashed=sashed)
-        verdict, od, td, margin = _outcome(hp, ours, theirs)
-        if worst is None or margin < worst[3]:
-            worst = (verdict, od, td, margin, " then ".join(schedule), log, hp)
-    return worst
+    text = "\n".join(log or [])
+    if kind == SWITCH:
+        # The stayer is whichever of our active Pokemon isn't `leaving` (which
+        # just switched out and cannot itself Protect); its Protect line reads
+        # "<name> protects itself!" and always sits before "--- Turn 2 ---".
+        turn1_text = text.split("--- Turn 2 ---")[0]
+        for line in turn1_text.splitlines():
+            stripped = line.strip()
+            if (stripped.endswith("protects itself!")
+                    and not stripped.startswith(arriving)):
+                return SWITCH_PROTECT, leaving, arriving
+        return kind, leaving, arriving
+    m = re.search(r"p1 sends in (.+?) \(replacing fainted (.+?)\)", text)
+    if m:
+        return SACRIFICE, m.group(2), m.group(1)
+    return kind, leaving, arriving
 
 
-def _sacrifice_plan(ms, typechart, field, battle, doomed, staying, arriving,
-                    theirs, turns, sashed, want_log):
-    """Turn 1: `doomed` and `staying` both attack; `doomed` dies; `arriving`
-    replaces it at FULL health for turn 2.
+def plays_for(battle, movesets, lead_names, back_names, turns=2,
+              want_log=False, breadth="full"):
+    """Every play available against one specific enemy opening, best first.
 
-    The play that was missing. Letting the pinned Pokemon faint costs a Pokemon
-    and buys a replacement that has eaten nothing -- which beats a switch whenever
-    the switch-in would have arrived damaged enough to lose anyway.
-    """
-    worst = None
-    schedules = [(a, b) for a in ENEMY_PLANS for b in ENEMY_PLANS
-                 if a == "both attack" or b == "both attack" or a != b]
-    for schedule in schedules:
-        hp = {id(c): 1.0 for c in [doomed, staying, arriving] + list(theirs)}
-        log = [] if want_log else None
-        if log is not None:
-            log.append(f"  Turn 1  their plan: {schedule[0]}")
-        move_turn(ms, typechart, field, battle, [doomed, staying], theirs, hp,
-                  plan=schedule[0], log=log, sashed=sashed)
-        # It is a sacrifice only if it actually died; otherwise this is `stay`.
-        if hp[id(doomed)] > 0:
-            continue
-        if log is not None:
-            log.append(f"  {doomed.name} fainted -- {arriving.name} comes in at "
-                       f"100%")
-            log.append(f"  Turn 2  their plan: {schedule[1]}")
-        ours2 = [staying, arriving]
-        move_turn(ms, typechart, field, battle, ours2, theirs, hp,
-                  plan=schedule[1], log=log, sashed=sashed)
-        # Scored on the THREE Pokemon that were involved, so the sacrificed one
-        # counts against us -- a 3v4 we win is a win, but it is not free.
-        allours = [doomed, staying, arriving]
-        verdict, od, td, margin = _outcome(hp, allours, theirs)
-        if worst is None or margin < worst[3]:
-            worst = (verdict, od, td, margin, " then ".join(schedule), log, hp)
-    return worst
-
-
-def mop_up(ms, typechart, field, battle, our_survivors, their_survivors,
-           our_bench, their_bench, turns=2):
-    """After the opening: do our remaining Pokemon beat theirs?
-
-        "It's also important that your backs can mop up and win vs remaining
-         pokemon after the 2 turn sequences."
-
-    A two-turn race between whoever we have left (survivors first, then bench)
-    and whoever they have left. Returns (verdict, margin, text). Counting only
-    Pokemon that are actually still alive is the point: an opening that trades
-    three-for-three and leaves us with nothing that beats their last is not a win,
-    and the two-turn window alone cannot see that.
-    """
-    ours = ([c for c in our_survivors] + [c for c in our_bench])[:2]
-    theirs = ([c for c in their_survivors] + [c for c in their_bench])[:2]
-    if not ours:
-        return LOSS, -1.0, "nothing left on our side"
-    if not theirs:
-        return WIN, 1.0, "their side is wiped"
-    verdict, od, td, margin, plan, _log = move_race(
-        ms, typechart, field, battle, ours, theirs, turns=turns)
-    text = (f"{' + '.join(c.name for c in ours)} vs "
-            f"{' + '.join(c.name for c in theirs)}: {verdict}"
-            f" (margin {margin:+.2f}, their best: {plan})")
-    return verdict, margin, text
-
-
-def plays_for(ms, typechart, field, battle, lead, back, theirs, turns=2,
-              want_log=False, sashed=None):
-    """Every play available against one enemy opening, best first.
-
-    STAY, then each SWITCH, each SWITCH+PROTECT, and each SACRIFICE. Ranked by
+    `battle` must already be built with the enemy pair being tested as its
+    active `p2` (see `full_report` / `item_fixes`, which build a fresh position
+    per opening via `lead_sim.build_position`). STAY and each SWITCH are raced
+    through `lead_sim.race`, i.e. `Battle.run_turn` end to end -- the real
+    simulator decides who Protects, who gets focused, whether a Focus Sash
+    holds, and which bench Pokemon is the best reply to a faint. Ranked by
     verdict then margin, so a guaranteed win sorts above a good-looking gamble.
     """
-    if sashed is None:
-        sashed = sash_ids(list(lead) + list(back) + list(theirs))
+    import lead_sim as sim
+
     out = []
+    v, _od, _td, m, plan, log = sim.race(battle, movesets, turns=turns,
+                                         breadth=breadth, want_log=want_log)
+    kind, leaving, arriving = _refine_play_kind(STAY, "", "", log)
+    out.append(Play(kind=kind, leaving=leaving, arriving=arriving, verdict=v,
+                    margin=m, their_plan=plan, log=log or []))
 
-    v, _od, _td, m, plan, log = move_race(
-        ms, typechart, field, battle, lead, theirs, turns=turns,
-        want_log=want_log)
-    out.append(Play(kind=STAY, verdict=v, margin=m, their_plan=plan,
-                    log=log or []))
-
-    for leaving in lead:
-        stayer = [c for c in lead if c is not leaving][0]
-        for arriving in back:
-            v2, _o, _t, m2, plan2, log2 = move_race(
-                ms, typechart, field, battle, [stayer, arriving], theirs,
-                turns=turns, not_acting_turn1=(arriving,), want_log=want_log)
-            out.append(Play(kind=SWITCH, leaving=leaving.name,
-                            arriving=arriving.name, verdict=v2, margin=m2,
-                            their_plan=plan2, log=log2 or []))
-
-            got = _protect_plan(ms, typechart, field, battle, stayer, arriving,
-                                theirs, turns, sashed, want_log)
-            if got:
-                v3, _o3, _t3, m3, plan3, log3, _hp3 = got
-                out.append(Play(kind=SWITCH_PROTECT, leaving=leaving.name,
-                                arriving=arriving.name, verdict=v3, margin=m3,
-                                their_plan=plan3, log=log3 or []))
-
-            sac = _sacrifice_plan(ms, typechart, field, battle, leaving, stayer,
-                                  arriving, theirs, turns, sashed, want_log)
-            if sac:
-                v4, _o4, _t4, m4, plan4, log4, _hp4 = sac
-                out.append(Play(kind=SACRIFICE, leaving=leaving.name,
-                                arriving=arriving.name, verdict=v4, margin=m4,
-                                their_plan=plan4, log=log4 or []))
+    for leaving in lead_names:
+        for arriving in back_names:
+            v2, _o, _t, m2, plan2, log2 = sim.race(
+                battle, movesets, turns=turns, breadth=breadth,
+                our_switch=(leaving, arriving), want_log=want_log)
+            kind2, lv2, ar2 = _refine_play_kind(SWITCH, leaving, arriving, log2)
+            out.append(Play(kind=kind2, leaving=lv2, arriving=ar2, verdict=v2,
+                            margin=m2, their_plan=plan2, log=log2 or []))
 
     rank = {WIN: 0, EVEN: 1, LOSS: 2}
     out.sort(key=lambda p: (rank.get(p.verdict, 3), -p.margin))
     return out
+
+
+def mop_up(our_names, their_names, world, sets=None, turns=2):
+    """After the opening: do our remaining Pokemon beat theirs, on the real
+    simulator?
+
+        "It's also important that your backs can mop up and win vs remaining
+         pokemon after the 2 turn sequences."
+
+    An approximation in the same place the old version was one: it re-fights at
+    fresh full HP rather than reading true HP off the specific played-out line,
+    because `plays_for` does not keep battle state per candidate play. What
+    changed is the fight itself -- `Battle.run_turn`, not hand-rolled arithmetic.
+    Counting only Pokemon that are actually still around is still the point: an
+    opening that trades evenly and leaves us with nothing that beats their last
+    is not a win, and the two-turn window alone cannot see that.
+    """
+    import lead_sim as sim
+
+    ours = list(our_names)[:2]
+    theirs = list(their_names)[:2]
+    if not ours:
+        return LOSS, -1.0, "nothing left on our side"
+    if not theirs:
+        return WIN, 1.0, "their side is wiped"
+    if len(ours) < 2 or len(theirs) < 2:
+        return EVEN, 0.0, (f"{' + '.join(ours)} vs {' + '.join(theirs)}: too "
+                           f"few Pokemon left on one side to simulate a 2v2")
+    battle, movesets, _s = sim.build_position(
+        ours, theirs, world, our_sets=sets, optimise=(sets is None))
+    v, _od, _td, m, plan, _log = sim.race(battle, movesets, turns=turns,
+                                          breadth="cheap", want_log=False)
+    text = (f"{' + '.join(ours)} vs {' + '.join(theirs)}: {v}"
+            f" (margin {m:+.2f}, their best: {plan})")
+    return v, m, text
 
 
 def switch_in_table(ms, typechart, field, battle, ours_out, their_bench,
@@ -1648,44 +1389,77 @@ def killing_types(ms, typechart, field, battle, ours, theirs):
     return [t for t, _v in sorted(tally.items(), key=lambda kv: -kv[1])]
 
 
+def _optimised_sets(our4, enemy_roster, world):
+    """Our4's best legal moveset and item against this whole enemy roster,
+    computed once and reused across every lead pair.
+
+    Optimising per lead pair would be both needlessly expensive and wrong: a
+    real team is built once, before team preview, not re-drafted after seeing
+    which two of six the opponent happens to lead with. `lead_sim.optimised_*`
+    already filters Regulation MB's banned items (Assault Vest, Choice Band /
+    Specs / Scarf), so nothing built through this helper can carry one.
+    """
+    import lead_sim as sim
+    moves = sim.optimised_movesets(list(our4), world,
+                                   enemy_names=list(enemy_roster))
+    items = sim.optimised_items(list(our4), world,
+                                enemy_names=list(enemy_roster))
+    sets = {}
+    for name in our4:
+        item, item_moves = items.get(name) or (None, None)
+        spec = {"moves": item_moves or moves.get(name)}
+        if item:
+            spec["item"] = item
+        sets[name] = {k: v for k, v in spec.items() if v}
+    return sets
+
+
 def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
     """Items that turn a losing opening into a held one. [(mon, item, play)].
 
     Tries each candidate on each of our four, one at a time -- a single change,
     so the answer is actionable rather than a wholesale re-spread -- plus the
-    type-resist berry for whichever type is actually killing us.
+    type-resist berry for whichever type is actually killing us. Every trial is
+    played out on the real simulator (`plays_for`, `Battle.run_turn`), at CHEAP
+    breadth: this is a search among many candidates, not the final verdict, and
+    a candidate worth taking should be re-checked at full breadth (which
+    `full_report` already does for whatever bring is eventually chosen).
     """
     from optimize_sets import TYPE_RESIST_BERRY
 
-    from _harness import setup_battle
+    import lead_sim as sim
+    if not all(n in enemy_roster for n in their_lead):
+        return []
+    base_sets = _optimised_sets(our4, enemy_roster, world)
+    enemy4 = list(their_lead) + [n for n in enemy_roster if n not in their_lead]
+    lead, back = list(our4[:2]), list(our4[2:])
 
-    def run(sets):
-        b, ms = setup_battle(list(our4), list(enemy_roster), world, sets=sets)
-        ours = [c for c in b.p1.roster if not c.fainted]
-        lead, back = ours[:2], ours[2:]
-        theirs = [c for c in b.p2.roster if c.name in their_lead][:2]
-        if len(theirs) < 2:
-            return None
-        return plays_for(ms, b.typechart, b.field, b, lead, back, theirs,
-                         turns=turns)[0]
+    def run(overrides):
+        sets = {k: dict(v) for k, v in base_sets.items()}
+        for name, ov in overrides.items():
+            sets.setdefault(name, {}).update(ov)
+        battle, movesets, _s = sim.build_position(our4, enemy4, world,
+                                                   our_sets=sets, optimise=False)
+        return plays_for(battle, movesets, lead, back, turns=turns,
+                         breadth="cheap")[0]
 
     base = run({})
-    if base is None or base.verdict == WIN:
+    if base.verdict == WIN:
         return []
 
-    b0, ms0 = setup_battle(list(our4), list(enemy_roster), world)
-    ours0 = [c for c in b0.p1.roster if not c.fainted]
-    theirs0 = [c for c in b0.p2.roster if c.name in their_lead][:2]
+    battle0, movesets0, _s0 = sim.build_position(
+        our4, enemy4, world, our_sets=base_sets, optimise=False)
+    ours0 = battle0.p1.roster
+    theirs0 = battle0.p2.roster[:2]
     berries = [TYPE_RESIST_BERRY[t] for t in
-               killing_types(ms0, b0.typechart, b0.field, b0, ours0[:2], theirs0)
+               killing_types(movesets0, battle0.typechart, battle0.field,
+                             battle0, ours0[:2], theirs0)
                if t in TYPE_RESIST_BERRY][:2]
 
     found = []
     for mon in our4:
         for item in list(ITEM_CANDIDATES) + berries:
             play = run({mon: {"item": item}})
-            if play is None:
-                continue
             if play.verdict == WIN or (base.verdict == LOSS
                                        and play.verdict == EVEN):
                 found.append((mon, item, play))
@@ -1694,68 +1468,88 @@ def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
 
 
 def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
-                want_logs=True, mega_name=None, plays=True, max_losses=0):
+                want_logs=True, mega_name=None, plays=True, max_losses=0,
+                sets=None):
     """One bring against one opponent (one Mega choice), with everything.
 
-    For each of their fifteen openings: the best PLAY we have (stay, switch,
-    switch+Protect, sacrifice), whether it is guaranteed, and the MOP-UP -- do our
-    remaining Pokemon beat their remaining Pokemon once the opening resolves.
-    Also the switch-in table for their bench.
+    For each of their lead pairs (every combination of two from `enemy_roster`):
+    the best PLAY we have (stay, switch, switch+Protect, sacrifice), whether it
+    is guaranteed, and the MOP-UP -- do our remaining Pokemon beat their
+    remaining Pokemon once the opening resolves. Also builds the reference
+    position (their roster in its own order) for the switch-in table.
+
+    ONE ENGINE. Every opening is played on a real `Battle`, built fresh per pair
+    via `lead_sim.build_position` (so weather, Intimidate on send-out, item and
+    the Mega slot are all resolved by the engine exactly as they are in a game)
+    and raced with `lead_sim.race`, i.e. `Battle.run_turn` end to end -- not a
+    second, hand-rolled damage model. `sets` fixes our moves/items instead of
+    optimising them fresh; `item_fixes`/`recommended_items` use this to ask
+    "what if this one held a different item" without re-deriving everything.
     """
     import itertools
 
-    from _harness import setup_battle
-    from threat import build_threat_matrix
-    b, ms = setup_battle(list(our4), list(enemy_roster), world)
-    matrix = build_threat_matrix(b, ms)
-    ours = [c for c in b.p1.roster if not c.fainted]
-    lead, back = ours[:2], ours[2:]
-    theirs = [c for c in b.p2.roster if not c.fainted]
-    sashed = sash_ids(ours + theirs)
+    import lead_sim as sim
+    theirs_all = list(enemy_roster)
+    if sets is None:
+        sets = _optimised_sets(our4, theirs_all, world)
+
+    lead, back = list(our4[:2]), list(our4[2:])
     label = (f"{opponent_name} (their Mega: {mega_name})" if mega_name
              else opponent_name)
-    report = RaceReport(lead=tuple(c.name for c in lead),
-                        back=tuple(c.name for c in back), opponent=label)
+    report = RaceReport(lead=tuple(lead), back=tuple(back), opponent=label)
 
-    for pair in itertools.combinations(theirs, 2):
+    # The reference position, in the roster's OWN order -- their stated leads
+    # first, the rest as bench -- for the switch-in table and for callers that
+    # want a single position representing "the bring as given".
+    ref_battle, ref_movesets, _s = sim.build_position(
+        our4, theirs_all, world, our_sets=sets, optimise=False,
+        enemy_mega=mega_name)
+
+    for pair in itertools.combinations(theirs_all, 2):
         # EARLY EXIT. The score is zeroed by a single unheld opening, so a bring
-        # already five down is not a candidate and finishing the other ten tells
-        # us nothing we will act on. Much the cheapest speed-up available.
+        # already five down is not a candidate and finishing the rest tells us
+        # nothing we will act on. Much the cheapest speed-up available.
         if max_losses and len(report.losses) >= max_losses:
             report.abandoned = True
             break
+        enemy4 = list(pair) + [n for n in theirs_all if n not in pair]
+        battle, movesets, _s2 = sim.build_position(
+            our4, enemy4, world, our_sets=sets, optimise=False,
+            enemy_mega=mega_name)
+        tie = any(race_speed(o, battle.field, "p1")
+                 == race_speed(e, battle.field, "p2")
+                 for o in battle.p1.active if o is not None
+                 for e in battle.p2.active if e is not None)
         if plays:
-            options = plays_for(ms, b.typechart, b.field, b, lead, back,
-                                list(pair), turns=turns, want_log=want_logs,
-                                sashed=sashed)
+            options = plays_for(battle, movesets, lead, back, turns=turns,
+                                want_log=want_logs)
             best = options[0]
         else:
-            # SWEEP MODE: the stay-in baseline only. Enumerating every play for
-            # every swept pair is minutes per pair -- measured, a 45-pair sweep
-            # over two opponents did not finish in five. The relationship to the
-            # detailed pass is MONOTONE, which is what makes the two numbers
-            # explainable rather than contradictory: adding plays can only improve
-            # an opening's verdict, never worsen it. So the sweep's score is a
-            # lower bound and the workbook's is the real one.
-            v, _o, _t, m, plan, log = move_race(
-                ms, b.typechart, b.field, b, lead, list(pair), turns=turns,
+            # SWEEP MODE: the stay-in baseline only, at CHEAP breadth. The
+            # relationship to the detailed pass is MONOTONE -- adding plays and
+            # more of their strategy space can only improve an opening's
+            # verdict, never worsen it -- so the sweep's score is a lower bound
+            # and the detailed report's is the real one. Same engine either way
+            # ("ONE ENGINE": the sweep and the workbook used to disagree because
+            # the sweep scored on committed-move arithmetic while the workbook
+            # played the threat-matrix race; now both are `Battle.run_turn`, at
+            # different breadths, so they can never contradict each other).
+            v, _o, _t, m, plan, log = sim.race(
+                battle, movesets, turns=turns, breadth="cheap",
                 want_log=want_logs)
             best = Play(kind=STAY, verdict=v, margin=m, their_plan=plan,
                         log=log or [])
-        # The mop-up: whatever survives, against whatever of theirs survives. An
-        # opening that trades evenly and leaves us with nothing that beats their
-        # last Pokemon is not a win, and two turns alone cannot see that.
+        # The mop-up: whatever of ours is left (everyone except whoever left, if
+        # anyone did) against whatever of theirs is left (everyone not in this
+        # opening's pair).
         if plays:
-            their_rest = [c for c in theirs if c not in pair]
-            our_rest = [c for c in ours
-                        if c.name not in (best.leaving, best.arriving)]
-            v_mop, _m_mop, text = mop_up(ms, b.typechart, b.field, b,
-                                         our_rest[:1], [], back, their_rest,
-                                         turns=turns)
+            their_rest = [n for n in theirs_all if n not in pair]
+            our_rest = [n for n in our4 if n != best.leaving]
+            v_mop, _m_mop, text = mop_up(our_rest, their_rest, world,
+                                         sets=sets, turns=turns)
             best.mopped = f"{v_mop}: {text}"
-        tie = bool(speed_ties(matrix, lead, pair))
         report.results.append(PairResult(
-            enemy_lead=tuple(c.name for c in pair), verdict=best.verdict,
+            enemy_lead=tuple(pair), verdict=best.verdict,
             our_dead=0, their_dead=0, margin=best.margin,
             plan=best.their_plan, tie=tie,
             # A patch only counts if it actually SALVAGES the opening. Setting
@@ -1766,79 +1560,102 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
                    if best.kind != STAY and best.verdict != LOSS else None),
             log=best.log, play=best))
     report.results.sort(key=lambda r: r.margin)
-    return report, ms, b
+    return report, ref_movesets, ref_battle
 
 
 def default_item(name, world):
-    """The most-used item for this Pokemon, which is already what it gets.
+    """The most-used LEGAL item for this Pokemon.
 
     Stated as a function so the workbook can SHOW the baseline it is deviating
-    from. `make_team` reads the usage table, so "give every Pokemon their most
-    popular item" is the existing behaviour, not a change: measured, Ninetales-
-    Alola gets Never-Melt Ice (29%), Garchomp Life Orb (61%), Rotom-Wash Sitrus
-    Berry (31%).
+    from. NOT quite `make_team`'s raw default: `make_team` (and everything
+    downstream of it, like `_harness.setup_battle`) trusts `items_usage`'s #1
+    entry outright, which is not filtered against Regulation MB's banned items
+    -- that table is logged across every format, banned or not, so a Pokemon
+    whose most-used item happens to be a Choice item or Assault Vest would
+    otherwise field one with nobody having asked for it (Hydreigon's #1 item is
+    Choice Scarf). `_legal_default_sets` turns this into an explicit override
+    for every `setup_battle` call in this module's cheap stage; `lead_sim`'s own
+    optimiser filters separately for the detailed stage. Measured, otherwise:
+    Ninetales-Alola gets Never-Melt Ice (29%), Garchomp Life Orb (61%),
+    Rotom-Wash Sitrus Berry (31%).
     """
+    from lead_sim import BANNED_ITEMS
     usage = (world["merged"].get(name) or {}).get("items_usage") or []
     for item, _pct in usage:
-        if item and item != "Other":
+        if item and item != "Other" and item not in BANNED_ITEMS:
             return item
     return None
 
 
+def _held_count(our4, enemy_roster, world, sets, mega_name=None, turns=2):
+    """How many of their lead pairs we hold (win outright, or salvage by
+    switching), at CHEAP simulator breadth. A ranking tool for item candidates,
+    not a verdict -- `full_report` (full breadth) is the real count.
+    """
+    import itertools
+
+    import lead_sim as sim
+    theirs_all = list(enemy_roster)
+    lead, back = list(our4[:2]), list(our4[2:])
+    n = 0
+    for pair in itertools.combinations(theirs_all, 2):
+        enemy4 = list(pair) + [x for x in theirs_all if x not in pair]
+        battle, movesets, _s = sim.build_position(
+            our4, enemy4, world, our_sets=sets, optimise=False,
+            enemy_mega=mega_name)
+        best = plays_for(battle, movesets, lead, back, turns=turns,
+                         breadth="cheap")[0]
+        if best.verdict != LOSS:
+            n += 1
+    return n
+
+
 def recommended_items(our4, enemy_roster, world, turns=2, mega_name=None):
-    """Per Pokemon: keep the popular item, or the one that holds more openings.
+    """Per Pokemon: keep the optimised item, or the one that holds more openings.
 
         "By default give every pokemon their most popular item, assuming no
          better item for a specific case."
 
-    So the baseline is the usage item and a swap has to EARN its place: it is only
-    reported when it strictly increases the number of openings we hold across all
-    fifteen of theirs. One change at a time, so the answer stays actionable.
+    The baseline is `_optimised_sets`'s choice (which already starts from the
+    usage-popular item and only departs from it when a matchup earns the
+    departure), and a swap has to EARN its place too: it is only reported when
+    it strictly increases the number of their lead pairs we hold. One change at
+    a time, so the answer stays actionable.
 
     Returns [(mon, from_item, to_item, held_before, held_after)] for the swaps
-    worth making, best first. An empty list means the popular items are right.
+    worth making, best first. An empty list means the chosen items are right.
     """
     from optimize_sets import TYPE_RESIST_BERRY
 
-    from _harness import setup_battle
+    import lead_sim as sim
+    theirs_all = list(enemy_roster)
+    base_sets = _optimised_sets(our4, theirs_all, world)
 
-    def held_count(sets):
-        rep, _ms, _b = full_report(our4, enemy_roster, world, want_logs=False,
-                                   mega_name=mega_name, turns=turns)
-        return rep.wins + len(rep.patched)
-
-    def held_with(sets):
-        b, ms = setup_battle(list(our4), list(enemy_roster), world, sets=sets)
-        ours = [c for c in b.p1.roster if not c.fainted]
-        lead, back = ours[:2], ours[2:]
-        theirs = [c for c in b.p2.roster if not c.fainted]
-        import itertools
-        n = 0
-        for pair in itertools.combinations(theirs, 2):
-            best = plays_for(ms, b.typechart, b.field, b, lead, back, list(pair),
-                             turns=turns, want_log=False)[0]
-            if best.verdict != LOSS:
-                n += 1
-        return n
-
-    base = held_with({})
-    b0, ms0 = setup_battle(list(our4), list(enemy_roster), world)
-    ours0 = [c for c in b0.p1.roster if not c.fainted]
-    theirs0 = [c for c in b0.p2.roster if not c.fainted][:2]
+    base = _held_count(our4, theirs_all, world, base_sets,
+                       mega_name=mega_name, turns=turns)
+    battle0, movesets0, _s0 = sim.build_position(
+        our4, theirs_all, world, our_sets=base_sets, optimise=False,
+        enemy_mega=mega_name)
+    ours0 = battle0.p1.roster
+    theirs0 = battle0.p2.roster[:2]
     berries = [TYPE_RESIST_BERRY[t] for t in
-               killing_types(ms0, b0.typechart, b0.field, b0, ours0[:2], theirs0)
+               killing_types(movesets0, battle0.typechart, battle0.field,
+                             battle0, ours0[:2], theirs0)
                if t in TYPE_RESIST_BERRY][:2]
 
     out = []
     for mon in our4:
-        current = default_item(mon, world)
+        current = (base_sets.get(mon) or {}).get("item") or default_item(mon, world)
         # A Mega is locked to its stone; swapping it is not a legal suggestion.
         if current and current.endswith("ite"):
             continue
         for item in list(ITEM_CANDIDATES) + berries:
             if item == current:
                 continue
-            got = held_with({mon: {"item": item}})
+            sets = {k: dict(v) for k, v in base_sets.items()}
+            sets.setdefault(mon, {}).update({"item": item})
+            got = _held_count(our4, theirs_all, world, sets,
+                              mega_name=mega_name, turns=turns)
             if got > base:
                 out.append((mon, current, item, base, got))
     out.sort(key=lambda t: -t[4])

@@ -595,52 +595,77 @@ class TestCommittedMoves(unittest.TestCase):
 
     def test_the_lines_are_readable_and_show_the_pin(self):
         """The turn-by-turn is the deliverable here: "I also need to see the
-        actual lines/moves and the logic as to why it is sound"."""
-        ours = [self._mon("p1", "Garchomp"), self._mon("p1", "Dragonite")]
-        theirs = [self._mon("p2", "Whimsicott"), self._mon("p2", "Mega Floette")]
-        _v, _od, _td, _m, _plan, log = ls.move_race(
-            self.ms, self.b.typechart, self.b.field, self.b, ours, theirs,
+        actual lines/moves and the logic as to why it is sound". Read straight
+        off a real `Battle.run_turn`, via `lead_sim.play`, with their plan
+        pinned to "both attack" so the line is deterministic (their WORST plan,
+        used by `race`, includes a Tailwind branch on this exact pairing and
+        would make the log unpredictable turn to turn)."""
+        import lead_sim as sim
+        battle, movesets, _s = sim.build_position(
+            ["Garchomp", "Dragonite", "Gallade", "Basculegion"],
+            ["Whimsicott", "Mega Floette", "Garchomp", "Kingambit"],
+            world(), optimise=False)
+        _v, _od, _td, _m, log, _b = sim.play(
+            battle, movesets, turns=2,
+            their_plans=[("both attack", None), ("both attack", None)],
             want_log=True)
         text = "\n".join(log)
         self.assertIn("Turn 1", text)
         self.assertIn("Turn 2", text)
-        self.assertIn("(spread)", text)
         self.assertIn("Earthquake", text)
-        self.assertIn("removed before it acted", text,
-                      "the pin has to be visible in the line")
+        # A spread move: Earthquake lands on BOTH of their active Pokemon in one
+        # turn, not just whichever a per-target threat matrix liked best.
+        self.assertIn("Earthquake on Whimsicott", text)
+        self.assertIn("Earthquake on Mega Floette", text)
+        # The pin: Mega Floette faints to that Earthquake before its own action
+        # this turn, so it never appears as an ATTACKER in turn 1's log.
+        turn1 = text.split("Turn 2")[0]
+        self.assertNotIn("Mega Floette uses", turn1,
+                         "a fainted Pokemon must not still act -- the pin")
 
     def test_nobody_protects_twice_in_a_row(self):
-        """The first version fixed one plan across both turns, so Mega Floette
-        Protected twice -- illegal, and it meant the Earthquake that was supposed
-        to remove it never landed."""
-        ours = [self._mon("p1", "Garchomp"), self._mon("p1", "Dragonite")]
-        theirs = [self._mon("p2", "Whimsicott"), self._mon("p2", "Mega Floette")]
-        _v, _od, _td, _m, plan, log = ls.move_race(
-            self.ms, self.b.typechart, self.b.field, self.b, ours, theirs,
-            want_log=True)
-        first, _sep, second = plan.partition(" then ")
-        if first != "both attack":
-            self.assertNotEqual(first, second, f"double Protect: {plan}")
+        """`lead_sim.their_strategies` enumerates a Protect plan per turn and
+        explicitly skips any pair where the same non-"both attack" plan repeats
+        -- an earlier version fixed one plan across both turns, so Mega Floette
+        Protected twice, which is illegal and meant the Earthquake meant to
+        remove it never landed. Checked directly against the enumerated
+        strategy space, not against one race's worst-case result."""
+        import lead_sim as sim
+        battle, movesets, _s = sim.build_position(
+            ["Garchomp", "Dragonite", "Gallade", "Basculegion"],
+            ["Whimsicott", "Mega Floette", "Garchomp", "Kingambit"],
+            world(), optimise=False)
+        for seq in sim.their_strategies(battle, movesets, turns=2):
+            first, second = seq[0][0], seq[1][0]
+            if first != "both attack":
+                self.assertNotEqual(first, second,
+                                    f"double Protect offered: {seq}")
 
-    def test_the_move_choice_is_known_bad_and_is_not_the_scorer(self):
-        """RECORDED AS A DEFECT, not asserted as correct.
+    def test_the_move_choice_defect_is_fixed_not_worked_around(self):
+        """RECORDED AS FIXED, not merely avoided.
 
-        `_best_joint` maximises net HP, and measured on Ninetales-Alola +
-        Garchomp against their Garchomp + Kingambit it plays Garchomp Earthquake
-        -- 71% onto Kingambit and 48% onto OUR OWN Ninetales -- because +23% net
-        beats Rock Slide's Rock-into-Dark/Steel. Kingambit then removes the
-        Ninetales it damaged. A net-HP objective cannot see that crossing a KO
-        threshold on your own side is categorically worse than the HP it costs.
+        `_best_joint` (deleted) maximised net HP and, measured on Ninetales-
+        Alola + Garchomp against their Garchomp + Kingambit, played Garchomp
+        Earthquake for 71% onto Kingambit and 48% onto OUR OWN Ninetales --
+        because +23% net beat Rock Slide's Rock-into-Dark/Steel -- and Kingambit
+        then removed the Ninetales it had damaged. A net-HP objective cannot see
+        that crossing a KO threshold on your own side is categorically worse
+        than the HP it costs.
 
-        So `race_bring` scores on the calibrated threat-matrix race and uses
-        `move_race` only for the turn-by-turn. This test pins that separation: if
-        the scorer ever starts coming from move_race, this fails until the move
-        choice is fixed.
+        `race_bring` still SCORES on the calibrated threat-matrix race (the
+        cheap narrowing stage -- that was never the defect). What changed is
+        where the turn-by-turn LINES come from: `Battle.run_turn`, played
+        through `lead_sim`, which chooses moves by actually PLAYING each
+        candidate and keeping the best result -- there is no separate move-
+        valuation heuristic left to get this wrong.
         """
         import inspect
         src = inspect.getsource(ls.race_bring)
         self.assertIn("race_robust(matrix, lead, pair", src)
-        self.assertIn("supplies the LINES", src)
+        self.assertIn("sim.race(", src)
+        self.assertFalse(hasattr(ls, "_best_joint"),
+                         "the flawed move-choice heuristic should be gone, "
+                         "not merely unused")
 
 
 class TestSpeedControlAndItems(unittest.TestCase):
@@ -694,19 +719,16 @@ class TestSpeedControlAndItems(unittest.TestCase):
 
     def test_their_setup_appears_in_the_enumerated_strategies(self):
         """It must be one of the options taken against us, not a footnote."""
-        ours = [self._mon("p1", "Ninetales-Alola"), self._mon("p1", "Garchomp")]
-        theirs = [self._mon("p2", "Mega Floette"), self._mon("p2", "Whimsicott")]
-        seen = set()
-        for turns in (2,):
-            for _i in range(1):
-                _v, _o, _t, _m, desc, _log = ls.move_race(
-                    self.ms, self.b.typechart, self.b.field, self.b, ours,
-                    theirs, turns=turns)
-                seen.add(desc)
-        # The description names the plan; Tailwind must be reachable as one.
-        import inspect
-        self.assertIn("Tailwind", inspect.getsource(ls.move_race))
-        self.assertTrue(seen)
+        import lead_sim as sim
+        battle, movesets, _s = sim.build_position(
+            EXAMPLE, ["Mega Floette", "Whimsicott", "Garchomp", "Kingambit"],
+            world(), optimise=False)
+        seqs = sim.their_strategies(battle, movesets, turns=2)
+        self.assertTrue(seqs)
+        self.assertTrue(
+            any(forced and forced[0] == "Tailwind"
+                for seq in seqs for _plan, forced in seq),
+            "Tailwind must be reachable as one of their enumerated strategies")
 
     def test_focus_sash_leaves_a_survivor_on_a_sliver(self):
         """And a Pokemon on a sliver still gets its turn, which is the point."""
@@ -825,33 +847,75 @@ class TestThePlaysAndTheMopUp(unittest.TestCase):
     """
 
     def setUp(self):
-        from _harness import setup_battle
+        import lead_sim as sim
         W = world()
         roster = [r for m, r in ls.mega_variants(W["teams"]["Big 6"], W)
                   if m == "Mega Floette"][0]
-        self.b, self.ms = setup_battle(EXAMPLE, roster, W)
-        ours = [c for c in self.b.p1.roster if not c.fainted]
-        self.lead, self.back = ours[:2], ours[2:]
-        self.theirs = [c for c in self.b.p2.roster
-                       if c.name in ("Mega Floette", "Whimsicott")][:2]
+        enemy4 = (["Mega Floette", "Whimsicott"]
+                 + [n for n in roster if n not in ("Mega Floette", "Whimsicott")])
+        self.battle, self.movesets, _s = sim.build_position(
+            EXAMPLE, enemy4, W, optimise=False, enemy_mega="Mega Floette")
+        self.lead, self.back = EXAMPLE[:2], EXAMPLE[2:]
 
     def _plays(self):
-        return ls.plays_for(self.ms, self.b.typechart, self.b.field, self.b,
-                            self.lead, self.back, self.theirs)
+        return ls.plays_for(self.battle, self.movesets, self.lead, self.back)
 
-    def test_all_four_kinds_are_offered(self):
+    def test_stay_and_switch_are_both_offered(self):
+        """STAY, plus one SWITCH per (leaving lead, arriving back) pair.
+
+        SWITCH_PROTECT and SACRIFICE used to be separate SEARCHES, because the
+        old turn resolver never itself considered Protect as an option and had
+        no notion of a fainted Pokemon's replacement. Against a real `Battle`
+        neither needs a special case: `candidate_joints` always offers Protect
+        to the stayer, and `Battle._replace_fainted` sends in the best answer
+        the instant a lead faints -- so STAY already covers "stay and attack",
+        "stay, and one Protects", and "one faints, the best replacement arrives
+        at 100%", whichever of those actually is best; SWITCH covers the same
+        for the switch case. `_refine_play_kind` (tested directly below) still
+        labels those OUTCOMES when they occur, from what the log says happened.
+        """
         kinds = {p.kind for p in self._plays()}
-        for kind in (ls.STAY, ls.SWITCH, ls.SWITCH_PROTECT, ls.SACRIFICE):
-            self.assertIn(kind, kinds, f"{kind} was not among the plays")
+        self.assertIn(ls.STAY, kinds)
+        self.assertIn(ls.SWITCH, kinds)
+        expected_switches = len(self.lead) * len(self.back)
+        self.assertEqual(sum(1 for p in self._plays()
+                             if p.kind in (ls.SWITCH, ls.SWITCH_PROTECT)),
+                         expected_switches)
 
-    def test_sacrifice_brings_the_replacement_in_at_full_health(self):
-        """The point of the play: a switch-in arrives having eaten both attacks,
-        a replacement after a faint arrives at 100%."""
-        sacs = [p for p in self._plays() if p.kind == ls.SACRIFICE]
-        self.assertTrue(sacs)
-        for p in sacs:
-            self.assertTrue(p.leaving and p.arriving)
-            self.assertNotEqual(p.leaving, p.arriving)
+    def test_switch_protect_is_detected_from_the_played_out_log(self):
+        """A SWITCH whose stayer actually Protected turn 1 is relabelled from
+        the log Battle itself writes, not guessed at."""
+        log = ["  Turn 1  their plan: both attack",
+               "    Garchomp protects itself!",
+               "    Mega Scizor switches in",
+               "  Turn 2  their plan: both attack",
+               "--- Turn 2 ---",
+               "    Whimsicott protects itself!"]
+        kind, leaving, arriving = ls._refine_play_kind(
+            ls.SWITCH, "Ninetales-Alola", "Mega Scizor", log)
+        self.assertEqual(kind, ls.SWITCH_PROTECT)
+        self.assertEqual((leaving, arriving), ("Ninetales-Alola", "Mega Scizor"))
+
+    def test_a_switch_where_the_arriving_pokemon_protects_is_impossible(self):
+        """The arriving Pokemon just switched in -- it cannot also Protect --
+        so a Protect line naming IT must not be mistaken for the stayer's."""
+        log = ["--- Turn 1 ---",
+               "    Mega Scizor protects itself!",
+               "--- Turn 2 ---"]
+        kind, _leaving, _arriving = ls._refine_play_kind(
+            ls.SWITCH, "Ninetales-Alola", "Mega Scizor", log)
+        self.assertEqual(kind, ls.SWITCH)
+
+    def test_sacrifice_is_detected_from_the_played_out_log(self):
+        """The point of the play: a switch-in arrives having eaten both
+        attacks, a replacement after a faint arrives at 100% -- read off the
+        engine's own replacement line."""
+        log = ["--- Turn 1 ---",
+               "    p1 sends in Rotom-Wash (replacing fainted Ninetales-Alola)"]
+        kind, leaving, arriving = ls._refine_play_kind(ls.STAY, "", "", log)
+        self.assertEqual(kind, ls.SACRIFICE)
+        self.assertEqual(leaving, "Ninetales-Alola")
+        self.assertEqual(arriving, "Rotom-Wash")
 
     def test_plays_are_ranked_with_guaranteed_wins_first(self):
         plays = self._plays()
@@ -860,8 +924,9 @@ class TestThePlaysAndTheMopUp(unittest.TestCase):
         self.assertEqual(keys, sorted(keys))
 
     def test_guaranteed_means_it_does_not_need_a_coin_flip(self):
-        """`move_race` resolves ties against us and takes their best plan, so a
-        WIN is a guarantee in the only sense that matters here."""
+        """`lead_sim.race` takes their best strategy over the whole enumeration
+        and `Battle` resolves every exact speed tie against us by its own rule,
+        so a WIN is a guarantee in the only sense that matters here."""
         for p in self._plays():
             self.assertEqual(p.guaranteed, p.verdict == ls.WIN)
 
@@ -1041,18 +1106,17 @@ class TestTheDefaultLoadout(unittest.TestCase):
         swap COSTS Never-Melt Ice's 1.2x on Blizzard, so the margin gets slightly
         worse: -1.12 bare, -1.15 with the sash.
         """
-        from _harness import setup_battle
+        import lead_sim as sim
         W = world()
+        enemy4 = ["Garchomp", "Kingambit"] + [n for n in W["teams"]["Big 6"]
+                                              if n not in ("Garchomp", "Kingambit")]
 
         def margin(item):
-            sets = {"Ninetales-Alola": {"item": item}} if item else None
-            b, ms = setup_battle(EXAMPLE, list(W["teams"]["Big 6"]), W, sets=sets)
-            ours = [c for c in b.p1.roster
-                    if c.name in ("Ninetales-Alola", "Garchomp")]
-            theirs = [c for c in b.p2.roster
-                      if c.name in ("Garchomp", "Kingambit")]
-            v, _o, _t, m, _p, _l = ls.move_race(ms, b.typechart, b.field, b,
-                                                ours, theirs)
+            sets = {"Ninetales-Alola": {"item": item}} if item else {}
+            battle, movesets, _s = sim.build_position(
+                EXAMPLE, enemy4, W, our_sets=sets, optimise=False)
+            v, _o, _t, m, _p, _l = sim.race(battle, movesets, turns=2,
+                                            breadth="full", want_log=False)
             return v, m
 
         bare_v, bare_m = margin(None)

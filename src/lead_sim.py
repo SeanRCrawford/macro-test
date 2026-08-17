@@ -133,12 +133,18 @@ BANNED_ITEMS = frozenset({"Assault Vest", "Choice Band", "Choice Specs",
 
 
 def build_position(our4, enemy4, world, our_sets=None, enemy_sets=None,
-                   optimise=True):
+                   optimise=True, enemy_mega=None):
     """A real `Battle`, with send-out abilities resolved and movesets attached.
 
     This is the ONLY place a position is constructed, so weather, Intimidate on
     send-out and the Mega slot are all resolved by the engine exactly as they are
     in a game.
+
+    `enemy_mega` pins WHICH of the enemy roster's Mega-capable names actually
+    evolves, independent of `enemy4`'s order -- needed because the lead race
+    tests the same six-Pokemon roster under many different lead-pair orderings,
+    and the Mega choice must not silently follow whichever one happens to sort
+    first (`make_team`'s default).
     """
     from combatants import make_team
 
@@ -159,7 +165,7 @@ def build_position(our4, enemy4, world, our_sets=None, enemy_sets=None,
 
     ours = make_team(list(our4), world["merged"], world["natures"], sets=sets)
     theirs = make_team(list(enemy4), world["merged"], world["natures"],
-                       sets=enemy_sets)
+                       sets=enemy_sets, mega_transforms=enemy_mega)
     movesets = {}
     for c in ours + theirs:
         spec = (sets.get(c.name) or (enemy_sets or {}).get(c.name) or {})
