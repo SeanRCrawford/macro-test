@@ -94,24 +94,29 @@ def benchmark_defender():
     )
 
 
-def neutral_probe_type(defender, typechart):
-    """A move type this defender takes at exactly 1.0x, for the incoming half.
+# A move type that is in no typechart, so `damageTaken.get(...)` misses for
+# every defending type and `_TYPE_MAPPING[0]` returns exactly 1.0. That is what
+# TYPELESS means here, and it is exact rather than searched-for: no immunity, no
+# resistance, and no STAB either, since it matches no attacker's typing.
+TYPELESS = "Typeless"
 
-    Needed because the DEFENDER here is a real Pokemon with real typing, so a
-    fixed probe type cannot be neutral for everyone -- Normal is 0x into Ghost,
-    and that is what produced the infinite-survivability bug. Falls back to the
-    type it resists least, so a Pokemon with no neutral type at all (rare, but
-    Shedinja-like typings exist) still gets a finite, honest number.
+
+def neutral_probe_type(defender, typechart):
+    """The typeless probe, and its multiplier. Always (TYPELESS, 1.0).
+
+    Kept as a function because the first two versions were not this. The first
+    used a fixed Normal probe, which does 0 damage to Ghost -- all thirteen
+    Ghost-types scored infinite survivability and swept the table. The second
+    SEARCHED the chart for a type this defender happens to take at 1.0x, which
+    is right for almost everyone and still not typeless: a Pokemon with no
+    neutral type fell back to "least resisted", so its row was measured on a
+    different yardstick from every other row.
+
+    `defender` and `typechart` are unused and stay in the signature so the
+    exactness is checkable -- see the test that asserts 1.0 for every Pokemon in
+    the dataset.
     """
-    from damage import type_multiplier
-    best = None
-    for t in typechart:
-        mult = type_multiplier(t, list(defender.types), typechart)
-        if mult == 1.0:
-            return t, 1.0
-        if mult > 0 and (best is None or mult < best[1]):
-            best = (t, mult)
-    return best if best is not None else (next(iter(typechart)), 1.0)
+    return TYPELESS, 1.0
 
 
 def spread_moves(record, moves_db, min_power=MIN_SPREAD_POWER,
@@ -290,3 +295,126 @@ def table(names, merged, natures, moves_db, typechart,
             rows.append(row)
     rows.sort(key=lambda r: -r["score"])
     return rows
+
+
+def write_workbook(rows, path, scope="", min_power=MIN_SPREAD_POWER,
+                   foes_only=False):
+    """The whole table as an .xlsx, so it can be sorted and checked by hand.
+
+    Two sheets: the ranking, and a legend that states every assumption. The
+    legend exists because the numbers are only meaningful next to their
+    definition -- "67.0%" is a claim about a specific benchmark, and a
+    spreadsheet detached from that is a spreadsheet that will be misread.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    header_fill = PatternFill("solid", start_color="2C3E50", end_color="2C3E50")
+    good = PatternFill("solid", start_color="D5F5E3", end_color="D5F5E3")
+    warn = PatternFill("solid", start_color="FCF3CF", end_color="FCF3CF")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Spread attackers"
+    cols = ["#", "Pokemon", "Spread move", "Type", "BP", "Weather", "Ability",
+            "1 target %", "2 targets %", "Taken per hit %", "Hits to KO",
+            "SCORE", "Hits ally", "Full-HP only"]
+    ws.append(cols)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+    ws.freeze_panes = "C2"
+
+    for i, r in enumerate(rows, start=1):
+        ws.append([
+            i, r["name"], r["move"], r["type"], r["power"],
+            r["weather"] or "-", r["ability"] or "-",
+            round(r["per_target"] * 100, 1), round(r["two_target"] * 100, 1),
+            round(r["incoming"] * 100, 1), round(r["hits_to_ko"], 2),
+            round(r["score"], 2),
+            "yes" if r["hits_ally"] else "", "yes" if r["hp_scaled"] else "",
+        ])
+        # Shade the score column so the top of the table reads at a glance, and
+        # amber the two caveat flags rather than hiding them in a text column.
+        ws.cell(ws.max_row, 12).fill = good if r["score"] >= 4.0 else warn
+        for col in (13, 14):
+            if ws.cell(ws.max_row, col).value:
+                ws.cell(ws.max_row, col).fill = warn
+
+    for idx, name in enumerate(cols, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = max(11, len(name) + 2)
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 18
+    ws.auto_filter.ref = ws.dimensions
+
+    legend = wb.create_sheet("How to read this")
+    for row in (
+        ["What this is"],
+        ["Spread attackers ranked by REPEATABLE, UNTARGETABLE damage: how much "
+         "a spread move removes across both foes, times how many hits the "
+         "attacker survives to keep doing it."],
+        [],
+        ["Scope", scope],
+        ["Minimum spread power", min_power],
+        ["allAdjacent moves", "excluded" if foes_only else "included, flagged"],
+        [],
+        ["Column", "Means"],
+        ["1 target %", "Neutral damage as a % of the benchmark's max HP, one "
+                       "target, with the 0.75x spread penalty applied."],
+        ["2 targets %", "The same doubled: what the turn actually removes. "
+                        "1.5x a single-target hit of the same power."],
+        ["Taken per hit %", f"Mean % of its own HP removed by a typeless "
+                            f"{INCOMING_POWER} BP hit from a {INCOMING_STAT} "
+                            f"offensive stat, averaged over physical and "
+                            f"special."],
+        ["Hits to KO", "1 / taken. How many of those it survives."],
+        ["SCORE", "2 targets % x hits to KO."],
+        ["Hits ally", "allAdjacent: Earthquake and Sludge Wave hit your own "
+                      "partner, which constrains the slot beside them in a way "
+                      "the score does not price."],
+        ["Full-HP only", "Eruption and Water Spout scale with the user's "
+                         "CURRENT HP, so the row is a full-health number and "
+                         "decays -- the opposite of the repeatability the "
+                         "score rewards."],
+        [],
+        ["The benchmark"],
+        ["Defender", f"base {BENCH_BASE} HP / {BENCH_BASE} Def / {BENCH_BASE} "
+                     f"SpD at level {BENCH_LEVEL}, 0 EVs, and TYPELESS."],
+        ["Typeless, both ways", "Outgoing damage hits a defender with no types, "
+                                "so the multiplier is 1.0 by construction. "
+                                "Incoming uses a move type that is in no "
+                                "typechart, so it is 1.0 against every real "
+                                "Pokemon -- no immunity, no resistance, no "
+                                "STAB. The table ranks the Pokemon, not the "
+                                "matchup."],
+        ["STAB is kept", "It reads the ATTACKER's own typing, so it is a "
+                         "property of the Pokemon rather than of the matchup."],
+        ["Megas", "Rated on the Mega's stats, ability and typing where the "
+                  "Pokemon has one -- Charizard Y's Drought is the whole "
+                  "point of Charizard Y."],
+        [],
+        ["What is excluded"],
+        ["Self-destruct moves", "Explosion and Self-Destruct are not repeatable "
+                                "output. They came out #1 and #2 before this."],
+        [],
+        ["What this does NOT know"],
+        ["", "Wide Guard, which is the direct counter to a spread plan."],
+        ["", "Whether the opponent resists your one spread type."],
+        ["", "Redirection (Follow Me / Rage Powder) and Prankster Tailwind."],
+        ["", "Items and EV spreads beyond the usage defaults."],
+        ["", "It is a screen for who is worth building around, not a verdict."],
+    ):
+        legend.append(row)
+    legend["A1"].font = Font(bold=True, size=13)
+    for cell in ("A8", "A18", "A25", "A28"):
+        legend[cell].font = Font(bold=True)
+    legend.column_dimensions["A"].width = 22
+    legend.column_dimensions["B"].width = 96
+    for row in legend.iter_rows(min_col=2, max_col=2):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    wb.save(path)
+    return len(rows)

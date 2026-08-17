@@ -44,6 +44,10 @@ def main():
                          "does not price.")
     ap.add_argument("--csv", default="",
                     help="also write the whole table (not just --top) here")
+    ap.add_argument("--xlsx", default="spread_table.xlsx", metavar="PATH",
+                    help="write the whole table as a workbook (default "
+                         "spread_table.xlsx, beside this script). Pass an "
+                         "empty string to skip it.")
     args = ap.parse_args()
 
     from _harness import load_world
@@ -99,6 +103,12 @@ def main():
             w.writeheader()
             w.writerows(rows)
         print(f"\nFull table ({len(rows)} rows): {os.path.abspath(args.csv)}")
+
+    if args.xlsx:
+        from spread_power import write_workbook
+        write_workbook(rows, args.xlsx, scope=scope, min_power=args.min_power,
+                       foes_only=args.foes_only)
+        print(f"\nWorkbook ({len(rows)} rows): {os.path.abspath(args.xlsx)}")
 
 
 if __name__ == "__main__":

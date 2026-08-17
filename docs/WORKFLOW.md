@@ -361,6 +361,76 @@ trimmed lines are the wins, so the plan's record read as nothing but losses.
 `--detail` recomputes rather than being served a record with less detail than
 it asked for. Existing stage-2 caches are invalidated by the bump.
 
+### The cheap screen — `tools\lead_sweep.py`
+
+    python lead_sweep.py --check "Ninetales-Alola,Garchomp,Mega Scizor,Rotom-Wash"
+    python lead_sweep.py --vs "Big 6,Rain" --pool-size 24 --xlsx lead_sweep.xlsx
+
+**No games are played.** Every number is arithmetic on a threat matrix, so 276
+lead pairs against two opponents takes **10 seconds** — against minutes per
+pairing for the audit. This is the narrowing step that decides what is worth the
+night.
+
+It came from a worked example: *"vs big 6, you only bring 4. There is one lead
+pair which has an overwhelming advantage: (focus sash) ninetales-alola + (life
+orb) garchomp with mega scizor and a flying/levitate pokemon in the back."* The
+breakdown given for it was six independent questions, each answerable by a sum —
+and `--check` reproduces it line for line:
+
+```
+Ninetales-Alola + Garchomp  (back: Mega Scizor, Rotom-Wash)  vs Big 6
+  1. Basculegion: FOCUSED  by Ninetales-Alola + Garchomp
+  2. Mega Charizard Y: OUTSPED  by Garchomp Rock Slide
+  3. Mega Floette: OUTSPED  by Garchomp Earthquake
+  4. Garchomp: OUTSPED  by Ninetales-Alola Blizzard
+  5. Kingambit: FOCUSED  by Ninetales-Alola + Garchomp
+  6. Whimsicott: FOCUSED  by Ninetales-Alola + Garchomp
+```
+
+**But per-enemy coverage is not a screen, and that took two goes to learn.**
+Scoring each of their six independently passed **235 of 275** swept pairs — 85%,
+which narrows nothing. The flaw was structural, not a tuning problem: every
+verdict let us aim *both* attacks at one enemy while its partner did nothing
+back, and two attackers focused on one target answer almost anything.
+
+So the ranking is the **2v2 race** (`race_bring`): our lead pair against all
+**fifteen** of theirs, two turns, both sides focus-firing, speed-ordered, and a
+Pokémon removed before it acts contributes nothing — the pin, expressed as the
+only thing it really is. Pass rate: **31 of 275, about 11%.** `score` is the mean
+margin across their fifteen openings and a **hard zero if any single one beats
+us**, because the requirement is a lead that withstands *any* of theirs.
+
+```
+  # lead pair                    back two                worst opp    W-L    score
+  1 Garchomp + Mega Dragonite    Gallade + Basculegion   Big 6        14-0   +1.00
+  2 Garchomp + Mega Alakazam     Gallade + Basculegion   Big 6        14-0   +0.99
+  3 Garchomp + Dragonite         Gallade + Basculegion   Big 6        14-0   +0.97
+```
+
+**Two bugs it shipped with, both caught by looking at the output:**
+
+* **Species clause.** The top answer was `Garchomp + Mega Garchomp`, with
+  `Dragonite + Mega Dragonite` behind it. Species clause counts the **base**
+  form; a Mega is that Pokémon holding a stone. `legal_bring` now requires four
+  distinct base species and at most one Mega. A screen that recommends an
+  illegal team is worse than no screen — its answer looks actionable.
+* **Duplicate brings.** Back pairs were sampled from the same pool as leads
+  without exclusion, so `Garchomp + Sneasler, back: Gallade, Garchomp` was a
+  bring of three.
+
+**The sharpest known limitation: which of their Pokémon holds the Mega slot.**
+One Mega per team, chosen at preview *after* seeing your four. Base Mega Floette
+is speed **111** and its Mega is **166 — exactly Garchomp**. On Big 6 as loaded
+Charizard Y holds the slot, so Floette stays at 111 and Garchomp outspeeds it
+cleanly; if they Mega Floette instead it is a coin flip, which is precisely the
+caution in the worked example. `mega_slots()` enumerates their choices and
+`--check` warns; scanning against each is not yet automatic.
+
+It also cannot see Protect stalling, redirection, Wide Guard, Substitute or
+setup — anything whose value is in a sequence rather than a sum — and it reads
+usage-default sets. Every verdict is a **hypothesis to point the audit at**: the
+cheap thing proposes, the expensive thing decides.
+
 ### Who wins the damageslop war — `tools\spread_table.py`
 
     python spread_table.py --top 20 --foes-only
@@ -406,11 +476,21 @@ that looked plausible and put the wrong Pokémon on top:
   Snorlax Self-Destruct #2 — 250 and 200 BP multiplied by four to six turns of
   survivability, for a move that faints the user. The score's premise is
   *repeatable* output; `selfdestruct` is its exact negation.
-* **The benchmark defender is typeless.** It was Normal-typed, and so was the
-  incoming probe — which does **0 damage to Ghosts**. All thirteen Ghost-types
-  came out with infinite survivability and swept the table. An empty type list
-  makes the multiplier 1.0 by construction, in both directions, and
-  `neutral_probe_type` picks a per-defender probe for the incoming half.
+* **Typeless in both directions, and it took two goes.** The defender was first
+  Normal-typed and so was the incoming probe — which does **0 damage to Ghosts**,
+  so all thirteen Ghost-types scored infinite survivability and swept the table.
+  The second version *searched* the chart for a type each defender happens to
+  take at 1.0×: right for almost everyone, and still not typeless, because a
+  Pokémon with no neutral type fell back to "least resisted" and was measured on
+  a different yardstick. Now the defender has **no types** and the probe uses a
+  move type that is **in no typechart** — verified exactly 1.0 against all 271
+  Pokémon in the dataset. No immunity, no resistance, no STAB. STAB is kept on
+  the *outgoing* half, since it reads the attacker's own typing and so is a
+  property of the Pokémon rather than the matchup.
+
+`--xlsx` (on by default, `spread_table.xlsx`) writes the whole ranking with an
+autofilter and a legend sheet stating every assumption, so it can be sorted and
+checked by hand.
 
 Rows still carry two honest caveats rather than being dropped: `hits ally`
 (`allAdjacent` — Earthquake and Sludge Wave hit your partner too; `--foes-only`
