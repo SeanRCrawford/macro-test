@@ -1485,13 +1485,25 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
     second, hand-rolled damage model. `sets` fixes our moves/items instead of
     optimising them fresh; `item_fixes`/`recommended_items` use this to ask
     "what if this one held a different item" without re-deriving everything.
+
+    SWEEP MODE (`plays=False`) skips the optimiser entirely when `sets` is not
+    given, using the LEGAL usage-default set instead (`_legal_default_sets`).
+    Profiled: `_optimised_sets` (an exhaustive move/item search) was over half
+    of every call's cost, paid again for every (opponent, Mega) combination of
+    every candidate bring `tools/lead_sweep.py`'s sweep tries -- tens of
+    thousands of times for a `--pool-size 30` run, which is what made it look
+    hung. The sweep never optimised sets before this session's rewrite either
+    (`scan_bring`/`race_bring` still don't); it is the cheap narrowing stage,
+    and the detailed pass (`plays=True`, run only for `--detail-top` brings)
+    is where a real item/moveset search belongs.
     """
     import itertools
 
     import lead_sim as sim
     theirs_all = list(enemy_roster)
     if sets is None:
-        sets = _optimised_sets(our4, theirs_all, world)
+        sets = (_optimised_sets(our4, theirs_all, world) if plays
+               else _legal_default_sets(our4, world))
 
     lead, back = list(our4[:2]), list(our4[2:])
     label = (f"{opponent_name} (their Mega: {mega_name})" if mega_name
@@ -1512,42 +1524,80 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
         if max_losses and len(report.losses) >= max_losses:
             report.abandoned = True
             break
-        enemy4 = list(pair) + [n for n in theirs_all if n not in pair]
-        battle, movesets, _s2 = sim.build_position(
-            our4, enemy4, world, our_sets=sets, optimise=False,
-            enemy_mega=mega_name)
-        tie = any(race_speed(o, battle.field, "p1")
-                 == race_speed(e, battle.field, "p2")
-                 for o in battle.p1.active if o is not None
-                 for e in battle.p2.active if e is not None)
         if plays:
+            enemy4 = list(pair) + [n for n in theirs_all if n not in pair]
+            battle, movesets, _s2 = sim.build_position(
+                our4, enemy4, world, our_sets=sets, optimise=False,
+                enemy_mega=mega_name)
+            tie = any(race_speed(o, battle.field, "p1")
+                     == race_speed(e, battle.field, "p2")
+                     for o in battle.p1.active if o is not None
+                     for e in battle.p2.active if e is not None)
             options = plays_for(battle, movesets, lead, back, turns=turns,
                                 want_log=want_logs)
             best = options[0]
-        else:
-            # SWEEP MODE: the stay-in baseline only, at CHEAP breadth. The
-            # relationship to the detailed pass is MONOTONE -- adding plays and
-            # more of their strategy space can only improve an opening's
-            # verdict, never worsen it -- so the sweep's score is a lower bound
-            # and the detailed report's is the real one. Same engine either way
-            # ("ONE ENGINE": the sweep and the workbook used to disagree because
-            # the sweep scored on committed-move arithmetic while the workbook
-            # played the threat-matrix race; now both are `Battle.run_turn`, at
-            # different breadths, so they can never contradict each other).
-            v, _o, _t, m, plan, log = sim.race(
-                battle, movesets, turns=turns, breadth="cheap",
-                want_log=want_logs)
-            best = Play(kind=STAY, verdict=v, margin=m, their_plan=plan,
-                        log=log or [])
-        # The mop-up: whatever of ours is left (everyone except whoever left, if
-        # anyone did) against whatever of theirs is left (everyone not in this
-        # opening's pair).
-        if plays:
+            # The mop-up: whatever of ours is left (everyone except whoever
+            # left, if anyone did) against whatever of theirs is left
+            # (everyone not in this opening's pair).
             their_rest = [n for n in theirs_all if n not in pair]
             our_rest = [n for n in our4 if n != best.leaving]
             v_mop, _m_mop, text = mop_up(our_rest, their_rest, world,
                                          sets=sets, turns=turns)
             best.mopped = f"{v_mop}: {text}"
+        else:
+            # SWEEP MODE: the calibrated threat-matrix race (`race_robust`),
+            # NOT `Battle.run_turn`. This stage exists specifically to be
+            # cheap across hundreds or thousands of pairs -- `tools/
+            # lead_sweep.py`'s own narrowing phase, `--pool-size 30` alone is
+            # 300+ lead pairs -- and racing each one through a real, deep-
+            # copied, searched-over-several-strategies turn (what `sim.race`
+            # does) made even that impractically slow, reported as "no
+            # progress" because it genuinely could take hours.
+            #
+            # A FRESH, SMALL Battle per pair -- just `our4` vs THIS pair (2,
+            # not the whole roster) -- not one matrix shared across the whole
+            # opponent roster: `projection.pending_mega` only projects a Mega
+            # pick's stats while it is ACTIVE, so a matrix built once from the
+            # roster's default lead ordering silently scored every OTHER
+            # pair's Mega candidate at base-form stats -- "mega floette has
+            # mega floette stats" failed for 13 of Big 6's 15 pairs. Building
+            # against the FULL 6-Pokemon roster (the `plays=True` branch's
+            # `enemy4`) was itself a needless cost here: `race_robust` only
+            # ever reads `lead` vs `pair`, so a `ThreatMatrix` over all 6 was
+            # computing 6x the threat edges this stage actually uses --
+            # profiled at over half of every sweep call. Cheap now because
+            # `race_robust` is arithmetic on a small ThreatMatrix:
+            # `make_combatant` caches by (name, force_base_form) and
+            # `threat.py`'s own damage cache mean the repeat work across
+            # hundreds of pairs against the same roster is nearly free after
+            # the first few. The relationship to the detailed pass stays
+            # MONOTONE -- adding plays and more of their strategy space can
+            # only improve an opening's verdict, never worsen it -- so the
+            # sweep's score is a lower bound and the detailed report's (which
+            # DOES play `Battle.run_turn`) is the real one.
+            from threat import build_threat_matrix
+            # A pair can contain a Mega-capable name that is NOT this team's
+            # actual choice (Big 6 can bring both Mega Charizard Y and Mega
+            # Floette). `enemy_mega` only pins which name evolves among the
+            # ones GIVEN to `make_team` -- it raises if asked to pin a name
+            # that is not present at all -- so the other Mega pick has to be
+            # swapped for its base-form name here rather than left as "Mega
+            # X": it does not hold the team's one stone this game, and
+            # evaluating it as its own plain species is what one stone per
+            # team actually means for a 2-Pokemon slice of the roster.
+            pair_names = [n if not (n.startswith("Mega ") and n != mega_name)
+                         else (base_form_name(n) or n) for n in pair]
+            battle, movesets, _s2 = sim.build_position(
+                our4, pair_names, world, our_sets=sets, optimise=False,
+                enemy_mega=mega_name if mega_name in pair_names else None)
+            tie = any(race_speed(o, battle.field, "p1")
+                     == race_speed(e, battle.field, "p2")
+                     for o in battle.p1.active if o is not None
+                     for e in battle.p2.active if e is not None)
+            matrix = build_threat_matrix(battle, movesets)
+            v, _o, _t, m, plan = race_robust(matrix, battle.p1.roster,
+                                             battle.p2.roster, turns=turns)
+            best = Play(kind=STAY, verdict=v, margin=m, their_plan=plan, log=[])
         report.results.append(PairResult(
             enemy_lead=tuple(pair), verdict=best.verdict,
             our_dead=0, their_dead=0, margin=best.margin,
@@ -1588,24 +1638,36 @@ def default_item(name, world):
 
 
 def _held_count(our4, enemy_roster, world, sets, mega_name=None, turns=2):
-    """How many of their lead pairs we hold (win outright, or salvage by
-    switching), at CHEAP simulator breadth. A ranking tool for item candidates,
-    not a verdict -- `full_report` (full breadth) is the real count.
+    """How many of their lead pairs we WIN outright (STAY, cheap breadth). A
+    ranking tool for comparing item candidates, not a verdict -- `full_report`
+    (full breadth, every switch) is the real count.
+
+    Deliberately STAY-only rather than `plays_for`'s STAY-plus-every-switch:
+    `recommended_items` calls this once per candidate item per Pokemon in the
+    bring (4 x ~6 = 24 times), and `--check`/`--xlsx` without `--vs` calls
+    `recommended_items` once per (opponent, Mega) -- up to a dozen times more.
+    The switch search alone made that combination take tens of minutes,
+    reported as "`--check` returns before `--xlsx` can generate a file" when
+    it was really just still running `recommended_items`. Comparing STAY-only
+    counts still ranks items correctly in the overwhelming majority of cases
+    (a genuinely better item wins more STAY openings too); the rare case it
+    misses -- an item that only helps because of a specific switch line -- is
+    exactly what `item_fixes` finds separately for whichever openings are
+    actually LOSSES, at full switch breadth.
     """
     import itertools
 
     import lead_sim as sim
     theirs_all = list(enemy_roster)
-    lead, back = list(our4[:2]), list(our4[2:])
     n = 0
     for pair in itertools.combinations(theirs_all, 2):
         enemy4 = list(pair) + [x for x in theirs_all if x not in pair]
         battle, movesets, _s = sim.build_position(
             our4, enemy4, world, our_sets=sets, optimise=False,
             enemy_mega=mega_name)
-        best = plays_for(battle, movesets, lead, back, turns=turns,
-                         breadth="cheap")[0]
-        if best.verdict != LOSS:
+        v, _od, _td, _m, _plan, _log = sim.race(battle, movesets, turns=turns,
+                                                breadth="cheap", want_log=False)
+        if v != LOSS:
             n += 1
     return n
 

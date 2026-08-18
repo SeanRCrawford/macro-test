@@ -146,6 +146,9 @@ class MoveInfo:
                                             # two options are otherwise equally good.
 
 
+_MOVE_INFO_CACHE: dict[int, "MoveInfo"] = {}
+
+
 def move_from_showdown(m: dict) -> MoveInfo:
     """Build a MoveInfo from a raw gen9moves.json entry.
 
@@ -153,8 +156,20 @@ def move_from_showdown(m: dict) -> MoveInfo:
     of this, and they had already drifted (one forgot `has_crash`); adding
     `ignore_defensive` to all of them separately is how a move flag ends up
     working in the simulator but not in the solver that chooses the move.
+
+    Cached by `id(m)`: `moves_db`'s entries are loaded once and never mutated,
+    so the same raw dict always produces the same `MoveInfo`, and every caller
+    already treats a `MoveInfo` as immutable (a converted move, e.g. Pixilate's
+    type change in `damage.py` itself, builds a NEW instance rather than
+    mutating one in place). Measured mattering: `solver.build_moveset` calls
+    this fresh for every Pokemon in every position a search or sweep builds,
+    uncached, which showed up as 11%+ of `lead_scan.full_report`'s own cost in
+    `tools/lead_sweep.py`'s sweep stage.
     """
-    return MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
+    cached = _MOVE_INFO_CACHE.get(id(m))
+    if cached is not None:
+        return cached
+    info = MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
                     priority=m.get("priority", 0), secondary=m.get("secondary"),
                     self_effect=m.get("self"), boosts=m.get("boosts"),
                     recoil=m.get("recoil"), drain=m.get("drain"),
@@ -163,6 +178,8 @@ def move_from_showdown(m: dict) -> MoveInfo:
                     self_switch=m.get("selfSwitch"),
                     ignore_defensive=bool(m.get("ignoreDefensive")),
                     accuracy=m.get("accuracy", True))
+    _MOVE_INFO_CACHE[id(m)] = info
+    return info
 
 
 def is_spread_move(move_target: str) -> bool:
