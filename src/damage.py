@@ -65,6 +65,8 @@ class Combatant:
     mega_stats: dict | None = None
     mega_ability: str | None = None
     mega_types: list | None = None
+    weight_kg: float | None = None       # current form's weight -- Low Kick/Grass Knot
+    mega_weight_kg: float | None = None  # swapped in on mega_evolve(), like mega_stats
 
     def __deepcopy__(self, memo):
         """Fast copy. Every field is a scalar, a flat dict of scalars, or a
@@ -96,6 +98,8 @@ class Combatant:
         new.mega_stats = self.mega_stats
         new.mega_ability = self.mega_ability
         new.mega_types = self.mega_types
+        new.weight_kg = self.weight_kg
+        new.mega_weight_kg = self.mega_weight_kg
         return new
 
     def max_hp(self) -> int:
@@ -396,16 +400,24 @@ def ability_type_immunity(defender: "Combatant", move_type: str) -> bool:
 
 
 def _offensive_ability_mult(attacker: "Combatant", move: "MoveInfo", type_eff: float,
-                             weather: str | None) -> float:
-    """Attacker-side ability damage multipliers."""
+                             weather: str | None, power: int | None = None) -> float:
+    """Attacker-side ability damage multipliers.
+
+    `power`: the move's RESOLVED power (defaults to `move.power` for callers
+    that don't have one), needed because `move.power` is 0 for Low Kick/Grass
+    Knot -- checking `move.power <= 60` there would always be true regardless
+    of the real (weight-dependent) power, wrongly Technicianing a 120-power
+    Low Kick against something heavy.
+    """
     mult = 1.0
     ab = attacker.ability
+    power = move.power if power is None else power
     if ab == "Sheer Force" and move.secondary:
         # +30% power, and the secondary effect is suppressed (handled in battle.py).
         mult *= 1.3
     if ab == SLICING_BOOST_ABILITY and (move.flags or {}).get("slicing"):
         mult *= 1.5
-    if ab == "Technician" and move.power <= 60:
+    if ab == "Technician" and power <= 60:
         mult *= 1.5
     if ab == "Tinted Lens" and type_eff < 1.0:
         mult *= 2.0
@@ -475,6 +487,30 @@ MULTI_HIT = {
 # solver.py/fast_eval.py's move-choice filtering, which both key off this).
 CHARGE_WEATHER_SKIP = {"Solar Beam": "sun", "Solar Blade": "sun", "Electro Shot": "rain"}
 
+# Moves whose base power depends on the TARGET's weight rather than being a
+# fixed number. Both use the same breakpoint table (current-gen Bulbapedia).
+# Showdown's raw data gives these `basePower: 0` with a `basePowerCallback` JS
+# function computing the real number at battle time -- which, unhandled, made
+# every Low Kick and Grass Knot in this simulator deal exactly zero damage.
+WEIGHT_BASED_POWER = ("Low Kick", "Grass Knot")
+
+# (weight threshold in kg, power below that threshold). The last row has no
+# threshold -- 200kg+ is the final bracket.
+_WEIGHT_POWER_BREAKPOINTS = ((10, 20), (25, 40), (50, 60), (100, 80), (200, 100))
+
+
+def weight_based_power(weight_kg: float | None) -> int | None:
+    """Low Kick / Grass Knot's real power against a target this heavy, or
+    None if the weight is unknown (a handful of cosmetic form variants have
+    no recorded weight -- see `damage_roll`, which leaves power alone rather
+    than guessing when this returns None)."""
+    if weight_kg is None:
+        return None
+    for threshold, power in _WEIGHT_POWER_BREAKPOINTS:
+        if weight_kg < threshold:
+            return power
+    return 120
+
 
 def hit_count_for(move_name: str, attacker: "Combatant") -> float:
     """How many times this move hits, for this tool's aggregate-damage model
@@ -505,7 +541,21 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     1.00x, 5 = the "5/16" roll callers sometimes want to inspect a specific
     path) instead of the true average. min/max/type_eff are unaffected, so
     this is a drop-in for any caller that only reads the avg slot.
+
+    `power` is resolved here for Low Kick/Grass Knot, from the DEFENDER's
+    weight, whenever the caller passes 0 -- which is every caller except
+    `battle.py`, since Showdown's raw data gives these `basePower: 0` (see
+    `WEIGHT_BASED_POWER`). Only when `power == 0`: `battle.py` resolves it
+    itself BEFORE this call so it can still apply Helping Hand's 1.5x
+    multiplier on top -- if this unconditionally overrode `power`, that
+    multiplier (already baked into whatever `battle.py` passed in) would be
+    silently discarded.
     """
+    if move.name in WEIGHT_BASED_POWER and power == 0:
+        got = weight_based_power(defender.weight_kg)
+        if got is not None:
+            power = got
+
     if power == 0 or move.category == "Status":
         return 0, 0, 0, 1.0
 
@@ -613,7 +663,7 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     modifier *= type_eff
 
     # Ability damage modifiers (Sheer Force, Sharpness, Thick Fat, Filter, ...)
-    modifier *= _offensive_ability_mult(attacker, move, type_eff, weather)
+    modifier *= _offensive_ability_mult(attacker, move, type_eff, weather, power=power)
     modifier *= _defensive_ability_mult(defender, move, type_eff)
 
     # Burn halves physical damage unless Guts (Guts instead boosts Atk stat, handled upstream)

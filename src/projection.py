@@ -120,5 +120,7 @@ def mega_view(battle, combatant):
     view.stats = dict(combatant.mega_stats)
     view.ability = combatant.mega_ability
     view.types = list(combatant.mega_types)
+    if combatant.mega_weight_kg is not None:
+        view.weight_kg = combatant.mega_weight_kg
     view.mega_evolved = True
     return view

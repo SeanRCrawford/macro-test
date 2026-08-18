@@ -31,7 +31,8 @@ from contextlib import contextmanager
 import itertools
 
 from damage import (Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll,
-                    defensive_stat, move_from_showdown, CHARGE_WEATHER_SKIP)
+                    defensive_stat, move_from_showdown, CHARGE_WEATHER_SKIP,
+                    WEIGHT_BASED_POWER)
 from engine import FieldState, Action, on_switch_in, effective_speed
 from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS
 from projection import mega_view, projected_field
@@ -112,7 +113,12 @@ def build_wide_movesets(names, merged: dict, moves_db: dict, pool: int = 6):
 def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo,
                            typechart: dict, field: FieldState, num_hit: int = 1,
                            battle=None) -> float:
-    if move.power == 0:
+    # `move.power == 0` normally means "no damage" (a Status move), but it is
+    # also what Low Kick/Grass Knot's raw power reads BEFORE damage_roll
+    # resolves it from the target's weight -- treating that the same way
+    # priced them at a flat 0 here always, so the search never valued using
+    # them even when they were the best move on the board.
+    if move.power == 0 and move.name not in WEIGHT_BASED_POWER:
         return 0.0
     power = move.power
     # Last Respects' true power depends on the attacker's fainted-ally count, which

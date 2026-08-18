@@ -191,5 +191,230 @@ class TestASwitchMoveThatDoesNotHitDoesNotSwitch(unittest.TestCase):
         self.assertEqual(second.stages["spa"], before["spa"])
 
 
+class TestLowKickWeightBasedPower(unittest.TestCase):
+    """"Low kick's base power varies depending on weight." Showdown's raw
+    data gives Low Kick/Grass Knot `basePower: 0` (a `basePowerCallback` JS
+    function computes the real number from the TARGET's weight at battle
+    time), which this simulator did not handle -- every Low Kick and Grass
+    Knot dealt exactly zero damage, silently, for the whole of this branch's
+    history before this fix."""
+
+    def test_the_raw_move_data_is_zero_power(self):
+        """The bug's precondition -- if Showdown ever ships a real basePower
+        for this move, `weight_based_power` becomes dead code and this whole
+        fix should be revisited."""
+        from damage import move_from_showdown
+        lk = move_from_showdown(world()["moves"]["lowkick"])
+        self.assertEqual(lk.power, 0)
+
+    def test_breakpoints_match_the_current_gen_table(self):
+        from damage import weight_based_power
+        self.assertEqual(weight_based_power(9.9), 20)
+        self.assertEqual(weight_based_power(10.0), 40)
+        self.assertEqual(weight_based_power(24.9), 40)
+        self.assertEqual(weight_based_power(25.0), 60)
+        self.assertEqual(weight_based_power(49.9), 60)
+        self.assertEqual(weight_based_power(50.0), 80)
+        self.assertEqual(weight_based_power(99.9), 80)
+        self.assertEqual(weight_based_power(100.0), 100)
+        self.assertEqual(weight_based_power(199.9), 100)
+        self.assertEqual(weight_based_power(200.0), 120)
+        self.assertEqual(weight_based_power(999), 120)
+
+    def test_unknown_weight_returns_none_rather_than_guessing(self):
+        from damage import weight_based_power
+        self.assertIsNone(weight_based_power(None))
+
+    def test_species_carry_their_real_weight(self):
+        """Populated all the way from the pokedex through make_combatant --
+        not just the standalone table above."""
+        from combatants import make_combatant
+        w = world()
+        whimsicott = make_combatant("Whimsicott", w["merged"], w["natures"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        self.assertAlmostEqual(whimsicott.weight_kg, 6.6)
+        self.assertAlmostEqual(kingambit.weight_kg, 120.0)
+
+    def test_a_mega_pick_carries_the_mega_forms_own_weight(self):
+        """Mega Gallade (56.4kg) is heavier than base Gallade (52kg) -- and a
+        Mega pick starts a real battle in base form, evolving on send-out
+        (see `TestMegaForm` in test_counter_finder.py for the same principle
+        applied to stats/ability/typing)."""
+        from combatants import make_combatant
+        from engine import mega_evolve
+        w = world()
+        c = make_combatant("Mega Gallade", w["merged"], w["natures"])
+        c.is_mega_pick = True
+        self.assertAlmostEqual(c.weight_kg, 52.0)
+        mega_evolve(c)
+        self.assertAlmostEqual(c.weight_kg, 56.4)
+
+    def test_low_kick_deals_more_damage_to_a_heavier_target(self):
+        """Direct damage_roll check: Kingambit (120kg -> 100 power) must take
+        a harder Low Kick than Whimsicott (6.6kg -> 20 power) from the same
+        attacker, and neither may be zero (the bug)."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        lk = move_from_showdown(w["moves"]["lowkick"])
+        gallade = make_combatant("Gallade", w["merged"], w["natures"])
+        light = make_combatant("Whimsicott", w["merged"], w["natures"])
+        heavy = make_combatant("Kingambit", w["merged"], w["natures"])
+        _lo, _hi, avg_light, _eff = damage_roll(
+            50, lk.power, gallade.stats["atk"], light.stats["def"], gallade,
+            light, lk, w["typechart"])
+        _lo, _hi, avg_heavy, _eff = damage_roll(
+            50, lk.power, gallade.stats["atk"], heavy.stats["def"], gallade,
+            heavy, lk, w["typechart"])
+        self.assertGreater(avg_light, 0.0, "Low Kick dealt zero -- the bug")
+        self.assertGreater(avg_heavy, 0.0, "Low Kick dealt zero -- the bug")
+        self.assertGreater(avg_heavy, avg_light)
+
+    def test_low_kick_deals_real_damage_in_a_played_turn(self):
+        """End to end through `Battle.run_turn`, not just the arithmetic --
+        the exact path a real game (and this simulator's engine) takes."""
+        b = battle(["Gallade", "Farigiraf"], ["Kingambit", "Garchomp"])
+        target = b.p2.active[0]
+        before_hp = target.current_hp
+        # Only the PARTNER protects -- the target itself must not, or the hit
+        # (rightly) never lands and the assertion would pass for the wrong
+        # reason.
+        b.run_turn([Action(b.p1.active[0], "p1", "move", b.make_move("lowkick"),
+                           [target]),
+                    Action(b.p1.active[1], "p1", "protect",
+                           b.make_move("protect"), [b.p1.active[1]])],
+                   [Action(target, "p2", "move", b.make_move("tailwind"), [target]),
+                    Action(b.p2.active[1], "p2", "protect",
+                           b.make_move("protect"), [b.p2.active[1]])])
+        self.assertLess(target.current_hp, before_hp)
+
+    def test_technician_reads_the_resolved_power_not_the_raw_zero(self):
+        """`move.power <= 60` (Technician's own threshold) is trivially true
+        for Low Kick's raw data (always 0), which would boost EVERY Low Kick
+        by 1.5x regardless of the real (weight-resolved) power -- wrong for
+        a heavy target where the resolved power is well above 60. Checked by
+        comparing a Technician attacker's ratio of actual-to-no-ability
+        damage: it must be ~1.5x against a LIGHT target (resolved power 20,
+        genuinely eligible) and ~1.0x (no boost) against a HEAVY one
+        (resolved power 100, not eligible)."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown, weight_based_power
+        w = world()
+        lk = move_from_showdown(w["moves"]["lowkick"])
+        light = make_combatant("Whimsicott", w["merged"], w["natures"])
+        heavy = make_combatant("Kingambit", w["merged"], w["natures"])
+        self.assertLessEqual(weight_based_power(light.weight_kg), 60)
+        self.assertGreater(weight_based_power(heavy.weight_kg), 60)
+
+        attacker = make_combatant("Gallade", w["merged"], w["natures"])
+        technician = make_combatant("Gallade", w["merged"], w["natures"])
+        technician.ability = "Technician"
+
+        for defender, expect_boost in ((light, True), (heavy, False)):
+            _lo, _hi, base, _eff = damage_roll(
+                50, lk.power, attacker.stats["atk"], defender.stats["def"],
+                attacker, defender, lk, w["typechart"])
+            _lo, _hi, boosted, _eff = damage_roll(
+                50, lk.power, technician.stats["atk"], defender.stats["def"],
+                technician, defender, lk, w["typechart"])
+            ratio = boosted / base
+            if expect_boost:
+                self.assertAlmostEqual(ratio, 1.5, places=2)
+            else:
+                self.assertAlmostEqual(ratio, 1.0, places=2)
+
+
+class TestFakeOutOnlyLegalTurnOne(unittest.TestCase):
+    """"Massive error in lead_sweep.py; Sneasler uses fake out turn 2. This
+    move can only be used on turn 1. ... The whole point of lead_sweep is it
+    must be robust to enemy switch, protect, or attack -> I don't think it
+    is." Fake Out (and First Impression) are legal only the exact turn a
+    Pokemon is sent out (`active_turn_count == 0`); `solver.py`'s real
+    action-generator already enforced this, but `lead_sim.py`'s OWN separate
+    `candidate_joints` (used by the cheap sweep's re-verification and the
+    workbook's turn-by-turn lines) and `threat.py`'s static matrix did not."""
+
+    def _position(self):
+        import lead_sim as sim
+        w = world()
+        battle, movesets, _sets = sim.build_position(
+            ["Sneasler", "Garchomp"], ["Kingambit", "Gyarados"], w,
+            optimise=False)
+        return battle, movesets
+
+    def test_fake_out_is_offered_the_turn_it_is_sent_out(self):
+        import lead_sim as sim
+        battle, movesets = self._position()
+        joints = sim.candidate_joints(battle, "p1", movesets)
+        moves_seen = {a.move.name for j in joints for a in j if a.move}
+        self.assertIn("Fake Out", moves_seen)
+
+    def test_fake_out_is_not_offered_once_active_turn_count_advances(self):
+        import lead_sim as sim
+        battle, movesets = self._position()
+        sneasler = next(c for c in battle.p1.roster if c.name == "Sneasler")
+        sneasler.active_turn_count = 1
+        joints = sim.candidate_joints(battle, "p1", movesets)
+        moves_seen = {a.move.name for j in joints for a in j if a.move}
+        self.assertNotIn("Fake Out", moves_seen)
+
+    def test_their_strategies_never_scripts_fake_out_past_turn_zero(self):
+        """The enemy-side scripted-plan generator, used by `race()`'s
+        exhaustive strategy search -- must not hand back a plan asking a
+        Pokemon to Fake Out on turn index 1."""
+        import lead_sim as sim
+        battle, movesets = self._position()
+        for seq in sim.their_strategies(battle, movesets, turns=2, breadth="full"):
+            for turn_idx, (_plan, forced) in enumerate(seq):
+                if forced and forced[0] == "Fake Out":
+                    self.assertEqual(turn_idx, 0)
+
+    def test_their_strategies_never_scripts_fake_out_for_an_already_active_mon(self):
+        import lead_sim as sim
+        battle, movesets = self._position()
+        kingambit = next(c for c in battle.p2.roster if c.name == "Kingambit")
+        kingambit.active_turn_count = 1
+        for seq in sim.their_strategies(battle, movesets, turns=2, breadth="full"):
+            for _plan, forced in seq:
+                if forced:
+                    self.assertFalse(forced[0] == "Fake Out" and forced[1] == "Kingambit")
+
+    def test_best_attack_never_credits_fake_out_in_the_threat_matrix(self):
+        """The cheap arithmetic layer (`scan_bring`/`race_bring`/`pin.py`)
+        reads a single static best-move-per-pair value with no notion of
+        which turn is being asked about, so Fake Out must never be it --
+        crediting it would silently assume it lands every turn it's asked
+        about, including turns it cannot possibly fire on."""
+        from threat import _best_attack
+        w = world()
+        from combatants import make_combatant
+        sneasler = make_combatant("Sneasler", w["merged"], w["natures"])
+        target = make_combatant("Whimsicott", w["merged"], w["natures"])
+        from solver import build_moveset
+        movesets = {"Sneasler": build_moveset(w["merged"]["Sneasler"], w["moves"])}
+        self.assertIn("Fake Out", [m.name for m, _pct in movesets["Sneasler"]])
+        best = _best_attack(sneasler, target, movesets, w["typechart"],
+                            context=(None, (), False, False, False))
+        self.assertIsNotNone(best)
+        move, _lo, _hi, _avg = best
+        self.assertNotEqual(move.name, "Fake Out")
+
+    def test_sneasler_never_repeats_fake_out_across_a_real_two_turn_race(self):
+        """End to end: play the actual turn-by-turn race and confirm the log
+        never shows Fake Out firing on turn 2 -- the exact symptom reported."""
+        import lead_sim as sim
+        w = world()
+        our4 = ["Sneasler", "Garchomp", "Whimsicott", "Hydreigon"]
+        enemy4 = ["Kingambit", "Gyarados", "Mega Floette", "Basculegion"]
+        battle, movesets, _sets = sim.build_position(our4, enemy4, w, optimise=False)
+        _verdict, _od, _td, _margin, _desc, log = sim.race(
+            battle, movesets, turns=2, breadth="full", want_log=True)
+        turn2_start = next((i for i, line in enumerate(log)
+                            if "Turn 2" in line), None)
+        self.assertIsNotNone(turn2_start, log)
+        turn2_lines = "\n".join(log[turn2_start:])
+        self.assertNotIn("Sneasler uses Fake Out", turn2_lines, log)
+
+
 if __name__ == "__main__":
     unittest.main()

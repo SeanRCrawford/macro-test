@@ -27,7 +27,8 @@ import random
 
 from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
                     defensive_stat, move_from_showdown,
-                     apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP)
+                     apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
+                     WEIGHT_BASED_POWER, weight_based_power)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS)
 
@@ -753,6 +754,15 @@ class Battle:
             side = self.side_of(attacker)
             fainted_allies = sum(1 for c in side.roster if c is not attacker and c.fainted)
             base_power = min(200, 50 + 50 * fainted_allies)
+        elif move.name in WEIGHT_BASED_POWER and hit_targets:
+            # Low Kick / Grass Knot: resolved from the target's weight HERE,
+            # before Helping Hand's multiplier below, so a Helping-Handed Low
+            # Kick gets its real 1.5x rather than losing it -- `damage_roll`
+            # only falls back to resolving this itself when `power` arrives
+            # as 0 (every other caller, which has no such multiplier to lose).
+            got = weight_based_power(hit_targets[0].weight_kg)
+            if got is not None:
+                base_power = got
         # Helping Hand: a partner's Helping Hand this same turn boosts this move's
         # power by 1.5x, once, regardless of how many targets it hits.
         move_power = base_power * 1.5 if attacker.volatile.pop("helping_hand", False) else base_power

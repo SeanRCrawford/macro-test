@@ -34,7 +34,7 @@ import copy
 import itertools
 
 from damage import is_spread_move
-from solver import Action, build_moveset
+from solver import Action, build_moveset, FIRST_TURN_ONLY_MOVES
 
 WIN, EVEN, LOSS = "win", "even", "loss"
 
@@ -194,6 +194,14 @@ def candidate_joints(battle, side, movesets, allow_protect=True,
     Deliberately NOT the solver's pruned list: the point of this module is that
     nothing is removed by a heuristic that might be wrong. Small by construction
     -- four moves times at most two targets, per slot.
+
+    ONE exception, and it is not a heuristic: Fake Out / First Impression
+    (`FIRST_TURN_ONLY_MOVES`) are dropped once `c.active_turn_count > 0`, same
+    rule `solver.py`'s real action-generator already enforces. This is a hard
+    legality rule, not a judgement call -- without it a Sneasler that is still
+    on the field two turns in remains free to "use" Fake Out again, which
+    cannot happen in a real game, and a bring that only wins because of it is
+    not actually robust to the enemy's real options.
     """
     me = battle.p1 if side == "p1" else battle.p2
     foe = battle.p2 if side == "p1" else battle.p1
@@ -208,7 +216,10 @@ def candidate_joints(battle, side, movesets, allow_protect=True,
             if bench is not None:
                 per_slot.append([Action(c, side, "switch", None, [bench])])
                 continue
-        for move, _usage in movesets.get(c.name) or []:
+        moveset = movesets.get(c.name) or []
+        if c.active_turn_count > 0:
+            moveset = [m for m in moveset if m[0].name not in FIRST_TURN_ONLY_MOVES]
+        for move, _usage in moveset:
             if move.name == "Protect":
                 if allow_protect and not c.protected_last_turn:
                     opts.append(Action(c, side, "move", move, [c]))
@@ -221,7 +232,7 @@ def candidate_joints(battle, side, movesets, allow_protect=True,
                 for t in live_foes:
                     opts.append(Action(c, side, "move", move, [t]))
         if not opts:
-            first = (movesets.get(c.name) or [(None, 0)])[0][0]
+            first = (moveset or [(None, 0)])[0][0]
             if first is not None and live_foes:
                 opts.append(Action(c, side, "move", first, [live_foes[0]]))
         per_slot.append(opts or [None])
@@ -364,14 +375,24 @@ def their_strategies(battle, movesets, turns=2, breadth="full"):
 
     `breadth` trades cost for coverage. "cheap" is the both-attack column plus one
     Protect split; "full" is every legal combination with nobody Protecting twice
-    in a row, plus Tailwind / Trick Room / Fake Out on either turn.
+    in a row, plus Tailwind / Trick Room on either turn, and Fake Out on turn 0
+    ONLY -- and only if `c` was actually just sent out (`active_turn_count == 0`
+    at the start of this window). Scripting Fake Out on a later turn, or on a
+    Pokemon that was already on the field before this window began, would be
+    scripting a move that fails to even execute in a real game.
     """
     actives = [c for c in battle.p2.active if c is not None and not c.fainted]
     setups = [None]
     for c in actives:
         for move, _u in movesets.get(c.name) or []:
             if move.name in SETUP_MOVES:
-                for turn in range(max(1, turns)):
+                if move.name == "Fake Out":
+                    if c.active_turn_count > 0:
+                        continue
+                    turns_to_try = (0,)
+                else:
+                    turns_to_try = range(max(1, turns))
+                for turn in turns_to_try:
                     setups.append((move.name, c.name, turn))
     plans = PROTECT_PLANS if breadth == "full" else ("both attack",
                                                      "left protects")

@@ -84,8 +84,8 @@ import itertools
 from dataclasses import dataclass
 
 from combatants import make_combatant
-from damage import (damage_roll, defensive_stat, effective_stat, hit_count_for,
-                    is_spread_move, move_from_showdown)
+from damage import (WEIGHT_BASED_POWER, damage_roll, defensive_stat, effective_stat,
+                    hit_count_for, is_spread_move, move_from_showdown)
 from engine import FieldState, effective_speed
 from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
 from solver import build_moveset
@@ -108,6 +108,8 @@ def _mega_project(c):
     view.types = list(c.mega_types) if c.mega_types else c.types
     if c.mega_ability:
         view.ability = c.mega_ability
+    if c.mega_weight_kg is not None:
+        view.weight_kg = c.mega_weight_kg
     view.mega_evolved = True
     return view
 
@@ -225,7 +227,9 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     is 2, `damage_roll`'s own rule) -- the caller's job to set correctly for
     a spread move actually hitting more than one Pokemon this turn.
     """
-    if move.category == "Status" or not move.power:
+    if move.category == "Status":
+        return NO_HIT
+    if not move.power and move.name not in WEIGHT_BASED_POWER:
         return NO_HIT
     physical = move.category == "Physical"
     ak, dk = ("atk", "def") if physical else ("spa", "spd")
@@ -275,7 +279,9 @@ def _choose_move(attacker, moves, defender, typechart, weather=None):
     """
     best_key, best_hit, best_move = None, NO_HIT, None
     for mv in moves:
-        if mv.category == "Status" or not mv.power:
+        if mv.category == "Status":
+            continue
+        if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
         got = _raw_hit(attacker, mv, defender, typechart, weather=weather, roll="avg")
         key = (got.frac >= 1.0, mv.priority, got.frac)

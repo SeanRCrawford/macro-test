@@ -93,6 +93,8 @@ def mega_evolve(combatant: Combatant):
     combatant.stats = dict(combatant.mega_stats)
     combatant.ability = combatant.mega_ability
     combatant.types = list(combatant.mega_types)
+    if combatant.mega_weight_kg is not None:
+        combatant.weight_kg = combatant.mega_weight_kg
     combatant.mega_evolved = True
 
 

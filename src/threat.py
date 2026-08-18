@@ -34,6 +34,7 @@ from engine import effective_speed
 from matching import max_weight_matching
 from projection import mega_view, projected_field, projected_weather
 from rolls import kill_probability
+from solver import FIRST_TURN_ONLY_MOVES
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,15 @@ def _best_attack(attacker, defender, movesets, typechart, context):
     screens. The engine passes all three (battle.py `_resolve_move`); an earlier
     version of this module passed only weather, which silently over-estimated
     damage into screens and mis-handled Fairy/Dark Aura.
+
+    FIRST_TURN_ONLY_MOVES (Fake Out / First Impression) are never picked as
+    "the move" here. This matrix is a single static snapshot -- one best move
+    per (attacker, defender) pair, read for BOTH this turn and (via `pin._incoming`'s
+    `only_before_it_acts`) the next -- so crediting Fake Out would silently
+    assume it lands twice, which cannot happen in a real game. Excluding it
+    entirely (rather than only on the "next turn" read) is deliberate: nothing
+    here tracks which turn is being asked about, so there is no reading at
+    which point crediting it would be safe.
     """
     key = _damage_key(attacker, defender, context)
     cached = _DAMAGE_CACHE.get(key)
@@ -130,6 +140,8 @@ def _best_attack(attacker, defender, movesets, typechart, context):
     entries = movesets.get(attacker.name) or []
     for move, _usage in entries:
         if move.power == 0 or move.category == "Status":
+            continue
+        if move.name in FIRST_TURN_ONLY_MOVES:
             continue
         physical = move.category == "Physical"
         atk_key = "atk" if physical else "spa"

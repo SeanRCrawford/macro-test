@@ -388,6 +388,7 @@ def build_merged_dataset():
             "species_id": sid,
             "base_stats": sdata["baseStats"],
             "types": sdata["types"],
+            "weight_kg": sdata.get("weightkg"),
             "legal_abilities": sdata.get("abilities", {}),
             "nature": rec["nature"],
             "evs": rec["evs"],
