@@ -6,6 +6,7 @@
     python counter_table.py --vs "Kingambit,Basculegion,Garchomp" --pairs
     python counter_table.py --vs "Kingambit,Basculegion" --pairs --chip-from "Ninetales-Alola" --chip-move "Blizzard"
     python counter_table.py --vs "Kingambit,Basculegion" --pool-size 60 --top 15
+    python counter_table.py --vs "Kingambit,Basculegion,Urshifu-Rapid-Strike,Chien-Pao,Landorus-Therian,Rillaboom" --team "Big 6" --item "Gallade=Choice Scarf"
 
 Three modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
@@ -21,6 +22,30 @@ Three modes, pick one (or combine --chip-from/--chip-move with --pairs):
               --chip-from/--chip-move to give it a partner's help; every
               combination of who the candidate and the partner go for is
               tried and the best is kept.
+
+By default every pool member's item AND moveset are searched for the best
+legal answer to `--vs` -- "or to just select optimal item" is the default,
+not something you have to ask for. To instead PIN a specific item on a named
+Pokemon (e.g. "Choice Scarf on Gallade beats Big 6 easily" -- go verify
+that claim directly), use --item:
+
+    --item "Gallade=Choice Scarf"
+    --item "Gallade=Choice Scarf;Ninetales-Alola=Life Orb"
+
+A pinned item does not freeze the moveset to some hardcoded default -- "For
+Choice Scarf, a pokemon can use 4 moves, which could be highly useful": the
+4 moves are still genuinely re-optimised FOR that item, same search as
+always, just with the item fixed instead of searched. Pin the moves too
+(skipping move search entirely) with --moves, semicolon-separated by
+Pokemon and comma-separated within:
+
+    --moves "Gallade=Psycho Cut,Sacred Sword,Close Combat,Ice Punch"
+
+--partner-item pins the --chip-from/--pairs partner's item the same way (it
+defaults to the partner's own best legal item otherwise). Pins are checked
+against Regulation MB's banned list (Assault Vest, Choice Band, Choice
+Specs) the same as a searched item would be -- a pin is a decision, not a
+loophole around the ban.
 
 Every damage number printed is the FULL roll (worst-average-best%), and a
 "Mega X" name always means the mega form, stats and all -- see
@@ -40,6 +65,38 @@ import argparse  # noqa: E402
 import _harness  # noqa: E402,F401
 
 from counter_finder import chip_then_ko, pair_search, threshold_search  # noqa: E402
+
+
+def _parse_item_overrides(spec):
+    """"Gallade=Choice Scarf;Ninetales-Alola=Life Orb" -> {name: item}."""
+    if not spec:
+        return None
+    out = {}
+    for entry in spec.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise SystemExit(f"--item entry {entry!r} must be 'Pokemon=Item'")
+        name, item = entry.split("=", 1)
+        out[name.strip()] = item.strip()
+    return out
+
+
+def _parse_move_overrides(spec):
+    """"Gallade=Psycho Cut,Sacred Sword;X=..." -> {name: [move, ...]}."""
+    if not spec:
+        return None
+    out = {}
+    for entry in spec.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise SystemExit(f"--moves entry {entry!r} must be 'Pokemon=Move,Move,...'")
+        name, moves = entry.split("=", 1)
+        out[name.strip()] = [m.strip() for m in moves.split(",") if m.strip()]
+    return out
 
 
 def _pool(args, merged):
@@ -168,6 +225,18 @@ def main():
                     help="partner Pokemon whose move chips the targets first")
     ap.add_argument("--chip-move", default="", metavar="MOVE",
                     help="the partner's move (requires --chip-from)")
+    ap.add_argument("--partner-item", default="", metavar="ITEM",
+                    help="pin the --chip-from/--pairs partner's item instead "
+                         "of searching for its best legal one")
+    ap.add_argument("--item", default="", metavar="POKEMON=ITEM[;...]",
+                    help="pin a specific legal item on named pool members "
+                         "instead of searching for the best one, e.g. "
+                         "'Gallade=Choice Scarf'. The moveset is still "
+                         "re-optimised under the pinned item")
+    ap.add_argument("--moves", default="", metavar="POKEMON=MOVE,MOVE,...[;...]",
+                    help="pin the moveset too (skips move search) for named "
+                         "pool members, e.g. 'Gallade=Psycho Cut,Sacred "
+                         "Sword,Close Combat,Ice Punch'")
     ap.add_argument("--pairs", action="store_true",
                     help="speed-order pair search instead of the single-hit "
                          "threshold search")
@@ -183,8 +252,11 @@ def main():
 
     if bool(args.chip_from) != bool(args.chip_move):
         raise SystemExit("--chip-from and --chip-move must be given together")
+    if args.partner_item and not args.chip_from:
+        raise SystemExit("--partner-item requires --chip-from/--chip-move")
 
     from _harness import load_world
+    from lead_sim import BANNED_ITEMS
     W = load_world()
     merged, moves, natures, typechart = (W["merged"], W["moves"], W["natures"],
                                          W["typechart"])
@@ -195,21 +267,47 @@ def main():
     pool = _pool(args, merged)
     threshold = args.threshold / 100.0
 
+    item_overrides = _parse_item_overrides(args.item)
+    move_overrides = _parse_move_overrides(args.moves)
+    banned = [i for i in (item_overrides or {}).values() if i in BANNED_ITEMS]
+    if banned:
+        raise SystemExit(f"--item: not legal in Regulation MB: {', '.join(banned)}")
+    overridden = set(item_overrides or {}) | set(move_overrides or {})
+    unknown = [n for n in overridden if n not in merged]
+    if unknown:
+        raise SystemExit(f"--item/--moves: unknown Pokemon: {', '.join(unknown)}")
+    # A pin only means something if the Pokemon is actually searched -- add
+    # anything named in --item/--moves that the pool (top-N or --team) didn't
+    # already include, so e.g. "Gallade=Choice Scarf" is tested even when
+    # Gallade wouldn't otherwise have made a --pool-size 40 cut.
+    pool = pool + [n for n in overridden if n not in pool and n not in targets]
+    if args.partner_item and args.partner_item in BANNED_ITEMS:
+        raise SystemExit(f"--partner-item: {args.partner_item!r} is not legal "
+                         "in Regulation MB")
+
     print(f"Searching {len(pool)} Pokemon vs {', '.join(targets)}\n")
 
     if args.pairs:
         rows = pair_search(pool, targets, merged, moves, natures, typechart,
                            partner_name=args.chip_from or None,
-                           partner_move_name=args.chip_move or None)
+                           partner_move_name=args.chip_move or None,
+                           partner_item=args.partner_item or None,
+                           item_overrides=item_overrides,
+                           move_overrides=move_overrides)
         _print_pairs(rows, targets, args.top, partner=args.chip_from,
                     move=args.chip_move)
     elif args.chip_from:
         rows = chip_then_ko(pool, targets, args.chip_from, args.chip_move,
-                            merged, moves, natures, typechart)
+                            merged, moves, natures, typechart,
+                            partner_item=args.partner_item or None,
+                            item_overrides=item_overrides,
+                            move_overrides=move_overrides)
         _print_chip(rows, targets, args.chip_from, args.chip_move, args.top)
     else:
         rows = threshold_search(pool, targets, merged, moves, natures, typechart,
-                                threshold=threshold)
+                                threshold=threshold,
+                                item_overrides=item_overrides,
+                                move_overrides=move_overrides)
         _print_threshold(rows, targets, threshold, args.top)
 
     if args.csv:

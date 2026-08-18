@@ -92,8 +92,9 @@ def optimised_items(names, world, enemy_names=()):
 
     `optimize_sets.best_item` rates the recorded items; Focus Sash is added as a
     candidate for everything, since surviving a would-be OHKO is a matchup effect
-    that no usage table prices. Regulation MB bans Assault Vest and the Choice
-    items, so `legal_items` is filtered against them here rather than trusted.
+    that no usage table prices. Regulation MB bans Assault Vest and two of the
+    three Choice items, so `legal_items` is filtered against them here rather
+    than trusted.
     """
     from optimize_sets import best_item, legal_items
     foes = list(enemy_names) or list(names)
@@ -114,9 +115,7 @@ def optimised_items(names, world, enemy_names=()):
         if item in BANNED_ITEMS:
             item = None
         if item is None:
-            # Fall back to the best LEGAL recorded item. This matters because the
-            # usage default can itself be banned: Hydreigon's most-used item is
-            # Choice Scarf, so leaving it alone put an illegal item on the field.
+            # Fall back to the best LEGAL recorded item.
             legal = [i for i in (legal_items(name, world["merged"]) or [])
                      if i not in BANNED_ITEMS]
             item = legal[0] if legal else None
@@ -128,8 +127,14 @@ def optimised_items(names, world, enemy_names=()):
 # Not legal in Regulation MB. Filtered rather than merely omitted, because they
 # appear in the usage tables and so would otherwise come back in through
 # `legal_items`. An item search that proposes an illegal item is worse than none.
-BANNED_ITEMS = frozenset({"Assault Vest", "Choice Band", "Choice Specs",
-                          "Choice Scarf"})
+#
+# Choice Scarf is NOT on this list -- it is a legal item in this format, and it
+# was wrongly banned here for a stretch of this branch's history (a mistake
+# made while implementing the other two Choice items' ban, not something the
+# user ever asked for; the original request named exactly Assault Vest, Choice
+# Band and Choice Specs). Confirmed and corrected directly: *"Choice Scarf
+# (which is a valid item, other choice items are not)"*.
+BANNED_ITEMS = frozenset({"Assault Vest", "Choice Band", "Choice Specs"})
 
 
 def build_position(our4, enemy4, world, our_sets=None, enemy_sets=None,

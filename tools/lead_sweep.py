@@ -20,6 +20,12 @@ night.
         --xlsx book.xlsx                                 a serious run
     python lead_sweep.py --check "Ninetales-Alola,Garchomp,Mega Scizor,Rotom-Wash"
                                                          one bring, console
+    python lead_sweep.py --check "Gallade,Garchomp,Mega Floette,Whimsicott" ^
+        --vs "Big 6" --items "Gallade=Choice Scarf"     pin an item, console
+    python lead_sweep.py --check "Gallade,Garchomp,Mega Floette,Whimsicott" ^
+        --vs "Big 6" --optimise                         genuinely optimise
+                                                         every item AND
+                                                         moveset, console
 
 The path is relative to wherever you run it, so `--xlsx book.xlsx` from `tools`
 lands in `tools\book.xlsx`. Generated workbooks are gitignored.
@@ -27,6 +33,27 @@ lands in `tools\book.xlsx`. Generated workbooks are gitignored.
 ITEMS. Every Pokemon holds its MOST POPULAR item by usage already -- that is what
 `make_team` does and it needs no flag. The Loadout sheet shows that baseline and
 names the one swap, if any, that strictly increases the number of openings held.
+
+`--check` prints against the usage-default item and moveset by default -- the
+same cheap baseline the sweep itself ranks on. Two ways to change what it
+tests, usable together:
+
+  --optimise      genuinely search for the best legal item AND moveset for
+                  each of the four against `--vs`, the same exhaustive search
+                  `--xlsx`'s detail stage already runs (`_optimised_sets`),
+                  instead of the usage-default set. Slower per opponent, still
+                  console-only and no games played.
+  --items "Gallade=Choice Scarf"
+                  pin a specific LEGAL item on a named Pokemon in the bring
+                  instead of searching for (or defaulting to) one -- e.g. to
+                  test a specific claim directly, "Choice Scarf on Gallade
+                  beats Big 6 easily". The moveset is still genuinely
+                  re-optimised UNDER the pinned item (a Choice item locks you
+                  into your first move used, not into one hard-coded move),
+                  and the pin overrides whatever `--optimise` would otherwise
+                  have searched for on that one Pokemon. Semicolon-separated
+                  for more than one: "Gallade=Choice Scarf;Whimsicott=Focus
+                  Sash". Checked against Regulation MB's banned list.
 
 No games are played. Every verdict is a sum -- see src/lead_scan.py for what
 that buys and what it cannot see. This is the narrowing step BEFORE the overnight
@@ -75,6 +102,22 @@ def read_preferences():
                 if name:
                     bucket.add(name)
     return exclude, prefer
+
+
+def _parse_item_overrides(spec):
+    """"Gallade=Choice Scarf;Whimsicott=Focus Sash" -> {name: item}."""
+    if not spec:
+        return None
+    out = {}
+    for entry in spec.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise SystemExit(f"--items entry {entry!r} must be 'Pokemon=Item'")
+        name, item = entry.split("=", 1)
+        out[name.strip()] = item.strip()
+    return out
 
 
 def _opponents(world, spec):
@@ -140,6 +183,16 @@ def main():
     ap.add_argument("--check", default="",
                     help="skip the sweep and report ONE bring, lead first: "
                          "--check \"Ninetales-Alola,Garchomp,Mega Scizor,Rotom-Wash\"")
+    ap.add_argument("--optimise", action="store_true",
+                    help="--check only: genuinely search for the best legal "
+                         "item AND moveset for each of the four, instead of "
+                         "the usage-default set (same search --xlsx's detail "
+                         "stage already runs)")
+    ap.add_argument("--items", default="", metavar="POKEMON=ITEM[;...]",
+                    help="--check only: pin a specific legal item on a named "
+                         "Pokemon in the bring instead of searching for one, "
+                         "e.g. 'Gallade=Choice Scarf'. The moveset is still "
+                         "re-optimised under the pinned item")
     ap.add_argument("--xlsx", default="", metavar="PATH",
                     help="write the workbook: brings, teams of 6, openings, "
                          "lines with damage, switch-ins and item fixes")
@@ -174,24 +227,41 @@ def main():
         our4 = [n.strip() for n in args.check.split(",") if n.strip()]
         if len(our4) != 4:
             raise SystemExit("--check needs exactly 4 Pokemon, lead first")
+        item_overrides = _parse_item_overrides(args.items)
+        unknown = [n for n in (item_overrides or {}) if n not in our4]
+        if unknown:
+            raise SystemExit(f"--items names not in --check's bring: "
+                             f"{', '.join(unknown)}")
         print()
         for opp in opponents:
+            # `sets` is built PER OPPONENT: --optimise searches against this
+            # one enemy roster, same as --xlsx's detail stage does per record
+            # (`_optimised_sets`) -- a real team is built once, but "the best
+            # item against this specific six" is still a legitimate thing to
+            # ask, one opponent at a time.
+            try:
+                sets = ls._sets_for(our4, world, enemy_roster=world["teams"][opp],
+                                    optimise=args.optimise,
+                                    item_overrides=item_overrides)
+            except ValueError as e:
+                raise SystemExit(f"--items: {e}")
             # Both views: the per-enemy breakdown (the EXPLANATION, in the shape
             # the idea was expressed in) and the race over their 15 openings
             # (the VERDICT, which is what a screen can act on).
             for line in ls.describe(ls.scan_bring(our4, world["teams"][opp],
-                                                  world, opponent_name=opp)):
+                                                  world, opponent_name=opp,
+                                                  sets=sets)):
                 print(line)
             print()
             race = ls.race_bring(our4, world["teams"][opp], world,
-                                 opponent_name=opp)
+                                 opponent_name=opp, sets=sets)
             for line in ls.describe_race(race, limit=args.top):
                 print(line)
             print()
             print(f"  Their HP budget -- what can switch in against our back "
                   f"two, and afford it:")
             for name, afford, verdict in ls.enemy_hp_budget(
-                    our4, world["teams"][opp], world):
+                    our4, world["teams"][opp], world, sets=sets):
                 print(f"    {name:20s} can afford to lose {afford * 100:+7.1f}%"
                       f"   {verdict}")
             slots = ls.mega_slots(world["teams"][opp], world)
@@ -203,7 +273,8 @@ def main():
         # produced no file. The single-bring case is exactly where the lines are
         # most worth having, so it writes the same workbook the sweep does.
         if args.xlsx:
-            records = _records_for(our4, opponents, world)
+            records = _records_for(our4, opponents, world,
+                                   item_overrides=item_overrides)
             import lead_book
             n = lead_book.build(records, args.xlsx)
             print(f"Workbook ({n} records): {os.path.abspath(args.xlsx)}")
@@ -271,19 +342,29 @@ def main():
 
 
 
-def _records_for(bring, opponents, world, want_items=True):
+def _records_for(bring, opponents, world, want_items=True, item_overrides=None):
     """Full records for one bring: every opponent x every Mega they could pick.
 
     A bring does NOT have to beat every opponent -- "a given 4 doesn't need to
     beat every enemy team" -- so this returns one record per (opponent, Mega) and
     lets the workbook be the catalogue.
+
+    `item_overrides` (from `--check`'s `--items`): pins a specific legal item
+    on a named Pokemon in `bring` for every record, instead of letting
+    `full_report`'s own exhaustive search pick one -- same `--items` pin
+    `--check`'s console output already honours, carried into the workbook too
+    when `--check` and `--xlsx` are combined.
     """
     out = []
     for opp in opponents:
         roster = world["teams"][opp]
         for mega_name, variant in ls.mega_variants(roster, world):
+            sets = (ls._sets_for(bring, world, enemy_roster=variant, optimise=True,
+                                 item_overrides=item_overrides)
+                   if item_overrides else None)
             report, ms, b = ls.full_report(bring, variant, world,
-                                           opponent_name=opp, mega_name=mega_name)
+                                           opponent_name=opp, mega_name=mega_name,
+                                           sets=sets)
             ours = [c for c in b.p1.roster if not c.fainted]
             their_bench = [c for c in b.p2.roster if not c.fainted][2:]
             switch_ins = ls.switch_in_table(ms, b.typechart, b.field, b,

@@ -121,18 +121,46 @@ def _build(name, merged, natures, item=None):
     return c
 
 
-def best_answer(name, merged, moves_db, natures, typechart, target_names):
+def best_answer(name, merged, moves_db, natures, typechart, target_names,
+                item=None, move_names=None):
     """(item, move_names, weather): `name`'s best LEGAL item and moveset
-    against `target_names`, via `optimize_sets.best_item`/`best_moveset`.
+    against `target_names`, via `optimize_sets.best_item`/`best_moveset` --
+    or, "or to just select optimal item" is not the only option, an explicit
+    override.
+
+    `item`: pin a specific item instead of searching for the best legal one
+    (e.g. Choice Scarf on a Pokemon the search would not have picked it for).
+    Checked against Regulation MB's banned list the same as a searched item
+    would be -- an override is a decision, not a loophole, so it still has to
+    be legal. The moveset is still genuinely re-optimised UNDER whichever
+    item ends up in play, pinned or found -- "For Choice Scarf, a pokemon can
+    use 4 moves, which could be highly useful": a Choice item locks you into
+    the first move you use, not into a single hard-coded one, so its set is
+    chosen the same way any other item's is.
+
+    `move_names`: pin the moveset outright too (skips move optimisation
+    entirely). Only meaningful together with `item`, since a pinned moveset
+    with a searched-for item would be re-deriving the item against moves that
+    might not even be the ones the search would have chosen.
 
     `best_item`'s own candidate list (`legal_items`) is not filtered against
-    Regulation MB's banned items (Assault Vest, the three Choice items) --
-    they are logged in `items_usage` same as everything else, across every
-    format. Filtered here the same way `lead_sim.optimised_items` filters it,
-    so a search "for the most favourable item" cannot hand back an illegal one.
+    Regulation MB's banned items (Assault Vest, Choice Band, Choice Specs --
+    NOT Choice Scarf, which is legal here) -- they are logged in
+    `items_usage` same as everything else, across every format. Filtered
+    here the same way `lead_sim.optimised_items` filters it, so a search
+    "for the most favourable item" cannot hand back an illegal one.
     """
     from lead_sim import BANNED_ITEMS
     weather = team_weather_for([name], merged)
+    if item is not None and item in BANNED_ITEMS:
+        raise ValueError(f"{item!r} is not legal in Regulation MB")
+    if item is not None and move_names is not None:
+        return item, move_names, weather
+    if item is not None:
+        move_names, _score = best_moveset(name, merged, moves_db, natures, typechart,
+                                          target_names, item=item, team_weather=weather)
+        return item, move_names, weather
+
     item, move_names, _score = best_item(name, merged, moves_db, natures, typechart,
                                          target_names, team_weather=weather)
     if item in BANNED_ITEMS:
@@ -256,8 +284,22 @@ def _choose_move(attacker, moves, defender, typechart, weather=None):
     return best_hit, best_move
 
 
+def _answer_for(name, merged, moves_db, natures, typechart, target_names,
+                item_overrides=None, move_overrides=None):
+    """`best_answer`, applying this specific `name`'s entry (if any) in
+    `item_overrides`/`move_overrides` -- "I also want the option to define
+    item ... such as Choice Scarf, or to just select optimal item". Both
+    dicts default to "search for the best", per-name, unaffected by an
+    override on some OTHER name in the same pool.
+    """
+    item = (item_overrides or {}).get(name)
+    moves = (move_overrides or {}).get(name)
+    return best_answer(name, merged, moves_db, natures, typechart, target_names,
+                       item=item, move_names=moves)
+
+
 def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
-                     threshold=0.9):
+                     threshold=0.9, item_overrides=None, move_overrides=None):
     """Each pool member's best legal item/moveset against `target_names`, and
     the worst-roll `Hit` its best move lands on EACH target individually.
 
@@ -265,6 +307,9 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
     "ranked on the worst" the lead screen uses throughout: a Pokemon that
     OHKOes one of the named targets and whiffs the other has not answered the
     question "beats Kingambit AND Basculegion", it has answered a smaller one.
+
+    `item_overrides`/`move_overrides`: optional {name: item} / {name:
+    [move, ...]} pins for specific pool members -- see `_answer_for`.
 
     Returns rows: {name, item, moves, per_target: {target: Hit}, worst_pct,
     meets_all}.
@@ -274,8 +319,9 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
     for name in pool:
         if name in targets:
             continue
-        item, move_names, weather = best_answer(name, merged, moves_db, natures,
-                                                 typechart, target_names)
+        item, move_names, weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides)
         if not move_names:
             continue
         attacker = _build(name, merged, natures, item=item)
@@ -293,7 +339,8 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
 
 
 def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
-                 moves_db, natures, typechart, partner_item=None):
+                 moves_db, natures, typechart, partner_item=None,
+                 item_overrides=None, move_overrides=None):
     """Who finishes each target off after `partner_name`'s `partner_move_name`
     has already landed (worst roll -- the guaranteed chip)?
 
@@ -304,6 +351,10 @@ def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
     friends), the chip is computed at the doubles 0.75x multi-target penalty
     -- a real field always has a second enemy for it to also be hitting, even
     one not among the named targets.
+
+    `item_overrides`/`move_overrides`: optional {name: item} / {name:
+    [move, ...]} pins for specific pool members (the finishers) -- see
+    `_answer_for`. Does not affect the partner; use `partner_item` for that.
 
     Returns rows: {name, item, chip: {target: Hit}, finishes:
     {target: (ko: bool, Hit)}, n_ko}.
@@ -332,8 +383,9 @@ def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
     for name in pool:
         if name in target_names or name == partner_name:
             continue
-        item, move_names, weather = best_answer(name, merged, moves_db, natures,
-                                                 typechart, target_names)
+        item, move_names, weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides)
         if not move_names:
             continue
         attacker = _build(name, merged, natures, item=item)
@@ -462,7 +514,8 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
 
 
 def pair_search(pool, target_names, merged, moves_db, natures, typechart,
-                partner_name=None, partner_move_name=None):
+                partner_name=None, partner_move_name=None, partner_item=None,
+                item_overrides=None, move_overrides=None):
     """For each pool member, against EVERY pair drawn from `target_names`: a
     full ONE-TURN exchange, in real priority-then-speed order, AVERAGE rolls
     -- does it KO one of the pair before the pair KOes it?
@@ -487,6 +540,11 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
     outcome is kept. A candidate that can only beat the pair with the right
     target assignment has still beaten the pair.
 
+    `partner_item` pins the partner's item instead of searching for its best
+    legal one (same idea as `chip_then_ko`'s). `item_overrides`/
+    `move_overrides`: optional {name: item} / {name: [move, ...]} pins for
+    specific pool members (the candidates) -- see `_answer_for`.
+
     Returns rows: {name, item, pairs_clean, pairs_trade, pairs_no_ko,
     pairs_pinned, pairs_total, detail} where detail is {(e1, e2): {outcome,
     target, partner_target, hp_left, hits}} for the choice that was kept.
@@ -504,8 +562,9 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
     for name in pool:
         if name in target_names or name == partner_name:
             continue
-        item, move_names, weather = best_answer(name, merged, moves_db, natures,
-                                                 typechart, target_names)
+        item, move_names, weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides)
         if not move_names:
             continue
         attacker = _build(name, merged, natures, item=item)
@@ -513,8 +572,11 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
 
         partner = None
         if partner_name is not None:
-            p_item, _mv, _w = best_answer(partner_name, merged, moves_db, natures,
-                                          typechart, target_names)
+            if partner_item is None:
+                p_item, _mv, _w = best_answer(partner_name, merged, moves_db, natures,
+                                              typechart, target_names)
+            else:
+                p_item = partner_item
             partner = _build(partner_name, merged, natures, item=p_item)
 
         detail = {}

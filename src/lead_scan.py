@@ -248,7 +248,7 @@ def _legal_default_sets(our4, world):
 
     `_harness.setup_battle` reads `make_team`'s raw usage default when no
     `sets` override is given, which does not filter Regulation MB's banned
-    items (Assault Vest, the three Choice items) -- so a Pokemon whose #1
+    items (Assault Vest, Choice Band, Choice Specs) -- so a Pokemon whose #1
     recorded item happens to be one of those would otherwise field it in
     every cheap-stage call below. `default_item` already skips them; this
     just turns that into an override for every member of the bring.
@@ -256,16 +256,62 @@ def _legal_default_sets(our4, world):
     return {name: {"item": default_item(name, world)} for name in our4}
 
 
-def scan_bring(our4, enemy_roster, world, lead_index=(0, 1), opponent_name=""):
+def _sets_for(our4, world, enemy_roster=None, optimise=False, item_overrides=None):
+    """{name: {"item":..., "moves":...}} for the cheap `--check` stage.
+
+    Default (optimise=False, no overrides): `_legal_default_sets` -- the
+    usage-default legal item; moves are left unset, so `setup_battle` fills
+    in the usage-default moveset (`build_moveset` with no `only_moves`).
+
+    `optimise=True`: genuinely search for the best legal item AND moveset
+    against `enemy_roster` -- `_optimised_sets`, the same exhaustive search
+    the workbook's detail stage and `item_fixes` already use -- instead of
+    the usage defaults. "the ability to optimise items and moves properly".
+
+    `item_overrides`: {name: item} pins (e.g. from `--items`) applied on top
+    of whichever base was chosen above. The MOVESET is still genuinely
+    re-optimised UNDER the pinned item (`optimize_sets.best_moveset(...,
+    item=item)`), not left at whatever the base search or usage table
+    happened to have -- "For Choice Scarf, a pokemon can use 4 moves, which
+    could be highly useful": a Choice item locks you into your first move
+    used, not into one hard-coded move. Same idea as
+    `counter_finder.best_answer`'s override, applied here instead of there.
+    Raises `ValueError` for a banned pin -- an override is a decision, not a
+    loophole around the ban.
+    """
+    from lead_sim import BANNED_ITEMS
+    if optimise:
+        sets = _optimised_sets(our4, enemy_roster or our4, world)
+    else:
+        sets = _legal_default_sets(our4, world)
+    sets = {name: dict(spec) for name, spec in sets.items()}
+    if item_overrides:
+        from optimize_sets import best_moveset
+        foes = list(enemy_roster or our4)
+        for name, item in item_overrides.items():
+            if name not in our4:
+                continue
+            if item in BANNED_ITEMS:
+                raise ValueError(f"{item!r} is not legal in Regulation MB")
+            moves, _score = best_moveset(name, world["merged"], world["moves"],
+                                         world["natures"], world["typechart"],
+                                         foes, item=item)
+            sets[name] = {"item": item, "moves": moves}
+    return sets
+
+
+def scan_bring(our4, enemy_roster, world, lead_index=(0, 1), opponent_name="",
+               sets=None):
     """Convenience wrapper: build the position, scan it, return the report.
 
     `our4` is the bring in lead-first order, so `lead_index` almost never needs
-    changing.
+    changing. `sets` defaults to `_legal_default_sets`; pass `_sets_for(...)`'s
+    result to optimise or pin items/moves instead.
     """
     from _harness import setup_battle
     from threat import build_threat_matrix
     b, ms = setup_battle(list(our4), list(enemy_roster), world,
-                         sets=_legal_default_sets(our4, world))
+                         sets=sets if sets is not None else _legal_default_sets(our4, world))
     matrix = build_threat_matrix(b, ms)
     ours = [c for c in b.p1.roster if not c.fainted]
     lead = [ours[i] for i in lead_index]
@@ -829,17 +875,18 @@ def hp_budget(matrix, ours, theirs_bench, turns=2):
     return rows
 
 
-def enemy_hp_budget(our4, enemy_roster, world, turns=2):
+def enemy_hp_budget(our4, enemy_roster, world, turns=2, sets=None):
     """`hp_budget` for a whole bring: their bench against OUR back two.
 
     The back two, not the lead, because the question this answers arrives after
     the patch has been made -- Scizor is in, and now what of theirs can come in
     against it. Convenience wrapper so a CLI does not have to build a battle.
+    `sets` defaults to `_legal_default_sets`; see `_sets_for`.
     """
     from _harness import setup_battle
     from threat import build_threat_matrix
     b, ms = setup_battle(list(our4), list(enemy_roster), world,
-                         sets=_legal_default_sets(our4, world))
+                         sets=sets if sets is not None else _legal_default_sets(our4, world))
     matrix = build_threat_matrix(b, ms)
     ours = [c for c in b.p1.roster if not c.fainted]
     established = [ours[0], ours[2]] if len(ours) > 2 else ours
@@ -981,7 +1028,7 @@ def setup_moves(moveset):
 
 
 def race_bring(our4, enemy_roster, world, opponent_name="", turns=2,
-               want_logs=False):
+               want_logs=False, sets=None):
     """Our bring-4, lead first, against all 15 of their lead pairs.
 
     Still scored on the calibrated threat-matrix race (`race_robust`) -- this is
@@ -993,13 +1040,15 @@ def race_bring(our4, enemy_roster, world, opponent_name="", turns=2,
     on a foe). Now the lines are read off an actual `Battle.run_turn`, played
     through `lead_sim`, so what you see explaining the score is the same engine
     the detailed report and the workbook use -- one damage model, not two.
+
+    `sets` defaults to `_legal_default_sets`; see `_sets_for`.
     """
     import itertools
 
     import lead_sim as sim
     from _harness import setup_battle
     from threat import build_threat_matrix
-    our_sets = _legal_default_sets(our4, world)
+    our_sets = sets if sets is not None else _legal_default_sets(our4, world)
     b, ms = setup_battle(list(our4), list(enemy_roster), world, sets=our_sets)
     matrix = build_threat_matrix(b, ms)
     ours = [c for c in b.p1.roster if not c.fainted]
@@ -1620,14 +1669,15 @@ def default_item(name, world):
     from. NOT quite `make_team`'s raw default: `make_team` (and everything
     downstream of it, like `_harness.setup_battle`) trusts `items_usage`'s #1
     entry outright, which is not filtered against Regulation MB's banned items
-    -- that table is logged across every format, banned or not, so a Pokemon
-    whose most-used item happens to be a Choice item or Assault Vest would
-    otherwise field one with nobody having asked for it (Hydreigon's #1 item is
-    Choice Scarf). `_legal_default_sets` turns this into an explicit override
-    for every `setup_battle` call in this module's cheap stage; `lead_sim`'s own
-    optimiser filters separately for the detailed stage. Measured, otherwise:
-    Ninetales-Alola gets Never-Melt Ice (29%), Garchomp Life Orb (61%),
-    Rotom-Wash Sitrus Berry (31%).
+    (Assault Vest, Choice Band, Choice Specs -- NOT Choice Scarf, which is
+    legal here) -- that table is logged across every format, banned or not, so
+    a Pokemon whose most-used item happens to be one of the three would
+    otherwise field it with nobody having asked for it. `_legal_default_sets`
+    turns this into an explicit override for every `setup_battle` call in this
+    module's cheap stage; `lead_sim`'s own optimiser filters separately for the
+    detailed stage. Measured, otherwise: Ninetales-Alola gets Never-Melt Ice
+    (29%), Garchomp Life Orb (61%), Rotom-Wash Sitrus Berry (31%), Hydreigon
+    Choice Scarf (its actual #1, and legal).
     """
     from lead_sim import BANNED_ITEMS
     usage = (world["merged"].get(name) or {}).get("items_usage") or []

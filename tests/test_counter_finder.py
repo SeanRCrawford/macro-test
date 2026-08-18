@@ -461,3 +461,101 @@ class TestPairSearchPartnerAssist(unittest.TestCase):
                         best = got
             self.assertLessEqual(cf._OUTCOME_RANK[best["outcome"]],
                                  cf._OUTCOME_RANK[matched["outcome"]])
+
+
+class TestItemOverrides(unittest.TestCase):
+    """"I also want the option to define item in counter_table.py, such as
+    Choice Scarf, or to just select optimal item. For Choice Scarf, a
+    pokemon can use 4 moves, which could be highly useful."""
+
+    def test_best_answer_pins_the_named_item(self):
+        W = world()
+        item, moves, _w = cf.best_answer(
+            "Gallade", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Kingambit"], item="Choice Scarf")
+        self.assertEqual(item, "Choice Scarf")
+        self.assertEqual(len(moves), 4)
+
+    def test_best_answer_re_optimises_the_moveset_under_the_pinned_item(self):
+        """A pin is not a frozen moveset -- "the moveset is still genuinely
+        re-optimised UNDER the pinned item". Confirmed by comparing against
+        `best_moveset` called directly with the same item: they must agree,
+        since `best_answer` is supposed to delegate to exactly that."""
+        W = world()
+        from optimize_sets import best_moveset
+        item, moves, _w = cf.best_answer(
+            "Gallade", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Kingambit"], item="Choice Scarf")
+        expect, _score = best_moveset(
+            "Gallade", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Kingambit"], item="Choice Scarf")
+        self.assertEqual(moves, expect)
+
+    def test_best_answer_rejects_a_banned_item_pin(self):
+        """A pin is a decision, not a loophole around the Regulation MB ban."""
+        W = world()
+        with self.assertRaises(ValueError):
+            cf.best_answer("Gallade", W["merged"], W["moves"], W["natures"],
+                           W["typechart"], ["Kingambit"], item="Assault Vest")
+
+    def test_best_answer_pins_item_and_moves_together(self):
+        W = world()
+        moves = ["Psycho Cut", "Sacred Sword", "Close Combat", "Ice Punch"]
+        item, got_moves, _w = cf.best_answer(
+            "Gallade", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Kingambit"], item="Choice Scarf", move_names=moves)
+        self.assertEqual(item, "Choice Scarf")
+        self.assertEqual(got_moves, moves)
+
+    def test_threshold_search_honours_a_per_name_item_override(self):
+        """Choice Scarf on Gallade specifically, verified through the same
+        `threshold_search` `counter_table.py --item` actually calls -- "like
+        Choice Scarf ... on Gallade beats 'Big 6' easily"."""
+        W = world()
+        rows = cf.threshold_search(
+            POOL, ["Kingambit", "Basculegion"], W["merged"], W["moves"],
+            W["natures"], W["typechart"],
+            item_overrides={"Gallade": "Choice Scarf"})
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["Gallade"]["item"], "Choice Scarf")
+        # An override on Gallade must not leak onto anyone else's row.
+        self.assertNotEqual(by_name["Garchomp"]["item"], "Choice Scarf")
+
+    def test_threshold_search_rejects_a_banned_override(self):
+        W = world()
+        with self.assertRaises(ValueError):
+            cf.threshold_search(
+                POOL, ["Kingambit"], W["merged"], W["moves"], W["natures"],
+                W["typechart"], item_overrides={"Gallade": "Choice Band"})
+
+    def test_chip_then_ko_honours_item_overrides_on_finishers(self):
+        W = world()
+        rows = cf.chip_then_ko(
+            POOL, ["Kingambit"], "Ninetales-Alola", "Blizzard", W["merged"],
+            W["moves"], W["natures"], W["typechart"],
+            item_overrides={"Gallade": "Choice Scarf"})
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["Gallade"]["item"], "Choice Scarf")
+
+    def test_chip_then_ko_partner_item_pins_the_partner(self):
+        W = world()
+        rows = cf.chip_then_ko(
+            POOL, ["Kingambit"], "Ninetales-Alola", "Blizzard", W["merged"],
+            W["moves"], W["natures"], W["typechart"], partner_item="Sitrus Berry")
+        chip = rows[0]["chip"]["Kingambit"]
+        attacker = cf._build("Ninetales-Alola", W["merged"], W["natures"],
+                             item="Sitrus Berry")
+        target = cf._build("Kingambit", W["merged"], W["natures"])
+        blizzard = cf._lookup_move("Blizzard", W["moves"])
+        expect = cf._raw_hit(attacker, blizzard, target, W["typechart"],
+                             num_targets_hit=2)
+        self.assertAlmostEqual(chip.lo, expect.lo)
+
+    def test_pair_search_honours_item_overrides_on_the_candidate(self):
+        W = world()
+        rows = cf.pair_search(
+            POOL, ["Kingambit", "Basculegion", "Garchomp"], W["merged"],
+            W["moves"], W["natures"], W["typechart"],
+            item_overrides={"Gallade": "Choice Scarf"})
+        by_name = {r["name"]: r for r in rows}
+        self.assertEqual(by_name["Gallade"]["item"], "Choice Scarf")
