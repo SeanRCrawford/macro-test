@@ -5,8 +5,9 @@
     python counter_table.py --vs "Kingambit" --chip-from "Ninetales-Alola" --chip-move "Blizzard"
     python counter_table.py --vs "Kingambit,Basculegion,Garchomp" --pairs
     python counter_table.py --vs "Kingambit,Basculegion" --pairs --chip-from "Ninetales-Alola" --chip-move "Blizzard"
-    python counter_table.py --vs "Kingambit,Basculegion" --pool-size 60 --top 15
+    python counter_table.py --vs "Kingambit,Basculegion" --top 15
     python counter_table.py --vs "Kingambit,Basculegion,Urshifu-Rapid-Strike,Chien-Pao,Landorus-Therian,Rillaboom" --team "Big 6" --item "Gallade=Choice Scarf"
+    python counter_table.py --vs "Kingambit,Basculegion,Mega Floette" --speed
 
 Three modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
@@ -22,6 +23,20 @@ Three modes, pick one (or combine --chip-from/--chip-move with --pairs):
               --chip-from/--chip-move to give it a partner's help; every
               combination of who the candidate and the partner go for is
               tried and the best is kept.
+  --speed     Instead of a damage search, a SPEED-TIER chart: `--vs`'s
+              targets plus the pool, in real turn order (priority bracket
+              first, then effective speed under each one's own best legal
+              item -- Choice Scarf and a weather-boosting ability both
+              apply). "to have an option to make sure my guys (accounting
+              for priority like bullet punch) outspeed their enemies" --
+              read down the list; anyone above a target in the SAME
+              priority bracket outspeeds it, and a higher bracket outspeeds
+              it regardless of the speed numbers.
+
+By default the WHOLE ~270-Pokemon dataset is searched, not a pre-narrowed
+"generically good" subset -- see `_pool` below for why (short version: "why
+does Mega Scizor not show up" used to have an answer, and it was a bug in
+which Pokemon ever got asked, not in the damage/item/move search itself).
 
 By default every pool member's item AND moveset are searched for the best
 legal answer to `--vs` -- "or to just select optimal item" is the default,
@@ -64,7 +79,7 @@ import argparse  # noqa: E402
 
 import _harness  # noqa: E402,F401
 
-from counter_finder import chip_then_ko, pair_search, threshold_search  # noqa: E402
+from counter_finder import chip_then_ko, pair_search, speed_tiers, threshold_search  # noqa: E402
 
 
 def _parse_item_overrides(spec):
@@ -100,12 +115,29 @@ def _parse_move_overrides(spec):
 
 
 def _pool(args, merged):
+    """Who gets searched. Default: EVERY Pokemon in the dataset.
+
+    "Why does Mega Scizor not show up" -- the earlier default reused
+    `generate_team.build_candidate_pool`, which ranks by roster.csv's generic
+    Score for TEAM GENERATION (a balanced-team-of-6 concern) and truncates to
+    the top N of that ranking. Mega Scizor's generic Score put it outside
+    that top 40 even though it is a genuinely strong, correctly-calculated
+    answer to a SPECIFIC trio (Close Combat/Knock Off/Bullet Punch clears
+    all three) -- the search itself was never the problem, the pool it never
+    got to run on was. A single-Pokemon threshold/chip/pairs search over the
+    full ~270-entry dataset takes low single-digit seconds, so there is no
+    real cost to searching everything by default; `--pool-size` still exists
+    to explicitly narrow it (e.g. to that same generic-Score top N) if
+    something ever needs to be faster.
+    """
     if args.team:
         from _harness import load_world
         W = load_world()
         return list(W["teams"][args.team])
-    from generate_team import build_candidate_pool
-    return list(build_candidate_pool(merged, top_n=args.pool_size))
+    if args.pool_size:
+        from generate_team import build_candidate_pool
+        return list(build_candidate_pool(merged, top_n=args.pool_size))
+    return sorted(merged)
 
 
 def _roll(h):
@@ -139,6 +171,30 @@ def _print_threshold(rows, targets, threshold, top):
         bits = [f"{t}: {h.move_name or '-'} {_roll(h)}"
                 for t, h in r["per_target"].items()]
         print(f"  {i:>3} {r['name']}: " + "; ".join(bits))
+
+
+def _print_speed(rows, targets, top):
+    print("Speed tiers -- real turn order: PRIORITY bracket first, then")
+    print("effective speed (Choice Scarf / a weather-boosting ability already")
+    print("applied) within the same bracket. No field: no Tailwind/Trick Room.")
+    print("'role' marks the named --vs targets so you can read straight down")
+    print("for anyone in your pool sitting above one in the same bracket.\n")
+    header = f"{'#':>3} {'Pokemon':20s} {'item':16s} {'pri':>4s} {'move':16s} {'speed':>6s}  role"
+    print(header)
+    print("-" * len(header))
+    shown = 0
+    for r in rows:
+        is_target = r["name"] in targets
+        if not is_target:
+            if shown >= top:
+                continue
+            shown += 1
+        pri = f"+{r['priority']}" if r["priority"] > 0 else "-"
+        num = "" if is_target else str(shown)
+        print(f"{num:>3} {r['name'][:20]:20s} "
+              f"{(r['item'] or '-')[:16]:16s} {pri:>4s} "
+              f"{(r['priority_move'] or '-')[:16]:16s} {r['speed']:>6.1f}  "
+              f"{'TARGET' if is_target else ''}")
 
 
 def _print_chip(rows, targets, partner, move, top):
@@ -240,12 +296,21 @@ def main():
     ap.add_argument("--pairs", action="store_true",
                     help="speed-order pair search instead of the single-hit "
                          "threshold search")
-    ap.add_argument("--pool-size", type=int, default=40,
-                    help="how many Pokemon from the generation pool to "
-                         "search (default 40)")
+    ap.add_argument("--speed", action="store_true",
+                    help="print a speed-tier chart (priority bracket, then "
+                         "effective speed) for --vs's targets plus the pool, "
+                         "instead of a damage search")
+    ap.add_argument("--pool-size", type=int, default=0, metavar="N",
+                    help="search only the top N of the generic team-"
+                         "generation Score ranking, instead of the whole "
+                         "~270-Pokemon dataset (the default, 0). Narrowing "
+                         "is rarely useful -- a full search is a couple of "
+                         "seconds -- and can HIDE a real answer whose "
+                         "generic Score is unremarkable (see 'Why does Mega "
+                         "Scizor not show up' at the top of this file)")
     ap.add_argument("--team", default="",
                     help="search this library team's members instead of the "
-                         "generation pool")
+                         "full dataset")
     ap.add_argument("--top", type=int, default=20, help="rows to print")
     ap.add_argument("--csv", default="", help="also write the whole table here")
     args = ap.parse_args()
@@ -287,7 +352,12 @@ def main():
 
     print(f"Searching {len(pool)} Pokemon vs {', '.join(targets)}\n")
 
-    if args.pairs:
+    if args.speed:
+        names = targets + [n for n in pool if n not in targets]
+        rows = speed_tiers(names, targets, merged, moves, natures, typechart,
+                           item_overrides=item_overrides)
+        _print_speed(rows, targets, args.top)
+    elif args.pairs:
         rows = pair_search(pool, targets, merged, moves, natures, typechart,
                            partner_name=args.chip_from or None,
                            partner_move_name=args.chip_move or None,
@@ -315,7 +385,12 @@ def main():
         flat = []
         for r in rows:
             row = {"name": r["name"], "item": r.get("item")}
-            if "per_target" in r:
+            if "priority" in r:
+                row["priority"] = r["priority"]
+                row["priority move"] = r["priority_move"]
+                row["speed"] = round(r["speed"], 1)
+                row["target"] = r["name"] in targets
+            elif "per_target" in r:
                 for t, h in r["per_target"].items():
                     row[f"{t} move"] = h.move_name
                     row[f"{t} lo%"] = round(h.lo * 100, 1)

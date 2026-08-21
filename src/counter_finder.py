@@ -344,6 +344,61 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
     return rows
 
 
+def speed_tiers(names, target_names, merged, moves_db, natures, typechart,
+                item_overrides=None):
+    """Real turn order for `names` -- priority bracket first, then effective
+    speed under each one's own best legal item (or a pinned one).
+
+        "I also need to see speed tiers, for instance to have an option to
+         make sure my guys (accounting for priority like bullet punch)
+         outspeed their enemies."
+
+    Priority is a property of a MOVE, not a fixed Pokemon stat, so this does
+    not claim a Pokemon always leads with its priority option -- it reports
+    the HIGHEST priority among its own chosen ATTACKING moves (Status moves
+    excluded: Protect's priority bracket does not describe "outspeeding to
+    hit something") as a note, and ranks on it, the same way a real turn
+    resolves: everyone in a higher bracket goes before everyone in a lower
+    one, and only within the SAME bracket does raw speed decide it.
+
+    Each Pokemon's item/moveset is `_answer_for`'s usual search against
+    `target_names` (or an `item_overrides` pin) -- the SAME set the rest of
+    this module searches against, so the chart shows the set a Pokemon would
+    actually be running for this matchup, not some other hypothetical one.
+    Scoring against `names` itself (everyone else in the chart, dozens to
+    hundreds of entries for a whole-pool `--speed` run) would be both the
+    wrong question ("what beats this specific cast" isn't what's asked) and
+    far more expensive -- `optimize_sets`' move/item search cost scales with
+    the enemy-name-list length.
+
+    No field: no Tailwind/screens, the same simplification the rest of this
+    module makes (see the module docstring) -- a real Tailwind or Trick Room
+    would reorder brackets this does not know about.
+
+    Returns rows: {name, item, moves, priority, priority_move, speed},
+    sorted by (-priority, -speed).
+    """
+    rows = []
+    for name in names:
+        item, move_names, _weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides)
+        if not move_names:
+            continue
+        combatant = _build(name, merged, natures, item=item)
+        moves = _move_infos(name, merged, moves_db, move_names)
+        atk_moves = [m for m in moves if m.category != "Status"]
+        priority = max((m.priority for m in atk_moves), default=0)
+        priority_move = next((m.name for m in atk_moves if m.priority == priority),
+                             None)
+        speed = effective_speed(combatant, FieldState(), "p1")
+        rows.append({"name": name, "item": item, "moves": move_names,
+                     "priority": priority, "priority_move": priority_move,
+                     "speed": speed})
+    rows.sort(key=lambda r: (-r["priority"], -r["speed"]))
+    return rows
+
+
 def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
                  moves_db, natures, typechart, partner_item=None,
                  item_overrides=None, move_overrides=None):

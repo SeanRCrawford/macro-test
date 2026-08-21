@@ -559,3 +559,93 @@ class TestItemOverrides(unittest.TestCase):
             item_overrides={"Gallade": "Choice Scarf"})
         by_name = {r["name"]: r for r in rows}
         self.assertEqual(by_name["Gallade"]["item"], "Choice Scarf")
+
+
+class TestSpeedTiers(unittest.TestCase):
+    """"I also need to see speed tiers, for instance to have an option to
+    make sure my guys (accounting for priority like bullet punch) outspeed
+    their enemies." """
+
+    def test_sorted_by_priority_bracket_then_speed(self):
+        W = world()
+        rows = cf.speed_tiers(
+            ["Kingambit", "Basculegion", "Whimsicott", "Garchomp"],
+            ["Kingambit"], W["merged"], W["moves"], W["natures"],
+            W["typechart"])
+        keys = [(r["priority"], r["speed"]) for r in rows]
+        self.assertEqual(keys, sorted(keys, key=lambda k: (-k[0], -k[1])))
+
+    def test_a_priority_move_user_ranks_above_a_faster_non_priority_one(self):
+        """"accounting for priority like bullet punch" -- Mega Scizor (slow,
+        Bullet Punch +1) must rank ABOVE something faster with no priority
+        move at all, exactly the case the report was about."""
+        W = world()
+        rows = cf.speed_tiers(
+            ["Mega Scizor", "Whimsicott"], ["Kingambit"], W["merged"],
+            W["moves"], W["natures"], W["typechart"])
+        by_name = {r["name"]: r for r in rows}
+        self.assertGreater(by_name["Whimsicott"]["speed"],
+                           by_name["Mega Scizor"]["speed"])
+        self.assertEqual(by_name["Mega Scizor"]["priority"], 1)
+        self.assertEqual(by_name["Mega Scizor"]["priority_move"], "Bullet Punch")
+        names_in_order = [r["name"] for r in rows]
+        self.assertLess(names_in_order.index("Mega Scizor"),
+                        names_in_order.index("Whimsicott"))
+
+    def test_status_moves_are_never_reported_as_the_priority_move(self):
+        """Protect's priority bracket does not describe outspeeding to hit
+        something -- a Pokemon whose only priority option is Protect must
+        report priority 0, not Protect's +4."""
+        W = world()
+        rows = cf.speed_tiers(POOL, ["Kingambit"], W["merged"], W["moves"],
+                              W["natures"], W["typechart"])
+        for r in rows:
+            self.assertNotEqual(r["priority_move"], "Protect")
+
+    def test_a_mega_pick_is_ranked_on_its_mega_speed(self):
+        """"make sure to use the mega form" -- Mega Floette (166 spe) is
+        dramatically faster than base Floette (111); this must be the number
+        speed_tiers reports."""
+        W = world()
+        rows = cf.speed_tiers(["Mega Floette"], ["Kingambit"], W["merged"],
+                              W["moves"], W["natures"], W["typechart"])
+        self.assertGreater(rows[0]["speed"], 140.0)
+
+    def test_choice_scarf_pin_is_reflected_in_the_reported_speed(self):
+        W = world()
+        unboosted = cf.speed_tiers(["Gallade"], ["Kingambit"], W["merged"],
+                                   W["moves"], W["natures"], W["typechart"])
+        scarfed = cf.speed_tiers(["Gallade"], ["Kingambit"], W["merged"],
+                                 W["moves"], W["natures"], W["typechart"],
+                                 item_overrides={"Gallade": "Choice Scarf"})
+        self.assertAlmostEqual(scarfed[0]["speed"], unboosted[0]["speed"] * 1.5)
+
+
+class TestCounterTablePoolDefault(unittest.TestCase):
+    """"Why does Mega Scizor not show up" -- it was never a damage/move-
+    optimisation bug: the default pool was `generate_team.build_candidate_pool`,
+    ranked by roster.csv's generic team-generation Score and truncated to the
+    top 40, and Mega Scizor's generic Score doesn't make that cut even though
+    it is a strong, correctly-scored answer to specific threats. The default
+    pool is now the whole dataset."""
+
+    class _Args:
+        team = ""
+        pool_size = 0
+
+    def test_default_pool_is_the_whole_dataset(self):
+        import counter_table as ct
+        W = world()
+        pool = ct._pool(self._Args(), W["merged"])
+        self.assertEqual(len(pool), len(W["merged"]))
+        self.assertIn("Mega Scizor", pool)
+
+    def test_pool_size_still_narrows_when_explicitly_given(self):
+        import counter_table as ct
+
+        class Args:
+            team = ""
+            pool_size = 10
+        W = world()
+        pool = ct._pool(Args(), W["merged"])
+        self.assertEqual(len(pool), 10)
