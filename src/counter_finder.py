@@ -304,8 +304,22 @@ def _answer_for(name, merged, moves_db, natures, typechart, target_names,
                        item=item, move_names=moves)
 
 
+def _scarf_speed(combatant):
+    """`combatant`'s effective speed AS IF it held Choice Scarf -- a
+    hypothesis for `threshold_search`'s `outspeed="scarf"` filter,
+    independent of whatever item its best-answer search actually chose for
+    damage purposes. Pin `--item "Name=Choice Scarf"` yourself if you want a
+    row's real displayed set (and damage numbers) to reflect Scarf too --
+    this is only "would it be fast enough if it did".
+    """
+    view = copy.copy(combatant)
+    view.item = "Choice Scarf"
+    return effective_speed(view, FieldState(), "p1")
+
+
 def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
-                     threshold=0.9, item_overrides=None, move_overrides=None):
+                     threshold=0.9, item_overrides=None, move_overrides=None,
+                     max_taken=None, outspeed=None):
     """Each pool member's best legal item/moveset against `target_names`, and
     the worst-roll `Hit` its best move lands on EACH target individually.
 
@@ -317,10 +331,46 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
     `item_overrides`/`move_overrides`: optional {name: item} / {name:
     [move, ...]} pins for specific pool members -- see `_answer_for`.
 
+    `max_taken`/`outspeed`: optional extra requirements, composed with
+    `threshold` and each other by AND --
+
+        "my attackers in counter_table must either be faster than the
+         enemy, able to be faster with choice scarf, and/or take max X
+         damage from the enemy's best attack (e.g., OHKO all, take less
+         than 50%, outspeed. or 2HKO all, take less than 33%, outspeed.)"
+
+    `max_taken`: a fraction (0.5 for "under 50%") -- a row only survives if
+    EVERY named target's best attack against it, read on THEIR best roll
+    (the most they could possibly do, the guaranteed-survival direction --
+    the mirror of `threshold` reading OUR worst roll), is under this.
+    `outspeed`: `None` (no filter) / `"natural"` (must out-speed every named
+    target under its own chosen item) / `"scarf"` (out-speeds naturally OR
+    would if it held Choice Scarf instead -- see `_scarf_speed`). A speed
+    TIE does not count as outspeeding, matching this module's "ties resolve
+    against us" convention elsewhere (`pair_search`'s turn order).
+
+    Both are `None` by default, in which case none of this runs at all --
+    same cost and same rows as before either existed. When either is given,
+    a row that fails is DROPPED, not merely flagged: "must" was asked for.
+
     Returns rows: {name, item, moves, per_target: {target: Hit}, worst_pct,
-    meets_all}.
+    meets_all}, plus, only when `max_taken`/`outspeed` are given: {incoming:
+    {target: Hit}, outspeeds: {target: bool}, outspeeds_scarf: {target:
+    bool}}. `incoming[t].frac`/`.hi` are the same number (their best roll);
+    `.lo`/`.avg` are their worst/average roll on you, still worth showing.
     """
     targets = set(target_names)
+    need_screen = max_taken is not None or outspeed is not None
+    # Each named target's own set is searched ONCE (against the whole pool,
+    # the same "what does this threat generally run" question `speed_tiers`
+    # asks), not once per candidate -- a real Pokemon carries one set, not a
+    # different one for every possible opponent it might face.
+    target_sets = {}
+    if need_screen:
+        for t in target_names:
+            target_sets[t] = _answer_for(t, merged, moves_db, natures,
+                                         typechart, pool)
+
     rows = []
     for name in pool:
         if name in targets:
@@ -336,10 +386,54 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
                                    typechart, weather=weather)
                      for t in target_names}
         worst_pct = min((h.frac for h in per_target.values()), default=0.0)
-        rows.append({"name": name, "item": item, "moves": move_names,
-                     "per_target": per_target, "worst_pct": worst_pct,
-                     "meets_all": all(h.frac >= threshold
-                                     for h in per_target.values())})
+        row = {"name": name, "item": item, "moves": move_names,
+              "per_target": per_target, "worst_pct": worst_pct,
+              "meets_all": all(h.frac >= threshold
+                              for h in per_target.values())}
+
+        if need_screen:
+            own_speed = effective_speed(attacker, FieldState(), "p1")
+            own_scarf_speed = _scarf_speed(attacker)
+            incoming, outspeeds, outspeeds_scarf = {}, {}, {}
+            for t in target_names:
+                t_item, t_moves, t_weather = target_sets[t]
+                if not t_moves:
+                    # This named target could not itself be built/optimised
+                    # (a data gap, not a real matchup fact) -- do not let it
+                    # silently fail every row's filter.
+                    incoming[t], outspeeds[t], outspeeds_scarf[t] = NO_HIT, True, True
+                    continue
+                t_combatant = _build(t, merged, natures, item=t_item)
+                t_move_infos = _move_infos(t, merged, moves_db, t_moves)
+                got = _best_hit(t_combatant, t_move_infos, attacker, typechart,
+                                weather=t_weather)
+                incoming[t] = Hit(move_name=got.move_name, frac=got.hi, lo=got.lo,
+                                  avg=got.avg, hi=got.hi, eff=got.eff,
+                                  num_targets_hit=got.num_targets_hit)
+                t_speed = effective_speed(t_combatant, FieldState(), "p1")
+                outspeeds[t] = own_speed > t_speed
+                outspeeds_scarf[t] = outspeeds[t] or own_scarf_speed > t_speed
+            row["incoming"] = incoming
+            row["outspeeds"] = outspeeds
+            row["outspeeds_scarf"] = outspeeds_scarf
+
+            taken_ok = max_taken is None or all(h.hi <= max_taken
+                                                for h in incoming.values())
+            if outspeed == "natural":
+                speed_ok = all(outspeeds.values())
+            elif outspeed == "scarf":
+                speed_ok = all(outspeeds_scarf.values())
+            else:
+                speed_ok = True
+            # `threshold`/`meets_all` is informational everywhere else in
+            # this function (a row that whiffs one target is still ranked
+            # and shown, since "how close" is useful on its own) -- but
+            # once a screen is actually requested, "OHKO all, take less
+            # than 50%, outspeed" reads as three MUSTS together, not two
+            # hard ones next to a soft one.
+            if not (taken_ok and speed_ok and row["meets_all"]):
+                continue
+        rows.append(row)
     rows.sort(key=lambda r: -r["worst_pct"])
     return rows
 

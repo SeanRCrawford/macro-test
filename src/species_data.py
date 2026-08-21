@@ -161,11 +161,44 @@ def load_roster():
     return out
 
 
+def _load_pasted_teams(dir_name, note_prefix, merged):
+    """{team_name: names}, {team_name: meta} for every data/<dir_name>/*.txt
+    pokepaste. Shared by `load_teams`'s two text-folder sources -- the
+    built-in data/teams/ library and data/my_teams/ (a personal team you
+    dropped in, or saved from the Streamlit app's paste box)."""
+    teams, meta = {}, {}
+    teams_dir = DATA_DIR / dir_name
+    if merged is None or not teams_dir.is_dir():
+        return teams, meta
+    for f in sorted(teams_dir.glob("*.txt")):
+        text = f.read_text()
+        if not text.strip():
+            continue
+        names, sets = custom_team_from_export(text, merged)
+        if not names:
+            continue
+        team_name = f.stem.replace("_", " ").replace("-", " ").title()
+        teams[team_name] = names
+        meta[team_name] = {"lead": None, "note": f"{note_prefix} ({f.name})",
+                           "sets": sets}
+    return teams, meta
+
+
 def load_teams(with_meta=False, merged=None):
-    """Rosters from teams.csv, plus any custom teams dropped into data/teams/*.txt
-    as raw Showdown-export pastes (pokepast.es "Export" text) -- a reusable way
-    to add a specific known enemy team (exact sets and all) alongside the
-    usage-derived teams.csv entries, without editing teams.csv by hand.
+    """Rosters from teams.csv, plus any custom teams dropped into
+    data/teams/*.txt or data/my_teams/*.txt as raw Showdown-export pastes
+    (pokepast.es "Export" text) -- a reusable way to add a specific known
+    team (exact sets and all) alongside the usage-derived teams.csv entries,
+    without editing teams.csv by hand.
+
+    data/teams/ is the built-in library (checked in); data/my_teams/ is
+    yours -- drop a pokepaste .txt in there directly, or use the Streamlit
+    app's "Paste a pokepaste" / "Save to My Teams" controls, which write
+    here. Both are scanned the same way and land in the same `teams` dict,
+    so a personal team shows up everywhere a saved team does. If a name
+    collides between the two, data/my_teams/ wins -- it is processed second,
+    on the theory that a personal file with the same name as a library one
+    is deliberately meant to override it.
 
     with_meta=True also returns {team: {"lead": [a, b] or None, "note": str,
     "sets": {name: {...}} or None}}. A team may declare a FIXED LEAD (e.g.
@@ -176,7 +209,7 @@ def load_teams(with_meta=False, merged=None):
     which use usage-derived defaults).
 
     merged: pass species_data.build_merged_dataset()'s `merged` dict to enable
-    parsing data/teams/*.txt (needed to resolve "Species + Stone item" into
+    parsing the .txt folders (needed to resolve "Species + Stone item" into
     this codebase's "Mega Species" roster names). Without it, custom team
     files are skipped -- only teams.csv is loaded.
     """
@@ -195,18 +228,10 @@ def load_teams(with_meta=False, merged=None):
         note = row.get("Note") if "Note" in df.columns else ""
         meta[name] = {"lead": lead, "note": note if isinstance(note, str) else "", "sets": None}
 
-    teams_dir = DATA_DIR / "teams"
-    if merged is not None and teams_dir.is_dir():
-        for f in sorted(teams_dir.glob("*.txt")):
-            text = f.read_text()
-            if not text.strip():
-                continue
-            names, sets = custom_team_from_export(text, merged)
-            if not names:
-                continue
-            team_name = f.stem.replace("_", " ").replace("-", " ").title()
-            teams[team_name] = names
-            meta[team_name] = {"lead": None, "note": f"Custom team ({f.name})", "sets": sets}
+    for dir_name, note_prefix in (("teams", "Custom team"), ("my_teams", "My team")):
+        t, m = _load_pasted_teams(dir_name, note_prefix, merged)
+        teams.update(t)
+        meta.update(m)
 
     return (teams, meta) if with_meta else teams
 

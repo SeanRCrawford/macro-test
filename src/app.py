@@ -36,12 +36,24 @@ def _data_fingerprint():
     """Modification times of the source data files. Used as a cache key so that
     editing mbsmogon.xlsx (EV spreads, items, moves) is picked up on the next
     rerun -- previously the parsed sheet was cached for the life of the process,
-    so hand-edited EVs appeared to have no effect at all."""
+    so hand-edited EVs appeared to have no effect at all.
+
+    Also watches every data/teams/*.txt and data/my_teams/*.txt pokepaste --
+    without this, saving a team from "Paste a pokepaste" -> "Save to My
+    Teams" would not appear in "A saved team" until something ELSE happened
+    to bump the fingerprint, since `load_teams_csv` below is cached on this
+    tuple and adding a new file does not change any of the four sheet paths.
+    """
     files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv"]
     out = []
     for f in files:
         p = species_data.DATA_DIR / f
         out.append((f, p.stat().st_mtime if p.exists() else 0))
+    for dir_name in ("teams", "my_teams"):
+        d = species_data.DATA_DIR / dir_name
+        if d.is_dir():
+            for p in sorted(d.glob("*.txt")):
+                out.append((f"{dir_name}/{p.name}", p.stat().st_mtime))
     return tuple(out)
 
 
@@ -196,32 +208,51 @@ def weakness_table(team):
 STAT_POINT_BUDGET = 66
 
 
-def our_side_pool(key_prefix, teams, all_names, team_meta=None):
+def _save_pasted_team(paste_text, raw_name):
+    """Write `paste_text` to data/my_teams/<slug>.txt. Returns the path, or
+    raises ValueError for an empty name. Matches `load_teams`'s own
+    filename -> display-name rule (underscores/hyphens -> spaces,
+    title-cased) in reverse, so the name you type is the name you'll see."""
+    slug = "_".join(raw_name.strip().split())
+    if not slug:
+        raise ValueError("Team name can't be empty")
+    my_teams_dir = species_data.DATA_DIR / "my_teams"
+    my_teams_dir.mkdir(parents=True, exist_ok=True)
+    path = my_teams_dir / f"{slug}.txt"
+    path.write_text(paste_text)
+    return path
+
+
+def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     """Where OUR six come from, offered the same way everywhere.
 
     Every view that puts our team against someone else's needs this, and each
     one used to answer it differently: the Battle Viewer silently fell back to
     all 271 species when the Team Builder was empty, which is unusable, and the
-    preview panels only ever offered the loaded team. One control, three
-    sources: the team in the Team Builder tab, any saved team from the library,
-    or the whole dataset for a one-off.
+    preview panels only ever offered the loaded team. One control, four
+    sources: the team in the Team Builder tab, any saved team from the library
+    (data/teams/ and data/my_teams/), a pasted pokepaste, or the whole dataset
+    for a one-off.
 
     Returns (names, sets). THE SETS TRAVEL WITH THE NAMES. Returning only the
     names left every caller reaching for st.session_state["sets"], which is the
-    Team Builder's -- correct for the loaded team and simply wrong for the other
-    two, where it applied one team's items, moves and abilities to a different
-    team's Pokemon.
+    Team Builder's -- correct for the loaded team and simply wrong for the
+    other sources, where it applied one team's items, moves and abilities to
+    a different team's Pokemon.
     """
     loaded = get_state_team()
-    options = ["My loaded team", "A saved team", "Any Pokemon"]
+    options = ["My loaded team", "A saved team", "Paste a pokepaste", "Any Pokemon"]
     default = 0 if loaded else 1
     source = st.radio("Our side", options, index=default, horizontal=True,
                       key=f"{key_prefix}_side_source",
                       help="'My loaded team' is whatever the Team Builder tab "
                            "currently holds, WITH the items, moves, abilities "
                            "and stat points you set there. 'A saved team' is "
-                           "anything in data/teams. 'Any Pokemon' opens the "
-                           "whole dataset for a one-off matchup.")
+                           "anything in data/teams or data/my_teams. 'Paste a "
+                           "pokepaste' reads a Showdown export straight from "
+                           "the clipboard, and can save it to data/my_teams "
+                           "for next time. 'Any Pokemon' opens the whole "
+                           "dataset for a one-off matchup.")
     if source == "My loaded team":
         if not loaded:
             st.warning("No team loaded — pick six in the Team Builder tab, "
@@ -229,10 +260,44 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None):
         return list(loaded), dict(st.session_state.get("sets") or {})
     if source == "A saved team":
         if not teams:
-            st.warning("No saved teams in data/teams.")
+            st.warning("No saved teams in data/teams or data/my_teams.")
             return [], {}
         pick = st.selectbox("Saved team", list(teams), key=f"{key_prefix}_saved")
         return list(teams[pick]), dict((team_meta or {}).get(pick, {}).get("sets") or {})
+    if source == "Paste a pokepaste":
+        paste = st.text_area(
+            "Paste Showdown export text here (blank line between each Pokemon)",
+            height=200, key=f"{key_prefix}_our_paste")
+        if not paste.strip():
+            return [], {}
+        from species_data import custom_team_from_export
+        roster, sets = custom_team_from_export(paste, merged or {})
+        unknown = [n for n in roster if n not in (merged or {})]
+        if unknown:
+            st.error(f"Unrecognised species (check spelling against "
+                     f"mbsmogon.xlsx): {unknown}")
+            return [], {}
+        if not roster:
+            st.error("Couldn't parse any Pokemon out of that paste.")
+            return [], {}
+        st.success(f"Parsed: {', '.join(roster)}")
+        with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
+            st.json(sets)
+        save_col, name_col = st.columns([1, 3])
+        team_name = name_col.text_input(
+            "Save as (data/my_teams/<name>.txt)", key=f"{key_prefix}_save_name",
+            label_visibility="collapsed", placeholder="Save as (data/my_teams/<name>.txt)")
+        if save_col.button("Save to My Teams", key=f"{key_prefix}_save_btn"):
+            try:
+                path = _save_pasted_team(paste, team_name or "My Team")
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.success(f"Saved to {path.relative_to(species_data.DATA_DIR.parent)} "
+                          f"— pick it from 'A saved team' from now on.")
+                st.cache_data.clear()
+                st.rerun()
+        return list(roster), sets
     # A one-off pick out of the whole dataset has no set to travel with it, and
     # borrowing the loaded team's would put its Choice Scarf on a stranger.
     return list(all_names), {}
@@ -2530,7 +2595,7 @@ with tab_battle:
 
     b1, b2 = st.columns(2)
     with b1:
-        our_pool, bv_our_sets = our_side_pool("bv", teams, all_names, team_meta)
+        our_pool, bv_our_sets = our_side_pool("bv", teams, all_names, team_meta, merged=merged)
         our_pool = our_pool or list(all_names)
         our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
@@ -2920,7 +2985,7 @@ with tab_vs:
                    "BEFORE they reveal theirs. This runs the advanced model on "
                    "that decision and reports the one committed plan, its "
                    "record across their brings, and what beats it.")
-        pv_pool, pv_our_sets = our_side_pool("pv", teams, all_names, team_meta)
+        pv_pool, pv_our_sets = our_side_pool("pv", teams, all_names, team_meta, merged=merged)
         # The source is part of the key so switching it re-defaults the picker.
         # With one shared key the widget kept the previous team's names, none
         # of which are options any more, so Streamlit dropped them and left the
@@ -3273,7 +3338,7 @@ with tab_vs:
                    "tier's analysis on that single position -- full payoff "
                    "matrix every turn, their wider move space, the "
                    "equilibrium solver piloting -- and shows the match.")
-        _loaded, dd_our_sets = our_side_pool("dd", teams, all_names, team_meta)
+        _loaded, dd_our_sets = our_side_pool("dd", teams, all_names, team_meta, merged=merged)
         our_bring = st.multiselect(
             "My bring-4 (LEAD FIRST, order matters)", _loaded or all_names,
             max_selections=4, key="dd_ours",

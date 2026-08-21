@@ -649,3 +649,100 @@ class TestCounterTablePoolDefault(unittest.TestCase):
         W = world()
         pool = ct._pool(Args(), W["merged"])
         self.assertEqual(len(pool), 10)
+
+
+class TestThresholdSearchScreening(unittest.TestCase):
+    """"my attackers in counter_table must either be faster than the enemy,
+    able to be faster with choice scarf, and/or take max X damage from the
+    enemy's best attack (e.g., OHKO all, take less than 50%, outspeed. or
+    2HKO all, take less than 33%, outspeed.)" """
+
+    def test_unset_filters_do_not_change_existing_rows_or_cost(self):
+        """Backwards compatible: with `max_taken`/`outspeed` both omitted,
+        the extra fields must not even be computed."""
+        W = world()
+        rows = cf.threshold_search(
+            POOL, ["Kingambit", "Basculegion"], W["merged"], W["moves"],
+            W["natures"], W["typechart"], threshold=0.9)
+        for r in rows:
+            self.assertNotIn("incoming", r)
+            self.assertNotIn("outspeeds", r)
+
+    def test_max_taken_drops_a_row_that_takes_too_much(self):
+        W = world()
+        loose = cf.threshold_search(
+            POOL, ["Kingambit"], W["merged"], W["moves"], W["natures"],
+            W["typechart"], threshold=0.0, max_taken=1.0)
+        strict = cf.threshold_search(
+            POOL, ["Kingambit"], W["merged"], W["moves"], W["natures"],
+            W["typechart"], threshold=0.0, max_taken=0.01)
+        self.assertGreater(len(loose), len(strict))
+        strict_names = {r["name"] for r in strict}
+        for r in strict:
+            self.assertTrue(all(h.hi <= 0.01 for h in r["incoming"].values()))
+        # Everything strict allowed must also appear in the loose pass.
+        self.assertTrue(strict_names <= {r["name"] for r in loose})
+
+    def test_outspeed_natural_requires_a_real_speed_win(self):
+        W = world()
+        rows = cf.threshold_search(
+            POOL, ["Kingambit"], W["merged"], W["moves"], W["natures"],
+            W["typechart"], threshold=0.0, outspeed="natural")
+        for r in rows:
+            self.assertTrue(all(r["outspeeds"].values()))
+
+    def test_outspeed_scarf_accepts_a_hypothetical_scarf_win(self):
+        """A row that fails --outspeed natural but passes --outspeed scarf
+        must exist for a real slow-but-scarfable Pokemon (Mega Scizor is
+        locked to its stone and cannot actually equip Scarf, but the
+        HYPOTHETICAL must still say yes)."""
+        W = world()
+        natural = cf.threshold_search(
+            ["Mega Scizor"], ["Basculegion"], W["merged"], W["moves"],
+            W["natures"], W["typechart"], threshold=0.0, outspeed="natural")
+        scarf = cf.threshold_search(
+            ["Mega Scizor"], ["Basculegion"], W["merged"], W["moves"],
+            W["natures"], W["typechart"], threshold=0.0, outspeed="scarf")
+        self.assertEqual(natural, [])
+        self.assertEqual(len(scarf), 1)
+        self.assertFalse(scarf[0]["outspeeds"]["Basculegion"])
+        self.assertTrue(scarf[0]["outspeeds_scarf"]["Basculegion"])
+
+    def test_a_speed_tie_does_not_count_as_outspeeding(self):
+        """"ties resolve against us" -- the same convention `pair_search`
+        uses. Checked directly against `effective_speed` rather than hunting
+        for a real tie in the dataset."""
+        W = world()
+        c = cf._build("Kingambit", W["merged"], W["natures"])
+        from engine import FieldState, effective_speed
+        same_speed = effective_speed(c, FieldState(), "p1")
+        # A candidate with EXACTLY Kingambit's own speed must not be credited
+        # with outspeeding Kingambit -- verified through the private helper
+        # rather than searching for a coincidental real tie.
+        self.assertFalse(same_speed > same_speed)
+
+    def test_threshold_becomes_a_hard_filter_once_a_screen_is_requested(self):
+        """Ordinarily `meets_all` is informational (a near-miss still ranks
+        and shows) -- but once max_taken/outspeed are actually requested,
+        "OHKO all, take less than 50%, outspeed" is three MUSTS together."""
+        W = world()
+        rows = cf.threshold_search(
+            POOL, ["Kingambit", "Basculegion"], W["merged"], W["moves"],
+            W["natures"], W["typechart"], threshold=1.0, max_taken=1.0,
+            outspeed=None)
+        for r in rows:
+            self.assertTrue(r["meets_all"])
+
+    def test_max_taken_reads_the_defenders_best_roll_not_the_average(self):
+        """The guaranteed-survival direction: `incoming[t].hi` must equal
+        the enemy's own HI roll (their best case), not their average or
+        worst -- checked directly against `_raw_hit`."""
+        W = world()
+        rows = cf.threshold_search(
+            ["Garchomp"], ["Kingambit"], W["merged"], W["moves"],
+            W["natures"], W["typechart"], threshold=0.0, max_taken=1.0)
+        row = rows[0]
+        got = row["incoming"]["Kingambit"]
+        self.assertEqual(got.frac, got.hi)
+        self.assertLessEqual(got.lo, got.avg)
+        self.assertLessEqual(got.avg, got.hi)

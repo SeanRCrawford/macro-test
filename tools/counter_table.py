@@ -8,6 +8,8 @@
     python counter_table.py --vs "Kingambit,Basculegion" --top 15
     python counter_table.py --vs "Kingambit,Basculegion,Urshifu-Rapid-Strike,Chien-Pao,Landorus-Therian,Rillaboom" --team "Big 6" --item "Gallade=Choice Scarf"
     python counter_table.py --vs "Kingambit,Basculegion,Mega Floette" --speed
+    python counter_table.py --vs "Kingambit,Basculegion" --threshold 100 --max-taken 50 --outspeed natural
+    python counter_table.py --vs "Kingambit,Basculegion" --threshold 50 --max-taken 33 --outspeed scarf
 
 Three modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
@@ -37,6 +39,25 @@ By default the WHOLE ~270-Pokemon dataset is searched, not a pre-narrowed
 "generically good" subset -- see `_pool` below for why (short version: "why
 does Mega Scizor not show up" used to have an answer, and it was a bug in
 which Pokemon ever got asked, not in the damage/item/move search itself).
+
+DEFAULT MODE ONLY: --max-taken and --outspeed add hard requirements on top
+of --threshold's KO bar, all three composed by AND -- a row failing any of
+them is dropped, not just flagged.
+
+    --max-taken 50           every named target's best roll against this
+                              Pokemon must do under 50%
+    --outspeed natural       must out-speed every named target under its
+                              own chosen item
+    --outspeed scarf         ... or would, if it held Choice Scarf instead
+                              (a hypothesis; pin --item yourself if you want
+                              that reflected in the actual damage numbers)
+
+"my attackers in counter_table must either be faster than the enemy, able
+to be faster with choice scarf, and/or take max X damage from the enemy's
+best attack (e.g., OHKO all, take less than 50%, outspeed. or 2HKO all,
+take less than 33%, outspeed.)" -- those two examples are exactly the last
+two commands above (2HKO all == --threshold 50, the same worst-roll->=50%
+guarantee --threshold already means).
 
 By default every pool member's item AND moveset are searched for the best
 legal answer to `--vs` -- "or to just select optimal item" is the default,
@@ -145,11 +166,14 @@ def _roll(h):
     return f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-{h.hi * 100:.0f}%"
 
 
-def _print_threshold(rows, targets, threshold, top):
+def _print_threshold(rows, targets, threshold, top, max_taken=None, outspeed=None):
+    screened = max_taken is not None or outspeed is not None
     header = f"{'#':>3} {'Pokemon':20s} {'item':16s}"
     for t in targets:
         header += f" {t[:22]:>22s}"
     header += f" {'worst':>6s} {'all >= thr':>10s}"
+    if screened:
+        header += f" {'max taken':>10s} {'outspeeds all':>14s}"
     print(header)
     print("-" * len(header))
     for i, r in enumerate(rows[:top], start=1):
@@ -158,6 +182,11 @@ def _print_threshold(rows, targets, threshold, top):
             h = r["per_target"][t]
             line += f" {_roll(h):>22s}"
         line += f" {r['worst_pct'] * 100:>5.0f}% {('YES' if r['meets_all'] else ''):>10s}"
+        if screened:
+            worst_taken = max((h.hi for h in r["incoming"].values()), default=0.0)
+            outsped = (r["outspeeds_scarf"] if outspeed == "scarf"
+                      else r["outspeeds"])
+            line += f" {worst_taken * 100:>9.0f}% {('YES' if all(outsped.values()) else ''):>14s}"
         print(line)
     print()
     print("Each cell is the damage ROLL (worst-average-best %) that Pokemon's")
@@ -167,10 +196,22 @@ def _print_threshold(rows, targets, threshold, top):
     print("worst-roll minimum across targets -- ranked on it, since answering")
     print("one target and whiffing the other is not the answer that was asked")
     print("for. A 'Mega X' name is always its mega stats.")
+    if screened:
+        print()
+        print("Rows that failed --max-taken/--outspeed are not shown at all --")
+        print("'max taken' is the worst of EACH named target's best roll against")
+        print("this Pokemon (the most they could do, guaranteed-survival reading);")
+        print("'outspeeds all' is against every named target " +
+             ("naturally OR with Choice Scarf (a hypothesis)."
+              if outspeed == "scarf" else "under its own chosen item."))
     for i, r in enumerate(rows[:top], start=1):
         bits = [f"{t}: {h.move_name or '-'} {_roll(h)}"
                 for t, h in r["per_target"].items()]
         print(f"  {i:>3} {r['name']}: " + "; ".join(bits))
+        if screened:
+            in_bits = [f"{t}: {h.move_name or '-'} {_roll(h)}"
+                      for t, h in r["incoming"].items()]
+            print(f"      incoming: " + "; ".join(in_bits))
 
 
 def _print_speed(rows, targets, top):
@@ -300,6 +341,19 @@ def main():
                     help="print a speed-tier chart (priority bracket, then "
                          "effective speed) for --vs's targets plus the pool, "
                          "instead of a damage search")
+    ap.add_argument("--max-taken", type=float, default=None, metavar="PCT",
+                    help="default mode only: drop any row where SOME named "
+                         "target's best attack could do PCT%% or more to it "
+                         "(their best roll, the guaranteed-survival "
+                         "direction). E.g. --max-taken 50 for 'take less "
+                         "than 50%%'")
+    ap.add_argument("--outspeed", choices=("natural", "scarf"), default=None,
+                    help="default mode only: drop any row that doesn't "
+                         "out-speed EVERY named target. 'natural': under "
+                         "its own chosen item. 'scarf': naturally, OR if it "
+                         "held Choice Scarf instead (a hypothesis -- pin "
+                         "--item yourself for that to show in the damage "
+                         "numbers too)")
     ap.add_argument("--pool-size", type=int, default=0, metavar="N",
                     help="search only the top N of the generic team-"
                          "generation Score ranking, instead of the whole "
@@ -319,6 +373,10 @@ def main():
         raise SystemExit("--chip-from and --chip-move must be given together")
     if args.partner_item and not args.chip_from:
         raise SystemExit("--partner-item requires --chip-from/--chip-move")
+    if (args.max_taken is not None or args.outspeed) and (
+            args.pairs or args.chip_from or args.speed):
+        raise SystemExit("--max-taken/--outspeed only apply to the default "
+                         "(threshold) mode")
 
     from _harness import load_world
     from lead_sim import BANNED_ITEMS
@@ -374,11 +432,14 @@ def main():
                             move_overrides=move_overrides)
         _print_chip(rows, targets, args.chip_from, args.chip_move, args.top)
     else:
+        max_taken = args.max_taken / 100.0 if args.max_taken is not None else None
         rows = threshold_search(pool, targets, merged, moves, natures, typechart,
                                 threshold=threshold,
                                 item_overrides=item_overrides,
-                                move_overrides=move_overrides)
-        _print_threshold(rows, targets, threshold, args.top)
+                                move_overrides=move_overrides,
+                                max_taken=max_taken, outspeed=args.outspeed)
+        _print_threshold(rows, targets, threshold, args.top,
+                         max_taken=max_taken, outspeed=args.outspeed)
 
     if args.csv:
         import csv
@@ -398,6 +459,12 @@ def main():
                     row[f"{t} hi%"] = round(h.hi * 100, 1)
                 row["worst %"] = round(r["worst_pct"] * 100, 1)
                 row["meets all"] = r["meets_all"]
+                if "incoming" in r:
+                    for t, h in r["incoming"].items():
+                        row[f"{t} incoming move"] = h.move_name
+                        row[f"{t} incoming hi%"] = round(h.hi * 100, 1)
+                    row["outspeeds all (natural)"] = all(r["outspeeds"].values())
+                    row["outspeeds all (scarf)"] = all(r["outspeeds_scarf"].values())
             elif "finishes" in r:
                 for t, (ko, h) in r["finishes"].items():
                     row[f"{t} KO"] = ko
