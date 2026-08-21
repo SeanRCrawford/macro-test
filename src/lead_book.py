@@ -159,27 +159,38 @@ def build(records, path):
     _wrap(ws, 5)
 
     # --- Openings -----------------------------------------------------------
+    # "Their back two" and "Blank backs" are the same opening asked twice: the
+    # verdict is against the WORST bring-4 their lead is consistent with (see
+    # lead_scan.enemy_positions), and the blank column is that lead pair with
+    # nothing behind it at all. Sorting or filtering on the gap between the two
+    # is how you find the openings their BACKS are winning rather than their
+    # lead -- which is a different problem with a different answer.
     ws = _sheet(wb, "Openings",
                 ["Our 4", "Opponent", "Their Mega", "Their lead pair", "Result",
                  "Speed tie", "Their best plan", "Our play", "Guaranteed?",
-                 "Margin", "After it settles (mop-up)"],
+                 "Margin", "Their back two", "Blank-backs margin",
+                 "After it settles (mop-up)"],
                 {"Our 4": 40, "Their lead pair": 34, "Their best plan": 34,
-                 "Our play": 46, "After it settles (mop-up)": 60})
+                 "Our play": 46, "Their back two": 30,
+                 "After it settles (mop-up)": 60})
     for r in sorted(records, key=lambda r: (r["opponent"], -r["score"])):
         rep = r["report"]
         for x in rep.results:
             play = x.play
+            backs = [n for n in (x.bring or ()) if n not in x.enemy_lead]
             ws.append([" / ".join(r["bring"]), r["opponent"],
                        r.get("mega") or "-", " + ".join(x.enemy_lead),
                        x.verdict, "yes" if x.tie else "", x.plan,
                        play.label if play else "-",
                        "GUARANTEED" if (play and play.guaranteed) else "",
-                       round(x.margin, 3), (play.mopped if play else "")])
+                       round(x.margin, 3), " + ".join(backs),
+                       round(x.blank.margin, 3) if x.blank else "",
+                       (play.mopped if play else "")])
             ws.cell(ws.max_row, 5).fill = FILL.get(x.verdict, WARN)
             if play and play.guaranteed:
                 ws.cell(ws.max_row, 9).fill = GOOD
     ws.auto_filter.ref = ws.dimensions
-    _wrap(ws, 11)
+    _wrap(ws, 13)
 
     # --- Lines --------------------------------------------------------------
     # "for each line in the Lines sheet, I want to see if its a win or not" --
@@ -297,7 +308,12 @@ def _legend(wb):
                        "once, naming the four to bring to each. One team, a "
                        "different bring per opponent."],
         ["Openings", "Every (our 4 x their lead pair): the result, their best "
-                     "plan, the play we make, and whether it is guaranteed."],
+                     "plan, the play we make, and whether it is guaranteed. "
+                     "The result is against the WORST four they could have "
+                     "brought behind that lead -- 'Their back two' names it. "
+                     "'Blank-backs margin' is the same opening with nothing "
+                     "behind their lead at all; where the two disagree, their "
+                     "backs are doing the work, not their lead pair."],
         ["Lines", "The turn-by-turn with damage on every hit. 'PINNED' marks a "
                   "Pokemon removed before it acted."],
         ["Switch-ins", "Why their backs cannot come in, and which one can."],

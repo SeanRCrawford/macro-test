@@ -120,6 +120,66 @@ def _parse_item_overrides(spec):
     return out
 
 
+def _intimidate_block(our4, roster, world, sets, turns=2):
+    """Price both sides' Intimidate, worst case over what they can still choose.
+
+    ONE ROW PER HOLDER, taken from the position where it hurts us most. Pricing
+    against a single assumed bring would answer the wrong question in exactly
+    the way this session's other fix does: their Intimidate user is usually a
+    BACK -- of the three library teams that hold one, King's Incineroar is its
+    sixth name -- so the bring that leaves it at home reports nothing while the
+    bring that brings it reports the real cost. Their Mega choice is swept for
+    the same reason it is everywhere else here: they pick it after seeing our
+    four. The row names the position that produced it.
+    """
+    import dataclasses
+
+    import intimidate as I
+
+    lead = list(roster[:2])
+    best = {}
+    for mega_name, variant in ls.mega_variants(roster, world):
+        for names, emega in ls.enemy_positions(variant, lead, mega_name,
+                                               backs=ls.WORST):
+            _base, values = I.worth(our4, names, world, our_sets=sets,
+                                    enemy_mega=emega, turns=turns)
+            where = f"vs {', '.join(names)}"
+            if mega_name:
+                where += f"; their Mega: {mega_name}"
+            for v in values:
+                # Worst FOR US: their Intimidate at its most valuable to them,
+                # ours at its least valuable to us.
+                cost = v.worth if v.holder.side == "theirs" else -v.worth
+                key = (v.holder.side, v.holder.name, v.joint)
+                if key not in best or cost > best[key][0]:
+                    best[key] = (cost, dataclasses.replace(v, context=where),
+                                 names, emega)
+    if not best:
+        return ["  Intimidate: neither side brings one."]
+    # "Never reached the field" is the most actionable row on the block and the
+    # least informative as written -- it says an Intimidate is coming without
+    # saying what it costs. Re-price exactly those against a window long enough
+    # for the bench to arrive, and quote the deeper number beside them. Cheap:
+    # one extra pair of races per unpaid-for holder, not per bring.
+    deep = turns + 2
+    rows = []
+    for _cost, v, names, emega in best.values():
+        if not v.brought:
+            _b, values = I.worth(our4, names, world, our_sets=sets,
+                                 enemy_mega=emega, turns=deep)
+            later = next((x for x in values
+                          if (x.holder.side, x.holder.name, x.joint)
+                          == (v.holder.side, v.holder.name, v.joint)), None)
+            if later is not None and later.brought:
+                who = "them" if v.holder.side == "theirs" else "us"
+                v = dataclasses.replace(
+                    v, context=v.context + f"; by turn {deep} it is worth "
+                                           f"{later.worth:+.2f} to {who}")
+        rows.append(v)
+    rows.sort(key=lambda v: (v.joint, -abs(v.worth)))
+    return I.describe(rows, turns=turns)
+
+
 def _opponents(world, spec):
     if not spec:
         return list(world["teams"])
@@ -193,6 +253,27 @@ def main():
                          "Pokemon in the bring instead of searching for one, "
                          "e.g. 'Gallade=Choice Scarf'. The moveset is still "
                          "re-optimised under the pinned item")
+    ap.add_argument("--intimidate", action="store_true",
+                    help="--check only: price every Intimidate on the board by "
+                         "playing the opening twice, once with the ability made "
+                         "inert (src/intimidate.py). Reports what it is worth to "
+                         "whoever owns it, across every bring-4 they could be "
+                         "holding behind their stated lead -- including an "
+                         "Intimidate on one of their BACKS that a two-turn "
+                         "window never makes you pay for. Off by default because "
+                         "it plays games and the rest of --check does not.")
+    ap.add_argument("--backs", default=ls.WORST,
+                    choices=[ls.WORST, ls.BLANK, ls.ROSTER],
+                    help="--xlsx only: what stands behind their lead pair in the "
+                         "detailed pass. 'worst' (default) plays the opening "
+                         "against every bring-4 consistent with that lead and "
+                         "takes the worst, since they picked their four after "
+                         "seeing yours. 'blank' is their lead pair alone -- much "
+                         "the fastest, and the reference number the report shows "
+                         "beside the verdict anyway. 'roster' hands them all six, "
+                         "which is what this used to do and is not a legal bring; "
+                         "kept only to reproduce an older number. Measured on one "
+                         "bring vs Perish Trap: blank/roster 21s, worst 99s.")
     ap.add_argument("--xlsx", default="", metavar="PATH",
                     help="write the workbook: brings, teams of 6, openings, "
                          "lines with damage, switch-ins and item fixes")
@@ -264,6 +345,11 @@ def main():
                     our4, world["teams"][opp], world, sets=sets):
                 print(f"    {name:20s} can afford to lose {afford * 100:+7.1f}%"
                       f"   {verdict}")
+            if args.intimidate:
+                for line in _intimidate_block(our4, world["teams"][opp], world,
+                                              sets):
+                    print(line)
+                print()
             slots = ls.mega_slots(world["teams"][opp], world)
             if len(slots) > 1:
                 print(f"\n  NOTE: they can Mega any of {', '.join(slots)} and "
@@ -274,7 +360,8 @@ def main():
         # most worth having, so it writes the same workbook the sweep does.
         if args.xlsx:
             records = _records_for(our4, opponents, world,
-                                   item_overrides=item_overrides)
+                                   item_overrides=item_overrides,
+                                   backs=args.backs)
             import lead_book
             n = lead_book.build(records, args.xlsx)
             print(f"Workbook ({n} records): {os.path.abspath(args.xlsx)}")
@@ -342,7 +429,8 @@ def main():
 
 
 
-def _records_for(bring, opponents, world, want_items=True, item_overrides=None):
+def _records_for(bring, opponents, world, want_items=True, item_overrides=None,
+                 backs=ls.WORST):
     """Full records for one bring: every opponent x every Mega they could pick.
 
     A bring does NOT have to beat every opponent -- "a given 4 doesn't need to
@@ -364,7 +452,7 @@ def _records_for(bring, opponents, world, want_items=True, item_overrides=None):
                    if item_overrides else None)
             report, ms, b = ls.full_report(bring, variant, world,
                                            opponent_name=opp, mega_name=mega_name,
-                                           sets=sets)
+                                           sets=sets, backs=backs)
             ours = [c for c in b.p1.roster if not c.fainted]
             their_bench = [c for c in b.p2.roster if not c.fainted][2:]
             switch_ins = ls.switch_in_table(ms, b.typechart, b.field, b,
@@ -376,8 +464,11 @@ def _records_for(bring, opponents, world, want_items=True, item_overrides=None):
                 # was only ever offered a fix for one of them.
                 for x in report.results:
                     if x.verdict == ls.LOSS:
+                        # Against the bring the report found worst behind that
+                        # lead, so the fix answers the opening that was scored.
                         for mon, item, play in ls.item_fixes(
-                                bring, variant, world, x.enemy_lead):
+                                bring, variant, world, x.enemy_lead,
+                                enemy4=x.bring, mega_name=mega_name):
                             fixes.append((x.enemy_lead, mon, item, play))
             out.append({"bring": tuple(bring), "opponent": opp,
                         "mega": mega_name, "score": report.score,
@@ -399,7 +490,8 @@ def _build_book(rows, opponents, args, world):
     records = []
     for i, r in enumerate(keep, start=1):
         bring = list(r["lead"]) + list(r["back"])
-        records.extend(_records_for(bring, opponents, world))
+        records.extend(_records_for(bring, opponents, world,
+                                    backs=args.backs))
         print(f"  [{i}/{len(keep)}] {' / '.join(bring)}", flush=True)
     n = lead_book.build(records, args.xlsx)
     print(f"\nWorkbook ({n} records): {os.path.abspath(args.xlsx)}")

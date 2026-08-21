@@ -519,6 +519,25 @@ def base_form_name(name: str) -> str | None:
     return rest
 
 
+# "They chose their stone, and then did not bring the Pokemon that holds it."
+#
+# `mega_transforms=None` means "no preference, evolve the first Mega-named pick",
+# which is a different statement and cannot express this one. It became a real
+# case when `lead_scan.enemy_positions` started playing openings against their
+# legal bring-4s: a team with two Mega-capable names has brings that contain the
+# OTHER one, and that Pokemon does not get to evolve.
+#
+# It used to be approximated by rewriting "Mega Delphox" to "Delphox" before
+# building the team. That is a worse model in two ways and one of them is fatal:
+# it silently swaps in the base species' own usage item, EVs and nature (a
+# brought Mega holds its STONE -- that is why it was brought), and a base
+# species that is never played un-mega'd is not in mbsmogon.xlsx at all, so the
+# rewrite raised KeyError('Delphox'). `force_base_form` already models this
+# correctly, keeping the name and the stone; this sentinel is how a caller asks
+# for it.
+NO_MEGA = "\x00no-mega"
+
+
 def resolve_team_mega_slot(team_names: list[str], mega_transforms: str | None = None) -> tuple[str | None, list[str]]:
     """A brought team (4 or 6) may include MULTIPLE mega-capable picks (this
     is legal and a real tech: e.g. bringing both a would-be Mega Charizard Y
@@ -531,13 +550,16 @@ def resolve_team_mega_slot(team_names: list[str], mega_transforms: str | None = 
     transforms (must be one of the Mega-named entries in team_names). If
     None, defaults to the FIRST Mega-named entry in list order (backward
     compatible default) -- pass this explicitly to search over which one
-    transforms without disturbing lead/back position order.
+    transforms without disturbing lead/back position order. `NO_MEGA` says
+    none of them does, because the stone is on a Pokemon that was not brought.
 
     Returns (name_that_mega_evolves_or_None, list_of_names_forced_to_base_form).
     """
     megas = [n for n in team_names if n.startswith("Mega ")]
     if not megas:
         return None, []
+    if mega_transforms == NO_MEGA:
+        return None, list(megas)
     if mega_transforms is not None:
         if mega_transforms not in megas:
             raise ValueError(f"mega_transforms='{mega_transforms}' not among this team's Mega picks {megas}")
