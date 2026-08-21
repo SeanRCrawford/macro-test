@@ -36,12 +36,24 @@ def _data_fingerprint():
     """Modification times of the source data files. Used as a cache key so that
     editing mbsmogon.xlsx (EV spreads, items, moves) is picked up on the next
     rerun -- previously the parsed sheet was cached for the life of the process,
-    so hand-edited EVs appeared to have no effect at all."""
+    so hand-edited EVs appeared to have no effect at all.
+
+    Also watches every data/teams/*.txt and data/my_teams/*.txt pokepaste --
+    without this, saving a team from "Paste a pokepaste" -> "Save to My
+    Teams" would not appear in "A saved team" until something ELSE happened
+    to bump the fingerprint, since `load_teams_csv` below is cached on this
+    tuple and adding a new file does not change any of the four sheet paths.
+    """
     files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv"]
     out = []
     for f in files:
         p = species_data.DATA_DIR / f
         out.append((f, p.stat().st_mtime if p.exists() else 0))
+    for dir_name in ("teams", "my_teams"):
+        d = species_data.DATA_DIR / dir_name
+        if d.is_dir():
+            for p in sorted(d.glob("*.txt")):
+                out.append((f"{dir_name}/{p.name}", p.stat().st_mtime))
     return tuple(out)
 
 
@@ -161,10 +173,15 @@ def team_sheet_df(team, sets=None):
         ev = spec.get("evs") or p["evs"]
         edited = bool(spec.get("evs")) and dict(spec["evs"]) != dict(p["evs"])
         from combatants import _default_ability
+        # Same override-or-default rule as item, moves and stat points. Reading
+        # the usage default unconditionally here is exactly the bug that was
+        # reported for stat points, one column over.
+        ability = spec.get("ability") or (_default_ability(p["abilities_usage"])
+                                          if p["abilities_usage"] else "-")
         rows.append({
             "Pokemon": n, "Types": "/".join(p["types"]), "Item": item,
-            "Ability": _default_ability(p["abilities_usage"]) if p["abilities_usage"] else "-",
-            "Nature": p["nature"],
+            "Ability": ability + (" (set)" if spec.get("ability") else ""),
+            "Nature": spec.get("nature") or p["nature"],
             "EVs": "/".join(str(ev.get(k, 0))
                             for k in ["hp", "atk", "def", "spa", "spd", "spe"])
                    + (" (edited)" if edited else ""),
@@ -191,39 +208,99 @@ def weakness_table(team):
 STAT_POINT_BUDGET = 66
 
 
-def our_side_pool(key_prefix, teams, all_names):
+def _save_pasted_team(paste_text, raw_name):
+    """Write `paste_text` to data/my_teams/<slug>.txt. Returns the path, or
+    raises ValueError for an empty name. Matches `load_teams`'s own
+    filename -> display-name rule (underscores/hyphens -> spaces,
+    title-cased) in reverse, so the name you type is the name you'll see."""
+    slug = "_".join(raw_name.strip().split())
+    if not slug:
+        raise ValueError("Team name can't be empty")
+    my_teams_dir = species_data.DATA_DIR / "my_teams"
+    my_teams_dir.mkdir(parents=True, exist_ok=True)
+    path = my_teams_dir / f"{slug}.txt"
+    path.write_text(paste_text)
+    return path
+
+
+def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     """Where OUR six come from, offered the same way everywhere.
 
     Every view that puts our team against someone else's needs this, and each
     one used to answer it differently: the Battle Viewer silently fell back to
     all 271 species when the Team Builder was empty, which is unusable, and the
-    preview panels only ever offered the loaded team. One control, three
-    sources: the team in the Team Builder tab, any saved team from the library,
-    or the whole dataset for a one-off.
+    preview panels only ever offered the loaded team. One control, four
+    sources: the team in the Team Builder tab, any saved team from the library
+    (data/teams/ and data/my_teams/), a pasted pokepaste, or the whole dataset
+    for a one-off.
 
-    Returns the list of names to pick a bring from (possibly empty).
+    Returns (names, sets). THE SETS TRAVEL WITH THE NAMES. Returning only the
+    names left every caller reaching for st.session_state["sets"], which is the
+    Team Builder's -- correct for the loaded team and simply wrong for the
+    other sources, where it applied one team's items, moves and abilities to
+    a different team's Pokemon.
     """
     loaded = get_state_team()
-    options = ["My loaded team", "A saved team", "Any Pokemon"]
+    options = ["My loaded team", "A saved team", "Paste a pokepaste", "Any Pokemon"]
     default = 0 if loaded else 1
     source = st.radio("Our side", options, index=default, horizontal=True,
                       key=f"{key_prefix}_side_source",
                       help="'My loaded team' is whatever the Team Builder tab "
-                           "currently holds. 'A saved team' is anything in "
-                           "data/teams. 'Any Pokemon' opens the whole dataset "
-                           "for a one-off matchup.")
+                           "currently holds, WITH the items, moves, abilities "
+                           "and stat points you set there. 'A saved team' is "
+                           "anything in data/teams or data/my_teams. 'Paste a "
+                           "pokepaste' reads a Showdown export straight from "
+                           "the clipboard, and can save it to data/my_teams "
+                           "for next time. 'Any Pokemon' opens the whole "
+                           "dataset for a one-off matchup.")
     if source == "My loaded team":
         if not loaded:
             st.warning("No team loaded — pick six in the Team Builder tab, "
                        "or choose another source above.")
-        return list(loaded)
+        return list(loaded), dict(st.session_state.get("sets") or {})
     if source == "A saved team":
         if not teams:
-            st.warning("No saved teams in data/teams.")
-            return []
+            st.warning("No saved teams in data/teams or data/my_teams.")
+            return [], {}
         pick = st.selectbox("Saved team", list(teams), key=f"{key_prefix}_saved")
-        return list(teams[pick])
-    return list(all_names)
+        return list(teams[pick]), dict((team_meta or {}).get(pick, {}).get("sets") or {})
+    if source == "Paste a pokepaste":
+        paste = st.text_area(
+            "Paste Showdown export text here (blank line between each Pokemon)",
+            height=200, key=f"{key_prefix}_our_paste")
+        if not paste.strip():
+            return [], {}
+        from species_data import custom_team_from_export
+        roster, sets = custom_team_from_export(paste, merged or {})
+        unknown = [n for n in roster if n not in (merged or {})]
+        if unknown:
+            st.error(f"Unrecognised species (check spelling against "
+                     f"mbsmogon.xlsx): {unknown}")
+            return [], {}
+        if not roster:
+            st.error("Couldn't parse any Pokemon out of that paste.")
+            return [], {}
+        st.success(f"Parsed: {', '.join(roster)}")
+        with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
+            st.json(sets)
+        save_col, name_col = st.columns([1, 3])
+        team_name = name_col.text_input(
+            "Save as (data/my_teams/<name>.txt)", key=f"{key_prefix}_save_name",
+            label_visibility="collapsed", placeholder="Save as (data/my_teams/<name>.txt)")
+        if save_col.button("Save to My Teams", key=f"{key_prefix}_save_btn"):
+            try:
+                path = _save_pasted_team(paste, team_name or "My Team")
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.success(f"Saved to {path.relative_to(species_data.DATA_DIR.parent)} "
+                          f"— pick it from 'A saved team' from now on.")
+                st.cache_data.clear()
+                st.rerun()
+        return list(roster), sets
+    # A one-off pick out of the whole dataset has no set to travel with it, and
+    # borrowing the loaded team's would put its Choice Scarf on a stranger.
+    return list(all_names), {}
 
 
 def their_side_pool(key_prefix, teams, all_names):
@@ -375,7 +452,85 @@ def report_as_line(report):
     }
 
 
-def advanced_model_controls(key_prefix, default="standard"):
+def render_model_settings():
+    """The two settings that change what EVERY number in this app means.
+
+    They live in the sidebar rather than in a panel because they are not a
+    property of one question -- a record produced by one pilot and a punish
+    figure produced by the other cannot be read side by side, so the choice has
+    to be visible while you are reading any of it.
+
+    The evaluation is applied process-wide here, at the top of the script run.
+    Streamlit re-executes the whole file on every interaction, so this runs
+    before anything simulates, and a profile chosen in one tab cannot leak into
+    another tab's cached module state.
+    """
+    import solver
+    with st.sidebar:
+        st.markdown("### Model settings")
+        st.caption("These change what every number below means.")
+        pilot = st.radio(
+            "Who plays the games", ["greedy (fast)", "equilibrium (honest)"],
+            index=0, key="model_pilot",
+            help="GREEDY plays OUR side with the real solver and THEIRS with a "
+                 "fixed policy this codebase wrote. That hands whichever side "
+                 "is p1 a systematic advantage: mirroring a matchup flips the "
+                 "winner in 78% of cases, which is why every preset team "
+                 "'beats' every other one. It is fast, and it is why a line "
+                 "can be recorded as a win and lose a real game.\n\n"
+                 "EQUILIBRIUM plays BOTH sides as a matrix game. When one side "
+                 "has a safe play and the other does not, the ground goes to "
+                 "the safe side -- the other has to make a read, and a read is "
+                 "an assumption that loses on average. ~13x slower per game.")
+        evaluation = st.radio(
+            "Evaluation", ["sacrifice (default)", "legacy"], index=0,
+            key="model_eval",
+            help="SACRIFICE scores speed control and discounts a Pokemon that "
+                 "is one hit from gone, so the solver sacrifices instead of "
+                 "preserving something it can no longer use. Measured cost: "
+                 "record 80% -> 74% over 9 pairings.\n\n"
+                 "LEGACY restores the previous evaluation exactly. Pick it if "
+                 "your winning lines got worse.")
+        p = "equilibrium" if pilot.startswith("equilibrium") else "greedy"
+        e = "legacy" if evaluation.startswith("legacy") else "sacrifice"
+        solver.apply_eval_profile(e)
+        if p == "greedy":
+            st.warning("Records are inflated: whoever is p1 wins 78% of "
+                       "mirrored matchups.", icon="⚠️")
+        else:
+            st.success("Both sides played properly.", icon="✅")
+        return p, e
+
+
+PILOT, EVALUATION = render_model_settings()
+
+
+def estimate_caption(effort, pairings=1, audit_all=False, jobs=1):
+    """"about 7 min" under a button, corrected by what earlier runs took.
+
+    The session factor is what makes this honest on a machine that is not the
+    one the constants were measured on: every panel that finishes a timed run
+    calls `note_actual`, and the next estimate is scaled by what it learned.
+    """
+    import time_estimate as _te
+    factor = st.session_state.get("time_factor", 1.0)
+    seconds = _te.tier_seconds(effort, pairings, audit_all, jobs) * factor
+    return (f"Estimated {_te.humanise(seconds)}"
+            + (f" for {pairings} pairings" if pairings > 1 else "")
+            + (f" across {jobs} workers" if jobs and jobs > 1 else "")
+            + ". An estimate, not a promise — a warm cache makes it instant, "
+              "and the first run of a session pays ~15s to load the dataset.")
+
+
+def note_actual(effort, pairings, audit_all, jobs, actual_seconds):
+    """Teach the estimator what this machine actually does."""
+    import time_estimate as _te
+    predicted = _te.tier_seconds(effort, pairings, audit_all, jobs)
+    st.session_state["time_factor"] = _te.calibrate(
+        st.session_state.get("time_factor", 1.0), predicted, actual_seconds)
+
+
+def advanced_model_controls(key_prefix, default="standard", pairings=1, jobs=1):
     """The one place the advanced model's strength is chosen.
 
     Returns (effort_name, audit_all). Used by every panel that runs the new
@@ -404,11 +559,104 @@ def advanced_model_controls(key_prefix, default="standard"):
              "their back still counts as a win. On, the record is a true "
              "X of 90. Costs about 90/leads times as much: this is the "
              "difference between a fast read and a number you can commit to.")
+    # Wall clock, not a multiple of "quick". relative_cost models the audit and
+    # treats the screen as free, so read as a time it is out by ~10x: it calls
+    # standard 17x quick where the measured ratio is 1.6x (25.0s -> 39.8s per
+    # pairing). See time_estimate.py.
     st.caption(f"{_t(effort)['label']}"
-               f"{' + all 90 brings' if audit_all else ''} "
-               f"— roughly {relative_cost(effort) * (22 if audit_all and not _t(effort).get('all_configs') else 1):.0f}x "
-               f"the quick setting.")
+               f"{' + all 90 brings' if audit_all else ''} — "
+               + estimate_caption(effort, pairings, audit_all, jobs))
+    if _t(effort).get("pilot") == "equilibrium" and PILOT != "equilibrium":
+        st.info("This tier plays both sides with the equilibrium solver, "
+                "overriding the sidebar's pilot for this panel.")
     return effort, audit_all
+
+
+def pilot_for(effort):
+    """The pilot this panel will actually use.
+
+    A tier that specifies `equilibrium` wins over the sidebar: picking
+    Thorough+ and silently getting a greedy record would defeat the only
+    reason to pick it.
+    """
+    from search_effort import tier as _t
+    return ("equilibrium" if _t(effort).get("pilot") == "equilibrium"
+            else PILOT)
+
+
+def replay_config(our4, enemy4, record, max_turns, our_sets, enemy_sets,
+                  script_team=None):
+    """Re-play one enemy config the way the RECORD played it.
+
+    The header on each battle ("LOSS — vs lead ...") comes from the stored
+    search; the "Avg-roll result" beneath it comes from replaying the config
+    live. If those two play different opponents they disagree, and the screen
+    shows a LOSS header above a WIN result with nothing to explain it.
+
+    They did. `play_scripted_worst_case` had no `pilot` argument, so every
+    replay ran the GREEDY pilot while a Thorough+ record had been made by the
+    EQUILIBRIUM one -- a genuinely weaker opponent, so the replay won games the
+    record lost. Reproduced on Pelipper/Archaludon + Mega Swampert/Garchomp:
+    record p2, replay p1.
+
+    The record stores which pilot made it, so replay reads it from there rather
+    than from the sidebar -- the sidebar can have been changed since, and a
+    replay is supposed to reproduce a specific past result, not the current
+    setting.
+    """
+    from matchup_search import GREEDY_PILOT, play_scripted_worst_case
+    return play_scripted_worst_case(
+        our4, enemy4, merged, moves, natures, typechart, script_team, max_turns,
+        our_sets=our_sets, enemy_sets=enemy_sets,
+        pilot=(record or {}).get("pilot") or GREEDY_PILOT)
+
+
+def replay_mismatch_note(winner, recorded_loss, record):
+    """Say it out loud when the replay disagrees with the header.
+
+    Once the pilot is threaded through, a live replay should reproduce the
+    recorded result. It can still diverge for one honest reason: the record was
+    saved by an older build, or before an engine fix, so it is describing a
+    game this code no longer plays. That is worth knowing and worth acting on
+    (re-run the search) -- but only if it is stated. Printing "LOSS" in the
+    header and "WIN" in the metric with nothing between them taught the reader
+    to distrust whichever of the two they liked less.
+    """
+    if (winner == "p1") == (not recorded_loss):
+        return
+    st.warning(
+        f"This replay disagrees with the saved record "
+        f"(record: {'loss' if recorded_loss else 'win'}, replay: "
+        f"{'win' if winner == 'p1' else winner}). Both now use the "
+        f"**{(record or {}).get('pilot') or 'greedy'}** pilot, so the likely "
+        f"cause is that the record predates an engine change — re-run the "
+        f"search to refresh it. Trust the replay, not the header.")
+
+
+def render_pins(our_bring, their_bring, our_sets=None, enemy_sets=None):
+    """The board before a move is made, in the language of pins.
+
+    Only called where the SETS for both sides are genuinely in scope. A pin is
+    a claim about a specific guaranteed OHKO, so computing one from default
+    usage sets and showing it next to a line that was played with different
+    ones would be confidently wrong -- which is worse than silent. That is why
+    the saved-run "best line" panel does not call this: its sets live in the
+    run blob, not in the page.
+    """
+    if not our_bring or not their_bring:
+        return
+    from preview_lead import opening_pins
+    texts = opening_pins(list(our_bring), list(their_bring),
+                         {"merged": merged, "moves": moves,
+                          "natures": natures, "typechart": typechart},
+                         our_sets=our_sets, enemy_sets=enemy_sets)
+    if not texts:
+        return
+    for text in texts:
+        st.markdown(f"- {text}")
+    st.caption("A pin is a guaranteed OHKO from something that moves first, so "
+               "the target cannot profitably stay in and attack. A 'safe play' "
+               "collects value on every reply — unlike a Protect that is a read.")
 
 
 def render_line_result(lead, key):
@@ -499,6 +747,33 @@ def render_audited_turn(turn, key=None):
 
 def get_state_team():
     return st.session_state.get("team", [])
+
+
+def _defer_rerun():
+    """Ask for a rerun AFTER the whole tab has rendered.
+
+    Calling st.rerun() straight from an Apply button stops the script where it
+    is, so every editor BELOW that button never renders this cycle -- and
+    Streamlit drops widget state for widgets that did not render. Applying
+    items therefore silently discarded a pending move or stat-point edit.
+    Setting a flag and rerunning at the end of the tab lets everything render
+    first, so nothing pending is lost.
+    """
+    st.session_state["_builder_rerun"] = True
+
+
+def describe_action(a):
+    """One entry of a committed_plan.describe() tuple, in words.
+
+    (name, kind, label, target_names) -- 'switch' puts the label where the
+    move name would go, which reads as nonsense unless it is special-cased.
+    """
+    name, kind, label, targets = a
+    if kind == "switch":
+        return f"{name} switches to {label}"
+    if kind == "protect" or not targets or list(targets) == [name]:
+        return f"{name} {label}"
+    return f"{name} {label} -> {'/'.join(targets)}"
 
 
 def render_path_explorer(key_prefix, matchup, our_sets):
@@ -844,16 +1119,124 @@ with tab_build:
             if b1.button("Apply items", width='stretch', key="item_apply"):
                 st.session_state["sets"] = item_sets
                 st.success("Applied — every simulation now uses them.")
-                st.rerun()
+                _defer_rerun()
             if b2.button("Reset to usage defaults", width='stretch',
                          key="item_reset"):
                 for mon in team:
                     if mon in item_sets:
                         item_sets[mon].pop("item", None)
                 st.session_state["sets"] = item_sets
-                st.rerun()
+                _defer_rerun()
             if item_changed:
                 st.info("Edited but not applied — press Apply items.")
+
+        # --- Ability editor ----------------------------------------------
+        # Reported: "Arcanine-Hisui with intimidate may be much better than
+        # rock head". The engine has always honoured a per-Pokemon ability
+        # override (combatants.make_team passes sets[name]['ability']); there
+        # was simply no way to set one, so every simulation used the most-used
+        # ability and the alternative could not be tried at all.
+        with st.expander("Edit abilities", expanded=False):
+            st.caption("Used by every simulation the app runs. Ordered by "
+                       "usage — Arcanine-Hisui is 68% Rock Head / 32% "
+                       "Intimidate, and which one you run changes the matchup, "
+                       "not just the flavour text.")
+            ab_sets = dict(st.session_state.get("sets") or {})
+            ab_changed = False
+            for mon in team:
+                spec = dict(ab_sets.get(mon) or {})
+                usage = [a for a, _p in (merged[mon].get("abilities_usage") or [])
+                         if a and a != "No Ability"]
+                if len(usage) < 2:
+                    st.caption(f"**{mon}** — {usage[0] if usage else 'no data'} "
+                               "(only one on record)")
+                    continue
+                current = spec.get("ability") or usage[0]
+                if current not in usage:
+                    usage = usage + [current]
+                ac1, ac2 = st.columns([2, 3])
+                ac1.markdown(f"**{mon}**")
+                # The usage split goes in the help text, not a format_func:
+                # a formatted selectbox stores the raw value but looks it up
+                # among formatted options, which makes the whole page
+                # undriveable headless.
+                split = ", ".join(f"{a} {p:.0f}%"
+                                  for a, p in (merged[mon].get("abilities_usage") or []))
+                choice = ac2.selectbox(
+                    "Ability", usage, index=usage.index(current),
+                    key=f"abil_{mon}", label_visibility="collapsed",
+                    help=f"usage: {split}. A Mega pick's Mega-form ability is "
+                         "fixed by the species; this sets the BASE form's, "
+                         "which is what it has on the turn it comes in, before "
+                         "it evolves.")
+                if choice != current:
+                    spec["ability"] = choice
+                    ab_sets[mon] = spec
+                    ab_changed = True
+            ab1, ab2 = st.columns(2)
+            if ab1.button("Apply abilities", width='stretch', key="abil_apply"):
+                st.session_state["sets"] = ab_sets
+                st.success("Applied — every simulation now uses them.")
+                _defer_rerun()
+            if ab2.button("Reset to most-used", width='stretch',
+                          key="abil_reset"):
+                for mon in team:
+                    if mon in ab_sets:
+                        ab_sets[mon].pop("ability", None)
+                st.session_state["sets"] = ab_sets
+                _defer_rerun()
+            if ab_changed:
+                st.info("Edited but not applied — press Apply abilities.")
+
+        # --- Move editor ---------------------------------------------------
+        # Reported: "I also need to be able to select moves, often the moves
+        # used aren't that good." The optimiser picks all four at once against
+        # the whole metagame; this is the other job, where you know this
+        # Pokemon wants Snarl and want the rest left alone.
+        with st.expander("Edit moves", expanded=False):
+            st.caption("Up to four. Leave a Pokemon empty to keep its "
+                       "usage-standard set. The list is what it is recorded "
+                       "using; tick the box below to pick from every move in "
+                       "the game — legality is NOT checked, because the "
+                       "dataset has no learnsets.")
+            any_move = st.checkbox("Allow any move in the game", value=False,
+                                   key="mv_anymove")
+            all_moves = sorted({m["name"] for m in moves.values()
+                                if m.get("name")})
+            mv_sets = dict(st.session_state.get("sets") or {})
+            mv_changed = False
+            for mon in team:
+                spec = dict(mv_sets.get(mon) or {})
+                usage = [m for m, _p in (merged[mon].get("moves_usage") or [])
+                         if m and m != "Other"]
+                current = list(spec.get("moves") or [])
+                options = all_moves if any_move else usage
+                options = list(dict.fromkeys(list(options) + current))
+                picked = st.multiselect(
+                    mon, options, default=current, max_selections=4,
+                    key=f"mv_{mon}_{'any' if any_move else 'usage'}",
+                    help=f"usage order: {', '.join(usage[:6])}")
+                if picked != current:
+                    if picked:
+                        spec["moves"] = picked
+                    else:
+                        spec.pop("moves", None)
+                    mv_sets[mon] = spec
+                    mv_changed = True
+            m1, m2 = st.columns(2)
+            if m1.button("Apply moves", width='stretch', key="mv_apply"):
+                st.session_state["sets"] = mv_sets
+                st.success("Applied — every simulation now uses them.")
+                _defer_rerun()
+            if m2.button("Reset to usage-standard", width='stretch',
+                         key="mv_reset"):
+                for mon in team:
+                    if mon in mv_sets:
+                        mv_sets[mon].pop("moves", None)
+                st.session_state["sets"] = mv_sets
+                _defer_rerun()
+            if mv_changed:
+                st.info("Edited but not applied — press Apply moves.")
 
         # --- Stat point editor -----------------------------------------
         # These are NOT standard EVs. stats.py is explicit:
@@ -899,16 +1282,127 @@ with tab_build:
             if e1.button("Apply stat points", width='stretch', key="ev_apply"):
                 st.session_state["sets"] = cur_sets
                 st.success("Applied — every simulation now uses them.")
-                st.rerun()
+                _defer_rerun()
             if e2.button("Reset to dataset spreads", width='stretch',
                          key="ev_reset"):
                 for mon in team:
                     if mon in cur_sets:
                         cur_sets[mon].pop("evs", None)
                 st.session_state["sets"] = cur_sets
-                st.rerun()
+                _defer_rerun()
             if changed:
                 st.info("Edited but not applied — press Apply stat points.")
+
+        # --- Swap the worst member ---------------------------------------
+        # The `--substitute` loop, which was CLI-only. It is the only stage
+        # that steers the search by the RATING rather than by the beam's
+        # coverage score, so having it reachable only from a batch file meant
+        # the app could never improve a team, only measure one.
+        with st.expander("Improve this team — swap its worst member"):
+            st.caption("Works out which member is not earning its slot, tries "
+                       "better ones against the opponents this team is "
+                       "actually failing, and rates each candidate the same "
+                       "way a generated team is rated. A swap is only worth "
+                       "taking if the rating improves — and the RECORD comes "
+                       "first: a swap that beats fewer of their brings is "
+                       "rejected however good its adjusted win rate looks.")
+            sb1, sb2, sb3 = st.columns(3)
+            sub_vs = st.multiselect(
+                "Rate against", list(teams), default=list(teams)[:2],
+                key="sub_vs",
+                help="Fewer opponents is proportionally faster. Two is enough "
+                     "to see whether a swap is going anywhere.")
+            # Not "quick": that tier has robustness off, so it produces no
+            # adjusted win rate -- and the adjusted win rate is what a swap is
+            # accepted on. Offering it would make the panel fail every time
+            # with "the current team has no rating".
+            sub_effort = sb1.selectbox("Effort", ["standard", "thorough"],
+                                       index=0, key="sub_effort",
+                                       help="Quick is not offered: it does no "
+                                            "punish analysis, so there is no "
+                                            "rating to accept a swap on.")
+            sub_n = sb2.slider("Candidates to rate", 1, 6, 3, key="sub_n")
+            sub_pool = sb3.slider("Eligible pool", 20, 80, 40, key="sub_pool")
+            if st.button("Propose and rate swaps", key="sub_go") and sub_vs:
+                import substitution as _sub
+                import roster_rating as _rr
+                from team_search import (build_candidate_pool as _bcp,
+                                         enemy_pairs_from_teams as _epft)
+                _world = {"merged": merged, "moves": moves, "natures": natures,
+                          "typechart": typechart,
+                          "teams": {t: teams[t] for t in sub_vs}}
+                _prefs = dict(species_data.load_preferences())
+                _pool = sorted(set(_bcp(merged, top_n=sub_pool, prefs=_prefs))
+                               | set(team))
+                _eps = _epft(_world["teams"])
+                _pm = _sub.PairMatrix(merged, moves, natures, typechart)
+                sets_now = st.session_state.get("sets") or {}
+                with st.spinner("Rating the current team..."):
+                    base = _rr.rate_team(list(team), _world, effort=sub_effort,
+                                         turns=10, our_sets=sets_now,
+                                         opponents=list(sub_vs), pilot=PILOT,
+                                         eval_profile=EVALUATION)
+                if base.get("adjusted_win_rate") is None:
+                    st.error("The current team has no rating (a screen "
+                             "dropped it), so there is nothing to improve on.")
+                else:
+                    weights = _sub.opponent_weights(base, list(sub_vs))
+                    props = _sub.propose(list(team), _pool, _eps, _pm,
+                                         record=base, weights=weights,
+                                         limit=sub_n)
+                    rows = [{"Change": "(keep as is)",
+                             "Record": f"{base['wins']}/{base['total']}",
+                             "Adjusted": round(base["adjusted_win_rate"], 3),
+                             "Punish": round(base["exploitability"] or 0, 1),
+                             "Verdict": "incumbent", "Team": " / ".join(team)}]
+                    bar = st.progress(0.0)
+                    for i, p in enumerate(props):
+                        rec = _rr.rate_team(
+                            list(p["team"]), _world, effort=sub_effort,
+                            turns=10, our_sets=sets_now,
+                            opponents=list(sub_vs), pilot=PILOT,
+                            eval_profile=EVALUATION)
+                        # Record first, exactly as the CLI loop does: the win
+                        # count and the adjusted rate can move in opposite
+                        # directions, and the record is the number the plan is
+                        # committed on.
+                        lost = _sub.lost_record(base, rec)
+                        adj = rec.get("adjusted_win_rate")
+                        if lost is not None and lost > 0:
+                            verdict = f"rejected — record −{lost:.0%}"
+                        elif adj is None:
+                            verdict = "rejected — no rating"
+                        elif adj > (base["adjusted_win_rate"] or 0):
+                            verdict = "BETTER"
+                        else:
+                            verdict = "no gain"
+                        rows.append({
+                            "Change": f"−{p['drop']} +{p['candidate']}",
+                            "Record": f"{rec.get('wins')}/{rec.get('total')}",
+                            "Adjusted": round(adj, 3) if adj is not None else None,
+                            "Punish": round(rec.get("exploitability") or 0, 1),
+                            "Verdict": verdict,
+                            "Team": " / ".join(p["team"])})
+                        bar.progress((i + 1) / max(1, len(props)))
+                    bar.empty()
+                    st.session_state["sub_rows"] = rows
+            if st.session_state.get("sub_rows"):
+                rows = st.session_state["sub_rows"]
+                st.dataframe(pd.DataFrame(rows), width='stretch',
+                             hide_index=True)
+                better = [r for r in rows if r["Verdict"] == "BETTER"]
+                if better:
+                    pick = st.selectbox("Adopt a swap",
+                                        [r["Change"] for r in better],
+                                        key="sub_pick")
+                    if st.button("Adopt", key="sub_adopt"):
+                        chosen = next(r for r in better if r["Change"] == pick)
+                        st.session_state["team"] = chosen["Team"].split(" / ")
+                        st.session_state.pop("sub_rows", None)
+                        _defer_rerun()
+                else:
+                    st.info("No swap improved the rating — this team is a "
+                            "local optimum for these opponents.")
 
         cc1, cc2 = st.columns(2)
         with cc1:
@@ -918,9 +1412,16 @@ with tab_build:
                 with st.spinner("Optimising..."):
                     en = enemy_individuals(teams)
                     opt = optimise_team(team, merged, moves, natures, typechart, en)
-                    st.session_state["sets"] = {n: {"item": opt[n]["item"], "moves": opt[n]["moves"]}
-                                                 for n in team}
-                st.rerun()
+                    # MERGE, don't replace. The optimiser decides items and
+                    # moves; abilities and stat points are hand-set elsewhere
+                    # in this tab and replacing the dict wholesale threw them
+                    # away without saying so.
+                    prev = dict(st.session_state.get("sets") or {})
+                    st.session_state["sets"] = {
+                        n: {**(prev.get(n) or {}), "item": opt[n]["item"],
+                            "moves": opt[n]["moves"]}
+                        for n in team}
+                _defer_rerun()
         with cc2:
             fname = st.text_input("Save as", value="team.json", key="save_name")
             if st.button("Save", width='stretch'):
@@ -1016,6 +1517,9 @@ with tab_build:
     else:
         st.warning(f"Select 6 Pokemon ({len(team)} chosen)")
 
+    if st.session_state.pop("_builder_rerun", False):
+        st.rerun()
+
 
 # ------------------------------------------------------------------ generate
 with tab_gen:
@@ -1102,6 +1606,38 @@ with tab_gen:
     if floor_pct:
         st.caption(f"A team must beat at least {floor_pct}% of EVERY opponent's "
                    f"brings ({round(floor_pct * 90 / 100)}/90) to be reported.")
+    # The CHEAPEST screen there is, and the only one that costs seconds rather
+    # than minutes per team. It was CLI-only (`--punish-screen`), which meant
+    # the app spent the whole run auditing teams whose opening was already lost.
+    import punish_screen as _ps
+    use_punish_screen = st.checkbox(
+        "Drop a team whose OPENING is already lost, before auditing it",
+        value=False, key="gen_punish_screen",
+        help="Solves turn 1 as a matrix game against the leads they would pick "
+             "-- seconds per team against minutes for the audit. It screens on "
+             "the GUARANTEED value of the opening, not the punish: a team with "
+             "no threats gives a best-responding opponent nothing to gain and "
+             "would otherwise screen best of all.")
+    punish_floor = None
+    if use_punish_screen:
+        punish_floor = st.slider(
+            "Reject if the opening cannot guarantee better than", -500, 0,
+            int(_ps.DEFAULT_FLOOR), step=10, key="gen_punish_floor",
+            help="heuristic_eval points. MEASURED: one Pokemon down is about "
+                 "-280, not the 180 of KO_WEIGHT (that is the KO credit alone; "
+                 "the lost HP is the rest). Half your side at 50% HP is about "
+                 "-200. Negative is normal -- they answer with a perfect read.\n\n"
+                 "Re-measured on the library after the screen moved to the "
+                 "maximin: Sand -160, NAIC -208, Big 6 -221, Rain -235. The "
+                 "default -250 keeps all four, but not by much, so raising it "
+                 "much above -200 starts rejecting real teams. The run prints "
+                 "the distribution below so you can calibrate against it.")
+        import time_estimate as _te
+        st.caption(f"Screening cost: {_te.humanise(_te.FIXED['punish_screen_per_team'] * beam)}"
+                   f" for {beam} finalists "
+                   f"(~{_te.FIXED['punish_screen_per_team']:.0f}s each, against "
+                   f"every team in the library). Still far cheaper than "
+                   f"auditing them.")
     script_screen = st.checkbox(
         "Early-disqualify finalists that always lose a scripted opening", value=False,
         help="Before ranking/reporting, cheaply check EVERY beam-search finalist (not just "
@@ -1166,6 +1702,50 @@ with tab_gen:
 
         finals = beam_search_teams(pool, matrix, eps, merged, beam_width=beam,
                                     must_include=run_prefs["include"], prefer=run_prefs["prefer"])
+
+        # BEFORE the script screen and the win-rate floor, because it is the
+        # cheapest of the three by an order of magnitude: one turn solved as a
+        # matrix game, against minutes of simulation for either of the others.
+        if punish_floor is not None and finals:
+            from punish_screen import is_hopeless, screen_team
+            kept_ps, dropped_ps, seen = [], [], []
+            bar_ps = st.progress(0.0, text="Screening openings...")
+            try:
+                for i, (sc, t) in enumerate(finals):
+                    verdict = screen_team(list(t), teams, merged, moves,
+                                          natures, typechart)
+                    seen.append(verdict.get("guaranteed"))
+                    if is_hopeless(verdict, floor=punish_floor):
+                        worst = verdict.get("worst_vs") or (None, [], None)
+                        dropped_ps.append((t, verdict.get("guaranteed"),
+                                           worst[0]))
+                    else:
+                        kept_ps.append((sc, t))
+                    bar_ps.progress((i + 1) / len(finals),
+                                    text=f"Screening openings... {i+1}/{len(finals)}")
+            finally:
+                bar_ps.empty()
+            live = [v for v in seen if v is not None]
+            if live:
+                # The distribution, not just the rejections: a floor you only
+                # see when it fires is one you cannot calibrate.
+                st.caption(
+                    f"Opening guaranteed across {len(live)} finalists: worst "
+                    f"{min(live):.0f}, median {sorted(live)[len(live)//2]:.0f}, "
+                    f"best {max(live):.0f} (floor {punish_floor:.0f}).")
+            if dropped_ps:
+                st.warning(f"Dropped {len(dropped_ps)}/{len(finals)} finalists "
+                           "whose opening is already lost.")
+                st.dataframe(pd.DataFrame(
+                    [{"Team": " / ".join(t), "Guaranteed": round(g or 0),
+                      "Worst vs": w} for t, g, w in dropped_ps]),
+                    width='stretch', hide_index=True)
+            if kept_ps:
+                finals = kept_ps
+            elif dropped_ps:
+                st.warning("Every finalist failed the opening screen — keeping "
+                           "the original list rather than showing nothing. "
+                           "Lower the floor.")
 
         if script_screen and finals:
             from generate_team import quick_script_screen
@@ -1540,7 +2120,8 @@ with tab_search:
                                                      fixed_lead=_fl,
                                                      enemy_script=_so.script_for(tname),
                                                      script_team=tname if tname in _so.SCRIPTS
-                                                     else None, enemy_sets=team_esets)
+                                                     else None, enemy_sets=team_esets,
+                                                     pilot=PILOT)
                     results[tname] = {"mode": "all", "robust": rob[0] if rob else None,
                                        "roster": roster}
                 else:
@@ -1558,6 +2139,95 @@ with tab_search:
             st.session_state["search_results"] = results
             st.session_state["search_maxturns"] = max_turns
             st.session_state["search_nroll"] = n_roll
+
+        # --- A/B test one change across the same opponents -----------------
+        # Asked for: "maybe give me an option to do an A/B test in the lead/back
+        # team page (i.e., two similar teams arcanine-hisui with intimidate and
+        # X moves, then with rock head)". Running the two teams separately and
+        # comparing by eye is the thing this replaces: same opponents, same
+        # turn cap, same enemy overrides, one number each.
+        with st.expander("A/B test a change (same opponents, side by side)"):
+            st.caption("B is your loaded team with ONE member changed. "
+                       "Everything else -- the other five, the opponents, the "
+                       "turn cap, the enemy overrides -- is held identical, so "
+                       "the difference in the table is the change and nothing "
+                       "else.")
+            ab_base = dict(st.session_state.get("sets") or {})
+            ab1, ab2 = st.columns(2)
+            ab_mon = ab1.selectbox("Change which Pokemon?", team, key="ab_mon")
+            ab_abils = [a for a, _p in (merged[ab_mon].get("abilities_usage") or [])
+                        if a and a != "No Ability"]
+            ab_cur = dict(ab_base.get(ab_mon) or {})
+            KEEP = "(unchanged)"
+            ab_ability = ab2.selectbox(
+                "B's ability", [KEEP] + ab_abils, key="ab_ability")
+            ab_usage_moves = [m for m, _p in (merged[ab_mon].get("moves_usage") or [])
+                              if m and m != "Other"]
+            ab_moves = st.multiselect(
+                "B's moves (empty = unchanged)", ab_usage_moves,
+                default=[], max_selections=4, key="ab_moves")
+            ab_opps = st.multiselect("Opponents to test on", list(teams),
+                                     default=list(chosen) or list(teams),
+                                     key="ab_opps")
+            if st.button("Run A/B", key="ab_go") and ab_opps:
+                from matchup_search import search_robust_composition
+                variant = {**ab_cur}
+                if ab_ability != KEEP:
+                    variant["ability"] = ab_ability
+                if ab_moves:
+                    variant["moves"] = list(ab_moves)
+                if variant == ab_cur:
+                    st.warning("B is identical to A — pick an ability or some "
+                               "moves to change.")
+                else:
+                    sets_b = {**ab_base, ab_mon: variant}
+                    esets_ab = st.session_state.get("enemy_sets_override") or {}
+                    ab_rows = []
+                    prog2 = st.progress(0.0)
+                    for i, tname in enumerate(ab_opps):
+                        te = {**esets_ab,
+                              **(team_meta.get(tname, {}).get("sets") or {})}
+                        fl = team_meta.get(tname, {}).get("lead")
+                        import scripted_openings as _so_ab
+                        out = {}
+                        for label, use_sets in (("A", ab_base), ("B", sets_b)):
+                            rr = search_robust_composition(
+                                team, teams[tname], merged, moves, natures,
+                                typechart, max_turns, our_sets=use_sets,
+                                verify_top=1, fixed_lead=fl,
+                                enemy_script=_so_ab.script_for(tname),
+                                script_team=tname if tname in _so_ab.SCRIPTS
+                                else None, enemy_sets=te, pilot=PILOT)
+                            out[label] = rr[0] if rr else None
+                        a, b = out["A"], out["B"]
+                        ab_rows.append({
+                            "Opponent": tname,
+                            "A wins": f"{a['solver_wins']}/{a['solver_total']}"
+                                      if a else "-",
+                            "B wins": f"{b['solver_wins']}/{b['solver_total']}"
+                                      if b else "-",
+                            "Delta": ((b["solver_wins"] - a["solver_wins"])
+                                      if a and b else None),
+                            "A bring": " / ".join(a["our_bring4"]) if a else "-",
+                            "B bring": " / ".join(b["our_bring4"]) if b else "-",
+                        })
+                        prog2.progress((i + 1) / len(ab_opps), f"{tname} done")
+                    prog2.empty()
+                    st.session_state["ab_rows"] = ab_rows
+                    st.session_state["ab_label"] = (
+                        f"{ab_mon}: "
+                        + ", ".join(filter(None, [
+                            ab_ability if ab_ability != KEEP else None,
+                            ", ".join(ab_moves) if ab_moves else None])))
+            if st.session_state.get("ab_rows"):
+                rows_ab = st.session_state["ab_rows"]
+                st.markdown(f"**B = {st.session_state.get('ab_label', '?')}**")
+                total = sum(r["Delta"] or 0 for r in rows_ab)
+                st.metric("Net games B gains over A", f"{total:+d}",
+                          help="Summed across every opponent tested. Positive "
+                               "means the change is worth making.")
+                st.dataframe(pd.DataFrame(rows_ab), width='stretch',
+                             hide_index=True)
 
         res = st.session_state.get("search_results")
         if res:
@@ -1662,41 +2332,80 @@ with tab_search:
             import scripted_openings as _so2
             scripted_chosen = [tn for tn in res if tn in _so2.SCRIPTS and res[tn].get("robust")]
             if scripted_chosen:
-                st.markdown("### Full match breakdown by opening variant")
-                st.caption("Fixed-lead opponents run a scripted opening with several variants "
-                           "(which of your slots it targets), plus two practical T1 lines "
-                           "they could take INSTEAD of the script: their best unscripted "
-                           "attack+attack ('greedy'), and either of their two Pokemon "
-                           "Protecting while the other attacks ('protect'). Each variant is "
-                           "played to completion -- the opponent keeps running its script on "
-                           "every turn it still has one for (e.g. Perish Trap's turns 2-4), "
-                           "falling back to greedy once it's spent -- so you see the whole "
-                           "match, not just the opening, for every option side by side.")
+                st.markdown("### One committed opening, against everything it can meet")
+                st.caption("ONE turn-1 action, chosen from what you can actually see -- your "
+                           "four, your lead, their lead -- and then played against every "
+                           "opening they might run crossed with every back pair their lead "
+                           "could be hiding. The turn is simultaneous and their backs are "
+                           "face down, so a plan that answers each of those differently is "
+                           "not a plan you can execute. Each side brings four.")
                 t1_tname = st.selectbox("Opponent", scripted_chosen, key="t1bd_tname")
+                t1_lead = (team_meta.get(t1_tname, {}).get("lead")
+                           or list(teams[t1_tname])[:2])
+                t1_rest = [x for x in teams[t1_tname] if x not in t1_lead]
+                t1_backs = list(itertools.combinations(t1_rest, 2))
+                NO_BET = "No — must beat all of them"
+                t1_bet = st.selectbox(
+                    f"Their lead is {t1_lead[0]}/{t1_lead[1]}. Bet on a back pair?",
+                    [NO_BET] + [f"{a} / {b}" for a, b in t1_backs], key="t1bd_bet",
+                    help="Leave this alone and the opening is chosen to withstand any "
+                         "back pair. Pick one and the opening is chosen against THAT "
+                         "pair only -- it is still reported against all six, so you can "
+                         "see what the bet costs you against the other five.")
+                assumed = (None if t1_bet == NO_BET
+                           else t1_backs[[f"{a} / {b}" for a, b in t1_backs].index(t1_bet)])
                 if st.button("Show breakdown", key="t1bd_go"):
                     from committed_plan import turn1_breakdown
                     b4 = res[t1_tname]["robust"]["our_bring4"]
-                    er = teams[t1_tname]
                     t1_esets = {**(st.session_state.get("enemy_sets_override") or {}),
                                 **(team_meta.get(t1_tname, {}).get("sets") or {})}
-                    with st.spinner("Playing out every opening variant to completion..."):
-                        bd = turn1_breakdown(b4, er, merged, moves, natures, typechart, t1_tname,
-                                              our_sets=sets, enemy_sets=t1_esets,
-                                              max_turns=st.session_state.get("search_maxturns", 12))
+                    with st.spinner("Playing the committed opening against every "
+                                    "variant x back pair..."):
+                        bd = turn1_breakdown(
+                            b4, teams[t1_tname], merged, moves, natures, typechart, t1_tname,
+                            our_sets=sets, enemy_sets=t1_esets,
+                            enemy_lead=t1_lead, assumed_back=assumed,
+                            max_turns=st.session_state.get("search_maxturns", 12))
+                    st.success("COMMITTED TURN 1: "
+                               + "; ".join(describe_action(a)
+                                           for a in (bd["opening"] or [])))
+                    if assumed:
+                        st.info(f"Chosen against {assumed[0]}/{assumed[1]} specifically. "
+                                "The table below still plays it against all "
+                                f"{len(bd['brings'])} back pairs.")
+                    allg = [r for d in bd["variants"].values()
+                            for r in d["per_back"].values()]
+                    st.metric("Games this one action wins",
+                              f"{sum(1 for r in allg if r['winner'] == 'p1')} / {len(allg)}",
+                              help="Every opening variant x every back pair.")
                     labels = {"greedy": "Unscripted: their best attack+attack",
                               "protect0": "Unscripted: one Protects, the other attacks (choice A)",
                               "protect1": "Unscripted: one Protects, the other attacks (choice B)"}
-                    for key, d in bd.items():
+                    for key, d in bd["variants"].items():
                         title = labels.get(key, f"Scripted variant {key}")
-                        result = {"p1": "WIN", "p2": "LOSS"}.get(d["winner"], d["winner"].upper())
-                        with st.expander(f"{title} — {result} (turn {d['turns']})"):
-                            st.write("Our turn-1 action:",
-                                     [(a[0], a[2], list(a[3])) for a in d["our_t1_action"]])
+                        result = {"p1": "WIN", "p2": "LOSS"}.get(d["winner"],
+                                                                 d["winner"].upper())
+                        won = sum(1 for r in d["per_back"].values() if r["winner"] == "p1")
+                        with st.expander(f"{title} — worst back pair: {result} "
+                                         f"({won}/{len(d['per_back'])} back pairs won)"):
+                            st.caption("Their backs are face down at turn 1, so the same "
+                                       "action is played against each pair. The worst one "
+                                       "is what this line is actually worth.")
+                            st.dataframe(pd.DataFrame(
+                                [{"Their back": f"{b[2]} / {b[3]}",
+                                  "Result": {"p1": "WIN", "p2": "LOSS"}.get(
+                                      r["winner"], r["winner"].upper()),
+                                  "Turns": r["turns"]}
+                                 for b, r in d["per_back"].items()]),
+                                width='stretch', hide_index=True)
                             st.write("Their turn-1 action:", d["enemy_t1_action"])
-                            st.caption("HP shown is the FINAL state at the end of the match.")
+                            st.caption(f"Log below is the worst pair "
+                                       f"({d['worst_bring'][2]}/{d['worst_bring'][3]}); "
+                                       "HP is the FINAL state.")
                             hprows = [{"Pokemon": n, "HP": f"{hp}/{mx}"}
                                       for n, (hp, mx) in d["hp_after"].items()]
-                            st.dataframe(pd.DataFrame(hprows), width='stretch', hide_index=True)
+                            st.dataframe(pd.DataFrame(hprows), width='stretch',
+                                         hide_index=True)
                             st.code(d["log"])
 
             # Branching detail: opponent -> enemy bring -> turn-by-turn gameplan.
@@ -1777,15 +2486,15 @@ with tab_search:
                             # its real scripted line playing out turn by turn, not an
                             # unscripted approximation. Degrades to plain greedy for any
                             # opponent with no script.
-                            from matchup_search import play_scripted_worst_case
-                            w, t, btl, variant_idx = play_scripted_worst_case(
-                                b4, list(lead) + list(back), merged, moves, natures, typechart,
-                                tname, st.session_state.get("search_maxturns", 12),
-                                our_sets=sets, enemy_sets=_repl_esets)
+                            w, t, btl, variant_idx = replay_config(
+                                b4, list(lead) + list(back), r,
+                                st.session_state.get("search_maxturns", 12),
+                                sets, _repl_esets, script_team=tname)
                             om = next((c.name for c in btl.p1.roster
                                        if c.is_mega_pick and c.mega_evolved), None)
                             tm = next((c.name for c in btl.p2.roster
                                        if c.is_mega_pick and c.mega_evolved), None)
+                            replay_mismatch_note(w, lost, r)
                             c1, c2, c3, c4 = st.columns(4)
                             c1.metric("Avg-roll result",
                                       {"p1": "WIN", "p2": "LOSS"}.get(w, w.upper()))
@@ -1886,7 +2595,8 @@ with tab_battle:
 
     b1, b2 = st.columns(2)
     with b1:
-        our_pool = our_side_pool("bv", teams, all_names) or list(all_names)
+        our_pool, bv_our_sets = our_side_pool("bv", teams, all_names, team_meta, merged=merged)
+        our_pool = our_pool or list(all_names)
         our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
         their_pool = their_side_pool("bv", teams, all_names)
@@ -1923,7 +2633,7 @@ with tab_battle:
         with solver_mode(nash=bv_nash, depth=bv_depth):
             w, t, btl, variant_idx = play_scripted_worst_case(
                 our4, their4, merged, moves, natures, typechart, opp, turns,
-                our_sets=st.session_state.get("sets", {}))
+                our_sets=bv_our_sets)
         ourm = next((c.name for c in btl.p1.roster if c.is_mega_pick and c.mega_evolved), None)
         theirm = next((c.name for c in btl.p2.roster if c.is_mega_pick and c.mega_evolved), None)
         r1, r2, r3 = st.columns(3)
@@ -1943,13 +2653,13 @@ with tab_battle:
             with st.spinner(f"Rolling {n_roll} games..."), \
                     solver_mode(nash=bv_nash, depth=bv_depth):
                 fair = evaluate_risk(our4, their4, merged, moves, natures, typechart, turns,
-                                      our_sets=st.session_state.get("sets", {}),
+                                      our_sets=bv_our_sets,
                                       n_random=n_roll, tie_bias=None)
                 adv = evaluate_risk(our4, their4, merged, moves, natures, typechart, turns,
-                                     our_sets=st.session_state.get("sets", {}),
+                                     our_sets=bv_our_sets,
                                      n_random=n_roll, tie_bias="p2")
                 tb = evaluate_tie_branches(our4, their4, merged, moves, natures, typechart,
-                                            turns, our_sets=st.session_state.get("sets", {}),
+                                            turns, our_sets=bv_our_sets,
                                             n_random=0)
             p1, p2, p3 = st.columns(3)
             p1.metric("Win % (fair coin ties)", f"{100*fair['win_rate']:.0f}%",
@@ -1989,9 +2699,14 @@ with tab_battle:
         from battle import Battle
         from solver import build_moveset, build_wide_movesets, solver_mode
         from robustness import describe_action, line_report
-        oc = make_team(our4, merged, natures, sets=st.session_state.get("sets", {}))
+        oc = make_team(our4, merged, natures, sets=bv_our_sets)
         ec = make_team(their4, merged, natures)
-        ms = {c.name: build_moveset(merged[c.name], moves) for c in oc + ec}
+        # The SET's four moves, not the usage-standard four -- make_team applies
+        # the item and ability from bv_our_sets and this used to drop the moves.
+        ms = {c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((bv_our_sets or {}).get(c.name) or {}).get("moves"))
+              for c in oc + ec}
         btl3 = Battle(oc, ec, typechart, moves)
         btl3.movesets = ms
         btl3.wide_movesets = {**ms, **build_wide_movesets(
@@ -2048,10 +2763,13 @@ with tab_battle:
         from battle import Battle
         from solver import build_moveset
         from turn_game import solve_turn
-        our_sets = st.session_state.get("sets", {})
+        our_sets = bv_our_sets
         oc = make_team(our4, merged, natures, sets=our_sets)
         ec = make_team(their4, merged, natures)
-        ms = {c.name: build_moveset(merged[c.name], moves) for c in oc + ec}
+        ms = {c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((our_sets or {}).get(c.name) or {}).get("moves"))
+              for c in oc + ec}
         btl2 = Battle(oc, ec, typechart, moves)
         btl2.movesets = ms
         with st.spinner(f"Solving (depth {bv_depth})..."):
@@ -2108,17 +2826,17 @@ with tab_battle:
         lo4, lt4, lturns = last_pc
         with st.spinner("Playing the match, checking every turn against every legal response..."):
             pc_res = full_game_punish_audit(lo4, lt4, merged, moves, natures, typechart, lturns,
-                                             our_sets=st.session_state.get("sets", {}))
+                                             our_sets=bv_our_sets)
         render_punish_audit(pc_res)
 
     # --- Path explorer: tie x roll scenario matrix -----------------------------
     st.divider()
     last = st.session_state.get("bv_last_matchup")
-    render_path_explorer("bv", last, st.session_state.get("sets", {}))
+    render_path_explorer("bv", last, bv_our_sets)
 
     # --- Salvage a losing matchup -----------------------------------------------
     st.divider()
-    render_salvage("bv", last, st.session_state.get("sets", {}))
+    render_salvage("bv", last, bv_our_sets)
 
 
 # ------------------------------------------------------------------ vs team
@@ -2267,27 +2985,285 @@ with tab_vs:
                    "BEFORE they reveal theirs. This runs the advanced model on "
                    "that decision and reports the one committed plan, its "
                    "record across their brings, and what beats it.")
-        pv_pool = our_side_pool("pv", teams, all_names)
+        pv_pool, pv_our_sets = our_side_pool("pv", teams, all_names, team_meta, merged=merged)
+        # The source is part of the key so switching it re-defaults the picker.
+        # With one shared key the widget kept the previous team's names, none
+        # of which are options any more, so Streamlit dropped them and left the
+        # box empty -- you had to re-pick six by hand after every switch.
         pv_ours = st.multiselect(
-            "My six", pv_pool or all_names, max_selections=6, key="pv_ours",
+            "My six", pv_pool or all_names, max_selections=6,
+            key=f"pv_ours_{st.session_state.get('pv_side_source', 'x')}",
             default=list(pv_pool)[:6] if len(pv_pool) == 6 else [],
-            help="Filled in from the source chosen above.")
+            help="Filled in from the source chosen above, with that team's own "
+                 "items, moves, abilities and stat points.")
         pv_theirs, pv_esets, _pv_meta = enemy_side_input(
             "pv", teams, team_meta, all_names, merged,
             label="Their six (from team preview)")
-        pv_effort, pv_all = advanced_model_controls("pv")
+        # --- THE ONE-MINUTE ANSWER ----------------------------------------
+        # The full model takes minutes to hours; at preview you have about a
+        # minute. This is the question that IS answerable in that time: which
+        # of my leads is not already lost against their best reply, and if the
+        # answer to their worst lead is to pivot, say so.
+        st.markdown("#### Fast: which lead is not already lost?")
+        st.caption("Solves TURN 1 as a matrix game for each of your lead pairs "
+                   "against every one of theirs, and reports the value you can "
+                   "GUARANTEE against their best reply. Maximin, so a lead is "
+                   "worth its worst case — and that prunes hard, which is what "
+                   "makes it fit in the time you have. It knows nothing about "
+                   "turn 5; use the full model below for that.")
+        fb1, fb2 = st.columns([1, 2])
+        pv_budget = fb1.slider("Seconds", 15, 180, 60, step=15,
+                               key="pv_budget",
+                               help="Wall clock. The search is ordered so "
+                                    "stopping early still returns the best "
+                                    "leads it finished.")
+        # These three panels are BUDGETED, so the estimate is exact: the budget
+        # is the answer. Said explicitly because a slider labelled "Seconds"
+        # reads as a tuning knob rather than as the time you will wait.
+        fb1.caption(f"Takes {pv_budget}s — the budget IS the time. It stops "
+                    f"there and returns the leads it finished; each opening "
+                    f"solve is ~0.75s, and 15 of our leads x 15 of theirs is "
+                    f"225 of them, so a full sweep needs ~170s.")
+        if fb2.button("Find my lead now", key="pv_fast", type="primary"):
+            if len(pv_ours) != 6 or len(pv_theirs) != 6:
+                st.warning("Both sides need six Pokemon.")
+            else:
+                import preview_lead
+                bar = st.progress(0.0, text="Solving openings...")
+                try:
+                    def _tick(entry, elapsed):
+                        bar.progress(min(1.0, elapsed / pv_budget),
+                                     text=f"{entry['lead'][0]}/{entry['lead'][1]}"
+                                          f"  {elapsed:.0f}s")
+                    ranked, meta = preview_lead.rank_leads(
+                        pv_ours, pv_theirs,
+                        {"merged": merged, "moves": moves, "natures": natures,
+                         "typechart": typechart},
+                        budget=float(pv_budget), our_sets=pv_our_sets,
+                        enemy_sets=pv_esets, on_progress=_tick)
+                finally:
+                    bar.empty()
+                st.session_state["pv_fast_result"] = (ranked, meta)
+
+        if st.session_state.get("pv_fast_result"):
+            ranked, meta = st.session_state["pv_fast_result"]
+            proven = [e for e in ranked if e["complete"]]
+            if proven:
+                best = proven[0]
+                st.success("LEAD  " + " / ".join(best["lead"]))
+                st.caption("BRING " + " / ".join(best["bring"]))
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Guaranteed turn-1 value",
+                          f"{best['guaranteed']:+.0f}",
+                          help="heuristic_eval points; ~180 is a Pokemon. "
+                               "This is what you can force against their BEST "
+                               "reply. Negative is normal — they get a perfect "
+                               "read — but a large negative is a lead that "
+                               "loses on the spot.")
+                m2.metric("Their worst lead for you",
+                          " / ".join(best["worst_vs"] or []))
+                m3.metric("Your answer to it", best["answer"].upper(),
+                          help="PIVOT means the plan is to switch, not to "
+                               "attack: the lead buys the switch.")
+                if best["answer"] == "pivot":
+                    st.info("Against their worst lead this plan SWITCHES rather "
+                            "than attacking — that is the lead earning its "
+                            "place, not a failure.")
+            else:
+                st.warning("No lead was fully checked in the time given. "
+                           "Raise the budget.")
+            st.dataframe(pd.DataFrame([{
+                "Lead": " / ".join(e["lead"]),
+                # One dtype for the column: mixing int and str makes Arrow
+                # guess, and it guessed wrong (int64) on the "<= N" rows.
+                "Guaranteed": (f"{round(e['guaranteed']):+d}" if e["complete"]
+                               else f"<= {round(e['guaranteed']):+d}"),
+                "Proven": "yes" if e["complete"] else "abandoned (worse)",
+                "Worst enemy lead": " / ".join(e["worst_vs"] or []),
+                "Answer": e["answer"],
+                "Punish": round(e["punish"]),
+            } for e in ranked]), width='stretch', hide_index=True)
+            st.caption(f"{meta['solves']} opening solves in "
+                       f"{meta['seconds']:.0f}s — {meta['complete']} of "
+                       f"{meta['our_leads']} leads fully checked against all "
+                       f"{meta['their_leads']} of theirs. A lead marked "
+                       f"'abandoned' is only known to be WORSE than a proven "
+                       f"one; its number is an upper bound.")
+
+            # --- THE BACK TWO. rank_leads solves turn 1, where the back is
+            # off the field and barely matters, so it used a placeholder. The
+            # back decides what you pivot INTO and whether the endgame is 2v2
+            # or 2v1, so it is played out rather than assumed.
+            if proven:
+                st.markdown("##### Now the back two")
+                st.caption("The lead search only sees turn 1, where your back "
+                           "is off the field. This plays each of the six "
+                           "possible back pairs out against their leads and "
+                           "keeps the one with the best WORST case.")
+                bk1, bk2 = st.columns([1, 2])
+                pv_back_budget = bk1.slider("Seconds for backs", 15, 240, 60,
+                                            step=15, key="pv_back_budget")
+                pv_back_games = bk1.slider("Games per pairing", 4, 16, 4,
+                                           step=4, key="pv_back_games")
+                bk1.caption(f"Takes {pv_back_budget}s — the budget IS the time. "
+                            f"Six back pairs; more games per pairing means "
+                            f"fewer pairs finished inside it, so a 'partial' "
+                            f"row is the budget talking, not the team.")
+                if bk2.button("Choose my back two", key="pv_backs",
+                              type="primary"):
+                    import preview_lead as _pl2
+                    bar3 = st.progress(0.0, text="Playing back pairs...")
+                    try:
+                        def _tick3(e, elapsed):
+                            bar3.progress(min(1.0, elapsed / pv_back_budget),
+                                          text=f"{'/'.join(e['back'])}  "
+                                               f"{elapsed:.0f}s")
+                        backs, bmeta = _pl2.rank_brings(
+                            proven[0], pv_ours, pv_theirs,
+                            {"merged": merged, "moves": moves,
+                             "natures": natures, "typechart": typechart},
+                            budget=float(pv_back_budget),
+                            our_sets=pv_our_sets, enemy_sets=pv_esets,
+                            win_samples=int(pv_back_games), on_progress=_tick3)
+                    finally:
+                        bar3.empty()
+                    st.session_state["pv_backs_result"] = (backs, bmeta)
+
+                if st.session_state.get("pv_backs_result"):
+                    backs, bmeta = st.session_state["pv_backs_result"]
+                    solid = [b for b in backs if b["complete"]]
+                    if solid:
+                        st.success("BRING " + " / ".join(solid[0]["bring"]))
+                        st.caption(f"Worst case {solid[0]['worst_win']:.0%} "
+                                   f"against their "
+                                   f"{'/'.join(solid[0]['worst_vs'] or [])}")
+                    st.dataframe(pd.DataFrame([{
+                        "Back two": " / ".join(b["back"]),
+                        "Worst win %": (f"{b['worst_win']:.0%}" if b["complete"]
+                                        else f"<= {b['worst_win']:.0%}"),
+                        "Proven": "yes" if b["complete"] else "partial",
+                        "Their lead": " / ".join(b["worst_vs"] or []),
+                        "Checked": f"{b['checked']}/{b['of']}",
+                    } for b in backs]), width='stretch', hide_index=True)
+                    st.caption(f"{bmeta['backs']} of {bmeta['of']} back pairs "
+                               f"in {bmeta['seconds']:.0f}s. A 'partial' row's "
+                               f"number is an UPPER bound — it was abandoned "
+                               f"once it fell behind a proven one.")
+
+            # --- AND THEN WHAT. The lead ranking says what to send out; this
+            # says what to play, turn by turn, against their equilibrium reply
+            # -- with the probability attached, because "wins on the average
+            # roll" and "probably wins" are different claims.
+            if proven:
+                st.markdown("##### The line from that lead")
+                lb1, lb2 = st.columns([1, 2])
+                pv_line_budget = lb1.slider("Seconds for lines", 15, 180, 45,
+                                            step=15, key="pv_line_budget")
+                pv_line_games = lb1.slider("Games per win %", 4, 24, 8, step=4,
+                                           key="pv_line_games",
+                                           help="Replays the position over "
+                                                "real damage rolls and speed "
+                                                "ties. More games, narrower "
+                                                "interval, fewer enemy leads "
+                                                "reached inside the budget.")
+                import time_estimate as _tel
+                lb1.caption(
+                    f"Takes {pv_line_budget}s — the budget IS the time. "
+                    f"~{_tel.line_seconds(pv_line_games):.0f}s per enemy lead at "
+                    f"{pv_line_games} games, so about "
+                    f"{_tel.leads_in_budget(pv_line_budget, pv_line_games)} of "
+                    f"their 15. Hardest first, so the budget cuts the easy ones.")
+                if lb2.button("Show me the line", key="pv_lines",
+                              type="primary"):
+                    import preview_lead as _pl
+                    bar2 = st.progress(0.0, text="Playing lines...")
+                    try:
+                        def _tick2(line, elapsed):
+                            bar2.progress(min(1.0, elapsed / pv_line_budget),
+                                          text=f"vs {'/'.join(line['their_lead'])}"
+                                               f"  {elapsed:.0f}s")
+                        _entry = dict(proven[0])
+                        _chosen = [b for b in
+                                   (st.session_state.get("pv_backs_result")
+                                    or ([], {}))[0] if b["complete"]]
+                        if _chosen:
+                            # Play the line from the bring we actually chose,
+                            # not the placeholder back the lead search assumed.
+                            _entry["bring"] = _chosen[0]["bring"]
+                        lines, lmeta = _pl.lines_for_lead(
+                            _entry, pv_theirs,
+                            {"merged": merged, "moves": moves,
+                             "natures": natures, "typechart": typechart},
+                            budget=float(pv_line_budget),
+                            our_sets=pv_our_sets, enemy_sets=pv_esets,
+                            win_samples=int(pv_line_games),
+                            on_progress=_tick2)
+                    finally:
+                        bar2.empty()
+                    st.session_state["pv_lines_result"] = (lines, lmeta)
+
+                if st.session_state.get("pv_lines_result"):
+                    lines, lmeta = st.session_state["pv_lines_result"]
+                    st.caption(f"{lmeta['played']} of {lmeta['of']} enemy leads "
+                               f"played in {lmeta['seconds']:.0f}s — hardest "
+                               f"first, so the one you most need is never the "
+                               f"one the budget cut.")
+                    st.dataframe(pd.DataFrame([{
+                        "Their lead": " / ".join(ln["their_lead"]),
+                        "Win %": (f"{ln['win_prob']:.0%}"
+                                  if ln["win_prob"] is not None else "-"),
+                        "Interval": (f"{ln['win_interval'][0]:.0%}–"
+                                     f"{ln['win_interval'][1]:.0%}"
+                                     if ln["win_interval"] else "-"),
+                        "Games": ln["win_games"],
+                        "Line result": ln["outcome"],
+                        "Turns": ln["length"],
+                    } for ln in lines]), width='stretch', hide_index=True)
+                    for ln in lines:
+                        pct = (f"{ln['win_prob']:.0%}"
+                               if ln["win_prob"] is not None else "?")
+                        with st.expander(
+                                f"vs {' / '.join(ln['their_lead'])} — {pct} win "
+                                f"({ln['outcome']} in {ln['length']} turns)"):
+                            if ln.get("pins"):
+                                # The board before a move is made: who cannot
+                                # stay in, and whether the Protect in this line
+                                # is safe or a read.
+                                for text in ln["pins"]:
+                                    st.markdown(f"- {text}")
+                                st.divider()
+                            for t in ln["turns"]:
+                                st.markdown(f"**T{t['turn']}** — {t['play']}")
+                                if t["their_reply"]:
+                                    st.caption(f"they: {t['their_reply']}")
+                                if t["kos"]:
+                                    st.caption("KO: " + ", ".join(t["kos"]))
+                            st.caption("Played against their EQUILIBRIUM reply "
+                                       "each turn — not against a best response "
+                                       "to the move you just made, which is a "
+                                       "clairvoyant opponent that beats every "
+                                       "team ever built.")
+
+        st.markdown("#### Full model (minutes to hours)")
+        # One pairing: our six against the one enemy six on this page.
+        pv_effort, pv_all = advanced_model_controls("pv", pairings=1)
 
         if st.button("Find my bring and lead", key="pv_run"):
             if len(pv_ours) != 6 or len(pv_theirs) != 6:
                 st.warning("Both sides need six Pokemon.")
             else:
+                import time as _time
                 from preview_plan import plan_against
-                with st.spinner("Running the advanced model on this preview..."):
+                _t0 = _time.time()
+                with st.spinner(f"Running the advanced model on this preview "
+                                f"({estimate_caption(pv_effort, 1, pv_all)})..."):
                     st.session_state["pv_plan"] = plan_against(
                         pv_ours, pv_theirs, merged, moves, natures, typechart,
                         effort=pv_effort, audit_all=pv_all,
-                        our_sets=st.session_state.get("sets", {}),
-                        enemy_sets=pv_esets)
+                        our_sets=pv_our_sets, enemy_sets=pv_esets,
+                        pilot=pilot_for(pv_effort))
+                # What it really took, so the next estimate is this machine's.
+                note_actual(pv_effort, 1, pv_all, 1, _time.time() - _t0)
 
         plan = st.session_state.get("pv_plan")
         if plan:
@@ -2337,6 +3313,10 @@ with tab_vs:
                                 f"vs {theirs}   punish "
                                 f"{ln.get('mean_exploitability') or 0:.0f}")
                         with st.expander(head):
+                            render_pins(plan.get("bring"),
+                                        ln.get("enemy_bring") or ln.get("lead"),
+                                        our_sets=pv_our_sets,
+                                        enemy_sets=pv_esets)
                             lt1, lt2 = st.tabs(["Battle result + log",
                                                 "Turn-by-turn analysis"])
                             with lt1:
@@ -2358,7 +3338,7 @@ with tab_vs:
                    "tier's analysis on that single position -- full payoff "
                    "matrix every turn, their wider move space, the "
                    "equilibrium solver piloting -- and shows the match.")
-        _loaded = our_side_pool("dd", teams, all_names)
+        _loaded, dd_our_sets = our_side_pool("dd", teams, all_names, team_meta, merged=merged)
         our_bring = st.multiselect(
             "My bring-4 (LEAD FIRST, order matters)", _loaded or all_names,
             max_selections=4, key="dd_ours",
@@ -2385,6 +3365,16 @@ with tab_vs:
                        f"{len(dd_backs)} lines. Pick one back pair above, or "
                        f"expect minutes.")
 
+        if dd_backs:
+            import time_estimate as _te
+            _per = _te.FIXED["deep_dive_depth2" if dd_depth >= 2
+                             else "deep_dive_depth1"]
+            st.caption(f"Estimated "
+                       f"{_te.humanise(_per * len(dd_backs) * st.session_state.get('time_factor', 1.0))}"
+                       f" — {len(dd_backs)} line"
+                       f"{'s' if len(dd_backs) != 1 else ''} at depth {dd_depth}"
+                       f" (~{_te.humanise(_per)} each).")
+
         if st.button("Analyse this position", key="dd_run"):
             if len(our_bring) != 4:
                 st.warning("Pick exactly 4 Pokemon on your side, lead first.")
@@ -2403,7 +3393,7 @@ with tab_vs:
                         runs.append((enemy4, audit_position(
                             our_bring, enemy4, merged, moves, natures,
                             typechart, max_turns=dd_turns, depth=dd_depth,
-                            our_sets=st.session_state.get("sets", {}),
+                            our_sets=dd_our_sets,
                             enemy_sets=dd_esets)))
                 finally:
                     bar.empty()
@@ -2535,8 +3525,12 @@ with tab_vs:
                      "is the original behaviour; the dear end audits far more "
                      "candidates against far more of their plausible leads.")
             _st = _tier(effort_vs)
-            st.caption(f"{_st['blurb']}  (~{relative_cost(effort_vs):.0f}x the "
-                       f"quick setting)")
+            # One pairing: this panel searches our team against ONE enemy
+            # roster. verify_top is divided by 3 below, so the estimate would
+            # otherwise overstate by that factor.
+            st.caption(f"{_st['blurb']}")
+            st.caption(estimate_caption(effort_vs, pairings=1,
+                                        audit_all=_st.get("all_configs", False)))
 
             vs_nash, vs_depth = solver_controls("vs")
             if vs_nash:
@@ -2584,7 +3578,8 @@ with tab_vs:
                                 fixed_lead=fl,
                                 enemy_script=_so_vs.script_for(script_team_vs) if script_team_vs
                                 else None,
-                                script_team=script_team_vs)
+                                script_team=script_team_vs,
+                                pilot=pilot_for(effort_vs))
                             r = rob[0] if rob else None
                             eb4_tested = None
                     if r is None:
@@ -2597,6 +3592,11 @@ with tab_vs:
                             else None,
                             "fixed_lead": fixed_lead_vs
                             if vs_search_mode == "Assume a guaranteed enemy lead (6 configs)" else None,
+                            # Needed to REPLAY a config the way the record played
+                            # it. Without it the replay faced a plain greedy 2v2
+                            # while the record faced the rehearsed script, and
+                            # the two printed different winners for one battle.
+                            "script_team": script_team_vs,
                         }
 
         vres = st.session_state.get("vs_result")
@@ -2726,15 +3726,15 @@ with tab_vs:
                     label_vs = (f"{'LOSS' if lost_vs else 'win '} — vs lead "
                                 f"{lead[0]}/{lead[1]} + back {back[0]}/{back[1]}")
                     with st.expander(label_vs):
-                        from matchup_search import play_out_worst_case
-                        w_vs, t_vs, btl_vs = play_out_worst_case(
-                            b4, list(lead) + list(back), merged, moves, natures, typechart,
-                            vres["max_turns"], our_sets=st.session_state.get("sets", {}),
-                            enemy_sets=vres["enemy_sets"])
+                        w_vs, t_vs, btl_vs, _v_vs = replay_config(
+                            b4, list(lead) + list(back), r, vres["max_turns"],
+                            st.session_state.get("sets", {}), vres["enemy_sets"],
+                            script_team=vres.get("script_team"))
                         om_vs = next((c.name for c in btl_vs.p1.roster
                                       if c.is_mega_pick and c.mega_evolved), None)
                         tm_vs = next((c.name for c in btl_vs.p2.roster
                                       if c.is_mega_pick and c.mega_evolved), None)
+                        replay_mismatch_note(w_vs, lost_vs, r)
                         vc1_, vc2_, vc3_ = st.columns(3)
                         vc1_.metric("Avg-roll result",
                                     {"p1": "WIN", "p2": "LOSS"}.get(w_vs, w_vs.upper()))

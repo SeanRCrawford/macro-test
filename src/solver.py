@@ -30,9 +30,12 @@ import random
 from contextlib import contextmanager
 import itertools
 
-from damage import Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll, CHARGE_WEATHER_SKIP
+from damage import (Combatant, MoveInfo, is_spread_move, effective_stat, damage_roll,
+                    defensive_stat, move_from_showdown, CHARGE_WEATHER_SKIP,
+                    WEIGHT_BASED_POWER)
 from engine import FieldState, Action, on_switch_in, effective_speed
 from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS
+from projection import mega_view, projected_field
 
 TOP_K_MOVES = 4   # real sets run 4 moves; 3 systematically under-armed the AI
 FIRST_TURN_ONLY_MOVES = {"Fake Out", "First Impression"}
@@ -49,22 +52,27 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
         key = mv_name.lower().replace(" ", "").replace("-", "").replace("'", "")
         if key not in moves_db:
             continue
-        m = moves_db[key]
-        out.append((MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
-                              priority=m.get("priority", 0), secondary=m.get("secondary"),
-                              self_effect=m.get("self"), boosts=m.get("boosts"),
-                              recoil=m.get("recoil"), drain=m.get("drain"),
-                              has_crash=bool(m.get("hasCrashDamage")),
-                              volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                              self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True)), pct))
+        out.append((move_from_showdown(moves_db[key]), pct))
     if only_moves:
         # Explicit set supplied (e.g. an optimised team sheet) -- use exactly these,
         # preserving the given order, ignoring usage ranking and top_k.
-        wanted = {m.lower() for m in only_moves}
-        chosen = [(mi, pct) for mi, pct in out if mi.name.lower() in wanted]
+        have = {mi.name.lower(): (mi, pct) for mi, pct in out}
+        chosen = []
+        for name in only_moves:
+            found = have.get(name.lower())
+            if found is not None:
+                chosen.append(found)
+                continue
+            # A move the usage data has never recorded for this Pokemon. It is
+            # still a move you can pick by hand, and dropping it silently was
+            # how a hand-built set could differ from the one being simulated
+            # with no indication that it had. 0% usage: it is a real choice,
+            # not a popular one. Learnset legality is NOT checked -- the
+            # dataset has no learnsets.
+            key = name.lower().replace(" ", "").replace("-", "").replace("'", "")
+            if key in moves_db:
+                chosen.append((move_from_showdown(moves_db[key]), 0.0))
         if chosen:
-            order = {m.lower(): i for i, m in enumerate(only_moves)}
-            chosen.sort(key=lambda x: order.get(x[0].name.lower(), 99))
             return chosen
     out.sort(key=lambda x: -x[1])
     return out[:top_k]
@@ -105,7 +113,12 @@ def build_wide_movesets(names, merged: dict, moves_db: dict, pool: int = 6):
 def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo,
                            typechart: dict, field: FieldState, num_hit: int = 1,
                            battle=None) -> float:
-    if move.power == 0:
+    # `move.power == 0` normally means "no damage" (a Status move), but it is
+    # also what Low Kick/Grass Knot's raw power reads BEFORE damage_roll
+    # resolves it from the target's weight -- treating that the same way
+    # priced them at a flat 0 here always, so the search never valued using
+    # them even when they were the best move on the board.
+    if move.power == 0 and move.name not in WEIGHT_BASED_POWER:
         return 0.0
     power = move.power
     # Last Respects' true power depends on the attacker's fainted-ally count, which
@@ -125,7 +138,8 @@ def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo
         atk_stat *= 1.5
     if attacker.item == "Choice Specs" and atk_key == "spa":
         atk_stat *= 1.5
-    def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
+    def_stat = defensive_stat(target, def_key, move,
+                              weather=field.weather)
     _, _, avg, _ = damage_roll(50, power, atk_stat, def_stat, attacker, target, move,
                                 typechart, weather=field.weather, num_targets_hit=num_hit)
     return avg
@@ -133,9 +147,21 @@ def quick_damage_estimate(attacker: Combatant, target: Combatant, move: MoveInfo
 
 def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: list,
                        moveset, typechart: dict, field: FieldState, turn_num: int,
-                       bench: list | None = None):
-    """Returns a pruned list of Action objects worth considering for this mon."""
+                       bench: list | None = None, self_view: Combatant | None = None):
+    """Returns a pruned list of Action objects worth considering for this mon.
+
+    `field` must be the field the chosen move will RESOLVE in, and `self_view`
+    the form this Pokemon will be in when it moves -- see projection.py. On the
+    turn a Mega transforms those are not what `battle.field` and `combatant`
+    say, and the difference silently deletes candidates: the charge filter below
+    reads the weather, and a Solar Beam that skips its charge in sun is dropped
+    outright when the decision is made a moment before Drought fires.
+
+    `self_view` is for DAMAGE ESTIMATION only. Every Action is built from
+    `combatant`, the real object on the field.
+    """
     actions = []
+    attacker = self_view if self_view is not None else combatant
     live_foes = [f for f in foes if not f.fainted]
     # NOTE: do NOT early-return here even if live_foes is empty. That happens
     # legitimately when both opposing actives just fainted this turn and are
@@ -188,12 +214,30 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
             tgts = spread_targets(move.target, live_foes, allies, combatant)
             actions.append(Action(combatant, side_key, "move", move, tgts))
         else:
-            # single-target: only branch on the target that does more damage (prune to 1)
-            best_target = max(
-                live_foes,
-                key=lambda f: quick_damage_estimate(combatant, f, move, typechart, field)
-            )
-            actions.append(Action(combatant, side_key, "move", move, [best_target]))
+            # Single-target. The hardest-hitting target, PLUS any other target
+            # this move would remove outright.
+            #
+            # Pruning to raw damage alone was measured wrong on a reported turn:
+            # Mega Scizor's Bullet Punch does 206-242 to Mega Floette and
+            # 134-158 to a 137 HP Whimsicott, so only the Floette version was
+            # ever offered -- and "kill the faster attacker before it moves with
+            # a +1 priority move" was not an option the search could see. That
+            # is not a subtle line, it is the first thing a player checks.
+            #
+            # A KO is the right second criterion rather than "damage is close":
+            # what makes the other target worth hitting is that the move
+            # FINISHES it, which is a different kind of value from chip and is
+            # exactly what raw damage cannot express. Costs at most one extra
+            # action per move, and only where a KO is actually on.
+            scored = [(quick_damage_estimate(attacker, f, move, typechart, field), f)
+                      for f in live_foes]
+            best_target = max(scored, key=lambda pair: pair[0])[1]
+            chosen = [best_target]
+            for estimate, foe in scored:
+                if foe is not best_target and estimate >= foe.current_hp:
+                    chosen.append(foe)
+            for target in chosen:
+                actions.append(Action(combatant, side_key, "move", move, [target]))
 
     if not actions:
         # No damaging move had a legal target (e.g. both opposing actives just fainted
@@ -217,6 +261,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                                   turn_num: int):
     joint = []
     used_incoming = set()
+    # The turn resolves after pending Mega Evolutions, not before them.
+    decision_field = projected_field(battle)
     for c in side.active:
         if c.fainted:
             if side.bench:
@@ -227,7 +273,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                     joint.append(Action(c, side.name, "switch", None, [incoming]))
             continue
         cands = candidate_actions(c, side.name, side.active, opp_side.active,
-                                   movesets[c.name], battle.typechart, battle.field, turn_num)
+                                   movesets[c.name], battle.typechart, decision_field, turn_num,
+                                   self_view=mega_view(battle, c))
         # Greedy: prefer a status/setup move on turn 1 only if it's their known signature
         # (Trick Room / Tailwind), else take the highest total estimated damage option.
         def action_value(a: Action):
@@ -255,7 +302,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
             own_side = battle.side_of(c)
             total_dealt = 0.0
             for t in a.targets:
-                dmg = quick_damage_estimate(c, t, a.move, battle.typechart, battle.field,
+                dmg = quick_damage_estimate(mega_view(battle, c), t, a.move,
+                                             battle.typechart, decision_field,
                                              num_hit=len(a.targets) if is_spread_move(a.move.target) else 1,
                                              battle=battle)
                 pct = 100.0 * min(dmg, t.current_hp) / t.max_hp() if t.max_hp() else 0.0
@@ -868,6 +916,75 @@ def _pick_from_mixture(actions, probabilities):
     return actions[-1]
 
 
+def _pick_index_from_mixture(probabilities):
+    """The same draw as `_pick_from_mixture`, returning the INDEX.
+
+    Two callers need different things from one draw -- robustness reports
+    `theirs[j]` and also uses `j` to index its payoff row -- and having two
+    samplers would mean two different opponents again.
+    """
+    total = sum(probabilities)
+    if total <= 0:
+        return 0
+    threshold = _NASH_RNG.random() * total
+    cumulative = 0.0
+    for j, weight in enumerate(probabilities):
+        cumulative += weight
+        if cumulative >= threshold:
+            return j
+    return len(probabilities) - 1
+
+
+# --------------------------------------------------------------- evaluation
+# The two depth-1 fixes of WORKFLOW.md §4.2 as ONE named switch, because they
+# were measured together and shipped together, and because "worse winning
+# lines" was reported the moment they went on.
+#
+# MEASURED COST of `sacrifice` over 9 pairings (3 teams x Rain/Sand/King,
+# standard tier): record 80% -> 74%, mean adjusted wins 0.518 -> 0.444. It is
+# still the default, because the behaviour it fixes was reported twice from
+# real games as a direct cause of losses -- but it is a trade, so it is a
+# setting rather than a constant, and `legacy` restores the previous
+# evaluation EXACTLY.
+EVAL_PROFILES = {
+    "sacrifice": {"SPEED_CONTROL_WEIGHT": 12.0, "FRAGILE_HP": 0.25},
+    "legacy": {"SPEED_CONTROL_WEIGHT": 0.0, "FRAGILE_HP": 0.0},
+}
+DEFAULT_EVAL_PROFILE = "sacrifice"
+
+
+def apply_eval_profile(name):
+    """Set the evaluation permanently in THIS process.
+
+    For pool workers, which never see the parent's context managers -- each job
+    carries the profile name and applies it on arrival. Returns the name that
+    was applied so a caller can record it.
+    """
+    global SPEED_CONTROL_WEIGHT, FRAGILE_HP
+    values = EVAL_PROFILES[name if name in EVAL_PROFILES else DEFAULT_EVAL_PROFILE]
+    SPEED_CONTROL_WEIGHT = values["SPEED_CONTROL_WEIGHT"]
+    FRAGILE_HP = values["FRAGILE_HP"]
+    return name if name in EVAL_PROFILES else DEFAULT_EVAL_PROFILE
+
+
+@contextmanager
+def evaluation(profile: str | None):
+    """Run a block under one evaluation profile, restoring it afterwards.
+
+    Same reason as `solver_mode`: Streamlit keeps module state alive across
+    reruns, so setting the globals directly would make the last-used profile
+    silently sticky for every other tab. `None` means "leave it alone".
+    """
+    global SPEED_CONTROL_WEIGHT, FRAGILE_HP
+    previous = (SPEED_CONTROL_WEIGHT, FRAGILE_HP)
+    if profile is not None:
+        apply_eval_profile(profile)
+    try:
+        yield
+    finally:
+        SPEED_CONTROL_WEIGHT, FRAGILE_HP = previous
+
+
 @contextmanager
 def solver_mode(nash: bool | None = None, depth: int | None = None):
     """Temporarily select the solver, restoring the previous setting after.
@@ -991,6 +1108,9 @@ def _is_pointless_double_protect(combo, battle: Battle, side: Side) -> bool:
 def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, movesets: dict,
                                  turn_num: int):
     per_mon_options = []
+    # Decide against the field the turn will resolve in, not the one showing
+    # now: a pending Mega Evolution lands before any move (see projection.py).
+    decision_field = projected_field(battle)
     for c in side.active:
         if c.fainted:
             if side.bench:
@@ -1013,9 +1133,10 @@ def our_candidate_joint_actions(battle: Battle, side: Side, opp_side: Side, move
         # -- the solver could choose a switch that simply failed.
         trapped = battle.is_trapped(c)
         cands = candidate_actions(c, side.name, side.active, opp_side.active,
-                                   movesets[c.name], battle.typechart, battle.field, turn_num,
+                                   movesets[c.name], battle.typechart, decision_field, turn_num,
                                    bench=None if trapped else
-                                   [b for b in side.bench if not b.fainted])
+                                   [b for b in side.bench if not b.fainted],
+                                   self_view=mega_view(battle, c))
         per_mon_options.append(cands)
     if not per_mon_options:
         return [[]]

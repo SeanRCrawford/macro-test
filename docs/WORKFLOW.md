@@ -18,6 +18,10 @@ bring and lead per opponent, and how many of their 90 brings it beats.
 
 ## 1. The question the system answers
 
+> **`X / 90` IS NOT A WIN RATE.** It breaks three things at once, and
+> `src/win_rate.py` is the sound version. Read §4.0b before quoting any record.
+
+
 **Commit to one bring-4 and one lead-2 against an opponent, before seeing what
 they bring. How many of their 90 possible bring-4s does that beat, and how much
 does a good player gain along the way?**
@@ -56,19 +60,107 @@ Options worth knowing:
 | `--keep N` | 6 | how many reach the deep search |
 | `--optimise-sets` | off | optimise item + 4 moves against the real metagame. **Use it** |
 | `--min-winrate F` | 0.80 | skip auditing a team that cannot win |
-| `--punish-screen` | off | throw out a team whose OPENING is already lost, before the audit. Seconds per team |
+| `--punish-screen [F]` | off (floor −250) | throw out a team whose OPENING is already lost, before the audit. Seconds per team. **Prints the number for every team it looks at, not only the ones it rejects** — see below |
 | `--worst-matchup F` | off | reject a team whose WORST single matchup wins less than F, e.g. `0.89` for 80/90. Abandons on the first failing opponent |
 | `--generations SPEC` | all | e.g. `1-5` |
 | `--jobs N` | all cores | ~1 GB RAM per worker; use 8 on a 16 GB machine |
 | `--sample-leads` | off | audit a sample of their leads instead of all 90. Faster, but the record becomes `X / 4` and stops being a total-pathing number |
 | `--vs "Big 6"` | all | deep-search only these opponents — the biggest single lever |
 | `--brings N` | tier default | audit only the N best of our brings per pairing |
-| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers; results accumulate. On its own it does NOT regenerate |
+| `--pick "4,10,12"` | off | deep-search only these stage 1 rank numbers, **ranges allowed** (`"1-40"`, `"1-10,25"`); results accumulate. On its own it does NOT regenerate |
 | `--list` | off | stage 1 only — rate and rank, then stop |
 | `--stage2-only` | off | skip generation, deep-search the shortlist on disk |
 | `--regenerate` | off | force stage 1 even when `--pick` would have skipped it |
-| `--deep-effort TIER` | thorough | `standard` / `thorough` / `exhaustive` — how many of OUR brings get audited |
+| `--deep-effort TIER` | thorough | `standard` / `thorough` / **`thorough+`** / `exhaustive` — how many of OUR brings get audited. `thorough+` is thorough with the equilibrium pilot: the only tier whose record is not inflated |
+| `--pilot NAME` | tier default | **who plays the games the record comes from.** `greedy` is fast and inflated (see §4.0); `equilibrium` plays both sides as a matrix game, ~13× slower per game |
+| `--evaluation NAME` | `sacrifice` | `sacrifice` scores speed control and discounts a spent Pokémon (measured cost: record 80% → 74%); `legacy` restores the previous evaluation exactly |
+| `--beam-width N` | 30 | how wide the beam SEARCHES. `--candidates` already raises it to match; set this only to search wider than you rate |
+| `--screen-vs NAMES` | all | rate STAGE 1 against only these opponents. Cost is linear in opponents, so two instead of eight is 4× more teams per night |
 | `--substitute N` | off | after stage 1, try to improve the top N teams by swapping their worst member. The only stage that steers the search by the rating |
+
+### Screening a large pool — the funnel, with its measured costs
+
+`rate_team` already IS a funnel: cheapest screen first, and every stage
+abandons the team before the next one runs.
+
+| stage | s/team | 1000 teams, 8 workers | what it costs you |
+|---|---|---|---|
+| screener matrix | — | **112 s once** | shared by every team |
+| beam → 1000 finalists | — | **77 s** | free, effectively |
+| `--punish-screen` | 18 | **0.6 h** | opening only |
+| `--min-winrate` (quick verify) | 94 | **3.3 h** | win count, greedy pilot |
+| standard rating, greedy | 150 | 5.2 h | |
+| standard rating, equilibrium | 600 | **20.8 h** | the honest one |
+
+So 1000 teams rated properly is a 20-hour job, and 1000 teams *screened* down
+to ~100 and then rated properly is a 4–5 hour one. A worked recipe:
+
+```bat
+:: 1. Screen wide and cheap, against TWO opponents rather than eight
+overnight.bat --list --candidates 1000 --pool-size 50 ^
+  --screen-vs "Big 6,Rain" --punish-screen --min-winrate 0.45 ^
+  --pilot equilibrium --optimise-sets --jobs 8
+
+:: 2. Deep-search the survivors against EVERYONE
+overnight.bat --stage2-only --pick "1-40" --deep-effort thorough+
+```
+
+`--candidates` already raises the beam width to match — you cannot rate more
+teams than the beam emits — so `--beam-width` is only for searching *wider*
+than you rate (`--beam-width 2000 --candidates 1000` explores twice the space
+and rates the better half).
+
+`--screen-vs` is the biggest lever: cost is linear in opponents, so two instead
+of eight is 4× more teams per night. The ranking it produces means "best
+against these two", which is why the survivors are re-rated against the whole
+library before you trust the order.
+
+**Is 1000 actually 1000 teams?** Measured on a 50-pool: the beam's finalists get
+*more* diverse as you widen it, not less — 29 distinct Pokémon and mean pairwise
+overlap 3.06/6 at width 40, against 49 distinct and 2.23/6 at width 1000. The
+most common 4-Pokémon core appears in 35% of the top 40 but only 10% of the top
+1000. So widening genuinely searches, it does not just permute. It is still one
+beam around one objective — see gap 1.
+
+**The recall of these screens is NOT measured.** That is the real risk, and this
+repo has been bitten by it before: `prescreen.py` measured 4–15% recall and is
+dead. A screen that discards the eventual winner is worse than no screen,
+because the team never appears in the output to be missed. Two mitigations that
+cost nothing: the punish screen prints its value for *every* team it looks at,
+so after a night you can check where the winners actually sat in that
+distribution; and every rating is cached by key, so raising a floor and re-running
+only re-rates what the old floor rejected.
+
+### Reading and calibrating `--punish-screen`
+
+The number is in `heuristic_eval` points, the same scale the rest of the tool
+uses — **≈180 points is one Pokémon**. It is the value of the board after
+turn 1 that we can *guarantee*: we pick our best opening, they answer it with
+a perfect read of what we picked. Negative is normal and expected, because a
+perfect read is not a fair fight. Measured on real rosters: Big 6 **−80**,
+Sand **−160**, NAIC **−208**, a deliberately bad junk team **−307**.
+
+The default floor of −250 is calibrated on those few teams, so treat it as a
+starting point rather than a setting. Every stage 1 run now prints the number
+for teams the screen **accepted** and for teams a **later** screen rejected,
+plus a distribution line at the end:
+
+```
+  [2/4] skipped: below --min-winrate (396/552 won)   open -215   ~3 min left
+opening guaranteed across 4 teams: worst -239, median -215, best -180   (--punish-screen floor was -250)
+```
+
+Read that line as the answer to "where should the floor be?". If the worst
+*kept* team is far above the floor, the floor rejected nothing and cost you
+nothing; if the whole distribution sits just above it — as in the run above,
+where four teams between −180 and −239 all cleared the floor and then all
+failed `--min-winrate` — the floor is too permissive for that pool and the
+audit budget is being spent on teams that were never going to pass.
+
+It screens on the **guaranteed value, not the punish**. The obvious version is
+measurably backwards: a team with no threats gives a best-responding opponent
+nothing to gain, so turn-1 exploitability ranked the junk team *first* (3.5,
+against 49.5 and 66.6 for real teams).
 
 ### Pinning a set in `preferences.csv`
 
@@ -213,6 +305,282 @@ progress line reports the real rate and a clock time:
 Kill it whenever you like -- every batch is saved, and re-running the identical
 command resumes.
 
+### How big the cache gets — `--detail` and `--workbook`
+
+Reported: a stage-2-only run producing **200 MB to 1.5 GB** of JSON, and no
+workbook buildable from it. Both are real, and they are two problems.
+
+**The cache.** The per-turn record measures ~890 bytes -- `events` is 479 of
+them and `hp_after` 187 -- so an 18-turn line is 10.6 kB. That is invisible at
+4 leads x 6 brings (0.3 MB a pairing) and ruinous at `--audit-all --brings 90`,
+which audits 90 x 90 = 8100 lines: **86 MB a pairing, ~690 MB across eight
+opponents.** `--detail` bounds it:
+
+| level | keeps turn-by-turn for |
+|---|---|
+| `full` | every audited line (the old behaviour) |
+| `light` **(default)** | the worst 6 lines per audited bring |
+| `summary` | none |
+
+Every line keeps its **summary** at all three levels -- outcome, margin, mean
+and worst punish, adjusted value -- so Plan, Matchups, Lines and Best lines are
+complete whichever you pick. What `summary` costs you is the damage log.
+
+**`light` is a BUDGET, not a filter, and that distinction was measured.** The
+first version was the predicate "keep it if the line lost or had a severe
+turn": reasonable-sounding, since turn-by-turn exists to answer *why did this
+go wrong* and a clean win has no answer to give. On a real thorough pairing it
+saved **0%** -- all 24 lines lost or went severe, so every one qualified. Of
+course it did: the runs whose caches blow up are the exhaustive ones, and an
+exhaustive run against a bad matchup is precisely where every line is worth
+explaining. A predicate cannot bound anything when the expensive case is the
+case that satisfies it. The budget keeps the worst six per bring -- losses
+first, then most-punished -- so the size is `brings x 6 x turns` regardless of
+how the matchup goes.
+
+**The workbook.** Those same 8100 lines a pairing give a **Turns sheet of
+roughly 1.2 million rows** across eight opponents, above Excel's 1,048,576
+limit -- so the export did not merely take a long time, it raised, after the
+search had spent the night. Two guards:
+
+* `--workbook light` writes Teams, Plan, Matchups, Best lines, Team sheets and
+  the legend, and drops **Lines, Candidates and Turns** -- exactly the three
+  whose row count scales with `brings x their configs`. `--workbook auto`
+  (default) picks it past 20,000 audited lines.
+* Every sheet is capped at 100,000 rows and ends with a line saying how many it
+  dropped, so a too-large cache produces a truncated workbook rather than a
+  traceback.
+
+A related bug worth knowing about, because it made `--detail` unusable on
+first landing: Best lines built its rows with `for i, t in enumerate(turns) or
+[(0, None)]`, and a generator is always truthy, so the fallback never fired and
+a line with no stored turns **vanished from the sheet**. Under `light` the
+trimmed lines are the wins, so the plan's record read as nothing but losses.
+
+**These flags are part of the cache key** (`SCHEMA` 8 -> 9), so a run at a new
+`--detail` recomputes rather than being served a record with less detail than
+it asked for. Existing stage-2 caches are invalidated by the bump.
+
+### The cheap screen — `tools\lead_sweep.py`
+
+    python lead_sweep.py --check "Ninetales-Alola,Garchomp,Mega Scizor,Rotom-Wash"
+    python lead_sweep.py --vs "Big 6,Rain" --pool-size 16 --detail-top 6 ^
+        --xlsx lead_book.xlsx
+
+**Getting the workbook.** `--xlsx` takes a **path** and writes nothing unless you
+pass one. Two stages, costing very different amounts:
+
+| flag | what it drives | cost |
+|---|---|---|
+| `--pool-size N` | how many Pokémon are eligible for a lead; pairs grow as N²/2 | seconds to minutes |
+| `--detail-top N` | how many of the **best** brings get the full treatment | **minutes each** |
+
+The full treatment is every play (stay / switch / switch+Protect / sacrifice),
+the mop-up, turn-by-turn lines with damage, the switch-in table, and the item
+search. `--detail-top 6` is a sensible evening; 40 is a night. The path is
+relative to where you run it, so `--xlsx book.xlsx` from `tools` lands in
+`tools\book.xlsx`, and generated workbooks are gitignored.
+
+Eight sheets: **Brings**, **Teams of 6**, **Openings** (their best plan, our
+play, guaranteed?, the mop-up), **Lines** (damage on every hit, `PINNED` where
+something is removed before it acts), **Switch-ins**, **Loadout**, **Item
+fixes**, and the legend.
+
+**Items: the most popular one, by default.** Every Pokémon already holds its
+most-used item — `make_team` reads the usage table, so this needs no flag
+(measured: Ninetales-Alola Never-Melt Ice 29%, Garchomp Life Orb 61%, Rotom-Wash
+Sitrus Berry 31%). The **Loadout** sheet shows that baseline and names the one
+swap, if any, that *strictly increases* the number of openings held; "keep it" is
+the usual answer. **Item fixes** is the narrower per-opening question.
+
+A suggestion that did **not** survive measurement, recorded so it is not retried:
+Focus Sash on Ninetales-Alola against Kingambit + Garchomp. Kingambit's Iron Head
+is Steel into Ice/Fairy — **4×** — so the sash keeps it alive at 1 HP and it dies
+on turn 2 regardless, while the swap gives up Never-Melt Ice's 1.2× on Blizzard.
+Margin goes **−1.12 → −1.15**: slightly worse.
+
+**No games are played.** Every number is arithmetic on a threat matrix, so 276
+lead pairs against two opponents takes **10 seconds** — against minutes per
+pairing for the audit. This is the narrowing step that decides what is worth the
+night.
+
+It came from a worked example: *"vs big 6, you only bring 4. There is one lead
+pair which has an overwhelming advantage: (focus sash) ninetales-alola + (life
+orb) garchomp with mega scizor and a flying/levitate pokemon in the back."* The
+breakdown given for it was six independent questions, each answerable by a sum —
+and `--check` reproduces it line for line:
+
+```
+Ninetales-Alola + Garchomp  (back: Mega Scizor, Rotom-Wash)  vs Big 6
+  1. Basculegion: FOCUSED  by Ninetales-Alola + Garchomp
+  2. Mega Charizard Y: OUTSPED  by Garchomp Rock Slide
+  3. Mega Floette: OUTSPED  by Garchomp Earthquake
+  4. Garchomp: OUTSPED  by Ninetales-Alola Blizzard
+  5. Kingambit: FOCUSED  by Ninetales-Alola + Garchomp
+  6. Whimsicott: FOCUSED  by Ninetales-Alola + Garchomp
+```
+
+**But per-enemy coverage is not a screen, and that took two goes to learn.**
+Scoring each of their six independently passed **235 of 275** swept pairs — 85%,
+which narrows nothing. The flaw was structural, not a tuning problem: every
+verdict let us aim *both* attacks at one enemy while its partner did nothing
+back, and two attackers focused on one target answer almost anything.
+
+So the ranking is the **2v2 race** (`race_bring`): our lead pair against all
+**fifteen** of theirs, two turns, both sides focus-firing, speed-ordered, and a
+Pokémon removed before it acts contributes nothing — the pin, expressed as the
+only thing it really is. Pass rate: **31 of 275, about 11%.** `score` is the mean
+margin across their fifteen openings and a **hard zero if any single one beats
+us**, because the requirement is a lead that withstands *any* of theirs.
+
+```
+  # lead pair                    back two                worst opp    W-L    score
+  1 Garchomp + Mega Dragonite    Gallade + Basculegion   Big 6        14-0   +1.00
+  2 Garchomp + Mega Alakazam     Gallade + Basculegion   Big 6        14-0   +0.99
+  3 Garchomp + Dragonite         Gallade + Basculegion   Big 6        14-0   +0.97
+```
+
+**Two bugs it shipped with, both caught by looking at the output:**
+
+* **Species clause.** The top answer was `Garchomp + Mega Garchomp`, with
+  `Dragonite + Mega Dragonite` behind it. Species clause counts the **base**
+  form; a Mega is that Pokémon holding a stone. `legal_bring` now requires four
+  distinct base species and at most one Mega. A screen that recommends an
+  illegal team is worse than no screen — its answer looks actionable.
+* **Duplicate brings.** Back pairs were sampled from the same pool as leads
+  without exclusion, so `Garchomp + Sneasler, back: Gallade, Garchomp` was a
+  bring of three.
+
+**A speed tie is never a win.** *"Ideally your strategy does not rely on winning
+speed ties."* The race resolves **every tie against us** — the first version
+sorted by `(priority, speed)` and left ties to list order, which put our Pokémon
+first and quietly handed us every coin flip. Tied openings are named in the
+report, and any one we do not win outright goes to the patch search exactly as a
+loss does.
+
+**The patch is the same question one level down, and that recursion is the
+method.** An opening we lose is not automatically a hole:
+
+> *"if the enemy Mega Floette is led and speed ties, you can switch Garchomp into
+> the back pokemon specifically prepared for that special case to make that rare
+> tied/losing lead a win ... ninetales-alola blizzards twice t1/t2, scizor is
+> switched in t1, then t2 bullet punch threatens kill on them; sequence starting
+> t2 is even if they attack they are pinned, as nothing else can come in to
+> survive and then win (not enough HP after switch damage)"*
+
+`salvage()` searches (which of ours leaves × which back arrives): the switch-in
+eats turn 1's damage and **deals none** — it spent its turn coming in — then both
+attack from turn 2. On the reference position it finds exactly the described
+switch, **Garchomp → Mega Scizor**, and the report marks the opening *held* with
+a back slot that has a job rather than *unheld*.
+
+**Their side may split, and every result takes their best plan.** *"is this
+robust to one enemy attacking and one protecting to whittle down"* — so each race
+is run over `{both attack, left protects, right protects}` and scored on the
+worst. On the reference position their best plan is frequently a Protect split,
+which the first version never saw.
+
+**The HP budget is the pin, as a number.** *"how much HP can each given potential
+back pokemon out of 4 afford to lose and still win vs yours ... if not then it is
+a pin."* Once Ninetales-Alola + Mega Scizor is established against Big 6:
+
+| their switch-in | can afford to lose | |
+|---|---|---|
+| Mega Charizard Y | **+4.6%** | can switch in and win |
+| Basculegion | −0.8% | cannot switch in |
+| Kingambit | −18.3% | cannot switch in |
+| Garchomp | −367.7% | cannot switch in |
+
+A negative budget means it dies arriving at **full health** — that is the "not
+enough HP after switch damage" clause. Three of their four are walled out
+outright, and the one exception has a 4.6% margin, which is also where the
+mega-bulk correction matters most: if Charizard holds their mega slot it is
+bulkier and that margin grows.
+
+**The sharpest known limitation: which of their Pokémon holds the Mega slot.**
+One Mega per team, chosen at preview *after* seeing your four. Base Mega Floette
+is speed **111** and its Mega is **166 — exactly Garchomp**. On Big 6 as loaded
+Charizard Y holds the slot, so Floette stays at 111 and Garchomp outspeeds it
+cleanly; if they Mega Floette instead it is a coin flip, which is precisely the
+caution in the worked example. `mega_slots()` enumerates their choices and
+`--check` warns; scanning against each is not yet automatic.
+
+It also cannot see Protect stalling, redirection, Wide Guard, Substitute or
+setup — anything whose value is in a sequence rather than a sum — and it reads
+usage-default sets. Every verdict is a **hypothesis to point the audit at**: the
+cheap thing proposes, the expensive thing decides.
+
+### Who wins the damageslop war — `tools\spread_table.py`
+
+    python spread_table.py --top 20 --foes-only
+    python spread_table.py --team "Big 6"
+    python spread_table.py --csv spread.csv
+
+> *"Spread damage appears to be highly valuable, as this game is what I like to
+> call a 'damageslop' format. Spread damage, given it attacks two enemies at
+> 0.75x, is a way to maximise damage output, and chip enemies into kills by
+> partner. If your spread attacker is bulky and not threatened by
+> supereffective damage, it can stay on the field and trade favourably vs the
+> enemy (they cannot match its output). It also is simple because there is no
+> target selection, so is harder to punish and harder to switch in on."*
+
+Two halves, and the **product** is the point. A spread move hits both foes at
+0.75×, so its turn total is **1.5× a single-target hit** of the same power —
+before the multipliers that make the good ones absurd, all of which are switched
+on here: self-generated weather (Drought sun on Heat Wave), the -ate abilities
+(Pixilate makes Hyper Voice a Fairy move, which *also* gains it STAB), Liquid
+Voice, Sheer Force, Aura. And output you don't get to repeat is worth one turn,
+so the score multiplies by `hits_to_ko = 1 / mean(incoming physical, special)`
+from a generic 125-stat, 100 BP attacker.
+
+Everything is **neutral in both directions** — the actual type multiplier is
+divided out — so the table ranks the Pokémon, not the matchup.
+
+```
+  # Pokemon                spread move      BP weather  1 tgt  2 tgt  taken  hits  SCORE
+  1 Torkoal                Eruption        150 sun      88.7% 177.4%  25.6%  3.90   6.91  full-hp only
+  2 Aurorus                Blizzard        110 snow     52.1% 104.1%  18.4%  5.43   5.65
+  3 Mega Charizard Y       Heat Wave        95 sun      67.0% 134.1%  27.1%  3.69   4.95
+  4 Gholdengo              Make It Rain    120 -        69.6% 139.1%  28.6%  3.50   4.87
+  5 Mega Blastoise         Water Spout     150 -        67.3% 134.5%  27.8%  3.59   4.84  full-hp only
+  6 Mega Tyranitar         Rock Slide       75 sand     39.5%  78.9%  16.9%  5.91   4.67
+ 30 Ninetales-Alola        Blizzard        110 snow     79.4% total   ...           2.93
+ 37 Sylveon                Hyper Voice      90 -        63.7% total   ...           2.68
+```
+
+**Two flags, and each is a bug this table had first.** Both produced a ranking
+that looked plausible and put the wrong Pokémon on top:
+
+* **Suicide moves are excluded.** The first run gave Metagross Explosion #1 and
+  Snorlax Self-Destruct #2 — 250 and 200 BP multiplied by four to six turns of
+  survivability, for a move that faints the user. The score's premise is
+  *repeatable* output; `selfdestruct` is its exact negation.
+* **Typeless in both directions, and it took two goes.** The defender was first
+  Normal-typed and so was the incoming probe — which does **0 damage to Ghosts**,
+  so all thirteen Ghost-types scored infinite survivability and swept the table.
+  The second version *searched* the chart for a type each defender happens to
+  take at 1.0×: right for almost everyone, and still not typeless, because a
+  Pokémon with no neutral type fell back to "least resisted" and was measured on
+  a different yardstick. Now the defender has **no types** and the probe uses a
+  move type that is **in no typechart** — verified exactly 1.0 against all 271
+  Pokémon in the dataset. No immunity, no resistance, no STAB. STAB is kept on
+  the *outgoing* half, since it reads the attacker's own typing and so is a
+  property of the Pokémon rather than the matchup.
+
+`--xlsx` (on by default, `spread_table.xlsx`) writes the whole ranking with an
+autofilter and a legend sheet stating every assumption, so it can be sorted and
+checked by hand.
+
+Rows still carry two honest caveats rather than being dropped: `hits ally`
+(`allAdjacent` — Earthquake and Sludge Wave hit your partner too; `--foes-only`
+excludes them) and `full-hp only` (Eruption and Water Spout scale with current
+HP, so the row decays — the opposite of what the score rewards).
+
+**It is a screen, not a verdict.** It does not know about Wide Guard, that the
+opponent has a Fairy for your Dragon, or that Prankster Tailwind changes who
+repeats first. Read it as "who is worth building around", then let the search
+argue.
+
 ### Reading the output — `tools\overnight_thorough.xlsx`
 
 1. **Plan** — the answer. One committed bring/lead per opponent, `Wins / Of`,
@@ -230,7 +598,8 @@ command resumes.
 
 | Panel | When | What it does |
 |---|---|---|
-| **Team preview** | you see their six, not their four | runs the advanced model on the bring/lead decision and returns ONE committed plan, its record, and what beats it |
+| **Team preview — fast** | you have about a minute | **`preview_lead.rank_leads`**: solves TURN 1 as a matrix game for each of your 15 lead pairs against each of their 15, and ranks your leads by the value you can GUARANTEE against their best reply. Measured **26 s** on a real preview |
+| **Team preview — full** | you have minutes to hours | runs the advanced model on the bring/lead decision and returns ONE committed plan, its record, and what beats it |
 | **Deep dive** | you have led, and so have they | the same model one notch deeper on that position, ~5 s, and depth 2 is available here because one line can afford it |
 | **Load an overnight run** | after a batch run | browse any committed line turn by turn, from the cache. Instant |
 
@@ -241,11 +610,68 @@ in its fixed lead and its scripted opening where it has them — hand-typing the
 same six by name silently answers a slightly different question, because the
 script and the sets do not come along.
 
+**The one-minute answer: which lead is not already lost?** The full model
+cannot serve team preview — it takes minutes to hours and you have a minute.
+What *is* answerable in that time is the opening: one matrix solve is ~0.5 s, so
+your 15 lead pairs against their 15 is 225 solves ≈ 112 s — and **maximin
+prunes**. A lead is worth its WORST case over their leads, and a minimum only
+falls, so once a lead is behind a fully-checked one nothing can rescue it.
+Measured: **58 solves, 26 s** on a real preview instead of 225.
+
+It reports, per lead: the guaranteed turn-1 value, WHICH of their leads is the
+one that hurts, and whether your answer to it is to **attack, protect or
+pivot** — the last being the "I can switch out to create a winning position"
+case, named rather than buried in a log. A lead abandoned by pruning shows its
+number as `<= N`, an upper bound, because on a real preview a pruned lead read
+81 against a proven 73 and that ordering is backwards.
+
+**Then the back two, which is a separate search.** The lead ranking solves
+turn 1, where your back is off the field and barely matters — so it uses a
+placeholder. The back decides what you pivot *into* and whether the endgame is
+2v2 or 2v1, so `preview_lead.rank_brings` plays all six possible back pairs out
+against their leads and keeps the best WORST case. On a real preview it moved
+the answer: the assumed back scored 25%, a searched one 50%.
+
+**And then what — the line.** Ranking leads says what to send out; it does not
+say what to play. `preview_lead.lines_for_lead` takes the chosen lead and
+returns the turn-by-turn plan against each of their leads: your joint action
+each turn, their equilibrium reply, the KOs, and **the probability that line
+wins**, sampled over real damage rolls and speed ties with an interval on it.
+
+Played against their **equilibrium reply**, not against a best response to the
+move you just made — that opponent is clairvoyant and beat every team tested
+(0 wins in 24 lines the same teams won 180/180 against the standard model).
+
+Hardest enemy lead **first**, so the budget can only ever cut the easy ones.
+Measured end to end: **30 s for the lead + 34 s for the lines**, and it is
+honest about bad news — on the sample preview the best lead still returns a 0%
+loss against Pelipper/Mega Swampert, which is the thing you want to know before
+you sit down rather than after.
+
+What it does **not** know is everything after turn 1 *for the lead ranking*. A
+lead that opens cleanly and collapses on turn five ranks fine; the line is what
+tells you it collapses.
+
 **Deep dive assumes you cannot see their back.** You give their six and the two
 they led with; the back is what you do *not* know at that moment, so by default
 it audits **every back pair they could still be holding** behind that lead and
 reports how the answer varies. One winning line is not a plan if the other five
 lose. Pick a specific back only if you have actually scouted it.
+
+**The opening is chosen at the information set you actually have** — your four,
+your lead, their lead. Not their backs, which are face down, and not their
+turn-1 action, because the turn is simultaneous. So the *Lead / Back* tab's
+opening breakdown picks **one** turn-1 action and plays that same action against
+every opening variant crossed with every back pair, each side bringing four.
+Previously it solved our response separately per variant, with that variant's
+script handed to the solver — Hard Trick Room got one answer if its Incineroar
+faked out the left slot and a different one if it faked out the right, which is
+a plan that reads their mind. Turns after the first still use the solver,
+script included; by then their line is observed.
+
+**Betting on a back pair is allowed and priced.** Name the pair you think they
+brought and the opening is chosen against it alone — but it is still *reported*
+against all six, so you can see what the hunch costs against the other five.
 
 **Every match, in every panel, has its log.** Team preview lists the games
 behind its record, deep dive lists one per back, and the bottom section lists
@@ -275,13 +701,50 @@ first failure, so a team with a hole costs one matchup instead of eight, and the
 rejects are listed with the opponent that ended each of them. The aggregate win
 rate cannot express this: 90/90 seven times and 20/90 once averages 88%.
 
-**Team Builder — what you can set by hand.** Items, stat points and moves are
-all overrides that travel together and are read by *every* simulation the app
-runs, not just the tab you set them in. Items can be picked one at a time
-(the optimiser decides all six at once, which is a different job); a
-Mega-capable pick is locked to its stone, since a Mega is a species choice
-here, and the "Any item…" option opens the full catalogue for something the
-usage data has never seen.
+**Team Builder — what you can set by hand.** Items, **abilities**, **moves**
+and stat points are all overrides that travel together and are read by *every*
+simulation the app runs, not just the tab you set them in.
+
+* **Abilities.** Arcanine-Hisui is 68% Rock Head / 32% Intimidate, and which one
+  you run changes the matchup. A Mega pick's Mega-form ability is fixed by the
+  species; the override sets its **base** form's, which is what it has on the
+  turn it comes in.
+* **Moves.** Up to four, from what it is recorded using — or from every move in
+  the game with the tick-box, which does **not** check learnset legality
+  (the dataset has none). A move the usage data has never seen is built anyway
+  and reported at 0% usage.
+* **Items** can be picked one at a time (the optimiser decides all six at once,
+  which is a different job); a Mega-capable pick is locked to its stone, since a
+  Mega is a species choice here, and "Any item…" opens the full catalogue.
+* **Apply is per-editor and no longer destructive.** Each Apply merges into the
+  same override dict, and the optimiser merges rather than replacing, so
+  optimising items+moves keeps a hand-set ability and stat spread. Applying one
+  editor also no longer discards a pending edit in another.
+
+**The sets travel with the team you picked, not with the Team Builder.** Every
+panel's *Our side* control offers the loaded team, a saved team, or any Pokémon
+— and each supplies its own overrides. Choosing a saved team used to keep
+applying the Team Builder's items and moves to somebody else's Pokémon.
+
+**Model settings — the sidebar.** Two controls, because they change what every
+other number means: **who plays the games** (greedy / equilibrium) and **which
+evaluation** (`sacrifice` / `legacy`). The greedy default carries a standing
+warning that records are inflated. `legacy` is the answer to "my winning lines
+got worse" — it turns off the speed-control and spent-Pokémon terms, restoring
+the pre-§4.2 evaluation exactly.
+
+**Everything the CLI can do, the app can now do.** `--punish-screen` (with its
+floor, and the distribution printed so it can be calibrated), the per-matchup
+floor, `--pilot`, `--evaluation`, and the `--substitute` hill-climb, which is
+in the Team Builder as *"Improve this team — swap its worst member"*. It
+proposes swaps, rates each one the same way a generated team is rated, and
+rejects any that loses record — record first, exactly as the CLI loop does.
+
+**A/B test one change — Lead / Back tab.** Two variants of the loaded team
+against the same opponents, same turn cap, same enemy overrides, with only one
+member's ability or moves different. Reports wins per opponent for each and the
+net games gained, so "is Intimidate better than Rock Head here" is one number
+instead of two runs compared by eye.
 
 **Where the advanced model is:** the *Advanced model strength* slider —
 Quick → Standard → Thorough → Exhaustive — with a tooltip explaining each, plus
@@ -326,6 +789,984 @@ a documented negative result.
 ---
 
 ## 4. Known gaps — read before trusting a number
+
+0e. **~~OUR SIDE SWITCHES AND PROTECTS INSTEAD OF PLAYING.~~ FIXED — and it was
+   neither the pilot nor the information asymmetry.**
+
+   The symptom, reported as "far too many switches and protects into a winning
+   match up (too many predicts, not necessarily safe)":
+
+   | line | result | OUR switches | our Protects | our attacks |
+   |---|---|---|---|---|
+   | before | loss, 11 turns | 6 | 8 | — |
+   | after | **win, 10 turns, 100%** | **3** | **3** | **14** |
+
+   **I guessed wrong first.** The entry here used to blame the wide-moveset
+   asymmetry — that pricing our options against their six moves and theirs
+   against our four makes passive play systematically cheaper for us. That was
+   a mechanism without a measurement, and it was not the cause. Recorded rather
+   than deleted, because the wrong hypothesis is the reason the real one took
+   so long to find: it pointed at the evaluation, and the bug was in candidate
+   *generation*.
+
+   **The actual cause: the decision was made against a field that no longer
+   existed by the time the move fired.** Mega Evolution resolves after all
+   switches and before any move, so on the turn a Mega transforms,
+   `battle.field` at decision time is stale. `solver.candidate_actions` reads
+   it, and its charge-move filter drops a two-turn move unless the skip weather
+   is *already* up — so with Pelipper's rain showing and Charizard's Drought one
+   step away, **Solar Beam was never offered at all**. Weather Ball was typed
+   Water into a Water/Ground target, and every special attack was priced off
+   base-form stats.
+
+   The payoff matrix was never wrong: every cell comes from a real `run_turn`,
+   which resolves the mega properly. The winning ROW was simply missing from it,
+   so the equilibrium was solved over the wrong game — and protecting really
+   was the best of the options it could see. Turn-1 equilibrium value went from
+   **−58.5 to +55.3** with nothing changed but the candidate list.
+
+   `src/projection.py` answers "what will be true when I move?" without touching
+   the battle; `solver` and `threat` decide against that.
+   `tests/test_projection.py` pins it, including that the charge filter still
+   works when no Drought is pending.
+
+   **The Pin (`src/pin.py`).** The concept, as it was put to me: a faster
+   guaranteed OHKO does not merely damage a Pokémon, it removes its option to
+   stay in and attack — *"speed order 1234 ... reduced to 124, because Swampert
+   must switch or protect if Zard pins it"*. The equilibrium finds this by
+   itself once the state is right (turn 2 already had Swampert switching out
+   72% of the time), so `pin.py` does not override the solver. It earns its
+   place in two narrower spots:
+
+   - **The prefix cut.** `turn_game._enumerate` truncates each side to
+     `INNER_ACTION_CAP=8`, and the order is whatever `itertools.product` emits —
+     Protect first, because Protect is first in the moveset. On the reported
+     position the Solar Beam row sits at index **11** and the first five rows are
+     all "Charizard Protects", so the move that wins the game was cut and the
+     passive rows kept. Ordering by pressure fixes that. Measured at depth 2:
+     +4.5% time, values 138.0 → 197.4 and −118.3 → −102.3.
+   - **Seeding the double oracle**, which converges in the number of iterations
+     it takes to *find* the decisive action. +9% time at depth 1.
+
+   It orders and seeds; it never prunes. "Stay in and attack while pinned" is
+   not dominated — it is excellent on the columns where they hit the other slot
+   — so deleting it would change the equilibrium.
+
+   **A pin is a claim about the whole side, not about the Pokémon in front.**
+   The first version tested only the board, and described a pin as *"must
+   switch or Protect"*. Both halves of that are wrong, per the correction:
+
+   > *"Favourable repositioning requires them to switch. A double protect is
+   > fine as long as the enemy can't favourably reposition or set up (though
+   > protecting one + switching or attacking almost always gains more
+   > MOMENTUM), but doesn't achieve anything unless there is fake out or
+   > stalling tailwind/trick room/weather. If there is no-one in the back who
+   > can resist the incoming hit, or survive this turn+next turn (i.e. I go
+   > first, I hit them on switch, then outspeed and KO next turn, that's a
+   > pin). But if they take the hit well, e.g. resisted, then can KO me next
+   > turn, either by outspeeding or by being slower and not getting KOd by
+   > either of mine, then that is not a pin and is a risk and a good play for
+   > them."*
+
+   And then the sum that actually decides it:
+
+   > *"Really, this turn + next turn (very quick and simple arithmetic) is all
+   > that matters. ... there is even potentially a complete pin; if Charizard
+   > switches in, it will take bullet punch + blizzard, then next turn another
+   > blizzard (outsped) + bullet punch (priority) which might kill, so could be
+   > a genuine full pin."*
+
+   `escape_from()` implements both. A benched **B** breaks the pin only when all
+   three hold: B survives the switch-in turn against **our whole side's**
+   guaranteed damage — it switched, so everything we aim there lands; B then
+   guarantees the KO back on the pinner; and B lives long enough to fire it,
+   meaning turn 1's damage plus everything resolving *before it acts* on turn 2
+   still leaves it up. Anything less is still a pin.
+
+   **The first version got this wrong, and the way it was wrong is instructive.**
+   It asked "does B survive the *pinner's* hit", which is the wrong sum.
+   Measured on the reported position — Scizor + Ninetales-Alola vs Mega Floette
+   + Whimsicott, with Mega Charizard Y in the back:
+
+   | | damage |
+   |---|---|
+   | Bullet Punch alone | 21.2% of Charizard's max |
+   | **Bullet Punch + Blizzard**, switch-in turn | **78.6% guaranteed** |
+   | the same again on turn 2 (Blizzard outspeeds, BP has priority) | **78.6%** |
+   | **two-turn total** | **157.1% — dead without ever acting** |
+
+   Charizard resists Bullet Punch at 0.25× and KOs Scizor back with Heat Wave,
+   so against the pinner alone it read as a clean escape and the pin was called
+   off. Against both attackers, twice, it dies on the way to firing. It is a
+   **complete pin** — the strongest version of the claim, and the one worth
+   committing a lead to.
+
+   `Pin.complete` names that case specifically: `real` *and* some bench Pokémon
+   threatened the KO back and still lost. A pin over a side whose bench simply
+   cannot threaten the pinner is uncontested; a pin that survives a Pokémon
+   switching in **specifically to answer it** is a different and much stronger
+   statement, so `describe` names who tried. A pin with a genuine escape is
+   *downgraded, not deleted* — still reported, with the piece that answers it.
+
+   The regression guard for this is `test_a_lone_pinner_cannot_claim_a_complete_pin`:
+   faint Ninetales on the same board and the verdict flips back to a risk,
+   because Bullet Punch alone is 21% a turn. Same position, same bench — the
+   difference is entirely the second attacker, which is what the two-turn sum is
+   for.
+
+   **Known approximation.** Their other active is still on the field while this
+   plays out; if it removes one of ours on turn 1, the second round is smaller
+   than the sum assumes. `secure` covers something pre-empting and killing the
+   *pinner*, but a partner traded off mid-sequence is not modelled, so a
+   two-turn pin is slightly optimistic when their other slot threatens our
+   second attacker.
+
+   **Protect is never an escape, and that is the other half.** A null turn
+   leaves the board exactly as it was and the same pin applies next turn — the
+   pinned side gains only if the stalled turns themselves pay (Fake Out, or
+   Tailwind / Trick Room / weather / screens running down). This matters
+   because the horizon currently says otherwise. On the reported position,
+   evaluating each of their replies at the horizon and again one turn later:
+
+   | their reply | value at the horizon | one turn later | deferred |
+   |---|---|---|---|
+   | **Protect + Protect** | **78.2** | 469.3 | **+391** |
+   | Protect + Moonblast | 220.1 | 483.8 | +264 |
+   | Light of Ruin + Moonblast | 491.2 | 491.2 | **0** |
+
+   Double Protect is their best reply *only* because the evaluator stops before
+   the pin re-applies. The reply where they actually act has **zero** deferred
+   value — the turn resolved, nothing is outstanding. Every stall defers, and
+   depth-1 reads "nothing happened" as neutral when for the pinned side it
+   means "still pinned". **This is not yet fixed**, and it is the likeliest
+   remaining cause of the original complaint (*"far too many switches and
+   protects into a winning match up"*). It is also why maximin cannot pick a
+   Bullet Punch target: both targets tie at 78.2 because the worst column is
+   Double Protect, identical for both.
+
+   **The safe play** is the companion idea and the reason the module exists
+   rather than the pin alone: *"if someone outspeeds and OHKOs one of your guys
+   but its partner isn't threatened to be fainted this turn ... it is a safe
+   play to protect the threatened guy + attack with other"*. A payoff matrix
+   cannot tell that apart from protecting on a read. `pin.safe_plays()` names
+   it, and deliberately refuses to fire when *both* of ours are under a
+   guaranteed KO — at that point choosing which to save is a read again, and
+   calling it safe would lie exactly where it costs a Pokémon.
+
+   Both are reported: `preview_lead.line_for` attaches `pins`, `describe_line`
+   prints them, and two app panels show them — Team Preview → "The line from
+   that lead", and the full model's "The games behind that record". Run
+   `python tools/measure_pin.py --all` to see the shape of the lines.
+
+   **In the app.** The projection is in candidate generation, so it reaches
+   every panel that solves a turn, whether or not that panel mentions pins —
+   nothing needs enabling. The whole Team Preview flow was driven headless to
+   check it: "Find my lead now" (45 s) returns LEAD Mega Charizard Y / Garchomp,
+   and "Show me the line" (61 s) prints the pins per enemy lead.
+   `tests/test_app_pin.py` holds that, and was checked against a build with the
+   rendering removed so it fails when the wiring breaks.
+
+   The one panel that deliberately does NOT show pins is the saved-run "Best
+   line against a specific opponent" in the Lead/Back tab: its sets live in the
+   run blob rather than on the page, and a pin computed from default usage sets
+   next to a line played with different ones would be confidently wrong.
+
+   What the fix does *not* claim: the three leads without Charizard Y still lose
+   in 5 turns, and the module now says why — **Mega Swampert pins them**, because
+   with no Drought the rain stands and Swift Swim makes it faster.
+
+
+0o. **THE SET OPTIMISER'S WEATHER ESCAPE HATCH WAS DEAD CODE.** Reported: "on
+   the teamsheet ninetales-alola doesn't even have blizzard which is crazy as it
+   is its best move by far".
+
+   It is a **95.7%-usage** move. `optimize_sets._accuracy_ok` drops anything
+   under 80% accuracy unless something guarantees it, and the guarantee it
+   should have found — "perfectly accurate in a weather the team itself sets" —
+   read a `team_weather` argument that **no caller ever passed**. Every call
+   took the default `None`, so the branch could not fire, and the one Pokémon in
+   the game that guarantees Blizzard for itself had it removed.
+
+   Fixed twice over, deliberately:
+
+   - the USER'S OWN ability is now checked directly (`WEATHER_SETTERS[ability]`),
+     which needs no plumbing and cannot be forgotten by a caller;
+   - `team_weather_for()` derives the team's weather and is threaded from both
+     team entry points, so a partner's weather counts too — Hurricane under a
+     Pelipper.
+
+   Ninetales-Alola now optimises to Protect / **Blizzard** / Freeze-Dry /
+   Moonblast, and Mega Scizor to Protect / Bullet Punch / Close Combat /
+   Dual Wingbeat (the report's own preferred set is Protect / Knock Off /
+   Close Combat / Bullet Punch — three of four, with Dual Wingbeat over Knock
+   Off the remaining judgement call).
+
+   The filter still does its job: Blizzard on a Pokémon that sets no snow is a
+   70% move and stays dropped.
+
+0n. **A SINGLE-TARGET MOVE COULD ONLY EVER AIM AT ONE POKÉMON.** Reported with
+   a turn log: *"a scizor bullet punch … would have outsped and KO'd the Mega
+   Floette … and even ignoring the target selection, bug bite after whimsicott
+   has already moved when bullet punch would go first makes no sense"*.
+
+   `candidate_actions` pruned every single-target move to the target that took
+   the most damage — the comment said "prune to 1". Measured on that position,
+   Mega Scizor's Bullet Punch does
+
+   | | damage | |
+   |---|---|---|
+   | → Mega Floette | 206–242 | 2x, guaranteed OHKO |
+   | → Whimsicott | 134–158 | 2x, OHKO on most rolls of 137 HP |
+   | Bug Bite → Whimsicott | 99–116 | what was played |
+
+   so only the Floette version existed, and **"remove the faster attacker before
+   it moves with a +1 priority move" was not an option the search could see**.
+
+   A KO is the right second criterion rather than "the damage is close": what
+   makes the other target worth hitting is that the move FINISHES it, which is a
+   different kind of value from chip and exactly what raw damage cannot express.
+   The move now offers its best-damage target plus any other target it would
+   remove outright.
+
+   Effect on the reported position: the equilibrium goes from Bullet
+   Punch/Bug Bite/switch to **Bullet Punch only**, 44.5% at Floette and 55.5% at
+   Whimsicott, with **Bug Bite at zero**. Cost is small because the extra action
+   only appears where a KO is on — 39 joint actions against 33 there, and no
+   change at all on two other boards.
+
+   Golden baseline re-recorded: 8 differences, all explicable. Action counts
+   rose (16→20, 18→22, 16→24, 4→12) and both changed plays score BETTER
+   (−21.1 → **+83.0**, −312.3 → −300.0).
+
+   **The move choice itself was never the bug**, which is worth separating from
+   0m: Technician, priority and the KO bonus were all working, and preferring
+   60 BP Bug Bite to 40 BP Bullet Punch is correct arithmetic. What was wrong
+   was the option set it chose from.
+
+0m. **THE AUDITED LINE PLAYED A DIFFERENT TEAM FROM THE ONE IT RATED.**
+   Reported as "best lines use moves not in the teamsheet; Scizor using Bug Bite
+   when it doesn't have it, and when Bullet Punch would have KO'd".
+
+   `_rate_and_rerank.build` — the closure that stands up the battle EVERY
+   audited line is played on — did this:
+
+       oc = make_team(our_names, merged, natures, sets=our_sets)   # item, ability, EVs
+       ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)}
+
+   `make_team` applied the item, ability and EVs from the set; the next line
+   dropped the MOVES and fell back to the four most-used. So the audit rated,
+   and the reported line played, a Pokémon holding the right item with somebody
+   else's attacks. Every other build site — `play_out_pair`, `deep_dive`,
+   `committed_plan`, `punish_screen`, `fast_eval` — already passed `only_moves`.
+   This one did not, so the RECORD and the LINE disagreed about what the team
+   was. Two app sites (Battle Viewer's audit and its turn solve) had the same
+   omission.
+
+   **The second half needs no separate explanation**, and that is worth saying
+   because "it picked the worse move" sounds like a solver bug. Scizor's usage
+   four are Bullet Punch, Protect, Bug Bite and Swords Dance. Both are
+   Technician-boosted; Bug Bite is 60 BP against Bullet Punch's 40, so
+   preferring it is *correct play given an illegal move to prefer*. Technician,
+   priority and the KO bonus were all working. One defect, two symptoms.
+
+   The regression test took two attempts to be worth anything. The first used a
+   six-Pokémon pool, the screen did not bring Scizor, and it passed with the bug
+   still in — asserting that a Pokémon which never took the field did not use a
+   move. With a four-Pokémon pool (one possible bring) the bug reproduces as
+   **16 turns of "Scizor Bug Bite"**, and the fix takes it to zero.
+   `tests/test_line_uses_the_sheet.py` now also asserts Scizor was brought and
+   acted, and scans EVERY build site rather than the one that was reported.
+
+0l. **CAN THE SEARCH BE MADE DRAMATICALLY FASTER? PROFILED: NO, NOT BY
+   MICRO-OPTIMISATION.** `cProfile` over one standard pairing (172 s, 231 M
+   calls), by cumulative share:
+
+   | | share | note |
+   |---|---|---|
+   | `copy.deepcopy` (11.4 M calls) | **24%** | already optimised once — `Battle.__deepcopy__` shares the typechart and move DB, `Combatant.__deepcopy__` is hand-written |
+   | `damage_roll` (1.1 M calls) | 13% self | the actual work |
+   | `type_multiplier` (3.6 M calls) | 5% self | **memoised, measured 1.09x** |
+   | `effective_speed` (4.1 M calls) | 3% self | memoisable per turn |
+
+   So the whole micro-optimisation budget is roughly **1.5x**, and eliminating
+   deepcopy entirely — which is not possible, the search has to explore on
+   copies — would be 1.3x. `type_multiplier` is now cached (348 distinct
+   answers for millions of calls); the A/B alternated cached and uncached in one
+   process across three rounds, because the machine drifted 57→64 s over the run
+   and a straight before/after would have read that drift as the result.
+
+   **Implemented since, both measured by same-process A/B:** `type_multiplier`
+   memoised (**1.09x**) and hand-written `__deepcopy__` for `Side` and
+   `FieldState` (**1.13x**), which were the two structures still going through
+   the reflective copy path while `Battle` and `Combatant` already had their
+   own. Together ~1.23x, and the budget above is spent.
+
+   The anchors were re-measured afterwards on a different, slower container:
+   absolute times rose ~1.37x but the ratios to quick barely moved
+   (1.59/3.79/10.11 → 1.56/3.95/9.12). So the model's terms are right and only
+   its scale is machine-specific — which is what the session calibration factor
+   absorbs. The constants were deliberately NOT refitted to the slower host,
+   since that would encode it as everyone's reference.
+
+   **Dramatic means fewer games, not faster games**, and those levers are
+   already measured and exposed: `--vs` (one opponent instead of eight, 8x),
+   `--screen-vs` for stage 1, `--top-leads` instead of `--brings 90` (18
+   configurations instead of 90, 5x), and NOT passing `--audit-all` (22x at
+   thorough, see 0j). The pin-driven action ordering in 0e is the one place a
+   real algorithmic saving has been found, and it went to accuracy rather than
+   speed.
+
+0k. **STAGE 2's RUNTIME SHAPE: A BURST, NOT A BOTTLENECK.** Reported as "the
+   1st team took 120 minutes, the next 3 took 10 minutes, then it takes a while
+   to finish — is there a bottleneck writing to disk?"
+
+   **Disk is not it**, and neither are the two other obvious candidates. All
+   measured rather than argued:
+
+   | hypothesis | measurement | verdict |
+   |---|---|---|
+   | cache writes | 32 entries = 8 MB, **0.24 s** per save; ~2 s across a run at `--batch 4` | not it |
+   | process warm-up | same pairing twice in one process: **0.99x**; the threat damage cache carries across pairings and buys nothing | not it |
+   | teams differ in cost | six teams at one tier: 22 s to 52 s, **2.4x** spread | not 12x |
+
+   **What it actually is: the parallel pool.** All pairings are submitted at
+   once (`ProcessPoolExecutor`, one pool for the whole run) and `jobs` is
+   ordered `[(team, opponent) for team in ours for opponent in theirs]`, so
+   every worker starts together on the first team's pairings. Nothing completes
+   until a whole pairing does — then results land in a burst. The progress line
+   made this worse by reporting `elapsed / completed` as "min/pairing": on the
+   FIRST completion that is the full duration of one pairing presented as the
+   per-pairing cost, and it collapses as the burst arrives. It now says
+   "throughput", prints how many are still running, and warns up front that the
+   first result takes as long as one whole pairing.
+
+   Worth checking in your own output before assuming a hang: the header prints
+   how many pairings were **skipped** because they were already cached, and a
+   run that skips most of its work looks instant for reasons that have nothing
+   to do with speed.
+
+   **The wait at the end is the workbook**, and it is by design: it is rebuilt
+   from the WHOLE accumulated cache, not just this run, so it grows every night
+   even when tonight computed almost nothing. Measured 0.2 s at 8 pairings,
+   1.9 s at 32, 7.0 s at 64 — faster than linear. Now announced with the
+   pairing count and timed, instead of being an unexplained pause.
+
+0j. **`--brings 3` AUDITS ONE LEAD, AND MISSES THE BEST BRING.** From "am I
+   really going to get any good lines with --brings 3 — how are those 3
+   selected?"
+
+   `--brings N` sets `verify_top`: audit the N best of our **90** (bring-4,
+   lead-2) configurations, chosen by the stage-1 screener. The defaults are
+   already small — 3 at standard, 6 at thorough, 8 at exhaustive.
+
+   **It misses.** Ground truth = wins over their three hardest leads under the
+   equilibrium pilot (`tools/measure_brings_recall.py`). Exactly 1 of 90
+   configurations beats all three, and it sits at **screen rank 18**:
+
+   | `--brings` | best found | |
+   |---|---|---|
+   | 3, 6, 8, 12 | 2 of 3 | **misses the winner** |
+   | 20, 45, 90 | 3 of 3 | finds it |
+
+   **And the shortlist is narrower than the number suggests.** The screener
+   yields ~14 distinct lead scores over 90 configurations, so its top is one
+   large tie. Distinct LEADS actually audited, consistent across three pairings:
+
+   | `--brings` | 3 | 6 | 8 | 12 | 20 |
+   |---|---|---|---|---|---|
+   | leads audited | **1** | **1** | 2 | 2 | 4 |
+
+   At the default, every audited configuration shares ONE lead and differs only
+   in the back pair. For "a fixed lead per opponent that withstands any of
+   theirs" that is the wrong shape: the search never compares leads. Use
+   `preview_lead.rank_leads` (the one-minute preview) for lead choice — it does
+   sweep all 15 — and treat `--brings` as a back-and-verification setting.
+
+   **ONE LEAD PER OPPONENT, A DIFFERENT LEAD PER OPPONENT.** Reported as "it
+   didn't seem to use the same lead for the first N, so it didn't seem to
+   prerank". Both halves of that are right, and they are about different
+   scopes — the screen runs once per PAIRING. Measured, `--brings 3`, one six
+   against three opponents:
+
+   | opponent | the three audited configurations | distinct leads |
+   |---|---|---|
+   | Rain | Charizard-Y/Pelipper + three backs | 1 |
+   | Big 6 | Garchomp/Farigiraf + three backs | 1 |
+   | Sand | Charizard-Y/Garchomp + three backs | 1 |
+
+   So it IS preranked, and within any one opponent the first N always share a
+   lead — structurally, since `worst_margin` reads `oc[:2]` alone, so the six
+   configurations behind a lead are exactly equal and a stable sort keeps them
+   together. Reading the workbook's Candidates or Lines sheet across opponents
+   shows three different leads, which looks unranked and is not. This was true
+   before the back tie-break too: the pre-existing sort was `-worst_margin`
+   alone, and the tie group was already one lead.
+
+   **A NEGATIVE RESULT, so it is not retried.** The obvious fix is a lead-diverse
+   shortlist: best configuration of each lead first, then the second of each.
+   Measured, it is WORSE. The winner's lead scores -214.3 and it is not the best
+   back within that lead, so round-robin moves it from rank 18 to **rank 78** and
+   misses at every N tested — where the plain order finds it at 20. The screen's
+   lead ranking is coarse but not worthless, and that is the evidence for it.
+
+   The working answer is to raise `--brings`. It is linear, but in TWO terms --
+   verification plays `brings x their configs` full games before the audit even
+   starts (see 0i), so it costs rather more than the audit term alone suggests:
+
+   | per pairing | brings 3 | brings 20 | brings 90 |
+   |---|---|---|---|
+   | standard | ~35 s | ~3 min | ~11 min |
+   | thorough | ~55 s | ~5 min | ~21 min |
+   | thorough + `--audit-all` | ~14 min | ~89 min | ~6.7 h |
+
+   **`--top-leads N` is the flag that fits.** Asked for "viable leads/backs
+   rather than all 90, whether there are 12 to check or 24". A flat count cannot
+   express that over a ranking that is not flat — but counting LEADS can, because
+   the tie groups are exactly one lead each:
+
+   | | `--brings 3` | `--brings 12` | `--top-leads 3` | `--top-leads 4` |
+   |---|---|---|---|---|
+   | configurations | 3 | 12 | **18** | **24** |
+   | distinct leads | **1** | 2 | **3** | **4** |
+
+   Measured end to end. It lands on a lead boundary every time, and on the
+   reference pairing three leads (18 configurations) contains the winner at rank
+   17 where `--brings 12` misses it — for ~2.5 min a pairing at standard against
+   ~11 min for all 90.
+
+       overnight.bat --stage2-only --pick "1-6" --vs "Rain,Big 6" ^
+                     --deep-effort thorough --top-leads 3 --jobs 0
+
+   Recommendation: `--top-leads 3` or `4` for stage 2, `--brings 90` only when
+   committing to a single opponent. `--brings 90 --audit-all` at thorough is a
+   night for one opponent, and the only complete answer.
+
+   **Is `--brings 30` the 30 best, or random?** The 30 best, deterministically:
+   `scored[:N]` after sorting on (-lead margin, -back margin). Measured on three
+   pairings, that key has **13–14 distinct LEAD values** over 90 configurations
+   and **78–87 distinct (lead, back) pairs** — so 6 to 24 configurations tie
+   exactly and their relative order falls back to enumeration order.
+
+   Reordering the same six does NOT change which configurations are audited.
+   Each unordered lead pair is generated exactly once whatever the pool order;
+   only its spelling changes, (A,B) against (B,A). Comparing raw tuples makes
+   the two look completely disjoint, which is how this nearly got written up as
+   a reproducibility bug — the canonical comparison shows the sets identical.
+
+   In practice `--brings 30` landed exactly on 5 leads in all three pairings, so
+   it is equivalent to `--top-leads 5` there. That is the tie structure being
+   convenient, not a guarantee; `--top-leads` guarantees it.
+
+   **TWO MORE NEGATIVE RESULTS**, both from trying to be cleverer than counting:
+
+   - *A viability band on the screen score.* The distribution is bimodal — one
+     tie group at +107, then a dense cluster from -212 to -240 — and the winner
+     sits in the LOWER mode. The band needed to include it is 322 points wide
+     and admits 18 of 90: the same 18 that three leads gives, but only knowable
+     after you already know the answer.
+   - *Ranking our brings by the OPENING MAXIMIN* — the lever 0h flagged as
+     promising. It puts the winner at **rank 60** against 17 for the plain screen
+     margin, and misses at every setting tested. The opening maximin is the
+     right statistic for "is this team hopeless" (0g) and the wrong one for
+     "which of our brings deserve the audit". Two different questions; the same
+     number does not answer both.
+
+   **Why `--audit-all` is the expensive one.** It is not a deeper search; it
+   changes how many of THEIR configurations each audited bring is played
+   against, from the tier's `leads` to all 90:
+
+   | tier | without | with | multiplier |
+   |---|---|---|---|
+   | standard | 2 | 90 | **45x** |
+   | thorough | 4 | 90 | **22.5x** |
+   | exhaustive | 6 | 90 | 15x (already on) |
+
+   Measured in isolation at `verify_top=1`, standard: 16.5 s against 252.8 s,
+   a 15x jump from that one flag.
+
+   And what the extra buys is mostly not backs. Their 90 configurations are 15
+   leads x 6 backs, so at thorough the 86 added configurations split as **24
+   backs of leads already tested** and **66 leads that were skipped as
+   implausible**. The documented reason for the flag is the first group -- "a
+   plan that beats their lead and loses to their back still counts as a win" --
+   and three quarters of the cost goes on the second. A middle setting that
+   resolved backs for the plausible leads only would be ~6x rather than 22.5x;
+   there is no flag for it today.
+
+0i. **"HOW LONG WILL THIS TAKE" HAD NO HONEST ANSWER.** The app said "minutes
+   to hours" in prose and, where it gave a number, quoted
+   `search_effort.relative_cost` as a multiple of the quick tier. That number is
+   not a wall-clock predictor and is wrong by about an order of magnitude when
+   read as one. Measured, one (our team x one opponent) pairing:
+
+   | tier | relative_cost | MEASURED | real ratio |
+   |---|---|---|---|
+   | quick | 1.0 | 25.0 s | 1.0x |
+   | standard | 17.0 | 39.8 s | **1.6x** |
+   | thorough | 73.0 | 94.8 s | **3.8x** |
+
+   `relative_cost` models the AUDIT and treats the screen as free. The screen
+   plays 90 of our configurations against 90 of theirs and is most of the wall
+   clock at the cheap tiers. Told "17x", you budget a night for forty minutes.
+
+   `src/time_estimate.py` replaces it with a measured model:
+
+       seconds = 14.4
+               + 0.0236 * (verify_top * their configs)     <- VERIFICATION
+               + 0.1635 * (verify_top * audited * turns) * pilot
+
+   **The middle term was missing from the first version**, which treated
+   everything before the audit as a constant 25 s. It survived the three
+   measurements it was fitted to and then failed the first test outside that
+   range: a `verify_top=1` pairing measured at **16.5 s**, below the supposed
+   constant. Verification plays `verify_top x their configs` full games, so
+   `--brings` appears in two terms, not one — which is why the first `--brings`
+   cost table understated the large settings. Refitted over five measurements
+   spanning verify_top 1–6 and audited 0–90; the large observations land within
+   3%, worst error +32% on the 16.5 s one (5 s absolute).
+
+   Panels that are BUDGETED report the budget as the answer, because a slider
+   labelled "Seconds" reads as a tuning knob rather than as the wait. The line
+   panel now also says how much of the question the budget actually answers:
+   at 45 s and 8 games it reaches about **5 of their 15 leads**, which the panel
+   previously left the reader to assume was all of them.
+
+   One thing measurement caught that a guess would not: line cost is SUB-LINEAR
+   in `win_samples`, because that is a CAP -- adaptive sampling stops once the
+   Wilson interval is tight. Measured 3.1 s / 6.6 s / 10.0 s at 0 / 4 / 12
+   games; a linear fit through the endpoints missed the middle by 18%, sqrt fits
+   all three within 0.9 s.
+
+   The constants were measured on one machine, so every finished run calls
+   `note_actual` and rescales a session factor. Bounded to [0.2, 5.0] blending
+   at 0.4, so a warm cache that returns instantly nudges the estimate instead of
+   convincing it that everything is free.
+
+0h. **THE GENERATION OBJECTIVE SATURATES.** The largest open problem, and the
+   one to read before planning a long run. Stated against the aim it fails:
+
+       "find a team that matches up very well into specified teams, by having a
+        gameplan, and a fixed lead vs each team that can withstand any of theirs"
+
+   The record generation ranks on is played by the GREEDY pilot. Measured over
+   eight of our brings against one real six, counting wins over their 15 leads
+   (`tools/measure_objective_saturation.py`):
+
+       greedy       spread 14-15 of 15,   2 distinct values
+       equilibrium  spread  3-7  of 15,   4 distinct values
+
+   The greedy record calls every bring a near-clean sweep, including the one
+   that wins 3 of 15 against a real opponent. **That is not a weak signal, it is
+   no signal.**
+
+   **WHAT IT DOES AND DOES NOT AFFECT — corrected.** I first wrote this entry
+   claiming generation *ranks* on that number. It does not, and the correction
+   matters because it changes what to do about it. Traced through:
+
+   | stage | pilot | what it feeds |
+   |---|---|---|
+   | beam search | no battles | which teams exist at all |
+   | `--punish-screen` / `--punish-floor` | **equilibrium** | reject or keep |
+   | the audit (`_rate_and_rerank`) | **equilibrium, always** — `solver_mode(nash=True)` regardless of `--pilot` | `adjusted_win_rate`, `exploitability` |
+   | the win count `X / 90` | **greedy**, unless the tier or `--pilot` says otherwise | `--min-winrate`, `--worst-matchup`, and the printed record |
+
+   `roster_rating.rank_key` is `(-adjusted_win_rate, exploitability)` — both from
+   the audit. So **the ranking was already equilibrium-based** and the saturation
+   does not corrupt it.
+
+   Where the saturation does bite: the two FILTERS and the headline. A
+   `--min-winrate 0.80` floor against a metric that scores 14-15 out of 15 for
+   everything passes the whole field, so it neither saves audit time nor
+   protects against anything; `--worst-matchup` is weak for the same reason.
+   Neither produces a false REJECTION -- a saturated-high metric only ever fails
+   to exclude -- so this wastes time rather than losing teams. And the `X / 90`
+   in the workbook is inflated: read `Adjusted` instead.
+
+   The budget, measured (`tools/measure_funnel.py`, pool 40, 8 workers):
+
+   | stage | s/team | 1000 teams |
+   |---|---|---|
+   | punish screen (opening only) | 21 | 0.7 h |
+   | quick verify (win count, greedy) | 119 | 4.1 h |
+   | standard rating, greedy | 150 | 5.2 h |
+   | **standard rating, equilibrium** | **600** | **20.8 h** |
+
+   And 1000 teams are not 1000 ideas: at beam width 200 the finalists use 38
+   distinct Pokemon, mean pairwise overlap 2.68 of 6, and **52 of 200 share a
+   single four-Pokemon core**. Widening the beam buys near-duplicates.
+
+   So the constraint on aim 1 is not that the ranking is wrong -- it is that
+   the ranking costs an audit per team, and the cheap filters in front of it
+   pass everything. Neither more pool nor more beam width addresses that.
+
+   What the evidence points at, none of it yet measured end to end: screen on
+   the OPENING MAXIMIN (21 s/team, and after 0g it is a sound statistic with a
+   -276 to +92 range on real positions) rather than on a greedy win count; and
+   prune THEIR configurations rather than ours, which is the lever
+   `prescreen.py`'s own post-mortem identifies and which nothing has yet tried.
+   Note the standing caution on the screen: it sees turn 1 only and says nothing
+   about a team that opens cleanly and collapses on turn five.
+
+0g. **THE SHORTLIST WAS BLIND TO THE BACK TWO, AND THE SCREEN REJECTED WINNING
+   OPENINGS.** From "is the lead/back generation really robust — I feel as
+   though I can see better ones" and "how does 'opening already lost' work".
+
+   **How to read the numbers.** Both the screen floor and the opening values are
+   in `heuristic_eval` points. Measured, not assumed
+   (`tools/measure_pin.py`-style probe, 4v4 openings):
+
+   | change from an even opening | points |
+   |---|---|
+   | even 4v4 opening | ~0 |
+   | our lead at 50% HP | −50 |
+   | our whole side at 50% HP | −201 |
+   | **one Pokémon down** | **−280** |
+   | two down | −597 |
+
+   So the −250 floor is a bit under one Pokémon. `KO_WEIGHT = 180` is the
+   KO-CREDIT term alone, not the total swing — losing a Pokémon also loses its
+   HP contribution, hence −280. The stage-1 screener margin is a DIFFERENT
+   scale (`(alive difference) * 100 + (HP difference) * 20`) and the two must
+   not be compared.
+
+   Three defects, all the same shape — a number standing in for a different one:
+
+   1. **The screener could not see the back two.** It scored `oc[:2]` only, so
+      all six configs sharing a lead scored identically and the back was decided
+      by `itertools` emission order. Measured on one real six: the six backs
+      behind the best lead all screened at 107.46 and played out at **4/15 to
+      8/15** under the equilibrium pilot. Now tie-broken on the back pair scored
+      the same way, which moves the pick from 4/15 to 6/15 and — the part that
+      matters — puts the true best (8/15) *inside* the verify_top=3 set, where
+      stage 2 finds it. Free, because the screener is now memoised: 8,100 calls
+      collapse to 225 distinct playouts, **34x faster**.
+
+   2. **`punish_screen` read `worst_case` while its docstring said MAXIMIN.**
+      `worst_case` is the worst case of the ONE row sampled from our equilibrium
+      mixture; the individual pure rows of a mixture can each look dreadful,
+      which is what mixing is for. The gap is `regret`. On Charizard-Y/Garchomp
+      into Pelipper/Swampert — a position that wins 100% — sampled was **−278.0**
+      and maximin **+20.1**, so the screen threw it out while keeping a weak
+      bring at −92. `TurnRobustness.maximin` is now exposed and used. This is
+      not a looser floor: the opening that loses in five turns still screens at
+      −276.4 and is still rejected.
+
+   3. **Stage 1 ignored the edited sets entirely.** `fast_playout` called
+      `make_team` with no `sets=` and built movesets with no `only_moves`, so
+      changing an ability or hand-picking four moves changed nothing about which
+      candidates were SHORTLISTED — only about how the shortlist then scored.
+      Fixed, with the moveset cache keyed by `(name, chosen moves)` so a mirror
+      cannot hand one side's set to the other.
+
+   **What is still bounded, honestly.** The candidate space itself is complete —
+   all 90 (bring-4, lead-2) combinations are enumerated — but only `verify_top`
+   of them are played out, and the back tie-break is a weak proxy (its ranking
+   of the six tied backs was 6, 5, 8, 4, 4, 4 against a true 8, 6, 5, 4, 4, 4).
+   It reliably sinks the worst backs and reliably lifts a good one into the
+   verified set; it is not a ranking you should trust on its own. The 34x
+   screener speedup is the argument for raising `verify_top` rather than
+   trusting the order.
+
+   `punish_screen.screen_team` is bounded too, and was not documented as such:
+   `leads_per_opponent` and `our_brings` default to 2, and those are the FIRST
+   two combinations in team order, not the two most threatening. A team can be
+   screened on a bring it would never make. Now stated in the module docstring.
+
+   **The same fix was needed in the one-minute preview.** `preview_lead.rank_leads`
+   ranked our leads on `rec.worst_case` too, which is why "the leads don't seem
+   good" was a fair report. Before and after, same six, same 90 s budget:
+
+   | lead | before | after |
+   |---|---|---|
+   | Mega Charizard Y / Farigiraf | −187.2 proven (top pick) | −112.2 proven (top pick) |
+   | **Mega Charizard Y / Garchomp** | **−278.0, ABANDONED** | **−113.3, proven (2nd)** |
+
+   The abandoned one is the lead that wins 100% against Pelipper/Swampert. The
+   prune was throwing it away on a number that did not mean what the ranking
+   thought it meant. `tests/test_preview_lead.py`'s stub now sets `worst_case`
+   to a deliberately wrong value, so reading that field again fails the tests
+   rather than quietly passing.
+
+   One test rotted on this fix rather than failing honestly:
+   `test_crippling_a_member_costs_real_games` named Gallade, and once the back
+   tie-break changed the chosen bring, Gallade was no longer brought — so
+   crippling it correctly cost nothing. It now derives its victim from the bring
+   the search actually chose.
+
+0f. **THE HEADER AND THE REPLAY PLAYED DIFFERENT OPPONENTS.** Reported as
+   "many wins falsely recorded as losses" — a battle headed `LOSS — vs lead …`
+   with `Avg-roll result: WIN` inside it.
+
+   **The header was right.** That is the part worth stating, because the report
+   assumed the opposite and acting on the wrong half would have thrown away
+   real losses. The header comes from the stored search; the metric comes from
+   replaying the config live. `play_scripted_worst_case` took no `pilot`
+   argument, so every replay ran the **greedy** pilot while a Thorough+ record
+   had been made by the **equilibrium** one — a genuinely stronger opponent. The
+   replay was winning games the record lost because it faced someone easier.
+
+   Reproduced on Pelipper/Archaludon + Mega Swampert/Garchomp: record `p2`,
+   replay `p1`. Both now return `p2` under equilibrium and `p1` under greedy.
+
+   Second half of the same bug: the search's own scripted branch never passed
+   `pilot` either, so picking Thorough+ against a **scripted** opponent produced
+   a greedy record that the record then labelled `"pilot": "equilibrium"`. Any
+   saved run against a scripted team from before this fix is mislabelled and
+   should be re-run.
+
+   `app.replay_config` now reads the pilot from the record rather than the
+   sidebar — the sidebar can have changed since, and a replay is meant to
+   reproduce a past result, not the current setting. `vs_result` also stores
+   `script_team`, which the second expander had been dropping, so its replay
+   faced a plain greedy 2v2 where the record faced the rehearsed script.
+
+   Where a record still disagrees — an older run, or one from before an engine
+   fix — `app.replay_mismatch_note` says so on screen and tells you to trust the
+   replay. Two contradictory numbers with nothing between them teach the reader
+   to distrust whichever they like less.
+
+   Same class as 0d, one layer up. Worth a standing check: **when two panels
+   report the same game, verify they are running the same opponent.** Pinned by
+   `tests/test_replay_matches_record.py`, including a test that the chosen
+   config is one where the pilots genuinely differ — otherwise the agreement
+   tests would pass on a position nobody could lose and prove nothing.
+
+   **The log under the metric is now the equilibrium game, turn by turn.** The
+   expander prints `battle.log.dump()`, and the battle returned is the one the
+   winner is reported from, so the two cannot describe different games. On the
+   reproduced config:
+
+   | pilot | winner | turns | turn 1 |
+   |---|---|---|---|
+   | greedy | p1 (WIN) | 4 | Earthquake + Heat Wave |
+   | equilibrium | p2 (LOSS) | 12 | Garchomp Protect + Solar Beam (immediate, sun) |
+
+   **Why it is reproducible at all**, which is the part that could easily not
+   have been: the equilibrium pilot SAMPLES from a mixture, so a record and a
+   replay sharing one global RNG walk at different positions could disagree at
+   random — and no amount of pilot-threading would have fixed that.
+   `matchup_search._equilibrium_joint_actions` reseeds per decision, so the
+   result is independent of how many games ran before it. Verified by advancing
+   the shared stream 0–35 draws before replaying: identical winner and turn
+   count every time.
+
+0c. **A TURN CAP IS A CLOCK, AND A CLOCK IS ADJUDICATED.** Capped games used to
+   count as losses. That is not conservative, it is wrong: a 3-1 position with
+   their last Pokemon on 8 HP is a won game, and calling it a loss discards
+   exactly the grind-out lines most real games are.
+
+   `Battle.adjudicate()` applies the real VGC rule — **Pokemon remaining, then
+   HP percentage** (a fraction, so a bulky survivor does not beat a healthy
+   frail one for free). All three `win_rate` estimators use it; `timeouts`
+   still records how many games needed adjudicating.
+
+0d. **THE LINE AND THE WIN RATE USED TO PLAY DIFFERENT OPPONENTS.** Found while
+   chasing a reported "0% that seems winnable": `robustness.turn_robustness`
+   advanced the line against their **modal** action (`argmax(q)`) while
+   `matchup_search` sampled their mixture. A mode is a pure strategy and the
+   equilibrium does not prescribe one — it is a systematically weaker opponent.
+
+   Measured on Charizard-Y + Garchomp into Pelipper + Mega Swampert: the LINE
+   reported a **win in 15**, the same position played out **0-4 against us in
+   11**. Both now sample, and both say loss in 11.
+
+   So the 0% was right and the *line* was wrong. Every "line to a win" this
+   system produced before this fix was generated against a weaker opponent than
+   the probability beside it was measured against.
+
+
+0b. **THE RECORD IS NOT A PROBABILITY, AND ITS AGGREGATE ASSUMES THEY CHOOSE AT
+   RANDOM.** Reported as "these winrates are not sound". They are not.
+
+   `wins / 90` plays ONE game per enemy bring, on the average damage roll, with
+   ties broken deterministically, scores it 1 or 0, and takes the uniform mean.
+   Three separate errors:
+
+   **P1 — a matchup's value is a probability, not a boolean.** Damage varies
+   over a 16-step range, speed ties are coin flips, secondaries fire or do not.
+   Measured on NAIC vs Hard Trick Room: **39 of 48 cells (81%) were genuinely
+   uncertain, averaging 46%** — near coin flips, each recorded as a clean win
+   or loss.
+
+   **P2 — their bring is chosen, not drawn from a hat.** At preview both sides
+   see the other's six and pick four *simultaneously*. That is a matrix game
+   and it has a value. The uniform mean is the number you would want if they
+   picked by lottery.
+
+   **P3 — a proportion without its interval is not a measurement.** Wilson, not
+   the normal approximation, because these numbers live near 0 and 1.
+
+   Measured, NAIC vs Hard Trick Room, 4 of our brings × 12 of theirs × 8
+   samples:
+
+   | reading | value | what it assumes |
+   |---|---|---|
+   | uniform (today's `X / 90`) | **41.1%** | they choose at random |
+   | **game value** | **30.6%** | both sides choose well — *the answer* |
+   | worst case | **0.0%** | they counter and we cannot mix |
+
+   The worst case being **zero** is the finding that matters: every one of our
+   brings loses to something they can bring, so **mixing is worth the entire
+   30.6%**. "Commit to ONE bring" — §1's framing — is itself unsound against
+   that opponent. `game_value` always sits between the other two, and the test
+   suite pins that ordering.
+
+   **What this costs, and which estimator to use.** The full version is
+   `samples × our brings × their brings`, so the per-cell estimator decides
+   whether it is affordable. Measured on 10 real cells against a 40-game ground
+   truth (`tools/measure_estimator.py`):
+
+   | estimator | cost/cell | mean abs error | worst cell | ranking |
+   |---|---|---|---|---|
+   | old (1 game, avg roll) | 0.7 s | 0.25 | 0.78 | 96% |
+   | quadrature (3 rolls × 2 ties) | 4.5 s | 0.17 | 0.78 | 91% |
+   | sample-8 | 6.1 s | 0.13 | 0.35 | — |
+   | **adaptive** (8–24 games) | 11.4 s | **0.05** | **0.17** | — |
+   | truth (40 games) | 31.4 s | — | — | — |
+
+   **Adaptive is the one to use** — a fifth of the old method's error at 2.7×
+   cheaper than the ground truth. It samples in batches and stops once the
+   Wilson interval is narrow enough, so a settled cell costs 8 games and a
+   coin-flip cell costs 24. It cannot bias the estimate; it changes only how
+   many honest games get played.
+
+   **Quadrature — "use 3 damage rolls instead of 16" — was tried and LOSES.**
+   It halves the mean error but keeps the same catastrophic worst cell (truth
+   78%, estimate 0%) and *ranks worse* than the single playout it replaces.
+   The reason is structural: pinning every roll in a game to one index is a
+   **correlated** extreme, and real games roll independently. "All rolls low"
+   is a game nobody plays, and the mid scenario is not the median game but the
+   all-median-rolls game — a line needing one high roll somewhere in twelve
+   turns gets it almost always in reality and never under quadrature.
+
+   **Double oracle over the bring matrix also saves nothing**: 720/720 cells at
+   8 × 90 on random matrices, 556/720 (77%) when their brings cluster into
+   archetypes. Computing the column player's best response requires scanning
+   every column. Kept as correct-but-inert.
+
+   At 11.4 s/cell an 8 × 90 audit is **~2.3 hours for one pairing** — the
+   decision point (team preview), not screening.
+
+   **But P2 is nearly free.** `win_rate.aggregate()` takes floats, so the
+   existing deterministic 0/1 matrix can be run through it at zero extra
+   simulation cost and gives the game value instead of the uniform mean. That
+   fixes the largest of the three errors everywhere, today.
+
+   **Not yet wired into the pipeline.** `X / 90` is still what the workbook and
+   the app report.
+
+
+0. **THE RECORD IS MEASURED AGAINST AN OPPONENT WHO PLAYS BADLY. Read this
+   before any other number in this file.**
+
+   `play_out_pair` plays OUR side with the real solver and THEIR side with
+   `greedy_opponent_joint_action`, a policy this codebase wrote itself. That is
+   a systematic advantage for whichever side is passed as p1, and it is large.
+
+   `tools/measure_side_bias.py` plays the same two bring-4s twice with the
+   sides swapped. If a result is real, mirroring it flips the winner.
+
+   | pilot | contradictions | direction | cost |
+   |---|---|---|---|
+   | greedy (default) | **21 / 27 decided (78%)** | **all 21 are "p1 wins both"** | 3s |
+   | equilibrium | 9 / 22 decided (41%) | 3 p1 / 6 p2 — no side advantage | 40s (13×) |
+
+   The greedy figure is not noise: every single contradiction points the same
+   way. The visible symptom is that all eight teams in `teams.csv` score
+   83–99% against each other, which cannot be true — Rain and Big 6 both count
+   their head-to-head as a win.
+
+   **What this invalidates:** every `Wins / Of` in every sheet, the generator's
+   ratings, `--min-winrate`, `--worst-matchup`, and any comparison between two
+   teams that were each rated as p1. They measure "how does this team do
+   against a bad opponent", and a line that wins there can lose a real game —
+   which is what "a great number of losses were marked as wins" is.
+
+   **What it does not invalidate:** the punish/exploitability numbers, which
+   already run a best-responding opponent, and `heuristic_eval`, which is
+   perfectly antisymmetric over 8242 states (`measure_antisymmetry.py`).
+
+   The equilibrium pilot removes the *greedy* bias. **A smaller, opposite one
+   remains, and it is not yet fixed.** Two obvious explanations were tested and
+   both are wrong:
+
+   * *"It is unresolved games."* No. At `--turns 24` every matchup decides
+     (undecided 6 → 0) and contradictions do not fall: 41% → 43%.
+   * *"A mixed equilibrium is sampled, so one playout is a coin flip."* No. The
+     same matchup, same sides, run 8 times, gives the same winner 8 times under
+     both pilots — the mixture draw is seeded per decision.
+
+   The residual turned out to be **two separate things, and only one of them
+   was a bug.** 28 mirrored matchups at `--turns 24`:
+
+   | pilot / seat rule / info | contradictions | direction |
+   |---|---|---|
+   | greedy | 78% | **21 p1 / 0 p2** |
+   | equilibrium, ours samples + theirs modal | 43% | 3 p1 / 9 p2 |
+   | equilibrium, both seats sample | 29% | 0 p1 / 8 p2 |
+   | equilibrium, old rule, `--symmetric-info` | 29% | 4 p1 / 4 p2 |
+   | **equilibrium, both sample + `--symmetric-info`** | **14%** | **2 p1 / 2 p2** |
+
+   **The seat rule was a bug, and is fixed.** `_equilibrium_joint_actions`
+   sampled OUR action from mixture `p` but took THEIR single modal action from
+   `q` — a pure strategy, which is not what the equilibrium prescribes. Two
+   different players wearing one name. Both seats now sample. Worth ~15 points.
+
+   **The wider opponent move space is not a bug.** `_attach_movesets`
+   deliberately gives the opponent six plausible moves per Pokémon against our
+   known four, because assuming they run the usage-standard four is
+   self-fulfilling and measured at 10 points of win rate. It is correct
+   modelling that rides with the *seat*, so it shows up in a mirror test as a
+   p2 lean — strip it with `measure_side_bias.py --symmetric-info` and the
+   direction balances exactly (4/4, then 2/2). Do not "fix" it.
+
+   **What is left: 14%, pointing both ways.** Genuine near-ties, now measured
+   rather than assumed. `q` was also checked and is a real equilibrium mixture
+   from `solve_matrix`, not a best response — that hypothesis was wrong too.
+
+   ### The trap the honest pilot sets
+
+   **Every screen threshold in this repo was calibrated against greedy
+   records, and those are roughly double.** Leave `--min-winrate` at its 0.80
+   default under `--pilot equilibrium` and it rejects teams better than
+   anything in `teams.csv` — the best hand-built team scores **60.6%** under
+   this pilot. Use `--min-winrate 0.45` and scale `--worst-matchup` the same
+   way. Stage 1 now prints a warning if you forget.
+
+   **What the fix is worth, measured.** Same three teams, same opponents, same
+   effort, same evaluation — only the pilot differs
+   (`tools/measure_generator.py --control-only --pilot equilibrium`):
+
+   | team | greedy | equilibrium |
+   |---|---|---|
+   | Rain | 449/462 **97.2%** | 232/462 **50.2%** |
+   | Big 6 | 425/462 **92.0%** | 280/462 **60.6%** |
+   | Hard Trick Room | 455/546 **83.3%** | 185/546 **33.9%** |
+
+   Records roughly halve. The greedy column is the one that claimed every team
+   in the library beats every other one; the equilibrium column is teams
+   beating a third to two thirds of their opponents' configurations, which is
+   what a field of comparable teams should look like. Cost was ~600s per team
+   against ~150s — about 4×, not the 13× the single-playout sweep suggested,
+   because the audit is unchanged and is a large share of the total.
+
+   Adjusted wins and punish move slightly too (Big 6 0.71 → 0.60; Rain
+   unchanged), because the pilot also decides which brings are selected for
+   auditing. The audit itself was always equilibrium-piloted.
+
+   **How to get an honest number today:**
+
+   ```bat
+   overnight.bat --pilot equilibrium ...      :: any tier
+   overnight.bat --gen-effort thorough+ ...   :: the same thing, as a preset
+   ```
+
+   In the app it is the sidebar's **Model settings → Who plays the games**, and
+   the strength slider's **Thorough+** tier forces it for that panel regardless
+   of the sidebar. The greedy default is left in place because it is 13× faster
+   and still useful for ranking, but every panel now says which one produced
+   the number in front of you.
+
 
 1. **The beam still ranks on coverage, and a better objective did not beat it
    (yet).**

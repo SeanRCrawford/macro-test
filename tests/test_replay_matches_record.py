@@ -1,0 +1,236 @@
+"""A replay has to reproduce the record, or the screen contradicts itself.
+
+Reported: in the Lead/Back "Vs Team" section, battles headed "LOSS — vs lead
+..." show "Avg-roll result: WIN" inside. Two numbers about one game, on one
+screen, disagreeing with nothing to explain it.
+
+Neither was random. The header comes from the stored search; the metric comes
+from replaying the config live. `play_scripted_worst_case` took no `pilot`
+argument, so every replay ran the GREEDY pilot -- while a Thorough+ record had
+been made by the EQUILIBRIUM one, which is a genuinely stronger opponent. The
+replay won games the record lost.
+
+Which one was wrong is worth stating, because the report assumed the header
+was: the header was RIGHT. The replay was playing an easier opponent. Same
+defect as WORKFLOW 0d ("the line and the win rate used to play different
+opponents"), one layer up.
+
+The second half of the same bug: the search's own scripted branch never passed
+`pilot` either, so picking Thorough+ against a scripted opponent produced a
+greedy record that the record then labelled `"pilot": "equilibrium"`.
+"""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+
+from _harness import load_world  # noqa: E402
+from matchup_search import (EQUILIBRIUM_PILOT, GREEDY_PILOT,  # noqa: E402
+                            play_out_worst_case, play_scripted_worst_case)
+
+_WORLD = None
+OUR4 = ["Mega Charizard Y", "Garchomp", "Mega Aerodactyl", "Farigiraf"]
+# The exact config the disagreement was reproduced on.
+EB4 = ["Pelipper", "Archaludon", "Mega Swampert", "Garchomp"]
+
+
+def world():
+    global _WORLD
+    if _WORLD is None:
+        _WORLD = load_world()
+    return _WORLD
+
+
+def record(pilot, our4=OUR4, eb4=EB4):
+    """What the search stores: the unscripted branch of search_robust_composition."""
+    w = world()
+    winner, _t, _b = play_out_worst_case(
+        list(our4), list(eb4), w["merged"], w["moves"], w["natures"],
+        w["typechart"], 12, pilot=pilot)
+    return winner
+
+
+def replay(pilot, our4=OUR4, eb4=EB4, script_team=None):
+    """What the app shows in the expander: app.replay_config."""
+    w = world()
+    winner, _t, _b, _v = play_scripted_worst_case(
+        list(our4), list(eb4), w["merged"], w["moves"], w["natures"],
+        w["typechart"], script_team, 12, pilot=pilot)
+    return winner
+
+
+# Enemy configurations to look through for one the two pilots disagree about.
+# The first entry is the configuration the bug was originally reproduced on.
+CANDIDATE_EB4 = [
+    ["Pelipper", "Archaludon", "Mega Swampert", "Garchomp"],
+    ["Pelipper", "Mega Swampert", "Archaludon", "Grimmsnarl"],
+    ["Mega Swampert", "Garchomp", "Pelipper", "Archaludon"],
+    ["Archaludon", "Grimmsnarl", "Pelipper", "Mega Swampert"],
+    ["Grimmsnarl", "Garchomp", "Pelipper", "Archaludon"],
+    ["Pelipper", "Garchomp", "Mega Swampert", "Grimmsnarl"],
+]
+
+_DIVERGENT = None
+
+
+def divergent_config():
+    """A configuration the two pilots genuinely disagree about.
+
+    DISCOVERED rather than named. This file used to hard-code one, and three
+    tests broke the day an unrelated mechanics fix (Parting Shot, self-switch
+    on a blocked hit) changed that game's outcome -- failing for a reason that
+    had nothing to do with what they test. The property under test is "record
+    and replay agree", and it is only meaningful on a position where the pilots
+    differ; which position that is, is not the point.
+    """
+    global _DIVERGENT
+    if _DIVERGENT is None:
+        for eb4 in CANDIDATE_EB4:
+            if record(GREEDY_PILOT, eb4=eb4) != record(EQUILIBRIUM_PILOT, eb4=eb4):
+                _DIVERGENT = eb4
+                break
+    return _DIVERGENT
+
+
+class TestTheReplayReproducesTheRecord(unittest.TestCase):
+
+    def test_a_divergent_configuration_exists(self):
+        """The premise of the rest. If no configuration divides the pilots then
+        the agreement tests below prove nothing, and that is worth failing on
+        rather than passing quietly."""
+        self.assertIsNotNone(divergent_config(),
+                             "no candidate configuration divides the pilots")
+
+    def test_they_agree_under_the_greedy_pilot(self):
+        eb4 = divergent_config() or CANDIDATE_EB4[0]
+        self.assertEqual(record(GREEDY_PILOT, eb4=eb4),
+                         replay(GREEDY_PILOT, eb4=eb4))
+
+    def test_they_agree_under_the_equilibrium_pilot(self):
+        eb4 = divergent_config() or CANDIDATE_EB4[0]
+        self.assertEqual(record(EQUILIBRIUM_PILOT, eb4=eb4),
+                         replay(EQUILIBRIUM_PILOT, eb4=eb4))
+
+    def test_the_two_pilots_reach_different_winners_there(self):
+        eb4 = divergent_config()
+        self.assertIsNotNone(eb4)
+        self.assertNotEqual(record(GREEDY_PILOT, eb4=eb4),
+                            record(EQUILIBRIUM_PILOT, eb4=eb4))
+
+
+class TestTheScriptedBranchTakesAPilotToo(unittest.TestCase):
+
+    def test_play_scripted_worst_case_accepts_a_pilot(self):
+        import inspect
+        self.assertIn("pilot",
+                      inspect.signature(play_scripted_worst_case).parameters)
+
+    def test_it_defaults_to_greedy_so_old_callers_are_unchanged(self):
+        import inspect
+        param = inspect.signature(play_scripted_worst_case).parameters["pilot"]
+        self.assertEqual(param.default, GREEDY_PILOT)
+
+    def test_the_pilot_actually_changes_the_result(self):
+        """Guards against the argument being accepted and then dropped on the
+        floor -- which is exactly what the bug looked like from outside."""
+        eb4 = divergent_config()
+        self.assertIsNotNone(eb4)
+        self.assertNotEqual(replay(GREEDY_PILOT, eb4=eb4),
+                            replay(EQUILIBRIUM_PILOT, eb4=eb4))
+
+    def test_the_search_passes_its_pilot_to_the_scripted_branch(self):
+        """Read from the source, because reaching this branch needs a scripted
+        opponent and a full verify pass."""
+        import re
+        path = os.path.join(os.path.dirname(__file__), "..", "src",
+                            "matchup_search.py")
+        body = open(path).read()
+        call = re.search(r"play_scripted_worst_case\(\s*\n\s*cand\[.our_bring4.\]"
+                         r".*?\)", body, re.S)
+        self.assertIsNotNone(call, "verify-pass call site not found")
+        self.assertIn("pilot=pilot", call.group(0))
+
+
+class TestTheLogIsTheGameTheMetricDescribes(unittest.TestCase):
+    """The expander prints `battle.log.dump()` under the Avg-roll metric. If the
+    returned battle were a different variant from the reported winner, the log
+    would be a turn-by-turn account of a game the metric is not about -- the
+    same contradiction one level down."""
+
+    def played(self, pilot):
+        w = world()
+        return play_scripted_worst_case(
+            list(OUR4), list(EB4), w["merged"], w["moves"], w["natures"],
+            w["typechart"], None, 12, pilot=pilot)
+
+    def test_the_returned_battle_agrees_with_the_reported_winner(self):
+        for pilot in (GREEDY_PILOT, EQUILIBRIUM_PILOT):
+            winner, _t, battle, _v = self.played(pilot)
+            if winner in ("p1", "p2"):
+                self.assertEqual(battle.winner(), winner, pilot)
+
+    def test_the_equilibrium_log_is_a_different_game(self):
+        """Not a cosmetic difference: greedy wins this in 4 turns, the
+        equilibrium pilot loses it in 12."""
+        _gw, gt, gb, _ = self.played(GREEDY_PILOT)
+        _ew, et, eb, _ = self.played(EQUILIBRIUM_PILOT)
+        self.assertNotEqual(gb.log.dump(), eb.log.dump())
+        self.assertGreater(et, gt)
+
+    def test_the_equilibrium_log_shows_the_pinning_move(self):
+        """Solar Beam firing immediately is the projection fix visible in the
+        log a player actually reads."""
+        _w, _t, battle, _v = self.played(EQUILIBRIUM_PILOT)
+        log = battle.log.dump()
+        self.assertIn("Solar Beam", log)
+        self.assertIn("strikes immediately", log)
+
+    def test_the_replay_is_reproducible(self):
+        """Mixture sampling is reseeded per decision
+        (matchup_search._equilibrium_joint_actions), so a replay does not depend
+        on how many games ran before it. Without that, the record and the replay
+        would share one global RNG walk at different positions and could
+        disagree at random -- which no amount of pilot-threading would fix."""
+        first = self.played(EQUILIBRIUM_PILOT)
+        second = self.played(EQUILIBRIUM_PILOT)
+        self.assertEqual(first[0], second[0])
+        self.assertEqual(first[1], second[1])
+        self.assertEqual(first[2].log.dump(), second[2].log.dump())
+
+
+class TestTheAppReplayHelper(unittest.TestCase):
+
+    def helper(self):
+        """app.replay_config without importing streamlit's page body."""
+        import inspect
+        path = os.path.join(os.path.dirname(__file__), "..", "src", "app.py")
+        body = open(path).read()
+        self.assertIn("def replay_config(", body)
+        start = body.index("def replay_config(")
+        return body[start:start + 2000]
+
+    def test_it_reads_the_pilot_from_the_record(self):
+        """Not from the sidebar: the sidebar can have been changed since, and a
+        replay reproduces a past result, not the current setting."""
+        src = self.helper()
+        self.assertIn('.get("pilot")', src)
+
+    def test_it_falls_back_to_greedy_for_records_that_predate_the_field(self):
+        self.assertIn("or GREEDY_PILOT", self.helper())
+
+    def test_both_expanders_use_it(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "src", "app.py")
+        body = open(path).read()
+        self.assertEqual(body.count("replay_config("), 3)   # def + two call sites
+
+    def test_a_disagreement_is_reported_rather_than_shown_silently(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "src", "app.py")
+        body = open(path).read()
+        self.assertIn("def replay_mismatch_note(", body)
+        self.assertEqual(body.count("replay_mismatch_note("), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

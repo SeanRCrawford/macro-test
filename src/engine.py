@@ -16,7 +16,8 @@ no every-ability coverage) -- it's built to cover exactly what's needed for
 this format, and is meant to be extended incrementally.
 """
 from dataclasses import dataclass, field
-from damage import Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate, effective_stat
+from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
+                    effective_stat, defensive_stat)
 
 # Display names, so the log reads like the game rather than like the code.
 WEATHER_NAMES = {"rain": "a rainstorm", "sun": "harsh sunlight",
@@ -45,6 +46,27 @@ class FieldState:
     screens_p1: dict = field(default_factory=lambda: {"reflect": 0, "lightscreen": 0})
     screens_p2: dict = field(default_factory=lambda: {"reflect": 0, "lightscreen": 0})
 
+    def __deepcopy__(self, memo):
+        """Every field is a scalar or a flat dict of ints, so the reflective
+        path `copy` takes by default is pure overhead.
+
+        Profiling a standard pairing put `copy.deepcopy` at 24% cumulative --
+        11.4 M calls -- and Battle and Combatant already had hand-written
+        copies. FieldState and Side did not, so they were still being walked
+        attribute by attribute through `_reconstruct` and `_deepcopy_dict`.
+        """
+        new = FieldState.__new__(FieldState)
+        memo[id(self)] = new
+        new.weather = self.weather
+        new.weather_turns_left = self.weather_turns_left
+        new.trick_room = self.trick_room
+        new.trick_room_turns_left = self.trick_room_turns_left
+        new.tailwind_p1 = self.tailwind_p1
+        new.tailwind_p2 = self.tailwind_p2
+        new.screens_p1 = dict(self.screens_p1)
+        new.screens_p2 = dict(self.screens_p2)
+        return new
+
 
 @dataclass
 class Action:
@@ -71,6 +93,8 @@ def mega_evolve(combatant: Combatant):
     combatant.stats = dict(combatant.mega_stats)
     combatant.ability = combatant.mega_ability
     combatant.types = list(combatant.mega_types)
+    if combatant.mega_weight_kg is not None:
+        combatant.weight_kg = combatant.mega_weight_kg
     combatant.mega_evolved = True
 
 
@@ -260,7 +284,8 @@ def resolve_damage_action(action: Action, field_state: FieldState, typechart: di
         if attacker.item == "Choice Specs" and atk_key == "spa":
             atk_stat *= 1.5
 
-        def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
+        def_stat = defensive_stat(target, def_key, action.move,
+                                  weather=field.weather)
 
         # NOTE: this standalone demo function doesn't track which side is which
         # (no Battle/Side objects here), so screens are not modeled -- the real,

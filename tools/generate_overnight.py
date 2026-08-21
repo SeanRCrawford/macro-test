@@ -63,7 +63,11 @@ def _stage1_settings(args):
             "min_winrate": args.min_winrate,
             "script_screen": bool(args.script_screen),
             "punish_screen": args.punish_screen,
-            "worst_matchup": args.worst_matchup}
+            "worst_matchup": args.worst_matchup,
+            # Both change WHICH teams come out and in what order, so a run that
+            # varies them is a different stage 1 and must renumber loudly.
+            "pilot": args.pilot, "evaluation": args.evaluation,
+            "screen_vs": args.screen_vs}
 
 
 def _warn_if_renumbering(args):
@@ -182,7 +186,14 @@ def _beam_finalists(args, world):
     return finals
 
 
-def main():
+def build_parser():
+    """The parser, separate from main().
+
+    So a test can ask what the real defaults are instead of keeping its own
+    copy of them. `_stage1_settings` reads attributes off the Namespace, and a
+    hand-maintained stand-in has now fallen out of step three times -- once per
+    new stage 1 flag -- failing the test rather than catching a bug.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--candidates", type=int, default=20,
                     help="how many beam finalists to RATE. The whole point of "
@@ -245,13 +256,44 @@ def main():
                          "(King / Hard Trick Room / Perish Trap) before the "
                          "audit. A team with no plan against a rehearsed line "
                          "is not worth auditing.")
+    ap.add_argument("--screen-vs", default=None, metavar="NAMES",
+                    help="rate stage 1 against ONLY these opponents, "
+                         "comma-separated. THE lever for screening a large "
+                         "pool: cost is linear in opponents, so two instead of "
+                         "eight is 4x more teams per night. The ranking is "
+                         "then 'best against these two', so use it to shortlist "
+                         "and re-rate the survivors against everyone.")
+    ap.add_argument("--pilot", default=None,
+                    choices=["greedy", "equilibrium"],
+                    help="WHO PLAYS THE GAMES the record comes from. Default "
+                         "follows the effort tier (greedy everywhere except "
+                         "--effort thorough+). 'greedy' plays our side with "
+                         "the real solver and theirs with a fixed policy, "
+                         "which hands whichever side is p1 a systematic "
+                         "advantage -- 78%% of mirrored matchups flip "
+                         "(tools/measure_side_bias.py). 'equilibrium' plays "
+                         "both sides as a matrix game: a safe play is worth "
+                         "what it is worth and a read is charged for being a "
+                         "read. ~13x slower per game.")
+    ap.add_argument("--evaluation", default=None,
+                    choices=["sacrifice", "legacy"],
+                    help="Which EVALUATION the solver uses. 'sacrifice' "
+                         "(default) scores speed control and discounts a "
+                         "Pokemon that is one hit from gone, so the solver "
+                         "sacrifices instead of preserving something it cannot "
+                         "use -- measured cost, record 80%% -> 74%%. 'legacy' "
+                         "restores the previous evaluation exactly.")
     ap.add_argument("--min-winrate", type=float, default=0.80, metavar="F",
                     help="abandon a team as soon as its running win rate "
                          "against the opponents checked so far falls below "
                          "this (default 0.80). A team that cannot win is not "
                          "worth auditing for punishability, and the audit is "
                          "the expensive stage. Set 0 to rate everything.")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
     args.jobs, _warning = blas_limits.workers_advice(args.jobs)
     if _warning:
         print(f"WARNING  : {_warning}")
@@ -266,6 +308,52 @@ def main():
     print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
 
     # `--punish-screen` with no number means "use the default floor".
+    # The tier carries a default pilot; --pilot overrides it. Resolved once,
+    # here, so the cache key, the workers and the printed banner cannot
+    # disagree about who played the games.
+    from search_effort import tier as _tier
+    from solver import DEFAULT_EVAL_PROFILE
+    args.pilot = args.pilot or _tier(args.effort).get("pilot", "greedy")
+    args.evaluation = args.evaluation or DEFAULT_EVAL_PROFILE
+    print(f"pilot    : {args.pilot}   evaluation: {args.evaluation}"
+          + ("   <-- record NOT inflated by the side bias"
+             if args.pilot == "equilibrium" else
+             "   <-- greedy: whoever is p1 has a systematic advantage "
+             "(see WORKFLOW.md section 4.0)"))
+    # THE TRAP THE HONEST PILOT SETS. Every screen threshold in this tool was
+    # calibrated against greedy records, and greedy records are roughly double:
+    # measured, Rain 97.2% -> 50.2%, Big 6 92.0% -> 60.6%, Hard Trick Room
+    # 83.3% -> 33.9%. Leave --min-winrate at 0.80 under equilibrium and it
+    # rejects teams better than anything in teams.csv, silently, all night.
+    if args.pilot == "equilibrium" and (args.min_winrate > 0.55
+                                        or args.worst_matchup > 0.55):
+        print("=" * 78)
+        print("WARNING: these screen floors were calibrated on GREEDY "
+              "records, and the equilibrium")
+        print("         pilot roughly halves them. They will reject almost "
+              "everything.")
+        print("  Equilibrium records are about HALF the greedy ones the "
+              "default was set for:")
+        print("  the best hand-built team in teams.csv scores 60.6% under this "
+              "pilot, so a")
+        print("  0.80 floor throws away teams better than anything you own.")
+        print(f"  You have --min-winrate {args.min_winrate:.2f}"
+              + (f" and --worst-matchup {args.worst_matchup:.2f}"
+                 if args.worst_matchup else "") + ".")
+        print("  Try --min-winrate 0.45; --worst-matchup wants the same "
+              "halving (0.89 -> ~0.45).")
+        print("=" * 78, flush=True)
+    screen_opponents = None
+    if args.screen_vs:
+        wanted = [t.strip() for t in args.screen_vs.split(",") if t.strip()]
+        unknown = [t for t in wanted if t not in world["teams"]]
+        if unknown:
+            raise SystemExit(f"--screen-vs: no such team(s) {unknown}. "
+                             f"Known: {', '.join(world['teams'])}")
+        screen_opponents = wanted
+        print(f"screen-vs: {', '.join(wanted)} only "
+              f"({len(world['teams'])} in the library) -- the ranking is "
+              f"'best against these', not 'best overall'")
     punish_floor = (punish_screen.DEFAULT_FLOOR if args.punish_screen is True
                     else args.punish_screen)
     if punish_floor is not None:
@@ -327,7 +415,10 @@ def main():
         our_sets = sets_by_team.get(tuple(sorted(team)))
         # The sets change what is simulated, so they belong in the key: an
         # optimised run must never be served a usage-default result.
-        key = roster_rating.rating_key(team, args.effort, args.turns, our_sets)
+        key = roster_rating.rating_key(team, args.effort, args.turns, our_sets,
+                                       opponents=screen_opponents,
+                                       pilot=args.pilot,
+                                       eval_profile=args.evaluation)
         keys.append(key)
         if cache.get(key) is None and not any(j["key"] == key for j in todo):
             # SCREEN FIRST, then audit -- see roster_rating.rate_team. A team
@@ -340,6 +431,9 @@ def main():
                          "script_screen": args.script_screen,
                          "punish_floor": punish_floor,
                          "worst_matchup_floor": args.worst_matchup,
+                         "pilot": args.pilot,
+                         "eval_profile": args.evaluation,
+                         "opponents": screen_opponents,
                          "beam_score": beam_score})
 
     started = time.time()
@@ -361,16 +455,25 @@ def main():
             done += 1
             elapsed = time.time() - started
             left = elapsed / done * (len(todo) - done) / 60
+            # The screen's number is printed for teams it ACCEPTED too, and for
+            # teams a LATER screen rejected. Seeing it only where it fires
+            # tells you nothing about where to put the floor; seeing the whole
+            # distribution does.
+            guar = record.get("opening_guaranteed")
             if record.get("skipped"):
+                # ...except where the reason already quotes it.
+                shown = ("" if record["skipped"].startswith("opening already")
+                         or guar is None else f"open {guar:.0f}   ")
                 print(f"  [{done}/{len(todo)}] skipped: {record['skipped']} "
                       f"({record['wins']}/{record['total']} won)   "
-                      f"~{left:.0f} min left", flush=True)
+                      f"{shown}~{left:.0f} min left", flush=True)
                 continue
             adj = record.get("adjusted_win_rate")
             print(f"  [{done}/{len(todo)}] "
                   f"adj {f'{adj:.2f}' if adj is not None else ' n/a'}   "
                   f"punish {record['exploitability'] or float('nan'):6.1f}   "
-                  f"{record['wins']}/{record['total']} won   "
+                  + (f"open {guar:6.0f}   " if guar is not None else "")
+                  + f"{record['wins']}/{record['total']} won   "
                   f"~{left:.0f} min left", flush=True)
 
     # Back into beam order. Results arrive out of order -- that is what keeps
@@ -383,8 +486,30 @@ def main():
     # punish -- observed live before this was changed.
     ranked = sorted([r for r in rated if r.get("exploitability") is not None],
                     key=roster_rating.rank_key)
+
+    def report_openings():
+        """WHERE TO PUT THE FLOOR NEXT TIME. Every team the screen looked at,
+        accepted or rejected, so the choice is made against a distribution
+        rather than against the one number a rejection happened to print. It
+        runs on the empty ranking too -- a run where nothing survived is
+        exactly the run where you need to know whether the floor was the
+        reason."""
+        openings = sorted(r["opening_guaranteed"] for r in rated
+                          if r.get("opening_guaranteed") is not None)
+        if not openings:
+            return
+        kept = [r["opening_guaranteed"] for r in ranked
+                if r.get("opening_guaranteed") is not None]
+        mid = openings[len(openings) // 2]
+        print(f"\nopening guaranteed across {len(openings)} teams: "
+              f"worst {openings[0]:.0f}, median {mid:.0f}, "
+              f"best {openings[-1]:.0f}"
+              + (f"; worst KEPT team {min(kept):.0f}" if kept else "")
+              + f"   (--punish-screen floor was {punish_floor:.0f})")
+
     if not ranked:
         print("\nNo ratings produced (quick tier does not compute them).")
+        report_openings()
         return
 
     print("\n" + "=" * 96)
@@ -401,6 +526,8 @@ def main():
         print(f"    {', '.join(r['team'])}")
         if r.get("worst_opponent"):
             print(f"    worst vs {r['worst_opponent']} ({r['worst_value']:.0f})")
+
+    report_openings()
 
     # EVERY rated team, not just the top --keep. The numbering is the ranking,
     # so gen06 means the same team tomorrow as it does today -- which is what

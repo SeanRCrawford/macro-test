@@ -65,6 +65,8 @@ class Combatant:
     mega_stats: dict | None = None
     mega_ability: str | None = None
     mega_types: list | None = None
+    weight_kg: float | None = None       # current form's weight -- Low Kick/Grass Knot
+    mega_weight_kg: float | None = None  # swapped in on mega_evolve(), like mega_stats
 
     def __deepcopy__(self, memo):
         """Fast copy. Every field is a scalar, a flat dict of scalars, or a
@@ -96,6 +98,8 @@ class Combatant:
         new.mega_stats = self.mega_stats
         new.mega_ability = self.mega_ability
         new.mega_types = self.mega_types
+        new.weight_kg = self.weight_kg
+        new.mega_weight_kg = self.mega_weight_kg
         return new
 
     def max_hp(self) -> int:
@@ -135,11 +139,51 @@ class MoveInfo:
                                             # stat stages/volatiles, 'shedtail' = Shed Tail leaves a
                                             # Substitute) -- only the switch itself is modeled here,
                                             # not those extra pass-along effects.
+    ignore_defensive: bool = False      # showdown 'ignoreDefensive': Sacred Sword, Chip Away and
+                                        # Darkest Lariat hit as if the target's Defence stage were 0.
+                                        # ('ignoreEvasion' rides along with it in the data and is a
+                                        # no-op here -- moves never miss in this simulation.)
     accuracy: bool | int = True            # raw showdown 'accuracy': True = never misses, else 1-100.
                                             # Battle resolution doesn't roll a miss chance (moves
                                             # always hit) -- this exists purely so the greedy/candidate
                                             # move-choice scoring can prefer a more reliable move when
                                             # two options are otherwise equally good.
+
+
+_MOVE_INFO_CACHE: dict[int, "MoveInfo"] = {}
+
+
+def move_from_showdown(m: dict) -> MoveInfo:
+    """Build a MoveInfo from a raw gen9moves.json entry.
+
+    THE one place that reads the raw dict. There were four hand-written copies
+    of this, and they had already drifted (one forgot `has_crash`); adding
+    `ignore_defensive` to all of them separately is how a move flag ends up
+    working in the simulator but not in the solver that chooses the move.
+
+    Cached by `id(m)`: `moves_db`'s entries are loaded once and never mutated,
+    so the same raw dict always produces the same `MoveInfo`, and every caller
+    already treats a `MoveInfo` as immutable (a converted move, e.g. Pixilate's
+    type change in `damage.py` itself, builds a NEW instance rather than
+    mutating one in place). Measured mattering: `solver.build_moveset` calls
+    this fresh for every Pokemon in every position a search or sweep builds,
+    uncached, which showed up as 11%+ of `lead_scan.full_report`'s own cost in
+    `tools/lead_sweep.py`'s sweep stage.
+    """
+    cached = _MOVE_INFO_CACHE.get(id(m))
+    if cached is not None:
+        return cached
+    info = MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
+                    priority=m.get("priority", 0), secondary=m.get("secondary"),
+                    self_effect=m.get("self"), boosts=m.get("boosts"),
+                    recoil=m.get("recoil"), drain=m.get("drain"),
+                    has_crash=bool(m.get("hasCrashDamage")),
+                    volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
+                    self_switch=m.get("selfSwitch"),
+                    ignore_defensive=bool(m.get("ignoreDefensive")),
+                    accuracy=m.get("accuracy", True))
+    _MOVE_INFO_CACHE[id(m)] = info
+    return info
 
 
 def is_spread_move(move_target: str) -> bool:
@@ -164,17 +208,98 @@ def spread_targets(move_target: str, live_foes: list, allies: list, user) -> lis
     return targets
 
 
-def type_multiplier(move_type: str, defender_types: list, typechart: dict) -> float:
-    mapping = {0: 1.0, 1: 2.0, 2: 0.5, 3: 0.0}
+# Moves whose effectiveness against one type is not what their own type says.
+# Freeze-Dry is the only one in this format: an Ice move that is SUPER effective
+# on Water, rather than resisted by it. The multiplier is replaced, not
+# multiplied, so Water/Ground takes 2x (Water) x 2x (Ground) = 4x.
+TYPE_OVERRIDE_MOVES = {"Freeze-Dry": {"water": 2.0}}
+
+
+_TYPE_MULT_CACHE = {}
+_TYPE_MAPPING = {0: 1.0, 1: 2.0, 2: 0.5, 3: 0.0}
+
+
+# Defender-side type-resist berries: {item: the move type it halves}. Inverted
+# from optimize_sets.TYPE_RESIST_BERRY rather than restated, so the two cannot
+# drift -- the salvage flow picks the berry from that table and this is what makes
+# the pick mean something.
+BERRY_RESIST_TYPE = {
+    "Chilan Berry": "Normal", "Occa Berry": "Fire", "Passho Berry": "Water",
+    "Wacan Berry": "Electric", "Rindo Berry": "Grass", "Yache Berry": "Ice",
+    "Chople Berry": "Fighting", "Kebia Berry": "Poison", "Shuca Berry": "Ground",
+    "Coba Berry": "Flying", "Payapa Berry": "Psychic", "Tanga Berry": "Bug",
+    "Charti Berry": "Rock", "Kasib Berry": "Ghost", "Haban Berry": "Dragon",
+    "Colbur Berry": "Dark", "Babiri Berry": "Steel", "Roseli Berry": "Fairy",
+}
+
+
+def type_multiplier(move_type: str, defender_types: list, typechart: dict,
+                    move_name: str | None = None) -> float:
+    """Type effectiveness, memoised.
+
+    A pure function of (move type, defender types, move name) for a fixed
+    typechart, and profiling a standard pairing found 3.6 MILLION calls costing
+    8.2 s of self time -- there are only a few thousand distinct answers, so
+    almost all of that was recomputing the same dictionary lookups. The
+    typechart's identity is part of the key so a caller holding a different
+    chart cannot be served another one's answers.
+    """
+    key = (id(typechart), move_type, tuple(defender_types), move_name)
+    hit = _TYPE_MULT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    override = TYPE_OVERRIDE_MOVES.get(move_name or "", {})
     mult = 1.0
     for dtype in defender_types:
-        entry = typechart[dtype.lower()]["damageTaken"].get(move_type, 0)
-        mult *= mapping[entry]
+        dkey = dtype.lower()
+        if dkey in override:
+            mult *= override[dkey]
+            continue
+        mult *= _TYPE_MAPPING[typechart[dkey]["damageTaken"].get(move_type, 0)]
+    _TYPE_MULT_CACHE[key] = mult
     return mult
 
 
 def effective_stat(base_val: int, stage: int, boost_mult: float = 1.0) -> float:
     return base_val * STAGE_MULT[stage] * boost_mult
+
+
+def defensive_stat(target: Combatant, def_key: str, move: "MoveInfo",
+                    weather=None) -> float:
+    """The defence a move actually hits, honouring `ignoreDefensive`.
+
+    Sacred Sword, Chip Away and Darkest Lariat hit as though the target's
+    Defence stage were 0 -- so a +2 Iron Defence does not blunt them. Showdown
+    ignores the stage in BOTH directions, so an already-lowered target does not
+    take extra damage from them either.
+
+    Every damage site in the codebase goes through this, because four of them
+    computed the defence independently and only one of them would otherwise
+    have learned about the flag.
+    """
+    stage = 0 if getattr(move, "ignore_defensive", False) else target.stages[def_key]
+    stat = effective_stat(target.stats[def_key], stage)
+    if weather:
+        stat *= weather_defence_boost(target, def_key, weather)
+    return stat
+
+
+# Weather boosts a defence for one type, and neither was modelled: reported as
+# "Ninetales-Alola doesn't get the defence boost from its snow". Sand's Rock
+# Special Defence boost had the same gap. {weather: (type, stat)}.
+WEATHER_DEFENCE = {"snow": ("ice", "def"), "hail": ("ice", "def"),
+                   "sand": ("rock", "spd"), "sandstorm": ("rock", "spd")}
+
+
+def weather_defence_boost(target: Combatant, def_key: str, weather) -> float:
+    """1.5x when the weather protects this type's relevant defence, else 1.0."""
+    entry = WEATHER_DEFENCE.get((weather or "").lower())
+    if not entry:
+        return 1.0
+    want_type, want_stat = entry
+    if want_stat != def_key:
+        return 1.0
+    return 1.5 if any(t.lower() == want_type for t in target.types) else 1.0
 
 
 STAT_DROP_IMMUNE_ABILITIES = {"Clear Body", "Full Metal Body", "White Smoke"}
@@ -242,6 +367,23 @@ def apply_intimidate(target: Combatant):
 
 SLICING_BOOST_ABILITY = "Sharpness"
 
+# Abilities that DRAW single-target moves of a type onto themselves from
+# anywhere on the opposing side -- the same redirection Follow Me performs, but
+# permanent and type-specific -- and take a stat boost instead of damage.
+#
+# The immunity below already made them take 0; what was missing is that the
+# move is pulled off the ally it was aimed at in the first place. That is most
+# of what the ability is for: it is not "my Electric resistance", it is "your
+# single-target Electric moves do not get to choose a target".
+#
+# Deliberately just these two. Motor Drive, Volt Absorb, Sap Sipper and the
+# Water absorbers are immunities that do NOT redirect, and they keep the
+# existing behaviour.
+DRAW_ABILITIES = {
+    "Lightning Rod": ("Electric", "spa"),
+    "Storm Drain": ("Water", "spa"),
+}
+
 # Defender abilities that grant a full immunity to a whole type.
 TYPE_IMMUNITY_ABILITIES = {
     "Levitate": "Ground",
@@ -258,16 +400,24 @@ def ability_type_immunity(defender: "Combatant", move_type: str) -> bool:
 
 
 def _offensive_ability_mult(attacker: "Combatant", move: "MoveInfo", type_eff: float,
-                             weather: str | None) -> float:
-    """Attacker-side ability damage multipliers."""
+                             weather: str | None, power: int | None = None) -> float:
+    """Attacker-side ability damage multipliers.
+
+    `power`: the move's RESOLVED power (defaults to `move.power` for callers
+    that don't have one), needed because `move.power` is 0 for Low Kick/Grass
+    Knot -- checking `move.power <= 60` there would always be true regardless
+    of the real (weight-dependent) power, wrongly Technicianing a 120-power
+    Low Kick against something heavy.
+    """
     mult = 1.0
     ab = attacker.ability
+    power = move.power if power is None else power
     if ab == "Sheer Force" and move.secondary:
         # +30% power, and the secondary effect is suppressed (handled in battle.py).
         mult *= 1.3
     if ab == SLICING_BOOST_ABILITY and (move.flags or {}).get("slicing"):
         mult *= 1.5
-    if ab == "Technician" and move.power <= 60:
+    if ab == "Technician" and power <= 60:
         mult *= 1.5
     if ab == "Tinted Lens" and type_eff < 1.0:
         mult *= 2.0
@@ -337,6 +487,30 @@ MULTI_HIT = {
 # solver.py/fast_eval.py's move-choice filtering, which both key off this).
 CHARGE_WEATHER_SKIP = {"Solar Beam": "sun", "Solar Blade": "sun", "Electro Shot": "rain"}
 
+# Moves whose base power depends on the TARGET's weight rather than being a
+# fixed number. Both use the same breakpoint table (current-gen Bulbapedia).
+# Showdown's raw data gives these `basePower: 0` with a `basePowerCallback` JS
+# function computing the real number at battle time -- which, unhandled, made
+# every Low Kick and Grass Knot in this simulator deal exactly zero damage.
+WEIGHT_BASED_POWER = ("Low Kick", "Grass Knot")
+
+# (weight threshold in kg, power below that threshold). The last row has no
+# threshold -- 200kg+ is the final bracket.
+_WEIGHT_POWER_BREAKPOINTS = ((10, 20), (25, 40), (50, 60), (100, 80), (200, 100))
+
+
+def weight_based_power(weight_kg: float | None) -> int | None:
+    """Low Kick / Grass Knot's real power against a target this heavy, or
+    None if the weight is unknown (a handful of cosmetic form variants have
+    no recorded weight -- see `damage_roll`, which leaves power alone rather
+    than guessing when this returns None)."""
+    if weight_kg is None:
+        return None
+    for threshold, power in _WEIGHT_POWER_BREAKPOINTS:
+        if weight_kg < threshold:
+            return power
+    return 120
+
 
 def hit_count_for(move_name: str, attacker: "Combatant") -> float:
     """How many times this move hits, for this tool's aggregate-damage model
@@ -367,7 +541,21 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     1.00x, 5 = the "5/16" roll callers sometimes want to inspect a specific
     path) instead of the true average. min/max/type_eff are unaffected, so
     this is a drop-in for any caller that only reads the avg slot.
+
+    `power` is resolved here for Low Kick/Grass Knot, from the DEFENDER's
+    weight, whenever the caller passes 0 -- which is every caller except
+    `battle.py`, since Showdown's raw data gives these `basePower: 0` (see
+    `WEIGHT_BASED_POWER`). Only when `power == 0`: `battle.py` resolves it
+    itself BEFORE this call so it can still apply Helping Hand's 1.5x
+    multiplier on top -- if this unconditionally overrode `power`, that
+    multiplier (already baked into whatever `battle.py` passed in) would be
+    silently discarded.
     """
+    if move.name in WEIGHT_BASED_POWER and power == 0:
+        got = weight_based_power(defender.weight_kg)
+        if got is not None:
+            power = got
+
     if power == 0 or move.category == "Status":
         return 0, 0, 0, 1.0
 
@@ -409,11 +597,34 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
 
     # Pixilate / Aerilate / Refrigerate / Galvanize: Normal moves become the
     # ability's type and gain 1.2x.
+    #
+    # NOTE the ORDER. STAB is applied above, on the move's ORIGINAL type, which is
+    # wrong for a converted move: Sylveon's Hyper Voice becomes Fairy and should
+    # get Fairy STAB. Corrected below by re-applying the difference, rather than
+    # moving the STAB block, because several callers depend on `move` still being
+    # the original object at that point.
     ATE = {"Pixilate": "Fairy", "Aerilate": "Flying", "Refrigerate": "Ice",
            "Galvanize": "Electric"}
+    # LIQUID VOICE was missing entirely, and the consequence was visible in the
+    # output: Primarina's best spread move came out as Dazzling Gleam, because its
+    # Hyper Voice stayed Normal-typed and so had no STAB and no Water boost. Sound
+    # moves only, and NO 1.2x -- Liquid Voice is a type conversion, not an -ate.
+    converted = None
     if attacker.ability in ATE and move.move_type == "Normal":
-        move = MoveInfo(**{**move.__dict__, "move_type": ATE[attacker.ability]})
+        converted = ATE[attacker.ability]
         modifier *= 1.2
+    elif (attacker.ability == "Liquid Voice"
+          and (move.flags or {}).get("sound")):
+        converted = "Water"
+    if converted:
+        was_stab = move.move_type in atk_types
+        now_stab = converted in atk_types
+        stab = 2.0 if attacker.ability == "Adaptability" else 1.5
+        if now_stab and not was_stab:
+            modifier *= stab
+        elif was_stab and not now_stab:
+            modifier /= stab
+        move = MoveInfo(**{**move.__dict__, "move_type": converted})
 
     # Knock Off: 1.5x if the target holds a removable item. Not a Mega Stone it needs
     # this battle (Showdown's real exemption list also covers Z-crystals/plates/primal
@@ -446,11 +657,13 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
 
     # Type effectiveness
     def_types = defender.types
-    type_eff = type_multiplier(move.move_type, def_types, typechart)
+    # `move.name` matters here, not just its type: Freeze-Dry is an Ice move
+    # that is super effective on Water (TYPE_OVERRIDE_MOVES).
+    type_eff = type_multiplier(move.move_type, def_types, typechart, move.name)
     modifier *= type_eff
 
     # Ability damage modifiers (Sheer Force, Sharpness, Thick Fat, Filter, ...)
-    modifier *= _offensive_ability_mult(attacker, move, type_eff, weather)
+    modifier *= _offensive_ability_mult(attacker, move, type_eff, weather, power=power)
     modifier *= _defensive_ability_mult(defender, move, type_eff)
 
     # Burn halves physical damage unless Guts (Guts instead boosts Atk stat, handled upstream)
@@ -472,6 +685,23 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     # Item: Expert Belt (super-effective boost)
     if attacker.item == "Expert Belt" and type_eff > 1.0:
         modifier *= 1.2
+
+    # DEFENDER'S item. Type-resist berries halve a SUPER-EFFECTIVE hit of their
+    # type -- Chilan Berry is the exception and halves any Normal hit. The berry
+    # TABLE has existed in optimize_sets since the salvage flow was written, and
+    # the salvage flow has been handing them out, but the halving was never
+    # implemented here: measured, a Roseli Berry changed Light of Ruin's damage by
+    # exactly nothing. So every "give it a resist berry" suggestion the system has
+    # ever made was cosmetic.
+    berry_type = BERRY_RESIST_TYPE.get(defender.item)
+    if berry_type and berry_type == move.move_type and (
+            type_eff > 1.0 or berry_type == "Normal"):
+        modifier *= 0.5
+
+    # Assault Vest: 1.5x SpD, so 1/1.5 damage from special moves. Same story --
+    # it was in item lists and did nothing.
+    if defender.item == "Assault Vest" and move.category == "Special":
+        modifier /= 1.5
 
     rolls = [base * modifier * (0.85 + 0.01 * i) for i in range(16)]
     avg_or_indexed = rolls[roll_index] if roll_index is not None else sum(rolls) / len(rolls)

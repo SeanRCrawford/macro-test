@@ -19,7 +19,7 @@ Treat it as set selection, then let the real solver judge the team.
 """
 import itertools
 
-from damage import MoveInfo, effective_stat, damage_roll, hit_count_for
+from damage import MoveInfo, effective_stat, damage_roll, hit_count_for, move_from_showdown
 from combatants import make_combatant
 
 # NOTE: there is deliberately no hardcoded catalogue of "good items" here.
@@ -186,34 +186,58 @@ def legal_items(name, merged, min_usage=MIN_ITEM_USAGE, extra_items=None):
 
 
 def _mk_move(m):
-    return MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
-                     priority=m.get("priority", 0), secondary=m.get("secondary"),
-                     self_effect=m.get("self"), boosts=m.get("boosts"),
-                     recoil=m.get("recoil"), drain=m.get("drain"),
-                     volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                     self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True))
+    return move_from_showdown(m)
 
 
 NEVER_MISS_ABILITIES = {"No Guard"}
 WEATHER_PERFECT_ACCURACY = {"Hurricane": "rain", "Thunder": "rain", "Blizzard": "snow"}
 
 
+def team_weather_for(team, merged):
+    """The weather this team puts up by itself, from its own abilities.
+
+    Exists because the `team_weather` escape hatch below was DEAD CODE: no
+    caller ever passed it, so every argument defaulted to None and the branch
+    could not fire. The visible result was Ninetales-Alola optimised without
+    Blizzard -- its 95.7%-usage move and by far its best attack -- because a
+    70% accuracy move is dropped unless something guarantees it, and the only
+    thing that would have (its own Snow Warning) was never consulted.
+    """
+    from combatants import _default_ability
+    from engine import WEATHER_SETTERS
+    for name in team or ():
+        record = merged.get(name)
+        if not record:
+            continue
+        setter = WEATHER_SETTERS.get(
+            _default_ability(record.get("abilities_usage") or []))
+        if setter:
+            return setter
+    return None
+
+
 def _accuracy_ok(move_raw, name, merged, team_weather=None):
     """Drop shaky moves (<80% accuracy) unless they cannot miss.
 
-    A move is kept if the user has No Guard, or if the move is perfectly accurate
-    in a weather the team itself sets (Hurricane/Thunder in rain, Blizzard in
-    snow). Planning around a 70% move that whiffs is worse than a weaker sure hit.
+    A move is kept if the user has No Guard, if the USER'S OWN ability sets the
+    weather that makes it perfect, or if a teammate does (`team_weather`).
+    Planning around a 70% move that whiffs is worse than a weaker sure hit.
+
+    The user's own ability is checked separately from `team_weather` on purpose:
+    it needs no plumbing and cannot be forgotten by a caller, which is exactly
+    how Blizzard came to be dropped from the one Pokemon in the game that
+    guarantees it for itself.
     """
     acc = move_raw.get("accuracy", True)
     if acc is True or acc >= 80:
         return True
     from combatants import _default_ability
+    from engine import WEATHER_SETTERS
     ability = _default_ability(merged[name]["abilities_usage"])
     if ability in NEVER_MISS_ABILITIES:
         return True
     need = WEATHER_PERFECT_ACCURACY.get(move_raw.get("name"))
-    if need and team_weather == need:
+    if need and (team_weather == need or WEATHER_SETTERS.get(ability) == need):
         return True
     return False
 
@@ -239,7 +263,7 @@ def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None
 
 
 def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, item=None,
-                      evs=None, nature=None):
+                      evs=None, nature=None, team_weather=None):
     """{move_name: {enemy_name: value}} where value is roughly 'fraction of
     that enemy's HP this move removes', with a bonus for securing a KO.
 
@@ -253,7 +277,8 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
     """
     attacker = make_combatant(name, merged, natures, item=item, evs=evs, nature=nature)
     table = {}
-    for move, pct in candidate_moves(name, merged, moves_db, item=item):
+    for move, pct in candidate_moves(name, merged, moves_db, item=item,
+                                     team_weather=team_weather):
         row = {}
         for en in enemy_names:
             defender = make_combatant(en, merged, natures)
@@ -299,7 +324,8 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
 
 
 def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=None,
-                  slots=4, force_protect=True, forced_candidates=None, evs=None, nature=None):
+                  slots=4, force_protect=True, forced_candidates=None, evs=None, nature=None,
+                  team_weather=None):
     """Pick the `slots` moves maximising summed best-value coverage over the
     enemy list: for each enemy, only the single best move against it counts,
     so redundant same-type attacks don't stack.
@@ -312,7 +338,7 @@ def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=N
     evs/nature: optional EV-spread override, see move_value_table.
     """
     table = move_value_table(name, merged, moves_db, natures, typechart, enemy_names, item=item,
-                              evs=evs, nature=nature)
+                              evs=evs, nature=nature, team_weather=team_weather)
     names = list(table.keys())
     # A Choice item locks you into the first move used, so Protect/Detect is a dead
     # slot -- drop them entirely rather than letting a zero-value move occupy one of
@@ -412,7 +438,8 @@ def defensive_bonus(item, name, merged, threat, n_attacks_estimate=3):
     return 0.0
 
 
-def best_item(name, merged, moves_db, natures, typechart, enemy_names, slots=4):
+def best_item(name, merged, moves_db, natures, typechart, enemy_names, slots=4,
+               team_weather=None):
     """Try each candidate item, re-optimise the moveset under it, keep the best.
 
     Score = offensive coverage (damage vs each enemy) + defensive value
@@ -424,6 +451,7 @@ def best_item(name, merged, moves_db, natures, typechart, enemy_names, slots=4):
     if stone:
         # Locked to its Mega Stone -- only the moveset is optimisable.
         mv, sc = best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=stone,
+                              team_weather=team_weather,
                                slots=slots)
         return stone, mv, sc
 
@@ -433,6 +461,7 @@ def best_item(name, merged, moves_db, natures, typechart, enemy_names, slots=4):
     best = (None, None, -1e9)
     for it in tried:
         mv, sc = best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=it,
+                              team_weather=team_weather,
                                slots=slots)
         sc += defensive_bonus(it, name, merged, threat)
 
@@ -487,6 +516,12 @@ def optimise_team(team, merged, moves_db, natures, typechart, enemy_names, slots
     """
     from species_data import find_mega_stone
 
+    # The weather this team puts up for ITSELF, so a 70%-accuracy move a
+    # teammate guarantees (Hurricane under Pelipper, Blizzard under Snow
+    # Warning) is not discarded as unreliable. Previously nothing ever
+    # passed this and the branch that reads it was dead code.
+    team_weather = team_weather_for(team, merged)
+
     # 1. Lock Megas to their stones first -- they have no choice.
     out, taken = {}, set()
     pending = []
@@ -494,6 +529,7 @@ def optimise_team(team, merged, moves_db, natures, typechart, enemy_names, slots
         stone = find_mega_stone(n, merged)
         if stone:
             mv, sc = best_moveset(n, merged, moves_db, natures, typechart, enemy_names,
+                                  team_weather=team_weather,
                                    item=stone, slots=slots)
             out[n] = {"item": stone, "moves": mv, "score": sc}
             taken.add(stone)
@@ -506,6 +542,7 @@ def optimise_team(team, merged, moves_db, natures, typechart, enemy_names, slots
         threat = incoming_threat(n, merged, moves_db, natures, typechart, enemy_names)
         for it in legal_items(n, merged):
             mv, sc = best_moveset(n, merged, moves_db, natures, typechart, enemy_names,
+                                  team_weather=team_weather,
                                    item=it, slots=slots)
             sc += defensive_bonus(it, n, merged, threat)
             if it.startswith("Choice"):
@@ -531,12 +568,14 @@ def optimise_team(team, merged, moves_db, natures, typechart, enemy_names, slots
         for it in legal_items(n, merged):
             if it not in taken:
                 mv, sc = best_moveset(n, merged, moves_db, natures, typechart, enemy_names,
+                                      team_weather=team_weather,
                                        item=it, slots=slots)
                 out[n] = {"item": it, "moves": mv, "score": sc}
                 taken.add(it)
                 break
         else:
-            mv, sc = best_moveset(n, merged, moves_db, natures, typechart, enemy_names, slots=slots)
+            mv, sc = best_moveset(n, merged, moves_db, natures, typechart, enemy_names,
+                                  slots=slots, team_weather=team_weather)
             out[n] = {"item": "(none available)", "moves": mv, "score": sc}
     return out
 
@@ -562,6 +601,12 @@ def optimise_team_unique(team, merged, moves_db, natures, typechart, enemy_names
     """
     from species_data import find_mega_stone
 
+    # The weather this team puts up for ITSELF, so a 70%-accuracy move a
+    # teammate guarantees (Hurricane under Pelipper, Blizzard under Snow
+    # Warning) is not discarded as unreliable. Previously nothing ever
+    # passed this and the branch that reads it was dead code.
+    team_weather = team_weather_for(team, merged)
+
     # Score every legal (mon, item) combination once.
     table = {}
     for n in team:
@@ -572,6 +617,7 @@ def optimise_team_unique(team, merged, moves_db, natures, typechart, enemy_names
         row = {}
         for it in items:
             mv, sc = best_moveset(n, merged, moves_db, natures, typechart, enemy_names,
+                                  team_weather=team_weather,
                                    item=it, slots=slots)
             if not stone:
                 sc += defensive_bonus(it, n, merged, threat)

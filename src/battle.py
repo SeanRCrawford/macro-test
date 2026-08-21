@@ -25,8 +25,10 @@ import copy
 from dataclasses import dataclass, field
 import random
 
-from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
-                     apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP)
+from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
+                    defensive_stat, move_from_showdown,
+                     apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
+                     WEIGHT_BASED_POWER, weight_based_power)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS)
 
@@ -47,6 +49,36 @@ class Side:
     screens_reflect: int = 0         # turns remaining
     screens_lightscreen: int = 0     # turns remaining
     screens_auroraveil: int = 0      # turns remaining -- blocks BOTH categories, snow-only
+
+    def __deepcopy__(self, memo):
+        """Hand-written for the same reason Battle and Combatant are: the
+        reflective path costs more than the copy.
+
+        The subtlety is IDENTITY. `active` and `bench` hold the very same
+        Combatant objects as `roster`, and `follow_me_target` points at one of
+        them; the copy has to preserve that or a Pokemon can be damaged in one
+        list and healthy in another. Everything therefore goes through the
+        shared `memo`, which is what makes `copy.deepcopy(c, memo)` hand back
+        the SAME copy for the same original rather than a second one.
+        """
+        cls = self.__class__
+        new = cls.__new__(cls)
+        memo[id(self)] = new
+        new.name = self.name
+        new.roster = [copy.deepcopy(c, memo) for c in self.roster]
+        # Not re-copied: looked up in the memo, so they stay the same objects.
+        new.active = [None if c is None else copy.deepcopy(c, memo)
+                      for c in self.active]
+        new.bench = [copy.deepcopy(c, memo) for c in self.bench]
+        new.wide_guard = self.wide_guard
+        new.quick_guard = self.quick_guard
+        new.mega_used = self.mega_used
+        new.follow_me_target = (None if self.follow_me_target is None
+                                else copy.deepcopy(self.follow_me_target, memo))
+        new.screens_reflect = self.screens_reflect
+        new.screens_lightscreen = self.screens_lightscreen
+        new.screens_auroraveil = self.screens_auroraveil
+        return new
 
     def alive_roster(self):
         return [c for c in self.roster if not c.fainted]
@@ -114,14 +146,7 @@ class Battle:
                    p2=[c.name for c in self.p2.active], weather_after=self.field.weather)
 
     def make_move(self, move_key: str) -> MoveInfo:
-        m = self.moves_db[move_key]
-        return MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
-                         priority=m.get("priority", 0), secondary=m.get("secondary"),
-                         self_effect=m.get("self"), boosts=m.get("boosts"),
-                         recoil=m.get("recoil"), drain=m.get("drain"),
-                         has_crash=bool(m.get("hasCrashDamage")),
-                         volatile_status=m.get("volatileStatus"), flags=m.get("flags"),
-                         self_switch=m.get("selfSwitch"), accuracy=m.get("accuracy", True))
+        return move_from_showdown(self.moves_db[move_key])
 
     def _roll(self, min_v, max_v, avg_v):
         # force_roll lets a caller demand worst-case ('min') or best-case ('max')
@@ -684,16 +709,36 @@ class Battle:
         # opposing side gets pulled onto the redirector instead. Spread moves are
         # unaffected, and a fainted/absent redirector doesn't redirect.
         target_side = self.side_of(live_targets[0]) if live_targets else None
+        single_target = (not is_spread_move(move.target)
+                         and move.category != "Status")
+        ignores_redirect = attacker.ability in ("Stalwart", "Propeller Tail")
         if (target_side is not None and target_side.follow_me_target is not None
-                and not is_spread_move(move.target) and move.category != "Status"):
+                and single_target):
             redirector = target_side.follow_me_target
             if (not redirector.fainted and redirector in target_side.active
                     and redirector not in live_targets
-                    and attacker.ability not in ("Stalwart", "Propeller Tail")):
+                    and not ignores_redirect):
                 self.log.add(f"{redirector.name} drew in {attacker.name}'s {move.name}!")
                 self._emit(event="redirected", side=target_side.name, actor=redirector.name,
                            move=move.name, source=attacker.name)
                 live_targets = [redirector]
+
+        # Lightning Rod / Storm Drain: draw the whole type off whoever it was
+        # aimed at. Checked after Follow Me, which is an active choice made this
+        # turn and outranks a passive ability.
+        if target_side is not None and single_target and not ignores_redirect:
+            for drawer in target_side.active:
+                if drawer is None or drawer.fainted or drawer in live_targets:
+                    continue
+                draw = DRAW_ABILITIES.get(drawer.ability)
+                if draw and draw[0] == move.move_type:
+                    self.log.add(f"{self.tag(drawer)}'s {drawer.ability} drew in "
+                                 f"{attacker.name}'s {move.name}!")
+                    self._emit(event="redirected", side=target_side.name,
+                               actor=drawer.name, move=move.name,
+                               source=attacker.name)
+                    live_targets = [drawer]
+                    break
 
         hit_targets = [t for t in live_targets if not self._blocked_by_guard(action, t)]
         blocked = [t for t in live_targets if t not in hit_targets]
@@ -709,10 +754,36 @@ class Battle:
             side = self.side_of(attacker)
             fainted_allies = sum(1 for c in side.roster if c is not attacker and c.fainted)
             base_power = min(200, 50 + 50 * fainted_allies)
+        elif move.name in WEIGHT_BASED_POWER and hit_targets:
+            # Low Kick / Grass Knot: resolved from the target's weight HERE,
+            # before Helping Hand's multiplier below, so a Helping-Handed Low
+            # Kick gets its real 1.5x rather than losing it -- `damage_roll`
+            # only falls back to resolving this itself when `power` arrives
+            # as 0 (every other caller, which has no such multiplier to lose).
+            got = weight_based_power(hit_targets[0].weight_kg)
+            if got is not None:
+                base_power = got
         # Helping Hand: a partner's Helping Hand this same turn boosts this move's
         # power by 1.5x, once, regardless of how many targets it hits.
         move_power = base_power * 1.5 if attacker.volatile.pop("helping_hand", False) else base_power
         for target in hit_targets:
+            # Lightning Rod / Storm Drain absorbing the move they drew: no
+            # damage (the type immunity already gives 0) and +1 to their stat.
+            # Done before the damage calculation rather than after, because the
+            # boost must not be applied to the attack that is being nullified.
+            draw = DRAW_ABILITIES.get(target.ability)
+            if draw and draw[0] == move.move_type and move.category != "Status":
+                stat = draw[1]
+                if target.stages[stat] < 6:
+                    target.stages[stat] += 1
+                    self.log.add(f"{self.tag(target)}'s {target.ability} absorbed "
+                                 f"{move.name}! Its {stat.upper()} rose!")
+                else:
+                    self.log.add(f"{self.tag(target)}'s {target.ability} absorbed "
+                                 f"{move.name}!")
+                self._emit(event="absorbed", side=self.side_of(target).name,
+                           actor=target.name, move=move.name, ability=target.ability)
+                continue
             atk_key = "atk" if move.category == "Physical" else "spa"
             def_key = "def" if move.category == "Physical" else "spd"
             atk_stat = effective_stat(attacker.stats[atk_key], attacker.stages[atk_key])
@@ -722,7 +793,8 @@ class Battle:
                 atk_stat *= 1.5
             if attacker.item == "Choice Specs" and atk_key == "spa":
                 atk_stat *= 1.5
-            def_stat = effective_stat(target.stats[def_key], target.stages[def_key])
+            def_stat = defensive_stat(target, def_key, move,
+                                      weather=self.field.weather)
 
             target_side = self.side_of(target)
             screens_active = target_side.screens_auroraveil > 0 or (
@@ -873,7 +945,13 @@ class Battle:
         # after the hit lands, same repositioning value as Parting Shot -- see
         # _voluntary_switch_out. The Status self-switch moves are handled in
         # _resolve_status_move.
-        if move.self_switch and not attacker.fainted:
+        # A self-switch move only pivots IF IT CONNECTED. Protect (or Wide
+        # Guard, or a Lightning Rod that ate it) blocks the hit, and a blocked
+        # U-turn leaves you exactly where you were -- which is the whole risk of
+        # clicking one. Previously the switch happened regardless, so the engine
+        # believed a Protect could not deny the pivot and priced U-turn and Flip
+        # Turn as free repositioning.
+        if move.self_switch and not attacker.fainted and hit_targets:
             self._voluntary_switch_out(attacker, action.side)
 
     @staticmethod
@@ -893,6 +971,9 @@ class Battle:
         attacker = action.combatant
         move = action.move
         side = self.side_of(attacker)
+        # Set False only by a status move that aims at a foe and was blocked --
+        # see Parting Shot. Everything else connects with itself.
+        status_connected = True
 
         if move.name == "Trick Room":
             if self.field.trick_room:
@@ -928,12 +1009,24 @@ class Battle:
             self._emit(event="perish_song", side=action.side, actor=attacker.name,
                        detail=", ".join(hit))
         elif move.name == "Parting Shot":
+            # SINGLE target, -1 Atk AND -1 SpA, and it can be Protected. All
+            # three were wrong: it hit both foes, took only Attack (it reused
+            # the Intimidate helper), and connected through Protect -- then
+            # pivoted anyway. That made it a free double debuff plus a free
+            # switch, which is why the solver liked it so much.
             opp_side = self.p2 if side.name == "p1" else self.p1
-            for foe in opp_side.active:
-                if foe and not foe.fainted:
-                    apply_intimidate(foe)  # -1 Atk (or Defiant/Competitive interaction), same as Intimidate math
-            self.log.add(f"{attacker.name} used Parting Shot, rattling the foe's stats!")
-            self._emit(event="parting_shot", side=action.side, actor=attacker.name)
+            live = [f for f in opp_side.active if f and not f.fainted]
+            target = next((f for f in live if not self._blocked_by_guard(action, f)),
+                          None)
+            if target is None:
+                self.log.add(f"{attacker.name}'s Parting Shot was blocked!")
+                status_connected = False
+            else:
+                changed = apply_boosts(target, {"atk": -1, "spa": -1}, from_foe=True)
+                self.log.add(f"{attacker.name} used Parting Shot on "
+                             f"{self.tag(target)}! {self._fmt_boosts(changed)}")
+                self._emit(event="parting_shot", side=action.side,
+                           actor=attacker.name, target=target.name)
         elif move.name == "Helping Hand":
             ally = next((c for c in side.active if c is not None and c is not attacker
                          and not c.fainted), None)
@@ -982,7 +1075,10 @@ class Battle:
         # since they're damaging; this covers the Status ones -- Parting Shot,
         # Baton Pass, Chilly Reception, Shed Tail. Only the switch itself is
         # modeled for the latter three, not their extra pass-along effects.
-        if move.self_switch and not attacker.fainted:
+        # A self-switch move only pivots IF IT CONNECTED. Parting Shot aims at a
+        # foe and can be Protected; Baton Pass, Shed Tail and Chilly Reception
+        # target the user and always connect, so `status_connected` stays True.
+        if move.self_switch and not attacker.fainted and status_connected:
             self._voluntary_switch_out(attacker, action.side)
 
     def _voluntary_switch_out(self, outgoing: Combatant, action_side: str):
@@ -1249,6 +1345,38 @@ class Battle:
         if self.p2.has_lost():
             return "p1"
         return None
+
+    def adjudicate(self):
+        """Who is winning if the clock runs out. Never None.
+
+        THE REAL RULE, not an invention: VGC decides a timed-out game on the
+        number of Pokemon remaining, and then on the percentage of HP left. A
+        turn cap is exactly a clock running out, so it is scored the same way.
+
+        Why this matters: counting a capped game as a LOSS is not conservative,
+        it is wrong. A position where we are 3-1 up with the opponent's last
+        Pokemon at 8 HP is a won game, and calling it a loss because the
+        simulation ran out of turns discards precisely the lines that grind out
+        wins -- which is the shape of most real VGC games.
+
+        Returns "p1" | "p2" | "draw".
+        """
+        decided = self.winner()
+        if decided is not None:
+            return decided
+        alive = [sum(1 for c in side.roster if not c.fainted)
+                 for side in (self.p1, self.p2)]
+        if alive[0] != alive[1]:
+            return "p1" if alive[0] > alive[1] else "p2"
+        # Same count: total remaining HP as a FRACTION of maximum, so a bulky
+        # survivor does not outweigh a healthy frail one by raw hit points.
+        share = []
+        for side in (self.p1, self.p2):
+            total = sum(c.max_hp() for c in side.roster) or 1
+            share.append(sum(c.current_hp for c in side.roster) / total)
+        if abs(share[0] - share[1]) < 1e-9:
+            return "draw"
+        return "p1" if share[0] > share[1] else "p2"
 
 
 if __name__ == "__main__":

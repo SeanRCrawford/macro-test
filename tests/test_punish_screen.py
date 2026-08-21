@@ -128,6 +128,42 @@ class TestWiring(unittest.TestCase):
             effort="quick", turns=6, punish_floor=None)
         self.assertNotIn("skipped", record)
 
+    def test_an_accepted_team_still_reports_its_opening(self):
+        """A floor you only see when it fires is one you cannot calibrate. The
+        number has to survive onto the teams that PASSED, or the only evidence
+        about where to put the floor is the teams you already threw away."""
+        import roster_rating
+        w = world()
+        record = roster_rating.rate_team(
+            JUNK, {**w, "teams": {"Big 6": w["teams"]["Big 6"]}},
+            effort="quick", turns=6, punish_floor=-1e9)   # reject nothing
+        self.assertNotIn("skipped", record)
+        self.assertIsInstance(record.get("opening_guaranteed"), float)
+
+    def test_a_team_a_LATER_screen_rejected_still_reports_its_opening(self):
+        """Found by running, not reading: on a live run all four teams passed
+        the opening screen and were then dropped by --min-winrate, so the
+        calibration summary saw nothing. A record that exits through a
+        different screen is still evidence about where this floor belongs."""
+        import roster_rating
+        w = world()
+        record = roster_rating.rate_team(
+            JUNK, {**w, "teams": {"Big 6": w["teams"]["Big 6"]}},
+            effort="quick", turns=6, punish_floor=-1e9,   # opening screen passes
+            min_winrate=1.01)                             # this one rejects
+        self.assertIn("below --min-winrate", record["skipped"])
+        self.assertIsInstance(record.get("opening_guaranteed"), float)
+
+    def test_without_the_screen_there_is_no_number_to_report(self):
+        """It must not appear as a stale or invented value when the screen did
+        not run -- the progress line keys off its presence."""
+        import roster_rating
+        w = world()
+        record = roster_rating.rate_team(
+            JUNK, {**w, "teams": {"Big 6": w["teams"]["Big 6"]}},
+            effort="quick", turns=6, punish_floor=None)
+        self.assertIsNone(record.get("opening_guaranteed"))
+
 
 if __name__ == "__main__":
     unittest.main()

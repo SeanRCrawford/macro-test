@@ -56,7 +56,11 @@ TYPICAL_LINE_TURNS = 8
 # Bumped when the shape of a cached record changes. It is part of the cache key,
 # so a run that recorded less detail is never served to a run that expects more
 # -- the same reasoning that puts the effort tier in the key.
-SCHEMA = 8   # 8: the evaluation moved -- speed control, the spent-Pokemon
+SCHEMA = 9   # 9: --detail. Stored records may now omit turn-by-turn for lines
+             #    that won cleanly, so a record is no longer interchangeable
+             #    with one written before the flag existed. --detail is in the
+             #    key too, so light and full runs never serve each other.
+             # 8: the evaluation moved -- speed control, the spent-Pokemon
              #    discount and the unspent-Mega premium are all on now
              #    (WORKFLOW.md §4.2), and every cached number was produced by
              #    the evaluation in force when it ran. 7: --brings became part
@@ -112,12 +116,54 @@ def load_roster_sets(path):
     return {}
 
 
+def parse_pick(spec, order):
+    """Turn a --pick spec into team names, or raise SystemExit explaining why.
+
+    Accepts numbers and RANGES: "4,10,12", "1-40", "1-10,25". Ranges exist
+    because the funnel produces them -- screening 1000 teams and deep-searching
+    the top 40 should not mean typing 40 numbers.
+
+    A named function rather than a block inside main() so the parsing can be
+    tested without starting a search; it now has enough cases (bad range,
+    backwards range, out of bounds, duplicate across a range and a single) that
+    reading it is not the same as knowing it works.
+    """
+    def at(idx):
+        if not 1 <= idx <= len(order):
+            raise SystemExit(f"--pick {idx} is out of range: the roster "
+                             f"file has {len(order)} teams (1-{len(order)})")
+        return order[idx - 1]
+
+    wanted = []
+    for token in spec.replace(" ", "").split(","):
+        if not token:
+            continue
+        if "-" in token[1:]:
+            lo_s, _, hi_s = token.partition("-")
+            if not (lo_s.isdigit() and hi_s.isdigit()):
+                raise SystemExit(f"--pick range must be N-M, got {token!r}")
+            lo, hi = int(lo_s), int(hi_s)
+            if lo > hi:
+                raise SystemExit(f"--pick range {token!r} runs backwards")
+            wanted.extend(at(i) for i in range(lo, hi + 1))
+            continue
+        if not token.lstrip("-").isdigit():
+            raise SystemExit(f"--pick takes rank NUMBERS, got {token!r}")
+        wanted.append(at(int(token)))
+    # A range crossing a single pick would otherwise deep-search a team twice,
+    # which is minutes each.
+    return list(dict.fromkeys(wanted)) or None
+
+
 def _run_pairing(job):
     """One pairing, start to finish. Must be top-level and return only plain
     types: on Windows the pool uses spawn, so both the function and its result
     cross a pickle boundary.
     """
-    ours, theirs, effort, turns, prescreen, audit_all, brings = job
+    (ours, theirs, effort, turns, prescreen, audit_all, brings,
+     pilot, eval_profile, top_leads, detail) = job
+    import solver
+    solver.apply_eval_profile(eval_profile)
     global _WORLD
     if _WORLD is None:                       # serial path, or a pool without init
         _worker_init()
@@ -133,7 +179,9 @@ def _run_pairing(job):
         robustness_leads=settings["leads"] or 1,
         robustness_turns=settings["turns"] or 1,
         prescreen_top=prescreen,
-        audit_all_configs=audit_all or settings.get("all_configs", False))
+        pilot=pilot or settings.get("pilot", "greedy"),
+        audit_all_configs=audit_all or settings.get("all_configs", False),
+        top_leads=top_leads, detail=detail)
     top = results[0] if results else None
     return {
         "ours": ours, "theirs": theirs,
@@ -177,6 +225,13 @@ def _candidate_row(rec):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--effort", choices=TIER_ORDER, default="standard")
+    ap.add_argument("--pilot", default=None, choices=["greedy", "equilibrium"],
+                    help="who plays the games the record comes from; default "
+                         "follows the tier. See WORKFLOW.md section 4.0.")
+    ap.add_argument("--evaluation", default=None,
+                    choices=["sacrifice", "legacy"],
+                    help="which evaluation the solver uses; 'legacy' restores "
+                         "the pre-sacrifice behaviour exactly.")
     ap.add_argument("--batch", type=int, default=4,
                     help="pairings per save point")
     ap.add_argument("--cache", default=DEFAULT_CACHE)
@@ -203,6 +258,45 @@ def main():
                          "teams that are not in teams.csv can be searched by "
                          "name. This is how generate_overnight.py feeds this "
                          "tool. Roster contents are part of the cache key.")
+    ap.add_argument("--detail", choices=("full", "light", "summary"),
+                    default="light", metavar="LEVEL",
+                    help="how much turn-by-turn detail to STORE. The per-turn "
+                         "record is essentially the whole cache -- ~890 bytes a "
+                         "turn, 10.6 kB an audited line -- so at --audit-all "
+                         "--brings 90 that is ~86 MB a pairing and ~690 MB "
+                         "across eight opponents, which no workbook can be "
+                         "built from. 'light' (default) keeps turn-by-turn for "
+                         "the worst 6 lines per audited bring -- a BUDGET, not "
+                         "a filter, because the first version filtered on "
+                         "'lost or went severe' and measured 0%% saving: an "
+                         "exhaustive run on a bad matchup is exactly where "
+                         "every line qualifies. 'summary' keeps none; 'full' "
+                         "is the old behaviour. Every line keeps its summary "
+                         "either way, so the workbook's rows are complete at "
+                         "all three.")
+    ap.add_argument("--workbook", choices=("auto", "full", "light"),
+                    default="auto", metavar="LEVEL",
+                    help="how many SHEETS --export writes. 'light' writes "
+                         "Teams, Plan, Matchups, Best lines, Team sheets and "
+                         "the legend, dropping Lines, Candidates and Turns -- "
+                         "the three whose row count scales with brings x their "
+                         "configs, and which at --audit-all --brings 90 "
+                         "project to a Turns sheet above Excel's 1,048,576-row "
+                         "limit. 'auto' (default) picks light past 20,000 "
+                         "audited lines and full below it. Every sheet is also "
+                         "capped at 100,000 rows and says so where it stopped.")
+    ap.add_argument("--top-leads", type=int, default=0, metavar="N",
+                    help="audit the N best of OUR LEADS and every back pair "
+                         "behind each -- 6 configurations per lead, so N=3 is "
+                         "18. The unit --brings should have been: the screener "
+                         "ranks the LEAD pair, so the six configurations "
+                         "sharing a lead tie exactly and --brings 3 audits ONE "
+                         "lead with an arbitrary three of its six backs. "
+                         "Measured on one real pairing, the bring that beats "
+                         "all three of their hardest leads sits at rank 17, so "
+                         "--brings 12 misses it and --top-leads 3 finds it, "
+                         "for about 2.5 min a pairing at standard. Overrides "
+                         "--brings when it asks for more.")
     ap.add_argument("--brings", type=int, default=0, metavar="N",
                     help="audit only the N best of OUR brings instead of the "
                          "tier's default. The cheap screen has already ranked "
@@ -213,7 +307,8 @@ def main():
                          "appear in the workbook, which is the trade.")
     ap.add_argument("--pick", default="",
                     help="which of the roster file's teams to search, by RANK "
-                         "NUMBER: --pick \"4,10,12\". The numbering is stable "
+                         "NUMBER, with ranges: --pick \"4,10,12\" or "
+                         "--pick \"1-40\" or a mix, \"1-10,25\". The numbering is stable "
                          "across runs, and results accumulate in the cache, so "
                          "you can search #6 tonight and come back for #4 and "
                          "#10 tomorrow without redoing either.")
@@ -285,19 +380,7 @@ def main():
 
     picked = None
     if args.pick:
-        order = list(extra) if extra else names
-        wanted = []
-        for token in args.pick.replace(" ", "").split(","):
-            if not token:
-                continue
-            if not token.lstrip("-").isdigit():
-                raise SystemExit(f"--pick takes rank NUMBERS, got {token!r}")
-            idx = int(token)
-            if not 1 <= idx <= len(order):
-                raise SystemExit(f"--pick {idx} is out of range: the roster "
-                                 f"file has {len(order)} teams (1-{len(order)})")
-            wanted.append(order[idx - 1])
-        picked = wanted or None
+        picked = parse_pick(args.pick, list(extra) if extra else names)
         if picked:
             print(f"picked   : {', '.join(picked)}")
 
@@ -356,25 +439,42 @@ def main():
     prescreen = args.prescreen or settings.get("prescreen")
     # A generated roster is part of what determines the answer, so it belongs
     # in the key: two teams sharing a name but not a roster must not collide.
+    # WHO PLAYED and WHICH EVALUATION are part of the answer, so they are part
+    # of the key -- a greedy record must never be served to an equilibrium run.
     keyed = [(ResultCache.key("bring", SCHEMA, a, b, args.effort, args.turns,
                               prescreen, args.audit_all, args.brings,
                               extra.get(a), extra.get(b),
-                              extra_sets.get(a), extra_sets.get(b)), a, b)
+                              extra_sets.get(a), extra_sets.get(b),
+                              args.pilot, args.evaluation,
+                              args.top_leads, args.detail), a, b)
              for a, b in jobs]
     todo = [(k, a, b) for k, a, b in keyed if cache.get(k) is None]
     skipped = len(keyed) - len(todo)
     done, computed = skipped, 0
     started = time.time()
 
-    def _progress(ours, theirs):
+    def _progress(ours, theirs, in_flight=0):
+        """One line per completed pairing.
+
+        The rate is THROUGHPUT -- wall seconds divided by pairings finished --
+        not the time one pairing takes. In parallel mode those are very
+        different numbers and the difference is confusing rather than subtle:
+        every worker starts at once, so nothing completes for the length of a
+        whole pairing and then results arrive in a burst. The first line of a
+        parallel run therefore reports the full duration of one pairing as if
+        it were the per-pairing cost, and the figure collapses as the burst
+        lands. Reported as throughput, and with the number still running, so a
+        long silence at the start reads as "8 in flight" rather than as a hang.
+        """
         nonlocal computed
         computed += 1
         elapsed = time.time() - started
-        rate = elapsed / computed                  # seconds per pairing, real
-        left = (len(keyed) - done) * rate
+        per = elapsed / computed          # wall seconds per COMPLETED pairing
+        left = (len(keyed) - done) * per
         eta = time.strftime("%H:%M", time.localtime(time.time() + left))
         print(f"  [{done}/{len(keyed)}] {ours} vs {theirs}"
-              f"   {rate / 60:.0f} min/pairing"
+              + (f"   {in_flight} still running" if in_flight else "")
+              + f"   {per / 60:.1f} min/pairing throughput"
               f"   elapsed {elapsed / 60:.0f} min"
               f"   left ~{left / 3600:.1f} h (done ~{eta})", flush=True)
 
@@ -396,15 +496,21 @@ def main():
                                     initargs=(extra, extra_sets)) as pool:
             futures = {pool.submit(_run_pairing,
                                    (a, b, args.effort, args.turns, prescreen,
-                                    args.audit_all, args.brings)): (k, a, b)
+                                    args.audit_all, args.brings,
+                                    args.pilot, args.evaluation,
+                                    args.top_leads, args.detail)): (k, a, b)
                        for k, a, b in todo}
             since_save = 0
+            print(f"  {len(todo)} pairings submitted to {args.jobs} workers. "
+                  f"They all start together, so the first result takes as long "
+                  f"as one whole pairing -- expect silence, then a burst.",
+                  flush=True)
             for future in cf.as_completed(futures):
                 k, a, b = futures[future]
                 cache.put(k, future.result())
                 done += 1
                 since_save += 1
-                _progress(a, b)
+                _progress(a, b, in_flight=len(todo) - (done - skipped))
                 if since_save >= max(1, args.batch):
                     cache.save()   # killing now costs at most --batch pairings
                     since_save = 0
@@ -414,7 +520,9 @@ def main():
             for k, ours, theirs in batch:
                 cache.put(k, _run_pairing((ours, theirs, args.effort,
                                            args.turns, prescreen,
-                                           args.audit_all, args.brings)))
+                                           args.audit_all, args.brings,
+                                           args.pilot, args.evaluation,
+                                           args.top_leads, args.detail)))
                 done += 1
                 _progress(ours, theirs)
             cache.save()
@@ -433,8 +541,31 @@ def main():
         if sheets_path and os.path.exists(sheets_path):
             with open(sheets_path, encoding="utf-8") as fh:
                 sheets = json.load(fh)
-        n = build_workbook(cache.data, path, team_sheets=sheets)
-        print(f"\nWorkbook: {os.path.abspath(path)}  ({n} pairings)")
+        # Rebuilt from the WHOLE cache, not just this run -- that is the point
+        # (results accumulate, so the workbook always shows everything searched
+        # so far), and it is also why the wait at the end grows run after run
+        # even when this run computed almost nothing. Measured: 0.2s at 8
+        # pairings, 1.9s at 32, 7.0s at 64, so it climbs faster than the pairing
+        # count. Announced rather than left as an unexplained pause.
+        cached_pairings = sum(1 for v in cache.data.values()
+                              if isinstance(v, dict) and v.get("ours"))
+        from export_search import audited_line_count, AUTO_LIGHT_LINES
+        n_lines = audited_line_count(cache.data)
+        level = args.workbook
+        if level == "auto":
+            level = "light" if n_lines > AUTO_LIGHT_LINES else "full"
+        print(f"\nBuilding the {level} workbook from all {cached_pairings} "
+              f"cached pairings ({n_lines:,} audited lines, not just this "
+              f"run's)...", flush=True)
+        if level == "light" and args.workbook == "auto":
+            print(f"  ({n_lines:,} lines is past {AUTO_LIGHT_LINES:,}, so the "
+                  f"Lines / Candidates / Turns sheets are skipped. "
+                  f"--workbook full forces them.)", flush=True)
+        _t0 = time.time()
+        n = build_workbook(cache.data, path, team_sheets=sheets,
+                           workbook=level)
+        print(f"Workbook: {os.path.abspath(path)}  ({n} pairings, "
+              f"{time.time() - _t0:.0f}s)")
 
     rows = [v for v in cache.data.values() if isinstance(v, dict) and v.get("ours")]
     by_team = {}

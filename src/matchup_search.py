@@ -124,9 +124,18 @@ def _equilibrium_joint_actions(battle, movesets, enemy_script=None):
     """Both sides' plays for one turn, from the SAME equilibrium solve.
 
     The pilot the audit uses (`matchup_search._rate_and_rerank`,
-    `robustness.line_report`): we play the equilibrium MIXTURE, they play their
-    equilibrium reply. Deliberately not the best response to our revealed move
-    -- that opponent is clairvoyant and beats every team ever built.
+    `robustness.line_report`): BOTH sides play their equilibrium mixture.
+    Deliberately not the best response to our revealed move -- that opponent is
+    clairvoyant and beats every team ever built.
+
+    Playing the two seats by the same rule is what makes a record mirror-
+    consistent; see WORKFLOW.md section 4.0 for the ladder of measurements. What
+    remains asymmetric after this is the OPPONENT'S WIDER MOVE SPACE
+    (`_attach_movesets`), and that one is deliberate: we know our own four
+    moves and we do not know theirs. It is correct modelling that happens to
+    ride with the seat, so a mirror test has to strip it
+    (`measure_side_bias.py --symmetric-info`) before its direction means
+    anything.
 
     Returns (ours, theirs), either of which may be None when the position has
     no legal action left to solve.
@@ -143,13 +152,21 @@ def _equilibrium_joint_actions(battle, movesets, enemy_script=None):
                               enemy_script=enemy_script)
     if not solution.our_actions:
         return None, None
-    ours = (_solver._pick_from_mixture(solution.our_actions, solution.p)
-            if _solver.NASH_SAMPLE else solution.best_action)
-    theirs = None
-    if solution.their_actions:
-        theirs = solution.their_actions[
-            max(range(len(solution.q)), key=lambda j: solution.q[j])]
-    return ours, theirs
+    # BOTH SEATS BY THE SAME RULE. This used to sample our action from the
+    # mixture `p` and take their single MODAL action from `q`, which is two
+    # different players wearing one name: the modal action is a pure strategy,
+    # and a pure strategy is not what the equilibrium prescribes. Measured on
+    # 28 mirrored matchups at 24 turns, that mismatch alone was worth 15 points
+    # of self-contradiction (43% -> 29% once both seats sample).
+    def _play(actions, dist):
+        if not actions:
+            return None
+        if _solver.NASH_SAMPLE:
+            return _solver._pick_from_mixture(actions, dist)
+        return actions[max(range(len(dist)), key=lambda j: dist[j])]
+
+    return _play(solution.our_actions, solution.p), _play(solution.their_actions,
+                                                          solution.q)
 
 
 def play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
@@ -704,7 +721,8 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                preview_tau=None, preview_alpha=None,
                                rate_robustness=False, robustness_leads=3,
                                robustness_turns=5, prescreen_top=None,
-                               audit_all_configs=False, pilot=GREEDY_PILOT):
+                               audit_all_configs=False, pilot=GREEDY_PILOT,
+                               top_leads=None, detail="full"):
     """Find the bring-4/lead-2 of ours with the best WORST CASE against every
     enemy configuration, rather than against one arbitrary back pair.
 
@@ -746,14 +764,45 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                                our_sets=our_sets, enemy_sets=enemy_sets)
 
     movesets_cache = {}
+    # Result memo for the screener. fast_pair_score depends only on the two
+    # PAIRS, so the 90x90 loop below asks it 8,100 questions with at most 15x15
+    # distinct answers. Memoising is worth ~36x on this stage by itself, and it
+    # is what makes scoring the back pair as well (see below) cost nothing.
+    pair_memo = {}
+
+    def pair_margin(our_pair, enemy_pair):
+        key = (our_pair, enemy_pair)
+        if key not in pair_memo:
+            pair_memo[key] = fast_pair_score(our_pair, enemy_pair, merged, moves_db,
+                                             natures, typechart, movesets_cache,
+                                             our_sets=our_sets,
+                                             enemy_sets=enemy_sets)["margin"]
+        return pair_memo[key]
+
     scored = []
     for i, oc in enumerate(our_configs):
         worst, worst_cfg, wins = None, None, 0
         margins = []
+        # THE BACK PAIR, SCORED THE SAME WAY. The screener only ever looked at
+        # `oc[:2]`, so all six configs sharing a lead scored IDENTICALLY and the
+        # back two was decided by whatever order itertools.combinations happened
+        # to emit. Measured on one real six against one real six: the six backs
+        # behind the best lead all screened at 107.46, and when actually played
+        # out under the equilibrium pilot they ranged from 4/15 to 8/15. The
+        # best available back was twice the worst, and which one you got was an
+        # accident of enumeration order.
+        #
+        # Scoring the back as if it led is not a claim that it will lead. It is
+        # the cheapest honest proxy for what a back is FOR -- it is what you
+        # pivot into, so how it fares against their leads is exactly the
+        # question -- and with the memo above it is free, because every pair of
+        # ours is already scored against every lead of theirs.
+        back_worst = None
         for lead, back in configs:
-            r = fast_pair_score(tuple(oc[:2]), tuple(lead), merged, moves_db, natures,
-                                 typechart, movesets_cache)
-            margin = r["margin"]
+            margin = pair_margin(tuple(oc[:2]), tuple(lead))
+            bm = pair_margin(tuple(oc[2:]), tuple(lead))
+            if back_worst is None or bm < back_worst:
+                back_worst = bm
             margins.append(margin)
             if margin > 0:
                 wins += 1
@@ -771,11 +820,43 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
                         "screen_wins": wins, "screen_total": len(configs),
                         "downside": downside_score(margins, tau=preview_tau,
                                                    alpha=preview_alpha),
+                        "screen_back_margin": back_worst,
                         "screen_margins": margins})
         if progress and (i + 1) % max(1, len(our_configs) // 10) == 0:
             progress(i + 1, len(our_configs))
 
-    scored.sort(key=lambda d: -d["worst_margin"])
+    # Lead first, back as the tie-break. The primary key is unchanged, so this
+    # cannot reorder two candidates the screener could genuinely distinguish --
+    # it only decides the ties it used to leave to enumeration order, and those
+    # were most of them (90 candidates, 14 distinct lead scores).
+    scored.sort(key=lambda d: (-d["worst_margin"],
+                               -(d["screen_back_margin"]
+                                 if d["screen_back_margin"] is not None else 0.0)))
+
+    # TOP-N LEADS, WITH EVERY BACK BEHIND THEM. `verify_top` is a flat count,
+    # and a flat count is the wrong unit for this screener: it ranks on the LEAD
+    # pair, so the six configurations sharing a lead tie exactly and a count of
+    # 3 or 6 audits ONE lead with an arbitrary subset of its backs. Measured
+    # over three pairings, the tie groups are 6, 6, 6, 6 -- one per lead -- so
+    # counting leads instead gives 6, 12, 18, 24 configurations and always ends
+    # on a lead boundary.
+    #
+    # It is also the cut that stops the audit missing the answer. On the
+    # reference pairing the configuration that beats all three of their hardest
+    # leads sits at rank 17, so `--brings 12` misses it and three leads (18
+    # configurations) finds it -- for about 2.5 minutes a pairing at standard.
+    if top_leads:
+        order, seen_leads = [], []
+        for d in scored:
+            lead = tuple(d["our_bring4"][:2])
+            if lead not in seen_leads:
+                if len(seen_leads) >= top_leads:
+                    break
+                seen_leads.append(lead)
+            order.append(d)
+        # Never fewer than the tier asked for: this is meant to widen the audit,
+        # and a roster with very few distinct leads should not silently narrow it.
+        verify_top = max(verify_top, len(order))
 
     # Verify the survivors properly against EVERY enemy config.
     verified = []
@@ -785,9 +866,15 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
         for lead, back in configs:
             eb4 = list(lead) + list(back)
             if script_team:
+                # `pilot` matters here as much as on the unscripted branch. It
+                # used not to be passed, so picking Thorough+ against a scripted
+                # opponent produced a GREEDY record that the rec below then
+                # labelled "equilibrium" -- a number that could not be compared
+                # with any other number in the app, including its own label.
                 w, t, _, _v, all_res = play_scripted_worst_case(
                     cand["our_bring4"], eb4, merged, moves_db, natures, typechart, script_team,
-                    max_turns, our_sets=our_sets, enemy_sets=enemy_sets, return_all=True)
+                    max_turns, our_sets=our_sets, enemy_sets=enemy_sets, return_all=True,
+                    pilot=pilot)
                 # Split the SAME already-played games (no extra simulation) into
                 # "beats their script (+ generic near-script deviations)" vs "beats
                 # plain conventional play" -- idx=None is specifically the plain
@@ -860,7 +947,8 @@ def search_robust_composition(our_pool6, enemy_roster, merged, moves_db, natures
         verified = _rate_and_rerank(verified, enemy_roster, merged, moves_db,
                                      natures, typechart, configs, our_sets,
                                      enemy_sets, preview_tau, robustness_leads,
-                                     robustness_turns, audit_all_configs)
+                                     robustness_turns, audit_all_configs,
+                                     detail=detail)
     return verified
 
 
@@ -881,9 +969,61 @@ def _line_value(report):
     return max(0.0, 1.0 - max(0.0, charged) / KO_WEIGHT)
 
 
+DETAIL_LEVELS = ("full", "light", "summary")
+
+# How many lines per audited bring keep their turn-by-turn record at "light".
+# Six because that is the size the payload had at the settings nobody
+# complained about (thorough --audit-all --brings 6, 5.7 MB a pairing); the
+# lines kept are the worst six, so the diagnosis you would actually open is
+# still there.
+LIGHT_LINE_BUDGET = 6
+
+
+def _detailed_lines(per_lead, detail):
+    """Which audited lines keep their turn-by-turn record. Returns a set of
+    indices into `per_lead`.
+
+    The per-turn payload is essentially the whole cache: measured at ~890 bytes
+    a turn, of which `events` is 479 and `hp_after` 187, and one audited line at
+    18 turns is 10.6 kB. That is fine at 4 leads x 6 brings (0.3 MB a pairing)
+    and ruinous at `--audit-all --brings 90`, which is 90 x 90 lines -- 86 MB a
+    pairing, ~690 MB across eight opponents, and reported in the field at
+    200 MB to 1.5 GB. A workbook cannot be built from that.
+
+    A BUDGET, NOT A FILTER, and that distinction is the whole point. The first
+    version of "light" was the predicate "keep it if the line lost or had a
+    severe turn" -- reasonable-sounding, since turn-by-turn exists to answer
+    "why did this go wrong" and a clean win has no answer to give. Measured on
+    a real thorough pairing it saved 0%: all 24 lines lost or went severe, so
+    the predicate kept every one. Of course it did. The runs whose caches blow
+    up are the exhaustive ones, and an exhaustive run against a bad matchup is
+    precisely where every line is a line worth explaining. A predicate cannot
+    bound anything, because the case that makes the file big is the case that
+    satisfies it.
+
+    So: keep at most LIGHT_LINE_BUDGET per bring, worst first (losses ahead of
+    wins, then by mean punish). The cache size is then bounded by
+    `brings x budget x turns` no matter how the matchup goes, and the lines
+    dropped are the ones nobody scrolls to.
+    """
+    if detail == "full":
+        return set(range(len(per_lead)))
+    if detail == "summary":
+        return set()
+
+    def rank(pair):
+        _i, (_lead, _prob, report) = pair
+        return ((report.outcome or "").lower() == "win",
+                -(report.mean_exploitability or 0.0))
+
+    ordered = sorted(enumerate(per_lead), key=rank)
+    return {i for i, _ in ordered[:LIGHT_LINE_BUDGET]}
+
+
 def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechart,
                       configs, our_sets, enemy_sets, preview_tau,
-                      leads_per_candidate, turns, audit_all_configs=False):
+                      leads_per_candidate, turns, audit_all_configs=False,
+                      detail="full"):
     """Attach an exploitability rating to each survivor and sort by it.
 
     Piloted with the least-exploitable solver configuration available: rating a
@@ -940,8 +1080,23 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             enemy4 = _enemy4(enemy_spec)
             oc = make_team(list(our_names), merged, natures, sets=our_sets)
             ec = make_team(enemy4, merged, natures, sets=enemy_sets)
-            ms = {c.name: build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES)
-                  for c in oc + ec}
+            # THE SET'S FOUR MOVES, not the usage-standard four. `make_team`
+            # above already applies the item, ability and EVs from `our_sets`,
+            # and this line used to drop the MOVES on the floor -- so the audit
+            # rated, and the reported line played, a Pokemon holding the right
+            # item with somebody else's attacks. Reported as "best lines use
+            # moves not in the teamsheet: Scizor using Bug Bite when it doesn't
+            # have it". Every other build site (play_out_pair, deep_dive,
+            # committed_plan, punish_screen) already passed only_moves; this one
+            # did not, which is why the RECORD and the LINE disagreed about what
+            # the team was.
+            ms = {}
+            for c in oc + ec:
+                spec = ((our_sets or {}).get(c.name)
+                        or (enemy_sets or {}).get(c.name) or {})
+                ms[c.name] = build_moveset(merged[c.name], moves_db,
+                                           top_k=TOP_K_MOVES,
+                                           only_moves=spec.get("moves"))
             battle = Battle(oc, ec, typechart, moves_db)
             _attach_movesets(battle, ms, ec, merged, moves_db, enemy_sets)
             return battle, ms
@@ -958,6 +1113,7 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
         rec["robust_win_rate"] = rating.robust_win_rate
         rec["reliable_wins"] = rating.reliable_wins
         rec["outcomes"] = rating.outcomes
+        detailed = _detailed_lines(rating.per_lead, detail)
         rec["audit"] = [{
             "lead": list(lead)[:2],
             # The bring they ACTUALLY played in this line, backs resolved the
@@ -976,7 +1132,10 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
             "outcome": report.outcome,
             "final_margin": report.final_margin,
             "line_turns": report.length,
-            "turns": [{
+            # Empty when this line is not one the detail level keeps -- the
+            # summary fields above still describe it, so a row in the workbook
+            # is complete even when its turn-by-turn is not stored.
+            "turns": [] if _i not in detailed else [{
                 "turn": t.turn,
                 "exploitability": t.exploitability,
                 "expected_loss": t.expected_loss,
@@ -997,7 +1156,7 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
                                 if (t.punisher and t.has_punish) else None),
                 "no_punish": not t.has_punish,
             } for t in report.turns],
-        } for lead, probability, report in rating.per_lead]
+        } for _i, (lead, probability, report) in enumerate(rating.per_lead)]
         worst = rating.worst_lead
         if worst:
             lead, _p, report = worst
@@ -1047,9 +1206,18 @@ def _rate_and_rerank(verified, enemy_roster, merged, moves_db, natures, typechar
 
 def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
                               team_name, max_turns=MAX_TURNS, our_sets=None, enemy_sets=None,
-                              return_all=False):
+                              return_all=False, pilot=GREEDY_PILOT):
     """Play a scripted opponent, trying EVERY opening variant and returning the
     worst outcome for us.
+
+    `pilot` is WHO PLAYS OUR SIDE, and it has to be passed in rather than
+    defaulted, because a record and a replay that disagree about it disagree
+    about the result. This function used not to take it at all: the Lead/Back
+    search would record a config as a loss under the equilibrium pilot, and the
+    app's per-battle replay would re-play the same config under the greedy one
+    and print "Avg-roll result: WIN" directly beneath a header reading "LOSS".
+    Same defect as WORKFLOW 0d, one layer up -- the two numbers were never
+    playing the same game.
 
     A forced-lead team has a tiny decision space -- mainly which of our two slots
     to Fake Out -- so it should be searched exhaustively rather than assuming it
@@ -1073,7 +1241,8 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
     variants = all_scripts(team_name) + [(None, None)]
     if not variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
-                                       typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
+                                       typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
+                                       pilot=pilot)
         return (w, t, b, None, {None: (w, t, b)}) if return_all else (w, t, b, None)
 
     worst = None
@@ -1081,7 +1250,8 @@ def play_scripted_worst_case(our_names, enemy_names, merged, moves_db, natures, 
     for idx, script in variants:
         w, t, b = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures,
                                        typechart, max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
-                                       enemy_script=script)   # script=None -> greedy 2v2
+                                       enemy_script=script,   # script=None -> greedy 2v2
+                                       pilot=pilot)
         all_results[idx] = (w, t, b)
         rank = (2, -t) if w == "p2" else ((0, t) if w == "p1" else (1, 0))
         if worst is None or rank > worst[0]:

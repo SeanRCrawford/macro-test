@@ -75,7 +75,8 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
     if base_name is None:
         # Regular (non-Mega) Pokemon -- single form for the whole battle.
         stats = compute_stats(p["base_stats"], nat, ev_points)
-        return Combatant(name=name, stats=stats, types=p["types"], ability=ability or usage_ability, item=it)
+        return Combatant(name=name, stats=stats, types=p["types"], ability=ability or usage_ability,
+                          item=it, weight_kg=p.get("weight_kg"))
 
     # Mega pick: compute BOTH forms up front. Base form is what it starts
     # battle as; mega form is applied by engine.mega_evolve() on switch-in
@@ -95,6 +96,7 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
         base_rec = merged[base_name]
         base_stats_table = base_rec["base_stats"]
         base_types = base_rec["types"]
+        base_weight_kg = base_rec.get("weight_kg")
         base_usage_default = (_default_ability(base_rec["abilities_usage"])
                                if base_rec["abilities_usage"] else mega_ability)
         base_ability = ability or base_usage_default
@@ -109,10 +111,12 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
             print(f"WARNING: could not resolve base form '{base_name}' for '{name}' -- "
                   f"treating as already Mega-evolved from turn 1 (inaccurate).")
             base_stats_table, base_types = p["base_stats"], p["types"]
+            base_weight_kg = p.get("weight_kg")
             base_ability = ability or mega_ability
         else:
             base_stats_table = sdata["baseStats"]
             base_types = sdata["types"]
+            base_weight_kg = sdata.get("weightkg")
             base_usage_default = (list(sdata.get("abilities", {}).values())[0]
                                    if sdata.get("abilities") else mega_ability)
             base_ability = ability or base_usage_default
@@ -134,12 +138,13 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
         # means it will never transform. It still holds its stone (that's why it was
         # brought), it simply doesn't get to use it this battle.
         return Combatant(name=name, stats=base_stats, types=base_types, ability=base_ability, item=it,
-                          is_mega_pick=False, mega_evolved=False)
+                          is_mega_pick=False, mega_evolved=False, weight_kg=base_weight_kg)
 
     return Combatant(
         name=name, stats=base_stats, types=base_types, ability=base_ability, item=it,
         is_mega_pick=True, mega_evolved=False,
         mega_stats=mega_stats, mega_ability=mega_ability, mega_types=mega_types,
+        weight_kg=base_weight_kg, mega_weight_kg=p.get("weight_kg"),
     )
 
 

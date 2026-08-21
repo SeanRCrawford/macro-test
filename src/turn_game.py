@@ -169,9 +169,32 @@ def _enumerate(battle, side_name, movesets, cap=None):
                                        battle.turn_num + 1)
     theirs = our_candidate_joint_actions(battle, them, us, theirs_movesets,
                                          battle.turn_num + 1)
-    if cap:
-        ours, theirs = ours[:cap], theirs[:cap]
+    if cap and (len(ours) > cap or len(theirs) > cap):
+        # The cap is a PREFIX cut, and the prefix is whatever order
+        # itertools.product happened to produce -- so without this, the row that
+        # fires a guaranteed KO can be discarded before the matrix is built,
+        # purely because of where its move sits in the moveset. Order by
+        # pressure first; the cut then keeps the actions that matter.
+        ours, theirs = _pressure_first(battle, movesets, ours, theirs, cap)
     return ours, theirs
+
+
+def _pressure_first(battle, movesets, ours, theirs, cap):
+    """Truncate both action lists, most pin-relevant first.
+
+    Costs one threat matrix (about one simulated turn) and is only reached when
+    the cap actually bites, so it never runs on the uncapped top-level solve.
+    Falls back to the plain prefix if anything goes wrong -- a worse ordering is
+    not worth an exception inside the search.
+    """
+    try:
+        from pin import rank_joint_actions
+        from threat import build_threat_matrix
+        matrix = build_threat_matrix(battle, movesets)
+        return (rank_joint_actions(matrix, battle, ours)[:cap],
+                rank_joint_actions(matrix, battle, theirs)[:cap])
+    except Exception:
+        return ours[:cap], theirs[:cap]
 
 
 def _seed_indices(battle, side_name, movesets, ours, theirs):
@@ -212,6 +235,25 @@ def _seed_indices(battle, side_name, movesets, ours, theirs):
         idx = protect_row(pool)
         if idx is not None and idx not in seeds:
             seeds.append(idx)
+
+    # The pin, as a seed. Double oracle converges in the number of iterations it
+    # takes to FIND the decisive action, so starting it from "the move that
+    # removes their Pokemon" and "the reply that survives ours" is worth more
+    # than any number of extra iterations. This is the pressure-driven seeding
+    # threat.py's docstring calls for, made concrete.
+    try:
+        from pin import joint_action_score
+        from threat import build_threat_matrix
+        matrix = build_threat_matrix(battle, movesets)
+        for pool, seeds in ((ours, seed_rows), (theirs, seed_cols)):
+            scored = max(range(len(pool)),
+                         key=lambda i: joint_action_score(matrix, battle, pool[i]),
+                         default=None)
+            if (scored is not None and scored not in seeds
+                    and joint_action_score(matrix, battle, pool[scored]) > 0):
+                seeds.append(scored)
+    except Exception:
+        pass
     return seed_rows, seed_cols
 
 

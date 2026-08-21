@@ -135,7 +135,7 @@
         "chosen": "Gallade:move:Leaf Blade->Mega Blastoise | Hydreigon:move:Snarl->Mega Blastoise",
         "eval": -474.2807,
         "eval_p2": 474.2807,
-        "n_our_actions": 16,
+        "n_our_actions": 20,
         "score": -219.1651,
         "turn": 3
       },
@@ -182,27 +182,27 @@
         "turn": 3
       },
       {
-        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Throat Chop->Mega Aerodactyl",
+        "chosen": "Farigiraf:move:Psychic->Mega Aerodactyl | Incineroar:switch:switch->Gallade",
         "eval": -134.9185,
         "eval_p2": 134.9185,
-        "n_our_actions": 18,
-        "score": -21.1001,
+        "n_our_actions": 22,
+        "score": 82.9899,
         "turn": 4
       },
       {
         "chosen": "Gallade:move:Sacred Sword->Mega Aerodactyl | Hydreigon:move:Draco Meteor->Mega Charizard Y",
         "eval": -329.553,
         "eval_p2": 329.553,
-        "n_our_actions": 16,
+        "n_our_actions": 24,
         "score": -75.809,
         "turn": 5
       },
       {
-        "chosen": "Gallade:move:Sacred Sword->Garchomp | Hydreigon:move:Dark Pulse->Garchomp",
+        "chosen": "Gallade:move:Sacred Sword->Mega Charizard Y | Hydreigon:move:Dark Pulse->Garchomp",
         "eval": -244.5841,
         "eval_p2": 244.5841,
-        "n_our_actions": 4,
-        "score": -312.3175,
+        "n_our_actions": 12,
+        "score": -299.9846,
         "turn": 6
       }
     ]
@@ -256,11 +256,11 @@
         "turn": 5
       },
       {
-        "chosen": "Hydreigon:move:Dark Pulse->Pelipper | Incineroar:move:Throat Chop->Pelipper",
-        "eval": -162.1915,
-        "eval_p2": 162.1915,
-        "n_our_actions": 8,
-        "score": -490.4696,
+        "chosen": "Gallade:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Mega Metagross",
+        "eval": 123.6328,
+        "eval_p2": -123.6328,
+        "n_our_actions": 14,
+        "score": 138.3971,
         "turn": 6
       }
     ]
@@ -314,11 +314,11 @@
         "turn": 5
       },
       {
-        "chosen": "Hydreigon:move:Dark Pulse->Pelipper | Incineroar:move:Throat Chop->Pelipper",
-        "eval": -95.0376,
-        "eval_p2": 95.0376,
-        "n_our_actions": 8,
-        "score": -423.3157,
+        "chosen": "Gallade:move:Psycho Cut->Mega Floette | Incineroar:move:Flare Blitz->Mega Floette",
+        "eval": 163.7866,
+        "eval_p2": -163.7866,
+        "n_our_actions": 14,
+        "score": 296.913,
         "turn": 6
       }
     ]

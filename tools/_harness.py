@@ -25,10 +25,16 @@ def load_world():
                 typechart=typechart, teams=teams, meta=meta)
 
 
-def setup_battle(our4, enemy4, world):
-    """A fresh Battle plus the movesets dict the solver functions expect."""
-    ours = make_team(our4, world["merged"], world["natures"])
-    theirs = make_team(enemy4, world["merged"], world["natures"])
+def setup_battle(our4, enemy4, world, sets=None, enemy_sets=None):
+    """A fresh Battle plus the movesets dict the solver functions expect.
+
+    `sets` / `enemy_sets` are the per-Pokemon item/move/EV overrides `make_team`
+    already understands -- needed so a caller can ask "what if this one held a
+    Roseli Berry" without rebuilding the world.
+    """
+    ours = make_team(our4, world["merged"], world["natures"], sets=sets)
+    theirs = make_team(enemy4, world["merged"], world["natures"],
+                       sets=enemy_sets)
     movesets = {c.name: build_moveset(world["merged"][c.name], world["moves"])
                 for c in ours + theirs}
     battle = Battle(ours, theirs, world["typechart"], world["moves"])

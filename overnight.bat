@@ -33,13 +33,78 @@ rem   --punish-screen    drop a team whose OPENING is already lost before
 rem                      spending the audit on it. Solves turn 1 as a matrix
 rem                      game -- seconds per team against minutes for the
 rem                      audit -- so the night is spent on plausible teams.
-rem                      Optionally takes a floor: --punish-screen -200 is
-rem                      stricter than the default -250.
+rem                      Takes NO value here; use --punish-floor to change it.
+rem   --punish-floor N   the floor --punish-screen rejects below. Default -250,
+rem                      which is a bit under one Pokemon (one Pokemon down is
+rem                      about -280 heuristic_eval points). -150 is stricter,
+rem                      -350 barely screens. Implies --punish-screen, so
+rem                      --punish-floor -150 on its own is enough.
+rem                      NOTE: "--punish-screen -150" does NOT work -- the -150
+rem                      is read as a separate argument and the run exits.
+rem   --beam-width N     how wide the beam SEARCHES. --candidates already
+rem                      raises it to match (you cannot rate more teams than
+rem                      the beam emits), so set this only to search WIDER than
+rem                      you rate -- e.g. --beam-width 2000 --candidates 1000
+rem                      explores twice the space and rates the better half.
+rem   --screen-vs NAMES  rate STAGE 1 against only these opponents, comma-
+rem                      separated. THE lever for screening a large pool: cost
+rem                      is linear in opponents, so two instead of eight is 4x
+rem                      more teams per night. The ranking becomes "best
+rem                      against these two", so shortlist with it and re-rate
+rem                      the survivors against everyone.
+rem   --pilot NAME       WHO PLAYS THE GAMES the record comes from.
+rem                      "greedy" (default) plays our side with the real solver
+rem                      and theirs with a fixed policy, which hands whichever
+rem                      side is p1 a systematic advantage -- 78%% of mirrored
+rem                      matchups flip (tools\measure_side_bias.py).
+rem                      "equilibrium" plays both sides as a matrix game, so a
+rem                      safe play is worth what it is worth and a read is
+rem                      charged for being a read. ~13x slower per game.
+rem                      --gen-effort thorough+ turns it on for stage 1.
+rem   --evaluation NAME  "sacrifice" (default) or "legacy". Sacrifice scores
+rem                      speed control and discounts a Pokemon that is one hit
+rem                      from gone, so the solver sacrifices instead of
+rem                      preserving something it cannot use. Measured cost:
+rem                      record 80%% -> 74%%. "legacy" restores the previous
+rem                      evaluation exactly.
 rem   --min-winrate F    skip a generated team whose win rate is below this
 rem                      before spending the audit on it. Default 0.80.
 rem   --vs "Big 6"       deep-search against ONLY these opponents instead of
 rem                      the whole library. THE biggest lever: 1 opponent
 rem                      instead of 7 is 7x less work. Comma-separated.
+rem   --detail LEVEL     how much turn-by-turn detail is STORED in the cache.
+rem                      "light" (default) keeps it for the worst 6 lines per
+rem                      audited bring; "summary" keeps none; "full" is the old
+rem                      behaviour. This is the fix for a stage 2 cache running
+rem                      to hundreds of MB or more: the per-turn record is ~890
+rem                      bytes, an audited line is 10.6 kB, and at
+rem                      --audit-all --brings 90 that is ~86 MB per pairing
+rem                      (~690 MB over eight opponents) -- which no workbook
+rem                      can be built from. Note it is a BUDGET, not a filter:
+rem                      "keep the lines that lost or went severe" sounds
+rem                      right and measured ZERO saving, because an
+rem                      exhaustive run on a bad matchup is exactly where
+rem                      every line qualifies. Every line keeps its
+rem                      SUMMARY at all three levels, so the workbook's rows
+rem                      stay complete.
+rem   --workbook LEVEL   how many SHEETS --export writes. "light" keeps Teams,
+rem                      Plan, Matchups, Best lines, Team sheets and the
+rem                      legend, and drops Lines / Candidates / Turns -- the
+rem                      three that scale with brings x their configs, and
+rem                      which at --audit-all --brings 90 project a Turns sheet
+rem                      past Excel's 1,048,576-row limit. "auto" (default)
+rem                      picks light past 20,000 audited lines. Every sheet is
+rem                      capped at 100,000 rows and says where it stopped.
+rem   --top-leads N      audit the N best of OUR LEADS and EVERY back behind
+rem                      each -- 6 configurations per lead, so 3 is 18. This is
+rem                      the unit --brings should have been: the screener ranks
+rem                      the LEAD pair, so the six configurations sharing a lead
+rem                      tie exactly, and --brings 3 audits ONE lead with an
+rem                      arbitrary three of its six backs. Measured on a real
+rem                      pairing, the bring that beats all three of their
+rem                      hardest leads is at rank 17: --brings 12 misses it,
+rem                      --top-leads 3 finds it, ~2.5 min a pairing at standard.
+rem                      Use this instead of --brings for stage 2.
 rem   --brings N         audit only the N best of OUR brings per pairing
 rem                      instead of the tier's default (6 at thorough). The
 rem                      cheap screen has already ranked them, so this keeps
@@ -59,8 +124,11 @@ rem                      accumulate, so you can run --pick "6" tonight and
 rem                      --pick "4,10,12" tomorrow without redoing #6. The
 rem                      workbook is rebuilt each time to include everything
 rem                      searched so far. Omit to search the top --keep.
-rem   --list             run stage 1 only, print the ranked teams, and stop --
-rem                      so you can look before spending the night on stage 2.
+rem   --stage1-only      run stage 1 only, print the ranked teams, and stop --
+rem   (--list, --stage1)  so you can look before spending the night on stage 2.
+rem                      It writes shortlist.json, which --stage2-only reads,
+rem                      and stops before --substitute as well as before the
+rem                      deep search.
 rem   --stage2-only      SKIP stage 1 entirely and deep-search the shortlist
 rem                      that is already on disk. This is the flag for coming
 rem                      back later: pair it with --pick to spend the night on
@@ -96,6 +164,11 @@ set MINWR=0.80
 set OPTSETS=
 set SCRIPTSCR=
 set PUNISHSCR=
+set PILOT=
+set SCREENVS=
+set BEAMW=
+set SUBVS=
+set EVALN=
 set WORSTMU=
 set PICK=
 set LISTONLY=
@@ -104,6 +177,9 @@ set GENFLAGS=
 set REGEN=
 set VS=
 set BRINGS=
+set TOPLEADS=
+set DETAIL=
+set WORKBOOK=
 set SUBST=
 set SUBROUNDS=2
 set SUBPER=4
@@ -117,6 +193,7 @@ rem `--pick "5"` on its own mean "deep-search what I already have" rather than
 rem "generate a fresh 40 teams and then pick the fifth of THOSE".
 if /i "%~1"=="--pool-size"    (set POOL=%~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--candidates"   (set CANDIDATES=%~2& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--beam-width"   (set BEAMW=--beam-width %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--keep"         (set KEEP=%~2& shift & shift & goto parse)
 if /i "%~1"=="--generations"  (set GENS=--generations %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--gen-effort"   (set GENEFFORT=%~2& set GENFLAGS=1& shift & shift & goto parse)
@@ -130,14 +207,30 @@ if /i "%~1"=="--optimise-sets" (set OPTSETS=--optimise-sets& set GENFLAGS=1& shi
 if /i "%~1"=="--script-screen" (set SCRIPTSCR=--script-screen& set GENFLAGS=1& shift & goto parse)
 if /i "%~1"=="--worst-matchup" (set WORSTMU=--worst-matchup %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--punish-screen" (set PUNISHSCR=--punish-screen& set GENFLAGS=1& shift & goto parse)
+rem WHO PLAYS THE GAMES, and WHICH EVALUATION. Both change the answer, so both
+rem reach stage 1 AND stage 2 -- a record played by one pilot and deep-searched
+rem by the other is two different numbers under one heading.
+if /i "%~1"=="--screen-vs"     (set SCREENVS=--screen-vs "%~2"& set SUBVS=--vs "%~2"& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--pilot"         (set PILOT=--pilot %~2& set GENFLAGS=1& shift & shift & goto parse)
+if /i "%~1"=="--evaluation"    (set EVALN=--evaluation %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--punish-floor"  (set PUNISHSCR=--punish-screen %~2& set GENFLAGS=1& shift & shift & goto parse)
 if /i "%~1"=="--pick"         (set PICK=--pick "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--list"         (set LISTONLY=1& shift & goto parse)
+rem Same thing under the name that matches --stage2-only. "--list" reads as
+rem "print something", but it is the stage-1-only switch: it runs the whole
+rem generation and screen, writes shortlist.json, and stops before the deep
+rem search (and before --substitute).
+if /i "%~1"=="--stage1-only" (set LISTONLY=1& shift & goto parse)
+if /i "%~1"=="--stage1"      (set LISTONLY=1& shift & goto parse)
+if /i "%~1"=="--skip-stage2" (set LISTONLY=1& shift & goto parse)
 if /i "%~1"=="--stage2-only"  (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--stage2"       (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--skip-stage1"  (set STAGE2ONLY=1& shift & goto parse)
 if /i "%~1"=="--vs"           (set VS=--vs "%~2"& shift & shift & goto parse)
 if /i "%~1"=="--brings"       (set BRINGS=--brings %~2& shift & shift & goto parse)
+if /i "%~1"=="--top-leads"    (set TOPLEADS=--top-leads %~2& shift & shift & goto parse)
+if /i "%~1"=="--detail"       (set DETAIL=--detail %~2& shift & shift & goto parse)
+if /i "%~1"=="--workbook"     (set WORKBOOK=--workbook %~2& shift & shift & goto parse)
 if /i "%~1"=="--substitute"   (set SUBST=%~2& shift & shift & goto parse)
 if /i "%~1"=="--sub-rounds"   (set SUBROUNDS=%~2& shift & shift & goto parse)
 if /i "%~1"=="--sub-per-round" (set SUBPER=%~2& shift & shift & goto parse)
@@ -209,6 +302,7 @@ echo ============================================================
 python generate_overnight.py --pool-size %POOL% --candidates %CANDIDATES% ^
     --keep %KEEP% %GENS% --effort %GENEFFORT% --jobs %JOBS% ^
     --min-winrate %MINWR% %OPTSETS% %SCRIPTSCR% %PUNISHSCR% %WORSTMU% ^
+    %PILOT% %EVALN% %SCREENVS% %BEAMW% ^
     --cache overnight_gen.json --out shortlist.json
 if errorlevel 1 (
     echo.
@@ -249,7 +343,7 @@ if defined SUBST (
         echo --- team %%i ---
         python substitute.py --rosters shortlist.json --team %%i --append ^
             --rounds %SUBROUNDS% --per-round %SUBPER% --pool-size %POOL% ^
-            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% ^
+            %GENS% --effort %GENEFFORT% --jobs %JOBS% %OPTSETS% %PILOT% %EVALN% %SUBVS% ^
             --cache overnight_gen.json --out substituted.json
         if errorlevel 1 (
             echo.
@@ -272,8 +366,8 @@ rem No --teams: with a roster file, search_teams defaults OUR side to the
 rem generated teams and theirs to the library. Parsing the shortlist here and
 rem passing the names back in is what broke stage 2 when the file grew a
 rem wrapper for the optimised sets.
-python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% ^
-    --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% ^
+python search_teams.py --rosters !ROSTERS! %PICK% %VS% %BRINGS% %TOPLEADS% %DETAIL% %WORKBOOK% ^
+    --effort %DEEPEFFORT% --jobs %JOBS% --batch 4 %AUDITALL% %PILOT% %EVALN% ^
     --sheets !SHEETS! ^
     --cache overnight_%DEEPEFFORT%.json --export
 set RC=%ERRORLEVEL%

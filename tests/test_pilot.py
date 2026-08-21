@@ -87,8 +87,14 @@ class TestEquilibriumPilotPlaysBothSides(unittest.TestCase):
         class FakeSolution:
             our_actions = ["ours-a", "ours-b"]
             their_actions = ["theirs-a", "theirs-b"]
+            # BOTH degenerate, so the assertion below is about WHICH
+            # distribution each seat reads rather than about a sampling draw.
+            # This used to leave q mixed and assert their MODAL action, which
+            # pinned the very asymmetry that made records self-contradictory --
+            # our seat sampled its mixture while theirs played a pure strategy.
+            # See tests/test_mirror_consistency.py for the measurements.
             p = [0.0, 1.0]
-            q = [0.25, 0.75]
+            q = [0.0, 1.0]
             best_action = "ours-b"
 
         import turn_game
@@ -107,7 +113,7 @@ class TestEquilibriumPilotPlaysBothSides(unittest.TestCase):
 
         self.assertEqual(calls, ["p1"])          # one solve, not two
         self.assertEqual(ours, "ours-b")         # our side, from the mixture
-        self.assertEqual(theirs, "theirs-b")     # their equilibrium reply
+        self.assertEqual(theirs, "theirs-b")     # from THEIR mixture, same rule
 
     def test_a_dead_position_yields_no_actions_rather_than_raising(self):
         class Empty:
