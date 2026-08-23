@@ -746,3 +746,140 @@ class TestThresholdSearchScreening(unittest.TestCase):
         self.assertEqual(got.frac, got.hi)
         self.assertLessEqual(got.lo, got.avg)
         self.assertLessEqual(got.avg, got.hi)
+
+
+class TestJointPairSearch(unittest.TestCase):
+    """`joint_pair_search` -- `pair_search` generalised from one candidate
+    (plus a partner locked to ONE fixed move) to two real attackers, and from
+    one turn to several, classified as a clean sweep, an out-trade win, a
+    loss, or no-KO, plus a Tailwind-robustness replay.
+
+        "against a given enemy pair, my pair either out trade all possible
+         enemy pairs to a win (including spread damage ...), outspeed and ko
+         before either of mine fail, or ... do not get OHKOd by any under
+         enemy tailwind"
+
+    Every fixture below is a real matchup pulled from the dataset (verified
+    by running the search itself), not a hand-derived guess.
+    """
+
+    def setUp(self):
+        self.W = world()
+
+    def _search(self, cand, targets, partner, **kw):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search([cand], targets, partner, merged, moves,
+                                    natures, typechart, **kw)
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_a_dominant_fast_pair_sweeps_a_weak_slow_pair(self):
+        """Mega Gengar + Mega Alakazam vs Sableye + Ariados: both dead before
+        either of them ever gets to act."""
+        row = self._search("Mega Gengar", ["Sableye", "Ariados"],
+                           "Mega Alakazam")
+        d = row["detail"][("Sableye", "Ariados")]
+        self.assertEqual(d["outcome"], "sweep")
+        self.assertTrue(d["tailwind_safe"])
+        self.assertEqual(d["tailwind_outcome"], "sweep")
+
+    def test_tailwind_can_flip_a_sweep_to_unsafe(self):
+        """Mega Gengar + Mega Alakazam vs Sharpedo + Rampardos: a real sweep
+        at normal speed, but NOT once the enemy pair moves first -- the
+        robustness check has to actually replay the race, not just assume a
+        win stays a win."""
+        row = self._search("Mega Gengar", ["Sharpedo", "Rampardos"],
+                           "Mega Alakazam")
+        d = row["detail"][("Sharpedo", "Rampardos")]
+        self.assertEqual(d["outcome"], "sweep")
+        self.assertFalse(d["tailwind_safe"])
+        self.assertEqual(d["tailwind_outcome"], "loss")
+
+    def test_out_trade_wins_the_race_without_a_clean_sweep(self):
+        """Mega Scizor + Whimsicott vs Kingambit + Basculegion: both die
+        within the window, but Kingambit gets at least one hit in first."""
+        row = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
+                           "Whimsicott", turns=2)
+        d = row["detail"][("Kingambit", "Basculegion")]
+        self.assertEqual(d["outcome"], "out_trade")
+        self.assertTrue(d["tailwind_safe"])
+
+    def test_turns_extends_the_window(self):
+        """The SAME matchup, only the turn cap different: too short a window
+        reports no_ko even though the pair wins it with one more turn."""
+        row1 = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
+                            "Whimsicott", turns=1)
+        d1 = row1["detail"][("Kingambit", "Basculegion")]
+        self.assertEqual(d1["outcome"], "no_ko")
+        self.assertEqual(d1["turns_used"], 1)
+
+        row2 = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
+                            "Whimsicott", turns=2)
+        d2 = row2["detail"][("Kingambit", "Basculegion")]
+        self.assertEqual(d2["outcome"], "out_trade")
+        self.assertEqual(d2["turns_used"], 2)
+
+    def test_spread_move_still_takes_the_075x_penalty_when_both_are_alive(self):
+        """Same rule `TestSpreadMovesInPairSearch` checks for `pair_search`,
+        now for the joint search's own move-choice helper: Garchomp's
+        Earthquake hits both live enemies at once, at the doubles multiplier,
+        not a full hit on each."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        item, mvs, weather = cf._answer_for(
+            "Garchomp", merged, moves, natures, typechart,
+            ["Kingambit", "Basculegion"])
+        c = cf._build("Garchomp", merged, natures, item=item)
+        c_moves = cf._move_infos("Garchomp", merged, moves, mvs)
+        e1 = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Basculegion", merged, natures)
+        hits, mv = cf._choose_action(c, c_moves, {"E1": e1, "E2": e2},
+                                     typechart, weather=weather)
+        self.assertEqual(mv.name, "Earthquake")
+        self.assertEqual(set(hits), {"E1", "E2"},
+                         "a live spread move must hit BOTH enemies")
+        for h in hits.values():
+            self.assertEqual(h.num_targets_hit, 2)
+
+    def test_a_single_live_target_does_not_get_the_spread_penalty(self):
+        """Once only one enemy is left standing, the SAME spread move should
+        no longer take the doubles penalty -- there's only one Pokemon left
+        for it to hit."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        item, mvs, weather = cf._answer_for(
+            "Garchomp", merged, moves, natures, typechart,
+            ["Kingambit", "Basculegion"])
+        c = cf._build("Garchomp", merged, natures, item=item)
+        c_moves = cf._move_infos("Garchomp", merged, moves, mvs)
+        e1 = cf._build("Kingambit", merged, natures)
+        hits, mv = cf._choose_action(c, c_moves, {"E1": e1}, typechart,
+                                     weather=weather)
+        self.assertEqual(set(hits), {"E1"})
+        self.assertEqual(hits["E1"].num_targets_hit, 1)
+
+    def test_the_partner_itself_is_excluded_from_the_pool(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(
+            ["Mega Alakazam", "Mega Gengar"], ["Sableye", "Ariados"],
+            "Mega Alakazam", merged, moves, natures, typechart)
+        self.assertNotIn("Mega Alakazam", [r["name"] for r in rows])
+
+    def test_a_named_target_is_excluded_from_the_pool_too(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(
+            ["Mega Gengar", "Sableye"], ["Sableye", "Ariados"],
+            "Mega Alakazam", merged, moves, natures, typechart)
+        self.assertNotIn("Sableye", [r["name"] for r in rows])
+
+    def test_rows_are_ranked_beaten_first_then_tailwind_safe(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(
+            ["Mega Gengar", "Ninetales-Alola"], ["Sharpedo", "Rampardos"],
+            "Mega Alakazam", merged, moves, natures, typechart)
+        beaten = [r["pairs_swept"] + r["pairs_traded"] for r in rows]
+        self.assertEqual(beaten, sorted(beaten, reverse=True))

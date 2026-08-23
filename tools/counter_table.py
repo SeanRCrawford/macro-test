@@ -10,8 +10,10 @@
     python counter_table.py --vs "Kingambit,Basculegion,Mega Floette" --speed
     python counter_table.py --vs "Kingambit,Basculegion" --threshold 100 --max-taken 50 --outspeed natural
     python counter_table.py --vs "Kingambit,Basculegion" --threshold 50 --max-taken 33 --outspeed scarf
+    python counter_table.py --vs "Kingambit,Basculegion,Garchomp" --joint --partner "Whimsicott"
+    python counter_table.py --vs "Kingambit,Basculegion,Garchomp" --joint --partner "Whimsicott" --turns 3
 
-Three modes, pick one (or combine --chip-from/--chip-move with --pairs):
+Four modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
   (default)   OHKO / threshold search: best legal item, WORST-roll % on EACH
               named target (a guarantee), ranked on the worst of them.
@@ -34,6 +36,17 @@ Three modes, pick one (or combine --chip-from/--chip-move with --pairs):
               read down the list; anyone above a target in the SAME
               priority bracket outspeeds it, and a higher bracket outspeeds
               it regardless of the speed numbers.
+  --joint     A JOINT pair table: paired with --partner (both attacking with
+              their own real set, not one fixed move), does the candidate +
+              partner beat every PAIR drawn from the named targets, over
+              --turns turns (default 2), in real priority-then-speed order?
+              Classified as a clean SWEEP (both enemies dead before either
+              of them ever acted), an OUT-TRADE win (both enemies dead
+              within the window, ours took hits but didn't faint), a LOSS,
+              or NO-KO (window elapsed, nobody finished). Also replays the
+              same race with the enemy side's speed doubled (a Tailwind
+              hypothesis, same spirit as --outspeed scarf) and reports
+              whether the pair is still safe.
 
 By default the WHOLE ~270-Pokemon dataset is searched, not a pre-narrowed
 "generically good" subset -- see `_pool` below for why (short version: "why
@@ -100,7 +113,8 @@ import argparse  # noqa: E402
 
 import _harness  # noqa: E402,F401
 
-from counter_finder import chip_then_ko, pair_search, speed_tiers, threshold_search  # noqa: E402
+from counter_finder import (chip_then_ko, joint_pair_search, pair_search,  # noqa: E402
+                            speed_tiers, threshold_search)
 
 
 def _parse_item_overrides(spec):
@@ -311,6 +325,51 @@ def _print_pairs(rows, targets, top, partner=None, move=None):
                          f"{_roll(h)}{spread}")
 
 
+_JOINT_RANK = {"sweep": 0, "out_trade": 1, "no_ko": 2, "loss": 3}
+
+
+def _print_joint(rows, targets, top, partner, turns):
+    total = rows[0]["pairs_total"] if rows else 0
+    print(f"Paired with {partner} (both attacking with their own real set, "
+          f"{turns} turns, average rolls):\n")
+    header = (f"{'#':>3} {'Pokemon':20s} {'item':16s} {'beaten':>7s} "
+              f"{'swept':>6s} {'traded':>7s} {'lost':>5s} {'no KO':>6s} "
+              f"{'tw-safe':>8s}")
+    print(header)
+    print("-" * len(header))
+    for i, r in enumerate(rows[:top], start=1):
+        beaten = r["pairs_swept"] + r["pairs_traded"]
+        print(f"{i:>3} {r['name'][:20]:20s} {(r['item'] or '-')[:16]:16s} "
+              f"{beaten:>4d}/{total:<2d} {r['pairs_swept']:>3d}/{total:<2d} "
+              f"{r['pairs_traded']:>4d}/{total:<2d} {r['pairs_lost']:>2d}/{total:<2d} "
+              f"{r['pairs_no_ko']:>3d}/{total:<2d} "
+              f"{r['pairs_tailwind_safe']:>5d}/{total:<2d}")
+    print()
+    print("Up to `turns` turns, priority THEN speed order, average rolls -- the")
+    print("candidate and the fixed partner both attack with their own real")
+    print("optimised set (not one fixed move). A spread move (Eruption, Heat")
+    print("Wave, ...) hits both of the enemy pair at once, 0.75x each. A")
+    print("'Mega X' name is always its mega stats.")
+    print("swept      both of the pair are dead before EITHER of them ever")
+    print("           got to act -- outsped and KO'd before they could move.")
+    print("out-trade  both of the pair die within the turn window, but ours")
+    print("           took a hit along the way (still won the race).")
+    print("lost       one of ours fainted before both of the pair did.")
+    print("no KO      the turn window elapsed with neither side finished.")
+    print("beaten     swept + traded -- pairs where the joint fight is won.")
+    print("tw-safe    the SAME race, replayed with the enemy pair's speed")
+    print("           doubled (a Tailwind hypothesis) -- still swept or")
+    print("           traded, not lost or no-KO'd, once they move first.")
+    for i, r in enumerate(rows[:top], start=1):
+        worst = sorted(r["detail"].items(),
+                       key=lambda kv: _JOINT_RANK[kv[1]["outcome"]])
+        print(f"  {i:>3} {r['name']}:")
+        for (e1, e2), d in worst[:3]:
+            tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
+            print(f"      {e1} + {e2}: {d['outcome']} "
+                 f"(turn {d['turns_used']}){tw}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vs", required=True,
@@ -341,6 +400,17 @@ def main():
                     help="print a speed-tier chart (priority bracket, then "
                          "effective speed) for --vs's targets plus the pool, "
                          "instead of a damage search")
+    ap.add_argument("--joint", action="store_true",
+                    help="a JOINT pair table: search the pool paired with "
+                         "--partner (both attacking with their own real "
+                         "set) against every pair drawn from --vs, over "
+                         "--turns turns, real priority-then-speed order, "
+                         "plus a Tailwind-robustness replay")
+    ap.add_argument("--partner", default="", metavar="POKEMON",
+                    help="--joint only: the fixed second half of the pair "
+                         "(required with --joint)")
+    ap.add_argument("--turns", type=int, default=2, metavar="N",
+                    help="--joint only: how many turns to race (default 2)")
     ap.add_argument("--max-taken", type=float, default=None, metavar="PCT",
                     help="default mode only: drop any row where SOME named "
                          "target's best attack could do PCT%% or more to it "
@@ -371,12 +441,20 @@ def main():
 
     if bool(args.chip_from) != bool(args.chip_move):
         raise SystemExit("--chip-from and --chip-move must be given together")
-    if args.partner_item and not args.chip_from:
-        raise SystemExit("--partner-item requires --chip-from/--chip-move")
+    if args.partner_item and not (args.chip_from or args.joint):
+        raise SystemExit("--partner-item requires --chip-from/--chip-move or --joint")
     if (args.max_taken is not None or args.outspeed) and (
-            args.pairs or args.chip_from or args.speed):
+            args.pairs or args.chip_from or args.speed or args.joint):
         raise SystemExit("--max-taken/--outspeed only apply to the default "
                          "(threshold) mode")
+    if args.joint and (args.pairs or args.chip_from or args.speed):
+        raise SystemExit("--joint cannot be combined with --pairs/--chip-from/--speed")
+    if args.joint and not args.partner:
+        raise SystemExit("--joint requires --partner")
+    if args.partner and not args.joint:
+        raise SystemExit("--partner requires --joint")
+    if args.turns != 2 and not args.joint:
+        raise SystemExit("--turns only applies to --joint")
 
     from _harness import load_world
     from lead_sim import BANNED_ITEMS
@@ -387,6 +465,10 @@ def main():
     missing = [n for n in targets if n not in merged]
     if missing:
         raise SystemExit(f"unknown Pokemon: {', '.join(missing)}")
+    if args.partner and args.partner not in merged:
+        raise SystemExit(f"unknown Pokemon: {args.partner}")
+    if args.partner and args.partner in targets:
+        raise SystemExit("--partner can't also be a --vs target")
     pool = _pool(args, merged)
     threshold = args.threshold / 100.0
 
@@ -415,6 +497,13 @@ def main():
         rows = speed_tiers(names, targets, merged, moves, natures, typechart,
                            item_overrides=item_overrides)
         _print_speed(rows, targets, args.top)
+    elif args.joint:
+        rows = joint_pair_search(pool, targets, args.partner, merged, moves,
+                                 natures, typechart, turns=args.turns,
+                                 partner_item=args.partner_item or None,
+                                 item_overrides=item_overrides,
+                                 move_overrides=move_overrides)
+        _print_joint(rows, targets, args.top, args.partner, args.turns)
     elif args.pairs:
         rows = pair_search(pool, targets, merged, moves, natures, typechart,
                            partner_name=args.chip_from or None,
@@ -473,6 +562,13 @@ def main():
                     row[f"{t} avg%"] = round(h.avg * 100, 1)
                     row[f"{t} hi%"] = round(h.hi * 100, 1)
                 row["n_ko"] = r["n_ko"]
+            elif "pairs_swept" in r:
+                row["pairs swept"] = r["pairs_swept"]
+                row["pairs traded"] = r["pairs_traded"]
+                row["pairs lost"] = r["pairs_lost"]
+                row["pairs no KO"] = r["pairs_no_ko"]
+                row["pairs tailwind-safe"] = r["pairs_tailwind_safe"]
+                row["pairs total"] = r["pairs_total"]
             else:
                 row["pairs clean"] = r["pairs_clean"]
                 row["pairs trade"] = r["pairs_trade"]

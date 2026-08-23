@@ -190,16 +190,35 @@ def team_sheet_df(team, sets=None):
     return pd.DataFrame(rows)
 
 
-def weakness_table(team):
+def weakness_table(team, max_weak=2, type_limits=None):
+    """Per type: who's weak, who resists (not counting immune separately),
+    who's outright immune, and the net (weak - resist - immune). `max_weak`/
+    `type_limits` decide "Over limit" -- pass whatever the run actually used
+    (the Advanced per-type override when one is set, else the global slider)
+    so the table's own "Over limit" column agrees with the search."""
     from species_data import TYPES
     rows = []
     for t in TYPES:
-        weak = [n for n in team if merged[n].get("defensive_chart")
-                and merged[n]["defensive_chart"][t] > 1.0]
-        resist = [n for n in team if merged[n].get("defensive_chart")
-                  and merged[n]["defensive_chart"][t] < 1.0]
-        rows.append({"Type": t, "Weak (n)": len(weak), "Weak": ", ".join(weak),
-                     "Resist (n)": len(resist), "Over limit": "YES" if len(weak) > 2 else ""})
+        weak, resist, immune = [], [], []
+        for n in team:
+            dc = merged[n].get("defensive_chart")
+            if not dc:
+                continue
+            if dc[t] > 1.0:
+                weak.append(n)
+            elif dc[t] == 0.0:
+                immune.append(n)
+            elif dc[t] < 1.0:
+                resist.append(n)
+        limit = ((type_limits or {}).get(t) or {}).get("max_weak", max_weak)
+        limit = max_weak if limit is None else limit
+        rows.append({
+            "Type": t, "Weak (n)": len(weak), "Weak": ", ".join(weak),
+            "Resist (n)": len(resist), "Resist": ", ".join(resist),
+            "Immune (n)": len(immune), "Immune": ", ".join(immune),
+            "Net": len(weak) - len(resist) - len(immune),
+            "Over limit": "YES" if len(weak) > limit else "",
+        })
     return pd.DataFrame(rows)
 
 
@@ -1514,6 +1533,12 @@ with tab_build:
         else:
             st.success("No type exceeds 2 weaknesses")
         st.dataframe(wt, width='stretch', hide_index=True, height=250)
+        from team_search import core_bonus as _core_bonus
+        _cb, _matched = _core_bonus(team, merged)
+        if _matched:
+            st.caption(f"Type cores ({_cb:.2f}): " + ", ".join(_matched))
+        else:
+            st.caption("Type cores: none of the preset cores are covered.")
     else:
         st.warning(f"Select 6 Pokemon ({len(team)} chosen)")
 
@@ -1558,6 +1583,62 @@ with tab_gen:
     max_net = w2.slider("Max net weakness", -6, 6, 1, disabled=not use_net) if True else None
     if not use_net:
         max_net = None
+
+    with st.expander("Advanced: per-type limits and required cores"):
+        st.caption("The two sliders above are a soft nudge -- a team that wins an extra "
+                   "matchup can still outrank one with a weakness problem. Anything set "
+                   "HERE is a hard requirement instead: a team that breaks a per-type "
+                   "limit or is missing a required core is dropped outright, however well "
+                   "it wins matchups.")
+        from species_data import TYPES as _ALL_TYPES
+        from team_search import TYPE_CORES as _TYPE_CORES
+        st.markdown("**Per-type overrides** (blank = no hard limit for that type)")
+        type_limit_df = st.data_editor(
+            pd.DataFrame({"Type": _ALL_TYPES,
+                         "Max weak": [None] * len(_ALL_TYPES),
+                         "Max net": [None] * len(_ALL_TYPES)}),
+            column_config={
+                "Type": st.column_config.TextColumn(disabled=True),
+                "Max weak": st.column_config.NumberColumn(min_value=0, max_value=6, step=1),
+                "Max net": st.column_config.NumberColumn(min_value=-6, max_value=6, step=1),
+            },
+            hide_index=True, width='stretch', key="gen_type_limits_editor")
+        type_limits = {}
+        for _, row in type_limit_df.iterrows():
+            entry = {}
+            if pd.notna(row["Max weak"]):
+                entry["max_weak"] = int(row["Max weak"])
+            if pd.notna(row["Max net"]):
+                entry["max_net"] = int(row["Max net"])
+            if entry:
+                type_limits[row["Type"]] = entry
+
+        core_options = ["/".join(c) for c in _TYPE_CORES]
+        required_core_sel = st.multiselect(
+            "Required type cores (ALL selected must be covered by the team's combined types)",
+            core_options,
+            help="e.g. picking Dragon/Fairy/Steel means the finished team must contain "
+                 "at least one member of EACH of those three types -- not just one of them.")
+        custom_core_txt = st.text_input(
+            "...or a custom 3-type core, comma-separated (e.g. \"Fire, Ground, Fairy\")",
+            value="")
+        required_cores = [tuple(c.split("/")) for c in required_core_sel]
+        if custom_core_txt.strip():
+            custom_types = [t.strip().title() for t in custom_core_txt.split(",") if t.strip()]
+            bad_types = [t for t in custom_types if t not in _ALL_TYPES]
+            if bad_types:
+                st.error(f"Not a real type: {', '.join(bad_types)}")
+            elif len(custom_types) != 3:
+                st.error("A custom core needs exactly 3 types.")
+            else:
+                required_cores.append(tuple(custom_types))
+        if type_limits or required_cores:
+            missing_pool_types = {t for core in required_cores for t in core
+                                  if not any(t in merged[n]["types"] for n in all_names)}
+            if missing_pool_types:
+                st.warning(f"No Pokemon in the dataset has type(s) "
+                           f"{', '.join(sorted(missing_pool_types))} -- a required core "
+                           f"naming them can never be satisfied.")
 
     with st.expander("Must include / exclude / prefer (overrides preferences.csv for this run)"):
         st.caption("A quick per-run knob instead of editing preferences.csv: 'must include' and "
@@ -1686,6 +1767,16 @@ with tab_gen:
             pool = build_candidate_pool(merged, top_n=pool_size, prefs=run_prefs)
         eps = enemy_pairs_from_teams(teams)
 
+        if required_cores:
+            missing_in_pool = {t for core in required_cores for t in core
+                               if not any(t in merged[n]["types"] for n in pool)}
+            if missing_in_pool:
+                st.warning(f"The candidate pool (top {pool_size}) has no "
+                           f"{', '.join(sorted(missing_in_pool))}-type Pokemon -- a "
+                           f"required core naming it cannot be satisfied at this pool "
+                           f"size. Widen the pool, add it via 'Must include' above, or "
+                           f"drop that core.")
+
         matrix = None
         if (st.session_state.get("gen_pool") == pool and st.session_state.get("gen_eps") == eps
                 and st.session_state.get("gen_matrix") is not None):
@@ -1701,7 +1792,15 @@ with tab_gen:
             prog.empty()
 
         finals = beam_search_teams(pool, matrix, eps, merged, beam_width=beam,
-                                    must_include=run_prefs["include"], prefer=run_prefs["prefer"])
+                                    must_include=run_prefs["include"], prefer=run_prefs["prefer"],
+                                    max_weak=max_weak, max_net=max_net,
+                                    type_limits=type_limits or None,
+                                    required_cores=required_cores or None)
+        if not finals and (type_limits or required_cores):
+            st.error("0 teams satisfy every Advanced constraint at this pool/beam size -- "
+                     "widen the pool, raise the beam width, or relax a limit/core above. "
+                     "(Advanced constraints are hard requirements, so this isn't falling "
+                     "back to an unfiltered list the way the screens below do.)")
 
         # BEFORE the script screen and the win-rate floor, because it is the
         # cheapest of the three by an order of magnitude: one turn solved as a
@@ -1831,6 +1930,22 @@ with tab_gen:
                     m3.metric("Weakness violations", sc["weakness_violations"])
                     if sc["matched_cores"]:
                         st.caption("Cores: " + ", ".join(sc["matched_cores"]))
+                    if required_cores:
+                        # NOT read off sc["matched_cores"] -- that list only ever covers
+                        # the PRESET TYPE_CORES, so a custom core would always show as
+                        # missing even when the team actually satisfies it.
+                        team_types = set()
+                        for n in t:
+                            team_types.update(merged[n]["types"])
+                        satisfied = [c for c in required_cores if set(c).issubset(team_types)]
+                        missing = [c for c in required_cores if c not in satisfied]
+                        st.caption(f"Required cores: {len(satisfied)}/{len(required_cores)} "
+                                  f"satisfied"
+                                  + (f" ({', '.join('/'.join(c) for c in missing)} missing)"
+                                     if missing else ""))
+                    with st.expander("Weak / resist / immune by type"):
+                        st.dataframe(weakness_table(t, max_weak=max_weak, type_limits=type_limits),
+                                    width='stretch', hide_index=True, height=250)
                     cg1, cg2 = st.columns([1, 2])
                     with cg1:
                         import json as _j

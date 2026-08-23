@@ -17,7 +17,7 @@
      permutations, and can include chip from ally. For a spread move such as
      Blizzard, make sure the chip is adjusted correctly (0.75x)"
 
-Three questions, three functions, and none of them re-derives damage or move
+Four questions, four functions, and none of them re-derives damage or move
 choice from scratch:
 
   threshold_search  -- who OHKOs / clears X% on each of these targets, with
@@ -27,6 +27,13 @@ choice from scratch:
   pair_search       -- who KOes one of every PAIR drawn from these targets
                         BEFORE the pair KOes it, in one priority-then-speed
                         ordered turn, with an optional partner assist?
+  joint_pair_search -- paired with a NAMED partner (both attacking with their
+                        own real set, not one fixed move), who joint-beats
+                        every pair drawn from these targets over several
+                        turns -- a clean sweep, an out-trade, or robust to
+                        the enemy having Tailwind up? See its own docstring;
+                        it's `pair_search` generalised from one fixed move to
+                        a real second attacker and from one turn to several.
 
 Move and item selection is `optimize_sets.best_item`/`best_moveset` -- the
 same search `spread_table.py` and the lead screen use, so a Pokemon found here
@@ -764,4 +771,284 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
             "pairs_total": len(detail), "detail": detail,
         })
     rows.sort(key=lambda r: (-(r["pairs_clean"] + r["pairs_trade"]), r["pairs_pinned"]))
+    return rows
+
+
+# ------------------------------------------------------------------ joint pair
+
+
+def _choose_action(attacker, moves, live_targets, typechart, weather=None,
+                   hinted_target=None):
+    """Best (hits: {role: Hit}, MoveInfo) for `attacker` against whichever of
+    `live_targets` ({role: Combatant}) it ends up hitting.
+
+    A spread move that's actually live (more than one target still standing)
+    always hits EVERY entry in `live_targets` at once (doubles 0.75x penalty,
+    via `num_targets_hit`), same rule `_hit_or_spread` applies -- target choice
+    doesn't mean anything for it. A single-target move is aimed at
+    `hinted_target` if it's one of `live_targets`' keys, else at whichever
+    live target the same KO-then-priority-then-damage key `_choose_move` uses
+    prefers (used for the enemy side here, which is not given a hint -- see
+    `joint_pair_search`'s module note on why only OUR side gets the
+    exhaustive-permutation treatment).
+
+    `live_targets` empty (everyone on the other side already fainted) returns
+    ({}, None) -- nothing left to hit.
+    """
+    if not live_targets:
+        return {}, None
+    best_key, best_hits, best_move = None, {}, None
+    n_live = len(live_targets)
+    for mv in moves:
+        if mv.category == "Status":
+            continue
+        if not mv.power and mv.name not in WEIGHT_BASED_POWER:
+            continue
+        if is_spread_move(mv.target) and n_live > 1:
+            hits = {role: _raw_hit(attacker, mv, d, typechart, weather=weather,
+                                   roll="avg", num_targets_hit=n_live)
+                   for role, d in live_targets.items()}
+            key = (all(h.frac >= 1.0 for h in hits.values()), mv.priority,
+                  sum(h.frac for h in hits.values()))
+            if best_key is None or key > best_key:
+                best_key, best_hits, best_move = key, hits, mv
+            continue
+        candidates = ([hinted_target] if hinted_target in live_targets
+                      else list(live_targets))
+        for role in candidates:
+            got = _raw_hit(attacker, mv, live_targets[role], typechart,
+                           weather=weather, roll="avg")
+            key = (got.frac >= 1.0, mv.priority, got.frac)
+            if best_key is None or key > best_key:
+                best_key, best_hits, best_move = key, {role: got}, mv
+    return best_hits, best_move
+
+
+def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
+                  enemy_speed_mult=1.0):
+    """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
+    enemy side chooses independently and greedily (`_choose_action` with no
+    hint), same "no coordination" behaviour `_sequential_pair_outcome`
+    already gives E1/E2. Does NOT mutate `hp` -- returns a fresh dict, log,
+    whether an enemy actually got to act, and which side (if either) was
+    fully fainted DURING this turn's resolution (checked after every actor's
+    hits land, so a true same-turn mutual wipe is still attributed to
+    whichever side went down first in the actual initiative order, not left
+    ambiguous).
+
+    `enemy_speed_mult`: `>1.0` for the Tailwind-robustness replay (mirrors
+    `engine.effective_speed`'s real `tailwind_p2 *= 2.0` rule) -- applied only
+    to the turn-ORDER comparison, the same thing a real Tailwind changes.
+    """
+    hp = dict(hp)
+    ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
+    theirs_live = {r: combatants[r] for r in ("E1", "E2") if hp[r] > 0}
+
+    plan = {}
+    for role, c in ours_live.items():
+        plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
+                                    typechart, weather=weather,
+                                    hinted_target=our_hints.get(role))
+    for role, c in theirs_live.items():
+        plan[role] = _choose_action(c, moves_by_role[role], ours_live,
+                                    typechart, weather=None)
+
+    def speed_key(role):
+        mv = plan[role][1]
+        prio = mv.priority if mv is not None else 0
+        side = "p1" if role in ("C", "P") else "p2"
+        spd = effective_speed(combatants[role], FieldState(), side)
+        if role in ("E1", "E2"):
+            spd *= enemy_speed_mult
+        theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
+        return (-prio, -spd, theirs_first)
+
+    order = sorted(plan.keys(), key=speed_key)
+    log, enemy_acted, wiped = [], False, None
+    for role in order:
+        if hp[role] <= 0:
+            continue
+        hits, mv = plan[role]
+        if role in ("E1", "E2") and mv is not None:
+            enemy_acted = True
+        if mv is None:
+            continue
+        for tgt_role, got in hits.items():
+            if hp.get(tgt_role, 0.0) <= 0:
+                continue
+            hp[tgt_role] = max(0.0, hp[tgt_role] - got.frac)
+            log.append((role, tgt_role, got))
+        if wiped is None:
+            if hp["E1"] <= 0 and hp["E2"] <= 0:
+                wiped = "theirs"
+            elif hp["C"] <= 0 and hp["P"] <= 0:
+                wiped = "ours"
+    return hp, log, enemy_acted, wiped
+
+
+def _best_turn(combatants, moves_by_role, hp, typechart, weather,
+              enemy_speed_mult=1.0):
+    """Try every combination of OUR target hints for this turn -- the same
+    "exhaustive over permutations, the better outcome is kept" `pair_search`
+    already promises, generalised from one candidate (plus an optional
+    partner locked to ONE named move) to two full attackers each choosing
+    their own move. At most 2x2=4 combinations (fewer once one side is down
+    to one live attacker or the other side to one live target), so this stays
+    cheap per turn.
+
+    Ranked by (enemies KO'd this turn, -ours KO'd this turn, net fractional
+    damage this turn) -- "best FOR US", matching every other joint search in
+    this module ranking on the attacker's own outcome, not the enemy's.
+    """
+    ours_live = [r for r in ("C", "P") if hp[r] > 0]
+    theirs_live_roles = [r for r in ("E1", "E2") if hp[r] > 0]
+    hint_options = theirs_live_roles or [None]
+    best = None
+    for combo in itertools.product(hint_options, repeat=max(1, len(ours_live))):
+        hints = dict(zip(ours_live, combo))
+        new_hp, log, enemy_acted, wiped = _resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, hints,
+            enemy_speed_mult=enemy_speed_mult)
+        enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
+        ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
+        dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
+        dmg_taken = sum(hp[r] - new_hp[r] for r in ("C", "P"))
+        key = (enemies_ko, -ours_ko, dmg_dealt - dmg_taken)
+        if best is None or key > best[0]:
+            best = (key, new_hp, log, enemy_acted, wiped)
+        if not ours_live:
+            break  # nothing of ours can act -- one combo (the empty one) is all there is
+    return best[1], best[2], best[3], best[4]
+
+
+def _joint_race(combatants, moves_by_role, typechart, weather, turns,
+                enemy_speed_mult=1.0):
+    """`turns` turns (or fewer, once a side is fully fainted), returns
+    (outcome, turns_used, hp) -- outcome is "sweep" (both enemies fainted
+    before either of them ever got to act), "out_trade" (both enemies
+    fainted within the window, ours took hits but didn't faint), "loss"
+    (ours fully fainted first), or "no_ko" (window elapsed, neither side
+    finished the other)."""
+    hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+    any_enemy_acted = False
+    wiped_side, turns_used = None, 0
+    for turn_i in range(max(1, turns)):
+        if (hp["E1"] <= 0 and hp["E2"] <= 0) or (hp["C"] <= 0 and hp["P"] <= 0):
+            break
+        hp, _log, enemy_acted, wiped = _best_turn(
+            combatants, moves_by_role, hp, typechart, weather,
+            enemy_speed_mult=enemy_speed_mult)
+        any_enemy_acted = any_enemy_acted or enemy_acted
+        turns_used = turn_i + 1
+        if wiped is not None:
+            wiped_side = wiped
+            break
+    theirs_alive = hp["E1"] > 0 or hp["E2"] > 0
+    ours_alive = hp["C"] > 0 or hp["P"] > 0
+    if wiped_side == "theirs" or (not theirs_alive and ours_alive):
+        outcome = "sweep" if not any_enemy_acted else "out_trade"
+    elif wiped_side == "ours" or not ours_alive:
+        outcome = "loss"
+    else:
+        outcome = "no_ko"
+    return outcome, turns_used, hp
+
+
+def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
+                      natures, typechart, turns=2, partner_item=None,
+                      item_overrides=None, move_overrides=None):
+    """Paired with `partner_name` (a fixed second attacker, both using their
+    own real optimised set -- not one fixed move), for each pool member:
+    against every pair drawn from `target_names`, does the joint pair beat
+    it?
+
+        "against a given enemy pair, my pair either out trade all possible
+         enemy pairs to a win (including spread damage ...), outspeed and ko
+         before either of mine fail, or ... do not get OHKOd by any under
+         enemy tailwind"
+
+    `pair_search` already answers a narrower version of this (one candidate,
+    an optional partner locked to ONE named move, one turn); this is the same
+    machinery -- `_build`, `_raw_hit`, mega projection, the doubles 0.75x rule
+    -- generalised to a real second attacker and to a multi-turn race
+    (`_joint_race`), still on `counter_finder.py`'s own cheap arithmetic
+    model rather than `Battle.run_turn`: a full pool search needs to stay
+    cheap across up to ~270 candidates, the same reason `pair_search` never
+    called into the real engine either.
+
+    Both the candidate's and the partner's item/moveset are optimised ONCE
+    against the whole `target_names` list (same convention `pair_search`/
+    `chip_then_ko` use -- a Pokemon carries one set, not a different one per
+    specific enemy pair). `partner_item` pins the partner's item instead of
+    searching for its best legal one. `item_overrides`/`move_overrides`:
+    optional {name: item} / {name: [move, ...]} pins for pool members (the
+    candidates) -- see `_answer_for`.
+
+    TAILWIND ROBUSTNESS: every enemy pair is also raced with the enemy side's
+    effective speed doubled throughout (mirroring `engine.effective_speed`'s
+    real `tailwind_p2 *= 2.0` rule) -- a hypothesis in the same spirit as
+    `threshold_search`'s existing `outspeed="scarf"`, not contingent on
+    either named enemy actually knowing Tailwind. `tailwind_safe` is True
+    when that re-run's outcome is STILL `sweep` or `out_trade`.
+
+    Returns rows: {name, item, pairs_swept, pairs_traded, pairs_lost,
+    pairs_no_ko, pairs_tailwind_safe, pairs_total, detail} where detail is
+    {(e1, e2): {outcome, turns_used, tailwind_outcome, tailwind_safe}}.
+    Ranked by (swept + traded) first, then tailwind_safe count -- mirrors
+    `pair_search`'s existing `(clean+trade, -pinned)` sort.
+    """
+    partner_item, partner_move_names, partner_weather = best_answer(
+        partner_name, merged, moves_db, natures, typechart, target_names,
+        item=partner_item)
+    partner = _build(partner_name, merged, natures, item=partner_item)
+    partner_moves = _move_infos(partner_name, merged, moves_db, partner_move_names)
+
+    rows = []
+    for name in pool:
+        if name in target_names or name == partner_name:
+            continue
+        item, move_names, weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides)
+        if not move_names:
+            continue
+        attacker = _build(name, merged, natures, item=item)
+        moves = _move_infos(name, merged, moves_db, move_names)
+        # Both sides' weather is whichever of ours is doing the setting, same
+        # simplification `pair_search` makes -- the enemy's own instant-set
+        # ability is not modelled here either (see the module docstring).
+        race_weather = weather or partner_weather
+
+        detail = {}
+        for e1_name, e2_name in itertools.combinations(target_names, 2):
+            e1 = _build(e1_name, merged, natures)
+            e2 = _build(e2_name, merged, natures)
+            e1_moves = [mi for mi, _pct in build_moveset(merged[e1_name], moves_db)]
+            e2_moves = [mi for mi, _pct in build_moveset(merged[e2_name], moves_db)]
+            combatants = {"C": attacker, "P": partner, "E1": e1, "E2": e2}
+            moves_by_role = {"C": moves, "P": partner_moves,
+                             "E1": e1_moves, "E2": e2_moves}
+
+            outcome, turns_used, _hp = _joint_race(
+                combatants, moves_by_role, typechart, race_weather, turns)
+            tw_outcome, _tw_turns, _tw_hp = _joint_race(
+                combatants, moves_by_role, typechart, race_weather, turns,
+                enemy_speed_mult=2.0)
+            tailwind_safe = tw_outcome in ("sweep", "out_trade")
+            detail[(e1_name, e2_name)] = {
+                "outcome": outcome, "turns_used": turns_used,
+                "tailwind_outcome": tw_outcome, "tailwind_safe": tailwind_safe,
+            }
+
+        rows.append({
+            "name": name, "item": item,
+            "pairs_swept": sum(1 for d in detail.values() if d["outcome"] == "sweep"),
+            "pairs_traded": sum(1 for d in detail.values() if d["outcome"] == "out_trade"),
+            "pairs_lost": sum(1 for d in detail.values() if d["outcome"] == "loss"),
+            "pairs_no_ko": sum(1 for d in detail.values() if d["outcome"] == "no_ko"),
+            "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
+            "pairs_total": len(detail), "detail": detail,
+        })
+    rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
+                             -r["pairs_tailwind_safe"]))
     return rows

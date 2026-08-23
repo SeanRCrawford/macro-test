@@ -150,7 +150,23 @@ def build_pair_matrix(pool, enemy_pairs, merged, moves_db, natures, typechart,
 
 # ---------------------------------------------------------------- synergy
 
-def weakness_violations(team, merged, max_weak=None, max_net=None):
+def _weak_resist(team, merged, t):
+    """(weak, resist) member-name lists for one type -- the one place this
+    per-type split is computed, shared by the soft count and the hard check
+    so they can never disagree on what "weak to Fire" means."""
+    weak, resist = [], []
+    for n in team:
+        dc = merged[n].get("defensive_chart")
+        if not dc:
+            continue
+        if dc[t] > 1.0:
+            weak.append(n)
+        elif dc[t] < 1.0:
+            resist.append(n)
+    return weak, resist
+
+
+def weakness_violations(team, merged, max_weak=None, max_net=None, type_limits=None):
     """Count how badly a team breaks its defensive rules.
 
     max_weak: most members allowed to be weak to any one type (default
@@ -159,27 +175,69 @@ def weakness_violations(team, merged, max_weak=None, max_net=None):
         (members weak) - (members resistant/immune). None disables the check.
         Net is often the better rule: three Fire-weak members matter much less
         if four others resist it.
+    type_limits: optional {type: {"max_weak": int|None, "max_net": int|None}}
+        -- a per-type override of the two scalars above, for the types named
+        in it only (e.g. {"Fire": {"max_weak": 1}} to hold Fire to a tighter
+        bar than everything else); an unset field within a named type's entry
+        falls back to the scalar default, same as a type with no entry at all.
+        This is the SOFT count (feeds `score_team`'s bounded synergy penalty)
+        -- see `hard_violations` for outright exclusion, which does NOT share
+        this function's "no override means MAX_WEAK_PER_TYPE" default.
     """
     max_weak = MAX_WEAK_PER_TYPE if max_weak is None else max_weak
     bad = 0
     detail = {}
     for t in TYPES:
-        weak, resist = [], []
-        for n in team:
-            dc = merged[n].get("defensive_chart")
-            if not dc:
-                continue
-            if dc[t] > 1.0:
-                weak.append(n)
-            elif dc[t] < 1.0:
-                resist.append(n)
-        over = max(0, len(weak) - max_weak)
+        override = (type_limits or {}).get(t) or {}
+        t_max_weak = override.get("max_weak", max_weak)
+        t_max_weak = max_weak if t_max_weak is None else t_max_weak
+        t_max_net = override.get("max_net", max_net)
+        weak, resist = _weak_resist(team, merged, t)
+        over = max(0, len(weak) - t_max_weak)
         net = len(weak) - len(resist)
-        over_net = max(0, net - max_net) if max_net is not None else 0
+        over_net = max(0, net - t_max_net) if t_max_net is not None else 0
         if over or over_net:
             bad += over + over_net
             detail[t] = {"weak": weak, "resist": resist, "net": net}
     return bad, detail
+
+
+def hard_violations(team, merged, type_limits=None, required_cores=None):
+    """True if `team` breaks an EXPLICIT per-type limit or is missing a
+    required core -- for outright exclusion, never for scoring.
+
+    Deliberately does NOT take the basic max_weak/max_net sliders, and does
+    NOT fall back to MAX_WEAK_PER_TYPE the way `weakness_violations` (the
+    soft count) does: those stay soft by design (`score_team`'s synergy term
+    is bounded so a single extra matchup win always outranks it), and the
+    whole point of this function is that only what the caller explicitly put
+    in `type_limits`/`required_cores` -- the Advanced panel -- is
+    non-negotiable. An empty `type_limits` and `required_cores` means no hard
+    constraints exist, and this always returns False.
+
+    type_limits: {type: {"max_weak": int|None, "max_net": int|None}} -- a
+    type absent from this dict, or a field left None within it, has NO hard
+    cap on that count.
+    required_cores: an ITERABLE of 3-type tuples that must ALL be satisfied --
+    "make sure certain cores are included" was plural and additive, not "at
+    least one of these", so this is an AND over the list, each checked the
+    same way `core_bonus` checks membership (`set(core).issubset(team_types)`).
+    """
+    for t, limits in (type_limits or {}).items():
+        weak, resist = _weak_resist(team, merged, t)
+        w_cap = limits.get("max_weak")
+        if w_cap is not None and len(weak) > w_cap:
+            return True
+        n_cap = limits.get("max_net")
+        if n_cap is not None and (len(weak) - len(resist)) > n_cap:
+            return True
+    if required_cores:
+        team_types = set()
+        for n in team:
+            team_types.update(merged[n]["types"])
+        if any(not set(core).issubset(team_types) for core in required_cores):
+            return True
+    return False
 
 
 def core_bonus(team, merged):
@@ -349,7 +407,8 @@ def answer_depth(team, matrix, enemy_pairs):
     return answered, (deep / len(enemy_pairs) if enemy_pairs else 0.0)
 
 
-def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
+def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None,
+               type_limits=None):
     """Scoring is LEXICOGRAPHIC in three tiers:
       1. `pairs_won` (how many enemy lead pairs at least one of our pairs beats)
          -- multiplied by a large constant so no amount of margin or synergy can
@@ -362,10 +421,16 @@ def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
          comfortably" from "barely scrapes by" among those ties.
       3. `synergy` (type cores / weakness rule / avg Score) -- a small nudge
          that only matters once pairs_won AND margin are both tied.
+
+    `type_limits`: passed straight through to `weakness_violations` -- an
+    Advanced per-type override still only feeds this SOFT penalty here, even
+    when the caller (`beam_search_teams`) also hard-excludes on it; a team
+    that's merely close to a per-type bar is still nudged toward it.
     """
     cov, per_enemy = team_coverage(team, matrix, enemy_pairs)
     cb, matched_cores = core_bonus(team, merged)
-    viol, viol_detail = weakness_violations(team, merged, max_weak=max_weak, max_net=max_net)
+    viol, viol_detail = weakness_violations(team, merged, max_weak=max_weak,
+                                            max_net=max_net, type_limits=type_limits)
     avg_score = sum(merged[n]["score"] for n in team) / len(team)
 
     pairs_won = sum(1 for v in per_enemy.values() if v > 0)
@@ -398,9 +463,27 @@ def score_team(team, matrix, enemy_pairs, merged, max_weak=None, max_net=None):
 
 # ---------------------------------------------------------------- beam search
 
+def _breaks_monotonic_hard_limit(team, merged, type_limits):
+    """True if a per-type HARD max_weak cap (from `type_limits`) is already
+    broken. Safe to prune mid-growth because a weak-count only grows as
+    members are added -- no completion can undo it. Net limits and required
+    cores are NOT monotonic (a resist added later can fix net; a core's third
+    type might not be in the team yet) and are checked only once, on the
+    completed team, by `hard_violations` after the beam finishes growing."""
+    for t, limits in (type_limits or {}).items():
+        w_cap = limits.get("max_weak")
+        if w_cap is None:
+            continue
+        weak, _resist = _weak_resist(team, merged, t)
+        if len(weak) > w_cap:
+            return True
+    return False
+
+
 def beam_search_teams(pool, matrix, enemy_pairs, merged, team_size=6, beam_width=40,
                        max_megas=2, must_include=None, prefer=None,
-                       max_weak=None, max_net=None):
+                       max_weak=None, max_net=None, type_limits=None,
+                       required_cores=None):
     """Grow teams from size 2 up to `team_size`, keeping the best partials.
 
     must_include: names that EVERY candidate team must contain. These are seeded
@@ -409,6 +492,17 @@ def beam_search_teams(pool, matrix, enemy_pairs, merged, team_size=6, beam_width
     which silently dropped the constraint.
     prefer: names given a small scoring bonus, enough to break ties but not enough
     to override matchup results.
+
+    type_limits/required_cores: the Advanced panel's HARD constraints (see
+    `hard_violations`) -- distinct from `max_weak`/`max_net`, which stay a
+    soft nudge in `score_team` no matter what. A per-type `max_weak` entry is
+    pruned as early as the beam allows (see `_breaks_monotonic_hard_limit`);
+    `max_net` entries and `required_cores` can only be checked once a team is
+    complete, so they're enforced as a FINAL filter, and unlike every other
+    screen in this pipeline that filter does NOT fall back to the unfiltered
+    list when it empties the beam -- a hard constraint the caller asked for
+    that quietly stopped applying because nothing satisfied it would be worse
+    than reporting zero teams and saying so.
     """
     must_include = [n for n in (must_include or []) if n in pool]
     prefer = set(prefer or [])
@@ -416,11 +510,13 @@ def beam_search_teams(pool, matrix, enemy_pairs, merged, team_size=6, beam_width
     def mega_count(t):
         return sum(1 for n in t if n.startswith("Mega "))
 
+    def sc_team(t):
+        return score_team(t, matrix, enemy_pairs, merged, max_weak=max_weak,
+                          max_net=max_net, type_limits=type_limits)
+
     # Seed with the best pairs by raw coverage.
     if len(must_include) >= team_size:
-        return [(score_team(must_include[:team_size], matrix, enemy_pairs, merged,
-                             max_weak=max_weak, max_net=max_net),
-                 must_include[:team_size])]
+        return [(sc_team(must_include[:team_size]), must_include[:team_size])]
 
     if len(must_include) >= 2:
         # Everything required is already in: start from exactly that set.
@@ -432,6 +528,8 @@ def beam_search_teams(pool, matrix, enemy_pairs, merged, team_size=6, beam_width
                 continue
             if must_include and must_include[0] not in p:
                 continue      # every seed must carry the required Pokemon
+            if _breaks_monotonic_hard_limit(list(p), merged, type_limits):
+                continue
             cov, _ = team_coverage(list(p), matrix, enemy_pairs)
             seeds.append((cov, list(p)))
         seeds.sort(key=lambda x: -x[0])
@@ -450,8 +548,9 @@ def beam_search_teams(pool, matrix, enemy_pairs, merged, team_size=6, beam_width
                 key = tuple(nt)
                 if key in cand:
                     continue
-                sc = score_team(nt, matrix, enemy_pairs, merged,
-                                 max_weak=max_weak, max_net=max_net)["total"]
+                if _breaks_monotonic_hard_limit(nt, merged, type_limits):
+                    continue
+                sc = sc_team(nt)["total"]
                 # Small nudge for preferences.csv "prefer" entries -- enough to break
                 # ties between otherwise equal teams, never enough to outweigh a
                 # matchup (MATCHUP_WEIGHT is 1000 per enemy pair beaten).
@@ -462,8 +561,11 @@ def beam_search_teams(pool, matrix, enemy_pairs, merged, team_size=6, beam_width
         if not beam:
             break
 
-    final = [(score_team(t, matrix, enemy_pairs, merged, max_weak=max_weak,
-                          max_net=max_net), t) for t in beam]
+    if type_limits or required_cores:
+        beam = [t for t in beam if not hard_violations(
+            t, merged, type_limits=type_limits, required_cores=required_cores)]
+
+    final = [(sc_team(t), t) for t in beam]
     final.sort(key=lambda x: -x[0]["total"])
     return final
 
