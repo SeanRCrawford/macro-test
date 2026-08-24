@@ -279,19 +279,32 @@ class Battle:
     def _emit(self, **kwargs):
         self.events.append({"turn": self.turn_num, **kwargs})
 
-    def _mega_evolve_now(self, c):
+    def _mega_evolve_now(self, c, mega_decisions=None):
         """Mega Evolve a single Pokemon at the moment it is about to move.
 
         Mega Evolution is declared with the move, so a Pokemon that is KO'd by a
         faster attack before acting never transforms -- and its weather ability
         (Drought, Snow Warning) never comes up. Still at most one per side per
         battle.
+
+        `mega_decisions`: optional {id(combatant): bool} -- when given, an
+        eligible Pokemon transforms ONLY if its id maps to a truthy value
+        (an explicit "yes, now" from whoever is playing this side), instead
+        of the default "the instant it's eligible" rule below. `None`
+        (every existing caller) is that default -- purely additive, so nothing
+        that doesn't pass this changes behaviour. Built for the Battle
+        Simulator: "I need to choose during the battle which of my brings
+        mega evolves... and choose at the start of the turn on which I wish
+        to mega evolve" -- a real per-turn choice, not a team-preview
+        pre-commitment that just fires automatically on first action.
         """
         from engine import mega_evolve
         if c is None or c.fainted or not c.is_mega_pick or c.mega_evolved:
             return
         side = self.side_of(c)
         if side.mega_used:
+            return
+        if mega_decisions is not None and not mega_decisions.get(id(c)):
             return
         before = c.ability
         mega_evolve(c)
@@ -352,12 +365,29 @@ class Battle:
                            ability_after=c.ability, weather_after=self.field.weather)
                 break  # only one Mega per side, ever
 
-    def run_turn(self, p1_actions: list, p2_actions: list):
+    def run_turn(self, p1_actions: list, p2_actions: list, mega_decisions=None,
+                 replacement_choices=None):
         """
         p1_actions / p2_actions: list of Action for each currently-active,
         non-fainted Combatant on that side (switches included). Caller
         (policy/user) is responsible for choosing legal actions; Choice
         lock is enforced here and will raise if violated.
+
+        `mega_decisions`: see `_mega_evolve_now` -- optional {id(combatant):
+        bool}, None preserves the default "transforms the instant it's
+        eligible" behaviour.
+
+        `replacement_choices`: see `_replace_fainted` -- optional
+        {id(currently-active combatant): Combatant to send in if THIS ONE
+        faints this turn}, None preserves the default `_best_replacement`
+        pick. Declared alongside this turn's actions (before the turn
+        resolves), not after the faint happens mid-turn -- `run_turn`
+        plays a whole turn in one call, so "wait and ask once it's dead"
+        would need splitting turn resolution into two phases; declaring a
+        preference for the contingency reaches the same outcome (the bench
+        member you actually wanted arrives) without that much larger,
+        riskier change to a function every other tool in this repo also
+        calls.
         """
         self.turn_num += 1
         self.log.add(f"\n--- Turn {self.turn_num} ---")
@@ -448,7 +478,7 @@ class Battle:
         # base form until next turn.
         for a in sorted(move_actions,
                          key=lambda x: -effective_speed(x.combatant, self.field, x.side)):
-            self._mega_evolve_now(a.combatant)
+            self._mega_evolve_now(a.combatant, mega_decisions=mega_decisions)
 
         ordered = turn_order(move_actions, self.field)
 
@@ -550,7 +580,7 @@ class Battle:
 
         # 4. Fainted Pokemon are replaced at the END of the turn, so the incoming
         #    mon is on the field and able to act starting NEXT turn.
-        self._replace_fainted()
+        self._replace_fainted(replacement_choices=replacement_choices)
 
     PRIORITY_BLOCK_ABILITIES = {"Queenly Majesty", "Dazzling", "Armor Tail"}
 
@@ -1168,7 +1198,7 @@ class Battle:
             return s
         return max(alive_bench, key=score)
 
-    def _replace_fainted(self):
+    def _replace_fainted(self, replacement_choices=None):
         """Send in replacements for fainted actives at the END of the turn, so
         they are on the field ready to act on the NEXT turn (they do not get an
         action on the turn they came in). Mega Evolution is NOT resolved here --
@@ -1190,6 +1220,14 @@ class Battle:
         The second phase also runs in SPEED ORDER, which is how simultaneous
         switch-in abilities resolve -- it decides which of two weather setters
         ends up owning the weather.
+
+        `replacement_choices`: optional {id(the active combatant BEFORE it
+        faints): Combatant to send in for it}, checked against the alive
+        bench at the moment of replacement (a choice naming a Pokemon that's
+        no longer available -- already sent in for a different slot, say --
+        is ignored, same as not naming one at all). `None`, or no entry for
+        a given faint, falls back to `_best_replacement` -- the default for
+        every existing caller, unchanged.
         """
         arrivals = []
         for side in (self.p1, self.p2):
@@ -1200,7 +1238,9 @@ class Battle:
                 alive_bench = [b for b in side.bench if not b.fainted]
                 if not alive_bench:
                     continue
-                incoming = self._best_replacement(alive_bench, opp.active)
+                chosen = (replacement_choices or {}).get(id(c))
+                incoming = (chosen if chosen is not None and chosen in alive_bench
+                           else self._best_replacement(alive_bench, opp.active))
                 side.bench[:] = [b for b in side.bench if b is not incoming]
                 side.active[slot] = incoming
                 arrivals.append((side, slot, incoming, c))

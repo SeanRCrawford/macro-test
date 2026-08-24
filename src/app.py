@@ -1384,6 +1384,73 @@ with tab_build:
             if ab_changed:
                 st.info("Edited but not applied — press Apply abilities.")
 
+        # --- Nature editor ---------------------------------------------------
+        # Reported: "I need to be able to change nature. If two mons of the
+        # same speed have different natures, the one with the speed boosting
+        # nature may automatically win." `combatants.make_combatant`/
+        # `make_team` have always honoured a per-Pokemon nature override
+        # (`spec.get("nature")`, same field the item/ability editors already
+        # write into); there was simply no way to set one. (Speed TIES
+        # themselves are unaffected by nature either way -- `engine.
+        # find_speed_ties`/`turn_order` compare the final computed speed stat
+        # only, which is where nature already lives; a genuine tie still
+        # breaks arbitrarily, not toward whoever has the faster-leaning
+        # nature. What nature actually changes is whether it's a tie at all.)
+        STAT_LABEL = {"atk": "Atk", "def": "Def", "spa": "SpA", "spd": "SpD", "spe": "Spe"}
+
+        def _nature_desc(name):
+            table = natures[name.lower()]
+            up = next((s for s in STAT_LABEL if table.get(s, 1.0) > 1.0), None)
+            down = next((s for s in STAT_LABEL if table.get(s, 1.0) < 1.0), None)
+            if not up:
+                return "neutral"
+            return f"+{STAT_LABEL[up]} -{STAT_LABEL[down]}"
+
+        with st.expander("Edit natures", expanded=False):
+            st.caption("Used by every simulation the app runs, including "
+                       "which side of a genuine speed tie you're even in -- "
+                       "a Timid/Jolly nature can turn a tie (or a loss) into "
+                       "an outright win before the coin flip ever comes up.")
+            nat_sets = dict(st.session_state.get("sets") or {})
+            nat_changed = False
+            base_nat_options = [n.capitalize() for n in sorted(natures, key=str.lower)]
+            for mon in team:
+                spec = dict(nat_sets.get(mon) or {})
+                default_nature = merged[mon]["nature"]
+                current = spec.get("nature") or default_nature
+                nat_options = (base_nat_options if current in base_nat_options
+                              else base_nat_options + [current])
+                nc1, nc2 = st.columns([2, 3])
+                # The +stat/-stat split goes in the help text, not a
+                # format_func -- see the ability editor's own note just
+                # above: a formatted selectbox stores the raw value but
+                # looks it up among formatted options, which makes the page
+                # undriveable headless.
+                nc1.markdown(f"**{mon}** ({_nature_desc(current)})")
+                choice = nc2.selectbox(
+                    "Nature", nat_options, index=nat_options.index(current),
+                    key=f"nature_{mon}", label_visibility="collapsed",
+                    help=f"usage default: {default_nature} "
+                         f"({_nature_desc(default_nature)})")
+                if choice != current:
+                    spec["nature"] = choice
+                    nat_sets[mon] = spec
+                    nat_changed = True
+            nn1, nn2 = st.columns(2)
+            if nn1.button("Apply natures", width='stretch', key="nature_apply"):
+                st.session_state["sets"] = nat_sets
+                st.success("Applied — every simulation now uses them.")
+                _defer_rerun()
+            if nn2.button("Reset to usage defaults", width='stretch',
+                         key="nature_reset"):
+                for mon in team:
+                    if mon in nat_sets:
+                        nat_sets[mon].pop("nature", None)
+                st.session_state["sets"] = nat_sets
+                _defer_rerun()
+            if nat_changed:
+                st.info("Edited but not applied — press Apply natures.")
+
         # --- Move editor ---------------------------------------------------
         # Reported: "I also need to be able to select moves, often the moves
         # used aren't that good." The optimiser picks all four at once against
@@ -4214,7 +4281,8 @@ with tab_sim:
             hp = c.current_hp / c.max_hp() if c.max_hp() else 0.0
             tag = "FAINTED" if c.fainted else f"{hp * 100:.0f}% HP"
             status = f", {c.status}" if c.status else ""
-            return f"{c.name} — {tag}{status} ({c.ability})"
+            mega = " 🔺MEGA" if c.mega_evolved else ""
+            return f"{c.name}{mega} — {tag}{status} ({c.ability})"
 
         bc1, bc2 = st.columns(2)
         with bc1:
@@ -4288,6 +4356,16 @@ with tab_sim:
             # "one action per slot that actually needs one", not "exactly 2".
             p1_actions = []
             slots_needing_action = 0
+            # Ours: an explicit per-turn yes/no from the checkbox below.
+            # Theirs: True for everyone, unconditionally -- `_mega_evolve_now`
+            # already re-checks real eligibility (fainted/not a Mega pick/
+            # already evolved/side already used its Mega) before consulting
+            # this, so marking the whole side True just preserves the
+            # engine's own default "transforms the instant it's eligible"
+            # behaviour for the opponent, who has no turn-by-turn UI of
+            # their own to defer it from.
+            our_mega_decisions = {}
+            replacement_choices = {}
             for i, c in enumerate(battle.p1.active):
                 if c.fainted:
                     alive_bench = [b for b in battle.p1.bench if not b.fainted]
@@ -4300,10 +4378,39 @@ with tab_sim:
                               for b in alive_bench]
                 else:
                     st.caption(f"{c.name}: choose an action")
+                    # "I need to choose during the battle which of my brings
+                    # mega evolves, not before, and choose at the start of
+                    # the turn on which I wish to mega evolve." -- a real
+                    # per-turn declaration, not a team-preview pre-commitment
+                    # that fires automatically the moment it first acts.
+                    eligible = (c.is_mega_pick and not c.mega_evolved
+                               and not battle.p1.mega_used)
+                    if eligible:
+                        our_mega_decisions[id(c)] = st.checkbox(
+                            f"Mega Evolve {c.name} this turn?",
+                            key=f"sim_mega_{i}_{battle.turn_num}")
                     options = sim_legal_actions(c, "p1", battle.p1.active, battle.p2.active,
                                                 movesets[c.name])
                     options += [(f"Switch to {b.name}", Action(c, "p1", "switch", None, [b]))
                                for b in battle.p1.bench if not b.fainted]
+                    alive_bench = [b for b in battle.p1.bench if not b.fainted]
+                    if alive_bench:
+                        # "I also need to be able to choose who I send in
+                        # after a faint." Declared now, alongside this
+                        # turn's action, since `run_turn` resolves a whole
+                        # turn (moves, then any faint, then the
+                        # replacement) in one call -- there's no mid-turn
+                        # pause to ask again once it's actually dead.
+                        # Reaches the same outcome (the bench member you
+                        # actually wanted arrives) without splitting turn
+                        # resolution into two engine calls.
+                        rep_labels = ["Auto-pick (recommended)"] + [b.name for b in alive_bench]
+                        rep_pick = st.selectbox(
+                            f"If {c.name} faints this turn, send in:", rep_labels,
+                            key=f"sim_replace_{i}_{battle.turn_num}")
+                        if rep_pick != rep_labels[0]:
+                            replacement_choices[id(c)] = next(
+                                b for b in alive_bench if b.name == rep_pick)
                 slots_needing_action += 1
                 if not options:
                     st.warning(f"No legal action for {c.name} this turn.")
@@ -4318,8 +4425,11 @@ with tab_sim:
                 from solver import greedy_opponent_joint_action
                 p2_actions = greedy_opponent_joint_action(
                     battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
+                mega_decisions = {id(c): True for c in battle.p2.active if c is not None}
+                mega_decisions.update(our_mega_decisions)
                 before = len(battle.log.lines)
-                battle.run_turn(p1_actions, p2_actions)
+                battle.run_turn(p1_actions, p2_actions, mega_decisions=mega_decisions,
+                               replacement_choices=replacement_choices)
                 st.session_state.setdefault("sim_turn_log", []).append(
                     "\n".join(battle.log.lines[before:]))
                 st.rerun()

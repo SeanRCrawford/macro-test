@@ -270,5 +270,103 @@ class TestBattleSimulatorOnlyOneMegaInLiveBattle(unittest.TestCase):
         self.assertIn(charizard.ability, ("Blaze", "Solar Power"))
 
 
+class TestPerTurnMegaChoiceAndReplacementUI(unittest.TestCase):
+    """"I need to be able to choose during the battle which of my brings
+    mega evolves, not before, and choose at the start of the turn on which
+    I wish to mega evolve. I also need to be able to choose who I send in
+    after a faint." """
+
+    OUR4 = ["Mega Gyarados", "Kingambit", "Garchomp", "Basculegion"]
+    THEIR4 = ["Whimsicott", "Sinistcha", "Incineroar", "Hydreigon"]
+
+    def test_mega_capable_active_gets_a_per_turn_checkbox(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next((c for c in tab.checkbox if "Mega Gyarados" in c.label), None)
+        self.assertIsNotNone(cb)
+        self.assertFalse(cb.value, "must default to NOT transforming -- a "
+                                   "real choice, not a pre-commitment")
+
+    def test_leaving_it_unchecked_keeps_the_pick_in_base_form(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        submit.click().run()
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        gyarados = next(c for c in battle.p1.roster if c.name == "Mega Gyarados")
+        self.assertFalse(gyarados.mega_evolved)
+
+    def test_checking_it_transforms_on_that_turn(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "Mega Gyarados" in c.label)
+        cb.set_value(True).run()
+        tab = sim_tab(at)
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        submit.click().run()
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        gyarados = next(c for c in battle.p1.roster if c.name == "Mega Gyarados")
+        self.assertTrue(gyarados.mega_evolved)
+
+    def test_opponent_still_mega_evolves_automatically(self):
+        """Our side's explicit choice must not silently gate theirs -- they
+        have no turn-by-turn UI of their own, so they keep the engine's
+        default "transforms the instant it's eligible" behaviour."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, ["Mega Charizard Y"] + self.THEIR4[1:])
+        tab = sim_tab(at)
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        submit.click().run()
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        charizard = next(c for c in battle.p2.roster if c.name == "Mega Charizard Y")
+        self.assertTrue(charizard.mega_evolved)
+
+    def test_replacement_picker_offers_the_live_bench(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        rep_sbs = [sb for sb in tab.selectbox if "faints this turn" in sb.label]
+        # One per non-fainted active slot with a live bench.
+        self.assertEqual(len(rep_sbs), 2)
+        for sb in rep_sbs:
+            self.assertEqual(sb.options[0], "Auto-pick (recommended)")
+            self.assertEqual(set(sb.options[1:]), {"Garchomp", "Basculegion"})
+            self.assertEqual(sb.value, "Auto-pick (recommended)")
+
+    def test_picking_a_specific_replacement_is_honoured(self):
+        """A pre-declared preference reaches `run_turn` correctly when the
+        Pokemon it names actually faints THIS turn -- 1 HP so any live
+        opposing attack KOes it. `THEIR4` here (not the class default,
+        which opens with Tailwind/Trick Room and deals no damage at all
+        turn 1) is picked to reliably attack rather than set up."""
+        at = fresh_app()
+        their4 = ["Basculegion", "Whimsicott", "Sinistcha", "Incineroar"]
+        at = seed_battle(at, self.OUR4, their4)
+        battle = at.session_state["sim_battle"]
+        battle.p1.active[0].current_hp = 1  # Mega Gyarados, still alive
+        at = at.run()
+
+        tab = sim_tab(at)
+        rep_sb = next(sb for sb in tab.selectbox
+                     if sb.label == "If Mega Gyarados faints this turn, send in:")
+        rep_sb.set_value("Basculegion").run()
+        tab = sim_tab(at)
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        self.assertFalse(submit.disabled)
+        submit.click().run()
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        gyarados = next(c for c in battle.p1.roster if c.name == "Mega Gyarados")
+        self.assertTrue(gyarados.fainted, "fixture assumes 1 HP dies to "
+                                          "any live opposing attack")
+        self.assertEqual(battle.p1.active[0].name, "Basculegion")
+
+
 if __name__ == "__main__":
     unittest.main()
