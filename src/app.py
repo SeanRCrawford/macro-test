@@ -3,12 +3,14 @@ Streamlit UI -- interactive front-end for the whole toolkit.
 
 Launch with:  ./run.sh app        (or: streamlit run src/app.py)
 
-Four tabs:
-  Team Builder  -- pick your 6 by hand (or load a generated team.json),
-                    optimise items/movesets, save the sheet
-  Generate      -- run the full team generation search with live controls
-  Lead / Back   -- run the lead/back search for a chosen team and opponent
-  Battle Viewer -- step through a single matchup turn by turn
+Tabs:
+  Team Builder     -- pick your 6 by hand (or load a generated team.json),
+                       optimise items/movesets, save the sheet
+  Generate         -- run the full team generation search with live controls
+  Lead / Back      -- run the lead/back search for a chosen team and opponent
+  Battle Viewer    -- auto-play a matchup to a verdict, both sides on the solver
+  Vs Team          -- audit a whole match against one saved team, line by line
+  Battle Simulator -- play a real match turn by turn, us in the loop
 """
 import sys
 import itertools
@@ -119,8 +121,9 @@ if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
 
-tab_build, tab_gen, tab_search, tab_battle, tab_vs = st.tabs(
-    ["Team Builder", "Generate Team", "Lead / Back Search", "Battle Viewer", "Vs Team"])
+tab_build, tab_gen, tab_search, tab_battle, tab_vs, tab_sim = st.tabs(
+    ["Team Builder", "Generate Team", "Lead / Back Search", "Battle Viewer", "Vs Team",
+     "Battle Simulator"])
 
 
 # ------------------------------------------------------------------ helpers
@@ -1005,6 +1008,180 @@ def render_punish_audit(res):
                 st.success("No legal response tried punishes this play.")
     with st.expander("Full battle log"):
         st.code(res["log"])
+
+
+# ------------------------------------------------------------------ battle simulator (shared logic)
+#
+#     "I want to add a new tool to the streamlit app - battle simulator.
+#      This will let me use a loaded team and play a match vs the
+#      preset/chosen teams, either with them bringing their optimal bring,
+#      them going through all 15 potential leads (+ optimal backs) in
+#      order, or with me selecting their bring."
+#
+# Confirmed: the human plays their OWN side manually, every turn (full
+# interactive play, not a solver auto-playing for them); the opponent
+# always plays its strongest available action once the match is underway,
+# regardless of which of the three modes chose its BRING; "all 15 leads"
+# steps through them one at a time (play one to a finish, then move on),
+# not a batch summary.
+#
+# This is genuinely a fourth thing this file does with a `Battle` (Battle
+# Viewer auto-plays both sides to a verdict; Vs Team audits a whole match;
+# this plays one turn at a time with a human in the loop) -- it reuses the
+# SAME primitives those already do (`combatants.make_team`,
+# `solver.build_moveset`, `Battle.run_turn`, `solver.greedy_opponent_joint_
+# action`), not a second battle engine.
+
+def sim_legal_actions(c, side_name, allies, foes, moveset):
+    """Every REAL legal action for one non-fainted active Pokemon, for a
+    HUMAN to pick from directly.
+
+    Deliberately NOT `solver.candidate_actions`: that function prunes to
+    what a heuristic AI search bothers to keep -- for a single-target
+    damaging move it offers only the hardest-hitting target (plus any
+    target the move would finish outright), and it refuses to offer a
+    charge move (Solar Beam, ...) at all unless the weather already skips
+    the charge, because its damage estimator can't price a charge turn
+    correctly. Both of those are AI-search shortcuts, not real illegality --
+    a human choosing to hit the "wrong" target, or to start charging Solar
+    Beam into an incoming sun, is exactly the kind of line a manual
+    simulator is FOR. `Battle.run_turn` itself already forces the correct
+    outcome for a mid-charge Pokemon regardless of what's submitted, so
+    offering the full moveset here can't produce an illegal turn.
+
+    Returns [(label, engine.Action), ...] -- switches are NOT included here
+    (the caller adds those from the bench, since only it knows who's
+    available and whether this slot is a forced replacement).
+    """
+    from battle import CHOICE_ITEMS, PROTECT_MOVES
+    from damage import is_spread_move, spread_targets
+    from engine import Action
+    from solver import FIRST_TURN_ONLY_MOVES
+
+    ms = moveset
+    if c.item in CHOICE_ITEMS and c.choice_locked_move:
+        locked = [m for m in ms if m[0].name == c.choice_locked_move]
+        if locked:
+            ms = locked
+    if c.active_turn_count > 0:
+        ms = [m for m in ms if m[0].name not in FIRST_TURN_ONLY_MOVES]
+
+    live_foes = [f for f in foes if f is not None and not f.fainted]
+    live_allies = [a for a in allies if a is not None and a is not c and not a.fainted]
+    out = []
+    for move, _pct in ms:
+        if move.name in PROTECT_MOVES:
+            if not c.protected_last_turn:
+                out.append((move.name, Action(c, side_name, "protect", move, [c])))
+            continue
+        if move.category == "Status":
+            if move.target in ("self", "allySide", "all"):
+                out.append((move.name, Action(c, side_name, "move", move, [c])))
+            elif move.target == "adjacentAlly" and live_allies:
+                ally = live_allies[0]
+                out.append((f"{move.name} -> {ally.name}",
+                           Action(c, side_name, "move", move, [ally])))
+            elif live_foes:
+                for f in live_foes:
+                    out.append((f"{move.name} -> {f.name}",
+                               Action(c, side_name, "move", move, [f])))
+            else:
+                out.append((move.name, Action(c, side_name, "move", move, [c])))
+            continue
+        if not live_foes:
+            continue
+        if is_spread_move(move.target):
+            tgts = spread_targets(move.target, live_foes, allies, c)
+            if not tgts:
+                continue
+            out.append((f"{move.name} (hits {'/'.join(t.name for t in tgts)})",
+                       Action(c, side_name, "move", move, tgts)))
+        else:
+            for f in live_foes:
+                out.append((f"{move.name} -> {f.name}",
+                           Action(c, side_name, "move", move, [f])))
+    if not out:
+        # Nothing legal at all (e.g. every move needed a target and both
+        # foes just fainted this turn) -- fall back to Protect, same rule
+        # `solver.candidate_actions` uses, so the turn always has an action.
+        from damage import MoveInfo
+        out.append(("Protect", Action(c, side_name, "protect",
+                                      MoveInfo("Protect", 0, "Normal", "Status", "self",
+                                              priority=4), [c])))
+    return out
+
+
+def sim_build_battle(our4, their4, merged, moves_db, natures, typechart,
+                     our_sets=None, enemy_sets=None, our_mega=None, enemy_mega=None):
+    """(battle, movesets) for an interactive match -- the same construction
+    `committed_plan._mk`/`_movesets` use for a played-out verification,
+    minus the fixed damage roll (an interactive match keeps real variance).
+    `our_mega`/`enemy_mega`: which Mega-named pick (if any) actually
+    Evolves, per `species_data.resolve_team_mega_slot` -- None defaults to
+    the first Mega-named pick in the bring, `species_data.NO_MEGA` says
+    neither does.
+    """
+    from combatants import make_team
+    from battle import Battle
+    from solver import build_moveset, TOP_K_MOVES
+
+    oc = make_team(our4, merged, natures, mega_transforms=our_mega, sets=our_sets)
+    ec = make_team(their4, merged, natures, mega_transforms=enemy_mega, sets=enemy_sets)
+    battle = Battle(oc, ec, typechart, moves_db)
+    movesets = {}
+    for roster, sets in ((oc, our_sets), (ec, enemy_sets)):
+        for c in roster:
+            spec = (sets or {}).get(c.name) or {}
+            movesets[c.name] = build_moveset(merged[c.name], moves_db, top_k=TOP_K_MOVES,
+                                             only_moves=spec.get("moves"))
+    return battle, movesets
+
+
+def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, our_sets=None):
+    """Every one of their C(6,2)=15 possible leads, each paired with a
+    plausible back pair, ranked worst-for-us first -- via `fast_eval.
+    fast_pair_score`, the SAME cheap threat-matrix screen `matchup_search.
+    search_robust_composition` already uses to rank enemy configurations
+    for the Lead/Back Search tab, not a new model. Mega choice on both
+    sides is resolved by that screen's own minimax (best-for-us Mega vs
+    worst-for-us Mega).
+
+    BACKS -- a genuine simplification, not a full search: for a given
+    enemy lead, each of its C(4,2) legal back pairs is scored the same way
+    `search_best_composition`'s own screener scores OUR back pairs --
+    "how would this pair do if it had to lead" is the cheap proxy for how
+    dangerous it is -- against OUR lead, and whichever scores worst for us
+    is kept. A real bring's backs matter for what they pivot into after a
+    KO, not just how they'd open; that's accepted here because this only
+    needs ONE plausible bring to start an interactive match with, not a
+    verified worst case -- once play begins, `solver.
+    greedy_opponent_joint_action`'s own in-battle logic picks switches from
+    whatever bench it's actually handed.
+
+    Returns [(margin, their4, lead_pair), ...], worst (most dangerous to
+    us -- lowest margin) first.
+    """
+    from fast_eval import fast_pair_score
+    from matchup_search import enemy_configs
+
+    our_lead = tuple(our4[:2])
+    by_lead = {}
+    for lead, back in enemy_configs(their6):
+        by_lead.setdefault(tuple(lead), []).append(tuple(back))
+
+    ranked = []
+    for lead, backs in by_lead.items():
+        lead_score = fast_pair_score(our_lead, lead, merged, moves_db, natures, typechart,
+                                     our_sets=our_sets)
+        best_back, best_back_margin = backs[0], None
+        for back in backs:
+            back_score = fast_pair_score(our_lead, back, merged, moves_db, natures, typechart,
+                                         our_sets=our_sets)
+            if best_back_margin is None or back_score["margin"] < best_back_margin:
+                best_back_margin, best_back = back_score["margin"], back
+        ranked.append((lead_score["margin"], list(lead) + list(best_back), list(lead)))
+    ranked.sort(key=lambda x: x[0])
+    return ranked
 
 
 # ------------------------------------------------------------------ builder
@@ -3910,3 +4087,244 @@ with tab_vs:
 
             st.divider()
             render_salvage("vs", vs_active_matchup, st.session_state.get("sets", {}))
+
+
+# ------------------------------------------------------------------ battle simulator
+with tab_sim:
+    st.subheader("Battle simulator")
+    st.caption("Play a real match, turn by turn -- you pick your own moves and switches "
+              "every turn on a real Battle.run_turn engine; the opponent always plays its "
+              "strongest available action once the match is underway, whichever mode "
+              "picked its bring.")
+
+    if st.session_state.get("sim_battle") is None:
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            st.markdown("**Our side**")
+            sim_our_pool, sim_our_sets = our_side_pool("sim", teams, all_names, team_meta,
+                                                        merged=merged)
+            sim_our_pool = sim_our_pool or list(all_names)
+            if "sim_our_lead" in st.session_state:
+                st.session_state["sim_our_lead"] = [n for n in st.session_state["sim_our_lead"]
+                                                    if n in sim_our_pool]
+            sim_our_lead = st.multiselect(
+                "Our lead (2)", sim_our_pool,
+                default=sim_our_pool[:2] if len(sim_our_pool) >= 2 else [],
+                max_selections=2, key="sim_our_lead")
+            our_back_opts = [n for n in sim_our_pool if n not in sim_our_lead]
+            if "sim_our_back" in st.session_state:
+                st.session_state["sim_our_back"] = [n for n in st.session_state["sim_our_back"]
+                                                    if n in our_back_opts]
+            sim_our_back = st.multiselect(
+                "Our back (2)", our_back_opts,
+                default=our_back_opts[:2] if len(our_back_opts) >= 2 else [],
+                max_selections=2, key="sim_our_back")
+            sim_our4 = sim_our_lead + sim_our_back
+            sim_our_mega = None
+            sim_our_megas = [n for n in sim_our4 if n.startswith("Mega ")]
+            if sim_our_megas:
+                from species_data import NO_MEGA
+                our_mega_choice = st.selectbox(
+                    "Which of ours actually Mega Evolves?", sim_our_megas + ["Neither"],
+                    key="sim_our_mega_choice",
+                    help="Only one Mega Evolution per side per game -- staying base keeps "
+                         "that Pokemon's own base ability and typing all match.")
+                sim_our_mega = NO_MEGA if our_mega_choice == "Neither" else our_mega_choice
+        with sc2:
+            st.markdown("**Their side**")
+            sim_their6 = their_side_pool("sim", teams, all_names)
+            sim_mode = st.radio(
+                "Their bring", ["Their optimal bring", "Step through all 15 leads",
+                                "I choose their bring"],
+                key="sim_mode_choice",
+                help="'Their optimal bring' and 'all 15 leads' both need their full six "
+                     "(a saved team, or all 6 picked by hand) -- 'I choose their bring' "
+                     "works with just the 4 you actually pick.")
+            sim_their4_manual, sim_their_mega_manual = [], None
+            if sim_mode == "I choose their bring":
+                if "sim_their_lead" in st.session_state:
+                    st.session_state["sim_their_lead"] = [
+                        n for n in st.session_state["sim_their_lead"] if n in sim_their6]
+                sim_their_lead = st.multiselect(
+                    "Their lead (2)", sim_their6,
+                    default=sim_their6[:2] if len(sim_their6) >= 2 else [],
+                    max_selections=2, key="sim_their_lead")
+                their_back_opts = [n for n in sim_their6 if n not in sim_their_lead]
+                if "sim_their_back" in st.session_state:
+                    st.session_state["sim_their_back"] = [
+                        n for n in st.session_state["sim_their_back"] if n in their_back_opts]
+                sim_their_back = st.multiselect(
+                    "Their back (2)", their_back_opts,
+                    default=their_back_opts[:2] if len(their_back_opts) >= 2 else [],
+                    max_selections=2, key="sim_their_back")
+                sim_their4_manual = sim_their_lead + sim_their_back
+                their_megas = [n for n in sim_their4_manual if n.startswith("Mega ")]
+                if their_megas:
+                    from species_data import NO_MEGA
+                    their_mega_choice = st.selectbox(
+                        "Which of theirs actually Mega Evolves?", their_megas + ["Neither"],
+                        key="sim_their_mega_choice")
+                    sim_their_mega_manual = (NO_MEGA if their_mega_choice == "Neither"
+                                            else their_mega_choice)
+
+        needs_six = sim_mode != "I choose their bring"
+        ready = (len(sim_our4) == 4
+                and ((needs_six and len(sim_their6) == 6)
+                     or (not needs_six and len(sim_their4_manual) == 4)))
+        if not ready:
+            if len(sim_our4) != 4:
+                st.info("Pick a full lead + back (4) for our side.")
+            elif needs_six and len(sim_their6) != 6:
+                st.info("'Their optimal bring' and 'all 15 leads' need their full six.")
+            elif not needs_six and len(sim_their4_manual) != 4:
+                st.info("Pick a full lead + back (4) for their side.")
+        if st.button("Start Battle", type="primary", disabled=not ready):
+            with st.spinner("Setting up..."):
+                if sim_mode == "I choose their bring":
+                    their4, their_mega = sim_their4_manual, sim_their_mega_manual
+                    sim_leads = None
+                else:
+                    ranked = sim_rank_enemy_brings(sim_our4, sim_their6, merged, moves,
+                                                   natures, typechart, our_sets=sim_our_sets)
+                    sim_leads = ranked if sim_mode == "Step through all 15 leads" else None
+                    _margin, their4, _lead = ranked[0]
+                    their_mega = None  # make_team's own default: first Mega in the bring
+                battle, movesets = sim_build_battle(
+                    sim_our4, their4, merged, moves, natures, typechart,
+                    our_sets=sim_our_sets, our_mega=sim_our_mega, enemy_mega=their_mega)
+                st.session_state["sim_battle"] = battle
+                st.session_state["sim_movesets"] = movesets
+                st.session_state["sim_our4"] = sim_our4
+                st.session_state["sim_our_sets"] = sim_our_sets
+                st.session_state["sim_our_mega"] = sim_our_mega
+                st.session_state["sim_their4"] = their4
+                st.session_state["sim_mode"] = sim_mode
+                st.session_state["sim_turn_log"] = []
+                if sim_leads is not None:
+                    st.session_state["sim_leads"] = sim_leads
+                    st.session_state["sim_lead_idx"] = 0
+            st.rerun()
+    else:
+        from engine import Action
+
+        battle = st.session_state["sim_battle"]
+        movesets = st.session_state["sim_movesets"]
+
+        def _sim_mon_line(c):
+            hp = c.current_hp / c.max_hp() if c.max_hp() else 0.0
+            tag = "FAINTED" if c.fainted else f"{hp * 100:.0f}% HP"
+            status = f", {c.status}" if c.status else ""
+            return f"{c.name} — {tag}{status} ({c.ability})"
+
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            st.markdown("**Ours**")
+            for c in battle.p1.active:
+                st.write(_sim_mon_line(c))
+            if battle.p1.bench:
+                st.caption("Bench: " + "; ".join(_sim_mon_line(c) for c in battle.p1.bench))
+        with bc2:
+            st.markdown("**Theirs**")
+            for c in battle.p2.active:
+                st.write(_sim_mon_line(c))
+            if battle.p2.bench:
+                st.caption("Bench: " + "; ".join(_sim_mon_line(c) for c in battle.p2.bench))
+
+        fld = battle.field
+        field_bits = []
+        if fld.weather:
+            field_bits.append(f"Weather: {fld.weather} ({fld.weather_turns_left} left)")
+        if fld.trick_room:
+            field_bits.append(f"Trick Room ({fld.trick_room_turns_left} left)")
+        if fld.tailwind_p1:
+            field_bits.append(f"Our Tailwind ({fld.tailwind_p1} left)")
+        if fld.tailwind_p2:
+            field_bits.append(f"Their Tailwind ({fld.tailwind_p2} left)")
+        if field_bits:
+            st.caption(" | ".join(field_bits))
+
+        winner = "p1" if battle.p2.has_lost() else ("p2" if battle.p1.has_lost() else None)
+        if winner:
+            st.success(f"Battle over — {'YOU WIN' if winner == 'p1' else 'YOU LOSE'} "
+                      f"(turn {battle.turn_num}).")
+            if st.session_state.get("sim_mode") == "Step through all 15 leads":
+                leads = st.session_state.get("sim_leads") or []
+                idx = st.session_state.get("sim_lead_idx", 0)
+                if idx + 1 < len(leads):
+                    if st.button(f"Next lead ({idx + 2}/{len(leads)})", type="primary"):
+                        _margin, next_their4, _lead = leads[idx + 1]
+                        our4 = st.session_state["sim_our4"]
+                        battle2, movesets2 = sim_build_battle(
+                            our4, next_their4, merged, moves, natures, typechart,
+                            our_sets=st.session_state.get("sim_our_sets"),
+                            our_mega=st.session_state.get("sim_our_mega"))
+                        st.session_state["sim_battle"] = battle2
+                        st.session_state["sim_movesets"] = movesets2
+                        st.session_state["sim_their4"] = next_their4
+                        st.session_state["sim_lead_idx"] = idx + 1
+                        st.session_state["sim_turn_log"] = []
+                        st.rerun()
+                else:
+                    st.caption("That was the last of the 15 leads.")
+            if st.button("New battle"):
+                for k in list(st.session_state):
+                    if k.startswith("sim_"):
+                        del st.session_state[k]
+                st.rerun()
+        else:
+            st.markdown(f"**Turn {battle.turn_num + 1} — your move**")
+            # `Battle._replace_fainted` sends in the strategically-best bench
+            # Pokemon for BOTH sides automatically, at the end of the turn a
+            # lead faints -- same engine rule `matchup_search.race_all_megas`'s
+            # own docstring describes. A fainted active therefore only shows up
+            # here if there was NO bench left to replace it with (an empty
+            # slot the game is still continuing around); reusing the engine's
+            # own replacement choice rather than adding a second one here is
+            # deliberate, not an oversight.
+            # A slot needing no action at all (fainted, nothing left on the
+            # bench to send in) is legal and genuinely actionless -- `Battle.
+            # run_turn` (see `solver.greedy_opponent_joint_action`'s own
+            # identical skip) simply gets no Action for it, so "ready" means
+            # "one action per slot that actually needs one", not "exactly 2".
+            p1_actions = []
+            slots_needing_action = 0
+            for i, c in enumerate(battle.p1.active):
+                if c.fainted:
+                    alive_bench = [b for b in battle.p1.bench if not b.fainted]
+                    if not alive_bench:
+                        st.caption(f"{c.name}: fainted, no bench left to replace it "
+                                  "-- no action needed")
+                        continue
+                    st.caption(f"{c.name}: fainted, no bench left to replace it")
+                    options = [(f"Switch in {b.name}", Action(c, "p1", "switch", None, [b]))
+                              for b in alive_bench]
+                else:
+                    st.caption(f"{c.name}: choose an action")
+                    options = sim_legal_actions(c, "p1", battle.p1.active, battle.p2.active,
+                                                movesets[c.name])
+                    options += [(f"Switch to {b.name}", Action(c, "p1", "switch", None, [b]))
+                               for b in battle.p1.bench if not b.fainted]
+                slots_needing_action += 1
+                if not options:
+                    st.warning(f"No legal action for {c.name} this turn.")
+                    continue
+                labels = [lbl for lbl, _a in options]
+                pick = st.selectbox("Action", labels, key=f"sim_action_{i}_{battle.turn_num}",
+                                    label_visibility="collapsed")
+                p1_actions.append(next(a for lbl, a in options if lbl == pick))
+
+            if st.button("Submit turn", type="primary",
+                        disabled=len(p1_actions) != slots_needing_action):
+                from solver import greedy_opponent_joint_action
+                p2_actions = greedy_opponent_joint_action(
+                    battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
+                before = len(battle.log.lines)
+                battle.run_turn(p1_actions, p2_actions)
+                st.session_state.setdefault("sim_turn_log", []).append(
+                    "\n".join(battle.log.lines[before:]))
+                st.rerun()
+
+        if st.session_state.get("sim_turn_log"):
+            with st.expander("Turn log", expanded=True):
+                for entry in reversed(st.session_state["sim_turn_log"]):
+                    st.code(entry)
