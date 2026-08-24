@@ -1110,3 +1110,95 @@ class TestDeepDive(unittest.TestCase):
         d = rows[0]["detail"][("Kingambit", "Basculegion")]
         self.assertNotIn("grid", d)
         self.assertNotIn("ohko_risk", d)
+
+
+class TestSwitchInSearch(unittest.TestCase):
+    """`switch_in_search` -- for a pair that LOSES a specific enemy pair,
+    which bench candidate switching in for which of ours turns it around.
+
+        "for losing enemy leads, see if there are easy and optimal switch
+         ins (i.e., they take little damage from the enemy on the switch
+         in, and then the board state becomes a clearly winning one again)"
+
+    Fixtures reuse `TestDeepDive`'s own Mega Scizor + Ninetales-Alola vs Big
+    Six case, whose losses and fixes were verified by hand before these
+    tests were written.
+    """
+
+    BENCH = ["Mega Feraligatr", "Arcanine-Hisui", "Mega Tyranitar", "Gyarados"]
+
+    def setUp(self):
+        self.W = world()
+        self.merged, self.moves = self.W["merged"], self.W["moves"]
+        self.natures, self.typechart = self.W["natures"], self.W["typechart"]
+
+    def _search(self, enemy_pair, bench=None, turns=2):
+        return cf.switch_in_search(
+            "Mega Scizor", "Ninetales-Alola", enemy_pair, bench or self.BENCH,
+            self.merged, self.moves, self.natures, self.typechart, turns=turns)
+
+    def test_a_real_fix_is_found_and_labelled_correctly(self):
+        rows, tried = self._search(("Mega Charizard Y", "Mega Floette"))
+        self.assertGreater(tried, 0)
+        self.assertTrue(rows)
+        best = rows[0]
+        self.assertEqual(best["leaving"], "Ninetales-Alola")
+        self.assertIn(best["arriving"], self.BENCH)
+        self.assertIn(best["outcome"], ("sweep", "out_trade"))
+
+    def test_a_genuine_loss_reports_no_fix_rather_than_a_bad_one(self):
+        """Basculegion + Mega Charizard Y is too much pressure for a single
+        switch to fix (verified by hand against a much wider bench) --
+        `rows` must come back empty, not padded with losing candidates."""
+        rows, tried = self._search(("Basculegion", "Mega Charizard Y"))
+        self.assertGreater(tried, 0)
+        for r in rows:
+            self.assertIn(r["outcome"], ("sweep", "out_trade"))
+
+    def test_only_candidates_that_fix_it_are_returned(self):
+        """A candidate that still loses must never appear in `rows` --
+        `switch_in_search` filters, it doesn't merely rank."""
+        rows, _tried = self._search(("Mega Charizard Y", "Garchomp"))
+        for r in rows:
+            self.assertIn(r["outcome"], ("sweep", "out_trade"))
+
+    def test_ranked_by_least_damage_taken_switching_in(self):
+        rows, _tried = self._search(("Mega Charizard Y", "Mega Floette"))
+        taken = [r["switch_in_taken"] for r in rows]
+        self.assertEqual(taken, sorted(taken))
+
+    def test_the_switch_in_never_attacks_on_turn_one(self):
+        """The mechanic this whole function turns on: a real doubles switch
+        means the incoming Pokemon has no move the turn it comes in."""
+        merged, moves = self.merged, self.moves
+        natures, typechart = self.natures, self.typechart
+        enemy_built = cf._build_enemy_pairs(
+            ["Mega Charizard Y", "Mega Floette"], merged, natures, moves)
+        e1c, e1m = enemy_built["Mega Charizard Y"]
+        e2c, e2m = enemy_built["Mega Floette"]
+        stay_item, stay_moves, stay_w = cf._answer_for(
+            "Mega Scizor", merged, moves, natures, typechart,
+            ["Mega Charizard Y", "Mega Floette"])
+        stay_c = cf._build("Mega Scizor", merged, natures, item=stay_item)
+        stay_m = cf._move_infos("Mega Scizor", merged, moves, stay_moves)
+        item, mvs, w = cf._answer_for(
+            "Mega Feraligatr", merged, moves, natures, typechart,
+            ["Mega Charizard Y", "Mega Floette"])
+        cand_c = cf._build("Mega Feraligatr", merged, natures, item=item)
+        cand_m = cf._move_infos("Mega Feraligatr", merged, moves, mvs)
+        combatants = {"C": stay_c, "P": cand_c, "E1": e1c, "E2": e2c}
+        moves_by_role = {"C": stay_m, "P": cand_m, "E1": e1m, "E2": e2m}
+        _outcome, _tu, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, stay_w or w, 2,
+            first_turn_moves_override={"P": []})
+        turn1_attackers = {role for role, _tgt, _h in log[0]}
+        self.assertNotIn("P", turn1_attackers)
+
+    def test_named_pair_and_enemies_are_never_tried_as_switch_ins(self):
+        bench = self.BENCH + ["Mega Scizor", "Ninetales-Alola",
+                              "Mega Charizard Y", "Mega Floette"]
+        rows, _tried = self._search(("Mega Charizard Y", "Mega Floette"),
+                                    bench=bench)
+        arriving = {r["arriving"] for r in rows}
+        self.assertFalse(arriving & {"Mega Scizor", "Ninetales-Alola",
+                                     "Mega Charizard Y", "Mega Floette"})

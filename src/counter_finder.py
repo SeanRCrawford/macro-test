@@ -17,7 +17,7 @@
      permutations, and can include chip from ally. For a spread move such as
      Blizzard, make sure the chip is adjusted correctly (0.75x)"
 
-Six questions, six functions, and none of them re-derives damage or move
+Seven questions, seven functions, and none of them re-derives damage or move
 choice from scratch:
 
   threshold_search  -- who OHKOs / clears X% on each of these targets, with
@@ -45,6 +45,11 @@ choice from scratch:
                         which enemy hits are outright OHKO risks on their
                         best roll, and the turn-by-turn line each one
                         collapses into.
+  switch_in_search  -- for a pair that LOSES a specific enemy pair, which
+                        bench candidate switching in for which of ours turns
+                        it around -- ranked by least damage taken on the
+                        switch-in turn, among the candidates that actually
+                        fix the loss.
 
 Move and item selection is `optimize_sets.best_item`/`best_moveset` -- the
 same search `spread_table.py` and the lead screen use, so a Pokemon found here
@@ -933,7 +938,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 
 
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
-                enemy_speed_mult=1.0):
+                enemy_speed_mult=1.0, first_turn_moves_override=None):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -948,6 +953,15 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     call is the Tailwind-robustness replay (`enemy_speed_mult=2.0`) -- a
     caller that wants both shows the outcome difference, not two logs to
     reconcile.
+
+    `first_turn_moves_override`: optional `{role: [MoveInfo, ...]}` applied
+    ONLY to the first turn, then dropped -- `switch_in_search` uses this to
+    hand the incoming Pokemon an EMPTY move list for turn 1, modeling a real
+    doubles switch: the ally staying in, and both enemies, still act that
+    same turn (via `_best_turn`'s existing target search, unmodified -- an
+    enemy is free to aim at the switch-in or the stayer, same "no
+    coordination, each picks its own best" rule this module already has),
+    only the Pokemon that just switched in has nothing to do yet.
     """
     hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
     any_enemy_acted = False
@@ -956,8 +970,11 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     for turn_i in range(max(1, turns)):
         if (hp["E1"] <= 0 and hp["E2"] <= 0) or (hp["C"] <= 0 and hp["P"] <= 0):
             break
+        turn_moves = moves_by_role
+        if turn_i == 0 and first_turn_moves_override:
+            turn_moves = {**moves_by_role, **first_turn_moves_override}
         hp, turn_log, enemy_acted, wiped = _best_turn(
-            combatants, moves_by_role, hp, typechart, weather,
+            combatants, turn_moves, hp, typechart, weather,
             enemy_speed_mult=enemy_speed_mult)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
@@ -1269,3 +1286,94 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
                                        enemy_built, typechart, w1 or w2,
                                        turns, want_grid=True)
     return item1, item2, detail, summary
+
+
+def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
+                     natures, typechart, turns=2, item_overrides=None,
+                     move_overrides=None):
+    """For the LOSING pair (`name1`, `name2`) against `enemy_pair`, try
+    swapping each of ours out for each `bench` candidate: does the new pair
+    turn this specific enemy pair around?
+
+        "for losing enemy leads, see if there are easy and optimal switch
+         ins (i.e., they take little damage from the enemy on the switch
+         in, and then the board state becomes a clearly winning one again)"
+
+    ONE TURN IS SPENT ON THE SWITCH: the incoming Pokemon has no move on
+    turn 1 -- the ally staying in, and both enemies, still act that same
+    turn, exactly like a real doubles turn (`_joint_race`'s own
+    `first_turn_moves_override`). Both enemies pick their own target
+    independently and greedily (this module's usual "no coordination" rule),
+    so a candidate that draws their fire is priced exactly as harshly as one
+    that doesn't -- no separate "worst case, assume both focus it" layered
+    on top; the SAME race that decides the outcome is what "how much did the
+    switch-in take" is read from.
+
+    `item_overrides`/`move_overrides`: optional {name: item} / {name:
+    [move, ...]} pins -- apply to the STAYING Pokemon and every candidate,
+    same as everywhere else in this module (`_answer_for`); the two enemies
+    are unaffected (their sets came from wherever `enemy_pair` was decided).
+
+    Returns rows, best (least damage taken switching in) first, FILTERED to
+    candidates that actually fix the loss (`outcome` in "sweep"/"out_trade")
+    -- "easy AND optimal", not a ranking of every candidate tried:
+    [{"leaving", "arriving", "switch_in_taken", "outcome", "turns_used",
+    "tailwind_outcome", "tailwind_safe"}]. Also returns `tried`, the total
+    candidate count, so a caller can say "0 found among N tried" rather than
+    silence standing in for "nothing tried".
+    """
+    e1_name, e2_name = enemy_pair
+    enemy_built = _build_enemy_pairs([e1_name, e2_name], merged, natures, moves_db)
+    e1c, e1m = enemy_built[e1_name]
+    e2c, e2m = enemy_built[e2_name]
+    set_targets = [e1_name, e2_name]
+
+    rows, tried = [], 0
+    for leaving_role, leaving_name, staying_name in (
+            ("C", name1, name2), ("P", name2, name1)):
+        stay_item, stay_moves, stay_w = _answer_for(
+            staying_name, merged, moves_db, natures, typechart, set_targets,
+            item_overrides=item_overrides, move_overrides=move_overrides)
+        if not stay_moves:
+            continue
+        stay_c = _build(staying_name, merged, natures, item=stay_item)
+        stay_m = _move_infos(staying_name, merged, moves_db, stay_moves)
+
+        for cand in bench:
+            if cand in (name1, name2, e1_name, e2_name):
+                continue
+            item, mvs, w = _answer_for(
+                cand, merged, moves_db, natures, typechart, set_targets,
+                item_overrides=item_overrides, move_overrides=move_overrides)
+            if not mvs:
+                continue
+            tried += 1
+            cand_c = _build(cand, merged, natures, item=item)
+            cand_m = _move_infos(cand, merged, moves_db, mvs)
+            if leaving_role == "C":
+                combatants = {"C": cand_c, "P": stay_c, "E1": e1c, "E2": e2c}
+                moves_by_role = {"C": cand_m, "P": stay_m, "E1": e1m, "E2": e2m}
+            else:
+                combatants = {"C": stay_c, "P": cand_c, "E1": e1c, "E2": e2c}
+                moves_by_role = {"C": stay_m, "P": cand_m, "E1": e1m, "E2": e2m}
+            race_weather = w or stay_w
+            override = {leaving_role: []}
+            outcome, turns_used, _hp, log = _joint_race(
+                combatants, moves_by_role, typechart, race_weather, turns,
+                first_turn_moves_override=override)
+            if outcome not in ("sweep", "out_trade"):
+                continue
+            tw_outcome, _tw_t, _tw_hp, _tw_log = _joint_race(
+                combatants, moves_by_role, typechart, race_weather, turns,
+                enemy_speed_mult=2.0, first_turn_moves_override=override)
+            switch_in_taken = (sum(h.avg for role, _tgt, h in log[0]
+                                   if role in ("E1", "E2")
+                                   and _tgt == leaving_role) if log else 0.0)
+            rows.append({
+                "leaving": leaving_name, "arriving": cand,
+                "switch_in_taken": switch_in_taken, "outcome": outcome,
+                "turns_used": turns_used, "tailwind_outcome": tw_outcome,
+                "tailwind_safe": tw_outcome in ("sweep", "out_trade"),
+            })
+    rows.sort(key=lambda r: (r["switch_in_taken"], not r["tailwind_safe"]))
+    return rows, tried

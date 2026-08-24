@@ -14,6 +14,8 @@
     python counter_table.py --vs "Kingambit,Basculegion,Garchomp" --joint --partner "Whimsicott" --turns 3
     python counter_table.py --vs "Kingambit,Basculegion" --joint --pool-size 30
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --vs "Basculegion,Mega Charizard Y,Mega Floette,Garchomp,Kingambit,Whimsicott"
+    python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --vs "Basculegion,Mega Charizard Y,Mega Floette,Garchomp,Kingambit,Whimsicott" --pool-size 60
+    python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --bench "Gyarados,Arcanine-Hisui" --vs "Basculegion,Mega Charizard Y"
 
 Five modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
@@ -62,6 +64,12 @@ Five modes, pick one (or combine --chip-from/--chip-move with --pairs):
               grid both directions (not just whichever move the race chose),
               and the turn-by-turn line each matchup collapses into. Losses
               and OHKO risks sort first, since those are what's actionable.
+              Add --switches to also check, for every LOSING enemy pair,
+              whether swapping in a --bench candidate (or the whole pool)
+              for one of ours turns it around -- one turn spent on the
+              switch (the incoming Pokemon can't act that turn, same as a
+              real doubles switch), ranked by least damage taken switching
+              in among candidates that actually fix the loss.
 
 By default the WHOLE ~270-Pokemon dataset is searched, not a pre-narrowed
 "generically good" subset -- see `_pool` below for why (short version: "why
@@ -130,7 +138,7 @@ import _harness  # noqa: E402,F401
 
 from counter_finder import (chip_then_ko, deep_dive, joint_pair_search,  # noqa: E402
                             joint_pool_search, pair_search, speed_tiers,
-                            threshold_search)
+                            switch_in_search, threshold_search)
 
 
 def _parse_item_overrides(spec):
@@ -470,6 +478,31 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
         print()
 
 
+def _print_switches(switch_results, bench_size):
+    """`switch_results`: {(e1, e2): (rows, tried)} -- `switch_in_search`'s
+    own return shape, one entry per LOSING enemy pair from the --deep report
+    above. Ranked (within each enemy pair) the same way `switch_in_search`
+    already ranks: least damage taken switching in first, among candidates
+    that actually fix the loss."""
+    if not switch_results:
+        print("No losses to check switch-ins for -- every enemy pair is "
+             "already held.\n")
+        return
+    print(f"\nSwitch-ins for {len(switch_results)} losing enemy pair(s), "
+         f"from a bench of {bench_size}:\n")
+    for (e1, e2), (rows, tried) in switch_results.items():
+        print(f"  {e1} + {e2}:")
+        if not rows:
+            print(f"      No switch-in fixes it, among {tried} candidates tried.")
+            continue
+        for r in rows[:5]:
+            tw = "" if r["tailwind_safe"] else f"  [tailwind: {r['tailwind_outcome']}]"
+            print(f"      {r['leaving']} -> {r['arriving']}: takes "
+                 f"{r['switch_in_taken'] * 100:.0f}% switching in, then "
+                 f"{r['outcome']} (turn {r['turns_used']}){tw}")
+        print()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vs", required=True,
@@ -529,6 +562,22 @@ def main():
                          "possible enemy leads'")
     ap.add_argument("--our", default="", metavar="POKEMON,POKEMON",
                     help="--deep only: the exact pair to check (required)")
+    ap.add_argument("--switches", action="store_true",
+                    help="--deep only: for every enemy pair --our LOSES, "
+                         "try swapping in each --bench candidate (or the "
+                         "whole pool, if --bench isn't given) for each of "
+                         "--our -- one turn is spent on the switch (the "
+                         "incoming Pokemon doesn't get to act that turn, "
+                         "same as a real doubles switch), then the new pair "
+                         "is raced the same way --deep already does. Reports "
+                         "candidates that actually fix the loss, ranked by "
+                         "LEAST damage taken switching in ('easy and "
+                         "optimal')")
+    ap.add_argument("--bench", default="", metavar="POKEMON,POKEMON,...",
+                    help="--switches only: the specific switch-in "
+                         "candidates to try, instead of searching the whole "
+                         "pool (--pool-size narrows that pool the same way "
+                         "it does everywhere else)")
     ap.add_argument("--turns", type=int, default=2, metavar="N",
                     help="--joint/--deep only: how many turns to race "
                          "(default 2)")
@@ -586,6 +635,10 @@ def main():
     if args.deep and (args.partner or args.partner_item):
         raise SystemExit("--partner/--partner-item don't apply to --deep -- "
                          "--our already names both of the pair")
+    if args.switches and not args.deep:
+        raise SystemExit("--switches requires --deep")
+    if args.bench and not args.switches:
+        raise SystemExit("--bench requires --switches")
 
     from _harness import load_world
     from lead_sim import BANNED_ITEMS
@@ -612,7 +665,14 @@ def main():
         if in_targets:
             raise SystemExit(f"--our can't also be a --vs target: "
                              f"{', '.join(in_targets)}")
-    pool = [] if args.deep else _pool(args, merged)
+    bench = [n.strip() for n in args.bench.split(",") if n.strip()]
+    if bench:
+        unknown_bench = [n for n in bench if n not in merged]
+        if unknown_bench:
+            raise SystemExit(f"unknown Pokemon: {', '.join(unknown_bench)}")
+    # --deep alone needs no pool at all (a fixed pair); --switches needs one
+    # UNLESS --bench already named the exact candidates to try.
+    pool = _pool(args, merged) if (not args.deep or (args.switches and not bench)) else []
     threshold = args.threshold / 100.0
 
     item_overrides = _parse_item_overrides(args.item)
@@ -662,6 +722,19 @@ def main():
             move_overrides=move_overrides)
         _print_deep(our_pair[0], our_pair[1], item1, item2, targets, detail,
                    summary, args.turns)
+        if args.switches:
+            bench_names = bench or [n for n in pool if n not in our_pair
+                                    and n not in targets]
+            switch_results = {}
+            for (e1, e2), d in detail.items():
+                if d["outcome"] != "loss":
+                    continue
+                s_rows, s_tried = switch_in_search(
+                    our_pair[0], our_pair[1], (e1, e2), bench_names, merged,
+                    moves, natures, typechart, turns=args.turns,
+                    item_overrides=item_overrides, move_overrides=move_overrides)
+                switch_results[(e1, e2)] = (s_rows, s_tried)
+            _print_switches(switch_results, len(bench_names))
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
         rows = speed_tiers(names, targets, merged, moves, natures, typechart,
