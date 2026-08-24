@@ -17,7 +17,7 @@
      permutations, and can include chip from ally. For a spread move such as
      Blizzard, make sure the chip is adjusted correctly (0.75x)"
 
-Four questions, four functions, and none of them re-derives damage or move
+Five questions, five functions, and none of them re-derives damage or move
 choice from scratch:
 
   threshold_search  -- who OHKOs / clears X% on each of these targets, with
@@ -34,6 +34,11 @@ choice from scratch:
                         the enemy having Tailwind up? See its own docstring;
                         it's `pair_search` generalised from one fixed move to
                         a real second attacker and from one turn to several.
+  joint_pool_search -- the same joint fight, but GENERATING both halves of
+                        the pair from the pool instead of fixing one --
+                        every legal pair, ranked the same way. Shares its
+                        detail shape (including the turn-by-turn damage log)
+                        with `joint_pair_search` via `_pair_vs_targets`.
 
 Move and item selection is `optimize_sets.best_item`/`best_moveset` -- the
 same search `spread_table.py` and the lead screen use, so a Pokemon found here
@@ -924,20 +929,31 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0):
     """`turns` turns (or fewer, once a side is fully fainted), returns
-    (outcome, turns_used, hp) -- outcome is "sweep" (both enemies fainted
-    before either of them ever got to act), "out_trade" (both enemies
-    fainted within the window, ours took hits but didn't faint), "loss"
-    (ours fully fainted first), or "no_ko" (window elapsed, neither side
-    finished the other)."""
+    (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
+    fainted before either of them ever got to act), "out_trade" (both
+    enemies fainted within the window, ours took hits but didn't faint),
+    "loss" (ours fully fainted first), or "no_ko" (window elapsed, neither
+    side finished the other).
+
+    `log` is `[turn_hits, ...]`, one entry per turn actually played, each a
+    list of `(role, target_role, Hit)` in the order they resolved -- "what
+    the damage roll is" for every hit either side landed, not just the win/
+    loss classification. Always the NORMAL-speed race's log, even when this
+    call is the Tailwind-robustness replay (`enemy_speed_mult=2.0`) -- a
+    caller that wants both shows the outcome difference, not two logs to
+    reconcile.
+    """
     hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
     any_enemy_acted = False
     wiped_side, turns_used = None, 0
+    full_log = []
     for turn_i in range(max(1, turns)):
         if (hp["E1"] <= 0 and hp["E2"] <= 0) or (hp["C"] <= 0 and hp["P"] <= 0):
             break
-        hp, _log, enemy_acted, wiped = _best_turn(
+        hp, turn_log, enemy_acted, wiped = _best_turn(
             combatants, moves_by_role, hp, typechart, weather,
             enemy_speed_mult=enemy_speed_mult)
+        full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
         if wiped is not None:
@@ -951,7 +967,58 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
         outcome = "loss"
     else:
         outcome = "no_ko"
-    return outcome, turns_used, hp
+    return outcome, turns_used, hp, full_log
+
+
+def _build_enemy_pairs(target_names, merged, natures, moves_db):
+    """{name: (Combatant, [MoveInfo, ...])}, built ONCE -- every candidate
+    (or candidate pair) evaluated against `target_names` reuses these instead
+    of rebuilding the same enemy Combatants on every row, which is what both
+    joint search functions below used to do."""
+    return {name: (_build(name, merged, natures),
+                   [mi for mi, _pct in build_moveset(merged[name], moves_db)])
+           for name in target_names}
+
+
+def _pair_vs_targets(c1, m1, c2, m2, target_names, enemy_built, typechart,
+                     weather, turns):
+    """(detail, summary) for OUR pair ((c1,m1), (c2,m2)) against every pair
+    drawn from `target_names` -- the one place a joint pair is actually
+    raced, so `joint_pair_search` (partner fixed) and `joint_pool_search`
+    (both slots searched) can never drift apart on what "beats" means.
+
+    `detail`: {(e1, e2): {outcome, turns_used, tailwind_outcome,
+    tailwind_safe, log}}. `log` is `_joint_race`'s own per-turn hit list --
+    "what the damage roll is", not just the win/loss classification -- for
+    the NORMAL-speed race (the one that decided `outcome`); the Tailwind
+    replay's log isn't kept, only whether it still won.
+    """
+    detail = {}
+    for e1_name, e2_name in itertools.combinations(target_names, 2):
+        e1c, e1m = enemy_built[e1_name]
+        e2c, e2m = enemy_built[e2_name]
+        combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
+        moves_by_role = {"C": m1, "P": m2, "E1": e1m, "E2": e2m}
+        outcome, turns_used, _hp, log = _joint_race(
+            combatants, moves_by_role, typechart, weather, turns)
+        tw_outcome, _tw_turns, _tw_hp, _tw_log = _joint_race(
+            combatants, moves_by_role, typechart, weather, turns,
+            enemy_speed_mult=2.0)
+        tailwind_safe = tw_outcome in ("sweep", "out_trade")
+        detail[(e1_name, e2_name)] = {
+            "outcome": outcome, "turns_used": turns_used,
+            "tailwind_outcome": tw_outcome, "tailwind_safe": tailwind_safe,
+            "log": log,
+        }
+    summary = {
+        "pairs_swept": sum(1 for d in detail.values() if d["outcome"] == "sweep"),
+        "pairs_traded": sum(1 for d in detail.values() if d["outcome"] == "out_trade"),
+        "pairs_lost": sum(1 for d in detail.values() if d["outcome"] == "loss"),
+        "pairs_no_ko": sum(1 for d in detail.values() if d["outcome"] == "no_ko"),
+        "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
+        "pairs_total": len(detail),
+    }
+    return detail, summary
 
 
 def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
@@ -992,9 +1059,9 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
     when that re-run's outcome is STILL `sweep` or `out_trade`.
 
     Returns rows: {name, item, pairs_swept, pairs_traded, pairs_lost,
-    pairs_no_ko, pairs_tailwind_safe, pairs_total, detail} where detail is
-    {(e1, e2): {outcome, turns_used, tailwind_outcome, tailwind_safe}}.
-    Ranked by (swept + traded) first, then tailwind_safe count -- mirrors
+    pairs_no_ko, pairs_tailwind_safe, pairs_total, detail} -- `detail` is
+    `_pair_vs_targets`'s own shape, damage log included. Ranked by
+    (swept + traded) first, then tailwind_safe count -- mirrors
     `pair_search`'s existing `(clean+trade, -pinned)` sort.
     """
     partner_item, partner_move_names, partner_weather = best_answer(
@@ -1002,6 +1069,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
         item=partner_item)
     partner = _build(partner_name, merged, natures, item=partner_item)
     partner_moves = _move_infos(partner_name, merged, moves_db, partner_move_names)
+    enemy_built = _build_enemy_pairs(target_names, merged, natures, moves_db)
 
     rows = []
     for name in pool:
@@ -1019,36 +1087,63 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
         # ability is not modelled here either (see the module docstring).
         race_weather = weather or partner_weather
 
-        detail = {}
-        for e1_name, e2_name in itertools.combinations(target_names, 2):
-            e1 = _build(e1_name, merged, natures)
-            e2 = _build(e2_name, merged, natures)
-            e1_moves = [mi for mi, _pct in build_moveset(merged[e1_name], moves_db)]
-            e2_moves = [mi for mi, _pct in build_moveset(merged[e2_name], moves_db)]
-            combatants = {"C": attacker, "P": partner, "E1": e1, "E2": e2}
-            moves_by_role = {"C": moves, "P": partner_moves,
-                             "E1": e1_moves, "E2": e2_moves}
+        detail, summary = _pair_vs_targets(
+            attacker, moves, partner, partner_moves, target_names,
+            enemy_built, typechart, race_weather, turns)
+        rows.append({"name": name, "item": item, "detail": detail, **summary})
+    rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
+                             -r["pairs_tailwind_safe"]))
+    return rows
 
-            outcome, turns_used, _hp = _joint_race(
-                combatants, moves_by_role, typechart, race_weather, turns)
-            tw_outcome, _tw_turns, _tw_hp = _joint_race(
-                combatants, moves_by_role, typechart, race_weather, turns,
-                enemy_speed_mult=2.0)
-            tailwind_safe = tw_outcome in ("sweep", "out_trade")
-            detail[(e1_name, e2_name)] = {
-                "outcome": outcome, "turns_used": turns_used,
-                "tailwind_outcome": tw_outcome, "tailwind_safe": tailwind_safe,
-            }
 
-        rows.append({
-            "name": name, "item": item,
-            "pairs_swept": sum(1 for d in detail.values() if d["outcome"] == "sweep"),
-            "pairs_traded": sum(1 for d in detail.values() if d["outcome"] == "out_trade"),
-            "pairs_lost": sum(1 for d in detail.values() if d["outcome"] == "loss"),
-            "pairs_no_ko": sum(1 for d in detail.values() if d["outcome"] == "no_ko"),
-            "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
-            "pairs_total": len(detail), "detail": detail,
-        })
+def joint_pool_search(pool, target_names, merged, moves_db, natures,
+                      typechart, turns=2, item_overrides=None,
+                      move_overrides=None):
+    """GENERATE the pair, not just search a second member for a named
+    partner: every legal pair drawn from `pool`, both members' item/moveset
+    genuinely searched (not one fixed), against every pair drawn from
+    `target_names`.
+
+        "I want it to generate my pair, i.e., mine and partner"
+
+    The expensive part -- `optimize_sets.best_item`/`best_moveset` -- is
+    still paid ONCE per pool member (`_answer_for`), same as everywhere else
+    in this module; what scales with the pool is the cheap arithmetic race
+    itself, C(pool, 2) of them. MEASURED: ~6ms per our-pair per 3 named
+    targets (3 enemy pairs, 2 races each, tailwind included) -- a
+    `--pool-size 80` run (3160 our-pairs) is under 20s, but the FULL
+    ~270-Pokemon default is minutes, not seconds, unlike every other search
+    in this module. Narrow with `--pool-size` for anything but a quick check.
+
+    Returns rows: {pair: (name1, name2), item1, item2, pairs_swept,
+    pairs_traded, pairs_lost, pairs_no_ko, pairs_tailwind_safe, pairs_total,
+    detail} -- `detail` is `_pair_vs_targets`'s own shape (damage log
+    included), ranked the same way `joint_pair_search` ranks.
+    """
+    built = {}
+    for name in pool:
+        if name in target_names:
+            continue
+        item, move_names, weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides)
+        if not move_names:
+            continue
+        built[name] = (_build(name, merged, natures, item=item),
+                       _move_infos(name, merged, moves_db, move_names),
+                       weather, item)
+    enemy_built = _build_enemy_pairs(target_names, merged, natures, moves_db)
+
+    rows = []
+    for n1, n2 in itertools.combinations(built, 2):
+        c1, m1, w1, item1 = built[n1]
+        c2, m2, w2, item2 = built[n2]
+        race_weather = w1 or w2
+        detail, summary = _pair_vs_targets(c1, m1, c2, m2, target_names,
+                                           enemy_built, typechart,
+                                           race_weather, turns)
+        rows.append({"pair": (n1, n2), "item1": item1, "item2": item2,
+                    "detail": detail, **summary})
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
                              -r["pairs_tailwind_safe"]))
     return rows

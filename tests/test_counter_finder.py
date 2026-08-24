@@ -883,3 +883,135 @@ class TestJointPairSearch(unittest.TestCase):
             "Mega Alakazam", merged, moves, natures, typechart)
         beaten = [r["pairs_swept"] + r["pairs_traded"] for r in rows]
         self.assertEqual(beaten, sorted(beaten, reverse=True))
+
+
+class TestJointDamageLog(unittest.TestCase):
+    """"I want it to ... display damage output vs enemies, and damage taken
+    by each" -- `_joint_race`'s log, threaded through `_pair_vs_targets` into
+    every `detail` entry both joint functions return."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_sweep_only_logs_our_own_hits(self):
+        """If the enemy never got to act (a real sweep), the log must not
+        contain an E1/E2 entry -- that's what "swept" means."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(["Mega Gengar"], ["Sableye", "Ariados"],
+                                    "Mega Alakazam", merged, moves, natures,
+                                    typechart)
+        d = rows[0]["detail"][("Sableye", "Ariados")]
+        self.assertEqual(d["outcome"], "sweep")
+        actors = {role for turn in d["log"] for role, _tgt, _h in turn}
+        self.assertEqual(actors, {"C", "P"})
+
+    def test_an_out_trade_logs_hits_from_both_sides(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(["Mega Scizor"], ["Kingambit", "Basculegion"],
+                                    "Whimsicott", merged, moves, natures,
+                                    typechart, turns=2)
+        d = rows[0]["detail"][("Kingambit", "Basculegion")]
+        self.assertEqual(d["outcome"], "out_trade")
+        actors = {role for turn in d["log"] for role, _tgt, _h in turn}
+        self.assertIn("C", actors | {"P"})  # at least one of ours acted
+        self.assertTrue(actors & {"E1", "E2"}, "an out-trade means the "
+                                               "enemy landed at least one hit")
+
+    def test_every_logged_hit_carries_a_real_move_and_roll(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(["Mega Scizor"], ["Kingambit", "Basculegion"],
+                                    "Whimsicott", merged, moves, natures,
+                                    typechart, turns=2)
+        d = rows[0]["detail"][("Kingambit", "Basculegion")]
+        self.assertTrue(any(turn for turn in d["log"]))
+        for turn in d["log"]:
+            for role, tgt, h in turn:
+                self.assertIn(role, ("C", "P", "E1", "E2"))
+                self.assertIn(tgt, ("C", "P", "E1", "E2"))
+                self.assertIsNotNone(h.move_name)
+                self.assertGreater(h.avg, 0.0)
+
+    def test_the_log_length_matches_turns_used(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(["Mega Scizor"], ["Kingambit", "Basculegion"],
+                                    "Whimsicott", merged, moves, natures,
+                                    typechart, turns=2)
+        d = rows[0]["detail"][("Kingambit", "Basculegion")]
+        self.assertEqual(len(d["log"]), d["turns_used"])
+
+
+class TestJointPoolSearch(unittest.TestCase):
+    """`joint_pool_search` -- GENERATE both halves of the pair from the
+    pool, instead of fixing one via --partner.
+
+        "I want it to generate my pair, i.e., mine and partner"
+
+    Shares `_pair_vs_targets` with `joint_pair_search`, so the win/loss
+    classification and the damage log are the same machinery, not a second
+    copy -- these tests check the POOL-SEARCH-specific behaviour only.
+    """
+
+    def setUp(self):
+        self.W = world()
+
+    def test_rows_are_keyed_by_pair_not_name(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pool_search(
+            ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola"],
+            ["Sableye", "Ariados"], merged, moves, natures, typechart)
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertIn("pair", r)
+            self.assertEqual(len(r["pair"]), 2)
+            self.assertNotIn("name", r)
+
+    def test_every_legal_pair_from_the_pool_is_covered(self):
+        pool = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola"]
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pool_search(pool, ["Sableye", "Ariados"], merged,
+                                    moves, natures, typechart)
+        got = {frozenset(r["pair"]) for r in rows}
+        import itertools as _it
+        want = {frozenset(p) for p in _it.combinations(pool, 2)}
+        self.assertEqual(got, want)
+
+    def test_a_named_target_is_excluded_from_the_pool(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pool_search(
+            ["Mega Gengar", "Sableye", "Mega Alakazam"], ["Sableye", "Ariados"],
+            merged, moves, natures, typechart)
+        for r in rows:
+            self.assertNotIn("Sableye", r["pair"])
+
+    def test_matches_joint_pair_search_when_one_slot_is_effectively_fixed(self):
+        """Same machinery, so the pool search's own (candidate, partner) row
+        must agree EXACTLY with what `joint_pair_search` computes for that
+        candidate against that same fixed partner."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool_rows = cf.joint_pool_search(
+            ["Mega Gengar", "Mega Alakazam"], ["Sableye", "Ariados"], merged,
+            moves, natures, typechart)
+        fixed_rows = cf.joint_pair_search(
+            ["Mega Gengar"], ["Sableye", "Ariados"], "Mega Alakazam", merged,
+            moves, natures, typechart)
+        pool_d = pool_rows[0]["detail"][("Sableye", "Ariados")]
+        fixed_d = fixed_rows[0]["detail"][("Sableye", "Ariados")]
+        self.assertEqual(pool_d["outcome"], fixed_d["outcome"])
+        self.assertEqual(pool_d["tailwind_safe"], fixed_d["tailwind_safe"])
+
+    def test_rows_are_ranked_beaten_first_then_tailwind_safe(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pool_search(
+            ["Mega Gengar", "Ninetales-Alola", "Mega Alakazam"],
+            ["Sharpedo", "Rampardos"], merged, moves, natures, typechart)
+        beaten = [r["pairs_swept"] + r["pairs_traded"] for r in rows]
+        self.assertEqual(beaten, sorted(beaten, reverse=True))
