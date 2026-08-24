@@ -432,7 +432,7 @@ class TestPairSearchPartnerAssist(unittest.TestCase):
         natures, typechart = self.natures, self.typechart
         e1, e2 = "Kingambit", "Basculegion"
         for name in ("Garchomp", "Hydreigon", "Gyarados"):
-            item, move_names, weather = cf.best_answer(
+            item, move_names, _weather = cf.best_answer(
                 name, merged, moves, natures, typechart, [e1, e2])
             if not move_names:
                 continue
@@ -448,14 +448,14 @@ class TestPairSearchPartnerAssist(unittest.TestCase):
             e2_moves = [mi for mi, _p in build_moveset(merged[e2], moves)]
             matched = cf._sequential_pair_outcome(
                 attacker, moves_list, e1, e1c, e1_moves, e2, e2c, e2_moves,
-                typechart, weather, e1, partner=partner, partner_move=p_move,
+                typechart, e1, partner=partner, partner_move=p_move,
                 partner_target=e1)
             best = None
             for c_t in (e1, e2):
                 for p_t in (e1, e2):
                     got = cf._sequential_pair_outcome(
                         attacker, moves_list, e1, e1c, e1_moves, e2, e2c, e2_moves,
-                        typechart, weather, c_t, partner=partner,
+                        typechart, c_t, partner=partner,
                         partner_move=p_move, partner_target=p_t)
                     if best is None or cf._OUTCOME_RANK[got["outcome"]] < cf._OUTCOME_RANK[best["outcome"]]:
                         best = got
@@ -627,18 +627,23 @@ class TestCounterTablePoolDefault(unittest.TestCase):
     ranked by roster.csv's generic team-generation Score and truncated to the
     top 40, and Mega Scizor's generic Score doesn't make that cut even though
     it is a strong, correctly-scored answer to specific threats. The default
-    pool is now the whole dataset."""
+    pool is now the whole dataset, minus whatever data/preferences.csv Exclude
+    actually names (the shipped file currently excludes "Slurpuff") -- see
+    TestPreferencesReducePool for the include/exclude behaviour itself."""
 
     class _Args:
         team = ""
         pool_size = 0
 
-    def test_default_pool_is_the_whole_dataset(self):
+    def test_default_pool_is_the_whole_dataset_minus_shipped_excludes(self):
         import counter_table as ct
+        from species_data import load_preferences
         W = world()
         pool = ct._pool(self._Args(), W["merged"])
-        self.assertEqual(len(pool), len(W["merged"]))
+        excluded = set(load_preferences()["exclude"])
+        self.assertEqual(len(pool), len(W["merged"]) - len(excluded))
         self.assertIn("Mega Scizor", pool)
+        self.assertFalse(excluded & set(pool))
 
     def test_pool_size_still_narrows_when_explicitly_given(self):
         import counter_table as ct
@@ -1172,10 +1177,10 @@ class TestSwitchInSearch(unittest.TestCase):
         means the incoming Pokemon has no move the turn it comes in."""
         merged, moves = self.merged, self.moves
         natures, typechart = self.natures, self.typechart
-        enemy_built = cf._build_enemy_pairs(
+        enemy_built = cf._build_forms(
             ["Mega Charizard Y", "Mega Floette"], merged, natures, moves)
-        e1c, e1m = enemy_built["Mega Charizard Y"]
-        e2c, e2m = enemy_built["Mega Floette"]
+        e1c, e1m = enemy_built["Mega Charizard Y"]["mega"], enemy_built["Mega Charizard Y"]["moves"]
+        e2c, e2m = enemy_built["Mega Floette"]["mega"], enemy_built["Mega Floette"]["moves"]
         stay_item, stay_moves, stay_w = cf._answer_for(
             "Mega Scizor", merged, moves, natures, typechart,
             ["Mega Charizard Y", "Mega Floette"])
@@ -1202,3 +1207,298 @@ class TestSwitchInSearch(unittest.TestCase):
         arriving = {r["arriving"] for r in rows}
         self.assertFalse(arriving & {"Mega Scizor", "Ninetales-Alola",
                                      "Mega Charizard Y", "Mega Floette"})
+
+
+class TestSharedFieldWeather(unittest.TestCase):
+    """"Make sure weather is accounted for, such as Mega Charizard Y's sun
+    applying uncontested if neither of your brings set weather."
+
+    Before this fix, `pair_search`/the joint searches only ever asked what
+    OUR candidate's own usage guess said, and applied that to OUR attacks
+    only -- an enemy's own Drought/Drizzle/Sand Stream/Snow Warning never
+    came up at all, for either side's damage or turn order."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_field_weather_reads_an_enemy_only_setter(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        candidate = cf._build("Gyarados", merged, natures)
+        e1 = cf._build("Mega Charizard Y", merged, natures)  # Drought, mega ability
+        e2 = cf._build("Basculegion", merged, natures)
+        self.assertEqual(
+            cf._field_weather({"C": candidate, "E1": e1, "E2": e2}), "sun")
+
+    def test_field_weather_is_none_when_nobody_sets_it(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        candidate = cf._build("Gyarados", merged, natures)
+        e1 = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Basculegion", merged, natures)
+        self.assertIsNone(
+            cf._field_weather({"C": candidate, "E1": e1, "E2": e2}))
+
+    def test_enemy_only_sun_boosts_that_enemys_own_attack_in_pair_search(self):
+        """The concrete example: Mega Charizard Y's sun must apply to ITS
+        OWN Fire-type attack even though neither of ours sets any weather --
+        the exact fraction `_sequential_pair_outcome` actually used for E1's
+        hit must match a weather="sun" `_choose_move` call, not weather=None
+        (what the pre-fix code hard-coded for every enemy action)."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        e1_name, e2_name = "Mega Charizard Y", "Basculegion"
+        candidate_name = "Kingambit"  # Steel/Dark: 2x weak to Fire, so Heat
+        # Wave is clearly its best move AND clearly shows the sun 1.5x boost.
+        item, move_names, _w = cf.best_answer(
+            candidate_name, merged, moves, natures, typechart,
+            [e1_name, e2_name])
+        attacker = cf._build(candidate_name, merged, natures, item=item)
+        atk_moves = cf._move_infos(candidate_name, merged, moves, move_names)
+        e1 = cf._build(e1_name, merged, natures)
+        e2 = cf._build(e2_name, merged, natures)
+        e1_moves = [mi for mi, _p in build_moveset(merged[e1_name], moves)]
+        e2_moves = [mi for mi, _p in build_moveset(merged[e2_name], moves)]
+
+        got = cf._sequential_pair_outcome(
+            attacker, atk_moves, e1_name, e1, e1_moves, e2_name, e2, e2_moves,
+            typechart, e1_name)
+
+        hit_sun, _mv_sun = cf._choose_move(e1, e1_moves, attacker, typechart,
+                                           weather="sun")
+        hit_none, _mv_none = cf._choose_move(e1, e1_moves, attacker, typechart,
+                                             weather=None)
+        # Fixture assumption: Mega Charizard Y actually has a move whose
+        # damage changes under sun (a STAB Fire move) -- otherwise this test
+        # can't tell a fixed bug from a coincidence.
+        self.assertNotAlmostEqual(hit_sun.frac, hit_none.frac)
+        self.assertAlmostEqual(got["hits"]["E1"]["C"].frac, hit_sun.frac)
+
+    def test_enemy_only_weather_speed_boost_changes_turn_order(self):
+        """A weather-speed-boost ability (Swift Swim here) on OUR side must
+        be able to activate off an ENEMY's own Drizzle -- before the fix,
+        turn order always used a weatherless FieldState() for everyone, so
+        this never applied regardless of which side set the weather."""
+        from combatants import make_combatant
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        e1_name, e2_name = "Politoed", "Kingambit"  # Politoed's default ability is Drizzle
+        candidate_name = "Basculegion"  # has Swift Swim as a legal (non-default) ability
+
+        item, move_names, _w = cf.best_answer(
+            candidate_name, merged, moves, natures, typechart,
+            [e1_name, e2_name])
+        attacker = cf._mega_project(make_combatant(
+            candidate_name, merged, natures, ability="Swift Swim", item=item))
+        attacker.current_hp = attacker.max_hp()
+        atk_moves = cf._move_infos(candidate_name, merged, moves, move_names)
+        e1 = cf._build(e1_name, merged, natures)
+        e2 = cf._build(e2_name, merged, natures)
+        self.assertEqual(e1.ability, "Drizzle", "fixture assumes Politoed's "
+                                               "default ability is Drizzle")
+        e1_moves = [mi for mi, _p in build_moveset(merged[e1_name], moves)]
+        e2_moves = [mi for mi, _p in build_moveset(merged[e2_name], moves)]
+
+        from engine import FieldState, effective_speed
+        no_weather_spd = effective_speed(attacker, FieldState(), "p1")
+        rain_spd = effective_speed(attacker, FieldState(weather="rain"), "p1")
+        self.assertGreater(rain_spd, no_weather_spd, "fixture assumes Swift "
+                          "Swim actually changes this candidate's speed")
+
+        weather = cf._field_weather({"C": attacker, "E1": e1, "E2": e2})
+        self.assertEqual(weather, "rain")
+
+
+class TestPreferencesReducePool(unittest.TestCase):
+    """"Make sure preferences.csv is taken into account (includes, excludes)
+    so that it reduces the pool of eligible mons." """
+
+    def setUp(self):
+        self.W = world()
+
+    def test_exclude_drops_the_named_pokemon_and_its_mega_forms(self):
+        import counter_table as ct
+
+        class Args:
+            team = ""
+            pool_size = 0
+        base = sorted(self.W["merged"])
+        self.assertIn("Kingambit", base)
+        with_pref = ct._apply_preferences(list(base), self.W["merged"],
+                                          verbose=False)
+        # The shipped preferences.csv excludes "Slurpuff" -- confirm it (and
+        # only it, of these two probes) is actually gone.
+        self.assertNotIn("Slurpuff", with_pref)
+        self.assertIn("Kingambit", with_pref)
+
+    def test_a_synthetic_exclude_also_drops_mega_forms(self):
+        import counter_table as ct
+        merged = self.W["merged"]
+        pool = [n for n in sorted(merged) if n in
+               ("Scizor", "Mega Scizor", "Kingambit")]
+        import unittest.mock as mock
+        with mock.patch("species_data.load_preferences",
+                        return_value={"include": [], "exclude": ["Scizor"],
+                                      "prefer": [], "sets": {}}):
+            out = ct._apply_preferences(pool, merged, verbose=False)
+        self.assertNotIn("Scizor", out)
+        self.assertNotIn("Mega Scizor", out)
+        self.assertIn("Kingambit", out)
+
+    def test_include_adds_a_name_back_after_a_pool_size_cut(self):
+        import counter_table as ct
+        merged = self.W["merged"]
+        pool = ["Kingambit", "Basculegion"]  # a small "cut" that omits Gallade
+        import unittest.mock as mock
+        with mock.patch("species_data.load_preferences",
+                        return_value={"include": ["Gallade"], "exclude": [],
+                                      "prefer": [], "sets": {}}):
+            out = ct._apply_preferences(pool, merged, verbose=False)
+        self.assertIn("Gallade", out)
+        self.assertIn("Kingambit", out)
+
+    def test_include_never_adds_an_excluded_name(self):
+        import counter_table as ct
+        merged = self.W["merged"]
+        import unittest.mock as mock
+        with mock.patch("species_data.load_preferences",
+                        return_value={"include": ["Gallade"],
+                                      "exclude": ["Gallade"], "prefer": [],
+                                      "sets": {}}):
+            out = ct._apply_preferences(["Kingambit"], merged, verbose=False)
+        self.assertNotIn("Gallade", out)
+
+    def test_default_counter_table_pool_excludes_shipped_preferences(self):
+        import counter_table as ct
+
+        class Args:
+            team = ""
+            pool_size = 0
+        pool = ct._pool(Args(), self.W["merged"])
+        self.assertNotIn("Slurpuff", pool)
+
+
+class TestOnlyOneMegaPerSide(unittest.TestCase):
+    """"Only one can mega. Both in a pair can be a potential Mega, but vs
+    each enemy pair only one can choose to become the Mega, the other will
+    stay as base form -- this can be favourable, such as Gyarados keeping
+    Water/Flying type rather than choosing to switch to Water/Dark. Account
+    for factors like intimidate too. This is also true for opponents.
+    Abilities from base form apply before mega, such as Gyarados Intimidates
+    then gains Mold Breaker when it megas." """
+
+    def setUp(self):
+        self.W = world()
+
+    def test_mega_choices_offers_stay_base_even_for_a_lone_mega(self):
+        """Unlike `species_data.mega_variants`, a SOLE Mega-capable pick is
+        still offered the "nobody transforms" option -- staying base is a
+        real per-matchup choice here, not a fixed team property."""
+        from species_data import NO_MEGA
+        choices = cf._mega_choices(["Mega Gyarados", "Kingambit"])
+        self.assertEqual(set(choices), {"Mega Gyarados", NO_MEGA})
+
+    def test_mega_choices_never_offers_both_at_once(self):
+        from species_data import NO_MEGA
+        choices = cf._mega_choices(["Mega Gyarados", "Mega Charizard Y"])
+        self.assertEqual(set(choices),
+                         {"Mega Gyarados", "Mega Charizard Y", NO_MEGA})
+
+    def test_no_mega_capable_member_has_a_single_trivial_choice(self):
+        self.assertEqual(cf._mega_choices(["Kingambit", "Basculegion"]), [None])
+
+    def test_resolve_forms_never_yields_two_megas_at_once(self):
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        built = cf._build_forms(["Mega Gyarados", "Mega Charizard Y"],
+                                merged, natures, moves)
+        for _mt, (c1, c2) in cf._resolve_forms(
+                ("Mega Gyarados", "Mega Charizard Y"), built):
+            both_mega = (c1 is built["Mega Gyarados"]["mega"]
+                        and c2 is built["Mega Charizard Y"]["mega"])
+            self.assertFalse(both_mega, "both members mega at once is illegal")
+
+    def test_resolve_forms_covers_every_legal_assignment(self):
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        built = cf._build_forms(["Mega Gyarados", "Mega Charizard Y"],
+                                merged, natures, moves)
+        seen = set()
+        for _mt, (c1, c2) in cf._resolve_forms(
+                ("Mega Gyarados", "Mega Charizard Y"), built):
+            seen.add((c1 is built["Mega Gyarados"]["mega"],
+                     c2 is built["Mega Charizard Y"]["mega"]))
+        # "Gyarados mega's", "Charizard Y mega's", "neither does" -- exactly
+        # the three legal combinations, never both.
+        self.assertEqual(seen, {(True, False), (False, True), (False, False)})
+
+    def test_staying_base_keeps_the_base_ability_and_typing(self):
+        """"Gyarados keeping Water/Flying type rather than choosing to
+        switch to Water/Dark" -- and Intimidate instead of Mold Breaker."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        base = cf._build_form("Mega Gyarados", merged, natures, stay_base=True)
+        mega = cf._build_form("Mega Gyarados", merged, natures, stay_base=False)
+        self.assertEqual(base.ability, "Intimidate")
+        self.assertEqual(set(base.types), {"Water", "Flying"})
+        self.assertEqual(mega.ability, "Mold Breaker")
+        self.assertEqual(set(mega.types), {"Water", "Dark"})
+
+    def test_staying_base_still_holds_the_mega_stone(self):
+        """"It still holds its stone (that's why it was brought), it simply
+        doesn't get to use it this battle" -- `_build_combatant`'s own
+        reasoning, confirmed still true through this module's `_build_form`."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        base = cf._build_form("Mega Gyarados", merged, natures, stay_base=True)
+        mega = cf._build_form("Mega Gyarados", merged, natures, stay_base=False)
+        self.assertEqual(base.item, mega.item)
+        self.assertTrue(base.item)
+
+    def test_a_non_mega_name_is_identical_in_both_forms(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        base = cf._build_form("Kingambit", merged, natures, stay_base=True)
+        mega = cf._build_form("Kingambit", merged, natures, stay_base=False)
+        self.assertEqual(base.ability, mega.ability)
+        self.assertEqual(base.stats, mega.stats)
+
+    def test_pair_search_with_two_mega_capable_names_does_not_crash(self):
+        """Smoke test: a pool member paired with a Mega-capable partner,
+        against a pool of Mega-capable enemies, exercises every branch of
+        the new mega-choice search without erroring."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.pair_search(
+            ["Mega Gyarados"], ["Mega Charizard Y", "Mega Floette"],
+            merged, moves, natures, typechart,
+            partner_name="Mega Scizor", partner_move_name="Bullet Punch")
+        self.assertEqual(len(rows), 1)
+        d = rows[0]["detail"][("Mega Charizard Y", "Mega Floette")]
+        self.assertIn(d["outcome"], ("clean", "trade", "no_ko", "pinned"))
+
+    def test_deep_dive_with_two_mega_capable_enemies_does_not_crash(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        item1, item2, detail, summary = cf.deep_dive(
+            "Mega Gyarados", "Kingambit",
+            ["Mega Charizard Y", "Mega Floette", "Basculegion"],
+            merged, moves, natures, typechart)
+        self.assertTrue(item1)
+        self.assertTrue(item2)
+        self.assertEqual(summary["pairs_total"], 3)
+        for entry in detail.values():
+            self.assertIn(entry["outcome"], ("sweep", "out_trade", "loss", "no_ko"))
+            self.assertIn("grid", entry)
+
+    def test_joint_pool_search_with_two_mega_capable_pool_members(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pool_search(
+            ["Mega Gyarados", "Mega Charizard Y", "Kingambit"],
+            ["Basculegion", "Whimsicott"], merged, moves, natures, typechart)
+        pairs = {r["pair"] for r in rows}
+        self.assertIn(("Mega Gyarados", "Mega Charizard Y"), pairs)
+
+    def test_switch_in_search_with_a_mega_capable_bench_and_enemy(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows, tried = cf.switch_in_search(
+            "Scizor", "Whimsicott", ("Mega Charizard Y", "Kingambit"),
+            ["Mega Gyarados", "Basculegion"], merged, moves, natures, typechart)
+        self.assertGreater(tried, 0)
+        for r in rows:
+            self.assertIn(r["outcome"], ("sweep", "out_trade"))

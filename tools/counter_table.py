@@ -119,11 +119,18 @@ against Regulation MB's banned list (Assault Vest, Choice Band, Choice
 Specs) the same as a searched item would be -- a pin is a decision, not a
 loophole around the ban.
 
-Every damage number printed is the FULL roll (worst-average-best%), and a
-"Mega X" name always means the mega form, stats and all -- see
-src/counter_finder.py for exactly what that means and what this deliberately
-does not model (no field, no Tailwind/screens/redirection, no whole-game item
-effects -- a hypothesis for the detailed lead-race tools, not a verdict).
+Every damage number printed is the FULL roll (worst-average-best%). A
+"Mega X" name evaluated ALONE (the default search, --chip-from/--chip-move)
+always means the mega form, stats and all; inside a real PAIR (--pairs'
+partner, --joint, --deep, --switches), only one member of a side may
+actually Mega Evolve -- every legal assignment (including "neither does",
+which keeps a Mega pick's own base ability and typing, e.g. Gyarados's
+Intimidate and Water/Flying instead of Mold Breaker and Water/Dark) is
+searched, ours for the best result and the named enemy pair's for the worst
+-- see src/counter_finder.py for exactly what that means and what this
+deliberately does not model (no Tailwind/screens/redirection outside the
+--joint family, no whole-game item effects, no Intimidate stat-drop
+simulation -- a hypothesis for the detailed lead-race tools, not a verdict).
 """
 import os
 import sys
@@ -188,15 +195,62 @@ def _pool(args, merged):
     real cost to searching everything by default; `--pool-size` still exists
     to explicitly narrow it (e.g. to that same generic-Score top N) if
     something ever needs to be faster.
+
+    Whatever the source, `data/preferences.csv`'s Include/Exclude are then
+    applied (`_apply_preferences`) -- "make sure preferences.csv is taken
+    into account (includes, excludes) so that it reduces the pool of
+    eligible mons."
     """
     if args.team:
         from _harness import load_world
         W = load_world()
-        return list(W["teams"][args.team])
-    if args.pool_size:
+        base = list(W["teams"][args.team])
+    elif args.pool_size:
         from generate_team import build_candidate_pool
-        return list(build_candidate_pool(merged, top_n=args.pool_size))
-    return sorted(merged)
+        base = list(build_candidate_pool(merged, top_n=args.pool_size))
+    else:
+        base = sorted(merged)
+    return _apply_preferences(base, merged, verbose=True)
+
+
+def _apply_preferences(pool, merged, verbose=False):
+    """preferences.csv Include/Exclude, honoured against whatever pool was
+    built (full dataset, --pool-size top-N, or a --team roster) -- the same
+    "always honour it, regardless of pool source" rule
+    `team_search.build_candidate_pool` documents for team generation.
+
+    Exclude also covers Mega forms of an excluded base species (and vice
+    versa) -- banning one form but not the other is almost never what's
+    meant, same reasoning `build_candidate_pool` applies. Include guarantees
+    a name is actually searched, adding it back in if a --pool-size cut or
+    --team roster left it out -- the same "a pin only means something if
+    it's actually searched" rule this file's --item/--moves overrides
+    already follow (see `main`).
+    """
+    from species_data import load_preferences
+    prefs = load_preferences()
+    excluded = set(prefs["exclude"])
+    for e in list(excluded):
+        if e.startswith("Mega "):
+            excluded.add(e[5:])
+        else:
+            excluded.update({f"Mega {e}", f"Mega {e} X", f"Mega {e} Y"})
+
+    before = len(pool)
+    kept = [n for n in pool if n not in excluded]
+    dropped = before - len(kept)
+    added = [n for n in prefs["include"]
+            if n in merged and n not in excluded and n not in kept]
+    out = kept + added
+
+    if verbose:
+        if dropped:
+            print(f"preferences.csv Exclude drops {dropped} Pokemon: "
+                 f"pool {before} -> {len(kept)}.")
+        if added:
+            print(f"preferences.csv Include adds {sorted(added)}: "
+                 f"pool -> {len(out)}.")
+    return out
 
 
 def _roll(h):
@@ -326,8 +380,10 @@ def _print_pairs(rows, targets, top, partner=None, move=None):
     print("does this Pokemon KO one of the pair before the pair KOs it? Tried")
     print("against every (candidate target, partner target) combination; the")
     print("better outcome is kept. A spread move (candidate's, or the")
-    print("partner's) hits BOTH pair members at once, 0.75x each. A 'Mega X'")
-    print("name is always its mega stats.")
+    print("partner's) hits BOTH pair members at once, 0.75x each. Only one")
+    print("Mega Evolution per side is legal -- every legal assignment (ours")
+    print("for the best result, theirs for the worst) is searched, including")
+    print("'neither does' (keeps a Mega pick's own base ability/typing).")
     print("clean   it KOs one of them and survives the rest of the turn.")
     print("trade   it KOs one of them but is also KO'd, later the same turn,")
     print("        by the pair member it wasn't aimed at -- still 'KO'd them")
@@ -388,8 +444,10 @@ def _print_joint(rows, targets, top, partner, turns):
     print("Up to `turns` turns, priority THEN speed order, average rolls -- both")
     print("of ours attack with their own real optimised set (not one fixed")
     print("move). A spread move (Eruption, Heat Wave, ...) hits both of the")
-    print("enemy pair at once, 0.75x each. A 'Mega X' name is always its mega")
-    print("stats.")
+    print("enemy pair at once, 0.75x each. Only one Mega Evolution per side")
+    print("is legal -- every legal assignment (ours for the best result,")
+    print("theirs for the worst) is searched, including 'neither does'")
+    print("(keeps a Mega pick's own base ability/typing).")
     print("swept      both of the pair are dead before EITHER of them ever")
     print("           got to act -- outsped and KO'd before they could move.")
     print("out-trade  both of the pair die within the turn window, but ours")

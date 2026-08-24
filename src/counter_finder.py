@@ -73,15 +73,40 @@ MEGA FORM. `combatants.make_combatant` builds a "Mega X" pick in its BASE
 form -- correct for the full engine, where mega evolution is a send-out event
 (`engine.mega_evolve`, applied by `Battle` at the start of the relevant
 turn) -- but this module has no Battle to send anything out INTO, and naming
-"Mega Floette" as a candidate or a target is asking about the mega form by
-construction. `_mega_project` swaps in the mega stats/ability/typing on every
-Combatant this module builds itself, unconditionally. It does NOT reach into
+"Mega Floette" as a candidate or a target (ALONE, not as half of a pair --
+see ONLY ONE MEGA PER SIDE below) is asking about the mega form by
+construction. `_mega_project` swaps in the mega stats/ability/typing for
+such a Combatant, unconditionally. It does NOT reach into
 `optimize_sets.best_item`/`best_moveset`, which build their OWN internal
 combatants for move/item scoring and are left alone here -- a wider, pre-
 existing property of that module, out of scope for this fix. That can
 occasionally make the OPTIMISER's move/item choice sub-optimal for a Mega
 pick (scored partly off base stats); the DAMAGE NUMBERS this module reports
-for whatever set comes back are always the mega ones.
+for whatever set comes back are always the mega ones (or the base ones, on
+whichever side of a pair a search decided should stay base).
+
+ONLY ONE MEGA PER SIDE. A real side may bring two Mega-capable picks, but
+only one may actually Mega Evolve per game -- the other plays the whole
+match in base form. The 2v2-board functions (the same five WEATHER lists
+below) never evaluate a pair with BOTH members mega'd at once:
+`_mega_choices`/`_build_forms`/`_resolve_forms` enumerate every legal
+assignment (each Mega name transforming, or nobody transforming) and
+`_pair_vs_targets`/`pair_search`/`switch_in_search` search it exactly like
+target assignment already was -- OURS for whichever gives us the best
+result (we know their team at preview), the ENEMY PAIR's for whichever is
+WORST for us, mirroring `matchup_search.play_out_worst_case`'s minimax.
+Unlike `species_data.mega_variants` (which treats a SOLE Mega-capable pick
+as having no real choice and always evolves it), this module always offers
+"stays base" too, even for a lone Mega pick: a forced-base Pokemon keeps
+its OWN base ability and typing (Gyarados's Intimidate and Water/Flying,
+not Mold Breaker and Water/Dark) for every damage/speed calculation that
+follows, which is exactly the per-matchup trade-off "should this one
+actually transform" is asking about. Actual Intimidate STAT-DROP
+simulation stays out of scope -- this module tracks no stat stages for
+anyone, Mega-related or not -- only which ability/typing is active is
+guaranteed correct. `threshold_search`/`chip_then_ko`/`speed_tiers`
+evaluate every name alone (no shared pair to search over), so they keep
+the old unconditional-mega behaviour.
 
 SPREAD MOVES. A move that hits multiple Pokemon at once (Blizzard, Earthquake,
 ...) takes the standard doubles 0.75x penalty whenever it actually lands on
@@ -92,15 +117,31 @@ even if unnamed) and applies it to any spread move unconditionally;
 move is actually used, since there only a Pokemon's own two moves are ever in
 play.
 
-WHAT THIS DOES NOT MODEL. No field: no weather except a combatant's own
-instant-set (Drought/Drizzle/Sand Stream/Snow Warning), no Tailwind, no
-screens, no Follow Me/Rage Powder redirection, no items played out over a
-whole game (Focus Sash survival, Life Orb recoil accumulating). `pair_search`
-resolves a single turn, not the two-turn horizon the lead-race tools use, and
-an enemy's spread move is never modelled as also hitting the assisting
-partner (the partner is assumed not to be a target this turn at all). These
-are hypotheses to point the detailed lead-race tools at, in the same division
-of labour `lead_scan.py` documents for its own cheap stage.
+WHAT THIS DOES NOT MODEL. No screens, no Follow Me/Rage Powder redirection,
+no items played out over a whole game (Focus Sash survival, Life Orb recoil
+accumulating). `pair_search` resolves a single turn, not the two-turn
+horizon the lead-race tools use, and an enemy's spread move is never
+modelled as also hitting the assisting partner (the partner is assumed not
+to be a target this turn at all). These are hypotheses to point the
+detailed lead-race tools at, in the same division of labour `lead_scan.py`
+documents for its own cheap stage.
+
+WEATHER. The real board has exactly ONE field weather, set by whichever
+weather ability actually resolves (either side's), and it applies to
+EVERYONE's damage and speed, not just its setter's own side. The 2v2-board
+functions -- `pair_search` (via `_sequential_pair_outcome`), `joint_pair_search`,
+`joint_pool_search`, `deep_dive`, `switch_in_search` -- model this correctly:
+`_field_weather(combatants)` looks at every combatant actually on the board
+(both named enemies, the candidate, and the partner when there is one) and
+picks whichever weather-setting ability is present, so e.g. a Mega
+Charizard Y opponent's sun applies uncontested -- to both sides' damage AND
+turn order (Swift Swim/Chlorophyll/Sand Rush/Slush Rush included) -- even
+when neither of ours sets anything. `threshold_search`/`chip_then_ko`/
+`speed_tiers` are NOT board functions in this sense (each checks a
+candidate against named targets one at a time, never assuming a specific
+enemy pairing), so they stay scoped to the candidate's/named-enemy's own
+weather-setting usage rather than a shared 2v2 field -- there is no single
+"the board" to derive one from.
 """
 import copy
 import itertools
@@ -109,9 +150,10 @@ from dataclasses import dataclass
 from combatants import make_combatant
 from damage import (WEIGHT_BASED_POWER, damage_roll, defensive_stat, effective_stat,
                     hit_count_for, is_spread_move, move_from_showdown)
-from engine import FieldState, effective_speed
+from engine import FieldState, WEATHER_SETTERS, effective_speed
 from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
 from solver import build_moveset
+from species_data import NO_MEGA, resolve_team_mega_slot
 
 
 def _mega_project(c):
@@ -140,10 +182,112 @@ def _mega_project(c):
 def _build(name, merged, natures, item=None):
     """A full-HP Combatant, mega-projected. The one place every Combatant in
     this module is built, so the projection can never be forgotten at a call
-    site."""
-    c = _mega_project(make_combatant(name, merged, natures, item=item))
+    site.
+
+    Only correct for a `name` evaluated ALONE (`threshold_search`/
+    `chip_then_ko`/`speed_tiers`, and enemies named one at a time outside a
+    shared 2v2 board) -- a PAIR (ours or the enemy's) can legally have at
+    most one Mega Evolution between its two members, so a board function
+    must go through `_build_forms`/`_resolve_forms` instead. See those for
+    why."""
+    return _build_form(name, merged, natures, item=item, stay_base=False)
+
+
+def _build_form(name, merged, natures, item=None, stay_base=False):
+    """One Combatant in a SPECIFIC form. `stay_base=True` mirrors
+    `combatants.make_team`'s `force_base_form` -- base stats/types/ability
+    (e.g. Gyarados keeps Intimidate instead of gaining Mold Breaker), still
+    holding whatever item it would otherwise (a Mega Stone pick still holds
+    its stone even when forced to stay base -- "brought it, didn't use it").
+    `stay_base=False` projects it into mega form immediately (`_mega_project`
+    is a no-op for a `force_base_form=True` combatant already, since
+    `is_mega_pick` comes back False for one -- there is nothing to
+    conditionally skip).
+    """
+    c = _mega_project(make_combatant(name, merged, natures, item=item,
+                                     force_base_form=stay_base))
     c.current_hp = c.max_hp()
     return c
+
+
+def _mega_choices(names_pair):
+    """Every legal `mega_transforms` value for this pair -- who (if anyone)
+    actually Mega Evolves, subject to VGC's real "at most one Mega Evolution
+    per side per game" rule.
+
+        "Only one can mega. Both in a pair can be a potential Mega, but vs
+         each enemy pair only one can choose to become the Mega, the other
+         will stay as base form -- this can be favourable, such as Gyarados
+         keeping Water/Flying type rather than choosing to switch to
+         Water/Dark. Account for factors like intimidate too. This is also
+         true for opponents."
+
+    Unlike `species_data.mega_variants` (which treats a SOLE Mega-capable
+    pick as having no real choice to search, and always evolves it -- the
+    right default for the rest of the codebase's minimax, where searching a
+    non-choice would be pure waste), this module always offers "nobody
+    Mega Evolves" too, even for a lone Mega-capable member: staying base
+    keeps that Pokemon's OWN base ability and typing (Gyarados's Intimidate,
+    Water/Flying) instead of the Mega's (Mold Breaker, Water/Dark), and
+    whether that is actually better is exactly the per-matchup question
+    being asked here, not a fixed property of the team. Actual Intimidate
+    stat-drop simulation is still out of scope for this module -- it tracks
+    no stat stages for anyone, Mega-related or not -- but which ABILITY is
+    active (for typing and for Mold Breaker's ignore-the-target's-ability
+    effect) is correct either way once the right form is built.
+
+    Returns `[None]` when neither name is Mega-capable (nothing to search),
+    else each Mega name present plus `species_data.NO_MEGA` (nobody
+    transforms) -- every value `species_data.resolve_team_mega_slot` accepts.
+    """
+    megas = [n for n in names_pair if n.startswith("Mega ")]
+    if not megas:
+        return [None]
+    return megas + [NO_MEGA]
+
+
+def _build_forms(names, merged, natures, moves_db, items=None):
+    """{name: {"mega": Combatant, "base": Combatant, "moves": [MoveInfo,...]}}
+    for every name in `names`, built ONCE regardless of how many pairs drawn
+    from `names` end up using it (`make_combatant`'s own template cache
+    already makes a second build of the same (name, form) pair cheap, so
+    there is no separate cache to maintain here). "mega" and "base" are
+    the SAME Combatant's stats for a non-Mega-capable name (nothing to
+    choose), so `_resolve_forms` never needs a special case for "this name
+    can't Mega Evolve anyway".
+
+    Shared by BOTH our own pair and the enemy pair -- a pool search's
+    per-pair mega-choice resolution never has two different code paths for
+    "ours" vs "theirs".
+    """
+    items = items or {}
+    out = {}
+    for name in names:
+        mvs = [mi for mi, _pct in build_moveset(merged[name], moves_db)]
+        out[name] = {
+            "mega": _build_form(name, merged, natures, item=items.get(name),
+                               stay_base=False),
+            "base": _build_form(name, merged, natures, item=items.get(name),
+                               stay_base=True),
+            "moves": mvs,
+        }
+    return out
+
+
+def _resolve_forms(names, built):
+    """For `names` (one candidate alone, or a real pair) drawn from `built`
+    (a `_build_forms` dict), every legal way to honour "only one Mega per
+    side" -- yields (mega_transforms, [combatant_for_each_name]) for each of
+    `_mega_choices(names)`, in the same order as `names`. A single-name list
+    still works (`_mega_choices` only ever looks for "Mega "-prefixed
+    entries, regardless of how many names it's given) -- `pair_search` uses
+    that for a candidate with no partner.
+    """
+    for mt in _mega_choices(names):
+        _evolves, forced_base = resolve_team_mega_slot(list(names),
+                                                        mega_transforms=mt)
+        cs = [built[n]["base" if n in forced_base else "mega"] for n in names]
+        yield mt, cs
 
 
 def best_answer(name, merged, moves_db, natures, typechart, target_names,
@@ -338,6 +482,40 @@ def _scarf_speed(combatant):
     view = copy.copy(combatant)
     view.item = "Choice Scarf"
     return effective_speed(view, FieldState(), "p1")
+
+
+def _field_weather(combatants):
+    """The ONE shared field weather for a 2v2 board -- checked against
+    EVERY combatant's ability (both sides), not just "ours".
+
+        "make sure weather is accounted for, such as Mega Charizard Y's sun
+         applying uncontested if neither of your brings set weather"
+
+    Before this, `pair_search`/the joint searches only ever asked "what does
+    OUR candidate's own `_answer_for` call say" (a single Pokemon's usage-
+    weather guess, via `optimize_sets.team_weather_for`), and applied that
+    number to OUR attacks only -- an enemy Drought/Drizzle/Sand Stream/Snow
+    Warning never came up at all, for either side's damage, and a weather-
+    speed-boost ability (Swift Swim, Chlorophyll, Sand Rush, Slush Rush)
+    never applied to anyone's turn order either, since the speed-order code
+    built its own bare, weatherless `FieldState()` on every call.
+
+    `combatants`: an ordered mapping ("C" then "P" then "E1" then "E2", same
+    convention every joint function already builds) -- resolved by applying
+    each entry's weather-setting ability IN THAT ORDER, later ones
+    overwriting earlier ones exactly like `battle.py`'s own opening
+    switch-in resolution does (`Battle.__init__` calls `on_switch_in` for
+    p1's two actives then p2's two, in that fixed order, each new distinct
+    weather overwriting the last) -- this module has no real send-out event
+    to order by speed, so it mirrors the real engine's own actual
+    tie-break rather than inventing a different one. `None` (no setter
+    anywhere) if nothing in `combatants` has one.
+    """
+    weather = None
+    for c in combatants.values():
+        if c is not None and c.ability in WEATHER_SETTERS:
+            weather = WEATHER_SETTERS[c.ability]
+    return weather
 
 
 def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
@@ -589,6 +767,12 @@ def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
 
 _OUTCOME_RANK = {"clean": 0, "trade": 1, "no_ko": 2, "pinned": 3}
 
+# `_joint_race`'s own outcome vocabulary -- lower is better for us, same
+# convention as `_OUTCOME_RANK` above. Used to pick our own best mega
+# choice (minimise) and the enemy's worst-for-us one (maximise) in
+# `_pair_vs_targets`/`pair_search`/`switch_in_search`.
+_JOINT_OUTCOME_RANK = {"sweep": 0, "out_trade": 1, "no_ko": 2, "loss": 3}
+
 
 def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
                    weather=None, roll="avg"):
@@ -610,7 +794,7 @@ def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
 
 
 def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
-                             e2_name, e2, e2_moves, typechart, weather,
+                             e2_name, e2, e2_moves, typechart,
                              candidate_target, partner=None, partner_move=None,
                              partner_target=None):
     """One full turn, PRIORITY THEN SPEED order, everyone at AVERAGE rolls,
@@ -628,6 +812,12 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     side, matching the rest of this codebase: a plan that needs to win a
     coin flip is a plan with a hole.
 
+    Field weather is resolved from EVERY combatant actually on this board
+    (`_field_weather`) -- candidate, partner (if any), and both named
+    enemies -- not just the candidate's own usage guess, so an enemy
+    Drought/Drizzle/Sand Stream/Snow Warning applies (to BOTH sides'
+    damage and turn order) even when neither of ours sets anything.
+
     Returns {"outcome": one of "clean"/"trade"/"no_ko"/"pinned", "target",
     "partner_target", "hp_left": {...}, "hits": {role: {tgt_role: Hit}}}.
     "clean" and "trade" both satisfy "KO them before being KO'd" -- the target
@@ -635,10 +825,11 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     only means `attacker` itself also went down later the same turn, to the
     pair member it wasn't aimed at.
     """
-    field = FieldState()
     combatants = {"C": attacker, "E1": e1, "E2": e2}
     if partner is not None:
         combatants["P"] = partner
+    weather = _field_weather(combatants)
+    field = FieldState(weather=weather)
     hp = {k: 1.0 for k in combatants}
     defenders = {"E1": e1, "E2": e2}
     target_role = "E1" if e1_name == candidate_target else "E2"
@@ -649,12 +840,13 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     plan["C"] = (_hit_or_spread(attacker, mv, target_role, defenders, typechart,
                                 weather=weather), mv)
     for role, e, e_moves in (("E1", e1, e1_moves), ("E2", e2, e2_moves)):
-        got, mv = _choose_move(e, e_moves, attacker, typechart)
-        plan[role] = (_hit_or_spread(e, mv, "C", {"C": attacker}, typechart), mv)
+        got, mv = _choose_move(e, e_moves, attacker, typechart, weather=weather)
+        plan[role] = (_hit_or_spread(e, mv, "C", {"C": attacker}, typechart,
+                                     weather=weather), mv)
     if partner is not None:
         p_target_role = "E1" if (partner_target or candidate_target) == e1_name else "E2"
         plan["P"] = (_hit_or_spread(partner, partner_move, p_target_role, defenders,
-                                    typechart), partner_move)
+                                    typechart, weather=weather), partner_move)
 
     def speed_key(role):
         mv = plan[role][1]
@@ -718,6 +910,20 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
     outcome is kept. A candidate that can only beat the pair with the right
     target assignment has still beaten the pair.
 
+    ONLY ONE MEGA PER SIDE. When the candidate AND its partner are both
+    Mega-capable (or even just one of them, since staying base is always a
+    legal choice too -- see `_mega_choices`), every legal assignment of
+    "who, if anyone, actually Mega Evolves" is tried and whichever gives US
+    the best outcome is kept -- we know their team at preview, so we choose
+    accordingly. The SAME is true of the named enemy pair: every legal
+    assignment on their side is tried too, and whichever is WORST for us is
+    assumed (mirroring `matchup_search.play_out_worst_case`'s minimax: we
+    pick our best response, they pick their best against us). A forced-base
+    pick keeps its own base ability and typing (e.g. Gyarados's Intimidate
+    and Water/Flying, instead of Mold Breaker and Water/Dark) for every one
+    of these combinations, exactly as `_build_forms`/`_resolve_forms`
+    resolve it.
+
     `partner_item` pins the partner's item instead of searching for its best
     legal one (same idea as `chip_then_ko`'s). `item_overrides`/
     `move_overrides`: optional {name: item} / {name: [move, ...]} pins for
@@ -736,46 +942,65 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
         raise ValueError(f"{partner_move_name!r} is not in the move database")
     partner_is_spread = partner_move is not None and is_spread_move(partner_move.target)
 
+    enemy_forms = _build_forms(target_names, merged, natures, moves_db)
+
     rows = []
     for name in pool:
         if name in target_names or name == partner_name:
             continue
-        item, move_names, weather = _answer_for(
+        item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
             item_overrides=item_overrides, move_overrides=move_overrides)
         if not move_names:
             continue
-        attacker = _build(name, merged, natures, item=item)
         moves = _move_infos(name, merged, moves_db, move_names)
 
-        partner = None
+        our_names = [name]
+        our_items = {name: item}
         if partner_name is not None:
             if partner_item is None:
                 p_item, _mv, _w = best_answer(partner_name, merged, moves_db, natures,
                                               typechart, target_names)
             else:
                 p_item = partner_item
-            partner = _build(partner_name, merged, natures, item=p_item)
+            our_names.append(partner_name)
+            our_items[partner_name] = p_item
+        our_forms = _build_forms(our_names, merged, natures, moves_db, items=our_items)
 
         detail = {}
         for e1_name, e2_name in itertools.combinations(target_names, 2):
-            e1 = _build(e1_name, merged, natures)
-            e2 = _build(e2_name, merged, natures)
-            e1_moves = [mi for mi, _pct in build_moveset(merged[e1_name], moves_db)]
-            e2_moves = [mi for mi, _pct in build_moveset(merged[e2_name], moves_db)]
+            e1_moves = enemy_forms[e1_name]["moves"]
+            e2_moves = enemy_forms[e2_name]["moves"]
 
-            partner_target_options = ((None,) if (partner is None or partner_is_spread)
+            partner_target_options = ((None,) if (partner_name is None or partner_is_spread)
                                       else (e1_name, e2_name))
+            # Minimax, outer to inner: WE pick our mega choice for the best
+            # result (outer); THEY pick their mega choice for the worst
+            # result against us (middle); WE pick our target assignment for
+            # the best result (inner) -- both target and mega choice are
+            # OUR calls, so both minimise, only the enemy's mega choice
+            # maximises.
             best = None
-            for c_target in (e1_name, e2_name):
-                for p_target in partner_target_options:
-                    got = _sequential_pair_outcome(
-                        attacker, moves, e1_name, e1, e1_moves, e2_name, e2, e2_moves,
-                        typechart, weather, c_target,
-                        partner=partner, partner_move=partner_move,
-                        partner_target=p_target)
-                    if best is None or _OUTCOME_RANK[got["outcome"]] < _OUTCOME_RANK[best["outcome"]]:
-                        best = got
+            for _our_mt, our_cs in _resolve_forms(our_names, our_forms):
+                attacker = our_cs[0]
+                partner = our_cs[1] if partner_name is not None else None
+                worst = None
+                for _enemy_mt, (e1, e2) in _resolve_forms((e1_name, e2_name), enemy_forms):
+                    best_targets = None
+                    for c_target in (e1_name, e2_name):
+                        for p_target in partner_target_options:
+                            got = _sequential_pair_outcome(
+                                attacker, moves, e1_name, e1, e1_moves, e2_name, e2, e2_moves,
+                                typechart, c_target,
+                                partner=partner, partner_move=partner_move,
+                                partner_target=p_target)
+                            if (best_targets is None or
+                                    _OUTCOME_RANK[got["outcome"]] < _OUTCOME_RANK[best_targets["outcome"]]):
+                                best_targets = got
+                    if worst is None or _OUTCOME_RANK[best_targets["outcome"]] > _OUTCOME_RANK[worst["outcome"]]:
+                        worst = best_targets
+                if best is None or _OUTCOME_RANK[worst["outcome"]] < _OUTCOME_RANK[best["outcome"]]:
+                    best = worst
             detail[(e1_name, e2_name)] = best
 
         rows.append({
@@ -855,10 +1080,18 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     `enemy_speed_mult`: `>1.0` for the Tailwind-robustness replay (mirrors
     `engine.effective_speed`'s real `tailwind_p2 *= 2.0` rule) -- applied only
     to the turn-ORDER comparison, the same thing a real Tailwind changes.
+
+    `weather` is the ONE shared field value (`_field_weather`'s own return)
+    -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
+    which side casts it) and, via a real `FieldState(weather=weather)`
+    rather than a bare one, to BOTH sides' turn order too (Swift Swim/
+    Chlorophyll/Sand Rush/Slush Rush all key off the field, not off who
+    happens to be attacking).
     """
     hp = dict(hp)
     ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
     theirs_live = {r: combatants[r] for r in ("E1", "E2") if hp[r] > 0}
+    field = FieldState(weather=weather)
 
     plan = {}
     for role, c in ours_live.items():
@@ -867,13 +1100,13 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                     hinted_target=our_hints.get(role))
     for role, c in theirs_live.items():
         plan[role] = _choose_action(c, moves_by_role[role], ours_live,
-                                    typechart, weather=None)
+                                    typechart, weather=weather)
 
     def speed_key(role):
         mv = plan[role][1]
         prio = mv.priority if mv is not None else 0
         side = "p1" if role in ("C", "P") else "p2"
-        spd = effective_speed(combatants[role], FieldState(), side)
+        spd = effective_speed(combatants[role], field, side)
         if role in ("E1", "E2"):
             spd *= enemy_speed_mult
         theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
@@ -993,16 +1226,6 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     return outcome, turns_used, hp, full_log
 
 
-def _build_enemy_pairs(target_names, merged, natures, moves_db):
-    """{name: (Combatant, [MoveInfo, ...])}, built ONCE -- every candidate
-    (or candidate pair) evaluated against `target_names` reuses these instead
-    of rebuilding the same enemy Combatants on every row, which is what both
-    joint search functions below used to do."""
-    return {name: (_build(name, merged, natures),
-                   [mi for mi, _pct in build_moveset(merged[name], moves_db)])
-           for name in target_names}
-
-
 def _grid_hit(attacker, moves, target, other_live, typechart, weather=None):
     """The best `Hit` `attacker`'s own moveset can land on `target`
     SPECIFICALLY -- one cell of the 2x2 damage grid, not the move a
@@ -1044,10 +1267,10 @@ def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather):
         ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather),
     }
     theirs = {
-        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, None),
-        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, None),
-        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, None),
-        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, None),
+        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather),
+        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather),
+        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather),
+        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather),
     }
     return {"ours": ours, "theirs": theirs}
 
@@ -1066,12 +1289,27 @@ def _ohko_risk(grid):
            for (atk, tgt), h in grid["theirs"].items() if h.hi >= 1.0]
 
 
-def _pair_vs_targets(c1, m1, c2, m2, target_names, enemy_built, typechart,
-                     weather, turns, want_grid=False):
-    """(detail, summary) for OUR pair ((c1,m1), (c2,m2)) against every pair
-    drawn from `target_names` -- the one place a joint pair is actually
-    raced, so `joint_pair_search` (partner fixed) and `joint_pool_search`
-    (both slots searched) can never drift apart on what "beats" means.
+def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
+                     turns, want_grid=False):
+    """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
+    `_build_forms` dict) against every pair drawn from `target_names` -- the
+    one place a joint pair is actually raced, so `joint_pair_search`
+    (partner fixed) and `joint_pool_search` (both slots searched) can never
+    drift apart on what "beats" means.
+
+    ONLY ONE MEGA PER SIDE, the same minimax `pair_search` uses: every legal
+    mega assignment on OUR side (`_resolve_forms`/`_mega_choices`) is tried
+    and whichever gives US the best outcome is kept; every legal assignment
+    on the ENEMY pair is tried too and whichever is WORST for us is assumed
+    -- mirroring `matchup_search.play_out_worst_case`'s minimax (we pick our
+    best response, they pick their best against us).
+
+    Field weather is resolved FRESH per (our mega choice, enemy pair, enemy
+    mega choice) combination, from all four combatants actually on the
+    board that time (`_field_weather`) -- it can genuinely differ between
+    two mega assignments of the SAME pair (a forced-base Ninetales-Alola
+    loses Snow Warning's usual guarantee), not just between two of
+    `target_names`' C(n,2) pairings.
 
     `detail`: {(e1, e2): {outcome, turns_used, tailwind_outcome,
     tailwind_safe, log}}. `log` is `_joint_race`'s own per-turn hit list --
@@ -1079,34 +1317,52 @@ def _pair_vs_targets(c1, m1, c2, m2, target_names, enemy_built, typechart,
     the NORMAL-speed race (the one that decided `outcome`); the Tailwind
     replay's log isn't kept, only whether it still won.
 
-    `want_grid`: also compute `_damage_grid`/`_ohko_risk` per enemy pair --
-    8 extra `_raw_hit` calls each, cheap for the single fixed pair `--deep`
-    checks but wasted (and never displayed) for a pool-wide search, so it
-    defaults OFF and only the `--deep` CLI path turns it on.
+    `want_grid`: also compute `_damage_grid`/`_ohko_risk` per enemy pair, on
+    whichever mega assignment was actually kept -- 8 extra `_raw_hit` calls
+    each, cheap for the single fixed pair `--deep` checks but wasted (and
+    never displayed) for a pool-wide search, so it defaults OFF and only
+    the `--deep` CLI path turns it on.
     """
+    m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
     detail = {}
     for e1_name, e2_name in itertools.combinations(target_names, 2):
-        e1c, e1m = enemy_built[e1_name]
-        e2c, e2m = enemy_built[e2_name]
-        combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
-        moves_by_role = {"C": m1, "P": m2, "E1": e1m, "E2": e2m}
-        outcome, turns_used, _hp, log = _joint_race(
-            combatants, moves_by_role, typechart, weather, turns)
-        tw_outcome, _tw_turns, _tw_hp, _tw_log = _joint_race(
-            combatants, moves_by_role, typechart, weather, turns,
-            enemy_speed_mult=2.0)
-        tailwind_safe = tw_outcome in ("sweep", "out_trade")
-        entry = {
-            "outcome": outcome, "turns_used": turns_used,
-            "tailwind_outcome": tw_outcome, "tailwind_safe": tailwind_safe,
-            "log": log,
-        }
+        e1m, e2m = enemy_built[e1_name]["moves"], enemy_built[e2_name]["moves"]
+
+        best = None
+        for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built):
+            worst = None
+            for _enemy_mt, (e1c, e2c) in _resolve_forms((e1_name, e2_name), enemy_built):
+                combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
+                moves_by_role = {"C": m1, "P": m2, "E1": e1m, "E2": e2m}
+                weather = _field_weather(combatants)
+                outcome, turns_used, _hp, log = _joint_race(
+                    combatants, moves_by_role, typechart, weather, turns)
+                tw_outcome, _tw_t, _tw_hp, _tw_log = _joint_race(
+                    combatants, moves_by_role, typechart, weather, turns,
+                    enemy_speed_mult=2.0)
+                entry = {
+                    "outcome": outcome, "turns_used": turns_used,
+                    "tailwind_outcome": tw_outcome,
+                    "tailwind_safe": tw_outcome in ("sweep", "out_trade"),
+                    "log": log, "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
+                }
+                if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
+                        > _JOINT_OUTCOME_RANK[worst["outcome"]]):
+                    worst = entry
+            if (best is None or _JOINT_OUTCOME_RANK[worst["outcome"]]
+                    < _JOINT_OUTCOME_RANK[best["outcome"]]):
+                best = worst
+
         if want_grid:
-            grid = _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m,
-                               typechart, weather)
-            entry["grid"] = grid
-            entry["ohko_risk"] = _ohko_risk(grid)
-        detail[(e1_name, e2_name)] = entry
+            weather = _field_weather({"C": best["_c1"], "P": best["_c2"],
+                                      "E1": best["_e1c"], "E2": best["_e2c"]})
+            grid = _damage_grid(best["_c1"], best["_c2"], best["_e1c"], best["_e2c"],
+                               m1, m2, e1m, e2m, typechart, weather)
+            best["grid"] = grid
+            best["ohko_risk"] = _ohko_risk(grid)
+        for k in ("_c1", "_c2", "_e1c", "_e2c"):
+            best.pop(k, None)
+        detail[(e1_name, e2_name)] = best
     summary = {
         "pairs_swept": sum(1 for d in detail.values() if d["outcome"] == "sweep"),
         "pairs_traded": sum(1 for d in detail.values() if d["outcome"] == "out_trade"),
@@ -1161,32 +1417,34 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
     (swept + traded) first, then tailwind_safe count -- mirrors
     `pair_search`'s existing `(clean+trade, -pinned)` sort.
     """
-    partner_item, partner_move_names, partner_weather = best_answer(
+    partner_item, partner_move_names, _partner_weather = best_answer(
         partner_name, merged, moves_db, natures, typechart, target_names,
         item=partner_item)
-    partner = _build(partner_name, merged, natures, item=partner_item)
     partner_moves = _move_infos(partner_name, merged, moves_db, partner_move_names)
-    enemy_built = _build_enemy_pairs(target_names, merged, natures, moves_db)
+    enemy_built = _build_forms(target_names, merged, natures, moves_db)
 
     rows = []
     for name in pool:
         if name in target_names or name == partner_name:
             continue
-        item, move_names, weather = _answer_for(
+        item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
             item_overrides=item_overrides, move_overrides=move_overrides)
         if not move_names:
             continue
-        attacker = _build(name, merged, natures, item=item)
         moves = _move_infos(name, merged, moves_db, move_names)
-        # Both sides' weather is whichever of ours is doing the setting, same
-        # simplification `pair_search` makes -- the enemy's own instant-set
-        # ability is not modelled here either (see the module docstring).
-        race_weather = weather or partner_weather
+
+        our_built = _build_forms([name, partner_name], merged, natures, moves_db,
+                                 items={name: item, partner_name: partner_item})
+        # The optimised set (not `_build_forms`' own usage-derived default)
+        # is what this function actually attacks with -- same convention
+        # `_answer_for`'s callers everywhere else in this module follow.
+        our_built[name]["moves"] = moves
+        our_built[partner_name]["moves"] = partner_moves
 
         detail, summary = _pair_vs_targets(
-            attacker, moves, partner, partner_moves, target_names,
-            enemy_built, typechart, race_weather, turns)
+            name, partner_name, our_built, target_names, enemy_built,
+            typechart, turns)
         rows.append({"name": name, "item": item, "detail": detail, **summary})
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
                              -r["pairs_tailwind_safe"]))
@@ -1221,26 +1479,24 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     for name in pool:
         if name in target_names:
             continue
-        item, move_names, weather = _answer_for(
+        item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
             item_overrides=item_overrides, move_overrides=move_overrides)
         if not move_names:
             continue
-        built[name] = (_build(name, merged, natures, item=item),
-                       _move_infos(name, merged, moves_db, move_names),
-                       weather, item)
-    enemy_built = _build_enemy_pairs(target_names, merged, natures, moves_db)
+        entry = _build_forms([name], merged, natures, moves_db,
+                             items={name: item})[name]
+        entry["moves"] = _move_infos(name, merged, moves_db, move_names)
+        entry["item"] = item
+        built[name] = entry
+    enemy_built = _build_forms(target_names, merged, natures, moves_db)
 
     rows = []
     for n1, n2 in itertools.combinations(built, 2):
-        c1, m1, w1, item1 = built[n1]
-        c2, m2, w2, item2 = built[n2]
-        race_weather = w1 or w2
-        detail, summary = _pair_vs_targets(c1, m1, c2, m2, target_names,
-                                           enemy_built, typechart,
-                                           race_weather, turns)
-        rows.append({"pair": (n1, n2), "item1": item1, "item2": item2,
-                    "detail": detail, **summary})
+        detail, summary = _pair_vs_targets(n1, n2, built, target_names,
+                                           enemy_built, typechart, turns)
+        rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
+                    "item2": built[n2]["item"], "detail": detail, **summary})
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
                              -r["pairs_tailwind_safe"]))
     return rows
@@ -1271,20 +1527,20 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     `_pair_vs_targets`'s own shape, `grid`/`ohko_risk` included on every
     entry.
     """
-    item1, moves1, w1 = _answer_for(
+    item1, moves1, _w1 = _answer_for(
         name1, merged, moves_db, natures, typechart, target_names,
         item_overrides=item_overrides, move_overrides=move_overrides)
-    item2, moves2, w2 = _answer_for(
+    item2, moves2, _w2 = _answer_for(
         name2, merged, moves_db, natures, typechart, target_names,
         item_overrides=item_overrides, move_overrides=move_overrides)
-    c1 = _build(name1, merged, natures, item=item1)
-    c2 = _build(name2, merged, natures, item=item2)
-    m1 = _move_infos(name1, merged, moves_db, moves1)
-    m2 = _move_infos(name2, merged, moves_db, moves2)
-    enemy_built = _build_enemy_pairs(target_names, merged, natures, moves_db)
-    detail, summary = _pair_vs_targets(c1, m1, c2, m2, target_names,
-                                       enemy_built, typechart, w1 or w2,
-                                       turns, want_grid=True)
+    our_built = _build_forms([name1, name2], merged, natures, moves_db,
+                             items={name1: item1, name2: item2})
+    our_built[name1]["moves"] = _move_infos(name1, merged, moves_db, moves1)
+    our_built[name2]["moves"] = _move_infos(name2, merged, moves_db, moves2)
+    enemy_built = _build_forms(target_names, merged, natures, moves_db)
+    detail, summary = _pair_vs_targets(name1, name2, our_built, target_names,
+                                       enemy_built, typechart, turns,
+                                       want_grid=True)
     return item1, item2, detail, summary
 
 
@@ -1323,56 +1579,93 @@ def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
     silence standing in for "nothing tried".
     """
     e1_name, e2_name = enemy_pair
-    enemy_built = _build_enemy_pairs([e1_name, e2_name], merged, natures, moves_db)
-    e1c, e1m = enemy_built[e1_name]
-    e2c, e2m = enemy_built[e2_name]
+    enemy_built = _build_forms([e1_name, e2_name], merged, natures, moves_db)
     set_targets = [e1_name, e2_name]
 
     rows, tried = [], 0
     for leaving_role, leaving_name, staying_name in (
             ("C", name1, name2), ("P", name2, name1)):
-        stay_item, stay_moves, stay_w = _answer_for(
+        stay_item, stay_moves, _stay_w = _answer_for(
             staying_name, merged, moves_db, natures, typechart, set_targets,
             item_overrides=item_overrides, move_overrides=move_overrides)
         if not stay_moves:
             continue
-        stay_c = _build(staying_name, merged, natures, item=stay_item)
         stay_m = _move_infos(staying_name, merged, moves_db, stay_moves)
+        # Built ONCE per role, outside the bench loop -- `staying_name`
+        # doesn't change per candidate, and an explicit `item=` bypasses
+        # `make_combatant`'s own template cache, so leaving this inside the
+        # loop would rebuild it (both forms) on every one of potentially
+        # ~270 bench candidates for nothing.
+        stay_built = _build_forms([staying_name], merged, natures, moves_db,
+                                  items={staying_name: stay_item})
+        stay_built[staying_name]["moves"] = stay_m
 
         for cand in bench:
             if cand in (name1, name2, e1_name, e2_name):
                 continue
-            item, mvs, w = _answer_for(
+            item, mvs, _w = _answer_for(
                 cand, merged, moves_db, natures, typechart, set_targets,
                 item_overrides=item_overrides, move_overrides=move_overrides)
             if not mvs:
                 continue
             tried += 1
-            cand_c = _build(cand, merged, natures, item=item)
             cand_m = _move_infos(cand, merged, moves_db, mvs)
-            if leaving_role == "C":
-                combatants = {"C": cand_c, "P": stay_c, "E1": e1c, "E2": e2c}
-                moves_by_role = {"C": cand_m, "P": stay_m, "E1": e1m, "E2": e2m}
-            else:
-                combatants = {"C": stay_c, "P": cand_c, "E1": e1c, "E2": e2c}
-                moves_by_role = {"C": stay_m, "P": cand_m, "E1": e1m, "E2": e2m}
-            race_weather = w or stay_w
+
+            cand_built = _build_forms([cand], merged, natures, moves_db,
+                                      items={cand: item})
+            cand_built[cand]["moves"] = cand_m
+            our_built = {**stay_built, **cand_built}
+            # our_names[0] takes role "C", our_names[1] takes role "P" --
+            # `leaving_role` says which slot the incoming candidate fills.
+            our_names = (cand, staying_name) if leaving_role == "C" else (staying_name, cand)
             override = {leaving_role: []}
-            outcome, turns_used, _hp, log = _joint_race(
-                combatants, moves_by_role, typechart, race_weather, turns,
-                first_turn_moves_override=override)
-            if outcome not in ("sweep", "out_trade"):
+
+            # ONLY ONE MEGA PER SIDE, same minimax `_pair_vs_targets` uses:
+            # we pick our own best mega assignment, the enemy pair (fixed by
+            # the caller) is assumed to pick whichever of ITS legal mega
+            # assignments is worst for us.
+            best = None
+            for _our_mt, (c_c, c_p) in _resolve_forms(our_names, our_built):
+                worst = None
+                for _enemy_mt, (e1c, e2c) in _resolve_forms((e1_name, e2_name), enemy_built):
+                    combatants = {"C": c_c, "P": c_p, "E1": e1c, "E2": e2c}
+                    moves_by_role = {"C": our_built[our_names[0]]["moves"],
+                                     "P": our_built[our_names[1]]["moves"],
+                                     "E1": enemy_built[e1_name]["moves"],
+                                     "E2": enemy_built[e2_name]["moves"]}
+                    # The switch-in's OWN weather-setting ability (a
+                    # Drought/Snow Warning candidate) applies on entry
+                    # regardless of whether it gets to ACT this turn --
+                    # `_field_weather` already covers this, since
+                    # `combatants` has it in its normal slot.
+                    race_weather = _field_weather(combatants)
+                    outcome, turns_used, _hp, log = _joint_race(
+                        combatants, moves_by_role, typechart, race_weather, turns,
+                        first_turn_moves_override=override)
+                    entry = {"outcome": outcome, "turns_used": turns_used, "log": log,
+                             "_combatants": combatants, "_moves_by_role": moves_by_role,
+                             "_weather": race_weather}
+                    if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
+                            > _JOINT_OUTCOME_RANK[worst["outcome"]]):
+                        worst = entry
+                if (best is None or _JOINT_OUTCOME_RANK[worst["outcome"]]
+                        < _JOINT_OUTCOME_RANK[best["outcome"]]):
+                    best = worst
+
+            if best["outcome"] not in ("sweep", "out_trade"):
                 continue
             tw_outcome, _tw_t, _tw_hp, _tw_log = _joint_race(
-                combatants, moves_by_role, typechart, race_weather, turns,
-                enemy_speed_mult=2.0, first_turn_moves_override=override)
+                best["_combatants"], best["_moves_by_role"], typechart,
+                best["_weather"], turns, enemy_speed_mult=2.0,
+                first_turn_moves_override=override)
+            log = best["log"]
             switch_in_taken = (sum(h.avg for role, _tgt, h in log[0]
                                    if role in ("E1", "E2")
                                    and _tgt == leaving_role) if log else 0.0)
             rows.append({
                 "leaving": leaving_name, "arriving": cand,
-                "switch_in_taken": switch_in_taken, "outcome": outcome,
-                "turns_used": turns_used, "tailwind_outcome": tw_outcome,
+                "switch_in_taken": switch_in_taken, "outcome": best["outcome"],
+                "turns_used": best["turns_used"], "tailwind_outcome": tw_outcome,
                 "tailwind_safe": tw_outcome in ("sweep", "out_trade"),
             })
     rows.sort(key=lambda r: (r["switch_in_taken"], not r["tailwind_safe"]))
