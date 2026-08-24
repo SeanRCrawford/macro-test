@@ -158,22 +158,35 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
         self.assertTrue(at.session_state["sim_turn_log"])
 
     def test_action_options_are_real_legal_moves_not_ai_pruned(self):
-        """`sim_legal_actions` must offer EVERY live-foe target for a
-        single-target move, not just the AI heuristic's "best" one --
-        the whole point of playing manually."""
+        """`sim_legal_actions` (via `sim_grouped_actions`'s button menu)
+        must offer EVERY live-foe target for a single-target move, not
+        just the AI heuristic's "best" one -- the whole point of playing
+        manually. Both actives default to their FIRST move, whose targets
+        (if it needs any) already show as a row of target buttons."""
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
-        action_sbs = [sb for sb in tab.selectbox if sb.label == "Action"]
-        self.assertEqual(len(action_sbs), 2)
-        # At least one slot must offer BOTH enemy leads as targets for some
-        # single-target move (not pruned to a single "best" one).
-        found_both_targets = False
-        for sb in action_sbs:
-            targets = {opt.split(" -> ")[1] for opt in sb.options if " -> " in opt}
-            if len(targets) >= 2:
-                found_both_targets = True
-        self.assertTrue(found_both_targets)
+        target_names = {"Kingambit", "Basculegion"}
+        found_both_targets = any(
+            b.label in target_names for b in tab.button
+        ) and len({b.label for b in tab.button} & target_names) >= 2
+        self.assertTrue(found_both_targets, "at least one default move's "
+                                            "target row must offer both "
+                                            "enemy leads, not just one")
+
+    def test_switching_the_selected_move_changes_the_target_row(self):
+        """The move buttons act as a real menu -- clicking a DIFFERENT
+        move re-renders the target row for that move, not the first one's
+        leftover targets."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        move_buttons = [b for b in tab.button
+                       if b.label not in ("Attack", "Switch", "Submit turn")
+                       and "faints" not in (b.label or "")]
+        self.assertTrue(move_buttons)
+        move_buttons[0].click().run()
+        self.assertEqual(len(at.exception), 0)
 
     def test_no_bench_left_does_not_wrongly_disable_submit(self):
         """Regression: a fainted active with an empty bench needs NO
@@ -206,10 +219,11 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
         self.assertEqual(len(at.exception), 0)
 
         tab = sim_tab(at)
-        # Only ONE action selectbox should render -- the fainted, bench-less
-        # slot needs none.
-        action_sbs = [sb for sb in tab.selectbox if sb.label == "Action"]
-        self.assertEqual(len(action_sbs), 1)
+        # No bench anywhere in this bring-2 -- Incineroar's slot (the only
+        # non-fainted one) has no "Switch" option at all, and Garchomp's
+        # fainted slot needs no action (nothing left to replace it with).
+        self.assertFalse(any(b.label == "Switch" for b in tab.button))
+        self.assertTrue(any(b.label == "Attack" for b in tab.button))
         submit = next(b for b in tab.button if b.label == "Submit turn")
         self.assertFalse(submit.disabled, "a permanently-empty slot must not "
                                           "block the turn from being submitted")
@@ -366,6 +380,64 @@ class TestPerTurnMegaChoiceAndReplacementUI(unittest.TestCase):
         self.assertTrue(gyarados.fainted, "fixture assumes 1 HP dies to "
                                           "any live opposing attack")
         self.assertEqual(battle.p1.active[0].name, "Basculegion")
+
+
+class TestBattleMenuAndSprites(unittest.TestCase):
+    """"It would also be good to have a better UI, like sprites, buttons
+    like battle->4 moves/switch->select pokemon." """
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_board_shows_a_sprite_per_active_pokemon(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        # One image per active slot on each side (4 actives total).
+        self.assertGreaterEqual(len(tab.image), 4)
+
+    def test_menu_defaults_to_attack_with_a_move_row(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        self.assertEqual(len([b for b in tab.button if b.label == "Attack"]), 2)
+        self.assertEqual(len([b for b in tab.button if b.label == "Switch"]), 2)
+        first_moveset = list(seed_movesets(self.OUR4[0]))
+        move_names = {mv.name for mv, _pct in first_moveset}
+        rendered_labels = {b.label for b in tab.button}
+        self.assertTrue(move_names & rendered_labels, "the default Attack "
+                                                       "menu must show real "
+                                                       "move-name buttons")
+
+    def test_clicking_switch_then_a_bench_mon_builds_a_switch_action(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        switch_btn = next(b for b in tab.button if b.label == "Switch")
+        switch_btn.click().run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        bench_btn = next(b for b in tab.button if b.label in ("Gallade", "Hydreigon"))
+        bench_btn.click().run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        self.assertFalse(submit.disabled)
+        submit.click().run()
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        self.assertIn(battle.p1.active[0].name, ("Gallade", "Hydreigon"))
+        self.assertNotEqual(battle.p1.active[0].name, "Garchomp")
+
+
+def seed_movesets(name):
+    """The real usage moveset for `name`, for a fixture to check button
+    labels against without hand-listing moves that could drift."""
+    from solver import build_moveset, TOP_K_MOVES
+    W = world()
+    return build_moveset(W["merged"][name], W["moves"], top_k=TOP_K_MOVES)
 
 
 if __name__ == "__main__":

@@ -1111,6 +1111,49 @@ def sim_legal_actions(c, side_name, allies, foes, moveset):
     return out
 
 
+def sim_grouped_actions(c, side_name, allies, foes, moveset):
+    """`sim_legal_actions`, grouped by move name -- [(move_name,
+    [(target_label, Action), ...]), ...], move order preserved.
+
+    Feeds the Battle Simulator's "battle -> 4 moves -> pick a target"
+    button menu: one button per move, and (only when a move actually has
+    more than one legal target -- most don't) a second row of target
+    buttons. Target labels are read off each Action's own `.targets`
+    (never re-parsed from a display string), so this can't drift from what
+    `sim_legal_actions` actually built.
+    """
+    groups, order = {}, []
+    for _label, action in sim_legal_actions(c, side_name, allies, foes, moveset):
+        mv_name = action.move.name if action.move is not None else "Protect"
+        if mv_name not in groups:
+            groups[mv_name] = []
+            order.append(mv_name)
+        if len(action.targets) > 1:
+            tgt_label = "hits " + "/".join(t.name for t in action.targets)
+        elif action.targets and action.targets[0] is not c:
+            tgt_label = action.targets[0].name
+        else:
+            tgt_label = mv_name
+        groups[mv_name].append((tgt_label, action))
+    return [(name, groups[name]) for name in order]
+
+
+def sim_sprite_url(name, merged):
+    """Best-effort Showdown sprite URL for `name` -- `merged[name][
+    "species_id"]` is already Showdown's own toID()-normalised species
+    identifier (it comes straight from `species_data.resolve_species`
+    against Showdown's pokedex), so this reuses that instead of
+    re-deriving a slug from the display name by hand. A name this dataset
+    doesn't have an id for (shouldn't happen for anything actually on a
+    battle) returns None, so the caller can skip the image rather than
+    request a guaranteed-broken URL.
+    """
+    sid = (merged.get(name) or {}).get("species_id")
+    if not sid:
+        return None
+    return f"https://play.pokemonshowdown.com/sprites/gen5/{sid}.png"
+
+
 def sim_build_battle(our4, their4, merged, moves_db, natures, typechart,
                      our_sets=None, enemy_sets=None, our_mega=None, enemy_mega=None):
     """(battle, movesets) for an interactive match -- the same construction
@@ -4284,17 +4327,29 @@ with tab_sim:
             mega = " 🔺MEGA" if c.mega_evolved else ""
             return f"{c.name}{mega} — {tag}{status} ({c.ability})"
 
+        def _sim_mon_card(c):
+            sprite_col, text_col = st.columns([1, 4])
+            url = sim_sprite_url(c.name, merged)
+            if url:
+                # Best-effort: `st.image` embeds an <img src=...> the
+                # VIEWER's browser fetches directly, so a name Showdown's
+                # CDN doesn't have under this exact id just renders as a
+                # broken-image icon in that one slot -- it can't crash the
+                # page or block anything else from rendering.
+                sprite_col.image(url, width=64)
+            text_col.write(_sim_mon_line(c))
+
         bc1, bc2 = st.columns(2)
         with bc1:
             st.markdown("**Ours**")
             for c in battle.p1.active:
-                st.write(_sim_mon_line(c))
+                _sim_mon_card(c)
             if battle.p1.bench:
                 st.caption("Bench: " + "; ".join(_sim_mon_line(c) for c in battle.p1.bench))
         with bc2:
             st.markdown("**Theirs**")
             for c in battle.p2.active:
-                st.write(_sim_mon_line(c))
+                _sim_mon_card(c)
             if battle.p2.bench:
                 st.caption("Bench: " + "; ".join(_sim_mon_line(c) for c in battle.p2.bench))
 
@@ -4366,6 +4421,25 @@ with tab_sim:
             # their own to defer it from.
             our_mega_decisions = {}
             replacement_choices = {}
+            def _button_pick(options, state_key, cols_per_row=2):
+                """A row of `st.button`s acting as a single-select radio --
+                Streamlit's default behaviour already reruns the whole
+                script on any button click, so setting `state_key` inside
+                the click branch and reading it right back below is enough;
+                no explicit `st.rerun()` needed. Returns the currently
+                selected option (defaults to the first)."""
+                if state_key not in st.session_state or st.session_state[state_key] not in options:
+                    st.session_state[state_key] = options[0]
+                cols = st.columns(min(cols_per_row, len(options)) or 1)
+                for idx, opt in enumerate(options):
+                    col = cols[idx % len(cols)]
+                    is_selected = st.session_state[state_key] == opt
+                    if col.button(opt, key=f"{state_key}_btn_{idx}",
+                                 type="primary" if is_selected else "secondary",
+                                 width='stretch'):
+                        st.session_state[state_key] = opt
+                return st.session_state[state_key]
+
             for i, c in enumerate(battle.p1.active):
                 if c.fainted:
                     alive_bench = [b for b in battle.p1.bench if not b.fainted]
@@ -4376,49 +4450,78 @@ with tab_sim:
                     st.caption(f"{c.name}: fainted, no bench left to replace it")
                     options = [(f"Switch in {b.name}", Action(c, "p1", "switch", None, [b]))
                               for b in alive_bench]
-                else:
-                    st.caption(f"{c.name}: choose an action")
-                    # "I need to choose during the battle which of my brings
-                    # mega evolves, not before, and choose at the start of
-                    # the turn on which I wish to mega evolve." -- a real
-                    # per-turn declaration, not a team-preview pre-commitment
-                    # that fires automatically the moment it first acts.
-                    eligible = (c.is_mega_pick and not c.mega_evolved
-                               and not battle.p1.mega_used)
-                    if eligible:
-                        our_mega_decisions[id(c)] = st.checkbox(
-                            f"Mega Evolve {c.name} this turn?",
-                            key=f"sim_mega_{i}_{battle.turn_num}")
-                    options = sim_legal_actions(c, "p1", battle.p1.active, battle.p2.active,
-                                                movesets[c.name])
-                    options += [(f"Switch to {b.name}", Action(c, "p1", "switch", None, [b]))
-                               for b in battle.p1.bench if not b.fainted]
-                    alive_bench = [b for b in battle.p1.bench if not b.fainted]
-                    if alive_bench:
-                        # "I also need to be able to choose who I send in
-                        # after a faint." Declared now, alongside this
-                        # turn's action, since `run_turn` resolves a whole
-                        # turn (moves, then any faint, then the
-                        # replacement) in one call -- there's no mid-turn
-                        # pause to ask again once it's actually dead.
-                        # Reaches the same outcome (the bench member you
-                        # actually wanted arrives) without splitting turn
-                        # resolution into two engine calls.
-                        rep_labels = ["Auto-pick (recommended)"] + [b.name for b in alive_bench]
-                        rep_pick = st.selectbox(
-                            f"If {c.name} faints this turn, send in:", rep_labels,
-                            key=f"sim_replace_{i}_{battle.turn_num}")
-                        if rep_pick != rep_labels[0]:
-                            replacement_choices[id(c)] = next(
-                                b for b in alive_bench if b.name == rep_pick)
-                slots_needing_action += 1
-                if not options:
-                    st.warning(f"No legal action for {c.name} this turn.")
+                    slots_needing_action += 1
+                    labels = [lbl for lbl, _a in options]
+                    pick = st.selectbox("Action", labels, key=f"sim_action_{i}_{battle.turn_num}",
+                                        label_visibility="collapsed")
+                    p1_actions.append(next(a for lbl, a in options if lbl == pick))
                     continue
-                labels = [lbl for lbl, _a in options]
-                pick = st.selectbox("Action", labels, key=f"sim_action_{i}_{battle.turn_num}",
-                                    label_visibility="collapsed")
-                p1_actions.append(next(a for lbl, a in options if lbl == pick))
+
+                st.markdown(f"**{c.name}**")
+                # "I need to choose during the battle which of my brings
+                # mega evolves, not before, and choose at the start of
+                # the turn on which I wish to mega evolve." -- a real
+                # per-turn declaration, not a team-preview pre-commitment
+                # that fires automatically the moment it first acts.
+                eligible = (c.is_mega_pick and not c.mega_evolved
+                           and not battle.p1.mega_used)
+                if eligible:
+                    our_mega_decisions[id(c)] = st.checkbox(
+                        f"Mega Evolve {c.name} this turn?",
+                        key=f"sim_mega_{i}_{battle.turn_num}")
+
+                alive_bench = [b for b in battle.p1.bench if not b.fainted]
+                # "It would also be good to have a better UI, like sprites,
+                # buttons like battle->4 moves/switch->select pokemon."
+                menu_key = f"sim_menu_{i}_{battle.turn_num}"
+                menu_options = ["Attack", "Switch"] if alive_bench else ["Attack"]
+                menu = _button_pick(menu_options, menu_key)
+
+                chosen_action = None
+                if menu == "Attack":
+                    groups = sim_grouped_actions(c, "p1", battle.p1.active, battle.p2.active,
+                                                 movesets[c.name])
+                    if groups:
+                        move_key = f"sim_move_{i}_{battle.turn_num}"
+                        move_name = _button_pick([name for name, _opts in groups], move_key)
+                        opts = dict(groups)[move_name]
+                        if len(opts) > 1:
+                            st.caption("Target:")
+                            target_key = f"sim_target_{i}_{battle.turn_num}_{move_name}"
+                            tgt_label = _button_pick([lbl for lbl, _a in opts], target_key,
+                                                    cols_per_row=len(opts))
+                            chosen_action = next(a for lbl, a in opts if lbl == tgt_label)
+                        else:
+                            chosen_action = opts[0][1]
+                else:
+                    switch_key = f"sim_switch_{i}_{battle.turn_num}"
+                    bench_name = _button_pick([b.name for b in alive_bench], switch_key)
+                    bench_mon = next(b for b in alive_bench if b.name == bench_name)
+                    chosen_action = Action(c, "p1", "switch", None, [bench_mon])
+
+                if alive_bench:
+                    # "I also need to be able to choose who I send in
+                    # after a faint." Declared now, alongside this turn's
+                    # action, since `run_turn` resolves a whole turn
+                    # (moves, then any faint, then the replacement) in one
+                    # call -- there's no mid-turn pause to ask again once
+                    # it's actually dead. Reaches the same outcome (the
+                    # bench member you actually wanted arrives) without
+                    # splitting turn resolution into two engine calls.
+                    rep_labels = ["Auto-pick (recommended)"] + [b.name for b in alive_bench]
+                    rep_pick = st.selectbox(
+                        f"If {c.name} faints this turn, send in:", rep_labels,
+                        key=f"sim_replace_{i}_{battle.turn_num}")
+                    if rep_pick != rep_labels[0]:
+                        replacement_choices[id(c)] = next(
+                            b for b in alive_bench if b.name == rep_pick)
+
+                slots_needing_action += 1
+                if chosen_action is None:
+                    st.warning(f"No legal action for {c.name} this turn.")
+                else:
+                    p1_actions.append(chosen_action)
+                st.divider()
 
             if st.button("Submit turn", type="primary",
                         disabled=len(p1_actions) != slots_needing_action):
