@@ -1046,8 +1046,10 @@ def sim_legal_actions(c, side_name, allies, foes, moveset):
     a human choosing to hit the "wrong" target, or to start charging Solar
     Beam into an incoming sun, is exactly the kind of line a manual
     simulator is FOR. `Battle.run_turn` itself already forces the correct
-    outcome for a mid-charge Pokemon regardless of what's submitted, so
-    offering the full moveset here can't produce an illegal turn.
+    outcome for a mid-charge or mid-recharge (Hyper Beam, Giga Impact, ...)
+    Pokemon regardless of what's submitted, so offering the full moveset
+    here can't produce an illegal turn -- EXCEPT during a forced recharge,
+    where the real game shows no action menu at all, so this doesn't either.
 
     Returns [(label, engine.Action), ...] -- switches are NOT included here
     (the caller adds those from the bench, since only it knows who's
@@ -1057,6 +1059,10 @@ def sim_legal_actions(c, side_name, allies, foes, moveset):
     from damage import is_spread_move, spread_targets
     from engine import Action
     from solver import FIRST_TURN_ONLY_MOVES
+
+    if c.volatile.get("must_recharge"):
+        return [("Must recharge (forced this turn)",
+                Action(c, side_name, "protect", None, [c]))]
 
     ms = moveset
     if c.item in CHOICE_ITEMS and c.choice_locked_move:
@@ -1136,22 +1142,6 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset):
             tgt_label = mv_name
         groups[mv_name].append((tgt_label, action))
     return [(name, groups[name]) for name in order]
-
-
-def sim_sprite_url(name, merged):
-    """Best-effort Showdown sprite URL for `name` -- `merged[name][
-    "species_id"]` is already Showdown's own toID()-normalised species
-    identifier (it comes straight from `species_data.resolve_species`
-    against Showdown's pokedex), so this reuses that instead of
-    re-deriving a slug from the display name by hand. A name this dataset
-    doesn't have an id for (shouldn't happen for anything actually on a
-    battle) returns None, so the caller can skip the image rather than
-    request a guaranteed-broken URL.
-    """
-    sid = (merged.get(name) or {}).get("species_id")
-    if not sid:
-        return None
-    return f"https://play.pokemonshowdown.com/sprites/gen5/{sid}.png"
 
 
 def sim_build_battle(our4, their4, merged, moves_db, natures, typechart,
@@ -4328,16 +4318,7 @@ with tab_sim:
             return f"{c.name}{mega} — {tag}{status} ({c.ability})"
 
         def _sim_mon_card(c):
-            sprite_col, text_col = st.columns([1, 4])
-            url = sim_sprite_url(c.name, merged)
-            if url:
-                # Best-effort: `st.image` embeds an <img src=...> the
-                # VIEWER's browser fetches directly, so a name Showdown's
-                # CDN doesn't have under this exact id just renders as a
-                # broken-image icon in that one slot -- it can't crash the
-                # page or block anything else from rendering.
-                sprite_col.image(url, width=64)
-            text_col.write(_sim_mon_line(c))
+            st.write(_sim_mon_line(c))
 
         bc1, bc2 = st.columns(2)
         with bc1:
@@ -4373,6 +4354,30 @@ with tab_sim:
             if st.session_state.get("sim_mode") == "Step through all 15 leads":
                 leads = st.session_state.get("sim_leads") or []
                 idx = st.session_state.get("sim_lead_idx", 0)
+                # Recorded once per lead, off `Battle.stats` (the engine's own
+                # per-Pokemon usage/damage/KO tracker -- see its docstring at
+                # `battle.py`'s `self.stats` -- reused rather than tallied a
+                # second way) plus `Combatant.fainted`, the moment THIS lead's
+                # battle ends. Guarded on length so re-rendering the same
+                # finished lead (every rerun while its winner screen is up)
+                # never double-counts it.
+                summary_list = st.session_state.setdefault("sim_leads_summary", [])
+                if len(summary_list) == idx:
+                    def _mon_tallies(side, roster):
+                        rows = []
+                        for c in roster:
+                            s = battle.stats.get((side, c.name), {})
+                            rows.append({"name": c.name, "fainted": c.fainted,
+                                        "damage_pct": s.get("damage_pct", 0.0),
+                                        "kos": s.get("kos", 0)})
+                        return rows
+                    summary_list.append({
+                        "their4": list(st.session_state.get("sim_their4") or []),
+                        "result": "win" if winner == "p1" else "loss",
+                        "turns": battle.turn_num,
+                        "ours": _mon_tallies("p1", battle.p1.roster),
+                        "theirs": _mon_tallies("p2", battle.p2.roster),
+                    })
                 if idx + 1 < len(leads):
                     if st.button(f"Next lead ({idx + 2}/{len(leads)})", type="primary"):
                         _margin, next_their4, _lead = leads[idx + 1]
@@ -4389,6 +4394,48 @@ with tab_sim:
                         st.rerun()
                 else:
                     st.caption("That was the last of the 15 leads.")
+                    wins = sum(1 for e in summary_list if e["result"] == "win")
+                    st.markdown(f"### Step-through summary — {wins}/{len(summary_list)} won")
+                    losses = [e for e in summary_list if e["result"] == "loss"]
+                    if losses:
+                        st.markdown("**Lost to:**")
+                        for e in losses:
+                            contributors = sorted(
+                                (m for m in e["theirs"] if m["kos"] or m["damage_pct"] > 0),
+                                key=lambda m: (-m["kos"], -m["damage_pct"]))
+                            top = ", ".join(
+                                f"{m['name']} ({m['kos']} KO, {m['damage_pct']:.0f}% dmg)"
+                                for m in contributors[:2])
+                            st.write(f"- vs {' + '.join(e['their4'])} "
+                                    f"(turn {e['turns']}): {top or '-'}")
+                    else:
+                        st.write("No losses across all 15 leads.")
+
+                    def _aggregate(side_key):
+                        agg = {}
+                        for e in summary_list:
+                            for m in e[side_key]:
+                                a = agg.setdefault(m["name"], {"damage_pct": 0.0,
+                                                               "kos": 0, "faints": 0,
+                                                               "leads": 0})
+                                a["damage_pct"] += m["damage_pct"]
+                                a["kos"] += m["kos"]
+                                a["faints"] += 1 if m["fainted"] else 0
+                                a["leads"] += 1
+                        return agg
+
+                    st.markdown("**KO / faint / damage dealt, totalled across all 15 leads:**")
+                    sc1, sc2 = st.columns(2)
+                    for col, label, side_key in ((sc1, "Ours", "ours"),
+                                                 (sc2, "Theirs", "theirs")):
+                        with col:
+                            st.write(f"**{label}**")
+                            agg = _aggregate(side_key)
+                            for name, a in sorted(agg.items(),
+                                                  key=lambda kv: -kv[1]["damage_pct"]):
+                                st.caption(
+                                    f"{name}: {a['kos']} KOs, {a['damage_pct']:.0f}% "
+                                    f"total dmg dealt, fainted {a['faints']}/{a['leads']}")
             if st.button("New battle"):
                 for k in list(st.session_state):
                     if k.startswith("sim_"):
@@ -4455,6 +4502,17 @@ with tab_sim:
                     pick = st.selectbox("Action", labels, key=f"sim_action_{i}_{battle.turn_num}",
                                         label_visibility="collapsed")
                     p1_actions.append(next(a for lbl, a in options if lbl == pick))
+                    continue
+
+                if c.volatile.get("must_recharge"):
+                    # Hyper Beam et al: no move, no switch, no choice at
+                    # all this turn -- the real games don't even show an
+                    # action menu, so this doesn't build the Attack/Switch
+                    # one either.
+                    st.markdown(f"**{c.name}** — must recharge (forced this turn)")
+                    slots_needing_action += 1
+                    p1_actions.append(Action(c, "p1", "protect", None, [c]))
+                    st.divider()
                     continue
 
                 st.markdown(f"**{c.name}**")

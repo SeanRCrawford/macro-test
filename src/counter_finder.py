@@ -118,13 +118,18 @@ move is actually used, since there only a Pokemon's own two moves are ever in
 play.
 
 WHAT THIS DOES NOT MODEL. No screens, no Follow Me/Rage Powder redirection,
-no items played out over a whole game (Focus Sash survival, Life Orb recoil
-accumulating). `pair_search` resolves a single turn, not the two-turn
-horizon the lead-race tools use, and an enemy's spread move is never
-modelled as also hitting the assisting partner (the partner is assumed not
-to be a target this turn at all). These are hypotheses to point the
-detailed lead-race tools at, in the same division of labour `lead_scan.py`
-documents for its own cheap stage.
+no Life Orb recoil accumulating. `pair_search` resolves a single turn, not
+the two-turn horizon the lead-race tools use, and an enemy's spread move is
+never modelled as also hitting the assisting partner (the partner is
+assumed not to be a target this turn at all). These are hypotheses to point
+the detailed lead-race tools at, in the same division of labour
+`lead_scan.py` documents for its own cheap stage.
+
+Focus Sash / Sturdy survival at 1 HP from full HP IS modelled, but only in
+the multi-turn joint-race functions (`_resolve_turn`, hence
+`joint_pair_search`/`joint_pool_search`/`deep_dive`/`switch_in_search`) --
+`pair_search`'s own single-turn resolution predates that and still assumes
+no items played out.
 
 WEATHER. The real board has exactly ONE field weather, set by whichever
 weather ability actually resolves (either side's), and it applies to
@@ -148,7 +153,7 @@ import itertools
 from dataclasses import dataclass
 
 from combatants import make_combatant
-from damage import (WEIGHT_BASED_POWER, damage_roll, defensive_stat, effective_stat,
+from damage import (WEIGHT_BASED_POWER, MoveInfo, damage_roll, defensive_stat, effective_stat,
                     hit_count_for, is_spread_move, move_from_showdown)
 from engine import FieldState, WEATHER_SETTERS, effective_speed
 from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
@@ -1018,6 +1023,15 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
 # ------------------------------------------------------------------ joint pair
 
 
+# A no-op stand-in for "this role used Protect this turn" -- `_resolve_turn`
+# substitutes this for a protected enemy role instead of calling
+# `_choose_action`, so it still counts as an action (priority 4, real speed
+# order effects) but lands no hit. Not a real move lookup (Protect isn't in
+# any moveset here) -- just enough of a `MoveInfo` for `speed_key`/the
+# enemy-acted bookkeeping to treat it like any other move.
+_PROTECT_MOVE = MoveInfo("Protect", 0, "Normal", "Status", "self", priority=4)
+
+
 def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None):
     """Best (hits: {role: Hit}, MoveInfo) for `attacker` against whichever of
@@ -1066,7 +1080,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
 
 def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
-                  enemy_speed_mult=1.0):
+                  enemy_speed_mult=1.0, protected_roles=frozenset()):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
     enemy side chooses independently and greedily (`_choose_action` with no
     hint), same "no coordination" behaviour `_sequential_pair_outcome`
@@ -1080,6 +1094,17 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     `enemy_speed_mult`: `>1.0` for the Tailwind-robustness replay (mirrors
     `engine.effective_speed`'s real `tailwind_p2 *= 2.0` rule) -- applied only
     to the turn-ORDER comparison, the same thing a real Tailwind changes.
+
+    `protected_roles`: enemy roles ("E1"/"E2") that use Protect THIS turn
+    instead of whatever `_choose_action` would have picked -- `_PROTECT_MOVE`
+    is substituted directly (still a real action, at priority 4, so it still
+    goes first in `speed_key` and still counts toward `enemy_acted`) and any
+    hit aimed at that role this turn is dropped rather than applied, exactly
+    like a real Protect block. This is what lets `_best_turn`'s existing
+    exhaustive hint search learn -- with no change to ITS own logic -- not to
+    waste an attack on a protected enemy: a hint combo that targets a
+    protected role simply scores no KO and no damage for that hit, so a combo
+    that targets the other, unprotected enemy naturally ranks higher.
 
     `weather` is the ONE shared field value (`_field_weather`'s own return)
     -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
@@ -1099,8 +1124,11 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                     typechart, weather=weather,
                                     hinted_target=our_hints.get(role))
     for role, c in theirs_live.items():
-        plan[role] = _choose_action(c, moves_by_role[role], ours_live,
-                                    typechart, weather=weather)
+        if role in protected_roles:
+            plan[role] = ({}, _PROTECT_MOVE)
+        else:
+            plan[role] = _choose_action(c, moves_by_role[role], ours_live,
+                                        typechart, weather=weather)
 
     def speed_key(role):
         mv = plan[role][1]
@@ -1123,9 +1151,28 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
         if mv is None:
             continue
         for tgt_role, got in hits.items():
+            if tgt_role in protected_roles:
+                continue  # Protect blocks this hit entirely
             if hp.get(tgt_role, 0.0) <= 0:
                 continue
-            hp[tgt_role] = max(0.0, hp[tgt_role] - got.frac)
+            target_c = combatants[tgt_role]
+            new_hp = hp[tgt_role] - got.frac
+            # Focus Sash / Sturdy: survive a would-be KO at 1 HP, but only
+            # from FULL HP -- mirrors `battle.py`'s own rule exactly
+            # (`target.current_hp == target.max_hp()`). Checked against
+            # `hp[tgt_role]` (still at 1.0, untouched) rather than a
+            # separate "already used" flag, and never written back onto the
+            # shared `Combatant` (`target_c.item` stays whatever it was) --
+            # these objects are reused across every replay `_pair_vs_targets`
+            # runs (normal, tailwind, Protect x2), so mutating the real item
+            # here would silently consume it in hypotheses that never
+            # actually happened. Once knocked down to that sliver, `hp[
+            # tgt_role]` is no longer 1.0, so a second lethal hit this same
+            # race correctly finishes it off instead of re-triggering.
+            if (new_hp <= 0 and hp[tgt_role] >= 1.0 and target_c.max_hp()
+                    and (target_c.item == "Focus Sash" or target_c.ability == "Sturdy")):
+                new_hp = 1.0 / target_c.max_hp()
+            hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))
         if wiped is None:
             if hp["E1"] <= 0 and hp["E2"] <= 0:
@@ -1136,7 +1183,7 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
 
 
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,
-              enemy_speed_mult=1.0):
+              enemy_speed_mult=1.0, protected_roles=frozenset()):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -1144,6 +1191,10 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     their own move. At most 2x2=4 combinations (fewer once one side is down
     to one live attacker or the other side to one live target), so this stays
     cheap per turn.
+
+    `protected_roles` is passed straight through to `_resolve_turn` -- see
+    its own docstring for how a protected enemy role naturally falls out of
+    OUR side's ranking here with no change to the ranking itself.
 
     Ranked by (enemies KO'd this turn, -ours KO'd this turn, net fractional
     damage this turn) -- "best FOR US", matching every other joint search in
@@ -1157,7 +1208,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
         hints = dict(zip(ours_live, combo))
         new_hp, log, enemy_acted, wiped = _resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, hints,
-            enemy_speed_mult=enemy_speed_mult)
+            enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
@@ -1171,7 +1222,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 
 
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
-                enemy_speed_mult=1.0, first_turn_moves_override=None):
+                enemy_speed_mult=1.0, first_turn_moves_override=None,
+                first_turn_protected_role=None):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -1195,6 +1247,13 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     enemy is free to aim at the switch-in or the stayer, same "no
     coordination, each picks its own best" rule this module already has),
     only the Pokemon that just switched in has nothing to do yet.
+
+    `first_turn_protected_role`: optional single enemy role ("E1" or "E2")
+    that Protects on turn 1 ONLY, then is dropped -- `_pair_vs_targets` uses
+    this (once for each enemy role) to check whether a scouting Protect on
+    the very first turn -- the canonical "50/50" moment in real doubles --
+    can still turn our sweep/out-trade into something worse. See
+    `_resolve_turn`'s own docstring for the mechanics.
     """
     hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
     any_enemy_acted = False
@@ -1206,9 +1265,11 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
         turn_moves = moves_by_role
         if turn_i == 0 and first_turn_moves_override:
             turn_moves = {**moves_by_role, **first_turn_moves_override}
+        protected = ({first_turn_protected_role}
+                    if turn_i == 0 and first_turn_protected_role else frozenset())
         hp, turn_log, enemy_acted, wiped = _best_turn(
             combatants, turn_moves, hp, typechart, weather,
-            enemy_speed_mult=enemy_speed_mult)
+            enemy_speed_mult=enemy_speed_mult, protected_roles=protected)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
@@ -1312,10 +1373,25 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     `target_names`' C(n,2) pairings.
 
     `detail`: {(e1, e2): {outcome, turns_used, tailwind_outcome,
-    tailwind_safe, log}}. `log` is `_joint_race`'s own per-turn hit list --
-    "what the damage roll is", not just the win/loss classification -- for
-    the NORMAL-speed race (the one that decided `outcome`); the Tailwind
-    replay's log isn't kept, only whether it still won.
+    tailwind_safe, protect_outcomes, protect_safe, log}}. `log` is
+    `_joint_race`'s own per-turn hit list -- "what the damage roll is", not
+    just the win/loss classification -- for the NORMAL-speed race (the one
+    that decided `outcome`); the Tailwind and Protect replays' logs aren't
+    kept, only whether they still won.
+
+    PROTECT ROBUSTNESS: the same normal-speed race is also replayed twice
+    more, once with E1 Protecting turn 1 and once with E2 Protecting turn 1
+    (mirroring the Tailwind replay's "same plan, one hypothesis changed"
+    pattern) -- the real-doubles 50/50 the user described (Metagross+
+    Hydreigon vs Mega Charizard Y+Sylveon: if Sylveon protects turn 1, Mega
+    Charizard Y KOs Metagross, then Sylveon beats Hydreigon next turn) is
+    exactly "does a turn-1 scouting Protect from either enemy still leave us
+    sweeping or out-trading". `protect_outcomes`: {"E1": outcome_if_E1_
+    protects, "E2": outcome_if_E2_protects}. `protect_safe` is True only when
+    BOTH replays are still "sweep" or "out_trade" -- either one flipping to
+    "loss"/"no_ko" means the enemy has a Protect-timed 50/50 against this
+    pair, which is exactly what the user wants surfaced rather than hidden
+    behind a `outcome` that only reflects the no-Protect line of play.
 
     `want_grid`: also compute `_damage_grid`/`_ohko_risk` per enemy pair, on
     whichever mega assignment was actually kept -- 8 extra `_raw_hit` calls
@@ -1340,10 +1416,20 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 tw_outcome, _tw_t, _tw_hp, _tw_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
                     enemy_speed_mult=2.0)
+                pr_e1_outcome, _pr1_t, _pr1_hp, _pr1_log = _joint_race(
+                    combatants, moves_by_role, typechart, weather, turns,
+                    first_turn_protected_role="E1")
+                pr_e2_outcome, _pr2_t, _pr2_hp, _pr2_log = _joint_race(
+                    combatants, moves_by_role, typechart, weather, turns,
+                    first_turn_protected_role="E2")
+                protect_outcomes = {"E1": pr_e1_outcome, "E2": pr_e2_outcome}
                 entry = {
                     "outcome": outcome, "turns_used": turns_used,
                     "tailwind_outcome": tw_outcome,
                     "tailwind_safe": tw_outcome in ("sweep", "out_trade"),
+                    "protect_outcomes": protect_outcomes,
+                    "protect_safe": all(o in ("sweep", "out_trade")
+                                        for o in protect_outcomes.values()),
                     "log": log, "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
                 }
                 if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
@@ -1369,6 +1455,7 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         "pairs_lost": sum(1 for d in detail.values() if d["outcome"] == "loss"),
         "pairs_no_ko": sum(1 for d in detail.values() if d["outcome"] == "no_ko"),
         "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
+        "pairs_protect_safe": sum(1 for d in detail.values() if d["protect_safe"]),
         "pairs_total": len(detail),
     }
     return detail, summary
@@ -1411,11 +1498,20 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
     either named enemy actually knowing Tailwind. `tailwind_safe` is True
     when that re-run's outcome is STILL `sweep` or `out_trade`.
 
+    PROTECT ROBUSTNESS: every enemy pair is also raced twice more, once with
+    each enemy Protecting turn 1 -- see `_pair_vs_targets`'s own docstring.
+    `protect_safe` is True only when BOTH replays are still `sweep` or
+    `out_trade`, i.e. neither enemy has a turn-1 scouting Protect that turns
+    this pair's win into a loss or stall.
+
     Returns rows: {name, item, pairs_swept, pairs_traded, pairs_lost,
-    pairs_no_ko, pairs_tailwind_safe, pairs_total, detail} -- `detail` is
-    `_pair_vs_targets`'s own shape, damage log included. Ranked by
-    (swept + traded) first, then tailwind_safe count -- mirrors
-    `pair_search`'s existing `(clean+trade, -pinned)` sort.
+    pairs_no_ko, pairs_tailwind_safe, pairs_protect_safe, pairs_total,
+    detail} -- `detail` is `_pair_vs_targets`'s own shape, damage log
+    included. Ranked by (swept + traded) first, then protect_safe count,
+    then tailwind_safe count -- mirrors `pair_search`'s existing
+    `(clean+trade, -pinned)` sort, with protect_safe weighted ahead of
+    tailwind_safe since a live Protect 50/50 is a more concrete risk than a
+    hypothetical Tailwind.
     """
     partner_item, partner_move_names, _partner_weather = best_answer(
         partner_name, merged, moves_db, natures, typechart, target_names,
@@ -1447,7 +1543,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
             typechart, turns)
         rows.append({"name": name, "item": item, "detail": detail, **summary})
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
-                             -r["pairs_tailwind_safe"]))
+                             -r["pairs_protect_safe"], -r["pairs_tailwind_safe"]))
     return rows
 
 
@@ -1471,9 +1567,10 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     in this module. Narrow with `--pool-size` for anything but a quick check.
 
     Returns rows: {pair: (name1, name2), item1, item2, pairs_swept,
-    pairs_traded, pairs_lost, pairs_no_ko, pairs_tailwind_safe, pairs_total,
-    detail} -- `detail` is `_pair_vs_targets`'s own shape (damage log
-    included), ranked the same way `joint_pair_search` ranks.
+    pairs_traded, pairs_lost, pairs_no_ko, pairs_tailwind_safe,
+    pairs_protect_safe, pairs_total, detail} -- `detail` is
+    `_pair_vs_targets`'s own shape (damage log included), ranked the same
+    way `joint_pair_search` ranks.
     """
     built = {}
     for name in pool:
@@ -1498,7 +1595,7 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                     "item2": built[n2]["item"], "detail": detail, **summary})
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
-                             -r["pairs_tailwind_safe"]))
+                             -r["pairs_protect_safe"], -r["pairs_tailwind_safe"]))
     return rows
 
 

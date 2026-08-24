@@ -428,7 +428,7 @@ def _print_joint(rows, targets, top, partner, turns):
               f"{turns} turns, average rolls:\n")
     header = (f"{'#':>3} {'Pair':34s} {'items':30s} {'beaten':>7s} "
               f"{'swept':>6s} {'traded':>7s} {'lost':>5s} {'no KO':>6s} "
-              f"{'tw-safe':>8s}")
+              f"{'tw-safe':>8s} {'pr-safe':>8s}")
     print(header)
     print("-" * len(header))
     for i, r in enumerate(rows[:top], start=1):
@@ -439,7 +439,8 @@ def _print_joint(rows, targets, top, partner, turns):
               f"{beaten:>4d}/{total:<2d} {r['pairs_swept']:>3d}/{total:<2d} "
               f"{r['pairs_traded']:>4d}/{total:<2d} {r['pairs_lost']:>2d}/{total:<2d} "
               f"{r['pairs_no_ko']:>3d}/{total:<2d} "
-              f"{r['pairs_tailwind_safe']:>5d}/{total:<2d}")
+              f"{r['pairs_tailwind_safe']:>5d}/{total:<2d} "
+              f"{r['pairs_protect_safe']:>5d}/{total:<2d}")
     print()
     print("Up to `turns` turns, priority THEN speed order, average rolls -- both")
     print("of ours attack with their own real optimised set (not one fixed")
@@ -458,6 +459,13 @@ def _print_joint(rows, targets, top, partner, turns):
     print("tw-safe    the SAME race, replayed with the enemy pair's speed")
     print("           doubled (a Tailwind hypothesis) -- still swept or")
     print("           traded, not lost or no-KO'd, once they move first.")
+    print("pr-safe    the SAME race, replayed twice more -- once with EACH")
+    print("           enemy Protecting turn 1 instead of attacking -- still")
+    print("           swept or traded both times. A turn-1 scouting Protect")
+    print("           is the classic doubles 50/50 (e.g. the second enemy")
+    print("           protects, the first still KOs one of ours, then the")
+    print("           protector cleans up next turn) -- this flags it rather")
+    print("           than hiding it behind the no-Protect line of play.")
     print()
     print("DAMAGE, both directions: each line is the roll (worst-average-best")
     print("%) that hit did, read against whatever HP the target had left AT")
@@ -472,8 +480,11 @@ def _print_joint(rows, targets, top, partner, turns):
         for (e1, e2), d in worst[:3]:
             role_name["E1"], role_name["E2"] = e1, e2
             tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
+            pr = "" if d["protect_safe"] else (
+                f"  [protect: {e1} protects->{d['protect_outcomes']['E1']}, "
+                f"{e2} protects->{d['protect_outcomes']['E2']}]")
             print(f"      {e1} + {e2}: {d['outcome']} "
-                 f"(turn {d['turns_used']}){tw}")
+                 f"(turn {d['turns_used']}){tw}{pr}")
             for turn_i, turn_hits in enumerate(d["log"], 1):
                 for role, tgt_role, h in turn_hits:
                     spread = " (spread)" if h.num_targets_hit > 1 else ""
@@ -496,7 +507,8 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
     print(f"{beaten}/{total} beaten ({summary['pairs_swept']} swept, "
          f"{summary['pairs_traded']} traded), {summary['pairs_lost']} lost, "
          f"{summary['pairs_no_ko']} no-KO, "
-         f"{summary['pairs_tailwind_safe']}/{total} tailwind-safe\n")
+         f"{summary['pairs_tailwind_safe']}/{total} tailwind-safe, "
+         f"{summary['pairs_protect_safe']}/{total} protect-safe\n")
 
     def sort_key(kv):
         (_e1, _e2), d = kv
@@ -507,7 +519,10 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
     for (e1, e2), d in ordered:
         role_name["E1"], role_name["E2"] = e1, e2
         tw = "" if d["tailwind_safe"] else f"  [UNSAFE under tailwind: {d['tailwind_outcome']}]"
-        print(f"  {e1} + {e2}: {d['outcome'].upper()} (turn {d['turns_used']}){tw}")
+        pr = "" if d["protect_safe"] else (
+            f"  [UNSAFE if {e1} protects: {d['protect_outcomes']['E1']}; "
+            f"if {e2} protects: {d['protect_outcomes']['E2']}]")
+        print(f"  {e1} + {e2}: {d['outcome'].upper()} (turn {d['turns_used']}){tw}{pr}")
         for r in d["ohko_risk"]:
             print(f"      OHKO RISK: {role_name[r['attacker']]}'s {r['move']} "
                  f"could one-shot {role_name[r['target']]} "
@@ -845,6 +860,9 @@ def main():
                   "outcome": d["outcome"], "turns used": d["turns_used"],
                   "tailwind outcome": d["tailwind_outcome"],
                   "tailwind safe": d["tailwind_safe"],
+                  "protect safe": d["protect_safe"],
+                  "if first enemy protects": d["protect_outcomes"]["E1"],
+                  "if second enemy protects": d["protect_outcomes"]["E2"],
                   "ohko risk": "; ".join(
                       f"{r['attacker']}'s {r['move']} on {r['target']} "
                       f"({r['hi'] * 100:.0f}%)" for r in d["ohko_risk"])}
@@ -900,6 +918,7 @@ def main():
                 row["pairs lost"] = r["pairs_lost"]
                 row["pairs no KO"] = r["pairs_no_ko"]
                 row["pairs tailwind-safe"] = r["pairs_tailwind_safe"]
+                row["pairs protect-safe"] = r["pairs_protect_safe"]
                 row["pairs total"] = r["pairs_total"]
             else:
                 row["pairs clean"] = r["pairs_clean"]

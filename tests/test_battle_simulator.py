@@ -260,6 +260,151 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
         self.assertFalse(any(b.label == "Submit turn" for b in tab.button))
 
 
+class TestRechargeUI(unittest.TestCase):
+    """"Hyper Beam requires a one turn cooldown after using." A recharging
+    Pokemon gets no action menu at all in the real games -- the Battle
+    Simulator must match that, not offer a move list `Battle.run_turn`
+    would just force into a no-op anyway."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_a_recharging_slot_shows_no_action_menu(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        garchomp = battle.p1.active[0]
+        garchomp.volatile["must_recharge"] = True
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        self.assertTrue(
+            any("must recharge" in (m.value or "") for m in tab.markdown),
+            "the recharging slot must be labelled, not shown a normal menu")
+        # Both active slots normally get their own "Switch" button (a full
+        # bench sits behind each) -- with Garchomp forced to recharge, only
+        # Incineroar's slot should still offer one.
+        switch_buttons = [b for b in tab.button if b.label == "Switch"]
+        self.assertEqual(len(switch_buttons), 1,
+                         "the recharging slot must not offer a Switch option")
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        self.assertFalse(submit.disabled)
+
+    def test_submitting_through_a_recharge_turn_advances_the_battle(self):
+        """Clicking Submit turn while a slot is recharging must still run a
+        real turn -- `sim_legal_actions`'s forced no-op action for that
+        slot, not a blocked or crashed submission."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        garchomp = battle.p1.active[0]
+        garchomp.volatile["must_recharge"] = True
+        at = at.run()
+
+        tab = sim_tab(at)
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        submit.click().run()
+        self.assertEqual(len(at.exception), 0)
+        battle_after = at.session_state["sim_battle"]
+        self.assertEqual(battle_after.turn_num, 1)
+        self.assertFalse(garchomp.volatile.get("must_recharge"),
+                         "the recharge turn must actually be spent")
+
+
+class TestStepThroughSummary(unittest.TestCase):
+    """"When I finish stepping through a team in the Battle Simulator, I
+    would like to see a summary of where I lose, to what, and KO/faint and
+    damage ratio by my/their mons." Built from `Battle.stats` (already
+    tracked per-battle by the engine) plus `Combatant.fainted`, accumulated
+    across `sim_leads` -- not a second stats mechanism."""
+
+    def _finished_battle(self, our4, their4, our_loses):
+        from combatants import make_team
+        from battle import Battle
+        from solver import build_moveset, TOP_K_MOVES
+        W = world()
+        oc = make_team(our4, W["merged"], W["natures"])
+        ec = make_team(their4, W["merged"], W["natures"])
+        battle = Battle(oc, ec, W["typechart"], W["moves"])
+        for c in (oc if our_loses else ec):
+            c.fainted = True
+            c.current_hp = 0
+        movesets = {c.name: build_moveset(W["merged"][c.name], W["moves"], top_k=TOP_K_MOVES)
+                   for c in oc + ec}
+        return battle, movesets
+
+    def test_summary_accumulates_and_shows_after_the_last_lead(self):
+        our4 = ["Garchomp", "Incineroar"]
+        their4_a = ["Kingambit", "Basculegion"]
+        their4_b = ["Whimsicott", "Sinistcha"]
+        battle1, movesets1 = self._finished_battle(our4, their4_a, our_loses=False)
+
+        at = fresh_app()
+        at.session_state["sim_battle"] = battle1
+        at.session_state["sim_movesets"] = movesets1
+        at.session_state["sim_our4"] = our4
+        at.session_state["sim_their4"] = their4_a
+        at.session_state["sim_mode"] = "Step through all 15 leads"
+        at.session_state["sim_leads"] = [(0.0, their4_a, None), (0.0, their4_b, None)]
+        at.session_state["sim_lead_idx"] = 0
+        at.session_state["sim_turn_log"] = []
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        self.assertEqual(len(at.session_state["sim_leads_summary"]), 1,
+                         "the first (won) lead must be recorded once it ends")
+        self.assertTrue(any("Next lead" in b.label for b in tab.button))
+        # No summary render yet -- there's still a lead left to step through.
+        self.assertFalse(any("Step-through summary" in (m.value or "")
+                             for m in tab.markdown))
+
+        # Advance to the (losing) second and final lead.
+        battle2, movesets2 = self._finished_battle(our4, their4_b, our_loses=True)
+        at.session_state["sim_battle"] = battle2
+        at.session_state["sim_movesets"] = movesets2
+        at.session_state["sim_their4"] = their4_b
+        at.session_state["sim_lead_idx"] = 1
+        at.session_state["sim_turn_log"] = []
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        self.assertEqual(len(at.session_state["sim_leads_summary"]), 2,
+                         "the second (lost) lead must be recorded too, not "
+                         "just overwrite the first")
+        headers = [m.value for m in tab.markdown
+                  if "Step-through summary" in (m.value or "")]
+        self.assertTrue(headers)
+        self.assertIn("1/2 won", headers[0])
+        self.assertTrue(any("Lost to" in (m.value or "") for m in tab.markdown))
+        self.assertTrue(any("Whimsicott" in (m.value or "") for m in tab.markdown),
+                        "the losing enemy pair's names must appear in the summary")
+
+    def test_new_battle_clears_the_accumulated_summary(self):
+        our4 = ["Garchomp", "Incineroar"]
+        their4 = ["Kingambit", "Basculegion"]
+        battle, movesets = self._finished_battle(our4, their4, our_loses=False)
+
+        at = fresh_app()
+        at.session_state["sim_battle"] = battle
+        at.session_state["sim_movesets"] = movesets
+        at.session_state["sim_our4"] = our4
+        at.session_state["sim_their4"] = their4
+        at.session_state["sim_mode"] = "Step through all 15 leads"
+        at.session_state["sim_leads"] = [(0.0, their4, None)]
+        at.session_state["sim_lead_idx"] = 0
+        at.session_state["sim_turn_log"] = []
+        at = at.run()
+        self.assertIn("sim_leads_summary", at.session_state)
+
+        tab = sim_tab(at)
+        new_battle_btn = next(b for b in tab.button if b.label == "New battle")
+        new_battle_btn.click().run()
+        self.assertNotIn("sim_leads_summary", at.session_state)
+
+
 class TestBattleSimulatorOnlyOneMegaInLiveBattle(unittest.TestCase):
     """The actual Combatants built for the interactive battle honour "only
     one Mega per side", the same rule this session's counter_finder.py fix
@@ -382,19 +527,23 @@ class TestPerTurnMegaChoiceAndReplacementUI(unittest.TestCase):
         self.assertEqual(battle.p1.active[0].name, "Basculegion")
 
 
-class TestBattleMenuAndSprites(unittest.TestCase):
-    """"It would also be good to have a better UI, like sprites, buttons
-    like battle->4 moves/switch->select pokemon." """
+class TestBattleMenu(unittest.TestCase):
+    """"It would also be good to have a better UI, ... buttons like
+    battle->4 moves/switch->select pokemon." Sprites were dropped later --
+    "remove links to showdown etc, I don't want to be calling external
+    websites" -- `st.image` would fetch them straight from the viewer's
+    browser, an external call this app must never make."""
 
     OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
     THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
 
-    def test_board_shows_a_sprite_per_active_pokemon(self):
+    def test_board_shows_no_external_images(self):
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
-        # One image per active slot on each side (4 actives total).
-        self.assertGreaterEqual(len(tab.image), 4)
+        self.assertEqual(len(tab.image), 0,
+                         "no st.image (or any other external fetch) belongs "
+                         "in the Battle Simulator board")
 
     def test_menu_defaults_to_attack_with_a_move_row(self):
         at = fresh_app()

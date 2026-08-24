@@ -409,6 +409,17 @@ class Battle:
         for a in sorted(switches, key=lambda a: -effective_speed(a.combatant, self.field, a.side)):
             side = self.p1 if a.side == "p1" else self.p2
             opp = self.p2 if a.side == "p1" else self.p1
+            if a.combatant.volatile.pop("must_recharge", False):
+                # Hyper Beam / Giga Impact / the other recharge moves lock
+                # their user in place for the whole following turn -- no
+                # move, no switch, no choice at all (the real games don't
+                # even show an action menu). A switch attempt never reaches
+                # the move-resolution phase's own recharge check below (a
+                # "switch" action is never in move_actions), so the flag
+                # has to be popped and logged here too, not only there.
+                self.log.add(f"{self.tag(a.combatant)} must recharge and cannot switch out!")
+                self._emit(event="recharge", side=a.side, actor=a.combatant.name)
+                continue
             if self.is_trapped(a.combatant):
                 self.log.add(f"{self.tag(a.combatant)} is trapped and cannot switch out!")
                 self._emit(event="trapped", side=a.side, actor=a.combatant.name)
@@ -440,6 +451,20 @@ class Battle:
 
         # 2. Moves resolve in priority/speed order.
         move_actions = [a for a in all_actions if a.kind in ("move", "protect")]
+        # A Pokemon that must recharge (see _resolve_move's own "recharge"
+        # flag set below) gets NO action this turn, regardless of what was
+        # submitted -- filtered out here, before Protect/Wide Guard/redirect
+        # registration even runs, since it is fully vulnerable while
+        # recharging (never protected) and genuinely cannot act. A switch
+        # attempt for it was already blocked and logged above, in the
+        # switches loop -- this only ever fires for a submitted move/protect.
+        still_recharging = [a for a in move_actions if a.combatant.volatile.get("must_recharge")]
+        for a in still_recharging:
+            a.combatant.volatile.pop("must_recharge", None)
+            self.log.add(f"{self.tag(a.combatant)} must recharge!")
+            self._emit(event="recharge", side=a.side, actor=a.combatant.name)
+        recharging_ids = {id(a) for a in still_recharging}
+        move_actions = [a for a in move_actions if id(a) not in recharging_ids]
         # A Pokemon mid-charge on a two-turn move (Solar Beam/Blade, Electro Shot)
         # MUST complete it this turn -- override whatever action was submitted for
         # it, same as the real games not offering a choice on the release turn.
@@ -733,6 +758,15 @@ class Battle:
         if not live_targets:
             self.log.add(f"{attacker.name} uses {move.name}")
             return
+
+        # Recharge moves (Hyper Beam, Giga Impact, the other "Blast Burn"-
+        # family signatures): using one -- landing, missing, or blocked by
+        # Protect makes no difference, only having a real target to use it
+        # against does -- locks the user out of any action next turn (see
+        # the "must_recharge" filter in run_turn, which fires this whether
+        # or not the hit actually connected).
+        if move.flags and move.flags.get("recharge"):
+            attacker.volatile["must_recharge"] = True
 
         num_hit = 0
         # Follow Me / Rage Powder redirection: a single-target move aimed at the

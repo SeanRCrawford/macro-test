@@ -789,15 +789,18 @@ class TestJointPairSearch(unittest.TestCase):
         self.assertTrue(d["tailwind_safe"])
         self.assertEqual(d["tailwind_outcome"], "sweep")
 
-    def test_tailwind_can_flip_a_sweep_to_unsafe(self):
-        """Mega Gengar + Mega Alakazam vs Sharpedo + Rampardos: a real sweep
-        at normal speed, but NOT once the enemy pair moves first -- the
+    def test_tailwind_can_flip_a_win_to_unsafe(self):
+        """Mega Gengar + Mega Alakazam vs Sharpedo (Focus Sash, its own
+        real most-used item -- see `TestJointFocusSashAndSturdy`) +
+        Rampardos: a real win at normal speed (Sharpedo's Sash keeps it
+        alive at 1 HP to land one hit back, so `out_trade` rather than a
+        clean `sweep`), but NOT once the enemy pair moves first -- the
         robustness check has to actually replay the race, not just assume a
         win stays a win."""
         row = self._search("Mega Gengar", ["Sharpedo", "Rampardos"],
                            "Mega Alakazam")
         d = row["detail"][("Sharpedo", "Rampardos")]
-        self.assertEqual(d["outcome"], "sweep")
+        self.assertEqual(d["outcome"], "out_trade")
         self.assertFalse(d["tailwind_safe"])
         self.assertEqual(d["tailwind_outcome"], "loss")
 
@@ -888,6 +891,205 @@ class TestJointPairSearch(unittest.TestCase):
             "Mega Alakazam", merged, moves, natures, typechart)
         beaten = [r["pairs_swept"] + r["pairs_traded"] for r in rows]
         self.assertEqual(beaten, sorted(beaten, reverse=True))
+
+
+class TestJointProtectRobustness(unittest.TestCase):
+    """A turn-1 scouting Protect from either enemy is the classic doubles
+    50/50 -- "it must be robust to either enemy protecting on turn 1, for
+    instance, Metagross/Hydreigon vs Mega Charizard Y/Sylveon - if Sylveon
+    protects, then Mega Charizard Y KOs Metagross, and Sylveon can beat
+    Hydreigon the next turn." `_pair_vs_targets` replays the same race with
+    each enemy role Protecting turn 1 and reports `protect_safe` only if
+    BOTH replays are still a win.
+
+    Both fixtures are the same named pair against the same enemy pair --
+    only Metagross's item differs -- verified by running the search itself,
+    not hand-derived: with its optimised Choice Scarf (fast enough to act
+    before Mega Charizard Y regardless of who Protects) the pair is safe;
+    forced onto Life Orb (slower than Mega Charizard Y) it is not.
+    """
+
+    def setUp(self):
+        self.W = world()
+
+    def _deep(self, item_overrides=None):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _i1, _i2, detail, summary = cf.deep_dive(
+            "Metagross", "Hydreigon", ["Mega Charizard Y", "Sylveon"],
+            merged, moves, natures, typechart, turns=2,
+            item_overrides=item_overrides)
+        return detail[("Mega Charizard Y", "Sylveon")], summary
+
+    def test_protect_outcomes_present_for_both_enemy_roles(self):
+        d, _summary = self._deep()
+        self.assertEqual(set(d["protect_outcomes"]), {"E1", "E2"})
+
+    def test_fast_enough_pair_is_protect_safe(self):
+        """Metagross on its own optimised (Scarf) set outspeeds Mega
+        Charizard Y regardless of which enemy Protects turn 1."""
+        d, summary = self._deep()
+        self.assertTrue(d["protect_safe"])
+        for outcome in d["protect_outcomes"].values():
+            self.assertIn(outcome, ("sweep", "out_trade"))
+        self.assertEqual(summary["pairs_protect_safe"], 1)
+
+    def test_a_slow_pair_can_have_a_real_protect_50_50(self):
+        """Forced off Scarf, Metagross no longer outspeeds Mega Charizard Y
+        -- a turn-1 Protect from one enemy role turns the race into a loss,
+        exactly the 50/50 the request describes."""
+        d, summary = self._deep(item_overrides={"Metagross": "Life Orb"})
+        self.assertFalse(d["protect_safe"])
+        self.assertTrue(
+            any(o not in ("sweep", "out_trade")
+                for o in d["protect_outcomes"].values()),
+            "expected at least one protect replay to flip the outcome")
+        self.assertEqual(summary["pairs_protect_safe"], 0)
+
+    def test_protect_replay_does_not_change_the_no_protect_outcome(self):
+        """The Protect robustness check must not mutate what `outcome`
+        itself reports -- it's an independent replay, not a different line
+        of play for the recorded race."""
+        d, _summary = self._deep()
+        self.assertEqual(d["outcome"], "out_trade")
+
+    def test_protected_role_takes_no_damage_on_the_turn_it_protects(self):
+        """A direct mechanical check on `_joint_race` itself: with E1
+        forced to Protect turn 1, no hit in that turn's log should ever
+        target E1."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        item, mvs, weather = cf._answer_for(
+            "Metagross", merged, moves, natures, typechart,
+            ["Mega Charizard Y", "Sylveon"])
+        c1 = cf._build("Metagross", merged, natures, item=item)
+        c1_moves = cf._move_infos("Metagross", merged, moves, mvs)
+        item2, mvs2, _w2 = cf._answer_for(
+            "Hydreigon", merged, moves, natures, typechart,
+            ["Mega Charizard Y", "Sylveon"])
+        c2 = cf._build("Hydreigon", merged, natures, item=item2)
+        c2_moves = cf._move_infos("Hydreigon", merged, moves, mvs2)
+        _e1_item, e1_mvs, _e1_w = cf._answer_for(
+            "Mega Charizard Y", merged, moves, natures, typechart,
+            ["Metagross", "Hydreigon"])
+        _e2_item, e2_mvs, _e2_w = cf._answer_for(
+            "Sylveon", merged, moves, natures, typechart,
+            ["Metagross", "Hydreigon"])
+        combatants = {"C": c1, "P": c2,
+                     "E1": cf._build("Mega Charizard Y", merged, natures),
+                     "E2": cf._build("Sylveon", merged, natures)}
+        moves_by_role = {
+            "C": c1_moves, "P": c2_moves,
+            "E1": cf._move_infos("Mega Charizard Y", merged, moves, e1_mvs),
+            "E2": cf._move_infos("Sylveon", merged, moves, e2_mvs),
+        }
+        weather = cf._field_weather(combatants)
+        _outcome, _t, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, weather, 2,
+            first_turn_protected_role="E1")
+        turn1 = log[0]
+        targets_hit = {tgt for _role, tgt, _h in turn1}
+        self.assertNotIn("E1", targets_hit)
+
+
+class TestJointFocusSashAndSturdy(unittest.TestCase):
+    """"The focus sash item also does not seem to work." The joint race
+    model previously tracked no items played out over a turn at all (a
+    documented gap in this module's own header note) -- Focus Sash / Sturdy
+    survival at 1 HP from full HP, mirroring `battle.py`'s own rule exactly,
+    is now honoured in `_resolve_turn`'s hit application."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _isolated_hit(self, attacker_name, attacker_moves, target_name,
+                      target_item=None, target_ability_move=None):
+        """C (holding `attacker_moves`) attacks E1 (`target_name`, holding
+        `target_item`) alone -- P and E2 forced fainted so only the one hit
+        being tested can land."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        c = cf._build(attacker_name, merged, natures)
+        e1 = cf._build(target_name, merged, natures, item=target_item)
+        c_moves = cf._move_infos(attacker_name, merged, moves, attacker_moves)
+        combatants = {"C": c, "P": c, "E1": e1, "E2": e1}
+        moves_by_role = {"C": c_moves, "P": [], "E1": [], "E2": []}
+        weather = cf._field_weather(combatants)
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        new_hp, log, _ea, _w = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
+        return new_hp["E1"], log, e1
+
+    def test_focus_sash_survives_a_would_be_ohko_at_1_hp(self):
+        hp_after, log, sylveon = self._isolated_hit(
+            "Metagross", ["Meteor Mash"], "Sylveon", target_item="Focus Sash")
+        self.assertTrue(any(h.frac >= 1.0 for _r, _t, h in log),
+                        "fixture assumes this hit is a real would-be OHKO")
+        self.assertGreater(hp_after, 0.0, "Focus Sash must prevent the faint")
+        self.assertAlmostEqual(hp_after, 1.0 / sylveon.max_hp(), places=6)
+
+    def test_focus_sash_does_not_help_from_anything_less_than_full_hp(self):
+        """The real rule: only from FULL HP -- a Sash-holder already chipped
+        once must faint normally on a second lethal hit."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        c = cf._build("Metagross", merged, natures)
+        e1 = cf._build("Sylveon", merged, natures, item="Focus Sash")
+        c_moves = cf._move_infos("Metagross", merged, moves, ["Meteor Mash"])
+        combatants = {"C": c, "P": c, "E1": e1, "E2": e1}
+        moves_by_role = {"C": c_moves, "P": [], "E1": [], "E2": []}
+        weather = cf._field_weather(combatants)
+        # Already down to a sliver, NOT full HP.
+        hp = {"C": 1.0, "P": 0.0, "E1": 0.02, "E2": 0.0}
+        new_hp, _log, _ea, _w = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
+        self.assertEqual(new_hp["E1"], 0.0)
+
+    def test_sturdy_survives_the_same_way_with_no_item_at_all(self):
+        # Sylveon doesn't naturally have Sturdy -- flip the built Combatant's
+        # ability directly (this module tracks no ability-legality table of
+        # its own; the fixture just needs SOME Sturdy-holder to exist, and
+        # Meteor Mash on Sylveon is already established as a real OHKO by
+        # the Focus Sash test above).
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        c = cf._build("Metagross", merged, natures)
+        e1 = cf._build("Sylveon", merged, natures)
+        e1.ability = "Sturdy"
+        c_moves = cf._move_infos("Metagross", merged, moves, ["Meteor Mash"])
+        combatants = {"C": c, "P": c, "E1": e1, "E2": e1}
+        moves_by_role = {"C": c_moves, "P": [], "E1": [], "E2": []}
+        weather = cf._field_weather(combatants)
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        new_hp, log, _ea, _w = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
+        self.assertTrue(any(h.frac >= 1.0 for _r, _t, h in log),
+                        "fixture assumes this hit is a real would-be OHKO")
+        self.assertGreater(new_hp["E1"], 0.0)
+
+    def test_the_shared_combatant_item_is_never_mutated(self):
+        """These Combatant objects are reused across every replay
+        `_pair_vs_targets` runs (normal, tailwind, Protect x2) -- consuming
+        the item on the shared object would silently carry a hypothesis's
+        consequence into an unrelated replay. Running the exact same lethal
+        hit twice must save the Sash both times, not just the first."""
+        hp_after_1, _log1, sylveon = self._isolated_hit(
+            "Metagross", ["Meteor Mash"], "Sylveon", target_item="Focus Sash")
+        self.assertEqual(sylveon.item, "Focus Sash",
+                         "the shared Combatant's item must never be consumed")
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        c = cf._build("Metagross", merged, natures)
+        c_moves = cf._move_infos("Metagross", merged, moves, ["Meteor Mash"])
+        combatants = {"C": c, "P": c, "E1": sylveon, "E2": sylveon}
+        moves_by_role = {"C": c_moves, "P": [], "E1": [], "E2": []}
+        weather = cf._field_weather(combatants)
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        new_hp2, _log2, _ea2, _w2 = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
+        self.assertGreater(new_hp2["E1"], 0.0,
+                          "a second independent replay must still honour "
+                          "the Sash, not treat it as already used")
 
 
 class TestJointDamageLog(unittest.TestCase):
