@@ -13,8 +13,9 @@
     python counter_table.py --vs "Kingambit,Basculegion,Garchomp" --joint --partner "Whimsicott"
     python counter_table.py --vs "Kingambit,Basculegion,Garchomp" --joint --partner "Whimsicott" --turns 3
     python counter_table.py --vs "Kingambit,Basculegion" --joint --pool-size 30
+    python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --vs "Basculegion,Mega Charizard Y,Mega Floette,Garchomp,Kingambit,Whimsicott"
 
-Four modes, pick one (or combine --chip-from/--chip-move with --pairs):
+Five modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
   (default)   OHKO / threshold search: best legal item, WORST-roll % on EACH
               named target (a guarantee), ranked on the worst of them.
@@ -51,6 +52,16 @@ Four modes, pick one (or combine --chip-from/--chip-move with --pairs):
               as --outspeed scarf) and reports whether the pair is still
               safe. Every printed line shows the actual damage roll each hit
               did, both directions -- not just the win/loss classification.
+  --deep      A DEEP DIVE on --our's specific, already-chosen pair -- no
+              search. Every enemy pair drawn from --vs shown in FULL (pass a
+              whole 6-Pokemon roster for "all 15 possible enemy leads"):
+              which of theirs is an outright OHKO RISK on ours (checked on
+              their best roll, a structural fact about the matchup -- "Scizor
+              is always OHKO'd by Mega Charizard Y" -- not contingent on
+              which line the race happens to play out), the full 2x2 damage
+              grid both directions (not just whichever move the race chose),
+              and the turn-by-turn line each matchup collapses into. Losses
+              and OHKO risks sort first, since those are what's actionable.
 
 By default the WHOLE ~270-Pokemon dataset is searched, not a pre-narrowed
 "generically good" subset -- see `_pool` below for why (short version: "why
@@ -117,7 +128,7 @@ import argparse  # noqa: E402
 
 import _harness  # noqa: E402,F401
 
-from counter_finder import (chip_then_ko, joint_pair_search,  # noqa: E402
+from counter_finder import (chip_then_ko, deep_dive, joint_pair_search,  # noqa: E402
                             joint_pool_search, pair_search, speed_tiers,
                             threshold_search)
 
@@ -405,6 +416,60 @@ def _print_joint(rows, targets, top, partner, turns):
                          f"{_roll(h)}{spread}")
 
 
+def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
+    """One named pair, every enemy pair drawn from `targets` in full --
+    OHKO risk, the 2x2 damage grid both directions, and the turn-by-turn
+    line. Deliberately shows ALL of them (not top-N): "a deep dive" means
+    seeing every one, not a ranked shortlist -- but LOSSES AND OHKO RISKS
+    FIRST, since those are what's actionable.
+    """
+    total = summary["pairs_total"]
+    beaten = summary["pairs_swept"] + summary["pairs_traded"]
+    print(f"Deep dive: {name1} ({item1 or '-'}) + {name2} ({item2 or '-'})")
+    print(f"vs {total} enemy pair(s) drawn from: {', '.join(targets)}\n")
+    print(f"{beaten}/{total} beaten ({summary['pairs_swept']} swept, "
+         f"{summary['pairs_traded']} traded), {summary['pairs_lost']} lost, "
+         f"{summary['pairs_no_ko']} no-KO, "
+         f"{summary['pairs_tailwind_safe']}/{total} tailwind-safe\n")
+
+    def sort_key(kv):
+        (_e1, _e2), d = kv
+        return (_JOINT_RANK[d["outcome"]], -len(d["ohko_risk"]))
+
+    ordered = sorted(detail.items(), key=sort_key)
+    role_name = {"C": name1, "P": name2}
+    for (e1, e2), d in ordered:
+        role_name["E1"], role_name["E2"] = e1, e2
+        tw = "" if d["tailwind_safe"] else f"  [UNSAFE under tailwind: {d['tailwind_outcome']}]"
+        print(f"  {e1} + {e2}: {d['outcome'].upper()} (turn {d['turns_used']}){tw}")
+        for r in d["ohko_risk"]:
+            print(f"      OHKO RISK: {role_name[r['attacker']]}'s {r['move']} "
+                 f"could one-shot {role_name[r['target']]} "
+                 f"(worst roll {r['hi'] * 100:.0f}%)")
+        grid = d["grid"]
+        print("      Damage we deal (average roll):")
+        for (atk, tgt), h in grid["ours"].items():
+            print(f"          {role_name[atk]} -> {role_name[tgt]}: "
+                 f"{h.move_name or '-'} {_roll(h)}"
+                 f"{' (spread)' if h.num_targets_hit > 1 else ''}")
+        print("      Damage we take (average roll):")
+        for (atk, tgt), h in grid["theirs"].items():
+            print(f"          {role_name[atk]} -> {role_name[tgt]}: "
+                 f"{h.move_name or '-'} {_roll(h)}"
+                 f"{' (spread)' if h.num_targets_hit > 1 else ''}")
+        print("      How it plays out:")
+        for turn_i, turn_hits in enumerate(d["log"], 1):
+            if not turn_hits:
+                print(f"          T{turn_i}: nobody left to act")
+                continue
+            for role, tgt_role, h in turn_hits:
+                spread = " (spread)" if h.num_targets_hit > 1 else ""
+                print(f"          T{turn_i} {role_name[role]} -> "
+                     f"{role_name[tgt_role]}: {h.move_name or '-'} "
+                     f"{_roll(h)}{spread}")
+        print()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vs", required=True,
@@ -453,8 +518,20 @@ def main():
                          "(measured: ~6ms per candidate pair per 3 named "
                          "targets, so a --pool-size 80 run is under 20s "
                          "but the full ~270-Pokemon default is minutes)")
+    ap.add_argument("--deep", action="store_true",
+                    help="a DEEP DIVE on --our's specific pair (no search): "
+                         "every enemy pair drawn from --vs shown in full -- "
+                         "which of theirs could OHKO one of ours outright "
+                         "(on their best roll, regardless of who moves "
+                         "first), the 2x2 damage grid both directions, and "
+                         "the turn-by-turn line it collapses into. Pass a "
+                         "whole 6-Pokemon roster to --vs for 'all 15 "
+                         "possible enemy leads'")
+    ap.add_argument("--our", default="", metavar="POKEMON,POKEMON",
+                    help="--deep only: the exact pair to check (required)")
     ap.add_argument("--turns", type=int, default=2, metavar="N",
-                    help="--joint only: how many turns to race (default 2)")
+                    help="--joint/--deep only: how many turns to race "
+                         "(default 2)")
     ap.add_argument("--max-taken", type=float, default=None, metavar="PCT",
                     help="default mode only: drop any row where SOME named "
                          "target's best attack could do PCT%% or more to it "
@@ -495,10 +572,20 @@ def main():
                          "(threshold) mode")
     if args.joint and (args.pairs or args.chip_from or args.speed):
         raise SystemExit("--joint cannot be combined with --pairs/--chip-from/--speed")
+    if args.deep and (args.joint or args.pairs or args.chip_from or args.speed):
+        raise SystemExit("--deep cannot be combined with --joint/--pairs/"
+                         "--chip-from/--speed")
     if args.partner and not args.joint:
         raise SystemExit("--partner requires --joint")
-    if args.turns != 2 and not args.joint:
-        raise SystemExit("--turns only applies to --joint")
+    if args.turns != 2 and not (args.joint or args.deep):
+        raise SystemExit("--turns only applies to --joint/--deep")
+    if args.deep and not args.our:
+        raise SystemExit("--deep requires --our \"Pokemon,Pokemon\"")
+    if args.our and not args.deep:
+        raise SystemExit("--our requires --deep")
+    if args.deep and (args.partner or args.partner_item):
+        raise SystemExit("--partner/--partner-item don't apply to --deep -- "
+                         "--our already names both of the pair")
 
     from _harness import load_world
     from lead_sim import BANNED_ITEMS
@@ -513,7 +600,19 @@ def main():
         raise SystemExit(f"unknown Pokemon: {args.partner}")
     if args.partner and args.partner in targets:
         raise SystemExit("--partner can't also be a --vs target")
-    pool = _pool(args, merged)
+    our_pair = [n.strip() for n in args.our.split(",") if n.strip()]
+    if args.deep:
+        if len(our_pair) != 2:
+            raise SystemExit(f"--our needs exactly 2 Pokemon, lead first "
+                             f"(got {len(our_pair)}: {our_pair})")
+        unknown_our = [n for n in our_pair if n not in merged]
+        if unknown_our:
+            raise SystemExit(f"unknown Pokemon: {', '.join(unknown_our)}")
+        in_targets = [n for n in our_pair if n in targets]
+        if in_targets:
+            raise SystemExit(f"--our can't also be a --vs target: "
+                             f"{', '.join(in_targets)}")
+    pool = [] if args.deep else _pool(args, merged)
     threshold = args.threshold / 100.0
 
     item_overrides = _parse_item_overrides(args.item)
@@ -534,7 +633,10 @@ def main():
         raise SystemExit(f"--partner-item: {args.partner_item!r} is not legal "
                          "in Regulation MB")
 
-    print(f"Searching {len(pool)} Pokemon vs {', '.join(targets)}\n")
+    if args.deep:
+        print(f"Deep dive: {' + '.join(our_pair)} vs {', '.join(targets)}\n")
+    else:
+        print(f"Searching {len(pool)} Pokemon vs {', '.join(targets)}\n")
 
     if args.joint and not args.partner:
         # ~2ms per (our-pair, enemy-pair) combo, measured -- see --partner's
@@ -553,7 +655,14 @@ def main():
         else:
             print()
 
-    if args.speed:
+    if args.deep:
+        item1, item2, detail, summary = deep_dive(
+            our_pair[0], our_pair[1], targets, merged, moves, natures,
+            typechart, turns=args.turns, item_overrides=item_overrides,
+            move_overrides=move_overrides)
+        _print_deep(our_pair[0], our_pair[1], item1, item2, targets, detail,
+                   summary, args.turns)
+    elif args.speed:
         names = targets + [n for n in pool if n not in targets]
         rows = speed_tiers(names, targets, merged, moves, natures, typechart,
                            item_overrides=item_overrides)
@@ -597,7 +706,28 @@ def main():
         _print_threshold(rows, targets, threshold, args.top,
                          max_taken=max_taken, outspeed=args.outspeed)
 
-    if args.csv:
+    if args.csv and args.deep:
+        import csv
+        flat = []
+        for (e1, e2), d in detail.items():
+            row = {"our pair": " + ".join(our_pair), "enemy lead": f"{e1} + {e2}",
+                  "outcome": d["outcome"], "turns used": d["turns_used"],
+                  "tailwind outcome": d["tailwind_outcome"],
+                  "tailwind safe": d["tailwind_safe"],
+                  "ohko risk": "; ".join(
+                      f"{r['attacker']}'s {r['move']} on {r['target']} "
+                      f"({r['hi'] * 100:.0f}%)" for r in d["ohko_risk"])}
+            for (atk, tgt), h in d["grid"]["ours"].items():
+                row[f"our {atk}->{tgt} avg%"] = round(h.avg * 100, 1)
+            for (atk, tgt), h in d["grid"]["theirs"].items():
+                row[f"their {atk}->{tgt} avg%"] = round(h.avg * 100, 1)
+            flat.append(row)
+        with open(args.csv, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(flat[0]) if flat else [])
+            w.writeheader()
+            w.writerows(flat)
+        print(f"\nFull table ({len(flat)} rows): {os.path.abspath(args.csv)}")
+    elif args.csv:
         import csv
         flat = []
         for r in rows:

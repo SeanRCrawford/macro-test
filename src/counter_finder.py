@@ -17,7 +17,7 @@
      permutations, and can include chip from ally. For a spread move such as
      Blizzard, make sure the chip is adjusted correctly (0.75x)"
 
-Five questions, five functions, and none of them re-derives damage or move
+Six questions, six functions, and none of them re-derives damage or move
 choice from scratch:
 
   threshold_search  -- who OHKOs / clears X% on each of these targets, with
@@ -39,6 +39,12 @@ choice from scratch:
                         every legal pair, ranked the same way. Shares its
                         detail shape (including the turn-by-turn damage log)
                         with `joint_pair_search` via `_pair_vs_targets`.
+  deep_dive         -- the full report for ONE named, already-chosen pair:
+                        every enemy pair (pass a whole 6-name roster for
+                        "all 15 leads"), the 2x2 damage grid both directions,
+                        which enemy hits are outright OHKO risks on their
+                        best roll, and the turn-by-turn line each one
+                        collapses into.
 
 Move and item selection is `optimize_sets.best_item`/`best_moveset` -- the
 same search `spread_table.py` and the lead screen use, so a Pokemon found here
@@ -980,8 +986,71 @@ def _build_enemy_pairs(target_names, merged, natures, moves_db):
            for name in target_names}
 
 
+def _grid_hit(attacker, moves, target, other_live, typechart, weather=None):
+    """The best `Hit` `attacker`'s own moveset can land on `target`
+    SPECIFICALLY -- one cell of the 2x2 damage grid, not the move a
+    target-choosing AI would actually pick (that's `_choose_action`).
+
+    A spread move still takes the doubles 0.75x penalty whenever
+    `other_live` (the OTHER Pokemon on the target's side) is not None --
+    hitting `target` at all means hitting `other_live` too, regardless of
+    which single cell is being asked about, same rule `_choose_action` and
+    `_hit_or_spread` already apply. Average roll, matching every other
+    "realistic exchange" reading in this module (`pair_search`'s own).
+    """
+    best_key, best_hit = None, NO_HIT
+    for mv in moves:
+        if mv.category == "Status":
+            continue
+        if not mv.power and mv.name not in WEIGHT_BASED_POWER:
+            continue
+        n = 2 if (is_spread_move(mv.target) and other_live is not None) else 1
+        got = _raw_hit(attacker, mv, target, typechart, weather=weather,
+                       roll="avg", num_targets_hit=n)
+        key = (got.frac >= 1.0, mv.priority, got.frac)
+        if best_key is None or key > best_key:
+            best_key, best_hit = key, got
+    return best_hit
+
+
+def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather):
+    """Every one of the 8 attacker-vs-specific-defender `Hit`s on this board
+    -- "see if and how I out-trade (2x2 damage)" asks for the actual numbers,
+    not just which line the race happened to choose. Returns {"ours": {("C",
+    "E1"): Hit, ("C","E2"): Hit, ("P","E1"): Hit, ("P","E2"): Hit}, "theirs":
+    {("E1","C"): Hit, ("E1","P"): Hit, ("E2","C"): Hit, ("E2","P"): Hit}}.
+    """
+    ours = {
+        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather),
+        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather),
+        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather),
+        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather),
+    }
+    theirs = {
+        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, None),
+        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, None),
+        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, None),
+        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, None),
+    }
+    return {"ours": ours, "theirs": theirs}
+
+
+def _ohko_risk(grid):
+    """Which of THEIRS' grid cells could OHKO one of ours outright, on their
+    BEST roll -- "Scizor is always OHKO'd by Mega Charizard Y" is a
+    structural fact about the matchup, true regardless of who happens to
+    move first in any one played-out line, so this reads `Hit.hi` (their
+    best-case roll, the same guaranteed-worst-case-FOR-US direction
+    `threshold_search`'s own `incoming` check uses) rather than the race's
+    actual (speed-order-dependent) outcome. Returns [{"attacker", "target",
+    "move", "hi"}, ...], only the cells that clear 100%.
+    """
+    return [{"attacker": atk, "target": tgt, "move": h.move_name, "hi": h.hi}
+           for (atk, tgt), h in grid["theirs"].items() if h.hi >= 1.0]
+
+
 def _pair_vs_targets(c1, m1, c2, m2, target_names, enemy_built, typechart,
-                     weather, turns):
+                     weather, turns, want_grid=False):
     """(detail, summary) for OUR pair ((c1,m1), (c2,m2)) against every pair
     drawn from `target_names` -- the one place a joint pair is actually
     raced, so `joint_pair_search` (partner fixed) and `joint_pool_search`
@@ -992,6 +1061,11 @@ def _pair_vs_targets(c1, m1, c2, m2, target_names, enemy_built, typechart,
     "what the damage roll is", not just the win/loss classification -- for
     the NORMAL-speed race (the one that decided `outcome`); the Tailwind
     replay's log isn't kept, only whether it still won.
+
+    `want_grid`: also compute `_damage_grid`/`_ohko_risk` per enemy pair --
+    8 extra `_raw_hit` calls each, cheap for the single fixed pair `--deep`
+    checks but wasted (and never displayed) for a pool-wide search, so it
+    defaults OFF and only the `--deep` CLI path turns it on.
     """
     detail = {}
     for e1_name, e2_name in itertools.combinations(target_names, 2):
@@ -1005,11 +1079,17 @@ def _pair_vs_targets(c1, m1, c2, m2, target_names, enemy_built, typechart,
             combatants, moves_by_role, typechart, weather, turns,
             enemy_speed_mult=2.0)
         tailwind_safe = tw_outcome in ("sweep", "out_trade")
-        detail[(e1_name, e2_name)] = {
+        entry = {
             "outcome": outcome, "turns_used": turns_used,
             "tailwind_outcome": tw_outcome, "tailwind_safe": tailwind_safe,
             "log": log,
         }
+        if want_grid:
+            grid = _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m,
+                               typechart, weather)
+            entry["grid"] = grid
+            entry["ohko_risk"] = _ohko_risk(grid)
+        detail[(e1_name, e2_name)] = entry
     summary = {
         "pairs_swept": sum(1 for d in detail.values() if d["outcome"] == "sweep"),
         "pairs_traded": sum(1 for d in detail.values() if d["outcome"] == "out_trade"),
@@ -1147,3 +1227,45 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
                              -r["pairs_tailwind_safe"]))
     return rows
+
+
+def deep_dive(name1, name2, target_names, merged, moves_db, natures,
+             typechart, turns=2, item_overrides=None, move_overrides=None):
+    """The full report for ONE SPECIFIC, already-chosen pair (not a pool
+    search) against every pair drawn from `target_names`.
+
+        "a deep dive on a selected given pair; see all the possible enemy
+         pairs, see if I'm at risk of being KO'd in one turn, to see if and
+         how I outtrade (2x2 damage), see how it collapses into a win. For
+         instance, Scizor is always OHKOd by Mega Charizard Y, so would not
+         be a good bring as it auto loses."
+
+    Pass the WHOLE 6-Pokemon roster as `target_names` for "the 15 possible
+    enemy pair leads of 6 individuals" reading -- `itertools.combinations`
+    inside `_pair_vs_targets` turns that into all C(6,2)=15 pairs on its own.
+
+    Same machinery as `joint_pair_search`/`joint_pool_search` (`_build`,
+    `_answer_for`, `_pair_vs_targets`), just for a NAMED pair instead of a
+    pool search -- with `want_grid=True`, since the 2x2 damage grid and the
+    OHKO-risk read (`_damage_grid`/`_ohko_risk`) are the whole point here and
+    a single pair against a handful of enemy pairs is cheap regardless.
+
+    Returns (item1, item2, detail, summary) -- `detail`/`summary` are
+    `_pair_vs_targets`'s own shape, `grid`/`ohko_risk` included on every
+    entry.
+    """
+    item1, moves1, w1 = _answer_for(
+        name1, merged, moves_db, natures, typechart, target_names,
+        item_overrides=item_overrides, move_overrides=move_overrides)
+    item2, moves2, w2 = _answer_for(
+        name2, merged, moves_db, natures, typechart, target_names,
+        item_overrides=item_overrides, move_overrides=move_overrides)
+    c1 = _build(name1, merged, natures, item=item1)
+    c2 = _build(name2, merged, natures, item=item2)
+    m1 = _move_infos(name1, merged, moves_db, moves1)
+    m2 = _move_infos(name2, merged, moves_db, moves2)
+    enemy_built = _build_enemy_pairs(target_names, merged, natures, moves_db)
+    detail, summary = _pair_vs_targets(c1, m1, c2, m2, target_names,
+                                       enemy_built, typechart, w1 or w2,
+                                       turns, want_grid=True)
+    return item1, item2, detail, summary

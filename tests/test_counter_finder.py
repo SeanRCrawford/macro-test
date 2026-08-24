@@ -1015,3 +1015,98 @@ class TestJointPoolSearch(unittest.TestCase):
             ["Sharpedo", "Rampardos"], merged, moves, natures, typechart)
         beaten = [r["pairs_swept"] + r["pairs_traded"] for r in rows]
         self.assertEqual(beaten, sorted(beaten, reverse=True))
+
+
+class TestDeepDive(unittest.TestCase):
+    """`deep_dive` -- one named, already-chosen pair against every enemy pair
+    drawn from a roster, with the OHKO-risk read and the 2x2 damage grid.
+
+        "a deep dive on a selected given pair; see all the possible enemy
+         pairs, see if I'm at risk of being KO'd in one turn, to see if and
+         how I outtrade (2x2 damage), see how it collapses into a win. For
+         instance, Scizor is always OHKOd by Mega Charizard Y, so would not
+         be a good bring as it auto loses."
+
+    BIG_SIX is the reference example this whole session's tooling was built
+    from; Mega Scizor/Zard-Y is the acceptance test named directly in the
+    request.
+    """
+
+    BIG_SIX = ["Basculegion", "Mega Charizard Y", "Mega Floette", "Garchomp",
+              "Kingambit", "Whimsicott"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.item1, self.item2, self.detail, self.summary = cf.deep_dive(
+            "Mega Scizor", "Ninetales-Alola", self.BIG_SIX, merged, moves,
+            natures, typechart, turns=2)
+
+    def test_covers_all_fifteen_enemy_leads(self):
+        import itertools as _it
+        self.assertEqual(len(self.detail), 15)
+        self.assertEqual(set(self.detail),
+                         set(_it.combinations(self.BIG_SIX, 2)))
+        self.assertEqual(self.summary["pairs_total"], 15)
+
+    def test_scizor_always_loses_when_zard_y_is_in_the_pair(self):
+        """The acceptance test named directly in the request."""
+        for (e1, e2), d in self.detail.items():
+            if "Mega Charizard Y" in (e1, e2):
+                self.assertEqual(d["outcome"], "loss",
+                                 f"expected a loss vs {e1}+{e2}")
+
+    def test_zard_y_is_flagged_as_an_ohko_risk_on_scizor(self):
+        d = self.detail[("Basculegion", "Mega Charizard Y")]
+        risky = [r for r in d["ohko_risk"]
+                if r["attacker"] == "E2" and r["target"] == "C"]
+        self.assertTrue(risky, "Mega Charizard Y's hit on Mega Scizor "
+                               "should be flagged")
+        self.assertGreaterEqual(risky[0]["hi"], 1.0)
+
+    def test_ohko_risk_is_structural_not_dependent_on_who_moved(self):
+        """A risk flag must survive even in a matchup the pair still WINS --
+        it's about what COULD happen on the worst roll, not what the one
+        played-out line happened to do."""
+        any_risk_in_a_win = any(
+            d["ohko_risk"] for d in self.detail.values()
+            if d["outcome"] in ("sweep", "out_trade"))
+        self.assertTrue(any_risk_in_a_win, "fixture assumes at least one "
+                                           "winning matchup still carries a "
+                                           "real OHKO risk on some hit")
+
+    def test_grid_has_all_eight_cells(self):
+        d = self.detail[("Garchomp", "Kingambit")]
+        self.assertEqual(set(d["grid"]["ours"]),
+                         {("C", "E1"), ("C", "E2"), ("P", "E1"), ("P", "E2")})
+        self.assertEqual(set(d["grid"]["theirs"]),
+                         {("E1", "C"), ("E1", "P"), ("E2", "C"), ("E2", "P")})
+        for h in list(d["grid"]["ours"].values()) + list(d["grid"]["theirs"].values()):
+            self.assertIsNotNone(h.move_name)
+
+    def test_a_grid_cell_for_a_spread_move_still_takes_the_075x_penalty(self):
+        """Ninetales-Alola's Blizzard is a spread move -- both of ITS grid
+        cells (against E1 and against E2) must reflect the doubles penalty,
+        since both enemies are alive for this check."""
+        d = self.detail[("Garchomp", "Kingambit")]
+        for (atk, _tgt), h in d["grid"]["ours"].items():
+            if atk == "P" and h.move_name == "Blizzard":
+                self.assertEqual(h.num_targets_hit, 2)
+
+    def test_items_are_the_optimised_ones_not_none(self):
+        self.assertIsNotNone(self.item1)
+        self.assertIsNotNone(self.item2)
+
+    def test_want_grid_is_off_by_default_for_the_pool_searches(self):
+        """The grid is expensive-ish (8 extra Hit calcs per enemy pair) and
+        never displayed by --joint's summary table, so it must stay opt-in --
+        `joint_pair_search`/`joint_pool_search` rows must not carry it."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search(
+            ["Mega Scizor"], ["Kingambit", "Basculegion"], "Whimsicott",
+            merged, moves, natures, typechart)
+        d = rows[0]["detail"][("Kingambit", "Basculegion")]
+        self.assertNotIn("grid", d)
+        self.assertNotIn("ohko_risk", d)
