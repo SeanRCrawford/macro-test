@@ -484,7 +484,14 @@ def _print_pairs(rows, targets, top, partner=None, move=None):
     print("pinned  removed before it ever gets to act.")
     print("beaten  clean + trade -- pairs where the stated condition holds.")
     for i, r in enumerate(rows[:top], start=1):
-        worst = sorted(r["detail"].items(), key=lambda kv: _RANK[kv[1]["outcome"]])
+        # WORST first -- _RANK ranks clean(0) best and pinned(3) worst, so a
+        # plain ascending sort shows the 3 BEST matchups under a variable
+        # named "worst" (the opposite of what a risk-scrutiny preview should
+        # show, and the opposite of what `_print_deep`'s own detail listing
+        # already promises: "LOSSES AND OHKO RISKS FIRST, since those are
+        # what's actionable"). Sort DESCENDING so the riskiest 3 print here.
+        worst = sorted(r["detail"].items(), key=lambda kv: _RANK[kv[1]["outcome"]],
+                       reverse=True)
         print(f"  {i:>3} {r['name']}:")
         for (e1, e2), d in worst[:3]:
             print(f"      {e1} + {e2}: {d['outcome']}"
@@ -565,8 +572,11 @@ def _print_joint(rows, targets, top, partner, turns):
     for i, r in enumerate(rows[:top], start=1):
         c_name, p_name, _items = _row_pair(r, partner)
         role_name = {"C": c_name, "P": p_name}
+        # WORST first -- see the matching note in `_print_pairs`: _JOINT_RANK
+        # ranks sweep(0) best and loss(3) worst, so this must sort DESCENDING
+        # to actually show the riskiest 3 matchups here, not the safest 3.
         worst = sorted(r["detail"].items(),
-                       key=lambda kv: _JOINT_RANK[kv[1]["outcome"]])
+                       key=lambda kv: _JOINT_RANK[kv[1]["outcome"]], reverse=True)
         print(f"  {i:>3} {c_name} + {p_name}:")
         for (e1, e2), d in worst[:3]:
             role_name["E1"], role_name["E2"] = e1, e2
@@ -603,7 +613,12 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
 
     def sort_key(kv):
         (_e1, _e2), d = kv
-        return (_JOINT_RANK[d["outcome"]], -len(d["ohko_risk"]))
+        # _JOINT_RANK ranks sweep(0) best and loss(3) worst -- negate it so
+        # the ascending sort below actually puts losses (and, tied on
+        # outcome, the most OHKO risks) FIRST, matching this function's own
+        # stated "LOSSES AND OHKO RISKS FIRST" promise instead of the
+        # opposite of it.
+        return (-_JOINT_RANK[d["outcome"]], -len(d["ohko_risk"]))
 
     ordered = sorted(detail.items(), key=sort_key)
     role_name = {"C": name1, "P": name2}

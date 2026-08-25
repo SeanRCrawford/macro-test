@@ -1292,6 +1292,100 @@ class TestArmorTailAndPriorityBlock(unittest.TestCase):
                         "Armor Tail on the board")
 
 
+class TestOneTurnLookahead(unittest.TestCase):
+    """"It's important to at least have a one turn lookahead. For instance,
+    if wave crash into aqua jet kills and outspeeds on the second turn."
+    Mega Metagross's Bullet Punch (priority +1, weak) vs Psychic Fangs
+    (no priority, much stronger) is a real, verified stand-in for "Aqua Jet
+    vs Wave Crash": against Mega Charizard Y, Psychic Fangs alone doesn't
+    KO, but TWO Psychic Fangs would (126% cumulative) while two Bullet
+    Punches never get close (31%) -- so Psychic Fangs must now win despite
+    having no priority. Against a much bulkier target (Mega Aggron) where
+    NEITHER move threatens a 2-turn kill, the old priority-first tie-break
+    must still apply -- the lookahead only changes the ranking when it
+    actually has a real 2-turn kill line to offer, matching this module's
+    existing "prefer priority, then damage" fallback exactly."""
+
+    def setUp(self):
+        self.W = world()
+        merged, natures = self.W["merged"], self.W["natures"]
+        self.metagross = cf._build_form("Mega Metagross", merged, natures,
+                                        stay_base=False)
+        self.bullet_punch = cf._lookup_move("Bullet Punch", self.W["moves"])
+        self.psychic_fangs = cf._lookup_move("Psychic Fangs", self.W["moves"])
+
+    def test_a_weaker_priority_move_alone_never_threatens_a_kill(self):
+        merged, natures, typechart = (self.W["merged"], self.W["natures"],
+                                      self.W["typechart"])
+        charizard = cf._build("Mega Charizard Y", merged, natures)
+        bp = cf._raw_hit(self.metagross, self.bullet_punch, charizard,
+                         typechart, roll="avg")
+        pf = cf._raw_hit(self.metagross, self.psychic_fangs, charizard,
+                         typechart, roll="avg")
+        self.assertLess(bp.frac, 1.0)
+        self.assertLess(pf.frac, 1.0)
+        self.assertLess(bp.frac * 2, 1.0, "fixture assumes Bullet Punch "
+                        "never threatens a kill even over 2 turns")
+        self.assertGreaterEqual(pf.frac * 2, 1.0, "fixture assumes Psychic "
+                                "Fangs DOES secure a kill within 2 turns")
+
+    def test_the_stronger_two_turn_kill_move_is_chosen_over_priority(self):
+        merged, natures, typechart = (self.W["merged"], self.W["natures"],
+                                      self.W["typechart"])
+        charizard = cf._build("Mega Charizard Y", merged, natures)
+        hit, mv = cf._choose_move(self.metagross,
+                                  [self.bullet_punch, self.psychic_fangs],
+                                  charizard, typechart)
+        self.assertEqual(mv.name, "Psychic Fangs")
+        self.assertGreater(hit.frac, 0.5)
+
+    def test_priority_still_wins_when_neither_move_threatens_a_kill(self):
+        merged, natures, typechart = (self.W["merged"], self.W["natures"],
+                                      self.W["typechart"])
+        aggron = cf._build("Mega Aggron", merged, natures)
+        bp = cf._raw_hit(self.metagross, self.bullet_punch, aggron,
+                         typechart, roll="avg")
+        pf = cf._raw_hit(self.metagross, self.psychic_fangs, aggron,
+                         typechart, roll="avg")
+        self.assertLess(bp.frac * 2, 1.0)
+        self.assertLess(pf.frac * 2, 1.0, "fixture assumes NEITHER move "
+                        "threatens a kill within 2 turns")
+        hit, mv = cf._choose_move(self.metagross,
+                                  [self.bullet_punch, self.psychic_fangs],
+                                  aggron, typechart)
+        self.assertEqual(mv.name, "Bullet Punch",
+                         "with no 2-turn kill line available from either "
+                         "move, priority must still be the tie-break")
+
+    def test_a_move_that_kos_outright_still_wins_regardless_of_lookahead(self):
+        """The lookahead only matters among moves that DON'T already KO --
+        an outright KO this turn is never second-guessed by a 2-turn
+        forecast for some other move."""
+        merged, natures, typechart = (self.W["merged"], self.W["natures"],
+                                      self.W["typechart"])
+        target = cf._build("Sylveon", merged, natures)
+        meteor_mash = cf._lookup_move("Meteor Mash", self.W["moves"])
+        real = cf._raw_hit(self.metagross, meteor_mash, target, typechart,
+                           roll="avg")
+        self.assertGreaterEqual(real.frac, 1.0,
+                                "fixture assumes Meteor Mash is a real OHKO")
+        hit, mv = cf._choose_move(
+            self.metagross, [self.bullet_punch, meteor_mash], target, typechart)
+        self.assertEqual(mv.name, "Meteor Mash")
+
+    def test_choose_action_applies_the_same_lookahead_per_target(self):
+        """Same guarantee through `_choose_action` (the multi-turn engine's
+        own move-picker) against a single live target."""
+        merged, natures, typechart = (self.W["merged"], self.W["natures"],
+                                      self.W["typechart"])
+        charizard = cf._build("Mega Charizard Y", merged, natures)
+        hits, mv = cf._choose_action(
+            self.metagross, [self.bullet_punch, self.psychic_fangs],
+            {"E1": charizard}, typechart)
+        self.assertEqual(mv.name, "Psychic Fangs")
+        self.assertIn("E1", hits)
+
+
 class TestJointDamageLog(unittest.TestCase):
     """"I want it to ... display damage output vs enemies, and damage taken
     by each" -- `_joint_race`'s log, threaded through `_pair_vs_targets` into

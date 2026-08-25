@@ -555,11 +555,12 @@ def _priority_blocked(attacker, mv, defending_side):
 def _choose_move(attacker, moves, defender, typechart, weather=None,
                  defending_side=None):
     """The move `attacker` would actually use against `defender`, searched on
-    the AVERAGE roll: prefer one that KOes, and among those prefer higher
-    PRIORITY (more likely to land before the target can reply or flee), then
-    more damage. Returns a `Hit` (`NO_HIT` if nothing does damage) plus the
-    chosen `MoveInfo` (needed by the caller to check `is_spread_move` and to
-    read `.priority` for turn ordering).
+    the AVERAGE roll: prefer one that KOes outright; failing that, prefer one
+    that sets up a KO within a FOLLOW-UP turn (below); failing THAT, prefer
+    higher PRIORITY (more likely to land before the target can reply or
+    flee), then more damage. Returns a `Hit` (`NO_HIT` if nothing does
+    damage) plus the chosen `MoveInfo` (needed by the caller to check
+    `is_spread_move` and to read `.priority` for turn ordering).
 
     This is the move-choice half of `pair_search`'s speed-order resolution --
     a move's priority decides the ACTION order, not just how hard it hits, so
@@ -568,6 +569,19 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     first, or over-credit a priority option that doesn't actually knock the
     target out.
 
+    ONE-TURN LOOKAHEAD: "it's important to at least have a one turn
+    lookahead -- if wave crash into aqua jet kills ... on the second turn."
+    A move that doesn't KO by itself is still credited with a KO if its
+    damage PLUS this attacker's own best available follow-up (any move here,
+    not necessarily the same one -- a slow, heavy hit now that a priority
+    finisher cleans up next turn) would clear 100% -- so a real 2-turn kill
+    line beats a weak priority move that never threatens a kill at all, and
+    priority is only the tie-break among moves that are equally (in)capable
+    of finishing the job. This is deliberately optimistic (it assumes the
+    attacker survives to act again and nothing heals or removes the target
+    in between) -- a forecast, not a guarantee, the same kind of hypothesis
+    this module already makes elsewhere (Tailwind, `outspeed="scarf"`).
+
     `defending_side`: the full list of Combatants on `defender`'s side
     (defaults to just `defender` alone) -- checked via `_priority_blocked`
     so a priority move that would actually fail against an Armor Tail /
@@ -575,7 +589,7 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     OR its damage; a rational attacker picks a move that actually lands.
     """
     defending_side = defending_side if defending_side is not None else (defender,)
-    best_key, best_hit, best_move = None, NO_HIT, None
+    candidates = []
     for mv in moves:
         if mv.category == "Status":
             continue
@@ -585,7 +599,15 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
         blocked = _priority_blocked(attacker, mv, defending_side)
         if blocked:
             got = NO_HIT
-        key = (got.frac >= 1.0, 0 if blocked else mv.priority, got.frac)
+        candidates.append((mv, got, 0 if blocked else mv.priority))
+    if not candidates:
+        return NO_HIT, None
+    best_follow_up = max(got.frac for _mv, got, _prio in candidates)
+    best_key, best_hit, best_move = None, NO_HIT, None
+    for mv, got, prio in candidates:
+        kos_now = got.frac >= 1.0
+        kos_in_two = kos_now or (got.frac + best_follow_up) >= 1.0
+        key = (kos_now, kos_in_two, prio, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hit, best_move = key, got, mv
     return best_hit, best_move
@@ -1220,12 +1242,28 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     against the WHOLE of `live_targets` -- held by either enemy blocks it)
     is scored as if it does no damage and carries no priority, same as
     `_choose_move`.
+
+    ONE-TURN LOOKAHEAD, same rule and reasoning as `_choose_move`: a move
+    that doesn't KO (every hit target, for a spread move) by itself is still
+    credited with a KO if its damage on a given target PLUS this attacker's
+    own best available follow-up ON THAT SAME TARGET (any move against it,
+    computed across every candidate here first) would clear 100% -- so
+    priority is only the tie-break among options that are equally (in)capable
+    of finishing the job, not the deciding factor the instant nothing KOes
+    outright.
     """
     if not live_targets:
         return {}, None
     defending_side = list(live_targets.values())
-    best_key, best_hits, best_move = None, {}, None
     n_live = len(live_targets)
+
+    # Two passes: gather every candidate action's raw hits FIRST (tracking
+    # the best single-hit damage this attacker can put on each target,
+    # across every move here), then rank -- the lookahead below needs to
+    # see every move's damage on a target before any of them can be scored.
+    single_candidates = []   # (mv, role, Hit, priority)
+    spread_candidates = []   # (mv, {role: Hit}, priority)
+    best_frac_by_role = {role: 0.0 for role in live_targets}
     for mv in moves:
         if mv.category == "Status":
             continue
@@ -1238,10 +1276,9 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                           _raw_hit(attacker, mv, d, typechart, weather=weather,
                                    roll="avg", num_targets_hit=n_live))
                    for role, d in live_targets.items()}
-            key = (all(h.frac >= 1.0 for h in hits.values()), prio,
-                  sum(h.frac for h in hits.values()))
-            if best_key is None or key > best_key:
-                best_key, best_hits, best_move = key, hits, mv
+            spread_candidates.append((mv, hits, prio))
+            for role, h in hits.items():
+                best_frac_by_role[role] = max(best_frac_by_role[role], h.frac)
             continue
         candidates = ([hinted_target] if hinted_target in live_targets
                       else list(live_targets))
@@ -1249,9 +1286,24 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             got = NO_HIT if blocked else _raw_hit(
                 attacker, mv, live_targets[role], typechart, weather=weather,
                 roll="avg")
-            key = (got.frac >= 1.0, prio, got.frac)
-            if best_key is None or key > best_key:
-                best_key, best_hits, best_move = key, {role: got}, mv
+            single_candidates.append((mv, role, got, prio))
+            best_frac_by_role[role] = max(best_frac_by_role[role], got.frac)
+
+    best_key, best_hits, best_move = None, {}, None
+    for mv, role, got, prio in single_candidates:
+        kos_now = got.frac >= 1.0
+        kos_in_two = kos_now or (got.frac + best_frac_by_role[role]) >= 1.0
+        key = (kos_now, kos_in_two, prio, got.frac)
+        if best_key is None or key > best_key:
+            best_key, best_hits, best_move = key, {role: got}, mv
+    for mv, hits, prio in spread_candidates:
+        kos_now = all(h.frac >= 1.0 for h in hits.values())
+        kos_in_two = kos_now or all(
+            h.frac >= 1.0 or (h.frac + best_frac_by_role[role]) >= 1.0
+            for role, h in hits.items())
+        key = (kos_now, kos_in_two, prio, sum(h.frac for h in hits.values()))
+        if best_key is None or key > best_key:
+            best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move
 
 

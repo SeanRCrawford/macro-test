@@ -28,8 +28,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 
 import counter_table as ct  # noqa: E402
+from counter_finder import Hit  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+
+def hit(name="Move", frac=0.5):
+    return Hit(move_name=name, frac=frac, lo=frac, avg=frac, hi=frac,
+              eff=1.0, num_targets_hit=1)
 
 
 def run_main(argv):
@@ -214,6 +220,98 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
             self.assertTrue(any("teamsheet" in h for h in header))
         finally:
             os.unlink(path)
+
+
+class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
+    """Both `_print_pairs` and `_print_joint` picked their per-row detail
+    preview via `sorted(r["detail"].items(), key=...)[:3]`, into a variable
+    literally named `worst` -- but `_RANK`/`_JOINT_RANK` rank the BEST
+    outcome (clean/sweep) as 0 and the WORST (pinned/loss) as 3, so a plain
+    ascending sort put the 3 BEST matchups under that name, not the worst
+    ones. `_print_deep`'s own docstring says outright "LOSSES AND OHKO
+    RISKS FIRST, since those are what's actionable" -- its sort had the
+    exact same inversion. All three now sort worst-first."""
+
+    def test_print_pairs_shows_the_pinned_result_before_the_clean_one(self):
+        row = {
+            "name": "Gallade", "item": "Life Orb", "pairs_clean": 1,
+            "pairs_trade": 0, "pairs_no_ko": 0, "pairs_pinned": 1,
+            "pairs_total": 2,
+            "detail": {
+                ("Kingambit", "Basculegion"): {
+                    "outcome": "clean", "target": "Kingambit",
+                    "hits": {"C": {"Kingambit": hit("Psycho Cut", 1.2)}}},
+                ("Garchomp", "Whimsicott"): {
+                    "outcome": "pinned", "target": None, "hits": {}},
+            },
+        }
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ct._print_pairs([row], ["Kingambit", "Basculegion", "Garchomp",
+                                    "Whimsicott"], top=1)
+        out = buf.getvalue()
+        self.assertLess(out.index("Garchomp + Whimsicott: pinned"),
+                        out.index("Kingambit + Basculegion: clean"),
+                        "the pinned (worst) matchup must print before the "
+                        "clean (best) one")
+
+    def test_print_joint_shows_the_loss_before_the_sweep(self):
+        row = {
+            "name": "Gallade", "item": "Life Orb",
+            "pairs_swept": 1, "pairs_traded": 0, "pairs_lost": 1,
+            "pairs_no_ko": 0, "pairs_tailwind_safe": 1, "pairs_protect_safe": 1,
+            "pairs_total": 2,
+            "detail": {
+                ("Kingambit", "Basculegion"): {
+                    "outcome": "sweep", "turns_used": 1,
+                    "tailwind_safe": True, "tailwind_outcome": "sweep",
+                    "protect_safe": True,
+                    "protect_outcomes": {"E1": "sweep", "E2": "sweep"},
+                    "log": []},
+                ("Garchomp", "Whimsicott"): {
+                    "outcome": "loss", "turns_used": 1,
+                    "tailwind_safe": False, "tailwind_outcome": "loss",
+                    "protect_safe": False,
+                    "protect_outcomes": {"E1": "loss", "E2": "loss"},
+                    "log": []},
+            },
+        }
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ct._print_joint([row], ["Kingambit", "Basculegion", "Garchomp",
+                                    "Whimsicott"], top=1, partner="", turns=2)
+        out = buf.getvalue()
+        self.assertLess(out.index("Garchomp + Whimsicott: loss"),
+                        out.index("Kingambit + Basculegion: sweep"),
+                        "the loss must print before the sweep")
+
+    def test_print_deep_shows_the_loss_before_the_sweep(self):
+        detail = {
+            ("Kingambit", "Basculegion"): {
+                "outcome": "sweep", "turns_used": 1, "ohko_risk": [],
+                "tailwind_safe": True, "tailwind_outcome": "sweep",
+                "protect_safe": True,
+                "protect_outcomes": {"E1": "sweep", "E2": "sweep"},
+                "grid": {"ours": {}, "theirs": {}}, "log": []},
+            ("Garchomp", "Whimsicott"): {
+                "outcome": "loss", "turns_used": 1, "ohko_risk": [],
+                "tailwind_safe": False, "tailwind_outcome": "loss",
+                "protect_safe": False,
+                "protect_outcomes": {"E1": "loss", "E2": "loss"},
+                "grid": {"ours": {}, "theirs": {}}, "log": []},
+        }
+        summary = {"pairs_total": 2, "pairs_swept": 1, "pairs_traded": 0,
+                  "pairs_lost": 1, "pairs_no_ko": 0, "pairs_tailwind_safe": 1,
+                  "pairs_protect_safe": 1}
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ct._print_deep("Gallade", "Ninetales-Alola", "Life Orb", None,
+                           ["Kingambit", "Basculegion", "Garchomp",
+                            "Whimsicott"], detail, summary, turns=2)
+        out = buf.getvalue()
+        self.assertLess(out.index("Garchomp + Whimsicott: LOSS"),
+                        out.index("Kingambit + Basculegion: SWEEP"),
+                        "fixture assumes both outcomes print in upper case")
 
 
 if __name__ == "__main__":
