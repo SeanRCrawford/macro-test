@@ -771,7 +771,7 @@ def get_state_team():
     return st.session_state.get("team", [])
 
 
-def _defer_rerun():
+def _defer_rerun(flash=None):
     """Ask for a rerun AFTER the whole tab has rendered.
 
     Calling st.rerun() straight from an Apply button stops the script where it
@@ -780,7 +780,23 @@ def _defer_rerun():
     items therefore silently discarded a pending move or stat-point edit.
     Setting a flag and rerunning at the end of the tab lets everything render
     first, so nothing pending is lost.
+
+    `flash`: an optional confirmation message for the rerun to show.
+
+        "the team editing in Team Builder is incredibly buggy and never
+         seems to apply"
+
+    It wasn't -- every edit here was already landing in `st.session_state
+    ["sets"]` correctly (confirmed by driving the real widgets headlessly).
+    What never happened is the user SEEING it: `st.success("Applied...")`
+    called right before this function used to render for exactly the one
+    frame `st.rerun()` immediately throws away, so nobody's browser ever
+    painted it -- clicking Apply looked like it did nothing. Stashing the
+    message here and showing it at the top of the tab, on the render that
+    actually follows the rerun, is what makes it visible.
     """
+    if flash:
+        st.session_state["_builder_flash"] = flash
     st.session_state["_builder_rerun"] = True
 
 
@@ -1144,6 +1160,76 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset):
     return [(name, groups[name]) for name in order]
 
 
+def sim_predict_faint_replacements(battle, p1_actions, p2_actions, mega_decisions):
+    """Which of OUR active Pokemon (that actually have a live bench behind
+    them) faint if this exact turn is played out -- so the Battle Simulator
+    can ask "who do you send in?" AFTER a faint really happens, not as a
+    pre-turn guess.
+
+        "For the 'if faints this turn', make it a choice when the faint
+         happens, not a preselection."
+
+    `_replace_fainted` also fires switch-in abilities (Intimidate, weather)
+    the moment a replacement is seated, so the real answer can't just be
+    swapped in after the fact -- it has to be `_replace_fainted`'s own
+    `replacement_choices` from the start. This runs the turn once on a
+    disposable deep copy (`Battle.__deepcopy__` is already the cheap,
+    engine-state-only copy `turn_step.step` uses for the same reason) with
+    NO replacement choices (auto-pick, since only WHO faints matters here,
+    not who the copy happened to send in), then reports it. The COPY is
+    discarded either way: the real commit re-runs `Battle.run_turn` on the
+    untouched original battle, whose rng was never touched by this dry
+    run, so the actually-applied turn draws the same rolls a real turn
+    would -- this is a read, not a second engine.
+    """
+    import copy as _copy
+    from engine import Action
+    pre_bench = {id(c): [b.name for b in battle.p1.bench if not b.fainted]
+                for c in battle.p1.active if c is not None}
+    sim = _copy.deepcopy(battle)
+    # `Battle.__deepcopy__` deliberately SHARES `.rng` by reference (a
+    # solver-search perf decision, not something to touch) -- fine for the
+    # interactive simulator today, where `rng` is always None (deterministic
+    # average rolls, per `Battle._roll`), but overridden here with a real
+    # copy anyway so this dry run can never advance a shared rng out from
+    # under the real commit that follows it, if a seeded rng is ever wired
+    # into the Battle Simulator later.
+    sim.rng = _copy.deepcopy(battle.rng)
+    forward = {}
+    for old, new in zip(battle.p1.roster, sim.p1.roster):
+        forward[id(old)] = new
+    for old, new in zip(battle.p2.roster, sim.p2.roster):
+        forward[id(old)] = new
+
+    def rebuild(a):
+        return Action(forward.get(id(a.combatant), a.combatant), a.side, a.kind,
+                     a.move, [forward.get(id(t), t) for t in a.targets])
+
+    sim_mega_decisions = {}
+    for cid, v in (mega_decisions or {}).items():
+        new_obj = forward.get(cid)
+        if new_obj is not None:
+            sim_mega_decisions[id(new_obj)] = v
+
+    try:
+        sim.run_turn([rebuild(a) for a in p1_actions], [rebuild(a) for a in p2_actions],
+                    mega_decisions=sim_mega_decisions)
+    except Exception:
+        return []
+
+    fainted = []
+    for c in battle.p1.active:
+        if c is None:
+            continue
+        bench_names = pre_bench.get(id(c), [])
+        if not bench_names:
+            continue
+        sim_c = forward.get(id(c))
+        if sim_c is not None and sim_c.fainted:
+            fainted.append({"id": id(c), "name": c.name, "bench_names": bench_names})
+    return fainted
+
+
 def sim_build_battle(our4, their4, merged, moves_db, natures, typechart,
                      our_sets=None, enemy_sets=None, our_mega=None, enemy_mega=None):
     """(battle, movesets) for an interactive match -- the same construction
@@ -1220,6 +1306,8 @@ def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, ou
 # ------------------------------------------------------------------ builder
 with tab_build:
     st.subheader("Pick your 6")
+    if _flash := st.session_state.pop("_builder_flash", None):
+        st.success(_flash)
     c1, c2 = st.columns([3, 1])
     with c2:
         st.markdown("**Load / save**")
@@ -1347,15 +1435,14 @@ with tab_build:
             b1, b2 = st.columns(2)
             if b1.button("Apply items", width='stretch', key="item_apply"):
                 st.session_state["sets"] = item_sets
-                st.success("Applied — every simulation now uses them.")
-                _defer_rerun()
+                _defer_rerun("Items applied — every simulation now uses them.")
             if b2.button("Reset to usage defaults", width='stretch',
                          key="item_reset"):
                 for mon in team:
                     if mon in item_sets:
                         item_sets[mon].pop("item", None)
                 st.session_state["sets"] = item_sets
-                _defer_rerun()
+                _defer_rerun("Items reset to usage defaults.")
             if item_changed:
                 st.info("Edited but not applied — press Apply items.")
 
@@ -1405,15 +1492,14 @@ with tab_build:
             ab1, ab2 = st.columns(2)
             if ab1.button("Apply abilities", width='stretch', key="abil_apply"):
                 st.session_state["sets"] = ab_sets
-                st.success("Applied — every simulation now uses them.")
-                _defer_rerun()
+                _defer_rerun("Abilities applied — every simulation now uses them.")
             if ab2.button("Reset to most-used", width='stretch',
                           key="abil_reset"):
                 for mon in team:
                     if mon in ab_sets:
                         ab_sets[mon].pop("ability", None)
                 st.session_state["sets"] = ab_sets
-                _defer_rerun()
+                _defer_rerun("Abilities reset to the most-used option.")
             if ab_changed:
                 st.info("Edited but not applied — press Apply abilities.")
 
@@ -1472,15 +1558,14 @@ with tab_build:
             nn1, nn2 = st.columns(2)
             if nn1.button("Apply natures", width='stretch', key="nature_apply"):
                 st.session_state["sets"] = nat_sets
-                st.success("Applied — every simulation now uses them.")
-                _defer_rerun()
+                _defer_rerun("Natures applied — every simulation now uses them.")
             if nn2.button("Reset to usage defaults", width='stretch',
                          key="nature_reset"):
                 for mon in team:
                     if mon in nat_sets:
                         nat_sets[mon].pop("nature", None)
                 st.session_state["sets"] = nat_sets
-                _defer_rerun()
+                _defer_rerun("Natures reset to usage defaults.")
             if nat_changed:
                 st.info("Edited but not applied — press Apply natures.")
 
@@ -1522,15 +1607,14 @@ with tab_build:
             m1, m2 = st.columns(2)
             if m1.button("Apply moves", width='stretch', key="mv_apply"):
                 st.session_state["sets"] = mv_sets
-                st.success("Applied — every simulation now uses them.")
-                _defer_rerun()
+                _defer_rerun("Moves applied — every simulation now uses them.")
             if m2.button("Reset to usage-standard", width='stretch',
                          key="mv_reset"):
                 for mon in team:
                     if mon in mv_sets:
                         mv_sets[mon].pop("moves", None)
                 st.session_state["sets"] = mv_sets
-                _defer_rerun()
+                _defer_rerun("Moves reset to the usage-standard set.")
             if mv_changed:
                 st.info("Edited but not applied — press Apply moves.")
 
@@ -1577,15 +1661,14 @@ with tab_build:
             e1, e2 = st.columns(2)
             if e1.button("Apply stat points", width='stretch', key="ev_apply"):
                 st.session_state["sets"] = cur_sets
-                st.success("Applied — every simulation now uses them.")
-                _defer_rerun()
+                _defer_rerun("Stat points applied — every simulation now uses them.")
             if e2.button("Reset to dataset spreads", width='stretch',
                          key="ev_reset"):
                 for mon in team:
                     if mon in cur_sets:
                         cur_sets[mon].pop("evs", None)
                 st.session_state["sets"] = cur_sets
-                _defer_rerun()
+                _defer_rerun("Stat points reset to the dataset spreads.")
             if changed:
                 st.info("Edited but not applied — press Apply stat points.")
 
@@ -1695,7 +1778,7 @@ with tab_build:
                         chosen = next(r for r in better if r["Change"] == pick)
                         st.session_state["team"] = chosen["Team"].split(" / ")
                         st.session_state.pop("sub_rows", None)
-                        _defer_rerun()
+                        _defer_rerun(f"Swap adopted: {pick}.")
                 else:
                     st.info("No swap improved the rating — this team is a "
                             "local optimum for these opponents.")
@@ -1717,7 +1800,7 @@ with tab_build:
                         n: {**(prev.get(n) or {}), "item": opt[n]["item"],
                             "moves": opt[n]["moves"]}
                         for n in team}
-                _defer_rerun()
+                _defer_rerun("Items + movesets optimised against teams.csv — applied.")
         with cc2:
             fname = st.text_input("Save as", value="team.json", key="save_name")
             if st.button("Save", width='stretch'):
@@ -4443,157 +4526,168 @@ with tab_sim:
                 st.rerun()
         else:
             st.markdown(f"**Turn {battle.turn_num + 1} — your move**")
-            # `Battle._replace_fainted` sends in the strategically-best bench
-            # Pokemon for BOTH sides automatically, at the end of the turn a
-            # lead faints -- same engine rule `matchup_search.race_all_megas`'s
-            # own docstring describes. A fainted active therefore only shows up
-            # here if there was NO bench left to replace it with (an empty
-            # slot the game is still continuing around); reusing the engine's
-            # own replacement choice rather than adding a second one here is
-            # deliberate, not an oversight.
-            # A slot needing no action at all (fainted, nothing left on the
-            # bench to send in) is legal and genuinely actionless -- `Battle.
-            # run_turn` (see `solver.greedy_opponent_joint_action`'s own
-            # identical skip) simply gets no Action for it, so "ready" means
-            # "one action per slot that actually needs one", not "exactly 2".
-            p1_actions = []
-            slots_needing_action = 0
-            # Ours: an explicit per-turn yes/no from the checkbox below.
-            # Theirs: True for everyone, unconditionally -- `_mega_evolve_now`
-            # already re-checks real eligibility (fainted/not a Mega pick/
-            # already evolved/side already used its Mega) before consulting
-            # this, so marking the whole side True just preserves the
-            # engine's own default "transforms the instant it's eligible"
-            # behaviour for the opponent, who has no turn-by-turn UI of
-            # their own to defer it from.
-            our_mega_decisions = {}
-            replacement_choices = {}
-            def _button_pick(options, state_key, cols_per_row=2):
-                """A row of `st.button`s acting as a single-select radio --
-                Streamlit's default behaviour already reruns the whole
-                script on any button click, so setting `state_key` inside
-                the click branch and reading it right back below is enough;
-                no explicit `st.rerun()` needed. Returns the currently
-                selected option (defaults to the first)."""
-                if state_key not in st.session_state or st.session_state[state_key] not in options:
-                    st.session_state[state_key] = options[0]
-                cols = st.columns(min(cols_per_row, len(options)) or 1)
-                for idx, opt in enumerate(options):
-                    col = cols[idx % len(cols)]
-                    is_selected = st.session_state[state_key] == opt
-                    if col.button(opt, key=f"{state_key}_btn_{idx}",
-                                 type="primary" if is_selected else "secondary",
-                                 width='stretch'):
-                        st.session_state[state_key] = opt
-                return st.session_state[state_key]
+            pending = st.session_state.get("sim_pending_turn")
 
-            for i, c in enumerate(battle.p1.active):
-                if c.fainted:
-                    alive_bench = [b for b in battle.p1.bench if not b.fainted]
-                    if not alive_bench:
-                        st.caption(f"{c.name}: fainted, no bench left to replace it "
-                                  "-- no action needed")
+            if pending is not None:
+                # "For the 'if faints this turn', make it a choice when the
+                # faint happens, not a preselection." -- this turn's actions
+                # were already dry-run (`sim_predict_faint_replacements`) to
+                # find out who ACTUALLY faints; only now, with a real faint
+                # in hand, do we ask who comes in.
+                st.info("A Pokemon on your side fainted this turn -- choose "
+                        "who comes in, then confirm to resolve the turn.")
+                chosen_names, used = {}, set()
+                for entry in pending["fainted"]:
+                    available = [n for n in entry["bench_names"] if n not in used]
+                    options = ["Auto-pick (recommended)"] + available
+                    pick = st.selectbox(
+                        f"{entry['name']} fainted -- send in:", options,
+                        key=f"sim_pending_repl_{entry['id']}_{battle.turn_num}")
+                    if pick != options[0]:
+                        chosen_names[entry["id"]] = pick
+                        used.add(pick)
+                if st.button("Confirm and resolve turn", type="primary"):
+                    replacement_choices = {}
+                    for cid, name in chosen_names.items():
+                        bm = next((b for b in battle.p1.bench
+                                  if b.name == name and not b.fainted), None)
+                        if bm is not None:
+                            replacement_choices[cid] = bm
+                    before = len(battle.log.lines)
+                    battle.run_turn(pending["p1_actions"], pending["p2_actions"],
+                                   mega_decisions=pending["mega_decisions"],
+                                   replacement_choices=replacement_choices)
+                    st.session_state.setdefault("sim_turn_log", []).append(
+                        "\n".join(battle.log.lines[before:]))
+                    del st.session_state["sim_pending_turn"]
+                    st.rerun()
+            else:
+                # `Battle._replace_fainted` sends in the strategically-best bench
+                # Pokemon for BOTH sides automatically, at the end of the turn a
+                # lead faints -- same engine rule `matchup_search.race_all_megas`'s
+                # own docstring describes. A fainted active therefore only shows
+                # up here if there was NO bench left to replace it with (an empty
+                # slot the game is still continuing around) -- when there IS a
+                # bench, the human's real choice is asked for AFTER this turn's
+                # actions are submitted (see `pending` above), once it's known
+                # whether anyone actually faints.
+                # A slot needing no action at all (fainted, nothing left on the
+                # bench to send in) is legal and genuinely actionless -- `Battle.
+                # run_turn` (see `solver.greedy_opponent_joint_action`'s own
+                # identical skip) simply gets no Action for it, so "ready" means
+                # "one action per slot that actually needs one", not "exactly 2".
+                p1_actions = []
+                slots_needing_action = 0
+                # Ours: an explicit per-turn yes/no from the checkbox below.
+                # Theirs: True for everyone, unconditionally -- `_mega_evolve_now`
+                # already re-checks real eligibility (fainted/not a Mega pick/
+                # already evolved/side already used its Mega) before consulting
+                # this, so marking the whole side True just preserves the
+                # engine's own default "transforms the instant it's eligible"
+                # behaviour for the opponent, who has no turn-by-turn UI of
+                # their own to defer it from.
+                our_mega_decisions = {}
+
+                for i, c in enumerate(battle.p1.active):
+                    if c.fainted:
+                        alive_bench = [b for b in battle.p1.bench if not b.fainted]
+                        if not alive_bench:
+                            st.caption(f"{c.name}: fainted, no bench left to replace it "
+                                      "-- no action needed")
+                            continue
+                        st.caption(f"{c.name}: fainted, no bench left to replace it")
+                        options = [(f"Switch in {b.name}", Action(c, "p1", "switch", None, [b]))
+                                  for b in alive_bench]
+                        slots_needing_action += 1
+                        labels = [lbl for lbl, _a in options]
+                        pick = st.selectbox("Action", labels, key=f"sim_action_{i}_{battle.turn_num}",
+                                            label_visibility="collapsed")
+                        p1_actions.append(next(a for lbl, a in options if lbl == pick))
                         continue
-                    st.caption(f"{c.name}: fainted, no bench left to replace it")
-                    options = [(f"Switch in {b.name}", Action(c, "p1", "switch", None, [b]))
-                              for b in alive_bench]
-                    slots_needing_action += 1
-                    labels = [lbl for lbl, _a in options]
-                    pick = st.selectbox("Action", labels, key=f"sim_action_{i}_{battle.turn_num}",
+
+                    if c.volatile.get("must_recharge"):
+                        # Hyper Beam et al: no move, no switch, no choice at
+                        # all this turn -- the real games don't even show an
+                        # action menu, so this doesn't build the Attack/Switch
+                        # one either.
+                        st.markdown(f"**{c.name}** — must recharge (forced this turn)")
+                        slots_needing_action += 1
+                        p1_actions.append(Action(c, "p1", "protect", None, [c]))
+                        st.divider()
+                        continue
+
+                    st.markdown(f"**{c.name}**")
+                    # "I need to choose during the battle which of my brings
+                    # mega evolves, not before, and choose at the start of
+                    # the turn on which I wish to mega evolve." -- a real
+                    # per-turn declaration, not a team-preview pre-commitment
+                    # that fires automatically the moment it first acts.
+                    eligible = (c.is_mega_pick and not c.mega_evolved
+                               and not battle.p1.mega_used)
+                    if eligible:
+                        our_mega_decisions[id(c)] = st.checkbox(
+                            f"Mega Evolve {c.name} this turn?",
+                            key=f"sim_mega_{i}_{battle.turn_num}")
+
+                    alive_bench = [b for b in battle.p1.bench if not b.fainted]
+                    # Dropdowns, not buttons -- "switch back to the dropdown
+                    # or something fast for the streamlit Battle Simulator,
+                    # the buttons are way too slow."
+                    menu_key = f"sim_menu_{i}_{battle.turn_num}"
+                    menu_options = ["Attack", "Switch"] if alive_bench else ["Attack"]
+                    menu = st.selectbox("Action type", menu_options, key=menu_key,
                                         label_visibility="collapsed")
-                    p1_actions.append(next(a for lbl, a in options if lbl == pick))
-                    continue
 
-                if c.volatile.get("must_recharge"):
-                    # Hyper Beam et al: no move, no switch, no choice at
-                    # all this turn -- the real games don't even show an
-                    # action menu, so this doesn't build the Attack/Switch
-                    # one either.
-                    st.markdown(f"**{c.name}** — must recharge (forced this turn)")
+                    chosen_action = None
+                    if menu == "Attack":
+                        groups = sim_grouped_actions(c, "p1", battle.p1.active, battle.p2.active,
+                                                     movesets[c.name])
+                        if groups:
+                            move_key = f"sim_move_{i}_{battle.turn_num}"
+                            move_name = st.selectbox(
+                                "Move", [name for name, _opts in groups], key=move_key)
+                            opts = dict(groups)[move_name]
+                            if len(opts) > 1:
+                                target_key = f"sim_target_{i}_{battle.turn_num}_{move_name}"
+                                tgt_label = st.selectbox(
+                                    "Target", [lbl for lbl, _a in opts], key=target_key)
+                                chosen_action = next(a for lbl, a in opts if lbl == tgt_label)
+                            else:
+                                chosen_action = opts[0][1]
+                    else:
+                        switch_key = f"sim_switch_{i}_{battle.turn_num}"
+                        bench_name = st.selectbox(
+                            "Switch to", [b.name for b in alive_bench], key=switch_key)
+                        bench_mon = next(b for b in alive_bench if b.name == bench_name)
+                        chosen_action = Action(c, "p1", "switch", None, [bench_mon])
+
                     slots_needing_action += 1
-                    p1_actions.append(Action(c, "p1", "protect", None, [c]))
+                    if chosen_action is None:
+                        st.warning(f"No legal action for {c.name} this turn.")
+                    else:
+                        p1_actions.append(chosen_action)
                     st.divider()
-                    continue
 
-                st.markdown(f"**{c.name}**")
-                # "I need to choose during the battle which of my brings
-                # mega evolves, not before, and choose at the start of
-                # the turn on which I wish to mega evolve." -- a real
-                # per-turn declaration, not a team-preview pre-commitment
-                # that fires automatically the moment it first acts.
-                eligible = (c.is_mega_pick and not c.mega_evolved
-                           and not battle.p1.mega_used)
-                if eligible:
-                    our_mega_decisions[id(c)] = st.checkbox(
-                        f"Mega Evolve {c.name} this turn?",
-                        key=f"sim_mega_{i}_{battle.turn_num}")
-
-                alive_bench = [b for b in battle.p1.bench if not b.fainted]
-                # "It would also be good to have a better UI, like sprites,
-                # buttons like battle->4 moves/switch->select pokemon."
-                menu_key = f"sim_menu_{i}_{battle.turn_num}"
-                menu_options = ["Attack", "Switch"] if alive_bench else ["Attack"]
-                menu = _button_pick(menu_options, menu_key)
-
-                chosen_action = None
-                if menu == "Attack":
-                    groups = sim_grouped_actions(c, "p1", battle.p1.active, battle.p2.active,
-                                                 movesets[c.name])
-                    if groups:
-                        move_key = f"sim_move_{i}_{battle.turn_num}"
-                        move_name = _button_pick([name for name, _opts in groups], move_key)
-                        opts = dict(groups)[move_name]
-                        if len(opts) > 1:
-                            st.caption("Target:")
-                            target_key = f"sim_target_{i}_{battle.turn_num}_{move_name}"
-                            tgt_label = _button_pick([lbl for lbl, _a in opts], target_key,
-                                                    cols_per_row=len(opts))
-                            chosen_action = next(a for lbl, a in opts if lbl == tgt_label)
-                        else:
-                            chosen_action = opts[0][1]
-                else:
-                    switch_key = f"sim_switch_{i}_{battle.turn_num}"
-                    bench_name = _button_pick([b.name for b in alive_bench], switch_key)
-                    bench_mon = next(b for b in alive_bench if b.name == bench_name)
-                    chosen_action = Action(c, "p1", "switch", None, [bench_mon])
-
-                if alive_bench:
-                    # "I also need to be able to choose who I send in
-                    # after a faint." Declared now, alongside this turn's
-                    # action, since `run_turn` resolves a whole turn
-                    # (moves, then any faint, then the replacement) in one
-                    # call -- there's no mid-turn pause to ask again once
-                    # it's actually dead. Reaches the same outcome (the
-                    # bench member you actually wanted arrives) without
-                    # splitting turn resolution into two engine calls.
-                    rep_labels = ["Auto-pick (recommended)"] + [b.name for b in alive_bench]
-                    rep_pick = st.selectbox(
-                        f"If {c.name} faints this turn, send in:", rep_labels,
-                        key=f"sim_replace_{i}_{battle.turn_num}")
-                    if rep_pick != rep_labels[0]:
-                        replacement_choices[id(c)] = next(
-                            b for b in alive_bench if b.name == rep_pick)
-
-                slots_needing_action += 1
-                if chosen_action is None:
-                    st.warning(f"No legal action for {c.name} this turn.")
-                else:
-                    p1_actions.append(chosen_action)
-                st.divider()
-
-            if st.button("Submit turn", type="primary",
-                        disabled=len(p1_actions) != slots_needing_action):
-                from solver import greedy_opponent_joint_action
-                p2_actions = greedy_opponent_joint_action(
-                    battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
-                mega_decisions = {id(c): True for c in battle.p2.active if c is not None}
-                mega_decisions.update(our_mega_decisions)
-                before = len(battle.log.lines)
-                battle.run_turn(p1_actions, p2_actions, mega_decisions=mega_decisions,
-                               replacement_choices=replacement_choices)
-                st.session_state.setdefault("sim_turn_log", []).append(
-                    "\n".join(battle.log.lines[before:]))
-                st.rerun()
+                if st.button("Submit turn", type="primary",
+                            disabled=len(p1_actions) != slots_needing_action):
+                    from solver import greedy_opponent_joint_action
+                    p2_actions = greedy_opponent_joint_action(
+                        battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
+                    mega_decisions = {id(c): True for c in battle.p2.active if c is not None}
+                    mega_decisions.update(our_mega_decisions)
+                    fainted = sim_predict_faint_replacements(
+                        battle, p1_actions, p2_actions, mega_decisions)
+                    if fainted:
+                        st.session_state["sim_pending_turn"] = {
+                            "p1_actions": p1_actions, "p2_actions": p2_actions,
+                            "mega_decisions": mega_decisions, "fainted": fainted,
+                        }
+                    else:
+                        before = len(battle.log.lines)
+                        battle.run_turn(p1_actions, p2_actions, mega_decisions=mega_decisions)
+                        st.session_state.setdefault("sim_turn_log", []).append(
+                            "\n".join(battle.log.lines[before:]))
+                    st.rerun()
 
         if st.session_state.get("sim_turn_log"):
             with st.expander("Turn log", expanded=True):

@@ -154,5 +154,52 @@ class TestTheOptimiserDoesNotEatHandEdits(unittest.TestCase):
                       "merging into it")
 
 
+class TestApplyGivesAVisibleConfirmation(unittest.TestCase):
+    """"the team editing in Team Builder is incredibly buggy and never seems
+    to apply." Every edit was already landing in `st.session_state["sets"]`
+    correctly (see `TestAnEditReachesTheOverrides` above, unaffected by this
+    bug) -- what never happened is the user SEEING it: `st.success(...)`
+    called right before `_defer_rerun()` rendered for exactly the one frame
+    `st.rerun()` immediately discards, so the confirmation never reached a
+    real browser. `_defer_rerun(flash=...)` stashes the message and shows it
+    on the render that actually follows the rerun instead.
+    """
+
+    def test_applying_an_ability_shows_a_success_message(self):
+        at = app()
+        at.selectbox(key="abil_Arcanine-Hisui").select("Intimidate").run()
+        at = click(at, "abil_apply")
+        self.assertTrue(at.success, "no confirmation reached the user at all")
+        self.assertTrue(any("Abilities applied" in s.value for s in at.success))
+
+    def test_applying_moves_shows_a_success_message(self):
+        at = app()
+        at.multiselect(key="mv_Arcanine-Hisui_usage").select("Rock Slide").run()
+        at = click(at, "mv_apply")
+        self.assertTrue(any("Moves applied" in s.value for s in at.success))
+
+    def test_resetting_also_confirms(self):
+        """Reset buttons never showed any message at all, doomed or not --
+        the same silent-looking-broken symptom applies to them too."""
+        at = app({"Arcanine-Hisui": {"ability": "Intimidate"}})
+        at = click(at, "abil_reset")
+        self.assertTrue(any("reset" in s.value.lower() for s in at.success))
+
+    def test_a_second_apply_overwrites_the_first_confirmation_not_both(self):
+        """Only the LATEST action's message should show -- a stale flash
+        from an earlier click must not linger and be mistaken for feedback
+        on the one just clicked."""
+        at = app()
+        at.selectbox(key="abil_Arcanine-Hisui").select("Intimidate").run()
+        at = click(at, "abil_apply")
+        at.multiselect(key="mv_Arcanine-Hisui_usage").select("Rock Slide").run()
+        at = click(at, "mv_apply")
+        messages = [s.value for s in at.success]
+        self.assertTrue(any("Moves applied" in m for m in messages))
+        self.assertFalse(any("Abilities applied" in m for m in messages),
+                         "the earlier Apply's confirmation must not still be "
+                         "showing once a different edit has been applied")
+
+
 if __name__ == "__main__":
     unittest.main()

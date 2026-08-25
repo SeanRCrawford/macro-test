@@ -50,6 +50,24 @@ def sim_tab(at):
     return at.tabs[SIM_TAB_INDEX]
 
 
+def submit_turn(at):
+    """Click "Submit turn" and, if this exact turn happens to faint one of
+    our own Pokemon (a real possibility any full-damage fixture can hit,
+    not something most tests here are trying to exercise), auto-confirm
+    with "Auto-pick" so the turn still fully resolves -- the dedicated
+    faint-choice tests drive that pause themselves instead of using this
+    helper. Returns the app state once the turn has genuinely gone through.
+    """
+    tab = sim_tab(at)
+    submit = next(b for b in tab.button if b.label == "Submit turn")
+    at = submit.click().run()
+    if "sim_pending_turn" in at.session_state:
+        tab = sim_tab(at)
+        confirm = next(b for b in tab.button if b.label == "Confirm and resolve turn")
+        at = confirm.click().run()
+    return at
+
+
 def seed_battle(at, our4, their4, our_mega=None, enemy_mega=None):
     """Build a real Battle exactly the way `app.sim_build_battle` does
     (combatants.make_team + solver.build_moveset), and inject it straight
@@ -151,41 +169,43 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
         tab = sim_tab(at)
         submit = next(b for b in tab.button if b.label == "Submit turn")
         self.assertFalse(submit.disabled)
-        submit.click().run()
+        at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
         battle1 = at.session_state["sim_battle"]
         self.assertEqual(battle1.turn_num, 1)
         self.assertTrue(at.session_state["sim_turn_log"])
 
     def test_action_options_are_real_legal_moves_not_ai_pruned(self):
-        """`sim_legal_actions` (via `sim_grouped_actions`'s button menu)
+        """`sim_legal_actions` (via `sim_grouped_actions`'s Target dropdown)
         must offer EVERY live-foe target for a single-target move, not
         just the AI heuristic's "best" one -- the whole point of playing
         manually. Both actives default to their FIRST move, whose targets
-        (if it needs any) already show as a row of target buttons."""
+        (if it needs any) already show as a "Target" dropdown."""
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
         target_names = {"Kingambit", "Basculegion"}
-        found_both_targets = any(
-            b.label in target_names for b in tab.button
-        ) and len({b.label for b in tab.button} & target_names) >= 2
+        target_sbs = [sb for sb in tab.selectbox if sb.label == "Target"]
+        found_both_targets = any(target_names.issubset(set(sb.options))
+                                 for sb in target_sbs)
         self.assertTrue(found_both_targets, "at least one default move's "
-                                            "target row must offer both "
+                                            "target dropdown must offer both "
                                             "enemy leads, not just one")
 
     def test_switching_the_selected_move_changes_the_target_row(self):
-        """The move buttons act as a real menu -- clicking a DIFFERENT
+        """The Move dropdown acts as a real menu -- picking a DIFFERENT
         move re-renders the target row for that move, not the first one's
         leftover targets."""
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
-        move_buttons = [b for b in tab.button
-                       if b.label not in ("Attack", "Switch", "Submit turn")
-                       and "faints" not in (b.label or "")]
-        self.assertTrue(move_buttons)
-        move_buttons[0].click().run()
+        move_sbs = [sb for sb in tab.selectbox if sb.label == "Move"]
+        self.assertTrue(move_sbs)
+        move_sb = next((sb for sb in move_sbs if len(sb.options) > 1), None)
+        self.assertIsNotNone(move_sb, "fixture assumes at least one slot's "
+                                      "moveset offers more than one move")
+        other = next(o for o in move_sb.options if o != move_sb.value)
+        move_sb.set_value(other).run()
         self.assertEqual(len(at.exception), 0)
 
     def test_no_bench_left_does_not_wrongly_disable_submit(self):
@@ -222,8 +242,9 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
         # No bench anywhere in this bring-2 -- Incineroar's slot (the only
         # non-fainted one) has no "Switch" option at all, and Garchomp's
         # fainted slot needs no action (nothing left to replace it with).
-        self.assertFalse(any(b.label == "Switch" for b in tab.button))
-        self.assertTrue(any(b.label == "Attack" for b in tab.button))
+        menu_sbs = [sb for sb in tab.selectbox if sb.label == "Action type"]
+        self.assertTrue(menu_sbs)
+        self.assertFalse(any("Switch" in sb.options for sb in menu_sbs))
         submit = next(b for b in tab.button if b.label == "Submit turn")
         self.assertFalse(submit.disabled, "a permanently-empty slot must not "
                                           "block the turn from being submitted")
@@ -282,12 +303,12 @@ class TestRechargeUI(unittest.TestCase):
         self.assertTrue(
             any("must recharge" in (m.value or "") for m in tab.markdown),
             "the recharging slot must be labelled, not shown a normal menu")
-        # Both active slots normally get their own "Switch" button (a full
-        # bench sits behind each) -- with Garchomp forced to recharge, only
-        # Incineroar's slot should still offer one.
-        switch_buttons = [b for b in tab.button if b.label == "Switch"]
-        self.assertEqual(len(switch_buttons), 1,
-                         "the recharging slot must not offer a Switch option")
+        # Both active slots normally get their own "Action type" dropdown (a
+        # full bench sits behind each) -- with Garchomp forced to recharge,
+        # only Incineroar's slot should still offer one.
+        menu_sbs = [sb for sb in tab.selectbox if sb.label == "Action type"]
+        self.assertEqual(len(menu_sbs), 1,
+                         "the recharging slot must not offer an action-type menu")
         submit = next(b for b in tab.button if b.label == "Submit turn")
         self.assertFalse(submit.disabled)
 
@@ -302,9 +323,7 @@ class TestRechargeUI(unittest.TestCase):
         garchomp.volatile["must_recharge"] = True
         at = at.run()
 
-        tab = sim_tab(at)
-        submit = next(b for b in tab.button if b.label == "Submit turn")
-        submit.click().run()
+        at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
         battle_after = at.session_state["sim_battle"]
         self.assertEqual(battle_after.turn_num, 1)
@@ -450,9 +469,7 @@ class TestPerTurnMegaChoiceAndReplacementUI(unittest.TestCase):
     def test_leaving_it_unchecked_keeps_the_pick_in_base_form(self):
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
-        tab = sim_tab(at)
-        submit = next(b for b in tab.button if b.label == "Submit turn")
-        submit.click().run()
+        at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
         battle = at.session_state["sim_battle"]
         gyarados = next(c for c in battle.p1.roster if c.name == "Mega Gyarados")
@@ -464,9 +481,7 @@ class TestPerTurnMegaChoiceAndReplacementUI(unittest.TestCase):
         tab = sim_tab(at)
         cb = next(c for c in tab.checkbox if "Mega Gyarados" in c.label)
         cb.set_value(True).run()
-        tab = sim_tab(at)
-        submit = next(b for b in tab.button if b.label == "Submit turn")
-        submit.click().run()
+        at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
         battle = at.session_state["sim_battle"]
         gyarados = next(c for c in battle.p1.roster if c.name == "Mega Gyarados")
@@ -475,35 +490,42 @@ class TestPerTurnMegaChoiceAndReplacementUI(unittest.TestCase):
     def test_opponent_still_mega_evolves_automatically(self):
         """Our side's explicit choice must not silently gate theirs -- they
         have no turn-by-turn UI of their own, so they keep the engine's
-        default "transforms the instant it's eligible" behaviour."""
+        default "transforms the instant it's eligible" behaviour. Mega
+        Charizard Y hits hard enough to faint one of ours turn 1, which now
+        pauses for a replacement choice -- `submit_turn` auto-confirms it,
+        since that pause isn't what this test is about."""
         at = fresh_app()
         at = seed_battle(at, self.OUR4, ["Mega Charizard Y"] + self.THEIR4[1:])
-        tab = sim_tab(at)
-        submit = next(b for b in tab.button if b.label == "Submit turn")
-        submit.click().run()
+        at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
         battle = at.session_state["sim_battle"]
         charizard = next(c for c in battle.p2.roster if c.name == "Mega Charizard Y")
         self.assertTrue(charizard.mega_evolved)
 
-    def test_replacement_picker_offers_the_live_bench(self):
+    def test_no_upfront_replacement_picker_and_no_pause_when_nobody_faints(self):
+        """"For the 'if faints this turn', make it a choice when the faint
+        happens, not a preselection." -- no "X faints this turn" dropdown
+        should ever be pre-rendered, and a turn where nobody on our side
+        faints resolves immediately, with no pending choice left behind."""
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
-        rep_sbs = [sb for sb in tab.selectbox if "faints this turn" in sb.label]
-        # One per non-fainted active slot with a live bench.
-        self.assertEqual(len(rep_sbs), 2)
-        for sb in rep_sbs:
-            self.assertEqual(sb.options[0], "Auto-pick (recommended)")
-            self.assertEqual(set(sb.options[1:]), {"Garchomp", "Basculegion"})
-            self.assertEqual(sb.value, "Auto-pick (recommended)")
+        self.assertFalse(any("faints this turn" in (sb.label or "")
+                             for sb in tab.selectbox))
 
-    def test_picking_a_specific_replacement_is_honoured(self):
-        """A pre-declared preference reaches `run_turn` correctly when the
-        Pokemon it names actually faints THIS turn -- 1 HP so any live
-        opposing attack KOes it. `THEIR4` here (not the class default,
-        which opens with Tailwind/Trick Room and deals no damage at all
-        turn 1) is picked to reliably attack rather than set up."""
+        submit = next(b for b in tab.button if b.label == "Submit turn")
+        submit.click().run()
+        self.assertEqual(len(at.exception), 0)
+        self.assertNotIn("sim_pending_turn", at.session_state)
+        self.assertEqual(at.session_state["sim_battle"].turn_num, 1)
+
+    def test_a_faint_pauses_for_a_real_choice_instead_of_a_preselection(self):
+        """A Pokemon that actually faints this turn must surface a real,
+        post-faint choice -- not resolve immediately on some earlier guess.
+        1 HP so any live opposing attack KOes it. `THEIR4` here (not the
+        class default, which opens with Tailwind/Trick Room and deals no
+        damage at all turn 1) is picked to reliably attack rather than set
+        up."""
         at = fresh_app()
         their4 = ["Basculegion", "Whimsicott", "Sinistcha", "Incineroar"]
         at = seed_battle(at, self.OUR4, their4)
@@ -511,16 +533,28 @@ class TestPerTurnMegaChoiceAndReplacementUI(unittest.TestCase):
         battle.p1.active[0].current_hp = 1  # Mega Gyarados, still alive
         at = at.run()
 
-        tab = sim_tab(at)
-        rep_sb = next(sb for sb in tab.selectbox
-                     if sb.label == "If Mega Gyarados faints this turn, send in:")
-        rep_sb.set_value("Basculegion").run()
-        tab = sim_tab(at)
-        submit = next(b for b in tab.button if b.label == "Submit turn")
-        self.assertFalse(submit.disabled)
+        submit = next(b for b in sim_tab(at).button if b.label == "Submit turn")
         submit.click().run()
         self.assertEqual(len(at.exception), 0)
+        # The turn must NOT have resolved yet -- a faint needs a real
+        # choice first, not whatever was declared before the turn ran.
+        self.assertIn("sim_pending_turn", at.session_state)
+        self.assertEqual(at.session_state["sim_battle"].turn_num, 0)
+
+        tab = sim_tab(at)
+        rep_sb = next(sb for sb in tab.selectbox
+                     if sb.label == "Mega Gyarados fainted -- send in:")
+        self.assertEqual(rep_sb.options[0], "Auto-pick (recommended)")
+        self.assertEqual(set(rep_sb.options[1:]), {"Garchomp", "Basculegion"})
+        rep_sb.set_value("Basculegion").run()
+
+        tab = sim_tab(at)
+        confirm = next(b for b in tab.button if b.label == "Confirm and resolve turn")
+        confirm.click().run()
+        self.assertEqual(len(at.exception), 0)
+        self.assertNotIn("sim_pending_turn", at.session_state)
         battle = at.session_state["sim_battle"]
+        self.assertEqual(battle.turn_num, 1)
         gyarados = next(c for c in battle.p1.roster if c.name == "Mega Gyarados")
         self.assertTrue(gyarados.fainted, "fixture assumes 1 HP dies to "
                                           "any live opposing attack")
@@ -545,39 +579,49 @@ class TestBattleMenu(unittest.TestCase):
                          "no st.image (or any other external fetch) belongs "
                          "in the Battle Simulator board")
 
-    def test_menu_defaults_to_attack_with_a_move_row(self):
+    def test_menu_defaults_to_attack_with_a_move_dropdown(self):
+        """"Switch back to the dropdown or something fast for the streamlit
+        Battle Simulator, the buttons are way too slow." -- Action type,
+        Move and Target are all plain `st.selectbox` dropdowns, one rerun
+        per pick instead of a whole grid of buttons."""
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
-        self.assertEqual(len([b for b in tab.button if b.label == "Attack"]), 2)
-        self.assertEqual(len([b for b in tab.button if b.label == "Switch"]), 2)
+        menu_sbs = [sb for sb in tab.selectbox if sb.label == "Action type"]
+        self.assertEqual(len(menu_sbs), 2)
+        for sb in menu_sbs:
+            self.assertEqual(set(sb.options), {"Attack", "Switch"})
+            self.assertEqual(sb.value, "Attack", "must default to Attack")
+        move_sbs = [sb for sb in tab.selectbox if sb.label == "Move"]
+        self.assertEqual(len(move_sbs), 2)
         first_moveset = list(seed_movesets(self.OUR4[0]))
         move_names = {mv.name for mv, _pct in first_moveset}
-        rendered_labels = {b.label for b in tab.button}
-        self.assertTrue(move_names & rendered_labels, "the default Attack "
-                                                       "menu must show real "
-                                                       "move-name buttons")
+        rendered_options = {opt for sb in move_sbs for opt in sb.options}
+        self.assertTrue(move_names & rendered_options, "the default Attack "
+                                                        "menu must offer real "
+                                                        "move names")
 
-    def test_clicking_switch_then_a_bench_mon_builds_a_switch_action(self):
+    def test_switching_to_switch_then_a_bench_mon_builds_a_switch_action(self):
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
-        switch_btn = next(b for b in tab.button if b.label == "Switch")
-        switch_btn.click().run()
+        menu_sb = next(sb for sb in tab.selectbox if sb.label == "Action type")
+        menu_sb.set_value("Switch").run()
         self.assertEqual(len(at.exception), 0)
 
         tab = sim_tab(at)
-        bench_btn = next(b for b in tab.button if b.label in ("Gallade", "Hydreigon"))
-        bench_btn.click().run()
+        switch_sb = next(sb for sb in tab.selectbox if sb.label == "Switch to")
+        self.assertEqual(set(switch_sb.options), {"Gallade", "Hydreigon"})
+        switch_sb.set_value("Hydreigon").run()
         self.assertEqual(len(at.exception), 0)
 
         tab = sim_tab(at)
         submit = next(b for b in tab.button if b.label == "Submit turn")
         self.assertFalse(submit.disabled)
-        submit.click().run()
+        at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
         battle = at.session_state["sim_battle"]
-        self.assertIn(battle.p1.active[0].name, ("Gallade", "Hydreigon"))
+        self.assertEqual(battle.p1.active[0].name, "Hydreigon")
         self.assertNotEqual(battle.p1.active[0].name, "Garchomp")
 
 
