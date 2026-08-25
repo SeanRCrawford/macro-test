@@ -1004,6 +1004,15 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     Drought/Drizzle/Sand Stream/Snow Warning applies (to BOTH sides'
     damage and turn order) even when neither of ours sets anything.
 
+    SURVIVAL-AWARE RECONSIDERATION: `C`/`E1`/`E2` (not `partner` -- its
+    move is a caller-fixed input) each get one chance to swap to a
+    strictly-faster move from their own moveset if their independently-
+    chosen pick would never actually fire (something faster kills them
+    first, the same turn, before their own turn comes up) -- see
+    `_resolve_turn`'s `_reconsider_for_survival` for the full reasoning;
+    this is the same idea, scoped to this function's simpler single-turn,
+    full-HP-start board.
+
     Returns {"outcome": one of "clean"/"trade"/"no_ko"/"pinned", "target",
     "partner_target", "hp_left": {...}, "hits": {role: {tgt_role: Hit}}}.
     "clean" and "trade" both satisfy "KO them before being KO'd" -- the target
@@ -1044,6 +1053,85 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         spd = effective_speed(combatants[role], field, side)
         theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
         return (-prio, -spd, theirs_first)
+
+    def doomed_roles(pl):
+        """Roles whose hp would already be <=0, from an earlier-acting
+        role's hit, by the time their own position in `pl`'s order comes up
+        -- a move that never actually fires. Same idea as `_apply_plan`'s
+        own `doomed` set (`_resolve_turn`'s survival-aware reconsideration),
+        scoped to this function's simpler single-turn, full-HP-start board
+        (no Focus Sash/Sturdy or Protect here to also account for).
+
+        Sorts by `pl`'s OWN move priorities, not the outer `plan` -- a
+        trial plan with one role's move swapped must be ordered by ITS
+        move, or a reconsideration can never actually change anything.
+        """
+        def pl_speed_key(role):
+            mv = pl[role][1]
+            prio = mv.priority if mv is not None else 0
+            side = "p1" if role in ("C", "P") else "p2"
+            spd = effective_speed(combatants[role], field, side)
+            theirs_first = 0 if role in ("E1", "E2") else 1
+            return (-prio, -spd, theirs_first)
+        local_hp = dict(hp)
+        found = set()
+        for role in sorted(pl.keys(), key=pl_speed_key):
+            hits, mv = pl[role]
+            if local_hp.get(role, 0.0) <= 0:
+                if mv is not None:
+                    found.add(role)
+                continue
+            if mv is None:
+                continue
+            for tgt_role, got in hits.items():
+                if local_hp.get(tgt_role, 1.0) <= 0:
+                    continue
+                local_hp[tgt_role] = max(0.0, local_hp[tgt_role] - got.frac)
+        return found
+
+    # SURVIVAL-AWARE RECONSIDERATION -- see `_reconsider_for_survival`'s own
+    # docstring for the full reasoning ("the enemy can sucker punch
+    # Lycanroc ... if Lycanroc-Dusk targets Kingambit"). `partner`'s move is
+    # a caller-fixed input (nothing to reconsider there); C/E1/E2 each get
+    # one chance to swap to a strictly-faster move from their own moveset
+    # if their current pick would never actually fire.
+    doomed = doomed_roles(plan)
+    if doomed:
+        move_source = {"C": atk_moves, "E1": e1_moves, "E2": e2_moves}
+        for role in doomed:
+            if role not in move_source:
+                continue
+            cur_mv = plan[role][1]
+            if cur_mv is None:
+                continue
+            faster = [m for m in move_source[role]
+                     if m.category != "Status"
+                     and (m.power or m.name in WEIGHT_BASED_POWER)
+                     and m.priority > cur_mv.priority]
+            if not faster:
+                continue
+            if role == "C":
+                _got2, new_mv = _choose_move(
+                    attacker, faster, combatants[target_role], typechart,
+                    weather=weather, defending_side=[e1, e2])
+                if new_mv is None:
+                    continue
+                new_hits = _hit_or_spread(attacker, new_mv, target_role,
+                                          defenders, typechart, weather=weather)
+            else:
+                e = combatants[role]
+                e_moves_for = faster
+                _got2, new_mv = _choose_move(e, e_moves_for, attacker, typechart,
+                                             weather=weather, defending_side=our_side)
+                if new_mv is None:
+                    continue
+                new_hits = _hit_or_spread(e, new_mv, "C", {"C": attacker},
+                                          typechart, weather=weather,
+                                          defending_side=our_side)
+            trial_plan = dict(plan)
+            trial_plan[role] = (new_hits, new_mv)
+            if role not in doomed_roles(trial_plan):
+                plan[role] = (new_hits, new_mv)
 
     order = sorted(plan.keys(), key=speed_key)
 
@@ -1307,57 +1395,20 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     return best_hits, best_move
 
 
-def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
-                  enemy_speed_mult=1.0, protected_roles=frozenset()):
-    """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
-    enemy side chooses independently and greedily (`_choose_action` with no
-    hint), same "no coordination" behaviour `_sequential_pair_outcome`
-    already gives E1/E2. Does NOT mutate `hp` -- returns a fresh dict, log,
-    whether an enemy actually got to act, and which side (if either) was
-    fully fainted DURING this turn's resolution (checked after every actor's
-    hits land, so a true same-turn mutual wipe is still attributed to
-    whichever side went down first in the actual initiative order, not left
-    ambiguous).
+def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
+    """Resolve `plan` ({role: (hits, MoveInfo)}) in priority-then-speed
+    order and apply every hit (Focus Sash/Sturdy honoured, a hit aimed at a
+    protected role dropped) -- the one place `_resolve_turn`'s real
+    application and its survival-reconsideration dry run
+    (`_reconsider_for_survival`) share the EXACT same rules, so "would this
+    role survive to act" can never quietly diverge from what actually
+    happens when the plan is applied for real.
 
-    `enemy_speed_mult`: `>1.0` for the Tailwind-robustness replay (mirrors
-    `engine.effective_speed`'s real `tailwind_p2 *= 2.0` rule) -- applied only
-    to the turn-ORDER comparison, the same thing a real Tailwind changes.
-
-    `protected_roles`: enemy roles ("E1"/"E2") that use Protect THIS turn
-    instead of whatever `_choose_action` would have picked -- `_PROTECT_MOVE`
-    is substituted directly (still a real action, at priority 4, so it still
-    goes first in `speed_key` and still counts toward `enemy_acted`) and any
-    hit aimed at that role this turn is dropped rather than applied, exactly
-    like a real Protect block. This is what lets `_best_turn`'s existing
-    exhaustive hint search learn -- with no change to ITS own logic -- not to
-    waste an attack on a protected enemy: a hint combo that targets a
-    protected role simply scores no KO and no damage for that hit, so a combo
-    that targets the other, unprotected enemy naturally ranks higher.
-
-    `weather` is the ONE shared field value (`_field_weather`'s own return)
-    -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
-    which side casts it) and, via a real `FieldState(weather=weather)`
-    rather than a bare one, to BOTH sides' turn order too (Swift Swim/
-    Chlorophyll/Sand Rush/Slush Rush all key off the field, not off who
-    happens to be attacking).
+    Returns (hp, log, enemy_acted, wiped, doomed) -- `doomed`: roles whose
+    hp was already <=0 by the time their own position in the order came up,
+    despite having a real (non-`None`) move queued: chosen a move, in other
+    words, that never actually got to fire.
     """
-    hp = dict(hp)
-    ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
-    theirs_live = {r: combatants[r] for r in ("E1", "E2") if hp[r] > 0}
-    field = FieldState(weather=weather)
-
-    plan = {}
-    for role, c in ours_live.items():
-        plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
-                                    typechart, weather=weather,
-                                    hinted_target=our_hints.get(role))
-    for role, c in theirs_live.items():
-        if role in protected_roles:
-            plan[role] = ({}, _PROTECT_MOVE)
-        else:
-            plan[role] = _choose_action(c, moves_by_role[role], ours_live,
-                                        typechart, weather=weather)
-
     def speed_key(role):
         mv = plan[role][1]
         prio = mv.priority if mv is not None else 0
@@ -1369,11 +1420,14 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
         return (-prio, -spd, theirs_first)
 
     order = sorted(plan.keys(), key=speed_key)
-    log, enemy_acted, wiped = [], False, None
+    hp = dict(hp)
+    log, enemy_acted, wiped, doomed = [], False, None, set()
     for role in order:
-        if hp[role] <= 0:
-            continue
         hits, mv = plan[role]
+        if hp[role] <= 0:
+            if mv is not None:
+                doomed.add(role)
+            continue
         if role in ("E1", "E2") and mv is not None:
             enemy_acted = True
         if mv is None:
@@ -1407,7 +1461,138 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                 wiped = "theirs"
             elif hp["C"] <= 0 and hp["P"] <= 0:
                 wiped = "ours"
-    return hp, log, enemy_acted, wiped
+    return hp, log, enemy_acted, wiped, doomed
+
+
+def _reconsider_for_survival(plan, doomed, combatants, moves_by_role, hp,
+                             typechart, weather, field, live_targets_by_role,
+                             hint_by_role, enemy_speed_mult, protected_roles):
+    """"It is not a clean win if the enemy protects one then uses a
+    priority move on Lycanroc-Dusk" -- a provisional `plan` chooses every
+    actor's move independently, unaware of the others, so an actor can end
+    up "choosing" a move that never actually fires because something FASTER
+    kills it first, in the very same turn, before its own turn ever comes
+    up (`_apply_plan`'s own `doomed` set -- e.g. Kingambit picking Iron
+    Head, a guaranteed KO, over Sucker Punch, when Lycanroc-Dusk's own
+    Close Combat is about to kill Kingambit first). A move that never fires
+    contributes nothing, so any doomed role that has a move in its own
+    moveset with STRICTLY HIGHER priority than its current pick (the only
+    lever that can move it earlier in the order -- speed is a property of
+    the combatant, not the move) is retried: `_choose_action` picks the
+    best of those faster options the normal way, and it's adopted only if
+    a trial `_apply_plan` confirms this role is no longer doomed under it.
+    A role with no such option, or where even the fastest alternative still
+    doesn't arrive in time, keeps its original pick -- it really will die
+    before acting, exactly as if this reconsideration didn't exist.
+
+    ONE PASS, not a fixed point, and only the SINGLE best-ranked faster
+    option per doomed role is tried (not every faster move in turn):
+    reassigning one role can in principle change whether ANOTHER role is
+    still doomed, or a second, slightly worse-ranked faster move might
+    survive when the best-ranked one doesn't -- but with only 4 actors on a
+    real board this already covers the case that motivated it, and the
+    module stays a cheap arithmetic screen, not an exhaustive search of
+    every ordering.
+    """
+    new_plan = dict(plan)
+    for role in doomed:
+        if role in protected_roles or role not in plan:
+            continue
+        cur_mv = plan[role][1]
+        if cur_mv is None:
+            continue
+        faster = [mv for mv in (moves_by_role.get(role) or [])
+                 if mv.category != "Status"
+                 and (mv.power or mv.name in WEIGHT_BASED_POWER)
+                 and mv.priority > cur_mv.priority]
+        if not faster:
+            continue
+        hits, mv = _choose_action(combatants[role], faster,
+                                  live_targets_by_role[role], typechart,
+                                  weather=weather,
+                                  hinted_target=(hint_by_role or {}).get(role))
+        if mv is None:
+            continue
+        trial_plan = dict(new_plan)
+        trial_plan[role] = (hits, mv)
+        _hp2, _log2, _ea2, _w2, doomed2 = _apply_plan(
+            trial_plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+        if role not in doomed2:
+            new_plan[role] = (hits, mv)
+    return new_plan
+
+
+def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
+                  enemy_speed_mult=1.0, protected_roles=frozenset()):
+    """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
+    enemy side chooses independently and greedily (`_choose_action` with no
+    hint), same "no coordination" behaviour `_sequential_pair_outcome`
+    already gives E1/E2. Does NOT mutate `hp` -- returns a fresh dict, log,
+    whether an enemy actually got to act, and which side (if either) was
+    fully fainted DURING this turn's resolution (checked after every actor's
+    hits land, so a true same-turn mutual wipe is still attributed to
+    whichever side went down first in the actual initiative order, not left
+    ambiguous).
+
+    `enemy_speed_mult`: `>1.0` for the Tailwind-robustness replay (mirrors
+    `engine.effective_speed`'s real `tailwind_p2 *= 2.0` rule) -- applied only
+    to the turn-ORDER comparison, the same thing a real Tailwind changes.
+
+    `protected_roles`: enemy roles ("E1"/"E2") that use Protect THIS turn
+    instead of whatever `_choose_action` would have picked -- `_PROTECT_MOVE`
+    is substituted directly (still a real action, at priority 4, so it still
+    goes first in `speed_key` and still counts toward `enemy_acted`) and any
+    hit aimed at that role this turn is dropped rather than applied, exactly
+    like a real Protect block. This is what lets `_best_turn`'s existing
+    exhaustive hint search learn -- with no change to ITS own logic -- not to
+    waste an attack on a protected enemy: a hint combo that targets a
+    protected role simply scores no KO and no damage for that hit, so a combo
+    that targets the other, unprotected enemy naturally ranks higher.
+
+    `weather` is the ONE shared field value (`_field_weather`'s own return)
+    -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
+    which side casts it) and, via a real `FieldState(weather=weather)`
+    rather than a bare one, to BOTH sides' turn order too (Swift Swim/
+    Chlorophyll/Sand Rush/Slush Rush all key off the field, not off who
+    happens to be attacking).
+
+    SURVIVAL-AWARE RECONSIDERATION: after the provisional plan is built,
+    any role about to die before its own turn comes up gets one chance to
+    reconsider toward a faster move that would actually land -- see
+    `_reconsider_for_survival`. Only runs (a second, cheap `_apply_plan`
+    pass) when the provisional plan actually leaves someone doomed, so a
+    turn where nobody would die-before-acting costs exactly what it always
+    did.
+    """
+    hp = dict(hp)
+    ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
+    theirs_live = {r: combatants[r] for r in ("E1", "E2") if hp[r] > 0}
+    field = FieldState(weather=weather)
+
+    plan = {}
+    for role, c in ours_live.items():
+        plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
+                                    typechart, weather=weather,
+                                    hinted_target=our_hints.get(role))
+    for role, c in theirs_live.items():
+        if role in protected_roles:
+            plan[role] = ({}, _PROTECT_MOVE)
+        else:
+            plan[role] = _choose_action(c, moves_by_role[role], ours_live,
+                                        typechart, weather=weather)
+
+    hp2, log, enemy_acted, wiped, doomed = _apply_plan(
+        plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+    if doomed - protected_roles:
+        live_targets_by_role = {r: theirs_live for r in ours_live}
+        live_targets_by_role.update({r: ours_live for r in theirs_live})
+        plan = _reconsider_for_survival(
+            plan, doomed, combatants, moves_by_role, hp, typechart, weather,
+            field, live_targets_by_role, our_hints, enemy_speed_mult,
+            protected_roles)
+        hp2, log, enemy_acted, wiped, _doomed2 = _apply_plan(
+            plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+    return hp2, log, enemy_acted, wiped
 
 
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,

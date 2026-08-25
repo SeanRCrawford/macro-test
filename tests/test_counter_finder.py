@@ -1386,6 +1386,111 @@ class TestOneTurnLookahead(unittest.TestCase):
         self.assertIn("E1", hits)
 
 
+class TestSurvivalAwareReconsideration(unittest.TestCase):
+    """"It is not a clean win if the enemy protects one then uses a
+    priority move on Lycanroc-Dusk, given Mega Metagross can't beat the
+    enemies on its own." A provisional move choice can pick something that
+    never actually fires: Kingambit's Iron Head is a guaranteed OHKO on
+    Lycanroc-Dusk (156% avg), so it independently outranks Sucker Punch
+    (82%, doesn't KO alone) under `_choose_move`'s own KO-first rule -- but
+    Kingambit is naturally SLOWER than Lycanroc-Dusk, whose own Close
+    Combat is ALSO a guaranteed OHKO on Kingambit (164%) and, with no
+    priority advantage on Kingambit's side, resolves first. Iron Head never
+    fires; Sucker Punch (priority +1) would have. Confirmed directly
+    against real damage rolls before writing these tests."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.lycanroc = cf._build("Lycanroc-Dusk", merged, natures)
+        self.close_combat = cf._move_infos(
+            "Lycanroc-Dusk", merged, moves, ["Close Combat"])
+        self.kingambit = cf._build("Kingambit", merged, natures)
+        self.kingambit_moves = cf._move_infos(
+            "Kingambit", merged, moves,
+            ["Sucker Punch", "Iron Head", "Kowtow Cleave"])
+        self.charizard = cf._build("Mega Charizard Y", merged, natures)
+        self.solar_beam = cf._move_infos(
+            "Mega Charizard Y", merged, moves, ["Solar Beam"])
+
+    def test_fixture_assumes_both_moves_are_real_ohkos(self):
+        typechart = self.W["typechart"]
+        close_combat = cf._raw_hit(self.lycanroc, self.close_combat[0],
+                                   self.kingambit, typechart, roll="avg")
+        iron_head = cf._raw_hit(self.kingambit, cf._lookup_move(
+            "Iron Head", self.W["moves"]), self.lycanroc, typechart, roll="avg")
+        self.assertGreaterEqual(close_combat.frac, 1.0)
+        self.assertGreaterEqual(iron_head.frac, 1.0)
+
+    def test_sequential_pair_outcome_reconsiders_toward_sucker_punch(self):
+        typechart = self.W["typechart"]
+        result = cf._sequential_pair_outcome(
+            self.lycanroc, self.close_combat, "Kingambit", self.kingambit,
+            self.kingambit_moves, "Mega Charizard Y", self.charizard,
+            self.solar_beam, typechart, candidate_target="Kingambit")
+        e1_hits = result["hits"].get("E1", {})
+        self.assertIn("C", e1_hits)
+        self.assertEqual(e1_hits["C"].move_name, "Sucker Punch",
+                         "Iron Head would never fire -- Kingambit dies to "
+                         "Close Combat before its own (slower) turn comes up")
+
+    def test_without_the_threat_the_guaranteed_ko_is_still_used(self):
+        """Reconsideration must not kick in when nothing is actually
+        threatened -- a much slower, harmless attacker in Lycanroc's seat
+        leaves Kingambit free to use its real best (KO-securing) move."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        harmless = cf._build("Whimsicott", merged, natures)
+        weak_move = cf._move_infos("Whimsicott", merged, moves, ["Tackle"])
+        result = cf._sequential_pair_outcome(
+            harmless, weak_move, "Kingambit", self.kingambit,
+            self.kingambit_moves, "Mega Charizard Y", self.charizard,
+            self.solar_beam, typechart, candidate_target="Kingambit")
+        e1_hits = result["hits"].get("E1", {})
+        self.assertIn("C", e1_hits)
+        self.assertEqual(e1_hits["C"].move_name, "Iron Head",
+                         "fixture assumes Whimsicott's Tackle is no threat "
+                         "to Kingambit at all -- Iron Head should fire "
+                         "unmodified")
+
+    def test_resolve_turn_reconsiders_the_same_way(self):
+        """Same guarantee through the multi-turn engine `joint_pair_search`/
+        `joint_pool_search`/`--multi-bring4` actually use."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        combatants = {"C": self.lycanroc, "P": self.lycanroc,
+                      "E1": self.kingambit, "E2": self.kingambit}
+        moves_by_role = {"C": self.close_combat, "P": [],
+                         "E1": self.kingambit_moves, "E2": []}
+        weather = cf._field_weather({"C": self.lycanroc, "E1": self.kingambit,
+                                     "E2": self.charizard})
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        _hp, log, _enemy_acted, _wiped = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
+        by_role = {(role, tgt): h.move_name for role, tgt, h in log}
+        self.assertEqual(by_role.get(("E1", "C")), "Sucker Punch")
+
+    def test_a_role_with_no_faster_option_stays_on_its_doomed_pick(self):
+        """When NOTHING in the doomed role's own moveset is fast enough to
+        matter, reconsideration must leave the original choice alone --
+        Kingambit restricted to Iron Head/Kowtow Cleave only (no Sucker
+        Punch in its set at all) has no escape, so it should still show up
+        using one of those, not silently vanish from the log."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        no_priority = cf._move_infos(
+            "Kingambit", merged, moves, ["Iron Head", "Kowtow Cleave"])
+        result = cf._sequential_pair_outcome(
+            self.lycanroc, self.close_combat, "Kingambit", self.kingambit,
+            no_priority, "Mega Charizard Y", self.charizard, self.solar_beam,
+            typechart, candidate_target="Kingambit")
+        e1_hits = result["hits"].get("E1")
+        self.assertIsNone(e1_hits, "Kingambit really does die before "
+                          "acting -- nothing in its restricted moveset "
+                          "could have saved it")
+
+
 class TestJointDamageLog(unittest.TestCase):
     """"I want it to ... display damage output vs enemies, and damage taken
     by each" -- `_joint_race`'s log, threaded through `_pair_vs_targets` into
@@ -1793,8 +1898,19 @@ class TestMultiBring4Search(unittest.TestCase):
             self.assertEqual(r["unused"], ())
 
     def test_beam_respects_beam_width(self):
-        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=3)
-        self.assertLessEqual(len(rows), 3)
+        """`found` accumulates DISTINCT cores across all 3 sizes (4/5/6) the
+        beam passes through, so the total row count is not itself capped at
+        `beam_width` (nothing in `multi_bring4_beam`'s own docstring
+        promises that) -- what IS guaranteed is that a narrower beam can
+        never find MORE than a wider one, since it's growing from a subset
+        of the same partials at every step."""
+        narrow = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=1)
+        wide = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=20)
+        self.assertLessEqual(len(narrow), len(wide))
+        self.assertGreater(len(wide), len(narrow),
+                           "fixture assumes beam_width actually changes the "
+                           "result for this pool -- otherwise this isn't "
+                           "testing anything")
 
     def test_beam_rows_are_ranked_best_worst_case_first(self):
         rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=8)
