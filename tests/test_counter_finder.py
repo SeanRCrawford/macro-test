@@ -561,6 +561,58 @@ class TestItemOverrides(unittest.TestCase):
         self.assertEqual(by_name["Gallade"]["item"], "Choice Scarf")
 
 
+class TestChoiceScarfExcludedByDefault(unittest.TestCase):
+    """"By default I do not want to allow choice scarf; it is too easy to
+    punish, but should be an option." Garchomp vs Dragapult is a real case
+    where the unrestricted optimizer picks Scarf (to outspeed) -- confirmed
+    directly against `optimize_sets.best_item`/`best_moveset` before writing
+    this test."""
+
+    def test_default_search_never_picks_scarf_even_when_it_would_win_speed(self):
+        W = world()
+        item, _moves, _w = cf.best_answer(
+            "Garchomp", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Dragapult"])
+        self.assertNotEqual(item, "Choice Scarf")
+
+    def test_excluded_items_frozenset_restores_scarf_as_a_candidate(self):
+        W = world()
+        item, _moves, _w = cf.best_answer(
+            "Garchomp", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Dragapult"], excluded_items=frozenset())
+        self.assertEqual(item, "Choice Scarf")
+
+    def test_an_explicit_pin_still_works_under_the_default_exclusion(self):
+        """The default exclusion is a search preference, not a legality
+        rule -- an explicit `--item` pin always bypasses it, same as
+        `BANNED_ITEMS` pins already do."""
+        W = world()
+        item, moves, _w = cf.best_answer(
+            "Garchomp", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Dragapult"], item="Choice Scarf")
+        self.assertEqual(item, "Choice Scarf")
+        self.assertEqual(len(moves), 4)
+
+    def test_threshold_search_excludes_scarf_by_default_from_the_pool(self):
+        W = world()
+        rows = cf.threshold_search(
+            ["Garchomp"], ["Dragapult"], W["merged"], W["moves"],
+            W["natures"], W["typechart"])
+        self.assertNotEqual(rows[0]["item"], "Choice Scarf")
+
+    def test_threshold_search_never_restricts_a_named_enemys_item(self):
+        """`excluded_items` must only ever narrow OUR OWN candidates -- a
+        named enemy's own set (`target_sets`, used for the `outspeed`/
+        `max_taken` screen) must still be searched unrestricted, since the
+        enemy could easily be running Choice Scarf themselves. Confirmed by
+        source inspection, mirroring the existing pragmatic pattern in
+        `test_team_builder_sets.py`'s `TestTheOptimiserDoesNotEatHandEdits`."""
+        import inspect
+        src = inspect.getsource(cf.threshold_search)
+        target_sets_call = src[src.index("target_sets[t] ="):][:250]
+        self.assertIn("excluded_items=frozenset()", target_sets_call)
+
+
 class TestSpeedTiers(unittest.TestCase):
     """"I also need to see speed tiers, for instance to have an option to
     make sure my guys (accounting for priority like bullet punch) outspeed
@@ -926,9 +978,12 @@ class TestJointProtectRobustness(unittest.TestCase):
         self.assertEqual(set(d["protect_outcomes"]), {"E1", "E2"})
 
     def test_fast_enough_pair_is_protect_safe(self):
-        """Metagross on its own optimised (Scarf) set outspeeds Mega
-        Charizard Y regardless of which enemy Protects turn 1."""
-        d, summary = self._deep()
+        """Metagross on Choice Scarf outspeeds Mega Charizard Y regardless
+        of which enemy Protects turn 1. Pinned explicitly (Scarf is
+        excluded from the default search since this session's "no Choice
+        Scarf by default" change) -- an explicit --item pin still works
+        regardless of that default."""
+        d, summary = self._deep(item_overrides={"Metagross": "Choice Scarf"})
         self.assertTrue(d["protect_safe"])
         for outcome in d["protect_outcomes"].values():
             self.assertIn(outcome, ("sweep", "out_trade"))
@@ -1090,6 +1145,151 @@ class TestJointFocusSashAndSturdy(unittest.TestCase):
         self.assertGreater(new_hp2["E1"], 0.0,
                           "a second independent replay must still honour "
                           "the Sash, not treat it as already used")
+
+
+class TestArmorTailAndPriorityBlock(unittest.TestCase):
+    """"Make sure anti-priority like Farigiraf's armor tail ability is taken
+    into account." `battle.py` already blocks a priority move outright when
+    Queenly Majesty / Dazzling / Armor Tail is held by ANY living member of
+    the target's side (`Battle._blocked_by_guard`) -- this module's cheap
+    arithmetic model had no notion of it at all before this. Farigiraf is
+    Armor Tail at ~99% usage by default (`_build` needs no override); Kingambit
+    Sucker Punch (priority +1) vs a non-priority Iron Head is the fixture
+    used throughout -- both real, common sets, not invented ones."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_priority_blocked_true_only_for_a_real_priority_move(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        attacker = cf._build("Kingambit", merged, natures)
+        target = cf._build("Farigiraf", merged, natures)
+        self.assertEqual(target.ability, "Armor Tail")
+        sucker_punch = cf._lookup_move("Sucker Punch", moves)
+        iron_head = cf._lookup_move("Iron Head", moves)
+        self.assertTrue(cf._priority_blocked(attacker, sucker_punch, [target]))
+        self.assertFalse(cf._priority_blocked(attacker, iron_head, [target]),
+                         "a non-priority move is never blocked by this rule")
+
+    def test_priority_blocked_ignored_by_mold_breaker_style_abilities(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        target = cf._build("Farigiraf", merged, natures)
+        sucker_punch = cf._lookup_move("Sucker Punch", moves)
+        for ability in ("Mold Breaker", "Teravolt", "Turboblaze"):
+            attacker = cf._build("Kingambit", merged, natures)
+            attacker.ability = ability
+            self.assertFalse(cf._priority_blocked(attacker, sucker_punch, [target]),
+                             ability)
+
+    def test_choose_move_picks_a_landing_move_over_a_blocked_priority_one(self):
+        """A rational attacker doesn't lock into a priority move that will
+        never land -- confirmed against a real damage-roll swing (Sucker
+        Punch normally OUTRANKS Iron Head here purely on priority)."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        attacker = cf._build("Kingambit", merged, natures)
+        sucker_punch = cf._lookup_move("Sucker Punch", moves)
+        iron_head = cf._lookup_move("Iron Head", moves)
+
+        armor_tail_target = cf._build("Farigiraf", merged, natures)
+        hit, mv = cf._choose_move(attacker, [sucker_punch, iron_head],
+                                  armor_tail_target, typechart,
+                                  defending_side=[armor_tail_target])
+        self.assertEqual(mv.name, "Iron Head")
+        self.assertGreater(hit.frac, 0.0)
+
+        plain_target = cf._build("Kingambit", merged, natures)
+        hit2, mv2 = cf._choose_move(attacker, [sucker_punch, iron_head],
+                                    plain_target, typechart,
+                                    defending_side=[plain_target])
+        self.assertEqual(mv2.name, "Sucker Punch",
+                         "fixture assumes Sucker Punch normally wins on priority")
+
+    def test_choose_move_scores_a_blocked_lone_move_as_no_hit(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        attacker = cf._build("Kingambit", merged, natures)
+        target = cf._build("Farigiraf", merged, natures)
+        sucker_punch = cf._lookup_move("Sucker Punch", moves)
+        hit, mv = cf._choose_move(attacker, [sucker_punch], target, typechart,
+                                  defending_side=[target])
+        self.assertEqual(mv.name, "Sucker Punch")  # still the only move used
+        self.assertEqual(hit.frac, 0.0)             # but it does nothing
+
+    def test_choose_action_and_grid_hit_agree_with_choose_move(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        attacker = cf._build("Kingambit", merged, natures)
+        target = cf._build("Farigiraf", merged, natures)
+        sucker_punch = cf._lookup_move("Sucker Punch", moves)
+
+        hits, mv = cf._choose_action(attacker, [sucker_punch], {"E1": target}, typechart)
+        self.assertEqual(hits["E1"].frac, 0.0)
+
+        grid = cf._grid_hit(attacker, [sucker_punch], target, None, typechart)
+        self.assertEqual(grid.frac, 0.0)
+
+    def test_end_to_end_sequential_pair_outcome_partner_armor_tail_blocks_enemy(self):
+        """Our PARTNER holding Armor Tail must block a priority move the
+        enemy aims at the CANDIDATE too -- the ability protects the whole
+        side, not just its own holder. Contrasted against an identical setup
+        with a non-Armor-Tail partner, where the same Sucker Punch is a real
+        OHKO on the candidate."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        attacker = cf._build("Basculegion", merged, natures)
+        atk_moves = cf._move_infos("Basculegion", merged, moves, ["Wave Crash"])
+        e1 = cf._build("Kingambit", merged, natures)
+        e1_moves = cf._move_infos("Kingambit", merged, moves, ["Sucker Punch"])
+        e2 = cf._build("Kingambit", merged, natures)
+        partner_move = cf._lookup_move("Dazzling Gleam", moves)
+
+        guarded = cf._sequential_pair_outcome(
+            attacker, atk_moves, "Kingambit", e1, e1_moves, "Kingambit2", e2, [],
+            typechart, candidate_target="Kingambit",
+            partner=cf._build("Farigiraf", merged, natures),
+            partner_move=partner_move, partner_target="Kingambit")
+        self.assertEqual(guarded["hits"].get("E1", {}), {})
+        self.assertEqual(guarded["hp_left"]["C"], 1.0)
+
+        unguarded = cf._sequential_pair_outcome(
+            attacker, atk_moves, "Kingambit", e1, e1_moves, "Kingambit2", e2, [],
+            typechart, candidate_target="Kingambit",
+            partner=cf._build("Sylveon", merged, natures),
+            partner_move=partner_move, partner_target="Kingambit")
+        self.assertIn("C", unguarded["hits"]["E1"])
+        self.assertLess(unguarded["hp_left"]["C"], 1.0,
+                        "fixture assumes Sucker Punch is a real hit without "
+                        "Armor Tail on the board")
+
+    def test_end_to_end_resolve_turn_blocks_the_enemys_priority_hit(self):
+        """Same guarantee through the multi-turn `_resolve_turn` engine
+        `joint_pair_search` actually uses -- mirrors the existing Focus Sash/
+        Sturdy `_isolated_hit` fixture pattern above."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        e1 = cf._build("Kingambit", merged, natures)
+        e1_moves = cf._move_infos("Kingambit", merged, moves, ["Sucker Punch"])
+
+        guard = cf._build("Farigiraf", merged, natures)
+        combatants = {"C": guard, "P": guard, "E1": e1, "E2": e1}
+        moves_by_role = {"C": [], "P": [], "E1": e1_moves, "E2": []}
+        weather = cf._field_weather(combatants)
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        new_hp, _log, enemy_acted, _wiped = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {})
+        self.assertTrue(enemy_acted, "the enemy still used its turn, it just failed")
+        self.assertEqual(new_hp["C"], 1.0)
+
+        plain = cf._build("Sylveon", merged, natures)
+        combatants2 = {"C": plain, "P": plain, "E1": e1, "E2": e1}
+        new_hp2, _log2, _ea2, _w2 = cf._resolve_turn(
+            combatants2, moves_by_role, hp, typechart, weather, {})
+        self.assertLess(new_hp2["C"], 1.0,
+                        "fixture assumes Sucker Punch is a real hit without "
+                        "Armor Tail on the board")
 
 
 class TestJointDamageLog(unittest.TestCase):
@@ -1333,6 +1533,14 @@ class TestBring4Search(unittest.TestCase):
             cf.bring4_search(self.OUR6 + ["Whimsicott"], self.TARGETS, merged,
                              moves, natures, typechart)
 
+    def test_rejects_a_mega_alongside_its_own_base_form(self):
+        """"You cannot have both a mega and its non-mega form." """
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        our6 = self.OUR6[:5] + ["Alakazam"]  # OUR6 already has Mega Alakazam
+        with self.assertRaises(ValueError):
+            cf.bring4_search(our6, self.TARGETS, merged, moves, natures, typechart)
+
 
 class TestMultiBring4Search(unittest.TestCase):
     """`multi_bring4_coverage`/`multi_bring4_exhaustive`/`multi_bring4_beam`
@@ -1384,10 +1592,10 @@ class TestMultiBring4Search(unittest.TestCase):
         self.assertNotIn("Basculegion", cov["candidate_pool"])
         # Must not crash, and must never recommend bringing the enemy's
         # own Pokemon.
-        if len(cov["candidate_pool"]) >= 6:
+        if len(cov["candidate_pool"]) >= 4:
             rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
             for r in rows:
-                self.assertNotIn("Basculegion", r["team6"])
+                self.assertNotIn("Basculegion", r["core"])
 
     def test_stage_a_runs_once_per_enemy_over_the_whole_pool(self):
         import itertools as _it
@@ -1417,17 +1625,35 @@ class TestMultiBring4Search(unittest.TestCase):
         self.assertTrue(set(strict["candidate_pool"])
                         .issubset(set(lenient["candidate_pool"])))
 
-    def test_exhaustive_covers_every_six_from_the_candidate_pool(self):
+    def test_exhaustive_covers_every_valid_core_size(self):
+        """"a full team of only 4-5 members is not a problem, in some ways
+        it is actually better and more efficient. I would still like to
+        see them" -- sizes 4, 5 AND 6 are all searched, not just 6. Every
+        returned core is a genuine subset of SOME size-4/5/6 combination
+        from the candidate pool, has no unused member (a wasted slot would
+        mean an identical-scoring smaller core exists on its own), and no
+        row is missing any size the fixture can actually reach."""
         import itertools as _it
         cov = self.coverage
-        if len(cov["candidate_pool"]) < 6:
+        if len(cov["candidate_pool"]) < 4:
             self.skipTest("fixture's candidate pool is too small at this "
                           "threshold -- covered structurally by the ceiling "
                           "test below instead")
         rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
-        got = {r["team6"] for r in rows}
-        want = {tuple(sorted(c)) for c in _it.combinations(cov["candidate_pool"], 6)}
-        self.assertEqual(got, want)
+        all_possible = set()
+        for size in (4, 5, 6):
+            if size <= len(cov["candidate_pool"]):
+                all_possible |= {tuple(sorted(c))
+                                for c in _it.combinations(cov["candidate_pool"], size)}
+        got = {r["core"] for r in rows}
+        self.assertTrue(got.issubset(all_possible))
+        self.assertTrue(all(r["core_size"] in (4, 5, 6) for r in rows))
+        self.assertTrue(all(r["unused"] == () for r in rows))
+        sizes_seen = {r["core_size"] for r in rows}
+        self.assertTrue(sizes_seen.issubset({4, 5, 6}))
+        self.assertGreaterEqual(len(sizes_seen), 2,
+                                "fixture assumes at least two different core "
+                                "sizes are valid (no-unused-member) answers")
 
     def test_exhaustive_rows_are_ranked_best_worst_case_first(self):
         cov = self.coverage
@@ -1439,16 +1665,16 @@ class TestMultiBring4Search(unittest.TestCase):
 
     def test_exhaustive_reports_a_best_bring4_per_enemy(self):
         cov = self.coverage
-        if len(cov["candidate_pool"]) < 6:
+        if len(cov["candidate_pool"]) < 4:
             self.skipTest("fixture's candidate pool is too small at this threshold")
         rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
         for r in rows[:1]:
             self.assertEqual(len(r["per_enemy"]), len(self.ENEMIES))
             for pe in r["per_enemy"]:
                 self.assertEqual(len(pe["best_bring4"]), 4)
-                self.assertTrue(set(pe["best_bring4"]).issubset(set(r["team6"])))
+                self.assertTrue(set(pe["best_bring4"]).issubset(set(r["core"])))
 
-    def test_exhaustive_rejects_a_pool_below_six(self):
+    def test_exhaustive_rejects_a_pool_below_four(self):
         cov = {"candidate_pool": ["Sharpedo", "Rampardos"],
               "pair_by_key": [{}], "target_name_lists": [["Sableye", "Ariados"]]}
         with self.assertRaises(ValueError):
@@ -1464,12 +1690,13 @@ class TestMultiBring4Search(unittest.TestCase):
         with self.assertRaises(ValueError):
             cf.multi_bring4_exhaustive(cov, good_threshold=0.0, max_candidates=3)
 
-    def test_beam_returns_only_complete_teams_of_six(self):
+    def test_beam_returns_only_complete_cores_of_valid_size(self):
         rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=6)
         self.assertTrue(rows)
         for r in rows:
-            self.assertEqual(len(r["team6"]), 6)
-            self.assertEqual(len(set(r["team6"])), 6)
+            self.assertIn(len(r["core"]), (4, 5, 6))
+            self.assertEqual(len(set(r["core"])), len(r["core"]))
+            self.assertEqual(r["unused"], ())
 
     def test_beam_respects_beam_width(self):
         rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=3)
@@ -1484,11 +1711,11 @@ class TestMultiBring4Search(unittest.TestCase):
         """Unlike the exhaustive mode, beam must be able to pick a member
         that never appeared in any enemy's own good-pair list."""
         rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=20)
-        all_picked = {n for r in rows for n in r["team6"]}
+        all_picked = {n for r in rows for n in r["core"]}
         self.assertTrue(all_picked.issubset(set(self.POOL)))
 
 
-class TestTeam6RowAndBring4Candidates(unittest.TestCase):
+class TestCoreRowAndBring4Candidates(unittest.TestCase):
     """The shared, no-new-racing combinatorics both `bring4_search` and the
     multi-enemy search are built on."""
 
@@ -1514,16 +1741,16 @@ class TestTeam6RowAndBring4Candidates(unittest.TestCase):
         self.assertEqual([b["bring4"] for b in direct],
                          [b["bring4"] for b in via_search])
 
-    def test_team6_row_picks_the_worse_enemy_as_the_bottleneck(self):
+    def test_core_row_picks_the_worse_enemy_as_the_bottleneck(self):
         """A trivial two-enemy case using the SAME enemy pair twice: the
         worst-case score across both must equal the single-enemy score,
         and the bottleneck can be either (they're identical)."""
-        team6 = ("Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
-                "Rampardos", "Kingambit")
-        row = cf._team6_row(team6, [self.pair_by_key, self.pair_by_key],
-                            [["Sableye", "Ariados"], ["Sableye", "Ariados"]],
-                            good_threshold=1.0)
-        solo = cf._bring4_candidates(team6, self.pair_by_key, good_threshold=1.0)[0]
+        core = ("Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+               "Rampardos", "Kingambit")
+        row = cf._core_row(core, [self.pair_by_key, self.pair_by_key],
+                           [["Sableye", "Ariados"], ["Sableye", "Ariados"]],
+                           good_threshold=1.0)
+        solo = cf._bring4_candidates(core, self.pair_by_key, good_threshold=1.0)[0]
         self.assertEqual(row["worst_enemy_score_key"],
                          cf._pair_sort_key(solo["worst_pair_row"]))
         self.assertIn(row["worst_enemy_idx"], (0, 1))

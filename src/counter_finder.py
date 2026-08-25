@@ -251,6 +251,79 @@ def _mega_choices(names_pair):
     return megas + [NO_MEGA]
 
 
+def _base_species_name(name):
+    """The base species name for a "Mega X" (or "Mega X Y", the Charizard/
+    Mewtwo-style split) roster entry -- `None` if `name` isn't a Mega pick
+    at all. This dataset lists a Mega and its base form as two INDEPENDENT
+    roster entries (their own usage stats, EVs, ability) -- there is no
+    existing "same species" lookup anywhere else in this module, since
+    nothing needed one before now.
+
+        "You cannot have both a mega and its non-mega form."
+
+    Only strips the ONE trailing " X"/" Y" suffix pattern this dataset
+    actually uses (Mega Charizard X/Y, Mega Mewtwo X/Y) -- a base species
+    name genuinely ending in " X" or " Y" does not otherwise occur.
+    """
+    if not name.startswith("Mega "):
+        return None
+    base = name[len("Mega "):]
+    for suffix in (" X", " Y"):
+        if base.endswith(suffix):
+            return base[:-len(suffix)]
+    return base
+
+
+def _mega_base_overlap(names):
+    """Every name in `names` that is EITHER a Mega pick whose own base
+    species is also present, OR a base species whose Mega form is also
+    present -- "you cannot have both a mega and its non-mega form" as a
+    reusable membership check, for both `--bring4`'s validation of a
+    user-named --our and `--multi-bring4`'s candidate-pool filtering.
+    """
+    names = set(names)
+    bad = set()
+    for n in names:
+        base = _base_species_name(n)
+        if base is not None and base in names:
+            bad.add(n)
+            bad.add(base)
+    return bad
+
+
+def member_weakness_summary(core, merged):
+    """Per-MEMBER type-weakness counts for `core` -- how many of the
+    game's types each member is weak to (0, 1, or 2+) -- feeding the
+    multi-bring4 CSV/CLI synergy summary:
+
+        "I want the multi-bring4 export to summarise type synergy too,
+         such as total weaknesses to 2 types, total weaknesses to 1 type
+         and overall"
+
+    Distinct from `team_search.weakness_violations`'s own per-TYPE
+    breakdown (how many members are weak to type X) -- both are real,
+    different readings of the same `defensive_chart` data; this is simply
+    the one `team_search.py` doesn't already compute, read the other way
+    round.
+
+    Returns {"per_member": {name: weak_type_count}, "weak_to_2plus": int,
+    "weak_to_1": int, "weak_to_0": int, "total_weakness_instances": int}.
+    """
+    from species_data import TYPES
+    per_member = {}
+    for n in core:
+        dc = (merged.get(n) or {}).get("defensive_chart") or {}
+        per_member[n] = sum(1 for t in TYPES if dc.get(t, 1.0) > 1.0)
+    counts = list(per_member.values())
+    return {
+        "per_member": per_member,
+        "weak_to_2plus": sum(1 for c in counts if c >= 2),
+        "weak_to_1": sum(1 for c in counts if c == 1),
+        "weak_to_0": sum(1 for c in counts if c == 0),
+        "total_weakness_instances": sum(counts),
+    }
+
+
 def _build_forms(names, merged, natures, moves_db, items=None):
     """{name: {"mega": Combatant, "base": Combatant, "moves": [MoveInfo,...]}}
     for every name in `names`, built ONCE regardless of how many pairs drawn
@@ -295,8 +368,17 @@ def _resolve_forms(names, built):
         yield mt, cs
 
 
+# "By default I do not want to allow choice scarf; it is too easy to
+# punish, but should be an option." -- Choice Scarf is legal in Regulation
+# MB (unlike Assault Vest/Choice Band/Choice Specs, `lead_sim.BANNED_ITEMS`),
+# so this is a SEPARATE, counter_table.py-specific preference on top of that
+# legality check, not a rule change: `--allow-scarf` passes `excluded_items=
+# frozenset()` through every search function below to opt back in.
+DEFAULT_EXCLUDED_ITEMS = frozenset({"Choice Scarf"})
+
+
 def best_answer(name, merged, moves_db, natures, typechart, target_names,
-                item=None, move_names=None):
+                item=None, move_names=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """(item, move_names, weather): `name`'s best LEGAL item and moveset
     against `target_names`, via `optimize_sets.best_item`/`best_moveset` --
     or, "or to just select optimal item" is not the only option, an explicit
@@ -306,16 +388,27 @@ def best_answer(name, merged, moves_db, natures, typechart, target_names,
     (e.g. Choice Scarf on a Pokemon the search would not have picked it for).
     Checked against Regulation MB's banned list the same as a searched item
     would be -- an override is a decision, not a loophole, so it still has to
-    be legal. The moveset is still genuinely re-optimised UNDER whichever
-    item ends up in play, pinned or found -- "For Choice Scarf, a pokemon can
-    use 4 moves, which could be highly useful": a Choice item locks you into
-    the first move you use, not into a single hard-coded one, so its set is
-    chosen the same way any other item's is.
+    be legal. `excluded_items` does NOT apply to an explicit pin -- naming
+    Choice Scarf yourself via `--item` still works even with the default
+    exclusion on, same "a decision, not a loophole" reasoning. The moveset
+    is still genuinely re-optimised UNDER whichever item ends up in play,
+    pinned or found -- "For Choice Scarf, a pokemon can use 4 moves, which
+    could be highly useful": a Choice item locks you into the first move you
+    use, not into a single hard-coded one, so its set is chosen the same way
+    any other item's is.
 
     `move_names`: pin the moveset outright too (skips move optimisation
     entirely). Only meaningful together with `item`, since a pinned moveset
     with a searched-for item would be re-deriving the item against moves that
     might not even be the ones the search would have chosen.
+
+    `excluded_items`: items dropped from the SEARCH's own candidate list --
+    defaults to `DEFAULT_EXCLUDED_ITEMS` (Choice Scarf); pass `frozenset()`
+    for "search every legal item, Scarf included". Applied the SAME way
+    `BANNED_ITEMS` already is (a post-hoc filter on `best_item`'s pick,
+    falling back to the most-used remaining legal item, not a full
+    re-optimisation excluding it -- `optimize_sets.best_item` itself is
+    shared with the rest of the app and is not touched).
 
     `best_item`'s own candidate list (`legal_items`) is not filtered against
     Regulation MB's banned items (Assault Vest, Choice Band, Choice Specs --
@@ -337,10 +430,11 @@ def best_answer(name, merged, moves_db, natures, typechart, target_names,
 
     item, move_names, _score = best_item(name, merged, moves_db, natures, typechart,
                                          target_names, team_weather=weather)
-    if item in BANNED_ITEMS:
+    if item in BANNED_ITEMS or item in excluded_items:
         item, move_names = None, None
     if item is None:
-        legal = [i for i in (legal_items(name, merged) or []) if i not in BANNED_ITEMS]
+        legal = [i for i in (legal_items(name, merged) or [])
+                if i not in BANNED_ITEMS and i not in excluded_items]
         item = legal[0] if legal else None
         move_names, _score = best_moveset(name, merged, moves_db, natures, typechart,
                                           target_names, item=item, team_weather=weather)
@@ -434,7 +528,32 @@ def _best_hit(attacker, moves, defender, typechart, weather=None):
     return best
 
 
-def _choose_move(attacker, moves, defender, typechart, weather=None):
+PRIORITY_BLOCK_ABILITIES = frozenset({"Queenly Majesty", "Dazzling", "Armor Tail"})
+_PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset(
+    {"Mold Breaker", "Teravolt", "Turboblaze"})
+
+
+def _priority_blocked(attacker, mv, defending_side):
+    """True if `mv` would fail outright against `defending_side` (an
+    iterable of the Combatants on the target's side -- `None` entries for an
+    absent/fainted slot are fine). Mirrors `battle.py`'s
+    `Battle._blocked_by_guard` priority-block rule exactly: Queenly Majesty /
+    Dazzling / Armor Tail, held by ANY still-living member of the defending
+    side, blocks an incoming priority move aimed at that side entirely --
+    "Make sure anti-priority like Farigiraf's armor tail ability is taken
+    into account" -- unless the attacker itself has Mold Breaker / Teravolt /
+    Turboblaze.
+    """
+    if mv is None or mv.priority <= 0:
+        return False
+    if attacker.ability in _PRIORITY_BLOCK_IGNORING_ABILITIES:
+        return False
+    return any(c is not None and c.ability in PRIORITY_BLOCK_ABILITIES
+              for c in defending_side)
+
+
+def _choose_move(attacker, moves, defender, typechart, weather=None,
+                 defending_side=None):
     """The move `attacker` would actually use against `defender`, searched on
     the AVERAGE roll: prefer one that KOes, and among those prefer higher
     PRIORITY (more likely to land before the target can reply or flee), then
@@ -448,7 +567,14 @@ def _choose_move(attacker, moves, defender, typechart, weather=None):
     prefer a slow 100% chunk over a Sucker Punch that secures the same KO
     first, or over-credit a priority option that doesn't actually knock the
     target out.
+
+    `defending_side`: the full list of Combatants on `defender`'s side
+    (defaults to just `defender` alone) -- checked via `_priority_blocked`
+    so a priority move that would actually fail against an Armor Tail /
+    Dazzling / Queenly Majesty holder is never credited with its priority
+    OR its damage; a rational attacker picks a move that actually lands.
     """
+    defending_side = defending_side if defending_side is not None else (defender,)
     best_key, best_hit, best_move = None, NO_HIT, None
     for mv in moves:
         if mv.category == "Status":
@@ -456,24 +582,29 @@ def _choose_move(attacker, moves, defender, typechart, weather=None):
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
         got = _raw_hit(attacker, mv, defender, typechart, weather=weather, roll="avg")
-        key = (got.frac >= 1.0, mv.priority, got.frac)
+        blocked = _priority_blocked(attacker, mv, defending_side)
+        if blocked:
+            got = NO_HIT
+        key = (got.frac >= 1.0, 0 if blocked else mv.priority, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hit, best_move = key, got, mv
     return best_hit, best_move
 
 
 def _answer_for(name, merged, moves_db, natures, typechart, target_names,
-                item_overrides=None, move_overrides=None):
+                item_overrides=None, move_overrides=None,
+                excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """`best_answer`, applying this specific `name`'s entry (if any) in
     `item_overrides`/`move_overrides` -- "I also want the option to define
     item ... such as Choice Scarf, or to just select optimal item". Both
     dicts default to "search for the best", per-name, unaffected by an
-    override on some OTHER name in the same pool.
+    override on some OTHER name in the same pool. `excluded_items`: see
+    `best_answer` -- an explicit `item_overrides` pin still bypasses it.
     """
     item = (item_overrides or {}).get(name)
     moves = (move_overrides or {}).get(name)
     return best_answer(name, merged, moves_db, natures, typechart, target_names,
-                       item=item, move_names=moves)
+                       item=item, move_names=moves, excluded_items=excluded_items)
 
 
 def _scarf_speed(combatant):
@@ -525,7 +656,8 @@ def _field_weather(combatants):
 
 def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
                      threshold=0.9, item_overrides=None, move_overrides=None,
-                     max_taken=None, outspeed=None):
+                     max_taken=None, outspeed=None,
+                     excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """Each pool member's best legal item/moveset against `target_names`, and
     the worst-roll `Hit` its best move lands on EACH target individually.
 
@@ -574,8 +706,13 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
     target_sets = {}
     if need_screen:
         for t in target_names:
+            # The named target's OWN set -- a real fact about the matchup,
+            # not something being recommended to the user, so it always
+            # searches the full item pool regardless of `excluded_items`
+            # (the enemy could easily be running Choice Scarf themselves).
             target_sets[t] = _answer_for(t, merged, moves_db, natures,
-                                         typechart, pool)
+                                         typechart, pool,
+                                         excluded_items=frozenset())
 
     rows = []
     for name in pool:
@@ -583,7 +720,8 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
             continue
         item, move_names, weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
-            item_overrides=item_overrides, move_overrides=move_overrides)
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
         if not move_names:
             continue
         attacker = _build(name, merged, natures, item=item)
@@ -645,7 +783,7 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
 
 
 def speed_tiers(names, target_names, merged, moves_db, natures, typechart,
-                item_overrides=None):
+                item_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """Real turn order for `names` -- priority bracket first, then effective
     speed under each one's own best legal item (or a pinned one).
 
@@ -680,9 +818,15 @@ def speed_tiers(names, target_names, merged, moves_db, natures, typechart,
     """
     rows = []
     for name in names:
+        # `names` here is a MIXED list -- the named targets plus the pool,
+        # in the same chart (`--speed` puts everyone on one turn-order
+        # ladder). The exclusion is a preference about OUR OWN candidates
+        # only; a named target's own set always searches the full item
+        # pool, same reasoning as `threshold_search`'s `target_sets`.
+        ex = frozenset() if name in target_names else excluded_items
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
-            item_overrides=item_overrides)
+            item_overrides=item_overrides, excluded_items=ex)
         if not move_names:
             continue
         combatant = _build(name, merged, natures, item=item)
@@ -701,7 +845,8 @@ def speed_tiers(names, target_names, merged, moves_db, natures, typechart,
 
 def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
                  moves_db, natures, typechart, partner_item=None,
-                 item_overrides=None, move_overrides=None):
+                 item_overrides=None, move_overrides=None,
+                 excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """Who finishes each target off after `partner_name`'s `partner_move_name`
     has already landed (worst roll -- the guaranteed chip)?
 
@@ -722,7 +867,8 @@ def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
     """
     if partner_item is None:
         partner_item, _mv, partner_weather = best_answer(
-            partner_name, merged, moves_db, natures, typechart, target_names)
+            partner_name, merged, moves_db, natures, typechart, target_names,
+            excluded_items=excluded_items)
     else:
         partner_weather = team_weather_for([partner_name], merged)
     partner = _build(partner_name, merged, natures, item=partner_item)
@@ -746,7 +892,8 @@ def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
             continue
         item, move_names, weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
-            item_overrides=item_overrides, move_overrides=move_overrides)
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
         if not move_names:
             continue
         attacker = _build(name, merged, natures, item=item)
@@ -780,13 +927,25 @@ _JOINT_OUTCOME_RANK = {"sweep": 0, "out_trade": 1, "no_ko": 2, "loss": 3}
 
 
 def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
-                   weather=None, roll="avg"):
+                   weather=None, roll="avg", defending_side=None):
     """{role: Hit} for whatever `mv` actually damages: every role in
     `defenders` if it's a spread move landing on more than one of them (the
     doubles 0.75x penalty applied via `num_targets_hit`), else just
     `intended_role`. `mv=None` (nothing to hit with) returns {}.
+
+    `defending_side`: the full list of Combatants on the defending side, for
+    the Armor Tail / Dazzling / Queenly Majesty priority-block check
+    (`_priority_blocked`) -- defaults to `defenders.values()`, but pass it
+    explicitly whenever the real defending side has a member NOT in
+    `defenders` (e.g. a partner the enemy isn't currently aiming at --
+    blocking is a whole-side effect, not scoped to just who's being hit). A
+    blocked move returns {} entirely, same as `mv=None`.
     """
     if mv is None:
+        return {}
+    defending_side = (defending_side if defending_side is not None
+                      else list(defenders.values()))
+    if _priority_blocked(attacker, mv, defending_side):
         return {}
     if is_spread_move(mv.target) and len(defenders) > 1:
         n = len(defenders)
@@ -839,15 +998,18 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     defenders = {"E1": e1, "E2": e2}
     target_role = "E1" if e1_name == candidate_target else "E2"
 
+    our_side = [combatants.get("C"), combatants.get("P")]
+
     plan = {}
     got, mv = _choose_move(attacker, atk_moves, combatants[target_role], typechart,
-                           weather=weather)
+                           weather=weather, defending_side=[e1, e2])
     plan["C"] = (_hit_or_spread(attacker, mv, target_role, defenders, typechart,
                                 weather=weather), mv)
     for role, e, e_moves in (("E1", e1, e1_moves), ("E2", e2, e2_moves)):
-        got, mv = _choose_move(e, e_moves, attacker, typechart, weather=weather)
+        got, mv = _choose_move(e, e_moves, attacker, typechart, weather=weather,
+                               defending_side=our_side)
         plan[role] = (_hit_or_spread(e, mv, "C", {"C": attacker}, typechart,
-                                     weather=weather), mv)
+                                     weather=weather, defending_side=our_side), mv)
     if partner is not None:
         p_target_role = "E1" if (partner_target or candidate_target) == e1_name else "E2"
         plan["P"] = (_hit_or_spread(partner, partner_move, p_target_role, defenders,
@@ -890,7 +1052,8 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
 
 def pair_search(pool, target_names, merged, moves_db, natures, typechart,
                 partner_name=None, partner_move_name=None, partner_item=None,
-                item_overrides=None, move_overrides=None):
+                item_overrides=None, move_overrides=None,
+                excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """For each pool member, against EVERY pair drawn from `target_names`: a
     full ONE-TURN exchange, in real priority-then-speed order, AVERAGE rolls
     -- does it KO one of the pair before the pair KOes it?
@@ -955,7 +1118,8 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
             continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
-            item_overrides=item_overrides, move_overrides=move_overrides)
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
         if not move_names:
             continue
         moves = _move_infos(name, merged, moves_db, move_names)
@@ -965,7 +1129,8 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
         if partner_name is not None:
             if partner_item is None:
                 p_item, _mv, _w = best_answer(partner_name, merged, moves_db, natures,
-                                              typechart, target_names)
+                                              typechart, target_names,
+                                              excluded_items=excluded_items)
             else:
                 p_item = partner_item
             our_names.append(partner_name)
@@ -1049,9 +1214,16 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
     `live_targets` empty (everyone on the other side already fainted) returns
     ({}, None) -- nothing left to hit.
+
+    A priority move that would be blocked outright by Armor Tail / Dazzling /
+    Queenly Majesty on the defending side (`_priority_blocked`, checked
+    against the WHOLE of `live_targets` -- held by either enemy blocks it)
+    is scored as if it does no damage and carries no priority, same as
+    `_choose_move`.
     """
     if not live_targets:
         return {}, None
+    defending_side = list(live_targets.values())
     best_key, best_hits, best_move = None, {}, None
     n_live = len(live_targets)
     for mv in moves:
@@ -1059,11 +1231,14 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             continue
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
+        blocked = _priority_blocked(attacker, mv, defending_side)
+        prio = 0 if blocked else mv.priority
         if is_spread_move(mv.target) and n_live > 1:
-            hits = {role: _raw_hit(attacker, mv, d, typechart, weather=weather,
-                                   roll="avg", num_targets_hit=n_live)
+            hits = {role: (NO_HIT if blocked else
+                          _raw_hit(attacker, mv, d, typechart, weather=weather,
+                                   roll="avg", num_targets_hit=n_live))
                    for role, d in live_targets.items()}
-            key = (all(h.frac >= 1.0 for h in hits.values()), mv.priority,
+            key = (all(h.frac >= 1.0 for h in hits.values()), prio,
                   sum(h.frac for h in hits.values()))
             if best_key is None or key > best_key:
                 best_key, best_hits, best_move = key, hits, mv
@@ -1071,9 +1246,10 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         candidates = ([hinted_target] if hinted_target in live_targets
                       else list(live_targets))
         for role in candidates:
-            got = _raw_hit(attacker, mv, live_targets[role], typechart,
-                           weather=weather, roll="avg")
-            key = (got.frac >= 1.0, mv.priority, got.frac)
+            got = NO_HIT if blocked else _raw_hit(
+                attacker, mv, live_targets[role], typechart, weather=weather,
+                roll="avg")
+            key = (got.frac >= 1.0, prio, got.frac)
             if best_key is None or key > best_key:
                 best_key, best_hits, best_move = key, {role: got}, mv
     return best_hits, best_move
@@ -1298,17 +1474,28 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None):
     which single cell is being asked about, same rule `_choose_action` and
     `_hit_or_spread` already apply. Average roll, matching every other
     "realistic exchange" reading in this module (`pair_search`'s own).
+
+    A priority move blocked outright by Armor Tail / Dazzling / Queenly
+    Majesty on `target`'s side (`_priority_blocked`, checked against
+    `target` + `other_live`) is scored as doing no damage, same as
+    `_choose_move`/`_choose_action` -- this "best cell" should never show a
+    number a real attack could not actually land.
     """
+    defending_side = [target, other_live]
     best_key, best_hit = None, NO_HIT
     for mv in moves:
         if mv.category == "Status":
             continue
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
-        n = 2 if (is_spread_move(mv.target) and other_live is not None) else 1
-        got = _raw_hit(attacker, mv, target, typechart, weather=weather,
-                       roll="avg", num_targets_hit=n)
-        key = (got.frac >= 1.0, mv.priority, got.frac)
+        blocked = _priority_blocked(attacker, mv, defending_side)
+        if blocked:
+            got = NO_HIT
+        else:
+            n = 2 if (is_spread_move(mv.target) and other_live is not None) else 1
+            got = _raw_hit(attacker, mv, target, typechart, weather=weather,
+                           roll="avg", num_targets_hit=n)
+        key = (got.frac >= 1.0, 0 if blocked else mv.priority, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hit = key, got
     return best_hit
@@ -1463,7 +1650,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
 
 def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
                       natures, typechart, turns=2, partner_item=None,
-                      item_overrides=None, move_overrides=None):
+                      item_overrides=None, move_overrides=None,
+                      excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """Paired with `partner_name` (a fixed second attacker, both using their
     own real optimised set -- not one fixed move), for each pool member:
     against every pair drawn from `target_names`, does the joint pair beat
@@ -1515,7 +1703,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
     """
     partner_item, partner_move_names, _partner_weather = best_answer(
         partner_name, merged, moves_db, natures, typechart, target_names,
-        item=partner_item)
+        item=partner_item, excluded_items=excluded_items)
     partner_moves = _move_infos(partner_name, merged, moves_db, partner_move_names)
     enemy_built = _build_forms(target_names, merged, natures, moves_db)
 
@@ -1525,7 +1713,8 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
             continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
-            item_overrides=item_overrides, move_overrides=move_overrides)
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
         if not move_names:
             continue
         moves = _move_infos(name, merged, moves_db, move_names)
@@ -1549,7 +1738,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 
 def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       typechart, turns=2, item_overrides=None,
-                      move_overrides=None):
+                      move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
     genuinely searched (not one fixed), against every pair drawn from
@@ -1578,7 +1767,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
             continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
-            item_overrides=item_overrides, move_overrides=move_overrides)
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
         if not move_names:
             continue
         entry = _build_forms([name], merged, natures, moves_db,
@@ -1624,7 +1814,7 @@ def _pair_sort_key(row):
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   turns=2, good_threshold=1.0, item_overrides=None,
-                  move_overrides=None):
+                  move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """For an ALREADY-DECIDED team of 6 (from team preview) against one
     specific enemy roster, which 4 should you actually bring?
 
@@ -1660,10 +1850,15 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     if len(our6) != 6:
         raise ValueError(f"bring4_search needs exactly 6 distinct Pokemon, "
                          f"got {len(our6)}: {our6}")
+    overlap = _mega_base_overlap(our6)
+    if overlap:
+        raise ValueError(f"can't bring both a Mega and its own base form: "
+                         f"{', '.join(sorted(overlap))}")
     pair_rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
                                   typechart, turns=turns,
                                   item_overrides=item_overrides,
-                                  move_overrides=move_overrides)
+                                  move_overrides=move_overrides,
+                                  excluded_items=excluded_items)
     pair_by_key = {frozenset(r["pair"]): r for r in pair_rows}
     bring4_rows = _bring4_candidates(our6, pair_by_key, good_threshold)
     return pair_rows, bring4_rows
@@ -1696,35 +1891,47 @@ def _bring4_candidates(six, pair_lookup, good_threshold=1.0):
     return bring4_rows
 
 
-def _team6_row(team6, pair_by_key_list, target_name_lists, good_threshold=1.0):
-    """For a candidate team-of-6 against SEVERAL enemy rosters: the BEST
-    bring-4 available from `team6` against EACH enemy (`_bring4_candidates`,
-    reused -- a bring-4 may differ per opponent, matching real VGC's "you
-    see their team at Team Preview before choosing your bring-4"), then the
-    WORST of those per-enemy best scores -- the enemy your team-of-6 is
-    weakest against, even playing its best available bring-4. Ranking
-    candidate teams-of-6 on THIS (ascending -- lower `_pair_sort_key` is
-    better) is the multi-enemy generalisation of `bring4_search`'s own
-    maximin.
+def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
+    """For a candidate CORE (4, 5, or 6 Pokemon -- see `multi_bring4_
+    exhaustive`'s own note on why fewer than 6 is a real, often BETTER
+    answer, not a fallback) against SEVERAL enemy rosters: the BEST bring-4
+    available from `core` against EACH enemy (`_bring4_candidates`, reused
+    -- a bring-4 may differ per opponent, matching real VGC's "you see
+    their team at Team Preview before choosing your bring-4"), then the
+    WORST of those per-enemy best scores -- the enemy this core is weakest
+    against, even playing its best available bring-4. Ranking candidate
+    cores on THIS (ascending -- lower `_pair_sort_key` is better) is the
+    multi-enemy generalisation of `bring4_search`'s own maximin.
+
+    Also reports `unused`: any core member that never appears in ANY
+    enemy's best bring-4 -- dead weight ("There is no point including a
+    6th member on a team if only the other 5 join the battles").
+    `multi_bring4_exhaustive`/`multi_bring4_beam` both drop any row where
+    this is non-empty, since the identical-scoring smaller core is already
+    enumerated on its own.
     """
-    team6 = tuple(sorted(team6))
+    core = tuple(sorted(core))
     per_enemy = []
     worst_key, worst_idx = None, None
+    used = set()
     for i, (pair_lookup, target_names) in enumerate(zip(pair_by_key_list, target_name_lists)):
-        candidates = _bring4_candidates(team6, pair_lookup, good_threshold)
+        candidates = _bring4_candidates(core, pair_lookup, good_threshold)
         best = candidates[0]
         key = _pair_sort_key(best["worst_pair_row"])
         per_enemy.append({"target_names": list(target_names),
                           "best_bring4": best["bring4"], "best_bring4_row": best})
+        used.update(best["bring4"])
         if worst_key is None or key > worst_key:
             worst_key, worst_idx = key, i
-    return {"team6": team6, "per_enemy": per_enemy,
-           "worst_enemy_idx": worst_idx, "worst_enemy_score_key": worst_key}
+    return {"core": core, "core_size": len(core), "per_enemy": per_enemy,
+           "worst_enemy_idx": worst_idx, "worst_enemy_score_key": worst_key,
+           "unused": tuple(sorted(set(core) - used))}
 
 
 def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                           typechart, turns=2, good_threshold=1.0,
-                          min_enemies=2, item_overrides=None, move_overrides=None):
+                          min_enemies=2, item_overrides=None, move_overrides=None,
+                          excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """Stage A, shared by `multi_bring4_exhaustive` and `multi_bring4_beam`:
     run the existing pool-wide pair search once per enemy roster.
 
@@ -1775,7 +1982,8 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
         rows = joint_pool_search(pool, target_names, merged, moves_db, natures,
                                  typechart, turns=turns,
                                  item_overrides=item_overrides,
-                                 move_overrides=move_overrides)
+                                 move_overrides=move_overrides,
+                                 excluded_items=excluded_items)
         per_enemy.append(rows)
         pair_by_key.append({frozenset(r["pair"]): r for r in rows})
         good_names = set()
@@ -1786,66 +1994,168 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
             appears_good_in[n] = appears_good_in.get(n, 0) + 1
     candidate_pool = sorted(n for n, c in appears_good_in.items() if c >= min_enemies)
     return {"per_enemy": per_enemy, "pair_by_key": pair_by_key,
-           "target_name_lists": target_name_lists, "candidate_pool": candidate_pool}
+           "target_name_lists": target_name_lists, "candidate_pool": candidate_pool,
+           "merged": merged}
 
 
-# C(30,6) is ~593k team-of-6 candidates, each scored by cheap dict lookups
-# (no racing) -- a couple of seconds. C(40,6) is ~3.8M -- still survivable
-# but no longer "instant", and the whole point of `candidate_pool`'s
-# multi-enemy narrowing is that it should rarely get anywhere near this.
+def _effective_type_limits(max_weak=None, type_limits=None):
+    """Merge a global `max_weak` (applied to every type not already
+    overridden) into `type_limits`'s own per-type {"max_weak", "max_net"}
+    shape -- computed ONCE per search, not per candidate, since
+    `hard_violations` is called for every core a multi-bring4 search
+    considers. `{}` (falsy) when neither is given, so callers can skip the
+    hard-violations check entirely rather than pay for a no-op one."""
+    if max_weak is None and not type_limits:
+        return {}
+    from species_data import TYPES
+    limits = {t: dict(v) for t, v in (type_limits or {}).items()}
+    if max_weak is not None:
+        for t in TYPES:
+            limits.setdefault(t, {}).setdefault("max_weak", max_weak)
+    return limits
+
+
+def _core_passes_hard_filters(core, merged, effective_limits):
+    """True if `core` (any size) may be proposed as a multi-bring4
+    candidate at all: "you cannot have both a mega and its non-mega form"
+    (always enforced, `_mega_base_overlap`) plus, when `effective_limits`
+    is non-empty, the Advanced weakness limits `team_search.hard_violations`
+    already implements -- reused directly, never reimplemented.
+    """
+    if _mega_base_overlap(core):
+        return False
+    if effective_limits:
+        from team_search import hard_violations
+        if hard_violations(list(core), merged, type_limits=effective_limits):
+            return False
+    return True
+
+
+def _monotonic_limits(effective_limits):
+    """The `max_weak`-only portion of `effective_limits` -- safe to prune
+    on DURING beam growth, before a candidate reaches a real core size,
+    because it is monotonic: a partial team that already has too many
+    members weak to a type can never fix that by adding more (mirrors
+    `team_search._breaks_monotonic_hard_limit`'s own reasoning). `max_net`
+    is NOT monotonic -- a later addition can add a resist and bring net
+    back under the cap -- so it is deliberately dropped here and only
+    checked once a candidate reaches `_CORE_SIZES` (`multi_bring4_beam`'s
+    own `found`-capture step, via the full `effective_limits`)."""
+    return {t: {"max_weak": v["max_weak"]} for t, v in effective_limits.items()
+           if v.get("max_weak") is not None}
+
+
+# C(30,6) is ~593k core candidates at size 6 alone (sizes 4/5 add a further
+# ~170k), each scored by cheap dict lookups (no racing) -- a couple of
+# seconds total. C(40,6) is ~3.8M -- still survivable but no longer
+# "instant", and the whole point of `candidate_pool`'s multi-enemy
+# narrowing is that it should rarely get anywhere near this.
 _EXHAUSTIVE_POOL_CEILING = 30
+
+# VGC team preview caps a roster at 6; a bring-4 needs at least 4 members to
+# exist at all. Every size in between is a REAL, often more efficient
+# answer ("a full team of only 4-5 members is not a problem, in some ways
+# it is actually better and more efficient") -- see `_core_row`'s own
+# `unused` field, which is what keeps a padded 6 from crowding out an
+# equally-good, genuinely-smaller 4 or 5 that a caller would rather see.
+_CORE_SIZES = (4, 5, 6)
 
 
 def multi_bring4_exhaustive(coverage, good_threshold=1.0,
-                            max_candidates=_EXHAUSTIVE_POOL_CEILING):
-    """Every possible team-of-6 drawn from `coverage["candidate_pool"]`
-    (`multi_bring4_coverage`), scored and ranked by `_team6_row`'s
-    worst-case-across-enemies metric -- exhaustive, so (within that
-    candidate pool) provably optimal, not a heuristic best-effort.
+                            max_candidates=_EXHAUSTIVE_POOL_CEILING,
+                            max_weak=None, type_limits=None):
+    """Every possible CORE (4, 5, or 6 Pokemon, not just exactly 6) drawn
+    from `coverage["candidate_pool"]` (`multi_bring4_coverage`), scored and
+    ranked by `_core_row`'s worst-case-across-enemies metric -- exhaustive,
+    so (within that candidate pool) provably optimal, not a heuristic
+    best-effort.
+
+        "I will note that a full team of only 4-5 members is not a
+         problem, in some ways it is actually better and more efficient.
+         I would still like to see them."
+
+    A core with ANY unused member (`_core_row`'s own `unused` field -- a
+    slot that never gets brought against any of the named enemies) is
+    dropped: the identical-scoring core without that member is already
+    enumerated on its own, so keeping the padded version would only ever
+    duplicate a real answer with dead weight attached. Also drops any core
+    with both a Mega and its own base form, and (when `max_weak`/
+    `type_limits` are given) any that breaks those Advanced weakness
+    limits (`team_search.hard_violations`, reused).
 
     Raises if the candidate pool is bigger than `max_candidates` -- narrow
     with a higher `--min-enemies`/`--good-threshold`, or use
     `multi_bring4_beam` instead.
 
-    Returns rows (`_team6_row`'s own shape), best-worst-case first.
+    Returns rows (`_core_row`'s own shape), best-worst-case first.
     """
     pool = coverage["candidate_pool"]
     n = len(pool)
-    if n < 6:
+    if n < 4:
         raise ValueError(f"only {n} candidate(s) appear in a good pair for "
-                         f"enough enemies to form a team of 6 -- widen the "
-                         f"pool, or lower --good-threshold/--min-enemies")
+                         f"enough enemies to form even a 4-member core -- "
+                         f"widen the pool, or lower "
+                         f"--good-threshold/--min-enemies")
     if n > max_candidates:
         raise ValueError(f"{n} candidates is too many for an exhaustive "
                          f"sweep (C({n},6) is enormous) -- narrow with a "
                          f"higher --min-enemies/--good-threshold, or pass "
                          f"--beam instead")
-    rows = [_team6_row(team6, coverage["pair_by_key"], coverage["target_name_lists"],
-                       good_threshold)
-           for team6 in itertools.combinations(pool, 6)]
+    effective_limits = _effective_type_limits(max_weak, type_limits)
+    merged = coverage["merged"]
+    rows = []
+    for size in _CORE_SIZES:
+        if size > n:
+            continue
+        for core in itertools.combinations(pool, size):
+            if not _core_passes_hard_filters(core, merged, effective_limits):
+                continue
+            row = _core_row(core, coverage["pair_by_key"],
+                            coverage["target_name_lists"], good_threshold)
+            if row["unused"]:
+                continue
+            rows.append(row)
     rows.sort(key=lambda r: r["worst_enemy_score_key"])
     return rows
 
 
-def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40):
-    """Beam-search a team-of-6 over the WHOLE pool `multi_bring4_coverage`
-    already has pair data for (the raw pool, NOT narrowed to
-    `candidate_pool`) -- for when that candidate pool is too large for
-    `multi_bring4_exhaustive`, or a broader search is wanted regardless.
+def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
+                      max_weak=None, type_limits=None):
+    """Beam-search a CORE (4, 5, or 6 Pokemon) over the WHOLE pool
+    `multi_bring4_coverage` already has pair data for (the raw pool, NOT
+    narrowed to `candidate_pool`) -- for when that candidate pool is too
+    large for `multi_bring4_exhaustive`, or a broader search is wanted
+    regardless.
 
     Mirrors `team_search.beam_search_teams`'s own incremental-growth
     structure closely (seed with the best PAIRS by raw coverage, then grow
     one member at a time, keeping the best `beam_width` partials at every
     size) -- a new sibling here rather than a modification of that
     function, since it is scored by a completely different metric and
-    `team_search.py`'s existing callers must not change behaviour.
+    `team_search.py`'s existing callers must not change behaviour. A
+    growth step never adds a member that would create a Mega/base overlap
+    or break a given weakness limit -- an invalid core is never grown INTO,
+    not filtered out after the fact.
 
-    Returns rows (`_team6_row`'s own shape), best-worst-case first, for
-    whichever teams-of-6 the beam actually reached (not exhaustive, so not
+    Sizes 4, 5 AND 6 are all captured as the beam passes through them (not
+    just the final size-6 beam) and returned together, ranked the same
+    way -- "a full team of only 4-5 members ... I would still like to see
+    them" applies here too. A core with an unused member is dropped, same
+    as `multi_bring4_exhaustive`.
+
+    Returns rows (`_core_row`'s own shape), best-worst-case first, for
+    whichever cores the beam actually reached (not exhaustive, so not
     guaranteed globally optimal).
     """
     pair_by_key_list = coverage["pair_by_key"]
     target_name_lists = coverage["target_name_lists"]
+    merged = coverage["merged"]
+    effective_limits = _effective_type_limits(max_weak, type_limits)
+    # Only `max_weak` is monotonic (safe to prune ON during growth, before a
+    # candidate reaches a real core size) -- `max_net` can only be checked
+    # once a candidate is a genuine 4-6 core, at the `found`-capture step
+    # below, using the FULL `effective_limits`. See `_monotonic_limits`.
+    growth_limits = _monotonic_limits(effective_limits)
     pool = sorted({n for pbk in pair_by_key_list for fs in pbk for n in fs})
 
     def score(team):
@@ -1861,13 +2171,15 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40):
                        for p in itertools.combinations(team, 2)
                        if frozenset(p) in pbk)
             return (-total,)
-        return _team6_row(team, pair_by_key_list, target_name_lists,
-                          good_threshold)["worst_enemy_score_key"]
+        return _core_row(team, pair_by_key_list, target_name_lists,
+                         good_threshold)["worst_enemy_score_key"]
 
-    seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)]
+    seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
+             if _core_passes_hard_filters(p, merged, growth_limits)]
     seeds.sort(key=lambda x: x[0])
     beam = [t for _, t in seeds[:beam_width]]
 
+    found = {}  # sorted-tuple -> row, across every size 4/5/6 the beam passes through
     for _ in range(4):  # grow 2 -> 3 -> 4 -> 5 -> 6
         cand = {}
         for team in beam:
@@ -1877,20 +2189,32 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40):
                 key = tuple(sorted(team + [n]))
                 if key in cand:
                     continue
+                if not _core_passes_hard_filters(key, merged, growth_limits):
+                    continue
                 cand[key] = score(list(key))
         ranked = sorted(cand.items(), key=lambda kv: kv[1])[:beam_width]
         beam = [list(k) for k, _ in ranked]
         if not beam:
             break
+        if len(beam[0]) in _CORE_SIZES:
+            for team in beam:
+                key = tuple(sorted(team))
+                if key in found:
+                    continue
+                if not _core_passes_hard_filters(key, merged, effective_limits):
+                    continue  # catches a max_net violation growth couldn't see
+                row = _core_row(team, pair_by_key_list, target_name_lists, good_threshold)
+                if not row["unused"]:
+                    found[key] = row
 
-    rows = [_team6_row(team, pair_by_key_list, target_name_lists, good_threshold)
-           for team in beam if len(team) == 6]
+    rows = list(found.values())
     rows.sort(key=lambda r: r["worst_enemy_score_key"])
     return rows
 
 
 def deep_dive(name1, name2, target_names, merged, moves_db, natures,
-             typechart, turns=2, item_overrides=None, move_overrides=None):
+             typechart, turns=2, item_overrides=None, move_overrides=None,
+             excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """The full report for ONE SPECIFIC, already-chosen pair (not a pool
     search) against every pair drawn from `target_names`.
 
@@ -1916,10 +2240,12 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     """
     item1, moves1, _w1 = _answer_for(
         name1, merged, moves_db, natures, typechart, target_names,
-        item_overrides=item_overrides, move_overrides=move_overrides)
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        excluded_items=excluded_items)
     item2, moves2, _w2 = _answer_for(
         name2, merged, moves_db, natures, typechart, target_names,
-        item_overrides=item_overrides, move_overrides=move_overrides)
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        excluded_items=excluded_items)
     our_built = _build_forms([name1, name2], merged, natures, moves_db,
                              items={name1: item1, name2: item2})
     our_built[name1]["moves"] = _move_infos(name1, merged, moves_db, moves1)
@@ -1933,7 +2259,7 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
                      natures, typechart, turns=2, item_overrides=None,
-                     move_overrides=None):
+                     move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """For the LOSING pair (`name1`, `name2`) against `enemy_pair`, try
     swapping each of ours out for each `bench` candidate: does the new pair
     turn this specific enemy pair around?
@@ -1974,7 +2300,8 @@ def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
             ("C", name1, name2), ("P", name2, name1)):
         stay_item, stay_moves, _stay_w = _answer_for(
             staying_name, merged, moves_db, natures, typechart, set_targets,
-            item_overrides=item_overrides, move_overrides=move_overrides)
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
         if not stay_moves:
             continue
         stay_m = _move_infos(staying_name, merged, moves_db, stay_moves)
@@ -1992,7 +2319,8 @@ def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
                 continue
             item, mvs, _w = _answer_for(
                 cand, merged, moves_db, natures, typechart, set_targets,
-                item_overrides=item_overrides, move_overrides=move_overrides)
+                item_overrides=item_overrides, move_overrides=move_overrides,
+                excluded_items=excluded_items)
             if not mvs:
                 continue
             tried += 1

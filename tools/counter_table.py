@@ -17,8 +17,10 @@
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --vs "Basculegion,Mega Charizard Y,Mega Floette,Garchomp,Kingambit,Whimsicott" --pool-size 60
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --bench "Gyarados,Arcanine-Hisui" --vs "Basculegion,Mega Charizard Y"
     python counter_table.py --our "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,Kingambit" --bring4 --vs "Kingambit,Basculegion,Whimsicott,Sinistcha,Mega Charizard Y,Sylveon"
+    python counter_table.py --multi-bring4 --vs-team "Kingambit,Basculegion,Whimsicott,Sinistcha,Mega Charizard Y,Sylveon" --vs-team "Garchomp,Landorus-Therian,Rillaboom,Chien-Pao,Urshifu-Rapid-Strike,Farigiraf" --pool-size 60
+    python counter_table.py --multi-bring4 --vs-team "..." --vs-team "..." --max-weak 2 --type-limit "Fire:max_weak=1,max_net=-2" --allow-scarf
 
-Seven modes, pick one (or combine --chip-from/--chip-move with --pairs):
+Eight modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
   (default)   OHKO / threshold search: best legal item, WORST-roll % on EACH
               named target (a guarantee), ranked on the worst of them.
@@ -81,6 +83,32 @@ Seven modes, pick one (or combine --chip-from/--chip-move with --pairs):
               it). --good-threshold sets the bar (default 100%% -- must
               beat every enemy pair drawn from --vs) for what counts as a
               "good" pair when counting how many of a bring-4's 6 clear it.
+  --multi-bring4
+              Instead of one already-decided 6, SEARCH the pool for the
+              best CORE across SEVERAL enemy rosters at once (--vs-team,
+              repeated 2+ times): for each enemy, the best bring-4 this
+              core can field against it (a bring-4 may differ per
+              opponent, real Team Preview); ranked on the WORST of those
+              per-enemy best cases (maximin, same idea as --bring4's own
+              Stage 2, generalised across enemies). A core is 4, 5, OR 6
+              Pokemon, not always 6 -- "a full team of only 4-5 members is
+              not a problem, in some ways it is actually better and more
+              efficient" -- and any core with a member that never actually
+              gets brought against any named enemy is dropped outright (the
+              smaller core without that dead weight is already shown on its
+              own). Each printed core also shows its type-weakness synergy
+              (member_weakness_summary: how many members are weak to 2+
+              types / exactly 1 / none) and a TEAMSHEET -- each bring-4
+              member's own best item/moveset for that specific enemy, with
+              every move's roster-wide usage%%. --max-weak/--type-limit add
+              HARD synergy limits (a core that breaks one is never shown,
+              however well it wins its bring-4s) -- e.g. --max-weak 2 for
+              "only 2 members may be weak to any one type", or
+              --type-limit "Fire:max_weak=1,max_net=-2" for "only 1 member
+              weak to Fire, Fire must have net 2 resistances". Exhaustive
+              by default over a candidate pool narrowed by --min-enemies/
+              --good-threshold; --beam searches the whole pool instead when
+              that's too large to sweep exhaustively.
 
 By default the WHOLE ~270-Pokemon dataset is searched, not a pre-narrowed
 "generically good" subset -- see `_pool` below for why (short version: "why
@@ -130,6 +158,13 @@ against Regulation MB's banned list (Assault Vest, Choice Band, Choice
 Specs) the same as a searched item would be -- a pin is a decision, not a
 loophole around the ban.
 
+Choice Scarf is legal in Regulation MB, but by default every item SEARCH
+(everywhere above -- not a pin) excludes it anyway: "it is too easy to
+punish" as a recommendation, even though it's a real option. Pass
+--allow-scarf to let the search consider it again. An explicit --item pin
+(e.g. "Gallade=Choice Scarf") already bypasses this exclusion regardless --
+same "a pin is a decision, not a loophole" rule as the Regulation MB ban.
+
 Every damage number printed is the FULL roll (worst-average-best%). A
 "Mega X" name evaluated ALONE (the default search, --chip-from/--chip-move)
 always means the mega form, stats and all; inside a real PAIR (--pairs'
@@ -154,11 +189,13 @@ import argparse  # noqa: E402
 
 import _harness  # noqa: E402,F401
 
-from counter_finder import (bring4_search, chip_then_ko, deep_dive,  # noqa: E402
+from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
+                            bring4_search, chip_then_ko, deep_dive,
                             joint_pair_search, joint_pool_search,
-                            multi_bring4_beam, multi_bring4_coverage,
-                            multi_bring4_exhaustive, pair_search, speed_tiers,
-                            switch_in_search, threshold_search)
+                            member_weakness_summary, multi_bring4_beam,
+                            multi_bring4_coverage, multi_bring4_exhaustive,
+                            pair_search, speed_tiers, switch_in_search,
+                            threshold_search)
 
 
 def _parse_item_overrides(spec):
@@ -174,6 +211,47 @@ def _parse_item_overrides(spec):
             raise SystemExit(f"--item entry {entry!r} must be 'Pokemon=Item'")
         name, item = entry.split("=", 1)
         out[name.strip()] = item.strip()
+    return out
+
+
+def _parse_type_limits(entries):
+    """["Fire:max_weak=1,max_net=-2", "Ice:max_weak=0", ...] -> {"Fire":
+    {"max_weak": 1, "max_net": -2}, "Ice": {"max_weak": 0}} -- --type-limit's
+    format, one flag per type, repeatable. Feeds `_effective_type_limits`/
+    `team_search.hard_violations` (via `multi_bring4_exhaustive`/
+    `multi_bring4_beam`) the same {type: {"max_weak", "max_net"}} shape
+    those already expect.
+    """
+    if not entries:
+        return None
+    from species_data import TYPES
+    out = {}
+    for entry in entries:
+        if ":" not in entry:
+            raise SystemExit(f"--type-limit entry {entry!r} must be "
+                             f"'Type:max_weak=N,max_net=M'")
+        type_name, rest = entry.split(":", 1)
+        type_name = type_name.strip()
+        if type_name not in TYPES:
+            raise SystemExit(f"--type-limit: unknown type {type_name!r}")
+        limits = {}
+        for kv in rest.split(","):
+            kv = kv.strip()
+            if not kv:
+                continue
+            if "=" not in kv:
+                raise SystemExit(f"--type-limit entry {entry!r}: {kv!r} "
+                                 f"must be 'key=value'")
+            k, v = kv.split("=", 1)
+            k = k.strip()
+            if k not in ("max_weak", "max_net"):
+                raise SystemExit(f"--type-limit: unknown key {k!r} "
+                                 f"(max_weak/max_net)")
+            try:
+                limits[k] = int(v.strip())
+            except ValueError:
+                raise SystemExit(f"--type-limit: {k}={v!r} must be an integer")
+        out[type_name] = limits
     return out
 
 
@@ -616,12 +694,42 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
     print("           a bring-4 that's merely good everywhere.")
 
 
+def _print_teamsheet_member(name, target_names, merged, moves_db, natures,
+                            typechart, item_overrides, move_overrides,
+                            excluded_items, indent="            "):
+    """One member's chosen item/moves + each move's roster-wide USAGE%,
+    against the specific enemy roster it's actually brought -- "Display
+    teamsheets, i.e., moves for the teams and usage." Re-calls `_answer_for`
+    (the same search `threshold_search`/etc already run) rather than
+    building a second model; usage%% is read straight off
+    `merged[name]["moves_usage"]`, 0.0 for a move that usage data never
+    recorded (the same "any move in the game" escape hatch
+    `solver.build_moveset` already allows).
+    """
+    item, move_names, _weather = _answer_for(
+        name, merged, moves_db, natures, typechart, target_names,
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        excluded_items=excluded_items)
+    usage_by_move = dict(merged[name].get("moves_usage") or [])
+    moves_str = ", ".join(f"{m} ({usage_by_move.get(m, 0.0):.0f}%)"
+                          for m in (move_names or []))
+    print(f"{indent}{name} @ {item or '-'}: {moves_str or '-'}")
+
+
 def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold,
-                        candidate_pool_size, pool_size):
+                        candidate_pool_size, pool_size, merged, moves_db,
+                        natures, typechart, item_overrides, move_overrides,
+                        excluded_items):
     """`multi_bring4_exhaustive`/`multi_bring4_beam`'s own row shape --
-    every printed team-of-6 shows its best bring-4 against EACH enemy
-    (they can differ), with the BOTTLENECK enemy (the worst of those best
-    cases -- what the team-of-6 is actually ranked on) marked."""
+    every printed CORE (4, 5, or 6 Pokemon -- "a full team of only 4-5
+    members is not a problem, in some ways it is actually better and more
+    efficient" -- `unused` is always empty by the time a row gets here, both
+    search functions already drop any core with dead weight) shows its best
+    bring-4 against EACH enemy (they can differ), with the BOTTLENECK enemy
+    (the worst of those best cases -- what the core is actually ranked on)
+    marked, a per-member weakness-count synergy line
+    (`member_weakness_summary`), and a teamsheet (item + moves + usage%%)
+    for every member of that enemy's bring-4."""
     print(f"Multi-bring4 search ({mode_label}): {candidate_pool_size} "
          f"candidate(s) from a {pool_size}-Pokemon search pool, "
          f"good-pair bar {good_threshold * 100:.0f}%\n")
@@ -629,12 +737,21 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
         print(f"  Enemy {i}: {', '.join(targets)}")
     print()
     if not rows:
-        print("No team-of-6 found -- widen the pool, lower --good-threshold/"
-             "--min-enemies, or pass --beam for a broader (non-exhaustive) "
+        print("No core (4, 5, or 6 Pokemon) found -- widen the pool, lower "
+             "--good-threshold/--min-enemies, relax --max-weak/"
+             "--type-limit, or pass --beam for a broader (non-exhaustive) "
              "search.\n")
         return
     for i, r in enumerate(rows[:top], start=1):
-        print(f"  {i:>3} {' / '.join(r['team6'])}")
+        core = r["core"]
+        print(f"  {i:>3} ({r['core_size']}) {' / '.join(core)}")
+        weak = member_weakness_summary(core, merged)
+        print(f"        synergy: weak to 2+ types: {weak['weak_to_2plus']}, "
+             f"weak to 1: {weak['weak_to_1']}, weak to 0: {weak['weak_to_0']} "
+             f"(members); {weak['total_weakness_instances']} total "
+             f"weakness instances")
+        print(f"        per-member weak-type counts: " + ", ".join(
+            f"{n}={c}" for n, c in weak["per_member"].items()))
         for e_idx, pe in enumerate(r["per_enemy"], start=1):
             wr = pe["best_bring4_row"]["worst_pair_row"]
             total = wr["pairs_total"]
@@ -644,16 +761,28 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
                  f"{' / '.join(pe['best_bring4'])} "
                  f"(worst pair beats {beaten}/{total} of Enemy {e_idx}'s "
                  f"pairs){bottleneck}")
+            for name in pe["best_bring4"]:
+                _print_teamsheet_member(
+                    name, pe["target_names"], merged, moves_db, natures,
+                    typechart, item_overrides, move_overrides, excluded_items)
         print()
-    print("bottleneck the enemy this team-of-6 is WEAKEST against, even")
-    print("           using its own best available bring-4 there -- what")
-    print("           the ranking is actually maximin'd on: a team-of-6")
-    print("           that's spectacular vs 2 enemies and shaky vs the 3rd")
-    print("           loses to one that's merely solid against all three.")
+    print("bottleneck the enemy this core is WEAKEST against, even using")
+    print("           its own best available bring-4 there -- what the")
+    print("           ranking is actually maximin'd on: a core that's")
+    print("           spectacular vs 2 enemies and shaky vs the 3rd loses")
+    print("           to one that's merely solid against all three.")
     print("worst pair the WEAKEST of that bring-4's own 6 internal pairs")
     print("           (same reading as --bring4's own 'worst pair') -- the")
     print("           bring-4 shown is the one whose worst pair is least")
     print("           bad, for that specific enemy.")
+    print("synergy    per-CORE type-weakness counts (`--max-weak`/")
+    print("           `--type-limit` hard-filter on this same data): how")
+    print("           many of the core's members are weak to 2+ types, to")
+    print("           exactly 1, or to none at all.")
+    print("teamsheet  each bring-4 member's own best legal item/moveset for")
+    print("           THAT specific enemy (a real set can differ by")
+    print("           opponent, same as Team Preview), with each move's")
+    print("           roster-wide usage%% alongside it.")
 
 
 def _print_switches(switch_results, bench_size):
@@ -775,6 +904,32 @@ def main():
                     help="--multi-bring4 only: one enemy roster, comma-"
                          "separated. Repeat for each enemy team (2+ "
                          "required)")
+    ap.add_argument("--max-weak", type=int, default=None, metavar="N",
+                    help="--multi-bring4 only: hard-drop any candidate CORE "
+                         "where more than N of its members are weak to the "
+                         "SAME type, for every type (e.g. --max-weak 2 for "
+                         "'only 2 members may be weak to any one type'). "
+                         "Overridden per-type by --type-limit. Unlike "
+                         "--good-threshold this is a hard exclusion, not a "
+                         "ranking factor -- a core that breaks it is never "
+                         "shown, however well it wins its bring-4s")
+    ap.add_argument("--type-limit", action="append", default=[],
+                    metavar="TYPE:max_weak=N,max_net=M",
+                    help="--multi-bring4 only: a hard per-type override on "
+                         "top of --max-weak, repeatable. max_weak=N caps "
+                         "how many members may be weak to TYPE; max_net=M "
+                         "caps (weak count - resist/immune count) for TYPE "
+                         "-- e.g. --type-limit \"Fire:max_weak=1,max_net=-2\" "
+                         "for 'only 1 member may be weak to Fire, Fire must "
+                         "have net 2 resistances'. Either key may be omitted")
+    ap.add_argument("--allow-scarf", action="store_true",
+                    help="by default Choice Scarf is excluded from every "
+                         "item SEARCH (it's legal in Regulation MB, but too "
+                         "easy to punish to want as a default recommendation "
+                         "-- see counter_finder.DEFAULT_EXCLUDED_ITEMS). "
+                         "Pass this to let the search consider it again; an "
+                         "explicit --item pin already bypasses the "
+                         "exclusion regardless")
     ap.add_argument("--min-enemies", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: a pool member only enters "
                          "the exhaustive search's candidate pool once it "
@@ -883,6 +1038,8 @@ def main():
             or args.min_enemies != 2) and not args.multi_bring4:
         raise SystemExit("--beam/--beam-width/--max-candidates/--min-enemies "
                          "only apply to --multi-bring4")
+    if (args.max_weak is not None or args.type_limit) and not args.multi_bring4:
+        raise SystemExit("--max-weak/--type-limit only apply to --multi-bring4")
     if args.partner and not args.joint:
         raise SystemExit("--partner requires --joint")
     if args.turns != 2 and not (args.joint or args.deep or args.bring4):
@@ -972,6 +1129,8 @@ def main():
 
     item_overrides = _parse_item_overrides(args.item)
     move_overrides = _parse_move_overrides(args.moves)
+    excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    type_limits = _parse_type_limits(args.type_limit)
     banned = [i for i in (item_overrides or {}).values() if i in BANNED_ITEMS]
     if banned:
         raise SystemExit(f"--item: not legal in Regulation MB: {', '.join(banned)}")
@@ -1019,7 +1178,7 @@ def main():
         item1, item2, detail, summary = deep_dive(
             our_pair[0], our_pair[1], targets, merged, moves, natures,
             typechart, turns=args.turns, item_overrides=item_overrides,
-            move_overrides=move_overrides)
+            move_overrides=move_overrides, excluded_items=excluded_items)
         _print_deep(our_pair[0], our_pair[1], item1, item2, targets, detail,
                    summary, args.turns)
         if args.switches:
@@ -1032,7 +1191,8 @@ def main():
                 s_rows, s_tried = switch_in_search(
                     our_pair[0], our_pair[1], (e1, e2), bench_names, merged,
                     moves, natures, typechart, turns=args.turns,
-                    item_overrides=item_overrides, move_overrides=move_overrides)
+                    item_overrides=item_overrides, move_overrides=move_overrides,
+                    excluded_items=excluded_items)
                 switch_results[(e1, e2)] = (s_rows, s_tried)
             _print_switches(switch_results, len(bench_names))
     elif args.bring4:
@@ -1040,7 +1200,8 @@ def main():
         pair_rows, bring4_rows = bring4_search(
             our6, targets, merged, moves, natures, typechart,
             turns=args.turns, good_threshold=good_threshold,
-            item_overrides=item_overrides, move_overrides=move_overrides)
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
     elif args.multi_bring4:
@@ -1049,43 +1210,49 @@ def main():
             pool, vs_teams, merged, moves, natures, typechart,
             turns=args.turns, good_threshold=good_threshold,
             min_enemies=args.min_enemies, item_overrides=item_overrides,
-            move_overrides=move_overrides)
+            move_overrides=move_overrides, excluded_items=excluded_items)
         print(f"Candidate pool (appears in a good pair for >= "
              f"{args.min_enemies} of {len(vs_teams)} enemies): "
              f"{len(coverage['candidate_pool'])} of {len(pool)}\n")
         if args.beam:
             multi_rows = multi_bring4_beam(
                 coverage, good_threshold=good_threshold,
-                beam_width=args.beam_width)
+                beam_width=args.beam_width, max_weak=args.max_weak,
+                type_limits=type_limits)
             mode_label = f"beam, width {args.beam_width}"
         else:
             try:
                 multi_rows = multi_bring4_exhaustive(
                     coverage, good_threshold=good_threshold,
-                    max_candidates=args.max_candidates)
+                    max_candidates=args.max_candidates, max_weak=args.max_weak,
+                    type_limits=type_limits)
             except ValueError as e:
                 raise SystemExit(str(e))
             mode_label = "exhaustive"
         _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
                             good_threshold, len(coverage["candidate_pool"]),
-                            len(pool))
+                            len(pool), merged, moves, natures, typechart,
+                            item_overrides, move_overrides, excluded_items)
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
         rows = speed_tiers(names, targets, merged, moves, natures, typechart,
-                           item_overrides=item_overrides)
+                           item_overrides=item_overrides,
+                           excluded_items=excluded_items)
         _print_speed(rows, targets, args.top)
     elif args.joint and args.partner:
         rows = joint_pair_search(pool, targets, args.partner, merged, moves,
                                  natures, typechart, turns=args.turns,
                                  partner_item=args.partner_item or None,
                                  item_overrides=item_overrides,
-                                 move_overrides=move_overrides)
+                                 move_overrides=move_overrides,
+                                 excluded_items=excluded_items)
         _print_joint(rows, targets, args.top, args.partner, args.turns)
     elif args.joint:
         rows = joint_pool_search(pool, targets, merged, moves, natures,
                                  typechart, turns=args.turns,
                                  item_overrides=item_overrides,
-                                 move_overrides=move_overrides)
+                                 move_overrides=move_overrides,
+                                 excluded_items=excluded_items)
         _print_joint(rows, targets, args.top, "", args.turns)
     elif args.pairs:
         rows = pair_search(pool, targets, merged, moves, natures, typechart,
@@ -1093,7 +1260,8 @@ def main():
                            partner_move_name=args.chip_move or None,
                            partner_item=args.partner_item or None,
                            item_overrides=item_overrides,
-                           move_overrides=move_overrides)
+                           move_overrides=move_overrides,
+                           excluded_items=excluded_items)
         _print_pairs(rows, targets, args.top, partner=args.chip_from,
                     move=args.chip_move)
     elif args.chip_from:
@@ -1101,7 +1269,8 @@ def main():
                             merged, moves, natures, typechart,
                             partner_item=args.partner_item or None,
                             item_overrides=item_overrides,
-                            move_overrides=move_overrides)
+                            move_overrides=move_overrides,
+                            excluded_items=excluded_items)
         _print_chip(rows, targets, args.chip_from, args.chip_move, args.top)
     else:
         max_taken = args.max_taken / 100.0 if args.max_taken is not None else None
@@ -1109,7 +1278,8 @@ def main():
                                 threshold=threshold,
                                 item_overrides=item_overrides,
                                 move_overrides=move_overrides,
-                                max_taken=max_taken, outspeed=args.outspeed)
+                                max_taken=max_taken, outspeed=args.outspeed,
+                                excluded_items=excluded_items)
         _print_threshold(rows, targets, threshold, args.top,
                          max_taken=max_taken, outspeed=args.outspeed)
 
@@ -1168,14 +1338,36 @@ def main():
         import csv
         flat = []
         for r in multi_rows:
-            row = {"team6": " / ".join(r["team6"]),
-                  "bottleneck enemy": r["worst_enemy_idx"] + 1}
+            core = r["core"]
+            weak = member_weakness_summary(core, merged)
+            row = {"core": " / ".join(core), "core size": r["core_size"],
+                  "unused": " / ".join(r["unused"]),
+                  "bottleneck enemy": r["worst_enemy_idx"] + 1,
+                  "weak to 2+ types (members)": weak["weak_to_2plus"],
+                  "weak to 1 type (members)": weak["weak_to_1"],
+                  "weak to 0 types (members)": weak["weak_to_0"],
+                  "total weakness instances": weak["total_weakness_instances"],
+                  "per-member weak-type counts": ", ".join(
+                      f"{n}={c}" for n, c in weak["per_member"].items())}
             for e_idx, pe in enumerate(r["per_enemy"], start=1):
                 wr = pe["best_bring4_row"]["worst_pair_row"]
                 row[f"enemy {e_idx}"] = ", ".join(pe["target_names"])
                 row[f"enemy {e_idx} best bring4"] = " / ".join(pe["best_bring4"])
                 row[f"enemy {e_idx} worst pair beaten"] = (
                     f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}")
+                teamsheet_bits = []
+                for name in pe["best_bring4"]:
+                    item, move_names, _weather = _answer_for(
+                        name, merged, moves, natures, typechart,
+                        pe["target_names"], item_overrides=item_overrides,
+                        move_overrides=move_overrides,
+                        excluded_items=excluded_items)
+                    usage_by_move = dict(merged[name].get("moves_usage") or [])
+                    moves_str = ", ".join(
+                        f"{m} ({usage_by_move.get(m, 0.0):.0f}%)"
+                        for m in (move_names or []))
+                    teamsheet_bits.append(f"{name} @ {item or '-'}: {moves_str}")
+                row[f"enemy {e_idx} teamsheet"] = "; ".join(teamsheet_bits)
             flat.append(row)
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=list(flat[0]) if flat else [])
