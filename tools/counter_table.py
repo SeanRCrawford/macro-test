@@ -16,8 +16,9 @@
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --vs "Basculegion,Mega Charizard Y,Mega Floette,Garchomp,Kingambit,Whimsicott"
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --vs "Basculegion,Mega Charizard Y,Mega Floette,Garchomp,Kingambit,Whimsicott" --pool-size 60
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --bench "Gyarados,Arcanine-Hisui" --vs "Basculegion,Mega Charizard Y"
+    python counter_table.py --our "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,Kingambit" --bring4 --vs "Kingambit,Basculegion,Whimsicott,Sinistcha,Mega Charizard Y,Sylveon"
 
-Five modes, pick one (or combine --chip-from/--chip-move with --pairs):
+Seven modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
   (default)   OHKO / threshold search: best legal item, WORST-roll % on EACH
               named target (a guarantee), ranked on the worst of them.
@@ -70,6 +71,16 @@ Five modes, pick one (or combine --chip-from/--chip-move with --pairs):
               switch (the incoming Pokemon can't act that turn, same as a
               real doubles switch), ranked by least damage taken switching
               in among candidates that actually fix the loss.
+  --bring4    For an ALREADY-DECIDED team of 6 (--our, exactly 6 names) vs
+              one enemy roster (--vs): every one of the C(6,2)=15 pairs
+              drawn from it (the same table --joint's own pool search
+              prints), then every one of the C(6,4)=15 possible BRING-4
+              subsets, ranked by how bad its WORST internal pair does
+              (maximin -- "I always have options no matter what position I
+              am in", not just one great pair propping up a hole behind
+              it). --good-threshold sets the bar (default 100%% -- must
+              beat every enemy pair drawn from --vs) for what counts as a
+              "good" pair when counting how many of a bring-4's 6 clear it.
 
 By default the WHOLE ~270-Pokemon dataset is searched, not a pre-narrowed
 "generically good" subset -- see `_pool` below for why (short version: "why
@@ -143,8 +154,10 @@ import argparse  # noqa: E402
 
 import _harness  # noqa: E402,F401
 
-from counter_finder import (chip_then_ko, deep_dive, joint_pair_search,  # noqa: E402
-                            joint_pool_search, pair_search, speed_tiers,
+from counter_finder import (bring4_search, chip_then_ko, deep_dive,  # noqa: E402
+                            joint_pair_search, joint_pool_search,
+                            multi_bring4_beam, multi_bring4_coverage,
+                            multi_bring4_exhaustive, pair_search, speed_tiers,
                             switch_in_search, threshold_search)
 
 
@@ -551,6 +564,98 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
         print()
 
 
+def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_threshold):
+    """`bring4_search`'s own two-stage output: every pair drawn from
+    `our6`, then every possible bring-4 subset ranked by how bad its WORST
+    pair is (maximin -- "always have options no matter what position I am
+    in")."""
+    total = pair_rows[0]["pairs_total"] if pair_rows else 0
+    print(f"Bring-4 robustness: {' / '.join(our6)}")
+    print(f"vs {', '.join(targets)} ({turns} turns, average rolls, "
+         f"good-pair bar {good_threshold * 100:.0f}% beaten)\n")
+
+    print(f"Stage 1 -- all {len(pair_rows)} pairs drawn from your 6:")
+    header = (f"  {'#':>3} {'Pair':34s} {'beaten':>7s} {'swept':>6s} "
+             f"{'traded':>7s} {'lost':>5s} {'no KO':>6s} {'tw-safe':>8s} "
+             f"{'pr-safe':>8s}")
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for i, r in enumerate(pair_rows, start=1):
+        pair_str = " + ".join(r["pair"])
+        beaten = r["pairs_swept"] + r["pairs_traded"]
+        print(f"  {i:>3} {pair_str[:34]:34s} {beaten:>4d}/{total:<2d} "
+             f"{r['pairs_swept']:>3d}/{total:<2d} {r['pairs_traded']:>4d}/{total:<2d} "
+             f"{r['pairs_lost']:>2d}/{total:<2d} {r['pairs_no_ko']:>3d}/{total:<2d} "
+             f"{r['pairs_tailwind_safe']:>5d}/{total:<2d} "
+             f"{r['pairs_protect_safe']:>5d}/{total:<2d}")
+
+    print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked by "
+         f"how their WORST pair does\n(best worst-case first), then by how "
+         f"many of its 6 pairs clear the good-pair bar:")
+    header2 = (f"  {'#':>3} {'Bring-4':46s} {'good':>6s} {'worst pair':34s} "
+              f"{'worst beaten':>13s}")
+    print(header2)
+    print("  " + "-" * (len(header2) - 2))
+    for i, b in enumerate(bring4_rows[:top], start=1):
+        bring4_str = " / ".join(b["bring4"])
+        worst_str = " + ".join(b["worst_pair"])
+        wr = b["worst_pair_row"]
+        print(f"  {i:>3} {bring4_str[:46]:46s} {b['pairs_good']:>3d}/6  "
+             f"{worst_str[:34]:34s} "
+             f"{wr['pairs_swept'] + wr['pairs_traded']:>4d}/{total:<2d}")
+    print()
+    print("beaten     swept + traded -- how many of the enemy pairs drawn")
+    print("           from --vs this OUR pair actually beats.")
+    print("good       (Stage 2) how many of this bring-4's 6 internal pairs")
+    print("           clear the good-pair bar above -- \"several perform")
+    print("           very well\" rather than relying on just one.")
+    print("worst pair (Stage 2) the WEAKEST of this bring-4's 6 pairs -- the")
+    print("           one you're stuck with if the game forces exactly that")
+    print("           board state. Ranked on THIS, not the average: a")
+    print("           bring-4 with one great pair and one awful one loses to")
+    print("           a bring-4 that's merely good everywhere.")
+
+
+def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold,
+                        candidate_pool_size, pool_size):
+    """`multi_bring4_exhaustive`/`multi_bring4_beam`'s own row shape --
+    every printed team-of-6 shows its best bring-4 against EACH enemy
+    (they can differ), with the BOTTLENECK enemy (the worst of those best
+    cases -- what the team-of-6 is actually ranked on) marked."""
+    print(f"Multi-bring4 search ({mode_label}): {candidate_pool_size} "
+         f"candidate(s) from a {pool_size}-Pokemon search pool, "
+         f"good-pair bar {good_threshold * 100:.0f}%\n")
+    for i, targets in enumerate(target_name_lists, start=1):
+        print(f"  Enemy {i}: {', '.join(targets)}")
+    print()
+    if not rows:
+        print("No team-of-6 found -- widen the pool, lower --good-threshold/"
+             "--min-enemies, or pass --beam for a broader (non-exhaustive) "
+             "search.\n")
+        return
+    for i, r in enumerate(rows[:top], start=1):
+        print(f"  {i:>3} {' / '.join(r['team6'])}")
+        for e_idx, pe in enumerate(r["per_enemy"], start=1):
+            wr = pe["best_bring4_row"]["worst_pair_row"]
+            total = wr["pairs_total"]
+            beaten = wr["pairs_swept"] + wr["pairs_traded"]
+            bottleneck = "  <-- bottleneck" if e_idx - 1 == r["worst_enemy_idx"] else ""
+            print(f"        vs Enemy {e_idx}: bring "
+                 f"{' / '.join(pe['best_bring4'])} "
+                 f"(worst pair beats {beaten}/{total} of Enemy {e_idx}'s "
+                 f"pairs){bottleneck}")
+        print()
+    print("bottleneck the enemy this team-of-6 is WEAKEST against, even")
+    print("           using its own best available bring-4 there -- what")
+    print("           the ranking is actually maximin'd on: a team-of-6")
+    print("           that's spectacular vs 2 enemies and shaky vs the 3rd")
+    print("           loses to one that's merely solid against all three.")
+    print("worst pair the WEAKEST of that bring-4's own 6 internal pairs")
+    print("           (same reading as --bring4's own 'worst pair') -- the")
+    print("           bring-4 shown is the one whose worst pair is least")
+    print("           bad, for that specific enemy.")
+
+
 def _print_switches(switch_results, bench_size):
     """`switch_results`: {(e1, e2): (rows, tried)} -- `switch_in_search`'s
     own return shape, one entry per LOSING enemy pair from the --deep report
@@ -578,8 +683,10 @@ def _print_switches(switch_results, bench_size):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--vs", required=True,
-                    help="comma-separated target Pokemon, by library name")
+    ap.add_argument("--vs", default="",
+                    help="comma-separated target Pokemon, by library name. "
+                         "Required by every mode except --multi-bring4 "
+                         "(which uses --vs-team, repeated, instead)")
     ap.add_argument("--threshold", type=float, default=90.0,
                     help="%% threshold for the default mode's 'meets all' "
                          "column (default 90)")
@@ -634,7 +741,64 @@ def main():
                          "whole 6-Pokemon roster to --vs for 'all 15 "
                          "possible enemy leads'")
     ap.add_argument("--our", default="", metavar="POKEMON,POKEMON",
-                    help="--deep only: the exact pair to check (required)")
+                    help="--deep: the exact pair to check (required). "
+                         "--bring4: your already-decided team of 6 (required, "
+                         "exactly 6 names)")
+    ap.add_argument("--bring4", action="store_true",
+                    help="for an ALREADY-DECIDED team of 6 (--our, exactly 6 "
+                         "names) against one enemy roster (--vs): every one "
+                         "of the C(6,2)=15 pairs drawn from it (same table "
+                         "--joint prints), then every one of the C(6,4)=15 "
+                         "possible bring-4 subsets, ranked by how bad its "
+                         "WORST internal pair does (maximin) -- 'I always "
+                         "have options no matter what position I am in', "
+                         "not just a strong best pair with a hole behind it")
+    ap.add_argument("--good-threshold", type=float, default=100.0, metavar="PCT",
+                    help="--bring4/--multi-bring4 only: a pair counts as "
+                         "'good' once it beats at least PCT%% of the named "
+                         "enemy pairs (default 100 -- must beat ALL of them)")
+    ap.add_argument("--multi-bring4", action="store_true",
+                    help="find the best team-of-6 (drawn from the pool) "
+                         "across SEVERAL enemy rosters at once (--vs-team, "
+                         "repeated, instead of --vs): runs the pool-wide "
+                         "pair search once per enemy, then finds the "
+                         "team-of-6 whose WORST-case enemy (even bringing "
+                         "that enemy its own best available bring-4 from "
+                         "this team-of-6 -- a bring-4 may differ per "
+                         "opponent, same as real Team Preview) is as good "
+                         "as possible. Exhaustive by default (over a "
+                         "candidate pool narrowed to names that appear in "
+                         "a good pair for --min-enemies of the named "
+                         "enemies); pass --beam for a broader, non-"
+                         "exhaustive search over the whole pool instead")
+    ap.add_argument("--vs-team", action="append", default=[], metavar="POKEMON,...",
+                    help="--multi-bring4 only: one enemy roster, comma-"
+                         "separated. Repeat for each enemy team (2+ "
+                         "required)")
+    ap.add_argument("--min-enemies", type=int, default=2, metavar="N",
+                    help="--multi-bring4 only: a pool member only enters "
+                         "the exhaustive search's candidate pool once it "
+                         "appears in a good pair (--good-threshold) for at "
+                         "least N of the named --vs-team enemies (default "
+                         "2). Ignored under --beam, which searches the "
+                         "whole pool regardless")
+    ap.add_argument("--beam", action="store_true",
+                    help="--multi-bring4 only: search the WHOLE pool with "
+                         "an incremental beam search (same growth pattern "
+                         "the Generate Team tab's own search uses) instead "
+                         "of an exhaustive sweep of the narrowed candidate "
+                         "pool -- not guaranteed optimal, but works when "
+                         "that candidate pool is too large to sweep "
+                         "exhaustively (or --min-enemies/--good-threshold "
+                         "narrowed it down to nothing)")
+    ap.add_argument("--beam-width", type=int, default=40, metavar="N",
+                    help="--beam only: how many partial teams to keep at "
+                         "each growth step (default 40)")
+    ap.add_argument("--max-candidates", type=int, default=30, metavar="N",
+                    help="--multi-bring4 (exhaustive, not --beam) only: "
+                         "refuse to sweep a candidate pool bigger than this "
+                         "(C(N,6) grows fast; default 30 -- C(30,6) is "
+                         "~593k, still a couple of seconds)")
     ap.add_argument("--switches", action="store_true",
                     help="--deep only: for every enemy pair --our LOSES, "
                          "try swapping in each --bench candidate (or the "
@@ -652,8 +816,8 @@ def main():
                          "pool (--pool-size narrows that pool the same way "
                          "it does everywhere else)")
     ap.add_argument("--turns", type=int, default=2, metavar="N",
-                    help="--joint/--deep only: how many turns to race "
-                         "(default 2)")
+                    help="--joint/--deep/--bring4/--multi-bring4 only: how "
+                         "many turns to race (default 2)")
     ap.add_argument("--max-taken", type=float, default=None, metavar="PCT",
                     help="default mode only: drop any row where SOME named "
                          "target's best attack could do PCT%% or more to it "
@@ -697,21 +861,51 @@ def main():
     if args.deep and (args.joint or args.pairs or args.chip_from or args.speed):
         raise SystemExit("--deep cannot be combined with --joint/--pairs/"
                          "--chip-from/--speed")
+    if args.bring4 and (args.joint or args.deep or args.pairs or args.chip_from
+                        or args.speed):
+        raise SystemExit("--bring4 cannot be combined with --joint/--deep/"
+                         "--pairs/--chip-from/--speed")
+    if args.multi_bring4 and (args.joint or args.deep or args.bring4 or args.pairs
+                              or args.chip_from or args.speed):
+        raise SystemExit("--multi-bring4 cannot be combined with --joint/"
+                         "--deep/--bring4/--pairs/--chip-from/--speed")
+    if not args.multi_bring4 and not args.vs:
+        raise SystemExit("--vs is required (except with --multi-bring4, "
+                         "which uses --vs-team instead)")
+    if args.multi_bring4 and args.vs:
+        raise SystemExit("--multi-bring4 uses --vs-team (repeated), not --vs")
+    if args.multi_bring4 and len(args.vs_team) < 2:
+        raise SystemExit("--multi-bring4 needs --vs-team given at least "
+                         "twice (one per enemy roster)")
+    if args.vs_team and not args.multi_bring4:
+        raise SystemExit("--vs-team requires --multi-bring4")
+    if (args.beam or args.beam_width != 40 or args.max_candidates != 30
+            or args.min_enemies != 2) and not args.multi_bring4:
+        raise SystemExit("--beam/--beam-width/--max-candidates/--min-enemies "
+                         "only apply to --multi-bring4")
     if args.partner and not args.joint:
         raise SystemExit("--partner requires --joint")
-    if args.turns != 2 and not (args.joint or args.deep):
-        raise SystemExit("--turns only applies to --joint/--deep")
+    if args.turns != 2 and not (args.joint or args.deep or args.bring4):
+        raise SystemExit("--turns only applies to --joint/--deep/--bring4")
     if args.deep and not args.our:
         raise SystemExit("--deep requires --our \"Pokemon,Pokemon\"")
-    if args.our and not args.deep:
-        raise SystemExit("--our requires --deep")
+    if args.bring4 and not args.our:
+        raise SystemExit("--bring4 requires --our \"Pokemon,Pokemon,...\" "
+                         "(exactly 6 names)")
+    if args.our and not (args.deep or args.bring4):
+        raise SystemExit("--our requires --deep or --bring4")
     if args.deep and (args.partner or args.partner_item):
         raise SystemExit("--partner/--partner-item don't apply to --deep -- "
                          "--our already names both of the pair")
+    if args.bring4 and (args.partner or args.partner_item):
+        raise SystemExit("--partner/--partner-item don't apply to --bring4 -- "
+                         "--our already names your whole 6")
     if args.switches and not args.deep:
         raise SystemExit("--switches requires --deep")
     if args.bench and not args.switches:
         raise SystemExit("--bench requires --switches")
+    if not (0.0 <= args.good_threshold <= 100.0):
+        raise SystemExit("--good-threshold must be between 0 and 100")
 
     from _harness import load_world
     from lead_sim import BANNED_ITEMS
@@ -738,14 +932,42 @@ def main():
         if in_targets:
             raise SystemExit(f"--our can't also be a --vs target: "
                              f"{', '.join(in_targets)}")
+    if args.bring4:
+        our6 = list(dict.fromkeys(our_pair))
+        if len(our6) != 6:
+            raise SystemExit(f"--bring4 needs exactly 6 distinct Pokemon in "
+                             f"--our (got {len(our6)}: {our6})")
+        unknown_our6 = [n for n in our6 if n not in merged]
+        if unknown_our6:
+            raise SystemExit(f"unknown Pokemon: {', '.join(unknown_our6)}")
+        in_targets6 = [n for n in our6 if n in targets]
+        if in_targets6:
+            raise SystemExit(f"--our can't also be a --vs target: "
+                             f"{', '.join(in_targets6)}")
     bench = [n.strip() for n in args.bench.split(",") if n.strip()]
     if bench:
         unknown_bench = [n for n in bench if n not in merged]
         if unknown_bench:
             raise SystemExit(f"unknown Pokemon: {', '.join(unknown_bench)}")
-    # --deep alone needs no pool at all (a fixed pair); --switches needs one
-    # UNLESS --bench already named the exact candidates to try.
-    pool = _pool(args, merged) if (not args.deep or (args.switches and not bench)) else []
+    vs_teams = []
+    if args.multi_bring4:
+        for raw in args.vs_team:
+            team = [n.strip() for n in raw.split(",") if n.strip()]
+            if len(team) < 2:
+                raise SystemExit(f"--vs-team {raw!r} needs at least 2 Pokemon "
+                                 f"to form any pairs")
+            unknown_team = [n for n in team if n not in merged]
+            if unknown_team:
+                raise SystemExit(f"unknown Pokemon: {', '.join(unknown_team)}")
+            vs_teams.append(team)
+        if not (1 <= args.min_enemies <= len(vs_teams)):
+            raise SystemExit(f"--min-enemies must be between 1 and the "
+                             f"number of --vs-team entries ({len(vs_teams)})")
+    # --deep/--bring4 alone need no pool at all (a fixed pair/six); --switches
+    # needs one UNLESS --bench already named the exact candidates to try.
+    pool = (_pool(args, merged)
+           if (not (args.deep or args.bring4) or (args.switches and not bench))
+           else [])
     threshold = args.threshold / 100.0
 
     item_overrides = _parse_item_overrides(args.item)
@@ -768,6 +990,11 @@ def main():
 
     if args.deep:
         print(f"Deep dive: {' + '.join(our_pair)} vs {', '.join(targets)}\n")
+    elif args.bring4:
+        print(f"Bring-4 search: {' / '.join(our6)} vs {', '.join(targets)}\n")
+    elif args.multi_bring4:
+        print(f"Multi-bring4 search: {len(pool)} Pokemon vs "
+             f"{len(vs_teams)} enemy teams\n")
     else:
         print(f"Searching {len(pool)} Pokemon vs {', '.join(targets)}\n")
 
@@ -808,6 +1035,40 @@ def main():
                     item_overrides=item_overrides, move_overrides=move_overrides)
                 switch_results[(e1, e2)] = (s_rows, s_tried)
             _print_switches(switch_results, len(bench_names))
+    elif args.bring4:
+        good_threshold = args.good_threshold / 100.0
+        pair_rows, bring4_rows = bring4_search(
+            our6, targets, merged, moves, natures, typechart,
+            turns=args.turns, good_threshold=good_threshold,
+            item_overrides=item_overrides, move_overrides=move_overrides)
+        _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
+                     args.turns, good_threshold)
+    elif args.multi_bring4:
+        good_threshold = args.good_threshold / 100.0
+        coverage = multi_bring4_coverage(
+            pool, vs_teams, merged, moves, natures, typechart,
+            turns=args.turns, good_threshold=good_threshold,
+            min_enemies=args.min_enemies, item_overrides=item_overrides,
+            move_overrides=move_overrides)
+        print(f"Candidate pool (appears in a good pair for >= "
+             f"{args.min_enemies} of {len(vs_teams)} enemies): "
+             f"{len(coverage['candidate_pool'])} of {len(pool)}\n")
+        if args.beam:
+            multi_rows = multi_bring4_beam(
+                coverage, good_threshold=good_threshold,
+                beam_width=args.beam_width)
+            mode_label = f"beam, width {args.beam_width}"
+        else:
+            try:
+                multi_rows = multi_bring4_exhaustive(
+                    coverage, good_threshold=good_threshold,
+                    max_candidates=args.max_candidates)
+            except ValueError as e:
+                raise SystemExit(str(e))
+            mode_label = "exhaustive"
+        _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
+                            good_threshold, len(coverage["candidate_pool"]),
+                            len(pool))
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
         rows = speed_tiers(names, targets, merged, moves, natures, typechart,
@@ -870,6 +1131,51 @@ def main():
                 row[f"our {atk}->{tgt} avg%"] = round(h.avg * 100, 1)
             for (atk, tgt), h in d["grid"]["theirs"].items():
                 row[f"their {atk}->{tgt} avg%"] = round(h.avg * 100, 1)
+            flat.append(row)
+        with open(args.csv, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(flat[0]) if flat else [])
+            w.writeheader()
+            w.writerows(flat)
+        print(f"\nFull table ({len(flat)} rows): {os.path.abspath(args.csv)}")
+    elif args.csv and args.bring4:
+        import csv
+        flat = []
+        for b in bring4_rows:
+            wr = b["worst_pair_row"]
+            row = {
+                "bring4": " / ".join(b["bring4"]),
+                "pairs good": b["pairs_good"], "pairs total": b["pairs_total"],
+                "worst pair": " + ".join(b["worst_pair"]),
+                "worst pair swept": wr["pairs_swept"],
+                "worst pair traded": wr["pairs_traded"],
+                "worst pair lost": wr["pairs_lost"],
+                "worst pair no ko": wr["pairs_no_ko"],
+                "worst pair tailwind safe": wr["pairs_tailwind_safe"],
+                "worst pair protect safe": wr["pairs_protect_safe"],
+                "worst pair total": wr["pairs_total"],
+            }
+            for i, pr in enumerate(b["pair_rows"], start=1):
+                row[f"pair {i}"] = " + ".join(pr["pair"])
+                row[f"pair {i} beaten"] = (f"{pr['pairs_swept'] + pr['pairs_traded']}"
+                                           f"/{pr['pairs_total']}")
+            flat.append(row)
+        with open(args.csv, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(flat[0]) if flat else [])
+            w.writeheader()
+            w.writerows(flat)
+        print(f"\nFull table ({len(flat)} rows): {os.path.abspath(args.csv)}")
+    elif args.csv and args.multi_bring4:
+        import csv
+        flat = []
+        for r in multi_rows:
+            row = {"team6": " / ".join(r["team6"]),
+                  "bottleneck enemy": r["worst_enemy_idx"] + 1}
+            for e_idx, pe in enumerate(r["per_enemy"], start=1):
+                wr = pe["best_bring4_row"]["worst_pair_row"]
+                row[f"enemy {e_idx}"] = ", ".join(pe["target_names"])
+                row[f"enemy {e_idx} best bring4"] = " / ".join(pe["best_bring4"])
+                row[f"enemy {e_idx} worst pair beaten"] = (
+                    f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}")
             flat.append(row)
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=list(flat[0]) if flat else [])

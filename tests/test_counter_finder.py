@@ -1224,6 +1224,311 @@ class TestJointPoolSearch(unittest.TestCase):
         self.assertEqual(beaten, sorted(beaten, reverse=True))
 
 
+class TestBring4Search(unittest.TestCase):
+    """`bring4_search` -- for an ALREADY-DECIDED team of 6, which 4 should
+    you bring against one specific enemy roster?
+
+        "given that I will bring 4 vs a specific enemy, that is 6 pairs I
+         will bring. I want the 6 possible pairs of my brings to perform
+         very well, or at least to have several perform very well, such
+         that I always have options no matter what position I am in. This
+         would involve searching the top pairs to see how many are in,
+         and then for a second stage, searching the given top teams and
+         searching for how bad their worst pair performs."
+
+    Stage 1 is literally `joint_pool_search(our6, ...)`, already covered by
+    `TestJointPoolSearch` -- these tests check the bring-4-specific Stage 2
+    combinatorics and ranking only.
+    """
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.pair_rows, self.bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart)
+
+    def test_stage1_covers_all_15_pairs_from_the_six(self):
+        import itertools as _it
+        got = {frozenset(r["pair"]) for r in self.pair_rows}
+        want = {frozenset(p) for p in _it.combinations(self.OUR6, 2)}
+        self.assertEqual(got, want)
+
+    def test_stage1_matches_joint_pool_search_exactly(self):
+        """`bring4_search` must not recompute pair races its own way --
+        Stage 1 IS `joint_pool_search`'s own output."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        direct = cf.joint_pool_search(self.OUR6, self.TARGETS, merged, moves,
+                                      natures, typechart)
+        direct_by_key = {frozenset(r["pair"]): r for r in direct}
+        for r in self.pair_rows:
+            d = direct_by_key[frozenset(r["pair"])]
+            self.assertEqual(r["pairs_swept"], d["pairs_swept"])
+            self.assertEqual(r["pairs_traded"], d["pairs_traded"])
+            self.assertEqual(r["pairs_lost"], d["pairs_lost"])
+
+    def test_stage2_covers_all_15_bring4_subsets(self):
+        import itertools as _it
+        got = {frozenset(b["bring4"]) for b in self.bring4_rows}
+        want = {frozenset(c) for c in _it.combinations(self.OUR6, 4)}
+        self.assertEqual(got, want)
+        self.assertTrue(all(len(b["bring4"]) == 4 for b in self.bring4_rows))
+
+    def test_each_bring4_has_exactly_six_internal_pairs(self):
+        for b in self.bring4_rows:
+            self.assertEqual(len(b["pairs"]), 6)
+            self.assertEqual(len(b["pair_rows"]), 6)
+            self.assertEqual(b["pairs_total"], 6)
+
+    def test_a_pair_appears_in_exactly_six_of_the_fifteen_bring4s(self):
+        """A FIXED pair leaves 4 members to choose the other 2 bring-4 slots
+        from: C(4,2)=6 -- a pure combinatorial check that Stage 2's lookup
+        is wired to the right subsets."""
+        target_pair = frozenset(self.pair_rows[0]["pair"])
+        count = sum(1 for b in self.bring4_rows
+                   if target_pair.issubset(set(b["bring4"])))
+        self.assertEqual(count, 6)
+
+    def test_worst_pair_really_is_the_worst_of_its_six(self):
+        for b in self.bring4_rows:
+            worst_key = cf._pair_sort_key(b["worst_pair_row"])
+            for r in b["pair_rows"]:
+                self.assertGreaterEqual(worst_key, cf._pair_sort_key(r),
+                                        "the reported worst pair must rank "
+                                        "no better than any of its siblings")
+
+    def test_bring4_rows_are_ranked_best_worst_case_first(self):
+        keys = [cf._pair_sort_key(b["worst_pair_row"]) for b in self.bring4_rows]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_pairs_good_counts_pairs_meeting_the_threshold(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pr, lenient_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+        # A threshold of 0% is cleared by every pair, however bad.
+        for b in lenient_rows:
+            self.assertEqual(b["pairs_good"], 6)
+        _pr2, strict_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=1.0)
+        for b, b_strict in zip(sorted(self.bring4_rows, key=lambda x: x["bring4"]),
+                               sorted(strict_rows, key=lambda x: x["bring4"])):
+            expected = sum(1 for r in b["pair_rows"] if cf._pair_beaten_frac(r) >= 1.0)
+            self.assertEqual(b_strict["pairs_good"], expected)
+
+    def test_rejects_a_team_that_is_not_exactly_six(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        with self.assertRaises(ValueError):
+            cf.bring4_search(self.OUR6[:5], self.TARGETS, merged, moves,
+                             natures, typechart)
+        with self.assertRaises(ValueError):
+            cf.bring4_search(self.OUR6 + ["Whimsicott"], self.TARGETS, merged,
+                             moves, natures, typechart)
+
+
+class TestMultiBring4Search(unittest.TestCase):
+    """`multi_bring4_coverage`/`multi_bring4_exhaustive`/`multi_bring4_beam`
+    -- generalising `bring4_search` from ONE enemy roster to SEVERAL, by
+    finding the best team-of-6 across all of them.
+
+        "I want to look at several 'vs' teams, for instance 3 different
+         sets of enemy 6. It will run the best pairs against each separate
+         team in the same way, but then it will find the best possible
+         group of 6, comprised of brings of possible 4 that perform well
+         in the 6-pair test I described above."
+
+    Confirmed with the user: the bring-4 can differ per opponent (matches
+    real VGC Team Preview), and both an exhaustive search (over a narrowed
+    candidate pool) and a beam search (over the raw pool) should exist.
+    """
+
+    POOL = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit", "Whimsicott"]
+    ENEMIES = [["Sableye", "Ariados"], ["Basculegion", "Mega Floette"]]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1)
+
+    def test_a_pool_member_that_is_also_an_enemy_elsewhere_is_dropped_everywhere(self):
+        """Regression: Basculegion is a pool candidate here AND one of
+        Enemy 1's own team members. `joint_pool_search` already excludes a
+        name from its OWN race when that name is in ITS target_names, but
+        a name excluded from only ONE enemy's pair table left
+        `_bring4_candidates` unable to find its pairs (KeyError) the
+        moment a team-of-6 containing it was checked against a DIFFERENT
+        enemy that never excluded it. Must be dropped from the pool
+        entirely, for every enemy, not just the one it's named on."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool_with_overlap = self.POOL + ["Basculegion"]
+        enemies = [["Sableye", "Ariados"], ["Basculegion", "Mega Floette"]]
+        cov = cf.multi_bring4_coverage(
+            pool_with_overlap, enemies, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1)
+        for rows in cov["per_enemy"]:
+            for r in rows:
+                self.assertNotIn("Basculegion", r["pair"])
+        self.assertNotIn("Basculegion", cov["candidate_pool"])
+        # Must not crash, and must never recommend bringing the enemy's
+        # own Pokemon.
+        if len(cov["candidate_pool"]) >= 6:
+            rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
+            for r in rows:
+                self.assertNotIn("Basculegion", r["team6"])
+
+    def test_stage_a_runs_once_per_enemy_over_the_whole_pool(self):
+        import itertools as _it
+        self.assertEqual(len(self.coverage["per_enemy"]), len(self.ENEMIES))
+        want_pairs = {frozenset(p) for p in _it.combinations(self.POOL, 2)}
+        for rows in self.coverage["per_enemy"]:
+            got_pairs = {frozenset(r["pair"]) for r in rows}
+            self.assertEqual(got_pairs, want_pairs)
+
+    def test_candidate_pool_is_a_subset_of_the_pool(self):
+        self.assertTrue(set(self.coverage["candidate_pool"]).issubset(set(self.POOL)))
+
+    def test_min_enemies_narrows_the_candidate_pool(self):
+        """Requiring a candidate to be good against EVERY named enemy
+        (min_enemies = len(ENEMIES)) can only keep as many or fewer names
+        than requiring it against just one."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        lenient = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1)
+        strict = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=len(self.ENEMIES))
+        self.assertLessEqual(len(strict["candidate_pool"]),
+                             len(lenient["candidate_pool"]))
+        self.assertTrue(set(strict["candidate_pool"])
+                        .issubset(set(lenient["candidate_pool"])))
+
+    def test_exhaustive_covers_every_six_from_the_candidate_pool(self):
+        import itertools as _it
+        cov = self.coverage
+        if len(cov["candidate_pool"]) < 6:
+            self.skipTest("fixture's candidate pool is too small at this "
+                          "threshold -- covered structurally by the ceiling "
+                          "test below instead")
+        rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
+        got = {r["team6"] for r in rows}
+        want = {tuple(sorted(c)) for c in _it.combinations(cov["candidate_pool"], 6)}
+        self.assertEqual(got, want)
+
+    def test_exhaustive_rows_are_ranked_best_worst_case_first(self):
+        cov = self.coverage
+        if len(cov["candidate_pool"]) < 6:
+            self.skipTest("fixture's candidate pool is too small at this threshold")
+        rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
+        keys = [r["worst_enemy_score_key"] for r in rows]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_exhaustive_reports_a_best_bring4_per_enemy(self):
+        cov = self.coverage
+        if len(cov["candidate_pool"]) < 6:
+            self.skipTest("fixture's candidate pool is too small at this threshold")
+        rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
+        for r in rows[:1]:
+            self.assertEqual(len(r["per_enemy"]), len(self.ENEMIES))
+            for pe in r["per_enemy"]:
+                self.assertEqual(len(pe["best_bring4"]), 4)
+                self.assertTrue(set(pe["best_bring4"]).issubset(set(r["team6"])))
+
+    def test_exhaustive_rejects_a_pool_below_six(self):
+        cov = {"candidate_pool": ["Sharpedo", "Rampardos"],
+              "pair_by_key": [{}], "target_name_lists": [["Sableye", "Ariados"]]}
+        with self.assertRaises(ValueError):
+            cf.multi_bring4_exhaustive(cov)
+
+    def test_exhaustive_rejects_a_pool_above_the_ceiling(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        cov = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)  # 0% bar -- everyone qualifies
+        self.assertGreaterEqual(len(cov["candidate_pool"]), 6)
+        with self.assertRaises(ValueError):
+            cf.multi_bring4_exhaustive(cov, good_threshold=0.0, max_candidates=3)
+
+    def test_beam_returns_only_complete_teams_of_six(self):
+        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=6)
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(len(r["team6"]), 6)
+            self.assertEqual(len(set(r["team6"])), 6)
+
+    def test_beam_respects_beam_width(self):
+        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=3)
+        self.assertLessEqual(len(rows), 3)
+
+    def test_beam_rows_are_ranked_best_worst_case_first(self):
+        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=8)
+        keys = [r["worst_enemy_score_key"] for r in rows]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_beam_searches_the_whole_pool_not_just_candidates(self):
+        """Unlike the exhaustive mode, beam must be able to pick a member
+        that never appeared in any enemy's own good-pair list."""
+        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=20)
+        all_picked = {n for r in rows for n in r["team6"]}
+        self.assertTrue(all_picked.issubset(set(self.POOL)))
+
+
+class TestTeam6RowAndBring4Candidates(unittest.TestCase):
+    """The shared, no-new-racing combinatorics both `bring4_search` and the
+    multi-enemy search are built on."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.pair_rows = cf.joint_pool_search(
+            ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+             "Rampardos", "Kingambit"],
+            ["Sableye", "Ariados"], merged, moves, natures, typechart)
+        self.pair_by_key = {frozenset(r["pair"]): r for r in self.pair_rows}
+
+    def test_bring4_candidates_matches_bring4_search_stage_two(self):
+        six = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+              "Rampardos", "Kingambit"]
+        direct = cf._bring4_candidates(six, self.pair_by_key, good_threshold=1.0)
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pr, via_search = cf.bring4_search(
+            six, ["Sableye", "Ariados"], merged, moves, natures, typechart,
+            good_threshold=1.0)
+        self.assertEqual([b["bring4"] for b in direct],
+                         [b["bring4"] for b in via_search])
+
+    def test_team6_row_picks_the_worse_enemy_as_the_bottleneck(self):
+        """A trivial two-enemy case using the SAME enemy pair twice: the
+        worst-case score across both must equal the single-enemy score,
+        and the bottleneck can be either (they're identical)."""
+        team6 = ("Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+                "Rampardos", "Kingambit")
+        row = cf._team6_row(team6, [self.pair_by_key, self.pair_by_key],
+                            [["Sableye", "Ariados"], ["Sableye", "Ariados"]],
+                            good_threshold=1.0)
+        solo = cf._bring4_candidates(team6, self.pair_by_key, good_threshold=1.0)[0]
+        self.assertEqual(row["worst_enemy_score_key"],
+                         cf._pair_sort_key(solo["worst_pair_row"]))
+        self.assertIn(row["worst_enemy_idx"], (0, 1))
+
+
 class TestDeepDive(unittest.TestCase):
     """`deep_dive` -- one named, already-chosen pair against every enemy pair
     drawn from a roster, with the OHKO-risk read and the 2x2 damage grid.

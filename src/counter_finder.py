@@ -1599,6 +1599,296 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     return rows
 
 
+# --------------------------------------------------------------- bring-4/6
+
+
+def _pair_beaten_frac(row):
+    """(swept + traded) / total for one `joint_pool_search`/`joint_pair_search`
+    row -- the fraction of `target_names`'s enemy pairs this OUR pair
+    actually beats. `pairs_total` is 0 only when `target_names` itself has
+    fewer than 2 names (nothing to race against), which every caller here
+    already guards against."""
+    return ((row["pairs_swept"] + row["pairs_traded"]) / row["pairs_total"]
+           if row["pairs_total"] else 0.0)
+
+
+def _pair_sort_key(row):
+    """The exact ranking `joint_pair_search`/`joint_pool_search` already sort
+    their own rows by, factored out so `bring4_search` and the multi-enemy
+    search can rank INDIVIDUAL pairs the same way those functions do --
+    ascending on this key is best-pair-first, so `max(..., key=_pair_sort_key)`
+    over a handful of pairs finds the WORST one."""
+    return (-(row["pairs_swept"] + row["pairs_traded"]),
+           -row["pairs_protect_safe"], -row["pairs_tailwind_safe"])
+
+
+def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
+                  turns=2, good_threshold=1.0, item_overrides=None,
+                  move_overrides=None):
+    """For an ALREADY-DECIDED team of 6 (from team preview) against one
+    specific enemy roster, which 4 should you actually bring?
+
+        "given that I will bring 4 vs a specific enemy, that is 6 pairs I
+         will bring. I want the 6 possible pairs of my brings to perform
+         very well, or at least to have several perform very well, such
+         that I always have options no matter what position I am in."
+
+    STAGE 1 -- every one of the C(6,2)=15 pairs drawn from `our6`, each
+    against every enemy pair drawn from `target_names`: literally
+    `joint_pool_search(our6, target_names, ...)`, no new racing. This
+    alone answers "searching the top pairs to see how many are in."
+
+    STAGE 2 -- every one of the C(6,4)=15 possible BRING-4 subsets of
+    `our6`: look up its own 6 internal pairs from Stage 1 (pure lookup,
+    still no new racing) and find the WORST one (`_pair_sort_key`, the
+    same ranking `joint_pool_search` already uses) -- "searching the given
+    top teams and searching for how bad their worst pair performs." A
+    bring-4 is ranked by that worst pair's own rank (maximin: the bring-4
+    whose worst case is LEAST bad wins), tie-broken by how many of its 6
+    pairs are "good" (beat at least `good_threshold` of `target_names`'s
+    enemy pairs, default 100% -- "always have options").
+
+    Returns (pair_rows, bring4_rows):
+      pair_rows -- `joint_pool_search`'s own 15-row output, unchanged.
+      bring4_rows -- [{bring4: (4 names), pairs: [(n1,n2), ...6...],
+                       pair_rows: [<pair_rows entry>, ...6...],
+                       worst_pair: (n1,n2), worst_pair_row: <pair_rows entry>,
+                       pairs_good: int, pairs_total: 6}], best-worst-case
+      first.
+    """
+    our6 = list(dict.fromkeys(our6))
+    if len(our6) != 6:
+        raise ValueError(f"bring4_search needs exactly 6 distinct Pokemon, "
+                         f"got {len(our6)}: {our6}")
+    pair_rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
+                                  typechart, turns=turns,
+                                  item_overrides=item_overrides,
+                                  move_overrides=move_overrides)
+    pair_by_key = {frozenset(r["pair"]): r for r in pair_rows}
+    bring4_rows = _bring4_candidates(our6, pair_by_key, good_threshold)
+    return pair_rows, bring4_rows
+
+
+def _bring4_candidates(six, pair_lookup, good_threshold=1.0):
+    """Every one of the C(len(six),4) possible bring-4 subsets of `six`
+    (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this also
+    runs for a 4- or 5-member PARTIAL team-of-6 during `multi_bring4_beam`'s
+    growth, where it degenerates to 1 or 5 subsets respectively -- the
+    combinatorics don't care), using an ALREADY-COMPUTED `pair_lookup`
+    ({frozenset(pair): row}) rather than racing anything. Shared by
+    `bring4_search`'s own Stage 2 and the multi-enemy search, which builds
+    the same shape of lookup per enemy from one shared pool-wide pair table.
+
+    Returns bring4_rows in `bring4_search`'s own shape, best-worst-case
+    first -- `[0]` is always "the best bring-4 available from `six`."
+    """
+    bring4_rows = []
+    for bring4 in itertools.combinations(six, 4):
+        pairs = [pair_lookup[frozenset(p)] for p in itertools.combinations(bring4, 2)]
+        worst = max(pairs, key=_pair_sort_key)
+        pairs_good = sum(1 for r in pairs if _pair_beaten_frac(r) >= good_threshold)
+        bring4_rows.append({
+            "bring4": bring4, "pairs": [r["pair"] for r in pairs],
+            "pair_rows": pairs, "worst_pair": worst["pair"], "worst_pair_row": worst,
+            "pairs_good": pairs_good, "pairs_total": 6,
+        })
+    bring4_rows.sort(key=lambda b: (_pair_sort_key(b["worst_pair_row"]), -b["pairs_good"]))
+    return bring4_rows
+
+
+def _team6_row(team6, pair_by_key_list, target_name_lists, good_threshold=1.0):
+    """For a candidate team-of-6 against SEVERAL enemy rosters: the BEST
+    bring-4 available from `team6` against EACH enemy (`_bring4_candidates`,
+    reused -- a bring-4 may differ per opponent, matching real VGC's "you
+    see their team at Team Preview before choosing your bring-4"), then the
+    WORST of those per-enemy best scores -- the enemy your team-of-6 is
+    weakest against, even playing its best available bring-4. Ranking
+    candidate teams-of-6 on THIS (ascending -- lower `_pair_sort_key` is
+    better) is the multi-enemy generalisation of `bring4_search`'s own
+    maximin.
+    """
+    team6 = tuple(sorted(team6))
+    per_enemy = []
+    worst_key, worst_idx = None, None
+    for i, (pair_lookup, target_names) in enumerate(zip(pair_by_key_list, target_name_lists)):
+        candidates = _bring4_candidates(team6, pair_lookup, good_threshold)
+        best = candidates[0]
+        key = _pair_sort_key(best["worst_pair_row"])
+        per_enemy.append({"target_names": list(target_names),
+                          "best_bring4": best["bring4"], "best_bring4_row": best})
+        if worst_key is None or key > worst_key:
+            worst_key, worst_idx = key, i
+    return {"team6": team6, "per_enemy": per_enemy,
+           "worst_enemy_idx": worst_idx, "worst_enemy_score_key": worst_key}
+
+
+def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
+                          typechart, turns=2, good_threshold=1.0,
+                          min_enemies=2, item_overrides=None, move_overrides=None):
+    """Stage A, shared by `multi_bring4_exhaustive` and `multi_bring4_beam`:
+    run the existing pool-wide pair search once per enemy roster.
+
+        "I want to look at several 'vs' teams, for instance 3 different
+         sets of enemy 6. It will run the best pairs against each separate
+         team in the same way, but then it will find the best possible
+         group of 6, comprised of brings of possible 4 that perform well
+         in the 6-pair test I described above."
+
+    `joint_pool_search(pool, target_i, ...)` -- no new racing machinery --
+    once per entry in `target_name_lists`. Then narrows `pool` down to a
+    CANDIDATE POOL: only members that appear in a "good" pair (beats
+    `good_threshold` or more of that one enemy's own pairs) for at least
+    `min_enemies` of the named enemy rosters.
+
+        "A good bring of 4 should probably have at least 3-4 good pairs
+         out of 6, and there shouldn't actually be many added pairs to
+         search anyway given the small number of top candidates, given
+         the caveat that they should appear in multiple top pairs."
+
+    This is what keeps `multi_bring4_exhaustive`'s team-of-6 sweep
+    tractable BY CONSTRUCTION rather than an arbitrary top-N cutoff --
+    someone who is only ever good against ONE of the N enemies is
+    presumably not the answer to "an option no matter which of these I
+    face."
+
+    Returns {"per_enemy": [pair_rows, ...], "pair_by_key": [{frozenset:
+    row}, ...], "target_name_lists": [...], "candidate_pool": [...]} --
+    `per_enemy`/`pair_by_key` cover the WHOLE (enemy-free) `pool` (so
+    `multi_bring4_beam` can grow a team over the full pool too),
+    `candidate_pool` is the narrowed subset for the exhaustive sweep.
+
+    A pool member named as an enemy on ANY of `target_name_lists` is
+    dropped from `pool` up front, for every enemy, not just the one it's
+    named on -- `joint_pool_search` already excludes a name from ITS OWN
+    race when that name is also in the enemy `target_names` it was just
+    given, but a species who's an enemy on team 2 and a candidate everyone
+    else's race considers would otherwise be excluded from ONLY team 2's
+    pair table, leaving `_bring4_candidates` unable to find its pairs the
+    moment a team-of-6 containing it is checked against team 2.
+    """
+    target_name_lists = [list(t) for t in target_name_lists]
+    any_enemy = {n for t in target_name_lists for n in t}
+    pool = [n for n in pool if n not in any_enemy]
+    per_enemy, pair_by_key = [], []
+    appears_good_in = {}
+    for target_names in target_name_lists:
+        rows = joint_pool_search(pool, target_names, merged, moves_db, natures,
+                                 typechart, turns=turns,
+                                 item_overrides=item_overrides,
+                                 move_overrides=move_overrides)
+        per_enemy.append(rows)
+        pair_by_key.append({frozenset(r["pair"]): r for r in rows})
+        good_names = set()
+        for r in rows:
+            if _pair_beaten_frac(r) >= good_threshold:
+                good_names.update(r["pair"])
+        for n in good_names:
+            appears_good_in[n] = appears_good_in.get(n, 0) + 1
+    candidate_pool = sorted(n for n, c in appears_good_in.items() if c >= min_enemies)
+    return {"per_enemy": per_enemy, "pair_by_key": pair_by_key,
+           "target_name_lists": target_name_lists, "candidate_pool": candidate_pool}
+
+
+# C(30,6) is ~593k team-of-6 candidates, each scored by cheap dict lookups
+# (no racing) -- a couple of seconds. C(40,6) is ~3.8M -- still survivable
+# but no longer "instant", and the whole point of `candidate_pool`'s
+# multi-enemy narrowing is that it should rarely get anywhere near this.
+_EXHAUSTIVE_POOL_CEILING = 30
+
+
+def multi_bring4_exhaustive(coverage, good_threshold=1.0,
+                            max_candidates=_EXHAUSTIVE_POOL_CEILING):
+    """Every possible team-of-6 drawn from `coverage["candidate_pool"]`
+    (`multi_bring4_coverage`), scored and ranked by `_team6_row`'s
+    worst-case-across-enemies metric -- exhaustive, so (within that
+    candidate pool) provably optimal, not a heuristic best-effort.
+
+    Raises if the candidate pool is bigger than `max_candidates` -- narrow
+    with a higher `--min-enemies`/`--good-threshold`, or use
+    `multi_bring4_beam` instead.
+
+    Returns rows (`_team6_row`'s own shape), best-worst-case first.
+    """
+    pool = coverage["candidate_pool"]
+    n = len(pool)
+    if n < 6:
+        raise ValueError(f"only {n} candidate(s) appear in a good pair for "
+                         f"enough enemies to form a team of 6 -- widen the "
+                         f"pool, or lower --good-threshold/--min-enemies")
+    if n > max_candidates:
+        raise ValueError(f"{n} candidates is too many for an exhaustive "
+                         f"sweep (C({n},6) is enormous) -- narrow with a "
+                         f"higher --min-enemies/--good-threshold, or pass "
+                         f"--beam instead")
+    rows = [_team6_row(team6, coverage["pair_by_key"], coverage["target_name_lists"],
+                       good_threshold)
+           for team6 in itertools.combinations(pool, 6)]
+    rows.sort(key=lambda r: r["worst_enemy_score_key"])
+    return rows
+
+
+def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40):
+    """Beam-search a team-of-6 over the WHOLE pool `multi_bring4_coverage`
+    already has pair data for (the raw pool, NOT narrowed to
+    `candidate_pool`) -- for when that candidate pool is too large for
+    `multi_bring4_exhaustive`, or a broader search is wanted regardless.
+
+    Mirrors `team_search.beam_search_teams`'s own incremental-growth
+    structure closely (seed with the best PAIRS by raw coverage, then grow
+    one member at a time, keeping the best `beam_width` partials at every
+    size) -- a new sibling here rather than a modification of that
+    function, since it is scored by a completely different metric and
+    `team_search.py`'s existing callers must not change behaviour.
+
+    Returns rows (`_team6_row`'s own shape), best-worst-case first, for
+    whichever teams-of-6 the beam actually reached (not exhaustive, so not
+    guaranteed globally optimal).
+    """
+    pair_by_key_list = coverage["pair_by_key"]
+    target_name_lists = coverage["target_name_lists"]
+    pool = sorted({n for pbk in pair_by_key_list for fs in pbk for n in fs})
+
+    def score(team):
+        """Ascending = better, matching `_pair_sort_key`'s own convention.
+        Fewer than 4 members: no bring-4 exists yet, so this falls back to
+        NEGATIVE summed pair-beaten-fraction across every enemy (more raw
+        coverage now is better -- a lower number in this convention), the
+        same idea `beam_search_teams` seeds its own beam with. 4 or more:
+        the real worst-case-across-enemies bring-4 score."""
+        if len(team) < 4:
+            total = sum(_pair_beaten_frac(pbk[frozenset(p)])
+                       for pbk in pair_by_key_list
+                       for p in itertools.combinations(team, 2)
+                       if frozenset(p) in pbk)
+            return (-total,)
+        return _team6_row(team, pair_by_key_list, target_name_lists,
+                          good_threshold)["worst_enemy_score_key"]
+
+    seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)]
+    seeds.sort(key=lambda x: x[0])
+    beam = [t for _, t in seeds[:beam_width]]
+
+    for _ in range(4):  # grow 2 -> 3 -> 4 -> 5 -> 6
+        cand = {}
+        for team in beam:
+            for n in pool:
+                if n in team:
+                    continue
+                key = tuple(sorted(team + [n]))
+                if key in cand:
+                    continue
+                cand[key] = score(list(key))
+        ranked = sorted(cand.items(), key=lambda kv: kv[1])[:beam_width]
+        beam = [list(k) for k, _ in ranked]
+        if not beam:
+            break
+
+    rows = [_team6_row(team, pair_by_key_list, target_name_lists, good_threshold)
+           for team in beam if len(team) == 6]
+    rows.sort(key=lambda r: r["worst_enemy_score_key"])
+    return rows
+
+
 def deep_dive(name1, name2, target_names, merged, moves_db, natures,
              typechart, turns=2, item_overrides=None, move_overrides=None):
     """The full report for ONE SPECIFIC, already-chosen pair (not a pool
