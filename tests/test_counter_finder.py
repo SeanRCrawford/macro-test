@@ -1048,26 +1048,37 @@ class TestJointProtectRobustness(unittest.TestCase):
 
 
 class TestTailwindAsARealThreat(unittest.TestCase):
-    """"If the enemy has a tailwind setter and tailwind is a loss, assume
-    they set tailwind and see if it is a loss." `_pair_vs_targets` already
-    replayed every enemy pair with their speed doubled as a pure hypothesis
-    (`tailwind_outcome`/`tailwind_safe`), regardless of whether either named
-    enemy could actually set it -- which buried a real threat behind a win
-    that only held on the no-Tailwind line of play. Real, verified fixture:
-    Gholdengo (136 speed) + Sylveon (95 speed) against Whimsicott (a real
-    Prankster Tailwind setter, confirmed against `moves_usage`) + Kingambit
-    (70 speed, no speed-boosting item by default). Normally both of ours
-    outspeed Kingambit and the race is an out-trade win; doubled to 140
-    under Tailwind, Kingambit outspeeds BOTH of ours and the same plan
-    turns into a loss (Kowtow Cleave one-shots Gholdengo before it can
-    act)."""
+    """"In the cases where set tailwind is assumed, do not just assume
+    tailwind is up, but just test the impact of the tailwind setter
+    choosing to set tailwind, and see if that changes the state from a win
+    to a loss." `_pair_vs_targets` now replays the race once per real
+    Tailwind setter (`merged[name]["moves_usage"]`) with that role actually
+    spending turn 1 CASTING it (`_joint_race`'s `first_turn_tailwind_role`,
+    a no-op action, same shape as a forced Protect) instead of attacking --
+    the speed boost only applies from turn 2 onward, since this module
+    doesn't re-sort mid-turn the way `battle.py`'s real engine does. That's
+    a real cost, not a free assumption: the setter itself can still die on
+    the very turn it commits to casting Tailwind, same as it would on any
+    other unprotected turn.
+
+    Real, verified fixture: Sylveon (95 speed) + Basculegion (139 speed)
+    against Hydreigon (150 speed, a real Tailwind setter per usage data) +
+    Kingambit (70 speed, no real Tailwind access). Normal-speed race is an
+    out-trade win: Hydreigon outspeeds and kills Basculegion turn 1, but
+    Sylveon kills Hydreigon that same turn and finishes Kingambit turn 2.
+    If Hydreigon instead spends turn 1 CASTING Tailwind, it still dies to
+    Sylveon's hit that same turn (Tailwind is a no-op, not a dodge) -- but
+    the boost still reaches its surviving ally from turn 2 onward:
+    Kingambit's doubled speed (140) now outspeeds Sylveon (95) and kills it
+    before Sylveon's own hit lands, turning the same win into a loss.
+    """
 
     def setUp(self):
         self.W = world()
         merged, moves, natures = (self.W["merged"], self.W["moves"],
                                   self.W["natures"])
-        self.our_names = ["Gholdengo", "Sylveon"]
-        self.enemy_names = ["Whimsicott", "Kingambit"]
+        self.our_names = ["Sylveon", "Basculegion"]
+        self.enemy_names = ["Hydreigon", "Kingambit"]
         self.our_built = cf._build_forms(self.our_names, merged, natures, moves)
         self.enemy_built = cf._build_forms(self.enemy_names, merged, natures, moves)
 
@@ -1079,12 +1090,12 @@ class TestTailwindAsARealThreat(unittest.TestCase):
             merged=merged)
         return detail[tuple(self.enemy_names)], summary
 
-    def test_whimsicott_really_knows_tailwind_kingambit_does_not(self):
+    def test_hydreigon_really_knows_tailwind_kingambit_does_not(self):
         """The fixture's precondition, checked against real usage data --
         if this ever stops being true the whole fixture needs revisiting."""
         merged = self.W["merged"]
         self.assertTrue(any(mv == "Tailwind" for mv, _pct in
-                            merged["Whimsicott"]["moves_usage"]))
+                            merged["Hydreigon"]["moves_usage"]))
         self.assertFalse(any(mv == "Tailwind" for mv, _pct in
                              merged["Kingambit"]["moves_usage"]))
 
@@ -1109,29 +1120,47 @@ class TestTailwindAsARealThreat(unittest.TestCase):
     def test_no_usage_data_leaves_the_old_behaviour_unchanged(self):
         """`merged=None` (the default every existing caller had before this
         feature) must reproduce the exact old behaviour: `tailwind_outcome`
-        is still computed as a pure hypothesis, but never promoted."""
+        falls back to the flat instant-speed-doubling hypothesis (no real
+        setter role to cast it realistically for) and is never promoted."""
         d, summary = self._race(merged=None)
         self.assertFalse(d["tailwind_is_real_threat"])
         self.assertFalse(d["tailwind_forced"])
-        self.assertEqual(d["tailwind_outcome"], "loss")
         self.assertEqual(d["outcome"], "out_trade")
         self.assertEqual(summary["pairs_swept"] + summary["pairs_traded"], 1)
 
     def test_the_log_matches_whichever_race_actually_decided_the_outcome(self):
         """When Tailwind is promoted, `log` must be the Tailwind race's own
-        turns -- Kingambit's Kowtow Cleave one-shots Gholdengo (C) before it
-        ever gets to act -- not the normal-speed race's turns, where
-        Gholdengo survives to attack. Otherwise the log would show a win
-        while `outcome` says loss."""
+        turns -- Kingambit's boosted speed kills Sylveon (C) on turn 2
+        before Sylveon's own hit lands -- not the normal-speed race's
+        turns, where Sylveon survives to finish Kingambit off. Otherwise
+        the log would show a win while `outcome` says loss."""
         d, _summary = self._race(merged=self.W["merged"])
-        actors = [role for turn in d["log"] for role, _tgt, _hit in turn]
-        self.assertNotIn("C", actors,
-                         "fixture assumes Gholdengo (C) never gets to act "
-                         "once Tailwind is assumed -- Kowtow Cleave kills "
-                         "it first")
+        last_turn = d["log"][-1]
+        actors = [role for role, _tgt, _hit in last_turn]
+        self.assertEqual(actors, ["E2"],
+                         "fixture assumes Kingambit (E2), sped up by the "
+                         "Tailwind its now-dead ally cast, is the only "
+                         "actor left on the final turn -- it kills Sylveon "
+                         "before Sylveon can act")
+
+    def test_the_setter_still_pays_the_real_cost_of_casting_it(self):
+        """Hydreigon (the setter) spends turn 1 casting Tailwind instead of
+        attacking -- and still dies to Sylveon's hit that same turn, same
+        as it would on any other unprotected turn. This is what separates
+        "realistically cast" from "assumed already up": the setter is not
+        free."""
+        d, _summary = self._race(merged=self.W["merged"])
+        first_turn = d["log"][0]
+        actors = [role for role, _tgt, _hit in first_turn]
+        self.assertNotIn("E1", actors,
+                         "Hydreigon (E1) must not land a hit turn 1 -- it "
+                         "spent the turn casting Tailwind, not attacking")
+        self.assertIn(("C", "E1"), [(role, tgt) for role, tgt, _hit in first_turn],
+                     "Sylveon must still get a hit in on Hydreigon turn 1 "
+                     "-- casting Tailwind doesn't protect the caster")
 
     def test_no_override_when_no_enemy_in_the_pair_knows_tailwind(self):
-        """Kingambit alone (no Whimsicott) has no real Tailwind access --
+        """Kingambit alone (no Hydreigon) has no real Tailwind access --
         the hypothesis replay still runs, but never gets promoted."""
         merged, moves, natures = (self.W["merged"], self.W["moves"],
                                   self.W["natures"])
@@ -1145,7 +1174,6 @@ class TestTailwindAsARealThreat(unittest.TestCase):
         self.assertFalse(d["tailwind_is_real_threat"])
         self.assertFalse(d["tailwind_forced"])
         self.assertEqual(d["outcome"], d["outcome_without_tailwind"])
-
 
 class TestChargeMovesNeedTheirWeather(unittest.TestCase):
     """"Electro shot needs rain and solar beam needs sun to be a 1-turn
@@ -1729,6 +1757,73 @@ class TestSpreadMoveGuaranteedKillCount(unittest.TestCase):
         self.assertGreaterEqual(hits["E1"].frac, 1.0)
 
 
+class TestGuaranteedKillAccountsForRemainingHp(unittest.TestCase):
+    """"Kowtow Cleave or Iron Head T1 into Sucker Punch T2 from Kingambit
+    would likely be a win vs Lycanroc-Dusk, why is it not played?" Real,
+    diagnosed fixture: Lycanroc-Dusk holds Focus Sash, so an Iron Head that
+    would otherwise OHKO it from full HP instead leaves it at 1 HP -- real,
+    correct Focus Sash behaviour, not a bug. The actual bug: `_choose_
+    action`'s guaranteed-kill check compared a hit's fraction (always read
+    against the target's MAX hp, `_raw_hit`'s own convention) against a
+    hardcoded 1.0, so a move that trivially finishes a target already down
+    to 1 HP got NO kill credit over one that merely dents a full-HP target
+    -- both looked "not a guaranteed kill" under the same wrong 100% bar,
+    so ties fell to raw damage, which has no idea one target is already on
+    its last HP. `_choose_action` now compares against the target's REAL
+    remaining fraction (`target_hp_fracs`), so finishing off the 1-HP
+    target is correctly recognised as strictly better than chipping a
+    healthy one, regardless of which does more raw damage."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        self.typechart = self.W["typechart"]
+        self.attacker = cf._build("Kingambit", merged, natures)
+        self.near_dead = cf._build("Sylveon", merged, natures)
+        self.full_hp = cf._build("Corviknight", merged, natures)
+        self.sucker_punch = cf._lookup_move("Sucker Punch", moves)
+
+    def test_the_fixture_assumes_raw_damage_alone_favours_the_healthy_target(self):
+        """The bug's precondition: without HP-awareness, Sucker Punch's
+        raw damage numbers alone would pick Corviknight over Sylveon --
+        proving any observed preference for Sylveon comes from the
+        remaining-HP fix, not a coincidence of raw magnitude."""
+        h_near_dead = cf._raw_hit(self.attacker, self.sucker_punch,
+                                  self.near_dead, self.typechart, roll="avg")
+        h_full_hp = cf._raw_hit(self.attacker, self.sucker_punch,
+                                self.full_hp, self.typechart, roll="avg")
+        self.assertLess(h_near_dead.frac, 1.0)
+        self.assertLess(h_full_hp.frac, 1.0)
+        self.assertGreater(h_full_hp.frac, h_near_dead.frac, "fixture "
+                           "assumes Sucker Punch's raw damage alone "
+                           "favours the full-HP Corviknight")
+
+    def test_choose_action_finishes_the_near_dead_target_instead(self):
+        live_targets = {"C": self.near_dead, "P": self.full_hp}
+        target_hp_fracs = {"C": 0.01, "P": 1.0}
+        hits, mv = cf._choose_action(
+            self.attacker, [self.sucker_punch], live_targets, self.typechart,
+            target_hp_fracs=target_hp_fracs)
+        self.assertEqual(mv.name, "Sucker Punch")
+        self.assertIn("C", hits, "must finish the 1-HP target, not chip "
+                      "the healthy one purely because it takes more raw "
+                      "damage")
+
+    def test_a_full_hp_target_still_uses_the_old_1_0_bar(self):
+        """No `target_hp_fracs` entry for a role (or none passed at all)
+        keeps the original full-HP assumption -- this fix only changes
+        behaviour for a target that's actually already damaged."""
+        live_targets = {"C": self.near_dead, "P": self.full_hp}
+        hits, mv = cf._choose_action(
+            self.attacker, [self.sucker_punch], live_targets, self.typechart)
+        # Neither target is a guaranteed kill from full HP, so this must
+        # fall back to raw damage -- the ORIGINAL (correct-for-full-HP)
+        # tie-break -- and pick Corviknight, same as before this fix.
+        self.assertEqual(mv.name, "Sucker Punch")
+        self.assertIn("P", hits)
+
+
 class TestSurvivalAwareReconsideration(unittest.TestCase):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk, given Mega Metagross can't beat the
@@ -2002,6 +2097,41 @@ class TestJointDamageLog(unittest.TestCase):
         self.assertEqual(len(d["log"]), d["turns_used"])
 
 
+class TestPairSortKeyRanksProtectSafeFirst(unittest.TestCase):
+    """"I think it would be best if the ranking was done by default as by
+    protect safe wins." A pure unit test of `_pair_sort_key` on synthetic
+    rows (no racing): a row with FEWER raw wins but MORE protect-safe wins
+    must still rank ABOVE one with more raw wins but fewer protect-safe
+    ones -- protect-safe leads the tuple, beaten count is only the
+    tie-break."""
+
+    def test_more_protect_safe_wins_beats_more_raw_wins(self):
+        fewer_wins_more_protect_safe = {
+            "pairs_swept": 0, "pairs_traded": 3, "pairs_protect_safe": 3,
+            "pairs_tailwind_safe": 3,
+        }
+        more_wins_fewer_protect_safe = {
+            "pairs_swept": 0, "pairs_traded": 5, "pairs_protect_safe": 1,
+            "pairs_tailwind_safe": 5,
+        }
+        self.assertLess(cf._pair_sort_key(fewer_wins_more_protect_safe),
+                        cf._pair_sort_key(more_wins_fewer_protect_safe),
+                        "3 protect-safe wins (even with fewer raw wins) "
+                        "must rank ahead of 1 protect-safe win")
+
+    def test_beaten_count_is_the_tiebreak_when_protect_safe_ties(self):
+        tied_protect_safe_fewer_wins = {
+            "pairs_swept": 0, "pairs_traded": 2, "pairs_protect_safe": 2,
+            "pairs_tailwind_safe": 2,
+        }
+        tied_protect_safe_more_wins = {
+            "pairs_swept": 0, "pairs_traded": 4, "pairs_protect_safe": 2,
+            "pairs_tailwind_safe": 4,
+        }
+        self.assertLess(cf._pair_sort_key(tied_protect_safe_more_wins),
+                        cf._pair_sort_key(tied_protect_safe_fewer_wins))
+
+
 class TestJointPoolSearch(unittest.TestCase):
     """`joint_pool_search` -- GENERATE both halves of the pair from the
     pool, instead of fixing one via --partner.
@@ -2065,14 +2195,19 @@ class TestJointPoolSearch(unittest.TestCase):
         self.assertEqual(pool_d["outcome"], fixed_d["outcome"])
         self.assertEqual(pool_d["tailwind_safe"], fixed_d["tailwind_safe"])
 
-    def test_rows_are_ranked_beaten_first_then_tailwind_safe(self):
+    def test_rows_are_ranked_protect_safe_first_then_beaten_then_tailwind_safe(self):
+        """"I think it would be best if the ranking was done by default as
+        by protect safe wins" -- protect-safe count is the PRIMARY
+        criterion, ahead of raw beaten count and tailwind-safe count."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         rows = cf.joint_pool_search(
             ["Mega Gengar", "Ninetales-Alola", "Mega Alakazam"],
             ["Sharpedo", "Rampardos"], merged, moves, natures, typechart)
-        beaten = [r["pairs_swept"] + r["pairs_traded"] for r in rows]
-        self.assertEqual(beaten, sorted(beaten, reverse=True))
+        keys = [cf._pair_sort_key(r) for r in rows]
+        self.assertEqual(keys, sorted(keys))
+        protect_safe = [r["pairs_protect_safe"] for r in rows]
+        self.assertEqual(protect_safe, sorted(protect_safe, reverse=True))
 
 
 class TestBring4Search(unittest.TestCase):
@@ -2154,8 +2289,24 @@ class TestBring4Search(unittest.TestCase):
                                         "no better than any of its siblings")
 
     def test_bring4_rows_are_ranked_best_worst_case_first(self):
-        keys = [cf._pair_sort_key(b["worst_pair_row"]) for b in self.bring4_rows]
+        keys = [(len(b["uncovered_enemy_pairs"]),
+                cf._pair_sort_key(b["worst_pair_row"]), -b["pairs_good"])
+               for b in self.bring4_rows]
         self.assertEqual(keys, sorted(keys))
+
+    def test_uncovered_enemy_pairs_dominates_the_ranking(self):
+        """A bring-4 with fewer uncovered enemy pairs must never rank BELOW
+        one with more, even if the latter's worst-pair `_pair_sort_key` (its
+        raw beaten count) happens to look better -- "having a pair that
+        every pair of yours loses against is terrible, and this is an
+        important factor." """
+        for i, b in enumerate(self.bring4_rows):
+            for later in self.bring4_rows[i + 1:]:
+                self.assertLessEqual(
+                    len(b["uncovered_enemy_pairs"]),
+                    len(later["uncovered_enemy_pairs"]),
+                    "an earlier-ranked bring-4 must never have MORE "
+                    "uncovered enemy pairs than a later one")
 
     def test_pairs_good_counts_pairs_meeting_the_threshold(self):
         merged, moves = self.W["merged"], self.W["moves"]
@@ -2569,7 +2720,8 @@ class TestCoreRowAndBring4Candidates(unittest.TestCase):
     def test_bring4_candidates_matches_bring4_search_stage_two(self):
         six = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
               "Rampardos", "Kingambit"]
-        direct = cf._bring4_candidates(six, self.pair_by_key, good_threshold=1.0)
+        direct = cf._bring4_candidates(six, self.pair_by_key,
+                                       ["Sableye", "Ariados"], good_threshold=1.0)
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         _pr, via_search = cf.bring4_search(
@@ -2587,10 +2739,112 @@ class TestCoreRowAndBring4Candidates(unittest.TestCase):
         row = cf._core_row(core, [self.pair_by_key, self.pair_by_key],
                            [["Sableye", "Ariados"], ["Sableye", "Ariados"]],
                            good_threshold=1.0)
-        solo = cf._bring4_candidates(core, self.pair_by_key, good_threshold=1.0)[0]
+        solo = cf._bring4_candidates(core, self.pair_by_key,
+                                     ["Sableye", "Ariados"], good_threshold=1.0)[0]
         self.assertEqual(row["worst_enemy_score_key"],
-                         cf._pair_sort_key(solo["worst_pair_row"]))
+                         (len(solo["uncovered_enemy_pairs"]),)
+                         + cf._pair_sort_key(solo["worst_pair_row"]))
         self.assertIn(row["worst_enemy_idx"], (0, 1))
+
+
+def _fake_pair_row(pair, beats, target_names):
+    """A synthetic `joint_pool_search`-shaped row for `pair`, without any
+    real racing -- `beats` is the subset of `target_names`'s enemy pairs
+    (tuples) this pair wins (out_trade, tailwind-safe, protect-safe);
+    every other enemy pair is a loss. Every row built this way has the
+    SAME aggregate `_pair_sort_key` whenever `len(beats)` matches, however
+    the WINS are distributed across which specific enemy pairs -- exactly
+    what's needed to build two candidates that tie on the old ranking but
+    differ on `_uncovered_enemy_pairs`."""
+    import itertools as _it
+    enemy_pairs = list(_it.combinations(target_names, 2))
+    detail = {}
+    for ep in enemy_pairs:
+        won = ep in beats
+        detail[ep] = {"outcome": "out_trade" if won else "loss",
+                      "tailwind_safe": won, "protect_safe": won}
+    n_win = len(beats)
+    return {"pair": pair, "detail": detail,
+           "pairs_swept": 0, "pairs_traded": n_win,
+           "pairs_lost": len(enemy_pairs) - n_win, "pairs_no_ko": 0,
+           "pairs_tailwind_safe": n_win, "pairs_protect_safe": n_win,
+           "pairs_total": len(enemy_pairs)}
+
+
+class TestUncoveredEnemyPairsDominateRanking(unittest.TestCase):
+    """"I think it would be best if the ranking was done by default as by
+    protect safe wins. I think ideally, of the pairs, wins would make up
+    for losses, for instance two are 12/15, but ideally one of pairs wins
+    the one the others lose; having pairs that every pair of yours loses
+    against is terrible, and this is an important factor."
+
+    A hand-built fixture (`_fake_pair_row`, no real racing) with two
+    bring-4 candidates that TIE on every OLD ranking criterion (identical
+    worst-pair `_pair_sort_key`, identical `pairs_good`) but differ on
+    coverage: candidate ABCD has all 6 of its internal pairs lose to the
+    SAME enemy pair (Y+Z, a real, unconditional loss); candidate ABCE's
+    losses are spread out so every enemy pair is beaten by at least one of
+    its 6 pairs. `_bring4_candidates` must still rank ABCE strictly above
+    ABCD.
+    """
+
+    TARGETS = ["X", "Y", "Z"]  # enemy pairs: XY, XZ, YZ
+
+    def setUp(self):
+        XY, XZ, YZ = ("X", "Y"), ("X", "Z"), ("Y", "Z")
+        # AB/AC/BC/AD/BD/CD all beat {XY, XZ}, always lose YZ.
+        both_xy_xz = {XY, XZ}
+        rows = {
+            ("A", "B"): _fake_pair_row(("A", "B"), both_xy_xz, self.TARGETS),
+            ("A", "C"): _fake_pair_row(("A", "C"), both_xy_xz, self.TARGETS),
+            ("B", "C"): _fake_pair_row(("B", "C"), both_xy_xz, self.TARGETS),
+            ("A", "D"): _fake_pair_row(("A", "D"), both_xy_xz, self.TARGETS),
+            ("B", "D"): _fake_pair_row(("B", "D"), both_xy_xz, self.TARGETS),
+            ("C", "D"): _fake_pair_row(("C", "D"), both_xy_xz, self.TARGETS),
+            # AE/BE beat YZ (between them, plus one of XY/XZ each) so
+            # bring-4 ABCE has an answer to every enemy pair; CE repeats
+            # the AB/AC/BC pattern so ABCE's raw total stays IDENTICAL to
+            # ABCD's (6 pairs x 2/3 beaten each either way).
+            ("A", "E"): _fake_pair_row(("A", "E"), {XY, YZ}, self.TARGETS),
+            ("B", "E"): _fake_pair_row(("B", "E"), {XZ, YZ}, self.TARGETS),
+            ("C", "E"): _fake_pair_row(("C", "E"), both_xy_xz, self.TARGETS),
+            # Never exercised by the two candidates under test -- just
+            # needs to exist so `_bring4_candidates`'s OTHER (irrelevant)
+            # C(5,4) subsets that include both D and E don't KeyError.
+            ("D", "E"): _fake_pair_row(("D", "E"), set(), self.TARGETS),
+        }
+        self.pair_lookup = {frozenset(p): r for p, r in rows.items()}
+        self.bring4_rows = cf._bring4_candidates(
+            ["A", "B", "C", "D", "E"], self.pair_lookup, self.TARGETS,
+            good_threshold=1.0)
+        self.by_bring4 = {frozenset(b["bring4"]): b for b in self.bring4_rows}
+
+    def test_abcd_has_one_uncovered_enemy_pair(self):
+        b = self.by_bring4[frozenset(("A", "B", "C", "D"))]
+        self.assertEqual(b["uncovered_enemy_pairs"], [("Y", "Z")])
+
+    def test_abce_has_no_uncovered_enemy_pairs(self):
+        b = self.by_bring4[frozenset(("A", "B", "C", "E"))]
+        self.assertEqual(b["uncovered_enemy_pairs"], [])
+
+    def test_the_two_candidates_tie_on_every_old_ranking_criterion(self):
+        """The fixture's precondition: without the uncovered-pairs fix,
+        these two candidates would be indistinguishable."""
+        abcd = self.by_bring4[frozenset(("A", "B", "C", "D"))]
+        abce = self.by_bring4[frozenset(("A", "B", "C", "E"))]
+        self.assertEqual(cf._pair_sort_key(abcd["worst_pair_row"]),
+                         cf._pair_sort_key(abce["worst_pair_row"]))
+        self.assertEqual(abcd["pairs_good"], abce["pairs_good"])
+
+    def test_full_coverage_ranks_strictly_above_an_unconditional_loss(self):
+        abcd_idx = next(i for i, b in enumerate(self.bring4_rows)
+                        if frozenset(b["bring4"]) == frozenset(("A", "B", "C", "D")))
+        abce_idx = next(i for i, b in enumerate(self.bring4_rows)
+                        if frozenset(b["bring4"]) == frozenset(("A", "B", "C", "E")))
+        self.assertLess(abce_idx, abcd_idx,
+                        "ABCE (no unconditional loss) must rank above ABCD "
+                        "(loses Y+Z no matter which pair is sent out), even "
+                        "though they tie on raw beaten count")
 
 
 class TestDeepDive(unittest.TestCase):

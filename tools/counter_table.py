@@ -705,27 +705,41 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
              f"{r['pairs_protect_safe']:>5d}/{total:<2d}")
 
     print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked by "
-         f"how their WORST pair does\n(best worst-case first), then by how "
-         f"many of its 6 pairs clear the good-pair bar:")
-    header2 = (f"  {'#':>3} {'Bring-4':46s} {'good':>6s} {'worst pair':34s} "
-              f"{'worst beaten':>13s}")
+         f"how many enemy pairs\nNONE of its 6 pairs can beat (fewest first), "
+         f"then by how their WORST pair does\n(best worst-case first), then "
+         f"by how many of its 6 pairs clear the good-pair bar:")
+    header2 = (f"  {'#':>3} {'Bring-4':46s} {'uncov':>6s} {'good':>6s} "
+              f"{'worst pair':34s} {'worst beaten':>13s}")
     print(header2)
     print("  " + "-" * (len(header2) - 2))
     for i, b in enumerate(bring4_rows[:top], start=1):
         bring4_str = " / ".join(b["bring4"])
         worst_str = " + ".join(b["worst_pair"])
         wr = b["worst_pair_row"]
-        print(f"  {i:>3} {bring4_str[:46]:46s} {b['pairs_good']:>3d}/6  "
+        uncov = len(b["uncovered_enemy_pairs"])
+        print(f"  {i:>3} {bring4_str[:46]:46s} {uncov:>3d}/{total:<2d} "
+             f"{b['pairs_good']:>3d}/6  "
              f"{worst_str[:34]:34s} "
              f"{wr['pairs_swept'] + wr['pairs_traded']:>4d}/{total:<2d}")
+        if b["uncovered_enemy_pairs"]:
+            print("           no answer to: " + ", ".join(
+                f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]))
     print()
     print("beaten     swept + traded -- how many of the enemy pairs drawn")
     print("           from --vs this OUR pair actually beats.")
+    print("uncov      (Stage 2) enemy pairs that NONE of this bring-4's 6")
+    print("           pairs beat -- a real, unconditional loss whichever of")
+    print("           the 4 you're forced to send out. Ranked on THIS")
+    print("           FIRST: a bring-4 with one such pair loses to one that")
+    print("           merely has a lower average, even at an equal beaten")
+    print("           fraction -- \"having a pair that every pair of yours")
+    print("           loses against is terrible.\"")
     print("good       (Stage 2) how many of this bring-4's 6 internal pairs")
     print("           clear the good-pair bar above -- \"several perform")
     print("           very well\" rather than relying on just one.")
-    print("worst pair (Stage 2) the WEAKEST of this bring-4's 6 pairs -- the")
-    print("           one you're stuck with if the game forces exactly that")
+    print("worst pair (Stage 2) the WEAKEST of this bring-4's 6 pairs, ranked")
+    print("           protect-safe wins first, then beaten count -- the one")
+    print("           you're stuck with if the game forces exactly that")
     print("           board state. Ranked on THIS, not the average: a")
     print("           bring-4 with one great pair and one awful one loses to")
     print("           a bring-4 that's merely good everywhere.")
@@ -835,11 +849,15 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
             wr = pe["best_bring4_row"]["worst_pair_row"]
             total = wr["pairs_total"]
             beaten = wr["pairs_swept"] + wr["pairs_traded"]
+            uncovered = pe["best_bring4_row"]["uncovered_enemy_pairs"]
             bottleneck = "  <-- bottleneck" if e_idx - 1 == r["worst_enemy_idx"] else ""
             print(f"        vs Enemy {e_idx}: bring "
                  f"{' / '.join(pe['best_bring4'])} "
                  f"(worst pair beats {beaten}/{total} of Enemy {e_idx}'s "
                  f"pairs){bottleneck}")
+            if uncovered:
+                print(f"          no answer to: " + ", ".join(
+                    f"{e1}+{e2}" for e1, e2 in uncovered))
             for name in pe["best_bring4"]:
                 _print_teamsheet_member(
                     name, pe["target_names"], merged, moves_db, natures,
@@ -850,10 +868,16 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
     print("           its own best available bring-4 there -- what the")
     print("           ranking is actually maximin'd on: a core that's")
     print("           spectacular vs 2 enemies and shaky vs the 3rd loses")
-    print("           to one that's merely solid against all three.")
-    print("worst pair the WEAKEST of that bring-4's own 6 internal pairs")
+    print("           to one that's merely solid against all three. An")
+    print("           enemy pair NONE of the core's pairs can beat")
+    print("           ('no answer to') outranks everything else here --")
+    print("           an equal beaten fraction with no unconditional loss")
+    print("           is always preferred.")
+    print("worst pair the WEAKEST of that bring-4's own 6 internal pairs,")
+    print("           ranked protect-safe wins first, then beaten count")
     print("           (same reading as --bring4's own 'worst pair') -- the")
-    print("           bring-4 shown is the one whose worst pair is least")
+    print("           bring-4 shown is the one with fewest enemy pairs it")
+    print("           has no answer to, then whose worst pair is least")
     print("           bad, for that specific enemy.")
     print("synergy    per-CORE type-weakness counts (`--max-weak`/")
     print("           `--type-limit` hard-filter on this same data): how")
@@ -939,7 +963,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               "Weaknesses by type"]
     for i in range(len(target_name_lists)):
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
-                   f"Enemy {i + 1} worst pair beaten"]
+                   f"Enemy {i + 1} worst pair beaten",
+                   f"Enemy {i + 1} uncovered enemy pairs"]
     ws.append(header)
     _style_header(ws)
     for r in rows:
@@ -952,8 +977,10 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               ", ".join(f"{t} {c}" for t, c in by_type)]
         for pe in r["per_enemy"]:
             wr = pe["best_bring4_row"]["worst_pair_row"]
+            uncovered = pe["best_bring4_row"]["uncovered_enemy_pairs"]
             row += [", ".join(pe["target_names"]), " / ".join(pe["best_bring4"]),
-                   f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}"]
+                   f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
+                   ", ".join(f"{e1}+{e2}" for e1, e2 in uncovered)]
         ws.append(row)
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
@@ -1638,6 +1665,8 @@ def main():
             wr = b["worst_pair_row"]
             row = {
                 "bring4": " / ".join(b["bring4"]),
+                "uncovered enemy pairs": "; ".join(
+                    f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
                 "pairs good": b["pairs_good"], "pairs total": b["pairs_total"],
                 "worst pair": " + ".join(b["worst_pair"]),
                 "worst pair swept": wr["pairs_swept"],
@@ -1682,6 +1711,9 @@ def main():
                 row[f"enemy {e_idx} best bring4"] = " / ".join(pe["best_bring4"])
                 row[f"enemy {e_idx} worst pair beaten"] = (
                     f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}")
+                row[f"enemy {e_idx} uncovered enemy pairs"] = "; ".join(
+                    f"{e1}+{e2}" for e1, e2 in
+                    pe["best_bring4_row"]["uncovered_enemy_pairs"])
                 teamsheet_bits = []
                 for name in pe["best_bring4"]:
                     # Read the same FIXED set every printed number was

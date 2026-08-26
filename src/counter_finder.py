@@ -1454,6 +1454,20 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
 _PROTECT_MOVE = MoveInfo("Protect", 0, "Normal", "Status", "self", priority=4)
 
 
+def _tailwind_move_for(combatant):
+    """A no-op stand-in for "this role used Tailwind this turn" -- same
+    role `_PROTECT_MOVE` plays for a forced Protect, substituted directly
+    instead of calling `_choose_action` so casting it still counts as a
+    real action (speed order, `enemy_acted`) but lands no hit. Priority
+    depends on the CASTER (Tailwind is priority 0 normally, +1 under
+    Prankster), unlike Protect's always-fixed +4, so this is built fresh
+    per combatant rather than a single module-level constant like
+    `_PROTECT_MOVE`.
+    """
+    priority = 1 if combatant.ability == "Prankster" else 0
+    return MoveInfo("Tailwind", 0, "Normal", "Status", "allySide", priority=priority)
+
+
 def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None, attacker_hp_frac=None,
                    target_hp_fracs=None, auras=None):
@@ -1558,19 +1572,37 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             single_candidates.append((mv, role, got))
             best_frac_by_role[role] = max(best_frac_by_role[role], got.frac)
 
+    def remaining(role):
+        """The target's ACTUAL current-HP fraction (of max HP) -- 1.0 (full
+        health) unless `target_hp_fracs` says otherwise. This is what a
+        guaranteed-kill check must clear, not a hardcoded 1.0: a target
+        already sitting at 1 HP after surviving on Focus Sash needs only a
+        sliver of `h.frac` (itself always read against MAX hp, `_raw_hit`'s
+        own convention) to be a sure kill, and comparing it against a full
+        100% instead systematically under-credits finishing it off --
+        exactly the bug behind "why doesn't Kingambit finish the 1-HP
+        Focus-Sash Lycanroc-Dusk instead of hitting the full-HP Metagross":
+        both looked equally "not a guaranteed kill" under the old
+        always-100% bar, so the tie-break fell to raw damage, which does
+        not know one target is already on its last HP.
+        """
+        return (target_hp_fracs or {}).get(role, 1.0)
+
     best_key, best_hits, best_move = None, {}, None
     for mv, role, got in single_candidates:
-        kos_now_count = 1 if got.frac >= 1.0 else 0
+        bar = remaining(role)
+        kos_now_count = 1 if got.frac >= bar else 0
         kos_in_two_count = 1 if (kos_now_count or
-                                 (got.frac + best_frac_by_role[role]) >= 1.0) else 0
+                                 (got.frac + best_frac_by_role[role]) >= bar) else 0
         key = (kos_now_count, kos_in_two_count, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
     for mv, hits in spread_candidates:
-        kos_now_count = sum(1 for h in hits.values() if h.frac >= 1.0)
+        kos_now_count = sum(1 for role, h in hits.items() if h.frac >= remaining(role))
         kos_in_two_count = sum(
             1 for role, h in hits.items()
-            if h.frac >= 1.0 or (h.frac + best_frac_by_role[role]) >= 1.0)
+            if h.frac >= remaining(role)
+            or (h.frac + best_frac_by_role[role]) >= remaining(role))
         key = (kos_now_count, kos_in_two_count, sum(h.frac for h in hits.values()))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
@@ -1762,7 +1794,7 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
 
 def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   enemy_speed_mult=1.0, protected_roles=frozenset(),
-                  recharging_roles=frozenset()):
+                  recharging_roles=frozenset(), tailwind_setter_role=None):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
     enemy side chooses independently and greedily (`_choose_action` with no
     hint), same "no coordination" behaviour `_sequential_pair_outcome`
@@ -1803,6 +1835,15 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     protected role simply scores no KO and no damage for that hit, so a combo
     that targets the other, unprotected enemy naturally ranks higher.
 
+    `tailwind_setter_role`: one enemy role ("E1"/"E2") that casts Tailwind
+    THIS turn instead of attacking -- `_tailwind_move_for` substituted
+    directly, same "still a real action, lands no hit" pattern
+    `protected_roles` uses. `_joint_race`'s own turn loop is what actually
+    makes this mean anything speed-wise (only passing this on turn 1, and
+    only applying the real `enemy_speed_mult` from turn 2 onward) -- see
+    its own docstring for the full "test the setter actually choosing to
+    set it, not an instant free boost" reasoning.
+
     `weather` is the ONE shared field value (`_field_weather`'s own return)
     -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
     which side casts it) and, via a real `FieldState(weather=weather)`
@@ -1839,6 +1880,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     for role, c in theirs_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
+        elif role == tailwind_setter_role:
+            plan[role] = ({}, _tailwind_move_for(c))
         elif role in protected_roles:
             plan[role] = ({}, _PROTECT_MOVE)
         else:
@@ -1867,7 +1910,7 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
 
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               enemy_speed_mult=1.0, protected_roles=frozenset(),
-              recharging_roles=frozenset()):
+              recharging_roles=frozenset(), tailwind_setter_role=None):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -1876,10 +1919,10 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     to one live attacker or the other side to one live target), so this stays
     cheap per turn.
 
-    `protected_roles`/`recharging_roles` are passed straight through to
-    `_resolve_turn` -- see its own docstring for how a protected or
-    recharging role naturally falls out of OUR side's ranking here with no
-    change to the ranking itself.
+    `protected_roles`/`recharging_roles`/`tailwind_setter_role` are passed
+    straight through to `_resolve_turn` -- see its own docstring for how a
+    protected, recharging, or tailwind-casting role naturally falls out of
+    OUR side's ranking here with no change to the ranking itself.
 
     Ranked by (enemies KO'd this turn, -ours KO'd this turn, net fractional
     damage this turn) -- "best FOR US", matching every other joint search in
@@ -1899,7 +1942,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
         new_hp, log, enemy_acted, wiped, recharging_next = _resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, hints,
             enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
-            recharging_roles=recharging_roles)
+            recharging_roles=recharging_roles,
+            tailwind_setter_role=tailwind_setter_role)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
@@ -1914,7 +1958,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0, first_turn_moves_override=None,
-                first_turn_protected_role=None):
+                first_turn_protected_role=None, first_turn_tailwind_role=None):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -1946,6 +1990,19 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     can still turn our sweep/out-trade into something worse. See
     `_resolve_turn`'s own docstring for the mechanics.
 
+    `first_turn_tailwind_role`: optional single enemy role that spends turn 1
+    CASTING Tailwind (a no-op action, same shape as `first_turn_protected_role`)
+    instead of attacking -- modeling the real cost of actually setting it,
+    rather than assuming it is simply already up. `enemy_speed_mult` (the
+    caller-supplied Tailwind multiplier) is only applied from turn 2 onward;
+    turn 1 always races at normal speed, since the boost doesn't exist until
+    the setter's own action resolves. This module has no intra-turn re-sort
+    (`battle.py`'s real engine does re-sort so a same-turn Tailwind can still
+    help a not-yet-acted teammate that turn -- see its comment near the
+    Tailwind field-effect application), so this is a deliberate, documented
+    simplification: the boost is available strictly starting the turn after
+    it's cast.
+
     RECHARGE (Hyper Beam, Giga Impact, ...): `_best_turn`'s own
     `recharging_next` return is carried forward as the NEXT call's
     `recharging_roles` -- the one piece of real cross-turn state this loop
@@ -1966,10 +2023,14 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             turn_moves = {**moves_by_role, **first_turn_moves_override}
         protected = ({first_turn_protected_role}
                     if turn_i == 0 and first_turn_protected_role else frozenset())
+        tailwind_role_this_turn = (first_turn_tailwind_role
+                                   if turn_i == 0 and first_turn_tailwind_role else None)
+        mult_this_turn = (1.0 if (first_turn_tailwind_role and turn_i == 0)
+                          else enemy_speed_mult)
         hp, turn_log, enemy_acted, wiped, recharging = _best_turn(
             combatants, turn_moves, hp, typechart, weather,
-            enemy_speed_mult=enemy_speed_mult, protected_roles=protected,
-            recharging_roles=recharging)
+            enemy_speed_mult=mult_this_turn, protected_roles=protected,
+            recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
@@ -2139,32 +2200,42 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
 
     TAILWIND AS AN ASSUMED THREAT, not just a hypothesis footnote: "If the
     enemy has a tailwind setter and tailwind is a loss, assume they set
-    tailwind and see if it is a loss." When either `e1_name` or `e2_name`
-    has REAL usage-data access to Tailwind (`merged[name]["moves_usage"]`,
-    the same real-movepool source `_field_weather`/ability lookups already
-    trust -- not just the hypothetical speed-doubling check every pair
-    already gets), and that hypothesis race comes out WORSE than the
-    normal-speed one (`_JOINT_OUTCOME_RANK`), the tailwind race's own
-    outcome/turns_used/log REPLACE the normal ones as `outcome`/
-    `turns_used`/`log` -- feeding the summary counts and the worst-enemy-
-    mega minimax below exactly the way a real threat should, rather than
-    being reported as a win with a buried caveat. `merged=None` (no usage
-    data available) or neither enemy actually knowing Tailwind leaves this
-    a no-op: `outcome` stays the normal-speed result, same as before this
-    was added. The pre-override result survives either way as
+    tailwind and see if it is a loss." -- but "assume they set tailwind"
+    means actually spending turn 1 casting it (`first_turn_tailwind_role`),
+    not treating the boost as already up before either enemy has acted: a
+    same-turn Tailwind cast doesn't speed up the caster's OWN attack that
+    turn, and this module doesn't re-sort mid-turn the way `battle.py`'s
+    real engine does. When either `e1_name` or `e2_name` has REAL usage-data
+    access to Tailwind (`merged[name]["moves_usage"]`, the same real-
+    movepool source `_field_weather`/ability lookups already trust), the
+    race is replayed once per real setter role with THAT role casting
+    Tailwind turn 1 (worst-for-us kept, when both enemies can set it); if
+    that comes out WORSE than the normal-speed one (`_JOINT_OUTCOME_RANK`),
+    the tailwind race's own outcome/turns_used/log REPLACE the normal ones
+    as `outcome`/`turns_used`/`log` -- feeding the summary counts and the
+    worst-enemy-mega minimax below exactly the way a real threat should,
+    rather than being reported as a win with a buried caveat. `merged=None`
+    (no usage data available) or neither enemy actually knowing Tailwind
+    leaves promotion a no-op: `outcome` stays the normal-speed result, same
+    as before this was added, and `tailwind_outcome`/`tailwind_safe` fall
+    back to the plain instant-speed-doubling hypothesis (no specific real
+    setter to cast it realistically for) -- the same reading
+    `switch_in_search`'s own separate, purely-informational tailwind check
+    still uses everywhere. The pre-override result survives either way as
     `outcome_without_tailwind`; `tailwind_forced` says whether the swap
-    happened; `tailwind_outcome`/`tailwind_safe` are unchanged -- still the
-    raw hypothesis-race read, independent of whether it was real enough to
-    get promoted.
+    happened.
     """
     m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
     detail = {}
     for e1_name, e2_name in itertools.combinations(target_names, 2):
         e1m, e2m = enemy_built[e1_name]["moves"], enemy_built[e2_name]["moves"]
-        real_tailwind_threat = merged is not None and any(
-            mv_name == "Tailwind"
-            for name in (e1_name, e2_name)
-            for mv_name, _pct in merged.get(name, {}).get("moves_usage", []))
+        def _has_tailwind(name):
+            return merged is not None and any(
+                mv_name == "Tailwind"
+                for mv_name, _pct in merged.get(name, {}).get("moves_usage", []))
+        tailwind_setter_roles = [role for role, name in (("E1", e1_name), ("E2", e2_name))
+                                 if _has_tailwind(name)]
+        real_tailwind_threat = bool(tailwind_setter_roles)
 
         best = None
         for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built):
@@ -2175,9 +2246,16 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 weather = _field_weather(combatants)
                 outcome, turns_used, _hp, log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns)
-                tw_outcome, tw_turns_used, _tw_hp, tw_log = _joint_race(
-                    combatants, moves_by_role, typechart, weather, turns,
-                    enemy_speed_mult=2.0)
+                if tailwind_setter_roles:
+                    tw_outcome, tw_turns_used, _tw_hp, tw_log = max(
+                        (_joint_race(combatants, moves_by_role, typechart, weather,
+                                    turns, first_turn_tailwind_role=role)
+                         for role in tailwind_setter_roles),
+                        key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                else:
+                    tw_outcome, tw_turns_used, _tw_hp, tw_log = _joint_race(
+                        combatants, moves_by_role, typechart, weather, turns,
+                        enemy_speed_mult=2.0)
                 pr_e1_outcome, _pr1_t, _pr1_hp, _pr1_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
                     first_turn_protected_role="E1")
@@ -2314,8 +2392,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
             name, partner_name, our_built, target_names, enemy_built,
             typechart, turns, merged=merged)
         rows.append({"name": name, "item": item, "detail": detail, **summary})
-    rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
-                             -r["pairs_protect_safe"], -r["pairs_tailwind_safe"]))
+    rows.sort(key=_pair_sort_key)
     return rows
 
 
@@ -2368,8 +2445,7 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                                            merged=merged)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                     "item2": built[n2]["item"], "detail": detail, **summary})
-    rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
-                             -r["pairs_protect_safe"], -r["pairs_tailwind_safe"]))
+    rows.sort(key=_pair_sort_key)
     return rows
 
 
@@ -2391,9 +2467,17 @@ def _pair_sort_key(row):
     their own rows by, factored out so `bring4_search` and the multi-enemy
     search can rank INDIVIDUAL pairs the same way those functions do --
     ascending on this key is best-pair-first, so `max(..., key=_pair_sort_key)`
-    over a handful of pairs finds the WORST one."""
-    return (-(row["pairs_swept"] + row["pairs_traded"]),
-           -row["pairs_protect_safe"], -row["pairs_tailwind_safe"])
+    over a handful of pairs finds the WORST one.
+
+    RANKED BY PROTECT-SAFE WINS FIRST, not raw beaten count: a "win" that
+    only holds on the no-Protect line of play is exactly the fragile result
+    `protect_outcomes`/`protect_safe` exists to catch (the real doubles
+    50/50 the user described), so it leads the ranking rather than being a
+    tie-break buried behind it. Raw beaten count (swept+traded) is the
+    second criterion, tailwind-safe count third.
+    """
+    return (-row["pairs_protect_safe"], -(row["pairs_swept"] + row["pairs_traded"]),
+           -row["pairs_tailwind_safe"])
 
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
@@ -2414,12 +2498,19 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
 
     STAGE 2 -- every one of the C(6,4)=15 possible BRING-4 subsets of
     `our6`: look up its own 6 internal pairs from Stage 1 (pure lookup,
-    still no new racing) and find the WORST one (`_pair_sort_key`, the
-    same ranking `joint_pool_search` already uses) -- "searching the given
-    top teams and searching for how bad their worst pair performs." A
-    bring-4 is ranked by that worst pair's own rank (maximin: the bring-4
-    whose worst case is LEAST bad wins), tie-broken by how many of its 6
-    pairs are "good" (beat at least `good_threshold` of `target_names`'s
+    still no new racing). Ranked PRIMARILY by how many of `target_names`'s
+    enemy pairs NONE of those 6 internal pairs can beat
+    (`uncovered_enemy_pairs` -- "having a pair that every pair of yours
+    loses against is terrible, and this is an important factor": two
+    bring-4s can have the identical raw beaten fraction while one of them
+    has every one of its 6 pairs losing to the SAME enemy pair -- a real,
+    unconditional loss whichever of the 4 you're forced to send out -- and
+    the other's losses are spread out so some pair of yours always has an
+    answer). THEN by the WORST pair's own rank (`_pair_sort_key`, the same
+    ranking `joint_pool_search` already uses) -- "searching the given top
+    teams and searching for how bad their worst pair performs," maximin:
+    the bring-4 whose worst case is LEAST bad wins. THEN by how many of its
+    6 pairs are "good" (beat at least `good_threshold` of `target_names`'s
     enemy pairs, default 100% -- "always have options").
 
     Returns (pair_rows, bring4_rows):
@@ -2427,8 +2518,9 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
       bring4_rows -- [{bring4: (4 names), pairs: [(n1,n2), ...6...],
                        pair_rows: [<pair_rows entry>, ...6...],
                        worst_pair: (n1,n2), worst_pair_row: <pair_rows entry>,
-                       pairs_good: int, pairs_total: 6}], best-worst-case
-      first.
+                       pairs_good: int, pairs_total: 6,
+                       uncovered_enemy_pairs: [(e1,e2), ...]}], best-worst-
+      case first.
     """
     our6 = list(dict.fromkeys(our6))
     if len(our6) != 6:
@@ -2444,11 +2536,28 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                                   move_overrides=move_overrides,
                                   excluded_items=excluded_items)
     pair_by_key = {frozenset(r["pair"]): r for r in pair_rows}
-    bring4_rows = _bring4_candidates(our6, pair_by_key, good_threshold)
+    bring4_rows = _bring4_candidates(our6, pair_by_key, target_names, good_threshold)
     return pair_rows, bring4_rows
 
 
-def _bring4_candidates(six, pair_lookup, good_threshold=1.0):
+def _uncovered_enemy_pairs(pairs, target_names):
+    """Enemy pairs (every C(len(target_names),2) drawn from `target_names`)
+    that NONE of `pairs`'s own `detail` rows beat (`outcome` "sweep" or
+    "out_trade"). "Having a pair that every pair of yours loses against is
+    terrible, and this is an important factor": two bring-4s can look
+    identical by raw beaten fraction (say 12/15 each) while one of them has
+    every one of its 6 internal pairs losing to the exact SAME enemy
+    composition (a real, unconditional loss whichever of the 4 you're
+    forced to send out) and the other's losses are spread across different
+    enemy pairs (so some pair of ours always has an answer) -- this is what
+    tells the two apart."""
+    enemy_pairs = list(itertools.combinations(target_names, 2))
+    return [ep for ep in enemy_pairs
+           if not any(r["detail"].get(ep, {}).get("outcome") in ("sweep", "out_trade")
+                      for r in pairs)]
+
+
+def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0):
     """Every one of the C(len(six),4) possible bring-4 subsets of `six`
     (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this also
     runs for a 4- or 5-member PARTIAL team-of-6 during `multi_bring4_beam`'s
@@ -2457,6 +2566,14 @@ def _bring4_candidates(six, pair_lookup, good_threshold=1.0):
     ({frozenset(pair): row}) rather than racing anything. Shared by
     `bring4_search`'s own Stage 2 and the multi-enemy search, which builds
     the same shape of lookup per enemy from one shared pool-wide pair table.
+    `target_names` is the exact enemy list `pair_lookup`'s own rows were
+    raced against -- needed here only to enumerate its enemy pairs for
+    `_uncovered_enemy_pairs`.
+
+    RANKED PRIMARILY BY UNCOVERED ENEMY PAIRS -- see `_uncovered_enemy_pairs`
+    -- THEN by the WORST of the 6 internal pairs' own rank (`_pair_sort_key`,
+    maximin: the bring-4 whose worst case is LEAST bad wins), THEN by how
+    many of the 6 clear the good-pair bar.
 
     Returns bring4_rows in `bring4_search`'s own shape, best-worst-case
     first -- `[0]` is always "the best bring-4 available from `six`."
@@ -2466,12 +2583,15 @@ def _bring4_candidates(six, pair_lookup, good_threshold=1.0):
         pairs = [pair_lookup[frozenset(p)] for p in itertools.combinations(bring4, 2)]
         worst = max(pairs, key=_pair_sort_key)
         pairs_good = sum(1 for r in pairs if _pair_beaten_frac(r) >= good_threshold)
+        uncovered = _uncovered_enemy_pairs(pairs, target_names)
         bring4_rows.append({
             "bring4": bring4, "pairs": [r["pair"] for r in pairs],
             "pair_rows": pairs, "worst_pair": worst["pair"], "worst_pair_row": worst,
             "pairs_good": pairs_good, "pairs_total": 6,
+            "uncovered_enemy_pairs": uncovered,
         })
-    bring4_rows.sort(key=lambda b: (_pair_sort_key(b["worst_pair_row"]), -b["pairs_good"]))
+    bring4_rows.sort(key=lambda b: (len(b["uncovered_enemy_pairs"]),
+                                    _pair_sort_key(b["worst_pair_row"]), -b["pairs_good"]))
     return bring4_rows
 
 
@@ -2484,8 +2604,18 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
     their team at Team Preview before choosing your bring-4"), then the
     WORST of those per-enemy best scores -- the enemy this core is weakest
     against, even playing its best available bring-4. Ranking candidate
-    cores on THIS (ascending -- lower `_pair_sort_key` is better) is the
-    multi-enemy generalisation of `bring4_search`'s own maximin.
+    cores on THIS (ascending -- lower `worst_enemy_score_key` is better) is
+    the multi-enemy generalisation of `bring4_search`'s own maximin.
+
+    `worst_enemy_score_key` is `(uncovered_enemy_pairs_count, *_pair_sort_key(...))`
+    -- the same "uncovered enemy pairs dominate the ranking" rule
+    `_bring4_candidates` already applies to pick each enemy's own best
+    bring-4, carried up here so it also decides which enemy ROSTER counts
+    as this core's bottleneck, and which CORE (in `multi_bring4_exhaustive`/
+    `multi_bring4_beam`, which sort on this same field) ranks above
+    another: a core with an unconditional loss against one enemy composition
+    must rank below one that has an answer everywhere, even if the first
+    core's raw worst-pair fraction otherwise looks better.
 
     Also reports `unused`: any core member that never appears in ANY
     enemy's best bring-4 -- dead weight ("There is no point including a
@@ -2499,9 +2629,9 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
     worst_key, worst_idx = None, None
     used = set()
     for i, (pair_lookup, target_names) in enumerate(zip(pair_by_key_list, target_name_lists)):
-        candidates = _bring4_candidates(core, pair_lookup, good_threshold)
+        candidates = _bring4_candidates(core, pair_lookup, target_names, good_threshold)
         best = candidates[0]
-        key = _pair_sort_key(best["worst_pair_row"])
+        key = (len(best["uncovered_enemy_pairs"]),) + _pair_sort_key(best["worst_pair_row"])
         per_enemy.append({"target_names": list(target_names),
                           "best_bring4": best["bring4"], "best_bring4_row": best})
         used.update(best["bring4"])
