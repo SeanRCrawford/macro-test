@@ -1147,6 +1147,147 @@ class TestTailwindAsARealThreat(unittest.TestCase):
         self.assertEqual(d["outcome"], d["outcome_without_tailwind"])
 
 
+class TestChargeMovesNeedTheirWeather(unittest.TestCase):
+    """"Electro shot needs rain and solar beam needs sun to be a 1-turn
+    move, otherwise they are 2-turn moves." `_raw_hit` (the one place every
+    move-choice/damage function in this module reads a move's real power
+    from) now treats a charge move (`move.flags.get("charge")`) as dealing
+    NO damage this turn unless the matching weather from `CHARGE_WEATHER_SKIP`
+    is already up -- same rule and reasoning `solver.candidate_actions`/
+    `fast_eval._pick_greedy_action` already apply for the real engine's own
+    heuristic layers, since this module has no per-role "already charging"
+    state to know the move is mid-commitment the way `battle.py`'s real
+    engine does."""
+
+    def setUp(self):
+        self.W = world()
+        merged, natures = self.W["merged"], self.W["natures"]
+        self.attacker = cf._build("Torkoal", merged, natures)
+        self.target = cf._build("Kingambit", merged, natures)
+        self.solar_beam = cf._lookup_move("Solar Beam", self.W["moves"])
+        self.electro_shot = cf._lookup_move("Electro Shot", self.W["moves"])
+
+    def test_solar_beam_is_flagged_as_a_charge_move(self):
+        self.assertEqual(self.solar_beam.flags.get("charge"), 1)
+        self.assertEqual(self.electro_shot.flags.get("charge"), 1)
+
+    def test_solar_beam_deals_no_damage_without_sun(self):
+        typechart = self.W["typechart"]
+        for weather in (None, "rain", "sand", "snow"):
+            got = cf._raw_hit(self.attacker, self.solar_beam, self.target,
+                              typechart, weather=weather, roll="avg")
+            self.assertEqual(got.frac, 0.0, f"weather={weather}")
+
+    def test_solar_beam_deals_real_damage_in_sun(self):
+        typechart = self.W["typechart"]
+        got = cf._raw_hit(self.attacker, self.solar_beam, self.target,
+                          typechart, weather="sun", roll="avg")
+        self.assertGreater(got.frac, 0.0)
+
+    def test_electro_shot_needs_rain_specifically_not_sun(self):
+        typechart = self.W["typechart"]
+        in_rain = cf._raw_hit(self.attacker, self.electro_shot, self.target,
+                              typechart, weather="rain", roll="avg")
+        in_sun = cf._raw_hit(self.attacker, self.electro_shot, self.target,
+                             typechart, weather="sun", roll="avg")
+        self.assertGreater(in_rain.frac, 0.0)
+        self.assertEqual(in_sun.frac, 0.0)
+
+    def test_a_charge_move_with_no_weather_skip_is_never_a_one_turn_hit(self):
+        """Fly/Dig/Sky Attack/... have no `CHARGE_WEATHER_SKIP` entry at
+        all -- always a 2-turn move here, regardless of weather."""
+        typechart = self.W["typechart"]
+        fly = cf._lookup_move("Fly", self.W["moves"])
+        self.assertNotIn("Fly", cf.CHARGE_WEATHER_SKIP)
+        for weather in (None, "sun", "rain", "sand", "snow"):
+            got = cf._raw_hit(self.attacker, fly, self.target, typechart,
+                              weather=weather, roll="avg")
+            self.assertEqual(got.frac, 0.0, f"weather={weather}")
+
+    def test_choose_move_never_picks_solar_beam_without_sun(self):
+        """A move-choice function, not just the raw hit -- Solar Beam must
+        never outrank a real one-turn move it's paired against."""
+        typechart = self.W["typechart"]
+        ember = cf._lookup_move("Flamethrower", self.W["moves"])
+        got, mv = cf._choose_move(self.attacker, [self.solar_beam, ember],
+                                  self.target, typechart, weather=None)
+        self.assertEqual(mv.name, "Flamethrower")
+
+    def test_choose_move_does_pick_solar_beam_once_sun_is_up(self):
+        typechart = self.W["typechart"]
+        ember = cf._lookup_move("Flamethrower", self.W["moves"])
+        got, mv = cf._choose_move(self.attacker, [self.solar_beam, ember],
+                                  self.target, typechart, weather="sun")
+        # Not asserting WHICH wins on raw damage -- only that Solar Beam is
+        # now a live candidate at all (it was hard-excluded above).
+        self.assertIn(mv.name, ("Solar Beam", "Flamethrower"))
+        solar_hit = cf._raw_hit(self.attacker, self.solar_beam, self.target,
+                                typechart, weather="sun", roll="avg")
+        self.assertGreater(solar_hit.frac, 0.0)
+
+
+class TestHyperBeamRecharge(unittest.TestCase):
+    """"Hyper beam must recharge on the second turn." `_joint_race`'s turn
+    loop now carries a `recharging` role set forward (via `_best_turn`'s own
+    `recharging_next` return) -- a role that fires a recharge move
+    (`move.flags.get("recharge")`) is forced to do nothing at all the
+    following turn, mirroring `battle.py`'s real `must_recharge` lockout.
+    Real, verified fixture: Snorlax with ONLY Hyper Beam against a Corviknight
+    + Sinistcha pair that only Protects -- without the fix Snorlax would
+    fire Hyper Beam every turn; with it, only on the odd turns."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        self.typechart = self.W["typechart"]
+        self.c1 = cf._build("Snorlax", merged, natures)
+        self.c2 = cf._build("Corviknight", merged, natures)
+        self.e1 = cf._build("Sinistcha", merged, natures)
+        self.e2 = cf._build("Corviknight", merged, natures)
+        self.hyper_beam = cf._lookup_move("Hyper Beam", moves)
+        protect = cf._lookup_move("Protect", moves)
+        self.moves_by_role = {
+            "C": [self.hyper_beam], "P": [protect],
+            "E1": [protect], "E2": [protect],
+        }
+        self.combatants = {"C": self.c1, "P": self.c2,
+                           "E1": self.e1, "E2": self.e2}
+
+    def test_hyper_beam_is_flagged_as_a_recharge_move(self):
+        self.assertEqual(self.hyper_beam.flags.get("recharge"), 1)
+
+    def test_hyper_beam_only_fires_every_other_turn(self):
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, None,
+            turns=4)
+        fired_turns = [i for i, turn in enumerate(log, 1)
+                      if any(role == "C" for role, _tgt, _h in turn)]
+        self.assertEqual(fired_turns, [1, 3],
+                         "fixture assumes Snorlax fires turn 1, recharges "
+                         "turn 2, fires again turn 3, recharges turn 4")
+
+    def test_resolve_turn_reports_the_recharging_role_for_next_turn(self):
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        _hp2, _log, _ea, _wiped, recharging_next = cf._resolve_turn(
+            self.combatants, self.moves_by_role, hp, self.typechart, None,
+            {})
+        self.assertEqual(recharging_next, {"C"})
+
+    def test_a_recharging_role_cannot_even_protect(self):
+        """The lockout is total -- substituted directly as `({}, None)`
+        rather than routed through `_choose_action`, so a recharging role
+        cannot fall back to Protect or anything else it might carry."""
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        protect = cf._lookup_move("Protect", self.W["moves"])
+        moves_with_protect = dict(self.moves_by_role)
+        moves_with_protect["C"] = [self.hyper_beam, protect]
+        _hp2, log, _ea, _wiped, _rc = cf._resolve_turn(
+            self.combatants, moves_with_protect, hp, self.typechart, None,
+            {}, recharging_roles={"C"})
+        self.assertFalse(any(role == "C" for role, _tgt, _h in log))
+
+
 class TestJointFocusSashAndSturdy(unittest.TestCase):
     """"The focus sash item also does not seem to work." The joint race
     model previously tracked no items played out over a turn at all (a
@@ -1171,7 +1312,7 @@ class TestJointFocusSashAndSturdy(unittest.TestCase):
         moves_by_role = {"C": c_moves, "P": [], "E1": [], "E2": []}
         weather = cf._field_weather(combatants)
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
-        new_hp, log, _ea, _w = cf._resolve_turn(
+        new_hp, log, _ea, _w, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
         return new_hp["E1"], log, e1
 
@@ -1196,7 +1337,7 @@ class TestJointFocusSashAndSturdy(unittest.TestCase):
         weather = cf._field_weather(combatants)
         # Already down to a sliver, NOT full HP.
         hp = {"C": 1.0, "P": 0.0, "E1": 0.02, "E2": 0.0}
-        new_hp, _log, _ea, _w = cf._resolve_turn(
+        new_hp, _log, _ea, _w, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
         self.assertEqual(new_hp["E1"], 0.0)
 
@@ -1216,7 +1357,7 @@ class TestJointFocusSashAndSturdy(unittest.TestCase):
         moves_by_role = {"C": c_moves, "P": [], "E1": [], "E2": []}
         weather = cf._field_weather(combatants)
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
-        new_hp, log, _ea, _w = cf._resolve_turn(
+        new_hp, log, _ea, _w, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
         self.assertTrue(any(h.frac >= 1.0 for _r, _t, h in log),
                         "fixture assumes this hit is a real would-be OHKO")
@@ -1240,7 +1381,7 @@ class TestJointFocusSashAndSturdy(unittest.TestCase):
         moves_by_role = {"C": c_moves, "P": [], "E1": [], "E2": []}
         weather = cf._field_weather(combatants)
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
-        new_hp2, _log2, _ea2, _w2 = cf._resolve_turn(
+        new_hp2, _log2, _ea2, _w2, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
         self.assertGreater(new_hp2["E1"], 0.0,
                           "a second independent replay must still honour "
@@ -1378,7 +1519,7 @@ class TestArmorTailAndPriorityBlock(unittest.TestCase):
         moves_by_role = {"C": [], "P": [], "E1": e1_moves, "E2": []}
         weather = cf._field_weather(combatants)
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
-        new_hp, _log, enemy_acted, _wiped = cf._resolve_turn(
+        new_hp, _log, enemy_acted, _wiped, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {})
         self.assertTrue(enemy_acted, "the enemy still used its turn, it just failed")
         self.assertEqual(new_hp["C"], 1.0)
@@ -1394,7 +1535,7 @@ class TestArmorTailAndPriorityBlock(unittest.TestCase):
         # Armor Tail specifically.
         moves_by_role2 = dict(moves_by_role)
         moves_by_role2["C"] = cf._move_infos("Sylveon", merged, moves, ["Moonblast"])
-        new_hp2, _log2, _ea2, _w2 = cf._resolve_turn(
+        new_hp2, _log2, _ea2, _w2, _rc = cf._resolve_turn(
             combatants2, moves_by_role2, hp, typechart, weather, {})
         self.assertLess(new_hp2["C"], 1.0,
                         "fixture assumes Sucker Punch is a real hit without "
@@ -1668,7 +1809,7 @@ class TestSurvivalAwareReconsideration(unittest.TestCase):
         weather = cf._field_weather({"C": self.lycanroc, "E1": self.kingambit,
                                      "E2": self.charizard})
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
-        _hp, log, _enemy_acted, _wiped = cf._resolve_turn(
+        _hp, log, _enemy_acted, _wiped, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
         by_role = {(role, tgt): h.move_name for role, tgt, h in log}
         self.assertEqual(by_role.get(("E1", "C")), "Sucker Punch")
@@ -1756,7 +1897,7 @@ class TestSuckerPunchFailsIfTheTargetAlreadyMoved(unittest.TestCase):
         moves_by_role = {"C": [], "P": [], "E1": self.sucker_punch, "E2": []}
         weather = cf._field_weather(combatants)
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
-        new_hp, log, _ea, _w = cf._resolve_turn(
+        new_hp, log, _ea, _w, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {})
         self.assertEqual(new_hp["C"], 1.0)
         self.assertFalse(log)
@@ -1796,7 +1937,7 @@ class TestSuckerPunchFailsIfTheTargetAlreadyMoved(unittest.TestCase):
                          "E1": arcanine_moves, "E2": []}
         weather = cf._field_weather(combatants)
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
-        _new_hp, log, _ea, _w = cf._resolve_turn(
+        _new_hp, log, _ea, _w, _rc = cf._resolve_turn(
             combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
         by_role = {(role, tgt): h.move_name for role, tgt, h in log}
         self.assertEqual(by_role.get(("C", "E1")), "Kowtow Cleave")
@@ -2236,6 +2377,181 @@ class TestMultiBring4Search(unittest.TestCase):
         self.assertTrue(all_picked.issubset(set(self.POOL)))
 
 
+class TestMultiBring4MaxMegas(unittest.TestCase):
+    """"A full team can only have two mega stone users. In a battle, either
+    may mega evolve depending on the specific pair matchup." A candidate
+    CORE is now always capped at `max_megas` (default 2) Mega-capable
+    members, the same default `team_search.beam_search_teams`/
+    `substitution.legal_swap` already use for the Generate tab -- this is a
+    TEAM COMPOSITION cap, not a per-battle one (the per-pair mega-vs-stay-
+    base minimax, `_resolve_forms`, is completely unaffected)."""
+
+    def test_core_passes_hard_filters_rejects_three_megas_by_default(self):
+        core = ("Mega Charizard Y", "Mega Floette", "Mega Metagross", "Whimsicott")
+        self.assertFalse(cf._core_passes_hard_filters(core, {}, {}))
+
+    def test_core_passes_hard_filters_allows_exactly_two(self):
+        core = ("Mega Charizard Y", "Mega Floette", "Whimsicott", "Corviknight")
+        self.assertTrue(cf._core_passes_hard_filters(core, {}, {}))
+
+    def test_max_megas_is_overridable(self):
+        core = ("Mega Charizard Y", "Mega Floette", "Mega Metagross", "Whimsicott")
+        self.assertTrue(cf._core_passes_hard_filters(core, {}, {}, max_megas=3))
+        self.assertFalse(cf._core_passes_hard_filters(core, {}, {}, max_megas=1))
+
+    def setUp(self):
+        self.W = world()
+        # 4 mega-capable + 2 non-mega, so a 4-6 member core drawn from the
+        # whole pool can genuinely exceed 2 megas if nothing stops it.
+        self.pool = ["Mega Charizard Y", "Mega Floette", "Mega Metagross",
+                    "Mega Tyranitar", "Whimsicott", "Corviknight"]
+        self.enemies = [["Sableye", "Ariados"], ["Basculegion", "Sinistcha"]]
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.pool, self.enemies, merged, moves, natures, typechart,
+            good_threshold=0.3, min_enemies=1)
+
+    def test_exhaustive_never_returns_a_core_over_the_default_cap(self):
+        rows = cf.multi_bring4_exhaustive(self.coverage, good_threshold=0.3)
+        for r in rows:
+            n_megas = sum(1 for n in r["core"] if n.startswith("Mega "))
+            self.assertLessEqual(n_megas, 2, r["core"])
+
+    def test_beam_never_returns_a_core_over_the_default_cap(self):
+        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.3, beam_width=20)
+        for r in rows:
+            n_megas = sum(1 for n in r["core"] if n.startswith("Mega "))
+            self.assertLessEqual(n_megas, 2, r["core"])
+
+    def test_a_looser_max_megas_actually_changes_the_result(self):
+        """A limit that never changes anything is a no-op wired in for
+        show -- confirm raising it actually allows a 3+ mega core to
+        appear that the default cap excluded."""
+        default_cores = {tuple(sorted(r["core"]))
+                         for r in cf.multi_bring4_exhaustive(
+                             self.coverage, good_threshold=0.3)}
+        loose_cores = {tuple(sorted(r["core"]))
+                      for r in cf.multi_bring4_exhaustive(
+                          self.coverage, good_threshold=0.3, max_megas=4)}
+        newly_allowed = loose_cores - default_cores
+        self.assertTrue(newly_allowed, "fixture assumes raising max_megas "
+                        "reveals at least one new core")
+        for core in newly_allowed:
+            n_megas = sum(1 for n in core if n.startswith("Mega "))
+            self.assertGreater(n_megas, 2)
+
+
+class TestMultiBring4SetsStayFixedAcrossEnemies(unittest.TestCase):
+    """"For a team, the moves must stay the same, i.e., they can't be
+    adjusted battle to battle." Calling `joint_pool_search` once per enemy
+    roster the naive way let `_answer_for` independently re-search each
+    pool member's item/moveset against just THAT one enemy team every
+    time -- the same Pokemon could come back with a genuinely different
+    set for enemy 1 than for enemy 2, which isn't a real, biddable
+    tournament team. `multi_bring4_coverage` now searches each pool
+    member's set ONCE, against the union of every named enemy, and reuses
+    it for every enemy team's races."""
+
+    POOL = ["Whimsicott", "Kingambit", "Garchomp", "Corviknight", "Gholdengo",
+           "Torkoal", "Arcanine"]
+    ENEMIES = [["Sableye", "Ariados"], ["Basculegion", "Sinistcha"],
+              ["Mega Charizard Y", "Farigiraf"]]
+
+    def setUp(self):
+        self.W = world()
+
+    def _item_by_enemy(self, coverage):
+        items_by_enemy = {}
+        for rows in coverage["per_enemy"]:
+            for r in rows:
+                for j, name in enumerate(r["pair"]):
+                    item = r["item1"] if j == 0 else r["item2"]
+                    items_by_enemy.setdefault(name, set()).add(item)
+        return items_by_enemy
+
+    def test_every_pool_members_item_is_identical_across_every_enemy(self):
+        """Real, verified fixture: before this fix, this exact pool/enemy
+        combination gave Whimsicott three DIFFERENT items (Sitrus Berry,
+        Focus Sash, Fairy Feather) depending only on which enemy team its
+        pair happened to be evaluated against."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.2, min_enemies=1)
+        items_by_enemy = self._item_by_enemy(coverage)
+        inconsistent = {n: i for n, i in items_by_enemy.items() if len(i) > 1}
+        self.assertEqual(inconsistent, {},
+                         "every pool member must hold ONE item across "
+                         "every enemy team, not a per-enemy re-optimised one")
+
+    def test_an_explicit_item_override_still_wins(self):
+        """The fixed-set search still respects a caller's own pin --
+        computed once, same as the search path, just skipping it."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.2, min_enemies=1,
+            item_overrides={"Kingambit": "Life Orb"})
+        for rows in coverage["per_enemy"]:
+            for r in rows:
+                for j, name in enumerate(r["pair"]):
+                    if name == "Kingambit":
+                        item = r["item1"] if j == 0 else r["item2"]
+                        self.assertEqual(item, "Life Orb")
+
+
+class TestMemberWeaknessSummaryByType(unittest.TestCase):
+    """"For total weaknesses, it should be by type, i.e., does the team
+    have 3 weaknesses to fire." A flat sum across every type couldn't
+    distinguish 3-weak-to-one-type from 1-each-to-three -- `per_type`
+    ({type: how many members are weak to it}) is what actually answers the
+    question, computed via `team_search._weak_resist` (the SAME per-type
+    split `--max-weak`/`--type-limit`'s own hard filter already reads)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_per_type_counts_members_weak_to_that_type(self):
+        """Torkoal alone is weak to Water; adding a second Water-weak
+        member (Arcanine, Fire) must bring the Water count from 1 to 2 --
+        confirming the number genuinely tracks per-type MEMBER COUNT, not
+        just presence/absence."""
+        merged = self.W["merged"]
+        solo = cf.member_weakness_summary(["Torkoal"], merged)
+        self.assertEqual(solo["per_type"]["Water"], 1)
+        duo = cf.member_weakness_summary(["Torkoal", "Arcanine"], merged)
+        self.assertEqual(duo["per_type"]["Water"], 2,
+                         "fixture assumes Arcanine is also weak to Water")
+
+    def test_per_type_sums_to_the_flat_total(self):
+        merged = self.W["merged"]
+        core = ["Torkoal", "Kingambit", "Garchomp", "Corviknight"]
+        weak = cf.member_weakness_summary(core, merged)
+        self.assertEqual(sum(weak["per_type"].values()),
+                         weak["total_weakness_instances"])
+
+    def test_per_type_agrees_with_the_hard_filters_own_reading(self):
+        """`per_type`'s count for a given type must match what
+        `team_search._weak_resist` (the same function `--max-weak`'s hard
+        filter is built on) says -- they can never legitimately disagree."""
+        from team_search import _weak_resist
+        merged = self.W["merged"]
+        core = ["Torkoal", "Kingambit", "Garchomp", "Corviknight", "Sylveon"]
+        weak = cf.member_weakness_summary(core, merged)
+        for t in ("Fire", "Water", "Ground", "Fairy"):
+            expected = len(_weak_resist(core, merged, t)[0])
+            self.assertEqual(weak["per_type"][t], expected, t)
+
+    def test_all_18_types_are_present_even_at_zero(self):
+        from species_data import TYPES
+        merged = self.W["merged"]
+        weak = cf.member_weakness_summary(["Torkoal"], merged)
+        self.assertEqual(set(weak["per_type"]), set(TYPES))
+
+
 class TestCoreRowAndBring4Candidates(unittest.TestCase):
     """The shared, no-new-racing combinatorics both `bring4_search` and the
     multi-enemy search are built on."""
@@ -2370,6 +2686,89 @@ class TestDeepDive(unittest.TestCase):
         d = rows[0]["detail"][("Kingambit", "Basculegion")]
         self.assertNotIn("grid", d)
         self.assertNotIn("ohko_risk", d)
+
+
+class TestCoreDeepDive(unittest.TestCase):
+    """`core_deep_dive` -- the opt-in, run-after-the-search follow-up for
+    ONE already-chosen `--multi-bring4` core: "for each pair... the full
+    beaten/swept/traded/lost/no KO/tw-safe/pr-safe, and then vs each
+    enemy... across 6 possible pairs beaten is 85/90... I also want to see
+    the gameplans for each pair included in a team vs enemies. Given the
+    size, maybe make this deep dive an option after the search has run."
+    """
+
+    CORE = ["Whimsicott", "Kingambit", "Garchomp", "Corviknight"]
+    ENEMIES = [["Sableye", "Ariados"], ["Basculegion", "Sinistcha"]]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.dive = cf.core_deep_dive(
+            self.CORE, self.ENEMIES, merged, moves, natures, typechart, turns=2)
+
+    def test_every_pair_of_the_core_is_covered(self):
+        import itertools as _it
+        self.assertEqual(set(self.dive["per_pair"]),
+                         set(_it.combinations(self.CORE, 2)))
+
+    def test_every_pair_covers_every_enemy_team(self):
+        for pair, d in self.dive["per_pair"].items():
+            self.assertEqual(len(d["per_enemy"]), len(self.ENEMIES), pair)
+            self.assertEqual([pe["target_names"] for pe in d["per_enemy"]],
+                             self.ENEMIES)
+
+    def test_per_pair_total_is_the_sum_of_its_own_per_enemy_summaries(self):
+        for pair, d in self.dive["per_pair"].items():
+            for field in ("pairs_swept", "pairs_traded", "pairs_lost",
+                         "pairs_no_ko", "pairs_tailwind_safe",
+                         "pairs_protect_safe", "pairs_total"):
+                self.assertEqual(
+                    d["total"][field],
+                    sum(pe["summary"][field] for pe in d["per_enemy"]),
+                    f"{pair} {field}")
+
+    def test_overall_is_the_sum_of_every_pairs_total(self):
+        """"across 6 possible pairs beaten is 85/90" -- the whole-core
+        aggregate must be the sum across every pair, not just one of
+        them."""
+        for field in ("pairs_swept", "pairs_traded", "pairs_lost",
+                     "pairs_no_ko", "pairs_tailwind_safe",
+                     "pairs_protect_safe", "pairs_total"):
+            self.assertEqual(
+                self.dive["overall"][field],
+                sum(d["total"][field] for d in self.dive["per_pair"].values()),
+                field)
+
+    def test_pairs_total_matches_the_real_enemy_pair_count(self):
+        """6 pairs, each vs 2 enemy teams of C(2,2)=1 enemy pair each ->
+        pairs_total for the whole core must be 6*2*1 = 12."""
+        import itertools as _it
+        n_pairs = len(list(_it.combinations(self.CORE, 2)))
+        pairs_per_team = sum(len(list(_it.combinations(t, 2)))
+                             for t in self.ENEMIES)
+        self.assertEqual(self.dive["overall"]["pairs_total"],
+                         n_pairs * pairs_per_team)
+
+    def test_every_members_set_is_fixed_and_present(self):
+        for name in self.CORE:
+            self.assertIn(name, self.dive["sets"])
+            self.assertTrue(self.dive["sets"][name]["moves"])
+
+    def test_the_gameplan_log_is_present_for_every_race(self):
+        for pair, d in self.dive["per_pair"].items():
+            for pe in d["per_enemy"]:
+                for enemy_pair, race in pe["detail"].items():
+                    self.assertIn("log", race, f"{pair} vs {enemy_pair}")
+                    self.assertIsInstance(race["log"], list)
+
+    def test_an_explicit_item_override_still_wins(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        dive = cf.core_deep_dive(
+            self.CORE, self.ENEMIES, merged, moves, natures, typechart,
+            turns=2, item_overrides={"Kingambit": "Life Orb"})
+        self.assertEqual(dive["sets"]["Kingambit"]["item"], "Life Orb")
 
 
 class TestSwitchInSearch(unittest.TestCase):
@@ -2560,6 +2959,113 @@ class TestSharedFieldWeather(unittest.TestCase):
 
         weather = cf._field_weather({"C": attacker, "E1": e1, "E2": e2})
         self.assertEqual(weather, "rain")
+
+
+class TestFairyAuraAndDarkAura(unittest.TestCase):
+    """"Fairy aura (1.33x damage to fairy moves) doesn't seem to be applying
+    to their side." `damage_roll` already knew how to apply Fairy Aura/Dark
+    Aura/Aura Break (`aura_multiplier`), but nothing in this module ever
+    computed the board's active auras and passed them through -- `_raw_hit`
+    and everything built on it defaulted to `auras=None` everywhere, so a
+    Mega Floette on the board never boosted anyone's Fairy move, including
+    its own."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_fairy_aura_boosts_a_fairy_move_for_everyone_on_the_field(self):
+        """Direct `_raw_hit` check, real fixture: Whimsicott's Moonblast
+        against Kingambit, with vs without Fairy Aura active -- a board-wide
+        effect, not something Whimsicott itself needs to hold."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        kingambit = cf._build("Kingambit", merged, natures)
+        moonblast = cf._lookup_move("Moonblast", moves)
+        no_aura = cf._raw_hit(whimsicott, moonblast, kingambit, typechart, roll="avg")
+        with_aura = cf._raw_hit(whimsicott, moonblast, kingambit, typechart,
+                                roll="avg", auras={"Fairy Aura"})
+        self.assertAlmostEqual(with_aura.frac / no_aura.frac, 5461 / 4096, places=3)
+
+    def test_aura_break_inverts_it_to_a_reduction(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        kingambit = cf._build("Kingambit", merged, natures)
+        moonblast = cf._lookup_move("Moonblast", moves)
+        no_aura = cf._raw_hit(whimsicott, moonblast, kingambit, typechart, roll="avg")
+        with_break = cf._raw_hit(whimsicott, moonblast, kingambit, typechart,
+                                 roll="avg", auras={"Fairy Aura", "Aura Break"})
+        self.assertAlmostEqual(with_break.frac / no_aura.frac, 0.75, places=3)
+
+    def test_a_non_fairy_move_is_unaffected(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        kingambit = cf._build("Kingambit", merged, natures)
+        hyper_voice = cf._lookup_move("Hyper Voice", moves)
+        no_aura = cf._raw_hit(whimsicott, hyper_voice, kingambit, typechart, roll="avg")
+        with_aura = cf._raw_hit(whimsicott, hyper_voice, kingambit, typechart,
+                                roll="avg", auras={"Fairy Aura"})
+        self.assertAlmostEqual(no_aura.frac, with_aura.frac)
+
+    def test_active_auras_reads_mega_floettes_real_mega_ability(self):
+        """Mega Floette's OWN ability (Fairy Aura) must count too -- not
+        just an ally holding it -- and must be sourced from the mega
+        PROJECTION (`_mega_project`), same as every other mega-ability
+        read in this module."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        floette = cf._build("Mega Floette", merged, natures)
+        self.assertEqual(floette.ability, "Fairy Aura")
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        kingambit = cf._build("Kingambit", merged, natures)
+        sinistcha = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": floette, "P": whimsicott, "E1": kingambit, "E2": sinistcha}
+        self.assertEqual(cf._active_auras(combatants), {"Fairy Aura"})
+
+    def test_a_fainted_aura_holder_no_longer_contributes(self):
+        """`hp` (the joint race's own `{role: fraction}` tracking) filters
+        out a dead aura holder, mirroring `battle.py`'s real `not c.fainted`
+        check on `_active_auras`."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        floette = cf._build("Mega Floette", merged, natures)
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        kingambit = cf._build("Kingambit", merged, natures)
+        sinistcha = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": floette, "P": whimsicott, "E1": kingambit, "E2": sinistcha}
+        alive = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        fainted = {"C": 0.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        self.assertEqual(cf._active_auras(combatants, alive), {"Fairy Aura"})
+        self.assertEqual(cf._active_auras(combatants, fainted), set())
+
+    def test_end_to_end_the_joint_race_applies_fairy_aura(self):
+        """`_resolve_turn` (via `_choose_action`) must actually apply the
+        boost in a real race, not just when `_raw_hit` is called by hand --
+        Whimsicott's Moonblast against Kingambit must do MORE damage with
+        Mega Floette as its partner than with a non-aura partner."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        moonblast = cf._lookup_move("Moonblast", moves)
+        protect = cf._lookup_move("Protect", moves)
+        kingambit = cf._build("Kingambit", merged, natures)
+        sinistcha = cf._build("Sinistcha", merged, natures)
+
+        def moonblast_dealt(partner_name):
+            whimsicott = cf._build("Whimsicott", merged, natures)
+            partner = cf._build(partner_name, merged, natures)
+            combatants = {"C": whimsicott, "P": partner, "E1": kingambit, "E2": sinistcha}
+            moves_by_role = {"C": [moonblast], "P": [protect],
+                             "E1": [protect], "E2": [protect]}
+            hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+            _hp2, log, _ea, _w, _rc = cf._resolve_turn(
+                combatants, moves_by_role, hp, typechart, None,
+                {"C": "E1"})
+            hit = next(h for role, tgt, h in log if role == "C" and tgt == "E1")
+            return hit.frac
+
+        boosted = moonblast_dealt("Mega Floette")
+        plain = moonblast_dealt("Corviknight")
+        self.assertAlmostEqual(boosted / plain, 5461 / 4096, places=3)
 
 
 class TestPreferencesReducePool(unittest.TestCase):

@@ -99,7 +99,12 @@ class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
     mode-specific flag in this file already follows."""
 
     def test_max_weak_without_multi_bring4_is_rejected(self):
-        msg, _out = run_main(["--vs", "Kingambit", "--max-weak", "2"])
+        # 3, not 2: --max-weak now defaults to 2 ("by default ... the
+        # weakness limit should be 2"), so an explicit value must differ
+        # from the default to be distinguishable from "never passed" --
+        # same "!= default" convention --beam-width/--max-candidates
+        # already use for this exact check.
+        msg, _out = run_main(["--vs", "Kingambit", "--max-weak", "3"])
         self.assertIsNotNone(msg)
         self.assertIn("--multi-bring4", msg)
 
@@ -117,6 +122,16 @@ class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
         # Fails on the unrelated "unknown Pokemon" check, not a mode
         # restriction -- proves --allow-scarf itself was accepted.
         self.assertIn("unknown Pokemon", msg)
+
+    def test_deep_dive_core_without_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--deep-dive-core", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--multi-bring4", msg)
+
+    def test_xlsx_without_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--xlsx", "/tmp/x.xlsx"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--multi-bring4", msg)
 
 
 class TestHelpDocumentsTheNewFlags(unittest.TestCase):
@@ -139,6 +154,15 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
 
     def test_type_limit_is_parsed(self):
         self.assertIn("--type-limit", self.help_text)
+
+    def test_max_megas_is_parsed(self):
+        self.assertIn("--max-megas", self.help_text)
+
+    def test_deep_dive_core_is_parsed(self):
+        self.assertIn("--deep-dive-core", self.help_text)
+
+    def test_xlsx_is_parsed(self):
+        self.assertIn("--xlsx", self.help_text)
 
     def test_every_flag_the_module_docstring_shows_is_parsed(self):
         import re
@@ -184,19 +208,24 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
         pool = ct._apply_preferences(
             list(build_candidate_pool(merged, top_n=16)), merged)
         from counter_finder import multi_bring4_coverage, multi_bring4_exhaustive
-        # good_threshold relaxed from the default 100%: this pool's top pair
-        # against the first enemy team now correctly loses once Whimsicott's
-        # REAL Tailwind access is assumed (see counter_finder.py's
-        # `_pair_vs_targets` -- "assume they set tailwind and see if it is a
-        # loss"), which drops the strict 100%-beaten candidate pool below 4
-        # for this fixture. A softer bar still gives a real, multi-size
-        # candidate pool to exercise the same exhaustive-search structure.
+        # good_threshold relaxed well below the default 100%: this pool's
+        # top pairs now correctly lose more often once Whimsicott's REAL
+        # Tailwind access is assumed (`_pair_vs_targets`'s "assume they set
+        # tailwind and see if it is a loss") and once every member's
+        # item/moveset is fixed across BOTH enemy teams instead of being
+        # independently re-optimised per enemy (`multi_bring4_coverage`'s
+        # own "a real team's set is fixed for the whole event" fix) -- at
+        # 0.8 the surviving candidate pool happens to be all 4 Mega-capable
+        # names, which the (also new) default --max-megas 2 cap correctly
+        # empties to zero cores; 0.5 gives a real, multi-size, mixed
+        # mega/non-mega candidate pool to exercise the same exhaustive-
+        # search structure this test actually cares about.
         coverage = multi_bring4_coverage(
             pool,
             [["Kingambit", "Basculegion", "Garchomp", "Whimsicott"],
              ["Sylveon", "Mega Charizard Y", "Sinistcha", "Farigiraf"]],
-            merged, moves, natures, typechart, good_threshold=0.8)
-        rows = multi_bring4_exhaustive(coverage, good_threshold=0.8)
+            merged, moves, natures, typechart, good_threshold=0.5)
+        rows = multi_bring4_exhaustive(coverage, good_threshold=0.5)
         sizes = {r["core_size"] for r in rows}
         self.assertTrue(sizes, "fixture assumes at least one core is found")
         self.assertTrue(all(r["unused"] == () for r in rows))
@@ -227,6 +256,83 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
             self.assertTrue(any("teamsheet" in h for h in header))
         finally:
             os.unlink(path)
+
+
+class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
+    """"I also want to see the gameplans for each pair included in a team
+    vs enemies. Given the size, maybe make this deep dive an option after
+    the search has run" + "it may make more sense to make counter_table.py
+    export an xlsx rather than a csv"."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "16", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--top", "3"]
+
+    def test_deep_dive_core_prints_the_aggregate_and_gameplans(self):
+        msg, out = run_main(self.argv + ["--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Deep dive:", out)
+        self.assertIn("OVERALL, every pair vs every enemy", out)
+        self.assertIn("beaten (", out)
+        self.assertIn("tw-safe", out)
+        self.assertIn("pr-safe", out)
+        # A real gameplan line (a turn's hit) must be present -- "T1 ... ->
+        # ...: <move> ...%", matching --deep's own format.
+        self.assertRegex(out, r"T\d .+ -> .+: .+ \d+-\d+-\d+%")
+
+    def test_deep_dive_core_out_of_range_is_rejected(self):
+        msg, _out = run_main(self.argv + ["--deep-dive-core", "999"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--deep-dive-core", msg)
+
+    def test_deep_dive_core_is_not_computed_by_default(self):
+        """The whole point of making it opt-in -- a plain run must not pay
+        for (or print) the full per-pair-per-enemy detail."""
+        _msg, out = run_main(self.argv)
+        self.assertNotIn("Deep dive:", out)
+
+    def test_xlsx_export_writes_a_real_workbook(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)  # let the tool create it fresh
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            self.assertTrue(os.path.exists(path))
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertIn("Cores", wb.sheetnames)
+            ws = wb["Cores"]
+            self.assertGreater(ws.max_row, 1, "header plus at least one core row")
+            self.assertEqual(ws.cell(row=1, column=1).value, "Core")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_xlsx_export_with_deep_dive_adds_the_extra_sheets(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, _out = run_main(
+                self.argv + ["--deep-dive-core", "1", "--xlsx", path])
+            self.assertIsNone(msg)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            for name in ("Cores", "Deep Dive Sets", "Deep Dive Summary",
+                        "Deep Dive Gameplans"):
+                self.assertIn(name, wb.sheetnames)
+            gp = wb["Deep Dive Gameplans"]
+            self.assertGreater(gp.max_row, 1)
+            self.assertEqual(gp.cell(row=1, column=1).value, "Pair")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):

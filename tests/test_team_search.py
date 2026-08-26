@@ -180,8 +180,6 @@ class TestBeamSearchWiring(unittest.TestCase):
         merged, matrix, eps = small_matrix_and_pairs()
         baseline = ts.beam_search_teams(POOL, matrix, eps, merged, beam_width=10)
         self.assertTrue(baseline)
-        base_team = baseline[0][1]
-        _viol, base_detail = ts.weakness_violations(base_team, merged)
         # A cap loose enough to allow anything (6) has to reproduce the
         # unconstrained (default max_weak=2) top team's synergy count, or the
         # plumbing itself is broken independent of any tightening.
@@ -189,13 +187,23 @@ class TestBeamSearchWiring(unittest.TestCase):
                                      max_weak=6)
         self.assertTrue(loose)
 
-        # A tight per-type HARD cap actually changes the top team when the
-        # baseline's own top team violates it.
-        tight_type = next((t for t, d in base_detail.items()
-                          if len(d["weak"]) >= 2), None)
-        self.assertIsNotNone(tight_type, "fixture assumes the unconstrained "
-                                         "top team has a real weakness to "
-                                         "tighten against")
+        # A tight per-type HARD cap actually changes the top team when SOME
+        # candidate the unconstrained search already found violates it --
+        # scanned across the whole reported beam (not just baseline[0]),
+        # since which single team ranks #1 can shift with any change
+        # elsewhere in this codebase's matchup/ability modelling, and this
+        # fixture only needs a real violation to exist somewhere in the
+        # pool's own results, not specifically at the very top.
+        tight_type = None
+        for _sc, team in baseline:
+            _v, detail = ts.weakness_violations(team, merged)
+            tight_type = next((t for t, d in detail.items()
+                              if len(d["weak"]) >= 2), None)
+            if tight_type is not None:
+                break
+        self.assertIsNotNone(tight_type, "fixture assumes at least one "
+                                         "unconstrained result has a real "
+                                         "weakness to tighten against")
         constrained = ts.beam_search_teams(
             POOL, matrix, eps, merged, beam_width=10,
             type_limits={tight_type: {"max_weak": 1}})

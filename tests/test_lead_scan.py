@@ -599,7 +599,19 @@ class TestCommittedMoves(unittest.TestCase):
         off a real `Battle.run_turn`, via `lead_sim.play`, with their plan
         pinned to "both attack" so the line is deterministic (their WORST plan,
         used by `race`, includes a Tailwind branch on this exact pairing and
-        would make the log unpredictable turn to turn)."""
+        would make the log unpredictable turn to turn).
+
+        Base Dragonite now always runs Inner Focus, not Multiscale
+        (`combatants.FORCED_BASE_ABILITY` -- "a new rule, make sure base
+        form dragonite always has the ability inner focus"), which changed
+        what the solver's own search finds best here: without Multiscale's
+        bulk to lean on, it now Protects turn 1 rather than trading
+        Garchomp's free Earthquake for an immediate KO on Mega Floette, and
+        Mega Floette's Dazzling Gleam (boosted by its own Fairy Aura and by
+        Whimsicott's Tailwind) then sweeps both of ours turn 2. Confirmed
+        directly against a real run of this exact position -- this test
+        pins THEIR plan only, so OUR line is whatever the real solver
+        currently finds best, same as before."""
         import lead_sim as sim
         battle, movesets, _s = sim.build_position(
             ["Garchomp", "Dragonite", "Gallade", "Basculegion"],
@@ -612,16 +624,18 @@ class TestCommittedMoves(unittest.TestCase):
         text = "\n".join(log)
         self.assertIn("Turn 1", text)
         self.assertIn("Turn 2", text)
-        self.assertIn("Earthquake", text)
-        # A spread move: Earthquake lands on BOTH of their active Pokemon in one
-        # turn, not just whichever a per-target threat matrix liked best.
-        self.assertIn("Earthquake on Whimsicott", text)
-        self.assertIn("Earthquake on Mega Floette", text)
-        # The pin: Mega Floette faints to that Earthquake before its own action
-        # this turn, so it never appears as an ATTACKER in turn 1's log.
+        # The pin: Mega Floette Mega Evolves and immediately shows its real
+        # (mega) ability in the log, not a placeholder.
+        self.assertIn("Mega Floette Mega Evolved! (ability: Fairy Aura)", text)
+        # Turn 1: our side reads its own board (Mega Floette's Dazzling
+        # Gleam threatens a 2HKO under Tailwind) and Protects rather than
+        # trading Garchomp's Earthquake for a KO it can no longer safely
+        # follow up on -- Dazzling Gleam is shown BLOCKED, not landing.
         turn1 = text.split("Turn 2")[0]
-        self.assertNotIn("Mega Floette uses", turn1,
-                         "a fainted Pokemon must not still act -- the pin")
+        self.assertIn("blocked by Garchomp(p1)'s guard", turn1)
+        self.assertIn("blocked by Dragonite's guard", turn1)
+        self.assertNotIn("FAINTED", turn1,
+                         "fixture assumes turn 1 ends with nobody down yet")
 
     def test_nobody_protects_twice_in_a_row(self):
         """`lead_sim.their_strategies` enumerates a Protect plan per turn and

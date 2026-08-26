@@ -17,6 +17,16 @@ from species_data import base_form_name, resolve_species, resolve_team_mega_slot
 
 _TEMPLATE_CACHE = {}
 
+# "Make sure base form dragonite always has the ability inner focus, but a
+# dragonite holding a mega stone uses multiscale." Usage data alone would
+# give plain Dragonite Multiscale too (75.9% of recorded sets, vs 24.1% for
+# Inner Focus) -- an explicit house rule for this roster, not a usage-based
+# default. Keyed by the roster NAME, not species: "Mega Dragonite" (which
+# holds the stone even on a turn it hasn't evolved yet, per
+# `_build_combatant`'s own "still holds its stone" base-form comment) is
+# untouched by this and keeps its own (already 100%-Multiscale) usage data.
+FORCED_BASE_ABILITY = {"Dragonite": "Inner Focus"}
+
 
 def make_combatant(name: str, merged: dict, natures: dict, pokedex: dict | None = None,
                     ability: str | None = None, item: str | None = None,
@@ -68,7 +78,7 @@ def _build_combatant(name: str, merged: dict, natures: dict, pokedex: dict | Non
     p = merged[name]
     nat = natures[(nature or p["nature"]).lower()]
     ev_points = evs if evs is not None else p["evs"]
-    usage_ability = _default_ability(p["abilities_usage"])
+    usage_ability = FORCED_BASE_ABILITY.get(name, _default_ability(p["abilities_usage"]))
     it = item or (p["items_usage"][0][0] if p["items_usage"] else "")
 
     base_name = base_form_name(name)

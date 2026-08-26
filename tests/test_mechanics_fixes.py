@@ -431,6 +431,53 @@ class TestEruptionHpScaledPower(unittest.TestCase):
                         "Eruption dealt zero -- the bug")
 
 
+class TestDragoniteAbilityRule(unittest.TestCase):
+    """"Dragonite also seems to keep multiscale no matter how much damage it
+    takes. As a new rule, make sure base form dragonite always has the
+    ability inner focus, but a dragonite holding a mega stone uses
+    multiscale." Usage data alone would give plain Dragonite Multiscale too
+    (75.9% of recorded sets) -- this is an explicit house rule
+    (`combatants.FORCED_BASE_ABILITY`), not a usage-based default."""
+
+    def test_plain_dragonite_is_always_inner_focus(self):
+        from combatants import make_combatant
+        w = world()
+        d = make_combatant("Dragonite", w["merged"], w["natures"])
+        self.assertEqual(d.ability, "Inner Focus")
+
+    def test_mega_dragonite_evolved_is_multiscale(self):
+        from combatants import make_combatant
+        from engine import mega_evolve
+        w = world()
+        d = make_combatant("Mega Dragonite", w["merged"], w["natures"])
+        d.is_mega_pick = True
+        mega_evolve(d)
+        self.assertEqual(d.ability, "Multiscale")
+
+    def test_mega_dragonite_forced_to_stay_base_still_holds_multiscale(self):
+        """"a dragonite HOLDING a mega stone uses multiscale" -- even one
+        that never actually transforms this game (a teammate is the real
+        Mega) still holds the stone, per `_build_combatant`'s own "still
+        holds its stone" comment, and keeps Multiscale rather than falling
+        back to the Inner Focus rule (that rule is for the roster entry
+        that can never hold the stone at all)."""
+        from combatants import make_combatant
+        w = world()
+        d = make_combatant("Mega Dragonite", w["merged"], w["natures"],
+                           force_base_form=True)
+        self.assertEqual(d.ability, "Multiscale")
+
+    def test_an_explicit_ability_override_still_wins(self):
+        """The forced default only fills in when nothing else is asked
+        for -- an explicit `ability=` pin (as several other tests in this
+        suite already rely on for OTHER species) must still work."""
+        from combatants import make_combatant
+        w = world()
+        d = make_combatant("Dragonite", w["merged"], w["natures"],
+                           ability="Multiscale")
+        self.assertEqual(d.ability, "Multiscale")
+
+
 class TestFakeOutOnlyLegalTurnOne(unittest.TestCase):
     """"Massive error in lead_sweep.py; Sneasler uses fake out turn 2. This
     move can only be used on turn 1. ... The whole point of lead_sweep is it
