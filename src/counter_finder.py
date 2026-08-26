@@ -1075,7 +1075,9 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
             return (-prio, -spd, theirs_first)
         local_hp = dict(hp)
         found = set()
+        pl_resolved = set()
         for role in sorted(pl.keys(), key=pl_speed_key):
+            pl_resolved.add(role)
             hits, mv = pl[role]
             if local_hp.get(role, 0.0) <= 0:
                 if mv is not None:
@@ -1083,6 +1085,14 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
                 continue
             if mv is None:
                 continue
+            if mv.name == "Sucker Punch":
+                # Same "must still be pending" rule the real application
+                # loop uses -- a reconsideration must not credit Sucker
+                # Punch with saving a role it wouldn't actually save.
+                hits = {tgt_role: got for tgt_role, got in hits.items()
+                       if tgt_role not in pl_resolved
+                       and pl.get(tgt_role, (None, None))[1] is not None
+                       and pl[tgt_role][1].category != "Status"}
             for tgt_role, got in hits.items():
                 if local_hp.get(tgt_role, 1.0) <= 0:
                     continue
@@ -1137,7 +1147,9 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
 
     pinned = False
     hits_done = {}
+    turn_resolved = set()
     for role in order:
+        turn_resolved.add(role)
         if hp[role] <= 0:
             if role == "C":
                 pinned = True
@@ -1145,6 +1157,15 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         hits, mv = plan[role]
         if mv is None:
             continue
+        if mv.name == "Sucker Punch":
+            # "Sucker punch fails if the target outspeeds and use[s] a
+            # priority move" -- same rule as `_apply_plan`'s: it only lands
+            # against a target that has NOT YET acted this turn and whose
+            # own queued move is damaging (not Status/Protect).
+            hits = {tgt_role: got for tgt_role, got in hits.items()
+                   if tgt_role not in turn_resolved
+                   and plan.get(tgt_role, (None, None))[1] is not None
+                   and plan[tgt_role][1].category != "Status"}
         hits_done[role] = hits
         for tgt_role, got in hits.items():
             if hp.get(tgt_role, 1.0) <= 0:
@@ -1408,6 +1429,14 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     hp was already <=0 by the time their own position in the order came up,
     despite having a real (non-`None`) move queued: chosen a move, in other
     words, that never actually got to fire.
+
+    "Sucker punch fails if the target outspeeds and use[s] a priority
+    move": it cannot retroactively read a move that's already happened, so
+    it only lands against a target that has NOT YET acted this turn (still
+    ahead of it in `order`) and whose own queued move is damaging (not
+    Status/Protect) -- checked against `resolved` (every role already
+    reached in this same walk of `order`), the same "still-pending, not the
+    unmutated full list" rule `battle.py`'s real engine uses.
     """
     def speed_key(role):
         mv = plan[role][1]
@@ -1421,8 +1450,9 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
 
     order = sorted(plan.keys(), key=speed_key)
     hp = dict(hp)
-    log, enemy_acted, wiped, doomed = [], False, None, set()
+    log, enemy_acted, wiped, doomed, resolved = [], False, None, set(), set()
     for role in order:
+        resolved.add(role)
         hits, mv = plan[role]
         if hp[role] <= 0:
             if mv is not None:
@@ -1432,6 +1462,11 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
             enemy_acted = True
         if mv is None:
             continue
+        if mv.name == "Sucker Punch":
+            hits = {tgt_role: got for tgt_role, got in hits.items()
+                   if tgt_role not in resolved
+                   and plan.get(tgt_role, (None, None))[1] is not None
+                   and plan[tgt_role][1].category != "Status"}
         for tgt_role, got in hits.items():
             if tgt_role in protected_roles:
                 continue  # Protect blocks this hit entirely

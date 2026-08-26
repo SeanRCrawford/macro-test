@@ -19,6 +19,7 @@
     python counter_table.py --our "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,Kingambit" --bring4 --vs "Kingambit,Basculegion,Whimsicott,Sinistcha,Mega Charizard Y,Sylveon"
     python counter_table.py --multi-bring4 --vs-team "Kingambit,Basculegion,Whimsicott,Sinistcha,Mega Charizard Y,Sylveon" --vs-team "Garchomp,Landorus-Therian,Rillaboom,Chien-Pao,Urshifu-Rapid-Strike,Farigiraf" --pool-size 60
     python counter_table.py --multi-bring4 --vs-team "..." --vs-team "..." --max-weak 2 --type-limit "Fire:max_weak=1,max_net=-2" --allow-scarf
+    python counter_table.py --multi-bring4 --vs-team "Rain" --vs-team "Big 6" --vs-team "NAIC" --pool-size 60
 
 Eight modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
@@ -86,7 +87,10 @@ Eight modes, pick one (or combine --chip-from/--chip-move with --pairs):
   --multi-bring4
               Instead of one already-decided 6, SEARCH the pool for the
               best CORE across SEVERAL enemy rosters at once (--vs-team,
-              repeated 2+ times): for each enemy, the best bring-4 this
+              repeated 2+ times -- either a comma-separated roster or the
+              name of a saved team from data/teams.csv/data/teams/
+              data/my_teams, the same library --team already searches):
+              for each enemy, the best bring-4 this
               core can field against it (a bring-4 may differ per
               opponent, real Team Preview); ranked on the WORST of those
               per-enemy best cases (maximin, same idea as --bring4's own
@@ -915,10 +919,15 @@ def main():
                          "a good pair for --min-enemies of the named "
                          "enemies); pass --beam for a broader, non-"
                          "exhaustive search over the whole pool instead")
-    ap.add_argument("--vs-team", action="append", default=[], metavar="POKEMON,...",
-                    help="--multi-bring4 only: one enemy roster, comma-"
-                         "separated. Repeat for each enemy team (2+ "
-                         "required)")
+    ap.add_argument("--vs-team", action="append", default=[],
+                    metavar="POKEMON,...|TEAM NAME",
+                    help="--multi-bring4 only: one enemy roster, EITHER "
+                         "comma-separated Pokemon, or the name of a saved "
+                         "team (a data/teams.csv row, or a pokepaste in "
+                         "data/teams/ or data/my_teams/ -- the same library "
+                         "--team already searches). Repeat for each enemy "
+                         "team (2+ required), e.g. --vs-team \"Rain\" "
+                         "--vs-team \"Big 6\"")
     ap.add_argument("--max-weak", type=int, default=None, metavar="N",
                     help="--multi-bring4 only: hard-drop any candidate CORE "
                          "where more than N of its members are weak to the "
@@ -1124,7 +1133,11 @@ def main():
     vs_teams = []
     if args.multi_bring4:
         for raw in args.vs_team:
-            team = [n.strip() for n in raw.split(",") if n.strip()]
+            name = raw.strip()
+            if name in W["teams"]:
+                team = list(W["teams"][name])
+            else:
+                team = [n.strip() for n in raw.split(",") if n.strip()]
             if len(team) < 2:
                 raise SystemExit(f"--vs-team {raw!r} needs at least 2 Pokemon "
                                  f"to form any pairs")

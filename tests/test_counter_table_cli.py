@@ -314,5 +314,54 @@ class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
                         "fixture assumes both outcomes print in upper case")
 
 
+class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
+    """"For --vs-team in counter_table.py, I would like to be able to use
+    named teams from the team.csv and /data/teams folder." `--vs-team`
+    already only ever fed `--multi-bring4`'s search, and
+    `species_data.load_teams` (the SAME library `--team` already searches
+    -- teams.csv rows plus any pokepaste dropped in data/teams/ or
+    data/my_teams/) was already loaded into `W["teams"]` before this parsing
+    ran; a named team is now tried FIRST, falling back to the existing
+    comma-separated-Pokemon parsing when the name isn't a known team."""
+
+    def test_a_known_team_name_resolves_to_its_full_roster(self):
+        from _harness import load_world
+        W = load_world()
+        self.assertIn("Rain", W["teams"])
+        self.assertIn("Big 6", W["teams"])
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+             "--pool-size", "12", "--good-threshold", "30", "--top", "1"])
+        self.assertIsNone(msg, out)
+        for name in W["teams"]["Rain"]:
+            self.assertIn(name, out)
+        for name in W["teams"]["Big 6"]:
+            self.assertIn(name, out)
+
+    def test_a_raw_comma_list_still_works_unchanged(self):
+        """Backward compatibility: a --vs-team value that ISN'T a known
+        team name still parses as individual Pokemon, exactly as before
+        this feature existed."""
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team",
+             "Kingambit,Basculegion,Garchomp,Whimsicott", "--vs-team",
+             "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf", "--pool-size",
+             "12", "--good-threshold", "30", "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Kingambit", out)
+        self.assertIn("Sylveon", out)
+
+    def test_an_unknown_bare_word_still_fails_loudly(self):
+        """A typo'd team name (no comma, not a real team) must not be
+        silently treated as one lone Pokemon -- it already fails the
+        existing 'needs at least 2 Pokemon' check, same as before named
+        teams existed."""
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "NotARealTeamName",
+             "--vs-team", "Big 6"])
+        self.assertIsNotNone(msg)
+        self.assertIn("needs at least 2 Pokemon", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

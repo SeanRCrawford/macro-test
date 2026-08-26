@@ -416,5 +416,66 @@ class TestFakeOutOnlyLegalTurnOne(unittest.TestCase):
         self.assertNotIn("Sneasler uses Fake Out", turn2_lines, log)
 
 
+class TestSuckerPunchFailsIfTheTargetAlreadyMoved(unittest.TestCase):
+    """"Sucker punch fails if the target outspeeds and use[s] a priority
+    move." The existing check only asked "is the target ALSO using a
+    damaging move THIS turn" against `ordered` -- the turn's full,
+    unmutated action list -- so a target whose OWN damaging move had
+    ALREADY resolved (higher priority, or a tied priority tier won on
+    speed) still counted as "the target was attacking", and Sucker Punch
+    landed anyway. It cannot retroactively read a move that already
+    happened -- the real rule is "the target has not yet moved AND that
+    still-pending move is damaging", checked against `remaining` (what's
+    still queued once the Sucker Punch user's own action was popped off),
+    not the original `ordered` list.
+    """
+
+    def test_extreme_speed_beats_sucker_punch_and_it_fails(self):
+        """Extreme Speed is priority +2, always ahead of Sucker Punch's +1
+        regardless of raw speed -- Dragonite has already moved by the time
+        Kingambit's Sucker Punch would resolve."""
+        b = battle(["Kingambit", "Whimsicott"], ["Dragonite", "Sylveon"])
+        kingambit, dragonite = b.p1.active[0], b.p2.active[0]
+        sucker_punch = b.make_move("suckerpunch")
+        extreme_speed = b.make_move("extremespeed")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(kingambit, "p1", "move", sucker_punch, [dragonite]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(dragonite, "p2", "move", extreme_speed, [kingambit]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("Sucker Punch failed", log, log)
+        self.assertIn("Extreme Speed", log, log)
+
+    def test_a_target_that_has_not_moved_yet_is_still_hit(self):
+        """Contrast: a target using an ordinary (priority 0) damaging move
+        has NOT yet acted when Sucker Punch (priority +1) resolves --
+        Sucker Punch must still land normally, same as before this fix."""
+        b = battle(["Kingambit", "Whimsicott"], ["Corviknight", "Sylveon"])
+        kingambit, corviknight = b.p1.active[0], b.p2.active[0]
+        sucker_punch = b.make_move("suckerpunch")
+        body_press = b.make_move("bodypress")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(kingambit, "p1", "move", sucker_punch, [corviknight]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(corviknight, "p2", "move", body_press, [kingambit]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertNotIn("Sucker Punch failed", log, log)
+        self.assertIn("Kingambit uses Sucker Punch", log, log)
+
+    def test_upper_hand_has_the_same_still_pending_rule(self):
+        """Upper Hand shares the exact same `ordered`-vs-`remaining` bug --
+        confirmed by source inspection rather than a second live battle,
+        since both checks were fixed together for the same reason."""
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                                "battle.py"), encoding="utf-8").read()
+        block = src[src.index('a.move.name == "Upper Hand"'):][:900]
+        self.assertIn("for o in remaining", block)
+        self.assertNotIn("for o in ordered", block)
+
+
 if __name__ == "__main__":
     unittest.main()

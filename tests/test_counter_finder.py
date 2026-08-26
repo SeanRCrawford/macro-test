@@ -1285,8 +1285,17 @@ class TestArmorTailAndPriorityBlock(unittest.TestCase):
 
         plain = cf._build("Sylveon", merged, natures)
         combatants2 = {"C": plain, "P": plain, "E1": e1, "E2": e1}
+        # Sucker Punch also requires the target to be USING a damaging move
+        # this turn (real mechanic, now honoured -- see
+        # TestSuckerPunchFailsIfTheTargetAlreadyMoved) -- an empty moveset
+        # (as above) is not that, so this contrast case needs C to have a
+        # real attack queued, or Sucker Punch would correctly fail here too
+        # for an unrelated reason and the test would no longer isolate
+        # Armor Tail specifically.
+        moves_by_role2 = dict(moves_by_role)
+        moves_by_role2["C"] = cf._move_infos("Sylveon", merged, moves, ["Moonblast"])
         new_hp2, _log2, _ea2, _w2 = cf._resolve_turn(
-            combatants2, moves_by_role, hp, typechart, weather, {})
+            combatants2, moves_by_role2, hp, typechart, weather, {})
         self.assertLess(new_hp2["C"], 1.0,
                         "fixture assumes Sucker Punch is a real hit without "
                         "Armor Tail on the board")
@@ -1489,6 +1498,75 @@ class TestSurvivalAwareReconsideration(unittest.TestCase):
         self.assertIsNone(e1_hits, "Kingambit really does die before "
                           "acting -- nothing in its restricted moveset "
                           "could have saved it")
+
+
+class TestSuckerPunchFailsIfTheTargetAlreadyMoved(unittest.TestCase):
+    """"Sucker punch fails if the target outspeeds and use[s] a priority
+    move" -- the cheap arithmetic model's own version of the fix already
+    made to `battle.py`'s real engine (`TestSuckerPunchFailsIfTheTarget
+    AlreadyMoved` in test_mechanics_fixes.py). Both `_apply_plan`
+    (`_resolve_turn`) and `_sequential_pair_outcome`'s own hit-application
+    loop now drop a Sucker Punch hit against any target that has ALREADY
+    acted (by turn order) or whose queued move isn't damaging."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.kingambit = cf._build("Kingambit", merged, natures)
+        self.sucker_punch = cf._move_infos("Kingambit", merged, moves,
+                                           ["Sucker Punch"])
+
+    def test_sequential_pair_outcome_drops_sucker_punch_against_extreme_speed(self):
+        """Extreme Speed is priority +2, always ahead of Sucker Punch's +1
+        -- the attacker has already moved by the time Sucker Punch would
+        resolve, regardless of relative speed."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        dragonite = cf._build("Dragonite", merged, natures)
+        extreme_speed = cf._move_infos("Dragonite", merged, moves,
+                                       ["Extreme Speed"])
+        sylveon = cf._build("Sylveon", merged, natures)
+        result = cf._sequential_pair_outcome(
+            dragonite, extreme_speed, "Kingambit", self.kingambit,
+            self.sucker_punch, "Sylveon", sylveon, [], typechart,
+            candidate_target="Kingambit")
+        self.assertEqual(result["hits"].get("E1"), {})
+
+    def test_sequential_pair_outcome_still_lands_against_a_pending_attack(self):
+        """Contrast: a target using an ordinary (priority 0, still-pending)
+        damaging move is still hit normally."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        corviknight = cf._build("Corviknight", merged, natures)
+        body_press = cf._move_infos("Corviknight", merged, moves,
+                                    ["Body Press"])
+        sylveon = cf._build("Sylveon", merged, natures)
+        result = cf._sequential_pair_outcome(
+            corviknight, body_press, "Kingambit", self.kingambit,
+            self.sucker_punch, "Sylveon", sylveon, [], typechart,
+            candidate_target="Kingambit")
+        e1_hits = result["hits"].get("E1", {})
+        self.assertIn("C", e1_hits)
+        self.assertEqual(e1_hits["C"].move_name, "Sucker Punch")
+
+    def test_resolve_turn_drops_sucker_punch_against_a_move_less_target(self):
+        """A target with NOTHING queued this turn (empty moveset here, but
+        the same reading applies to a real status/switch choice) is not
+        "using a damaging move" either -- Sucker Punch must fail against it
+        too, not just against Armor Tail or a faster priority user."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        idle = cf._build("Sylveon", merged, natures)
+        combatants = {"C": idle, "P": idle, "E1": self.kingambit,
+                     "E2": self.kingambit}
+        moves_by_role = {"C": [], "P": [], "E1": self.sucker_punch, "E2": []}
+        weather = cf._field_weather(combatants)
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        new_hp, log, _ea, _w = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {})
+        self.assertEqual(new_hp["C"], 1.0)
+        self.assertFalse(log)
 
 
 class TestJointDamageLog(unittest.TestCase):

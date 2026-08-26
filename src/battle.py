@@ -574,23 +574,33 @@ class Battle:
                 continue  # screens already registered above
             if a.move and a.move.name == "Sucker Punch":
                 # Sucker Punch fails unless the target is using a DAMAGING move this
-                # turn (it whiffs into status, Protect, or a switch).
+                # turn (it whiffs into status, Protect, or a switch) AND has not
+                # already moved -- checked against `remaining` (what's STILL pending
+                # after `a` was popped off above), not the original `ordered` list,
+                # which still contains everyone including actions that already
+                # resolved earlier this turn. A target that outsped Sucker Punch (or
+                # used a tying-or-higher priority move and won the speed tie) has
+                # already acted by this point, and Sucker Punch cannot retroactively
+                # read a move that's already happened -- it fails just the same as
+                # if the target had used a status move, not silently credited with
+                # "the target was attacking" from a hit that's already landed.
                 tgt_ids = {id(x) for x in a.targets}
                 if not any(id(o.combatant) in tgt_ids and o.kind == "move" and o.move
                             and o.move.category != "Status"
-                            for o in ordered if o is not a):
+                            for o in remaining):
                     self.log.add(f"{self.tag(a.combatant)}'s Sucker Punch failed -- "
-                                  f"the target was not attacking.")
+                                  f"the target was not attacking, or already moved.")
                     continue
             if a.move and a.move.name == "Upper Hand":
                 # Upper Hand only connects if the target is itself using a damaging
                 # priority move this turn (it pre-empts Fake Out, Sucker Punch, Aqua
                 # Jet). Being priority itself, it is stopped by Armor Tail / Queenly
-                # Majesty / Dazzling on the other side.
+                # Majesty / Dazzling on the other side. Same "must still be pending"
+                # rule as Sucker Punch above -- checked against `remaining`.
                 tgt_ids = {id(x) for x in a.targets}
                 if not any(id(o.combatant) in tgt_ids and o.move
                             and o.move.priority > 0 and o.move.category != "Status"
-                            for o in ordered if o is not a):
+                            for o in remaining):
                     self.log.add(f"{self.tag(a.combatant)}'s Upper Hand failed -- "
                                   f"the target was not using a priority move.")
                     continue
