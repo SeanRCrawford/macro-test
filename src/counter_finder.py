@@ -557,36 +557,41 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     """The move `attacker` would actually use against `defender`, searched on
     the AVERAGE roll: prefer one that KOes outright; failing that, prefer one
     that sets up a KO within a FOLLOW-UP turn (below); failing THAT, prefer
-    higher PRIORITY (more likely to land before the target can reply or
-    flee), then more damage. Returns a `Hit` (`NO_HIT` if nothing does
-    damage) plus the chosen `MoveInfo` (needed by the caller to check
-    `is_spread_move` and to read `.priority` for turn ordering).
+    more damage. Returns a `Hit` (`NO_HIT` if nothing does damage) plus the
+    chosen `MoveInfo` (needed by the caller to check `is_spread_move` and to
+    read `.priority` for turn ordering).
 
-    This is the move-choice half of `pair_search`'s speed-order resolution --
-    a move's priority decides the ACTION order, not just how hard it hits, so
-    picking "the biggest number" the way `_best_hit` does would silently
-    prefer a slow 100% chunk over a Sucker Punch that secures the same KO
-    first, or over-credit a priority option that doesn't actually knock the
-    target out.
+    PRIORITY IS NOT A TIE-BREAK HERE. It used to be (right after the KO
+    checks) -- "prefer a slow 100% chunk over a Sucker Punch that secures
+    the same KO first" was the original reasoning -- but that let a WEAK
+    priority move beat a far STRONGER slow one whenever both merely cleared
+    the same "not a guaranteed kill" bar (Aqua Jet, 34%, over Wave Crash,
+    95% and nearly an outright OHKO, because both technically reach a
+    2-turn kill once ONE-TURN LOOKAHEAD below exists -- priority is not the
+    thing that should decide between "barely" and "almost entirely" done).
+    A move's priority is still fully honoured in the REAL turn-order
+    computation once chosen (nothing here changes that), and the two cases
+    where priority genuinely needs to drive the CHOICE -- surviving to act
+    at all, or a Sucker Punch pick that would otherwise fail outright --
+    are handled by a dedicated correction afterward
+    (`_reconsider_for_survival`), not baked into this base ranking.
 
     ONE-TURN LOOKAHEAD: "it's important to at least have a one turn
     lookahead -- if wave crash into aqua jet kills ... on the second turn."
     A move that doesn't KO by itself is still credited with a KO if its
     damage PLUS this attacker's own best available follow-up (any move here,
-    not necessarily the same one -- a slow, heavy hit now that a priority
-    finisher cleans up next turn) would clear 100% -- so a real 2-turn kill
-    line beats a weak priority move that never threatens a kill at all, and
-    priority is only the tie-break among moves that are equally (in)capable
-    of finishing the job. This is deliberately optimistic (it assumes the
-    attacker survives to act again and nothing heals or removes the target
-    in between) -- a forecast, not a guarantee, the same kind of hypothesis
-    this module already makes elsewhere (Tailwind, `outspeed="scarf"`).
+    not necessarily the same one) would clear 100% -- so a real 2-turn kill
+    line beats a move that never threatens a kill at all. This is
+    deliberately optimistic (it assumes the attacker survives to act again
+    and nothing heals or removes the target in between) -- a forecast, not
+    a guarantee, the same kind of hypothesis this module already makes
+    elsewhere (Tailwind, `outspeed="scarf"`).
 
     `defending_side`: the full list of Combatants on `defender`'s side
     (defaults to just `defender` alone) -- checked via `_priority_blocked`
     so a priority move that would actually fail against an Armor Tail /
-    Dazzling / Queenly Majesty holder is never credited with its priority
-    OR its damage; a rational attacker picks a move that actually lands.
+    Dazzling / Queenly Majesty holder is never credited with its damage;
+    a rational attacker picks a move that actually lands.
     """
     defending_side = defending_side if defending_side is not None else (defender,)
     candidates = []
@@ -596,18 +601,17 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
         got = _raw_hit(attacker, mv, defender, typechart, weather=weather, roll="avg")
-        blocked = _priority_blocked(attacker, mv, defending_side)
-        if blocked:
+        if _priority_blocked(attacker, mv, defending_side):
             got = NO_HIT
-        candidates.append((mv, got, 0 if blocked else mv.priority))
+        candidates.append((mv, got))
     if not candidates:
         return NO_HIT, None
-    best_follow_up = max(got.frac for _mv, got, _prio in candidates)
+    best_follow_up = max(got.frac for _mv, got in candidates)
     best_key, best_hit, best_move = None, NO_HIT, None
-    for mv, got, prio in candidates:
+    for mv, got in candidates:
         kos_now = got.frac >= 1.0
         kos_in_two = kos_now or (got.frac + best_follow_up) >= 1.0
-        key = (kos_now, kos_in_two, prio, got.frac)
+        key = (kos_now, kos_in_two, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hit, best_move = key, got, mv
     return best_hit, best_move
@@ -1008,10 +1012,12 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     move is a caller-fixed input) each get one chance to swap to a
     strictly-faster move from their own moveset if their independently-
     chosen pick would never actually fire (something faster kills them
-    first, the same turn, before their own turn comes up) -- see
-    `_resolve_turn`'s `_reconsider_for_survival` for the full reasoning;
-    this is the same idea, scoped to this function's simpler single-turn,
-    full-HP-start board.
+    first, the same turn, before their own turn comes up), and one chance
+    to swap away from Sucker Punch to a different, unconditional move if
+    Sucker Punch itself turned out to fail (the target had already moved)
+    -- see `_resolve_turn`'s `_reconsider_for_survival` for the full
+    reasoning; this is the same idea, scoped to this function's simpler
+    single-turn, full-HP-start board.
 
     Returns {"outcome": one of "clean"/"trade"/"no_ko"/"pinned", "target",
     "partner_target", "hp_left": {...}, "hits": {role: {tgt_role: Hit}}}.
@@ -1055,12 +1061,16 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         return (-prio, -spd, theirs_first)
 
     def doomed_roles(pl):
-        """Roles whose hp would already be <=0, from an earlier-acting
-        role's hit, by the time their own position in `pl`'s order comes up
-        -- a move that never actually fires. Same idea as `_apply_plan`'s
-        own `doomed` set (`_resolve_turn`'s survival-aware reconsideration),
-        scoped to this function's simpler single-turn, full-HP-start board
-        (no Focus Sash/Sturdy or Protect here to also account for).
+        """(doomed, sucker_punch_wasted) for `pl` -- `doomed`: roles whose
+        hp would already be <=0, from an earlier-acting role's hit, by the
+        time their own position in `pl`'s order comes up (a move that never
+        actually fires). `sucker_punch_wasted`: roles that chose Sucker
+        Punch, stayed alive, had a real target queued, but every one of
+        those hits got dropped by the "target already moved" check. Same
+        idea as `_apply_plan`'s own `doomed`/`sucker_punch_wasted`
+        (`_resolve_turn`'s survival-aware reconsideration), scoped to this
+        function's simpler single-turn, full-HP-start board (no Focus Sash/
+        Sturdy or Protect here to also account for).
 
         Sorts by `pl`'s OWN move priorities, not the outer `plan` -- a
         trial plan with one role's move swapped must be ordered by ITS
@@ -1074,7 +1084,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
             theirs_first = 0 if role in ("E1", "E2") else 1
             return (-prio, -spd, theirs_first)
         local_hp = dict(hp)
-        found = set()
+        found, sp_wasted = set(), set()
         pl_resolved = set()
         for role in sorted(pl.keys(), key=pl_speed_key):
             pl_resolved.add(role)
@@ -1089,59 +1099,77 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
                 # Same "must still be pending" rule the real application
                 # loop uses -- a reconsideration must not credit Sucker
                 # Punch with saving a role it wouldn't actually save.
-                hits = {tgt_role: got for tgt_role, got in hits.items()
-                       if tgt_role not in pl_resolved
-                       and pl.get(tgt_role, (None, None))[1] is not None
-                       and pl[tgt_role][1].category != "Status"}
+                filtered = {tgt_role: got for tgt_role, got in hits.items()
+                           if tgt_role not in pl_resolved
+                           and pl.get(tgt_role, (None, None))[1] is not None
+                           and pl[tgt_role][1].category != "Status"}
+                if hits and not filtered:
+                    sp_wasted.add(role)
+                hits = filtered
             for tgt_role, got in hits.items():
                 if local_hp.get(tgt_role, 1.0) <= 0:
                     continue
                 local_hp[tgt_role] = max(0.0, local_hp[tgt_role] - got.frac)
-        return found
+        return found, sp_wasted
 
     # SURVIVAL-AWARE RECONSIDERATION -- see `_reconsider_for_survival`'s own
     # docstring for the full reasoning ("the enemy can sucker punch
-    # Lycanroc ... if Lycanroc-Dusk targets Kingambit"). `partner`'s move is
+    # Lycanroc ... if Lycanroc-Dusk targets Kingambit"; "Kingambit has no
+    # reason to target Arcanine [with Sucker Punch]"). `partner`'s move is
     # a caller-fixed input (nothing to reconsider there); C/E1/E2 each get
-    # one chance to swap to a strictly-faster move from their own moveset
-    # if their current pick would never actually fire.
-    doomed = doomed_roles(plan)
-    if doomed:
-        move_source = {"C": atk_moves, "E1": e1_moves, "E2": e2_moves}
-        for role in doomed:
-            if role not in move_source:
-                continue
-            cur_mv = plan[role][1]
-            if cur_mv is None:
-                continue
-            faster = [m for m in move_source[role]
-                     if m.category != "Status"
-                     and (m.power or m.name in WEIGHT_BASED_POWER)
-                     and m.priority > cur_mv.priority]
-            if not faster:
-                continue
-            if role == "C":
-                _got2, new_mv = _choose_move(
-                    attacker, faster, combatants[target_role], typechart,
-                    weather=weather, defending_side=[e1, e2])
-                if new_mv is None:
-                    continue
-                new_hits = _hit_or_spread(attacker, new_mv, target_role,
-                                          defenders, typechart, weather=weather)
-            else:
-                e = combatants[role]
-                e_moves_for = faster
-                _got2, new_mv = _choose_move(e, e_moves_for, attacker, typechart,
-                                             weather=weather, defending_side=our_side)
-                if new_mv is None:
-                    continue
-                new_hits = _hit_or_spread(e, new_mv, "C", {"C": attacker},
-                                          typechart, weather=weather,
-                                          defending_side=our_side)
-            trial_plan = dict(plan)
-            trial_plan[role] = (new_hits, new_mv)
-            if role not in doomed_roles(trial_plan):
-                plan[role] = (new_hits, new_mv)
+    # one chance to swap to a strictly-faster move if a doomed pick would
+    # never actually fire, or to any non-Sucker-Punch move if Sucker Punch
+    # itself turned out to fail (the target had already moved).
+    def build_hits(role, e, new_mv):
+        if role == "C":
+            return _hit_or_spread(attacker, new_mv, target_role, defenders,
+                                  typechart, weather=weather)
+        return _hit_or_spread(e, new_mv, "C", {"C": attacker}, typechart,
+                              weather=weather, defending_side=our_side)
+
+    move_source = {"C": atk_moves, "E1": e1_moves, "E2": e2_moves}
+    doomed, sp_wasted = doomed_roles(plan)
+    for role in doomed:
+        if role not in move_source:
+            continue
+        cur_mv = plan[role][1]
+        if cur_mv is None:
+            continue
+        faster = [m for m in move_source[role]
+                 if m.category != "Status"
+                 and (m.power or m.name in WEIGHT_BASED_POWER)
+                 and m.priority > cur_mv.priority]
+        if not faster:
+            continue
+        e = combatants[role]
+        target_for = combatants[target_role] if role == "C" else attacker
+        defending_side_for = [e1, e2] if role == "C" else our_side
+        _got2, new_mv = _choose_move(e, faster, target_for, typechart,
+                                     weather=weather,
+                                     defending_side=defending_side_for)
+        if new_mv is None:
+            continue
+        trial_plan = dict(plan)
+        trial_plan[role] = (build_hits(role, e, new_mv), new_mv)
+        if role not in doomed_roles(trial_plan)[0]:
+            plan[role] = trial_plan[role]
+    for role in sp_wasted:
+        if role not in move_source:
+            continue
+        alternatives = [m for m in move_source[role]
+                       if m.name != "Sucker Punch" and m.category != "Status"
+                       and (m.power or m.name in WEIGHT_BASED_POWER)]
+        if not alternatives:
+            continue
+        e = combatants[role]
+        target_for = combatants[target_role] if role == "C" else attacker
+        defending_side_for = [e1, e2] if role == "C" else our_side
+        _got2, new_mv = _choose_move(e, alternatives, target_for, typechart,
+                                     weather=weather,
+                                     defending_side=defending_side_for)
+        if new_mv is None:
+            continue
+        plan[role] = (build_hits(role, e, new_mv), new_mv)
 
     order = sorted(plan.keys(), key=speed_key)
 
@@ -1356,10 +1384,16 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     that doesn't KO (every hit target, for a spread move) by itself is still
     credited with a KO if its damage on a given target PLUS this attacker's
     own best available follow-up ON THAT SAME TARGET (any move against it,
-    computed across every candidate here first) would clear 100% -- so
-    priority is only the tie-break among options that are equally (in)capable
-    of finishing the job, not the deciding factor the instant nothing KOes
-    outright.
+    computed across every candidate here first) would clear 100%.
+
+    PRIORITY IS NOT A TIE-BREAK HERE, same reasoning as `_choose_move`: it
+    let a weak priority move beat a far stronger slow one whenever both
+    merely cleared the same "reaches a 2-turn kill" bar. Raw damage is the
+    tie-break instead; a chosen move's real priority is still fully
+    honoured in the turn-order computation once picked, and
+    `_reconsider_for_survival` is the dedicated place priority-driven
+    reconsideration actually belongs (surviving to act, or a Sucker Punch
+    pick that would otherwise fail).
     """
     if not live_targets:
         return {}, None
@@ -1370,8 +1404,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     # the best single-hit damage this attacker can put on each target,
     # across every move here), then rank -- the lookahead below needs to
     # see every move's damage on a target before any of them can be scored.
-    single_candidates = []   # (mv, role, Hit, priority)
-    spread_candidates = []   # (mv, {role: Hit}, priority)
+    single_candidates = []   # (mv, role, Hit)
+    spread_candidates = []   # (mv, {role: Hit})
     best_frac_by_role = {role: 0.0 for role in live_targets}
     for mv in moves:
         if mv.category == "Status":
@@ -1379,13 +1413,12 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
         blocked = _priority_blocked(attacker, mv, defending_side)
-        prio = 0 if blocked else mv.priority
         if is_spread_move(mv.target) and n_live > 1:
             hits = {role: (NO_HIT if blocked else
                           _raw_hit(attacker, mv, d, typechart, weather=weather,
                                    roll="avg", num_targets_hit=n_live))
                    for role, d in live_targets.items()}
-            spread_candidates.append((mv, hits, prio))
+            spread_candidates.append((mv, hits))
             for role, h in hits.items():
                 best_frac_by_role[role] = max(best_frac_by_role[role], h.frac)
             continue
@@ -1395,22 +1428,22 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             got = NO_HIT if blocked else _raw_hit(
                 attacker, mv, live_targets[role], typechart, weather=weather,
                 roll="avg")
-            single_candidates.append((mv, role, got, prio))
+            single_candidates.append((mv, role, got))
             best_frac_by_role[role] = max(best_frac_by_role[role], got.frac)
 
     best_key, best_hits, best_move = None, {}, None
-    for mv, role, got, prio in single_candidates:
+    for mv, role, got in single_candidates:
         kos_now = got.frac >= 1.0
         kos_in_two = kos_now or (got.frac + best_frac_by_role[role]) >= 1.0
-        key = (kos_now, kos_in_two, prio, got.frac)
+        key = (kos_now, kos_in_two, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
-    for mv, hits, prio in spread_candidates:
+    for mv, hits in spread_candidates:
         kos_now = all(h.frac >= 1.0 for h in hits.values())
         kos_in_two = kos_now or all(
             h.frac >= 1.0 or (h.frac + best_frac_by_role[role]) >= 1.0
             for role, h in hits.items())
-        key = (kos_now, kos_in_two, prio, sum(h.frac for h in hits.values()))
+        key = (kos_now, kos_in_two, sum(h.frac for h in hits.values()))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move
@@ -1425,10 +1458,10 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     role survive to act" can never quietly diverge from what actually
     happens when the plan is applied for real.
 
-    Returns (hp, log, enemy_acted, wiped, doomed) -- `doomed`: roles whose
-    hp was already <=0 by the time their own position in the order came up,
-    despite having a real (non-`None`) move queued: chosen a move, in other
-    words, that never actually got to fire.
+    Returns (hp, log, enemy_acted, wiped, doomed, sucker_punch_wasted) --
+    `doomed`: roles whose hp was already <=0 by the time their own position
+    in the order came up, despite having a real (non-`None`) move queued:
+    chosen a move, in other words, that never actually got to fire.
 
     "Sucker punch fails if the target outspeeds and use[s] a priority
     move": it cannot retroactively read a move that's already happened, so
@@ -1437,6 +1470,13 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     Status/Protect) -- checked against `resolved` (every role already
     reached in this same walk of `order`), the same "still-pending, not the
     unmutated full list" rule `battle.py`'s real engine uses.
+    `sucker_punch_wasted`: roles that chose Sucker Punch, were alive and had
+    a real (non-empty) hit queued, but every one of those hits got dropped
+    by the check above -- distinct from `doomed` (still alive, still had
+    something worth doing) and worth a reconsideration pass same as it
+    ("Kingambit has no reason to target Arcanine [with Sucker Punch]" --
+    a whole turn spent on a move that was never going to land, when a
+    normal attack sitting in the same moveset would have).
     """
     def speed_key(role):
         mv = plan[role][1]
@@ -1450,7 +1490,8 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
 
     order = sorted(plan.keys(), key=speed_key)
     hp = dict(hp)
-    log, enemy_acted, wiped, doomed, resolved = [], False, None, set(), set()
+    log, enemy_acted, wiped = [], False, None
+    doomed, resolved, sucker_punch_wasted = set(), set(), set()
     for role in order:
         resolved.add(role)
         hits, mv = plan[role]
@@ -1463,10 +1504,13 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
         if mv is None:
             continue
         if mv.name == "Sucker Punch":
-            hits = {tgt_role: got for tgt_role, got in hits.items()
-                   if tgt_role not in resolved
-                   and plan.get(tgt_role, (None, None))[1] is not None
-                   and plan[tgt_role][1].category != "Status"}
+            filtered = {tgt_role: got for tgt_role, got in hits.items()
+                       if tgt_role not in resolved
+                       and plan.get(tgt_role, (None, None))[1] is not None
+                       and plan[tgt_role][1].category != "Status"}
+            if hits and not filtered:
+                sucker_punch_wasted.add(role)
+            hits = filtered
         for tgt_role, got in hits.items():
             if tgt_role in protected_roles:
                 continue  # Protect blocks this hit entirely
@@ -1496,12 +1540,13 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
                 wiped = "theirs"
             elif hp["C"] <= 0 and hp["P"] <= 0:
                 wiped = "ours"
-    return hp, log, enemy_acted, wiped, doomed
+    return hp, log, enemy_acted, wiped, doomed, sucker_punch_wasted
 
 
-def _reconsider_for_survival(plan, doomed, combatants, moves_by_role, hp,
-                             typechart, weather, field, live_targets_by_role,
-                             hint_by_role, enemy_speed_mult, protected_roles):
+def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
+                             moves_by_role, hp, typechart, weather, field,
+                             live_targets_by_role, hint_by_role,
+                             enemy_speed_mult, protected_roles):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk" -- a provisional `plan` chooses every
     actor's move independently, unaware of the others, so an actor can end
@@ -1520,14 +1565,25 @@ def _reconsider_for_survival(plan, doomed, combatants, moves_by_role, hp,
     doesn't arrive in time, keeps its original pick -- it really will die
     before acting, exactly as if this reconsideration didn't exist.
 
-    ONE PASS, not a fixed point, and only the SINGLE best-ranked faster
-    option per doomed role is tried (not every faster move in turn):
-    reassigning one role can in principle change whether ANOTHER role is
-    still doomed, or a second, slightly worse-ranked faster move might
-    survive when the best-ranked one doesn't -- but with only 4 actors on a
-    real board this already covers the case that motivated it, and the
-    module stays a cheap arithmetic screen, not an exhaustive search of
-    every ordering.
+    `sucker_punch_wasted` is the OTHER way a chosen move can turn out to
+    contribute nothing: alive, with a real target, but Sucker Punch itself
+    failed (the target had already moved) -- unlike a doomed role, priority
+    isn't the fix here (Sucker Punch is already the highest-priority option
+    most movesets carry); the fix is simply "use something else that
+    doesn't have a fail condition attached". Every non-Sucker-Punch, non-
+    Status move in the role's own moveset is retried via `_choose_action`
+    (already lookahead-aware) and adopted directly -- no trial-replay guard
+    needed here, since an ordinary move has no analogous condition to fail
+    against ("Kingambit has no reason to target Arcanine [with Sucker
+    Punch]" -- Iron Head/Kowtow Cleave/Low Kick sitting in the same
+    moveset would have landed for real).
+
+    ONE PASS, not a fixed point, and only the SINGLE best-ranked
+    alternative per role is tried in either case: reassigning one role can
+    in principle change another's own doomed/wasted status -- but with
+    only 4 actors on a real board this already covers the cases that
+    motivated it, and the module stays a cheap arithmetic screen, not an
+    exhaustive search of every ordering.
     """
     new_plan = dict(plan)
     for role in doomed:
@@ -1550,10 +1606,25 @@ def _reconsider_for_survival(plan, doomed, combatants, moves_by_role, hp,
             continue
         trial_plan = dict(new_plan)
         trial_plan[role] = (hits, mv)
-        _hp2, _log2, _ea2, _w2, doomed2 = _apply_plan(
+        _hp2, _log2, _ea2, _w2, doomed2, _sp2 = _apply_plan(
             trial_plan, combatants, hp, protected_roles, enemy_speed_mult, field)
         if role not in doomed2:
             new_plan[role] = (hits, mv)
+    for role in sucker_punch_wasted:
+        if role in protected_roles or role not in plan:
+            continue
+        alternatives = [mv for mv in (moves_by_role.get(role) or [])
+                       if mv.name != "Sucker Punch" and mv.category != "Status"
+                       and (mv.power or mv.name in WEIGHT_BASED_POWER)]
+        if not alternatives:
+            continue
+        hits, mv = _choose_action(combatants[role], alternatives,
+                                  live_targets_by_role[role], typechart,
+                                  weather=weather,
+                                  hinted_target=(hint_by_role or {}).get(role))
+        if mv is None:
+            continue
+        new_plan[role] = (hits, mv)
     return new_plan
 
 
@@ -1591,13 +1662,15 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     Chlorophyll/Sand Rush/Slush Rush all key off the field, not off who
     happens to be attacking).
 
-    SURVIVAL-AWARE RECONSIDERATION: after the provisional plan is built,
-    any role about to die before its own turn comes up gets one chance to
-    reconsider toward a faster move that would actually land -- see
-    `_reconsider_for_survival`. Only runs (a second, cheap `_apply_plan`
-    pass) when the provisional plan actually leaves someone doomed, so a
-    turn where nobody would die-before-acting costs exactly what it always
-    did.
+    SURVIVAL-AWARE RECONSIDERATION: after the provisional plan is built, any
+    role about to die before its own turn comes up gets one chance to
+    reconsider toward a faster move that would actually land, and any role
+    whose chosen Sucker Punch turned out to fail (the target had already
+    moved) gets one chance to reconsider toward a different, unconditional
+    move instead -- see `_reconsider_for_survival`. Only runs (a second,
+    cheap `_apply_plan` pass) when the provisional plan actually leaves
+    someone doomed or Sucker-Punch-wasted, so an ordinary turn costs
+    exactly what it always did.
     """
     hp = dict(hp)
     ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
@@ -1616,16 +1689,16 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = _choose_action(c, moves_by_role[role], ours_live,
                                         typechart, weather=weather)
 
-    hp2, log, enemy_acted, wiped, doomed = _apply_plan(
+    hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
         plan, combatants, hp, protected_roles, enemy_speed_mult, field)
-    if doomed - protected_roles:
+    if (doomed - protected_roles) or (sp_wasted - protected_roles):
         live_targets_by_role = {r: theirs_live for r in ours_live}
         live_targets_by_role.update({r: ours_live for r in theirs_live})
         plan = _reconsider_for_survival(
-            plan, doomed, combatants, moves_by_role, hp, typechart, weather,
-            field, live_targets_by_role, our_hints, enemy_speed_mult,
+            plan, doomed, sp_wasted, combatants, moves_by_role, hp, typechart,
+            weather, field, live_targets_by_role, our_hints, enemy_speed_mult,
             protected_roles)
-        hp2, log, enemy_acted, wiped, _doomed2 = _apply_plan(
+        hp2, log, enemy_acted, wiped, _doomed2, _sp2 = _apply_plan(
             plan, combatants, hp, protected_roles, enemy_speed_mult, field)
     return hp2, log, enemy_acted, wiped
 
@@ -1752,22 +1825,44 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None):
     `target` + `other_live`) is scored as doing no damage, same as
     `_choose_move`/`_choose_action` -- this "best cell" should never show a
     number a real attack could not actually land.
+
+    ONE-TURN LOOKAHEAD, same rule as `_choose_move`: a move that doesn't KO
+    by itself is still credited with a KO if its damage plus this
+    attacker's own best available follow-up would clear 100% within 2 turns.
+
+    PRIORITY IS NOT A TIE-BREAK HERE, same reasoning as `_choose_move`/
+    `_choose_action` -- a weak priority move (Sucker Punch, Aqua Jet, ...)
+    no longer beats a far stronger slow one just for being priority; raw
+    damage decides once KO-status ties. This also happens to be the honest
+    answer for Sucker Punch specifically: this "one cell" has no idea
+    whether the target has already moved (`_apply_plan`'s Sucker-Punch-fail
+    rule needs the target's SPECIFIC chosen action, information a
+    context-free cell doesn't have), so it was never safe to credit its
+    priority here regardless -- exactly what produced "Kingambit has no
+    reason to target Arcanine with Sucker Punch" before this fix.
     """
     defending_side = [target, other_live]
-    best_key, best_hit = None, NO_HIT
+    candidates = []
     for mv in moves:
         if mv.category == "Status":
             continue
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
-        blocked = _priority_blocked(attacker, mv, defending_side)
-        if blocked:
+        if _priority_blocked(attacker, mv, defending_side):
             got = NO_HIT
         else:
             n = 2 if (is_spread_move(mv.target) and other_live is not None) else 1
             got = _raw_hit(attacker, mv, target, typechart, weather=weather,
                            roll="avg", num_targets_hit=n)
-        key = (got.frac >= 1.0, 0 if blocked else mv.priority, got.frac)
+        candidates.append((mv, got))
+    if not candidates:
+        return NO_HIT
+    best_follow_up = max(got.frac for _mv, got in candidates)
+    best_key, best_hit = None, NO_HIT
+    for mv, got in candidates:
+        kos_now = got.frac >= 1.0
+        kos_in_two = kos_now or (got.frac + best_follow_up) >= 1.0
+        key = (kos_now, kos_in_two, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hit = key, got
     return best_hit

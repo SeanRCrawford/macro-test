@@ -1348,7 +1348,43 @@ class TestOneTurnLookahead(unittest.TestCase):
         self.assertEqual(mv.name, "Psychic Fangs")
         self.assertGreater(hit.frac, 0.5)
 
-    def test_priority_still_wins_when_neither_move_threatens_a_kill(self):
+    def test_the_bigger_hit_wins_even_when_both_reach_a_two_turn_kill(self):
+        """The actual reported case, real fixture: Basculegion's Wave Crash
+        (95%, no priority, nearly a 1-turn OHKO) vs Aqua Jet (34%, priority
+        +1) against Mega Tyranitar -- BOTH clear the 2-turn-kill bar (34%
+        doubled is 68%, short alone, but the lookahead's "best available
+        follow-up" is Wave Crash's own 95%, so 34+95 clears it too), so
+        under the OLD priority-tie-break this picked the much weaker Aqua
+        Jet purely for going first. Confirmed directly against real damage
+        rolls before writing this test."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        basculegion = cf._build("Basculegion", merged, natures)
+        tyranitar = cf._build("Mega Tyranitar", merged, natures)
+        wave_crash = cf._lookup_move("Wave Crash", moves)
+        aqua_jet = cf._lookup_move("Aqua Jet", moves)
+        wc = cf._raw_hit(basculegion, wave_crash, tyranitar, typechart, roll="avg")
+        aj = cf._raw_hit(basculegion, aqua_jet, tyranitar, typechart, roll="avg")
+        self.assertLess(wc.frac, 1.0)
+        self.assertLess(aj.frac, 1.0)
+        self.assertGreaterEqual(aj.frac + wc.frac, 1.0,
+                                "fixture assumes Aqua Jet also reaches a "
+                                "2-turn kill via Wave Crash as follow-up")
+        hit, mv = cf._choose_move(basculegion, [wave_crash, aqua_jet],
+                                  tyranitar, typechart)
+        self.assertEqual(mv.name, "Wave Crash")
+        self.assertAlmostEqual(hit.frac, wc.frac)
+
+    def test_raw_damage_still_wins_when_neither_move_threatens_a_kill(self):
+        """Priority is NOT a tie-break in the base ranking (a later,
+        harder-learned lesson than the lookahead itself -- see
+        TestSurvivalAwareReconsideration's own docstring for the real
+        example that forced this: Aqua Jet beating Wave Crash, which does
+        3x the damage, purely because both technically cleared the same
+        2-turn-kill bar). With no 2-turn kill line available from EITHER
+        move here, the tie-break is raw damage, same as any other tie --
+        Psychic Fangs (weaker than Bullet Punch's PRIORITY but stronger in
+        raw terms) wins."""
         merged, natures, typechart = (self.W["merged"], self.W["natures"],
                                       self.W["typechart"])
         aggron = cf._build("Mega Aggron", merged, natures)
@@ -1359,12 +1395,12 @@ class TestOneTurnLookahead(unittest.TestCase):
         self.assertLess(bp.frac * 2, 1.0)
         self.assertLess(pf.frac * 2, 1.0, "fixture assumes NEITHER move "
                         "threatens a kill within 2 turns")
+        self.assertGreater(pf.frac, bp.frac, "fixture assumes Psychic "
+                           "Fangs is the bigger raw hit of the two here")
         hit, mv = cf._choose_move(self.metagross,
                                   [self.bullet_punch, self.psychic_fangs],
                                   aggron, typechart)
-        self.assertEqual(mv.name, "Bullet Punch",
-                         "with no 2-turn kill line available from either "
-                         "move, priority must still be the tie-break")
+        self.assertEqual(mv.name, "Psychic Fangs")
 
     def test_a_move_that_kos_outright_still_wins_regardless_of_lookahead(self):
         """The lookahead only matters among moves that DON'T already KO --
@@ -1567,6 +1603,46 @@ class TestSuckerPunchFailsIfTheTargetAlreadyMoved(unittest.TestCase):
             combatants, moves_by_role, hp, typechart, weather, {})
         self.assertEqual(new_hp["C"], 1.0)
         self.assertFalse(log)
+
+    def test_grid_hit_does_not_credit_sucker_punchs_priority_either(self):
+        """"Kingambit should have iron head, kowtow cleave, or low kick,
+        and has no reason to target arcanine [with Sucker Punch]." The 2x2
+        damage-grid cell (`--deep`'s display) has no idea whether Arcanine
+        would actually let Sucker Punch land, so it must not show a number
+        that move could easily never produce -- Kowtow Cleave (unconditional,
+        and the biggest raw hit here) wins instead."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        arcanine = cf._build("Arcanine", merged, natures)
+        candidates = [cf._lookup_move(n, moves) for n in
+                     ("Sucker Punch", "Iron Head", "Kowtow Cleave", "Low Kick")]
+        result = cf._grid_hit(self.kingambit, candidates, arcanine, None, typechart)
+        self.assertEqual(result.move_name, "Kowtow Cleave")
+
+    def test_resolve_turn_reconsiders_away_from_a_wasted_sucker_punch(self):
+        """End to end, through `_resolve_turn`: Kingambit's independent
+        pick (Sucker Punch, since it clears the same 2-turn-kill bar as
+        Kowtow Cleave and USED to win on priority) fails outright once
+        Arcanine's own move is Extreme Speed -- Kingambit must reconsider
+        to Kowtow Cleave rather than log nothing at all."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        kingambit_moves = cf._move_infos(
+            "Kingambit", merged, moves, ["Sucker Punch", "Kowtow Cleave"])
+        arcanine = cf._build("Arcanine", merged, natures)
+        arcanine_moves = cf._move_infos("Arcanine", merged, moves,
+                                        ["Extreme Speed"])
+        combatants = {"C": kingambit, "P": arcanine, "E1": arcanine,
+                     "E2": arcanine}
+        moves_by_role = {"C": kingambit_moves, "P": [],
+                         "E1": arcanine_moves, "E2": []}
+        weather = cf._field_weather(combatants)
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        _new_hp, log, _ea, _w = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"C": "E1"})
+        by_role = {(role, tgt): h.move_name for role, tgt, h in log}
+        self.assertEqual(by_role.get(("C", "E1")), "Kowtow Cleave")
 
 
 class TestJointDamageLog(unittest.TestCase):
