@@ -194,8 +194,8 @@ import argparse  # noqa: E402
 import _harness  # noqa: E402,F401
 
 from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
-                            bring4_search, chip_then_ko, deep_dive,
-                            joint_pair_search, joint_pool_search,
+                            _pair_sort_key, bring4_search, chip_then_ko,
+                            deep_dive, joint_pair_search, joint_pool_search,
                             member_weakness_summary, multi_bring4_beam,
                             multi_bring4_coverage, multi_bring4_exhaustive,
                             pair_search, speed_tiers, switch_in_search,
@@ -584,7 +584,14 @@ def _print_joint(rows, targets, top, partner, turns):
         print(f"  {i:>3} {c_name} + {p_name}:")
         for (e1, e2), d in worst[:3]:
             role_name["E1"], role_name["E2"] = e1, e2
-            tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
+            if d.get("tailwind_forced"):
+                tw = (f"  [REAL TAILWIND THREAT: {e1}/{e2} can actually set "
+                     f"it -- assumed, result is {d['tailwind_outcome']} "
+                     f"(would be {d['outcome_without_tailwind']} without it)]")
+            elif not d["tailwind_safe"]:
+                tw = f"  [tailwind: {d['tailwind_outcome']}]"
+            else:
+                tw = ""
             pr = "" if d["protect_safe"] else (
                 f"  [protect: {e1} protects->{d['protect_outcomes']['E1']}, "
                 f"{e2} protects->{d['protect_outcomes']['E2']}]")
@@ -628,7 +635,14 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
     role_name = {"C": name1, "P": name2}
     for (e1, e2), d in ordered:
         role_name["E1"], role_name["E2"] = e1, e2
-        tw = "" if d["tailwind_safe"] else f"  [UNSAFE under tailwind: {d['tailwind_outcome']}]"
+        if d.get("tailwind_forced"):
+            tw = (f"  [REAL TAILWIND THREAT: {e1}/{e2} can actually set it "
+                 f"-- assumed, result is {d['tailwind_outcome']} (would be "
+                 f"{d['outcome_without_tailwind']} without it)]")
+        elif not d["tailwind_safe"]:
+            tw = f"  [UNSAFE under tailwind: {d['tailwind_outcome']}]"
+        else:
+            tw = ""
         pr = "" if d["protect_safe"] else (
             f"  [UNSAFE if {e1} protects: {d['protect_outcomes']['E1']}; "
             f"if {e2} protects: {d['protect_outcomes']['E2']}]")
@@ -711,6 +725,31 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
     print("           board state. Ranked on THIS, not the average: a")
     print("           bring-4 with one great pair and one awful one loses to")
     print("           a bring-4 that's merely good everywhere.")
+
+
+def _print_pair_summary(coverage, top=10):
+    """"I want to at least see the results (i.e., high performing pairs,
+    results /15)" -- `multi_bring4_coverage`'s own Stage A already ran the
+    full pool-wide pair search against EVERY named enemy (`per_enemy`), a
+    cost that's linear-ish in pool size (C(pool,2) pairs, same as --joint),
+    entirely independent of whether the LATER team-of-6 sweep
+    (`multi_bring4_exhaustive`/`multi_bring4_beam`) can run at all -- so
+    this always has something to show, even when the candidate pool is far
+    too large for an exhaustive C(N,6) sweep. For each enemy, the top pairs
+    by beaten fraction (swept+traded)/total -- "/15" for a full 6-Pokemon
+    enemy roster (C(6,2)=15 pairs), whatever the real total is otherwise.
+    """
+    for i, (target_names, rows) in enumerate(
+            zip(coverage["target_name_lists"], coverage["per_enemy"]), start=1):
+        total = rows[0]["pairs_total"] if rows else 0
+        print(f"  Enemy {i} ({', '.join(target_names)}) -- top pairs:")
+        ranked = sorted(rows, key=_pair_sort_key)
+        for r in ranked[:top]:
+            beaten = r["pairs_swept"] + r["pairs_traded"]
+            n1, n2 = r["pair"]
+            print(f"      {n1} + {n2}: {beaten}/{total} beaten "
+                 f"({r['pairs_swept']} swept, {r['pairs_traded']} traded)")
+    print()
 
 
 def _print_teamsheet_member(name, target_names, merged, moves_db, natures,
@@ -1242,6 +1281,14 @@ def main():
         print(f"Candidate pool (appears in a good pair for >= "
              f"{args.min_enemies} of {len(vs_teams)} enemies): "
              f"{len(coverage['candidate_pool'])} of {len(pool)}\n")
+        # Stage A (the pair-vs-each-enemy search) is already done at this
+        # point, regardless of whether the team-of-6 sweep below can even
+        # run -- "I want to at least see the results (i.e., high performing
+        # pairs, results /15)" when a huge candidate pool makes the
+        # exhaustive sweep infeasible. Always shown, not just on that
+        # fallback, so a --multi-bring4 run never depends on Stage B
+        # succeeding to show anything at all.
+        _print_pair_summary(coverage, top=args.top)
         if args.beam:
             multi_rows = multi_bring4_beam(
                 coverage, good_threshold=good_threshold,
@@ -1254,9 +1301,23 @@ def main():
                     coverage, good_threshold=good_threshold,
                     max_candidates=args.max_candidates, max_weak=args.max_weak,
                     type_limits=type_limits)
+                mode_label = "exhaustive"
             except ValueError as e:
-                raise SystemExit(str(e))
-            mode_label = "exhaustive"
+                # "It should be very quick to compute the sets of 4 brings
+                # for each [enemy] with the highest wins /15 ... this
+                # should not take long" -- multi_bring4_beam already IS
+                # that fast path (bounded by beam_width * pool_size per
+                # growth step, not C(pool,6)), and it's built from the
+                # exact same already-computed pair data Stage A just
+                # produced -- no new racing. Auto-fallback instead of
+                # erroring out with nothing to show.
+                print(f"{e}\nFalling back to --beam automatically (width "
+                     f"{args.beam_width}) so there's still a result.\n")
+                multi_rows = multi_bring4_beam(
+                    coverage, good_threshold=good_threshold,
+                    beam_width=args.beam_width, max_weak=args.max_weak,
+                    type_limits=type_limits)
+                mode_label = f"beam, width {args.beam_width} (auto-fallback)"
         _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
                             good_threshold, len(coverage["candidate_pool"]),
                             len(pool), merged, moves, natures, typechart,

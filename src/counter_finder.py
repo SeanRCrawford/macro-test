@@ -1394,6 +1394,19 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     `_reconsider_for_survival` is the dedicated place priority-driven
     reconsideration actually belongs (surviving to act, or a Sucker Punch
     pick that would otherwise fail).
+
+    SPREAD MOVES RANK BY HOW MANY TARGETS THEY GUARANTEE KILLING RIGHT NOW,
+    not an all-or-nothing "does it KO every target" flag: a Heat Wave that
+    outright kills one of two live enemies (and merely chips the other)
+    must still outrank a single-target Weather Ball that kills neither --
+    even though neither move clears every target, and even though Weather
+    Ball's OWN 2-turn-kill lookahead on its one target can look satisfied
+    (fed by Heat Wave's own big hit on that same target as the "best
+    follow-up") while Heat Wave's spread-wide `kos_in_two` fails on its
+    weaker leg. `kos_now_count`/`kos_in_two_count` (0, 1, or more for a
+    spread move; 0 or 1 for a single-target one) are compared before raw
+    damage for exactly this reason -- an outright kill on even one target
+    is worth more than any amount of un-lethal chip.
     """
     if not live_targets:
         return {}, None
@@ -1433,17 +1446,18 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
     best_key, best_hits, best_move = None, {}, None
     for mv, role, got in single_candidates:
-        kos_now = got.frac >= 1.0
-        kos_in_two = kos_now or (got.frac + best_frac_by_role[role]) >= 1.0
-        key = (kos_now, kos_in_two, got.frac)
+        kos_now_count = 1 if got.frac >= 1.0 else 0
+        kos_in_two_count = 1 if (kos_now_count or
+                                 (got.frac + best_frac_by_role[role]) >= 1.0) else 0
+        key = (kos_now_count, kos_in_two_count, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
     for mv, hits in spread_candidates:
-        kos_now = all(h.frac >= 1.0 for h in hits.values())
-        kos_in_two = kos_now or all(
-            h.frac >= 1.0 or (h.frac + best_frac_by_role[role]) >= 1.0
-            for role, h in hits.items())
-        key = (kos_now, kos_in_two, sum(h.frac for h in hits.values()))
+        kos_now_count = sum(1 for h in hits.values() if h.frac >= 1.0)
+        kos_in_two_count = sum(
+            1 for role, h in hits.items()
+            if h.frac >= 1.0 or (h.frac + best_frac_by_role[role]) >= 1.0)
+        key = (kos_now_count, kos_in_two_count, sum(h.frac for h in hits.values()))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move
@@ -1905,7 +1919,7 @@ def _ohko_risk(grid):
 
 
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
-                     turns, want_grid=False):
+                     turns, want_grid=False, merged=None):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
@@ -1952,11 +1966,35 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     each, cheap for the single fixed pair `--deep` checks but wasted (and
     never displayed) for a pool-wide search, so it defaults OFF and only
     the `--deep` CLI path turns it on.
+
+    TAILWIND AS AN ASSUMED THREAT, not just a hypothesis footnote: "If the
+    enemy has a tailwind setter and tailwind is a loss, assume they set
+    tailwind and see if it is a loss." When either `e1_name` or `e2_name`
+    has REAL usage-data access to Tailwind (`merged[name]["moves_usage"]`,
+    the same real-movepool source `_field_weather`/ability lookups already
+    trust -- not just the hypothetical speed-doubling check every pair
+    already gets), and that hypothesis race comes out WORSE than the
+    normal-speed one (`_JOINT_OUTCOME_RANK`), the tailwind race's own
+    outcome/turns_used/log REPLACE the normal ones as `outcome`/
+    `turns_used`/`log` -- feeding the summary counts and the worst-enemy-
+    mega minimax below exactly the way a real threat should, rather than
+    being reported as a win with a buried caveat. `merged=None` (no usage
+    data available) or neither enemy actually knowing Tailwind leaves this
+    a no-op: `outcome` stays the normal-speed result, same as before this
+    was added. The pre-override result survives either way as
+    `outcome_without_tailwind`; `tailwind_forced` says whether the swap
+    happened; `tailwind_outcome`/`tailwind_safe` are unchanged -- still the
+    raw hypothesis-race read, independent of whether it was real enough to
+    get promoted.
     """
     m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
     detail = {}
     for e1_name, e2_name in itertools.combinations(target_names, 2):
         e1m, e2m = enemy_built[e1_name]["moves"], enemy_built[e2_name]["moves"]
+        real_tailwind_threat = merged is not None and any(
+            mv_name == "Tailwind"
+            for name in (e1_name, e2_name)
+            for mv_name, _pct in merged.get(name, {}).get("moves_usage", []))
 
         best = None
         for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built):
@@ -1967,7 +2005,7 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 weather = _field_weather(combatants)
                 outcome, turns_used, _hp, log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns)
-                tw_outcome, _tw_t, _tw_hp, _tw_log = _joint_race(
+                tw_outcome, tw_turns_used, _tw_hp, tw_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
                     enemy_speed_mult=2.0)
                 pr_e1_outcome, _pr1_t, _pr1_hp, _pr1_log = _joint_race(
@@ -1977,14 +2015,22 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     combatants, moves_by_role, typechart, weather, turns,
                     first_turn_protected_role="E2")
                 protect_outcomes = {"E1": pr_e1_outcome, "E2": pr_e2_outcome}
+                tailwind_forced = (real_tailwind_threat and
+                                   _JOINT_OUTCOME_RANK[tw_outcome] >
+                                   _JOINT_OUTCOME_RANK[outcome])
                 entry = {
-                    "outcome": outcome, "turns_used": turns_used,
+                    "outcome": tw_outcome if tailwind_forced else outcome,
+                    "outcome_without_tailwind": outcome,
+                    "tailwind_is_real_threat": real_tailwind_threat,
+                    "tailwind_forced": tailwind_forced,
+                    "turns_used": tw_turns_used if tailwind_forced else turns_used,
                     "tailwind_outcome": tw_outcome,
                     "tailwind_safe": tw_outcome in ("sweep", "out_trade"),
                     "protect_outcomes": protect_outcomes,
                     "protect_safe": all(o in ("sweep", "out_trade")
                                         for o in protect_outcomes.values()),
-                    "log": log, "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
+                    "log": tw_log if tailwind_forced else log,
+                    "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
                 }
                 if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
                         > _JOINT_OUTCOME_RANK[worst["outcome"]]):
@@ -2096,7 +2142,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 
         detail, summary = _pair_vs_targets(
             name, partner_name, our_built, target_names, enemy_built,
-            typechart, turns)
+            typechart, turns, merged=merged)
         rows.append({"name": name, "item": item, "detail": detail, **summary})
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
                              -r["pairs_protect_safe"], -r["pairs_tailwind_safe"]))
@@ -2148,7 +2194,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     rows = []
     for n1, n2 in itertools.combinations(built, 2):
         detail, summary = _pair_vs_targets(n1, n2, built, target_names,
-                                           enemy_built, typechart, turns)
+                                           enemy_built, typechart, turns,
+                                           merged=merged)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                     "item2": built[n2]["item"], "detail": detail, **summary})
     rows.sort(key=lambda r: (-(r["pairs_swept"] + r["pairs_traded"]),
@@ -2620,7 +2667,7 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     enemy_built = _build_forms(target_names, merged, natures, moves_db)
     detail, summary = _pair_vs_targets(name1, name2, our_built, target_names,
                                        enemy_built, typechart, turns,
-                                       want_grid=True)
+                                       want_grid=True, merged=merged)
     return item1, item2, detail, summary
 
 

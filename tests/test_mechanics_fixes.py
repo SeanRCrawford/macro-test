@@ -324,6 +324,113 @@ class TestLowKickWeightBasedPower(unittest.TestCase):
                 self.assertAlmostEqual(ratio, 1.0, places=2)
 
 
+class TestEruptionHpScaledPower(unittest.TestCase):
+    """"Eruption damage should also scale with health." Showdown's raw data
+    gives Eruption/Water Spout `basePower: 150` (the full-HP ceiling) with a
+    `basePowerCallback` JS function that scales it down as the user takes
+    damage -- unhandled, this simulator dealt full-HP Eruption damage no
+    matter how much the user had already taken."""
+
+    def test_the_raw_move_data_is_the_full_hp_ceiling(self):
+        """The bug's precondition -- if Showdown ever ships a real fixed
+        basePower for this move, the HP_BASED_POWER special case becomes
+        dead code and this whole fix should be revisited."""
+        from damage import move_from_showdown
+        eruption = move_from_showdown(world()["moves"]["eruption"])
+        self.assertEqual(eruption.power, 150)
+
+    def test_full_hp_uses_the_ceiling_power(self):
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        torkoal = make_combatant("Torkoal", w["merged"], w["natures"])
+        torkoal.current_hp = torkoal.max_hp()
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        _lo, _hi, avg_full, _eff = damage_roll(
+            50, eruption.power, torkoal.stats["spa"], kingambit.stats["spd"],
+            torkoal, kingambit, eruption, w["typechart"])
+        self.assertGreater(avg_full, 0.0)
+
+    def test_half_hp_deals_roughly_half_the_damage(self):
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        full = make_combatant("Torkoal", w["merged"], w["natures"])
+        full.current_hp = full.max_hp()
+        half = make_combatant("Torkoal", w["merged"], w["natures"])
+        half.current_hp = half.max_hp() // 2
+        _lo, _hi, avg_full, _eff = damage_roll(
+            50, eruption.power, full.stats["spa"], kingambit.stats["spd"],
+            full, kingambit, eruption, w["typechart"])
+        _lo, _hi, avg_half, _eff = damage_roll(
+            50, eruption.power, half.stats["spa"], kingambit.stats["spd"],
+            half, kingambit, eruption, w["typechart"])
+        self.assertGreater(avg_half, 0.0, "Eruption dealt zero at half HP")
+        self.assertLess(avg_half, avg_full)
+        ratio = avg_half / avg_full
+        self.assertAlmostEqual(ratio, 0.5, places=1)
+
+    def test_near_zero_hp_still_deals_at_least_minimum_power(self):
+        """`max(1, ...)` -- HP-scaled power never rounds all the way down to
+        zero, matching Showdown's own floor for this callback."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        torkoal = make_combatant("Torkoal", w["merged"], w["natures"])
+        torkoal.current_hp = 1
+        _lo, _hi, avg, _eff = damage_roll(
+            50, eruption.power, torkoal.stats["spa"], kingambit.stats["spd"],
+            torkoal, kingambit, eruption, w["typechart"])
+        self.assertGreater(avg, 0.0)
+
+    def test_helping_hand_still_stacks_correctly_with_hp_scaling(self):
+        """`battle.py` pre-multiplies Helping Hand's 1.5x into the power it
+        passes to `damage_roll` -- multiplication commutes, so a half-HP
+        Eruption with Helping Hand must be exactly 1.5x a half-HP Eruption
+        without it, same ratio as at full HP."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        torkoal = make_combatant("Torkoal", w["merged"], w["natures"])
+        torkoal.current_hp = torkoal.max_hp() // 2
+        _lo, _hi, plain, _eff = damage_roll(
+            50, eruption.power, torkoal.stats["spa"], kingambit.stats["spd"],
+            torkoal, kingambit, eruption, w["typechart"])
+        _lo, _hi, helped, _eff = damage_roll(
+            50, int(eruption.power * 1.5), torkoal.stats["spa"],
+            kingambit.stats["spd"], torkoal, kingambit, eruption,
+            w["typechart"])
+        self.assertAlmostEqual(helped / plain, 1.5, places=1)
+
+    def test_a_reduced_hp_eruption_lands_real_damage_in_a_played_turn(self):
+        """End to end through `Battle.run_turn`: Torkoal takes a hit first,
+        then its own Eruption must reflect the already-reduced HP rather
+        than a static full-HP number."""
+        b = battle(["Torkoal", "Farigiraf"], ["Kingambit", "Garchomp"])
+        torkoal = b.p1.active[0]
+        kingambit = b.p2.active[0]
+        before_hp = kingambit.current_hp
+        b.run_turn(
+            [Action(torkoal, "p1", "move", b.make_move("eruption"),
+                    [kingambit, b.p2.active[1]]),
+             Action(b.p1.active[1], "p1", "protect", b.make_move("protect"),
+                    [b.p1.active[1]])],
+            [Action(kingambit, "p2", "move", b.make_move("tackle"), [torkoal]),
+             Action(b.p2.active[1], "p2", "protect", b.make_move("protect"),
+                    [b.p2.active[1]])])
+        self.assertLess(torkoal.current_hp, torkoal.max_hp(),
+                        "fixture assumes Torkoal took real chip damage first")
+        self.assertLess(kingambit.current_hp, before_hp,
+                        "Eruption dealt zero -- the bug")
+
+
 class TestFakeOutOnlyLegalTurnOne(unittest.TestCase):
     """"Massive error in lead_sweep.py; Sneasler uses fake out turn 2. This
     move can only be used on turn 1. ... The whole point of lead_sweep is it

@@ -184,12 +184,19 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
         pool = ct._apply_preferences(
             list(build_candidate_pool(merged, top_n=16)), merged)
         from counter_finder import multi_bring4_coverage, multi_bring4_exhaustive
+        # good_threshold relaxed from the default 100%: this pool's top pair
+        # against the first enemy team now correctly loses once Whimsicott's
+        # REAL Tailwind access is assumed (see counter_finder.py's
+        # `_pair_vs_targets` -- "assume they set tailwind and see if it is a
+        # loss"), which drops the strict 100%-beaten candidate pool below 4
+        # for this fixture. A softer bar still gives a real, multi-size
+        # candidate pool to exercise the same exhaustive-search structure.
         coverage = multi_bring4_coverage(
             pool,
             [["Kingambit", "Basculegion", "Garchomp", "Whimsicott"],
              ["Sylveon", "Mega Charizard Y", "Sinistcha", "Farigiraf"]],
-            merged, moves, natures, typechart)
-        rows = multi_bring4_exhaustive(coverage)
+            merged, moves, natures, typechart, good_threshold=0.8)
+        rows = multi_bring4_exhaustive(coverage, good_threshold=0.8)
         sizes = {r["core_size"] for r in rows}
         self.assertTrue(sizes, "fixture assumes at least one core is found")
         self.assertTrue(all(r["unused"] == () for r in rows))
@@ -361,6 +368,67 @@ class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
              "--vs-team", "Big 6"])
         self.assertIsNotNone(msg)
         self.assertIn("needs at least 2 Pokemon", msg)
+
+
+class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
+    """"When a sweep of --vs-team gets too many results it doesn't even
+    output the results or anything to CSV. I want to at least see the
+    results (i.e., high performing pairs, results /15) and it should be
+    very quick to compute the sets of 4 brings ... this should not take
+    long." A candidate pool too big for the exhaustive C(N,6) sweep used
+    to abort the whole run via SystemExit before anything printed -- Stage
+    A (the pool-wide pair-vs-each-enemy search) is unaffected by that
+    limit and was simply being thrown away. Now: the pair summary always
+    prints, and hitting the exhaustive ceiling auto-falls back to --beam
+    (already the fast, non-exhaustive path) instead of erroring out."""
+
+    def test_a_too_large_candidate_pool_falls_back_instead_of_exiting(self):
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+             "--pool-size", "12", "--good-threshold", "30",
+             "--min-enemies", "1", "--top", "5", "--max-candidates", "3"])
+        self.assertIsNone(msg, out)
+        self.assertIn("too many for an exhaustive sweep", out)
+        self.assertIn("Falling back to --beam automatically", out)
+        self.assertIn("auto-fallback", out)
+
+    def test_the_pair_summary_prints_even_on_the_fallback_path(self):
+        _msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+             "--pool-size", "12", "--good-threshold", "30",
+             "--min-enemies", "1", "--top", "5", "--max-candidates", "3"])
+        self.assertIn("top pairs:", out)
+        self.assertIn("beaten (", out)
+        self.assertIn("/15 beaten", out)
+
+    def test_the_pair_summary_prints_on_the_normal_exhaustive_path_too(self):
+        """Not just a fallback-only feature -- always shown."""
+        _msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+             "--pool-size", "12", "--good-threshold", "30",
+             "--min-enemies", "1", "--top", "5"])
+        self.assertNotIn("too many for an exhaustive sweep", out)
+        self.assertIn("top pairs:", out)
+
+    def test_csv_export_still_works_after_the_fallback(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(
+                ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+                 "--pool-size", "12", "--good-threshold", "30",
+                 "--min-enemies", "1", "--top", "5", "--max-candidates", "3",
+                 "--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.reader(fh))
+            self.assertGreater(len(rows), 1, "the fallback must still "
+                               "write real rows, not an empty file")
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":

@@ -1047,6 +1047,106 @@ class TestJointProtectRobustness(unittest.TestCase):
         self.assertNotIn("E1", targets_hit)
 
 
+class TestTailwindAsARealThreat(unittest.TestCase):
+    """"If the enemy has a tailwind setter and tailwind is a loss, assume
+    they set tailwind and see if it is a loss." `_pair_vs_targets` already
+    replayed every enemy pair with their speed doubled as a pure hypothesis
+    (`tailwind_outcome`/`tailwind_safe`), regardless of whether either named
+    enemy could actually set it -- which buried a real threat behind a win
+    that only held on the no-Tailwind line of play. Real, verified fixture:
+    Gholdengo (136 speed) + Sylveon (95 speed) against Whimsicott (a real
+    Prankster Tailwind setter, confirmed against `moves_usage`) + Kingambit
+    (70 speed, no speed-boosting item by default). Normally both of ours
+    outspeed Kingambit and the race is an out-trade win; doubled to 140
+    under Tailwind, Kingambit outspeeds BOTH of ours and the same plan
+    turns into a loss (Kowtow Cleave one-shots Gholdengo before it can
+    act)."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        self.our_names = ["Gholdengo", "Sylveon"]
+        self.enemy_names = ["Whimsicott", "Kingambit"]
+        self.our_built = cf._build_forms(self.our_names, merged, natures, moves)
+        self.enemy_built = cf._build_forms(self.enemy_names, merged, natures, moves)
+
+    def _race(self, merged):
+        typechart = self.W["typechart"]
+        detail, summary = cf._pair_vs_targets(
+            self.our_names[0], self.our_names[1], self.our_built,
+            self.enemy_names, self.enemy_built, typechart, turns=2,
+            merged=merged)
+        return detail[tuple(self.enemy_names)], summary
+
+    def test_whimsicott_really_knows_tailwind_kingambit_does_not(self):
+        """The fixture's precondition, checked against real usage data --
+        if this ever stops being true the whole fixture needs revisiting."""
+        merged = self.W["merged"]
+        self.assertTrue(any(mv == "Tailwind" for mv, _pct in
+                            merged["Whimsicott"]["moves_usage"]))
+        self.assertFalse(any(mv == "Tailwind" for mv, _pct in
+                             merged["Kingambit"]["moves_usage"]))
+
+    def test_the_normal_race_alone_is_a_win(self):
+        d, _summary = self._race(merged=None)
+        self.assertEqual(d["outcome_without_tailwind"], "out_trade")
+
+    def test_a_real_tailwind_threat_that_is_worse_becomes_the_outcome(self):
+        d, summary = self._race(merged=self.W["merged"])
+        self.assertTrue(d["tailwind_is_real_threat"])
+        self.assertTrue(d["tailwind_forced"])
+        self.assertEqual(d["tailwind_outcome"], "loss")
+        self.assertEqual(d["outcome"], "loss",
+                         "a real Tailwind threat that turns a win into a "
+                         "loss must be the assumed outcome, not a footnote")
+        self.assertEqual(d["outcome_without_tailwind"], "out_trade",
+                         "the original no-Tailwind result must still be "
+                         "recoverable, not overwritten")
+        self.assertEqual(summary["pairs_lost"], 1)
+        self.assertEqual(summary["pairs_swept"] + summary["pairs_traded"], 0)
+
+    def test_no_usage_data_leaves_the_old_behaviour_unchanged(self):
+        """`merged=None` (the default every existing caller had before this
+        feature) must reproduce the exact old behaviour: `tailwind_outcome`
+        is still computed as a pure hypothesis, but never promoted."""
+        d, summary = self._race(merged=None)
+        self.assertFalse(d["tailwind_is_real_threat"])
+        self.assertFalse(d["tailwind_forced"])
+        self.assertEqual(d["tailwind_outcome"], "loss")
+        self.assertEqual(d["outcome"], "out_trade")
+        self.assertEqual(summary["pairs_swept"] + summary["pairs_traded"], 1)
+
+    def test_the_log_matches_whichever_race_actually_decided_the_outcome(self):
+        """When Tailwind is promoted, `log` must be the Tailwind race's own
+        turns -- Kingambit's Kowtow Cleave one-shots Gholdengo (C) before it
+        ever gets to act -- not the normal-speed race's turns, where
+        Gholdengo survives to attack. Otherwise the log would show a win
+        while `outcome` says loss."""
+        d, _summary = self._race(merged=self.W["merged"])
+        actors = [role for turn in d["log"] for role, _tgt, _hit in turn]
+        self.assertNotIn("C", actors,
+                         "fixture assumes Gholdengo (C) never gets to act "
+                         "once Tailwind is assumed -- Kowtow Cleave kills "
+                         "it first")
+
+    def test_no_override_when_no_enemy_in_the_pair_knows_tailwind(self):
+        """Kingambit alone (no Whimsicott) has no real Tailwind access --
+        the hypothesis replay still runs, but never gets promoted."""
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        typechart = self.W["typechart"]
+        enemy_names = ["Kingambit", "Sylveon"]
+        enemy_built = cf._build_forms(enemy_names, merged, natures, moves)
+        detail, _summary = cf._pair_vs_targets(
+            self.our_names[0], self.our_names[1], self.our_built,
+            enemy_names, enemy_built, typechart, turns=2, merged=merged)
+        d = detail[tuple(enemy_names)]
+        self.assertFalse(d["tailwind_is_real_threat"])
+        self.assertFalse(d["tailwind_forced"])
+        self.assertEqual(d["outcome"], d["outcome_without_tailwind"])
+
+
 class TestJointFocusSashAndSturdy(unittest.TestCase):
     """"The focus sash item also does not seem to work." The joint race
     model previously tracked no items played out over a turn at all (a
@@ -1429,6 +1529,63 @@ class TestOneTurnLookahead(unittest.TestCase):
             {"E1": charizard}, typechart)
         self.assertEqual(mv.name, "Psychic Fangs")
         self.assertIn("E1", hits)
+
+
+class TestSpreadMoveGuaranteedKillCount(unittest.TestCase):
+    """"Why the hell doesn't Mega Charizard Y use Heat Wave if it kills
+    Metagross and also damages Torkoal?" Real, verified fixture: Mega
+    Charizard Y (Drought sun active) against a live Mega Metagross + Torkoal
+    board. Heat Wave (spread) outright kills Mega Metagross but only chips
+    Torkoal, so the OLD all-or-nothing `kos_now`/`kos_in_two` booleans gave
+    it no KO credit at all -- while Weather Ball (single-target, aimed only
+    at Metagross) looked like it "reached a 2-turn kill" on paper because
+    the lookahead's own best-follow-up number was fed by Heat Wave's big
+    hit on that same target. An outright kill on even ONE target must
+    outrank a move that guarantees zero, so `_choose_action` now compares
+    ordinal guaranteed-kill COUNTS ahead of the 2-turn-kill count and raw
+    damage."""
+
+    def setUp(self):
+        self.W = world()
+        merged, natures = self.W["merged"], self.W["natures"]
+        self.charizard = cf._build_form("Mega Charizard Y", merged, natures,
+                                        stay_base=False)
+        self.metagross = cf._build("Mega Metagross", merged, natures)
+        self.torkoal = cf._build("Torkoal", merged, natures)
+        self.heat_wave = cf._lookup_move("Heat Wave", self.W["moves"])
+        self.weather_ball = cf._lookup_move("Weather Ball", self.W["moves"])
+
+    def test_heat_wave_kills_metagross_but_not_torkoal(self):
+        typechart = self.W["typechart"]
+        hw_on_metagross = cf._raw_hit(self.charizard, self.heat_wave,
+                                      self.metagross, typechart,
+                                      weather="sun", roll="avg",
+                                      num_targets_hit=2)
+        hw_on_torkoal = cf._raw_hit(self.charizard, self.heat_wave,
+                                    self.torkoal, typechart, weather="sun",
+                                    roll="avg", num_targets_hit=2)
+        self.assertGreaterEqual(hw_on_metagross.frac, 1.0, "fixture assumes "
+                                "Heat Wave outright kills Mega Metagross")
+        self.assertLess(hw_on_torkoal.frac, 1.0, "fixture assumes Heat "
+                        "Wave does not kill Torkoal")
+
+    def test_weather_ball_alone_never_kills_metagross(self):
+        typechart = self.W["typechart"]
+        wb = cf._raw_hit(self.charizard, self.weather_ball, self.metagross,
+                         typechart, weather="sun", roll="avg")
+        self.assertLess(wb.frac, 1.0, "fixture assumes Weather Ball alone "
+                        "never OHKOs Mega Metagross")
+
+    def test_choose_action_prefers_the_guaranteed_kill_over_bigger_lookahead(self):
+        typechart = self.W["typechart"]
+        hits, mv = cf._choose_action(
+            self.charizard, [self.heat_wave, self.weather_ball],
+            {"E1": self.metagross, "E2": self.torkoal}, typechart,
+            weather="sun")
+        self.assertEqual(mv.name, "Heat Wave")
+        self.assertIn("E1", hits)
+        self.assertIn("E2", hits)
+        self.assertGreaterEqual(hits["E1"].frac, 1.0)
 
 
 class TestSurvivalAwareReconsideration(unittest.TestCase):
