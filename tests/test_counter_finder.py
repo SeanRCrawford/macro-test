@@ -2344,6 +2344,41 @@ class TestBring4Search(unittest.TestCase):
             cf.bring4_search(our6, self.TARGETS, merged, moves, natures, typechart)
 
 
+class TestBring4SearchRejectsOverlap(unittest.TestCase):
+    """Two DIFFERENT preset teams (e.g. picked from a library in a UI) can
+    legitimately share a Pokemon -- `joint_pool_search` silently excludes any
+    pool member also named as an enemy (the right call for
+    `multi_bring4_coverage`'s own "this candidate is someone else's named
+    enemy" case), but `bring4_search`'s `our6` is a FIXED, complete 6 that
+    Stage 2 needs a pair for every member of. Left unchecked this used to
+    crash deep inside `_bring4_candidates` with a bare `KeyError` instead of
+    failing at the door with a clear message, the same way the Mega/base
+    overlap already does."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_shared_name_is_rejected_with_a_clear_message(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        targets = ["Sableye", "Kingambit"]  # Kingambit is also in OUR6
+        with self.assertRaises(ValueError) as ctx:
+            cf.bring4_search(self.OUR6, targets, merged, moves, natures, typechart)
+        self.assertIn("Kingambit", str(ctx.exception))
+
+    def test_no_overlap_still_works(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        targets = ["Sableye", "Ariados"]
+        pair_rows, bring4_rows = cf.bring4_search(
+            self.OUR6, targets, merged, moves, natures, typechart)
+        self.assertEqual(len(pair_rows), 15)
+        self.assertEqual(len(bring4_rows), 15)
+
+
 class TestMultiBring4Search(unittest.TestCase):
     """`multi_bring4_coverage`/`multi_bring4_exhaustive`/`multi_bring4_beam`
     -- generalising `bring4_search` from ONE enemy roster to SEVERAL, by

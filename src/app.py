@@ -121,9 +121,9 @@ if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
 
-tab_build, tab_gen, tab_search, tab_battle, tab_vs, tab_sim = st.tabs(
-    ["Team Builder", "Generate Team", "Lead / Back Search", "Battle Viewer", "Vs Team",
-     "Battle Simulator"])
+tab_build, tab_gen, tab_search, tab_counter, tab_battle, tab_vs, tab_sim = st.tabs(
+    ["Team Builder", "Generate Team", "Lead / Back Search", "Counter Table",
+     "Battle Viewer", "Vs Team", "Battle Simulator"])
 
 
 # ------------------------------------------------------------------ helpers
@@ -2671,6 +2671,17 @@ with tab_search:
             help="Re-runs each recommended matchup with real damage rolls, secondary "
                  "effects like Rock Slide flinches, and coin-flip speed ties, reporting a "
                  "win probability. A deterministic WIN can still be an 80% matchup.")
+        top_leads = st.slider(
+            "Leads fully verified with the real solver", 1, 8, 3,
+            help="The recommended lead/back is picked in two stages: a FAST heuristic "
+                 "screen ranks every possible lead of yours, then only the top N leads "
+                 "(every back behind each) actually get played out with the real solver "
+                 "against all 90 enemy configs -- the number reported is only ever the "
+                 "best of THOSE, never compared against a lead the screen ranked lower. "
+                 "Measured on a real pairing: the lead that actually beats all of their "
+                 "hardest leads sat at screen-rank 17 -- 1 leaves real headroom on the "
+                 "table, higher costs roughly proportionally more (~2.5 min/opponent at "
+                 "3).")
 
         with st.expander("Enemy set overrides (optional)"):
             st.caption("Pin a specific enemy Pokemon's exact item/moves instead of its "
@@ -2713,7 +2724,7 @@ with tab_search:
                     _fl = team_meta.get(tname, {}).get('lead')
                     rob = search_robust_composition(team, roster, merged, moves, natures,
                                                      typechart, max_turns, our_sets=sets,
-                                                     verify_top=1,
+                                                     top_leads=top_leads,
                                                      fixed_lead=_fl,
                                                      enemy_script=_so.script_for(tname),
                                                      script_team=tname if tname in _so.SCRIPTS
@@ -2791,7 +2802,7 @@ with tab_search:
                             rr = search_robust_composition(
                                 team, teams[tname], merged, moves, natures,
                                 typechart, max_turns, our_sets=use_sets,
-                                verify_top=1, fixed_lead=fl,
+                                top_leads=top_leads, fixed_lead=fl,
                                 enemy_script=_so_ab.script_for(tname),
                                 script_team=tname if tname in _so_ab.SCRIPTS
                                 else None, enemy_sets=te, pilot=PILOT)
@@ -3150,6 +3161,209 @@ with tab_search:
                                            "salvage now act on this matchup.")
                     if shown == 0:
                         st.success("No losses against any of the 90 enemy brings.")
+
+
+# ------------------------------------------------------------------ counter table
+with tab_counter:
+    st.subheader("Counter Table")
+    st.caption("`tools/counter_table.py`'s own search, in the app -- team-of-4/5/6 "
+               "search across SEVERAL enemy rosters at once, and joint pair search "
+               "(generate a partner for a named Pokemon), both built on "
+               "`counter_finder.py`'s cheap arithmetic model (average rolls, no "
+               "punish/exploitability audit -- a fast SCREEN, same role it plays for "
+               "the CLI). Use Lead / Back Search for the slow, honest, real-solver "
+               "verification of whatever this recommends.")
+    from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search,
+                                joint_pair_search, member_weakness_summary,
+                                multi_bring4_beam, multi_bring4_coverage,
+                                multi_bring4_exhaustive)
+    from team_search import build_candidate_pool
+
+    ct_mode = st.radio(
+        "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
+                 "Joint pair search"], key="ct_mode", horizontal=True)
+
+    ct_allow_scarf = st.checkbox(
+        "Allow Choice Scarf", value=False, key="ct_allow_scarf",
+        help="Off by default -- Regulation M-B bans Assault Vest/Choice Band/"
+             "Choice Specs outright (never offered), and Scarf is legal but "
+             "excluded from this search by default (`DEFAULT_EXCLUDED_ITEMS`), "
+             "matching the CLI's own default.")
+    ct_excluded = frozenset() if ct_allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    ct_turns = st.slider("Turns", 1, 4, 2, key="ct_turns",
+                         help="How many turns the joint race is played out for.")
+
+    if ct_mode == "Bring-4 (one enemy roster)":
+        st.caption("For an ALREADY-DECIDED team of 6, which 4 should you actually "
+                   "bring against one specific enemy roster? Every C(6,2)=15 pair, "
+                   "then every C(6,4)=15 possible bring-4, ranked by how its WORST "
+                   "pair does (protect-safe wins first, then beaten count), then by "
+                   "how many enemy pairs NONE of its 6 pairs can beat.")
+        b1, b2 = st.columns(2)
+        ct_our_source = b1.selectbox(
+            "Our 6", ["(current Team Builder team)"] + list(teams), key="ct_b4_our")
+        our6 = (get_state_team() if ct_our_source == "(current Team Builder team)"
+               else list(teams[ct_our_source]))
+        ct_vs_name = b2.selectbox("Enemy roster", list(teams), key="ct_b4_vs")
+        vs_roster = list(teams[ct_vs_name])
+        ct_good = st.slider("Good-pair bar (%)", 0, 100, 100, key="ct_b4_good",
+                            help="A pair 'clears the bar' if it beats at least this "
+                                 "share of the enemy roster's own C(len,2) pairs.")
+        if len(our6) != 6:
+            st.warning("Pick exactly 6 (load a team in Team Builder, or choose a "
+                       "preset above).")
+        elif st.button("Search bring-4s", type="primary", key="ct_b4_go"):
+            try:
+                with st.spinner("Searching every pair, then every bring-4..."):
+                    pair_rows, bring4_rows = bring4_search(
+                        our6, vs_roster, merged, moves, natures, typechart,
+                        turns=ct_turns, good_threshold=ct_good / 100,
+                        excluded_items=ct_excluded)
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                total = pair_rows[0]["pairs_total"] if pair_rows else 0
+                st.markdown(f"**Stage 1** -- all {len(pair_rows)} pairs drawn from your 6, "
+                           f"vs {ct_vs_name}'s {total} enemy pairs:")
+                st.dataframe(pd.DataFrame([
+                    {"Pair": " + ".join(r["pair"]),
+                     "Beaten": f"{r['pairs_swept'] + r['pairs_traded']}/{total}",
+                     "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
+                     "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
+                     "Tailwind-safe": r["pairs_tailwind_safe"],
+                     "Protect-safe": r["pairs_protect_safe"]}
+                    for r in pair_rows]), width='stretch', hide_index=True)
+                st.markdown(f"**Stage 2** -- all {len(bring4_rows)} possible bring-4s, "
+                           f"ranked best worst-case first:")
+                st.dataframe(pd.DataFrame([
+                    {"Bring-4": " / ".join(b["bring4"]),
+                     "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
+                     "Good pairs": f"{b['pairs_good']}/6",
+                     "Worst pair": " + ".join(b["worst_pair"]),
+                     "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
+                                           f"/{total}")}
+                    for b in bring4_rows]), width='stretch', hide_index=True)
+
+    elif ct_mode == "Multi-bring4 (several enemy rosters)":
+        st.caption("Search a whole POOL for the best team-of-4/5/6 across SEVERAL "
+                   "named enemy rosters at once -- a real team's set is searched "
+                   "ONCE (against the union of every enemy) and held fixed, the way "
+                   "a real tournament team can't be re-optimised battle to battle.")
+        pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 80, 34,
+                              key="ct_mb4_pool")
+        ct_vs_names = st.multiselect("Enemy rosters", list(teams),
+                                     default=list(teams)[:3], key="ct_mb4_vs")
+        c1, c2, c3 = st.columns(3)
+        ct_good2 = c1.slider("Good-pair bar (%)", 0, 100, 100, key="ct_mb4_good")
+        ct_min_enemies = c2.slider(
+            "Min enemies a member must be 'good' against", 1,
+            max(1, len(ct_vs_names)), min(2, max(1, len(ct_vs_names))),
+            key="ct_mb4_minenemies",
+            help="Narrows the candidate pool to members who appear in a good pair "
+                 "for at least this many of the named rosters, before the "
+                 "expensive team-of-6 sweep.")
+        ct_max_weak = c3.slider("Max weaknesses per type", 0, 6, 2, key="ct_mb4_maxweak")
+        c4, c5 = st.columns(2)
+        ct_max_megas = c4.slider("Max Mega-stone users on a team", 0, 6, 2,
+                                 key="ct_mb4_maxmegas")
+        ct_search_kind = c5.radio("Search", ["Exhaustive", "Beam (broader pool)"],
+                                  key="ct_mb4_kind", horizontal=True)
+        if ct_search_kind == "Beam (broader pool)":
+            ct_beam_width = st.slider("Beam width", 5, 100, 40, key="ct_mb4_beamw")
+        top_n = st.slider("Show top N cores", 1, 20, 5, key="ct_mb4_topn")
+
+        if len(ct_vs_names) < 1:
+            st.warning("Pick at least one enemy roster.")
+        elif st.button("Search multi-bring4", type="primary", key="ct_mb4_go"):
+            pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
+            target_name_lists = [list(teams[n]) for n in ct_vs_names]
+            with st.spinner(f"Pair-searching {len(pool)} Pokemon against "
+                            f"{len(ct_vs_names)} enemy roster(s)..."):
+                coverage = multi_bring4_coverage(
+                    pool, target_name_lists, merged, moves, natures, typechart,
+                    turns=ct_turns, good_threshold=ct_good2 / 100,
+                    min_enemies=ct_min_enemies, excluded_items=ct_excluded)
+            st.caption(f"Candidate pool (appears in a good pair for >= "
+                      f"{ct_min_enemies} of {len(ct_vs_names)} enemies): "
+                      f"{len(coverage['candidate_pool'])} of {len(pool)}")
+            if len(coverage["candidate_pool"]) < 4:
+                st.error("Fewer than 4 candidates survive -- widen the pool, lower "
+                         "the good-pair bar, or lower min-enemies.")
+            else:
+                with st.spinner("Searching cores..."):
+                    if ct_search_kind == "Exhaustive":
+                        try:
+                            rows = multi_bring4_exhaustive(
+                                coverage, good_threshold=ct_good2 / 100,
+                                max_weak=ct_max_weak, max_megas=ct_max_megas)
+                        except ValueError as e:
+                            st.error(f"{e} -- try Beam instead.")
+                            rows = None
+                    else:
+                        rows = multi_bring4_beam(
+                            coverage, good_threshold=ct_good2 / 100,
+                            beam_width=ct_beam_width, max_weak=ct_max_weak,
+                            max_megas=ct_max_megas)
+                if rows:
+                    st.session_state["ct_mb4_rows"] = rows
+                    st.session_state["ct_mb4_vs_names"] = ct_vs_names
+                elif rows is not None:
+                    st.error("No core (4, 5, or 6 Pokemon) found -- widen the pool, "
+                             "lower the good-pair bar/min-enemies, relax max-weak, "
+                             "or try Beam.")
+
+        rows = st.session_state.get("ct_mb4_rows")
+        shown_vs = st.session_state.get("ct_mb4_vs_names") or []
+        if rows:
+            for i, r in enumerate(rows[:top_n], start=1):
+                core = r["core"]
+                with st.expander(f"#{i} ({r['core_size']}) {' / '.join(core)}",
+                                 expanded=(i == 1)):
+                    weak = member_weakness_summary(core, merged)
+                    by_type = sorted(((t, c) for t, c in weak["per_type"].items() if c > 0),
+                                     key=lambda tc: -tc[1])
+                    st.caption(f"Weak to 2+ types: {weak['weak_to_2plus']} members -- "
+                              + (", ".join(f"{t} {c}" for t, c in by_type)
+                                 if by_type else "no weaknesses"))
+                    for e_idx, pe in enumerate(r["per_enemy"]):
+                        wr = pe["best_bring4_row"]["worst_pair_row"]
+                        total = wr["pairs_total"]
+                        beaten = wr["pairs_swept"] + wr["pairs_traded"]
+                        uncovered = pe["best_bring4_row"]["uncovered_enemy_pairs"]
+                        bottleneck = "  <-- bottleneck" if e_idx == r["worst_enemy_idx"] else ""
+                        name = shown_vs[e_idx] if e_idx < len(shown_vs) else f"enemy {e_idx + 1}"
+                        st.markdown(f"**vs {name}**: bring {' / '.join(pe['best_bring4'])} "
+                                  f"(worst pair beats {beaten}/{total}){bottleneck}")
+                        if uncovered:
+                            st.caption("No answer to: " + ", ".join(
+                                f"{a}+{b}" for a, b in uncovered))
+
+    else:  # Joint pair search
+        st.caption("GENERATE a partner for a fixed Pokemon: every legal pool member "
+                   "paired with it, both fully searched (item + moveset), against "
+                   "every pair drawn from the enemy roster.")
+        pool_size2 = st.slider("Search pool size (top-Score Pokemon)", 10, 80, 34,
+                               key="ct_jp_pool")
+        j1, j2 = st.columns(2)
+        ct_partner = j1.selectbox("Fixed partner", all_names, key="ct_jp_partner")
+        ct_jp_vs = j2.selectbox("Enemy roster", list(teams), key="ct_jp_vs")
+        top_n2 = st.slider("Show top N pairs", 1, 30, 10, key="ct_jp_topn")
+        if st.button("Search partners", type="primary", key="ct_jp_go"):
+            pool = build_candidate_pool(merged, top_n=pool_size2, prefs=prefs)
+            vs_roster2 = list(teams[ct_jp_vs])
+            with st.spinner(f"Searching {len(pool)} Pokemon as {ct_partner}'s partner..."):
+                rows = joint_pair_search(
+                    pool, vs_roster2, ct_partner, merged, moves, natures, typechart,
+                    turns=ct_turns, excluded_items=ct_excluded)
+            total = rows[0]["pairs_total"] if rows else 0
+            st.dataframe(pd.DataFrame([
+                {"Name": r["name"], "Item": r["item"],
+                 "Beaten": f"{r['pairs_swept'] + r['pairs_traded']}/{total}",
+                 "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
+                 "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
+                 "Tailwind-safe": r["pairs_tailwind_safe"],
+                 "Protect-safe": r["pairs_protect_safe"]}
+                for r in rows[:top_n2]]), width='stretch', hide_index=True)
 
 
 # ------------------------------------------------------------------ battle

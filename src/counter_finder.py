@@ -2530,6 +2530,18 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     if overlap:
         raise ValueError(f"can't bring both a Mega and its own base form: "
                          f"{', '.join(sorted(overlap))}")
+    shared = set(our6) & set(target_names)
+    if shared:
+        # joint_pool_search silently excludes any pool member also named as
+        # an enemy (the right call for multi_bring4_coverage's own "this
+        # candidate is someone else's named enemy" case) -- but `our6` here
+        # is a FIXED, complete 6, every member of which Stage 2 needs a
+        # pair for. Left unchecked this doesn't fail here; it fails deep
+        # inside `_bring4_candidates` with a bare KeyError once Stage 2
+        # tries to look up a pair that was silently never computed.
+        raise ValueError(f"our6 and target_names share a Pokemon, which "
+                         f"can't be both ours and the enemy's: "
+                         f"{', '.join(sorted(shared))}")
     pair_rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
                                   typechart, turns=turns,
                                   item_overrides=item_overrides,

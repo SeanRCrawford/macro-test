@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 from _harness import load_world  # noqa: E402
 
 APP = os.path.join(os.path.dirname(__file__), "..", "src", "app.py")
-SIM_TAB_INDEX = 5  # Team Builder, Generate, Lead/Back, Battle Viewer, Vs Team, Battle Simulator
+SIM_TAB_INDEX = 6  # Team Builder, Generate, Lead/Back, Counter Table, Battle Viewer, Vs Team, Battle Simulator
 
 _WORLD = None
 
