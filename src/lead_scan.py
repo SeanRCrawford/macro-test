@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 
 from damage import hits_ally, is_spread_move
 from pin import _incoming, _kills_outright, _moves_first, mega_bulk_factor
-from species_data import base_form_name
+from species_data import NO_MEGA, base_form_name
 
 # Verdicts, best first. Order matters: `scan` reports the FIRST that applies, so
 # "we outspeed and OHKO it" is preferred over "we can grind it down", even
@@ -628,6 +628,15 @@ class PairResult:
     patch: tuple | None = None
     log: list = field(default_factory=list)   # the turn-by-turn, when asked for
     play: object = None                       # the Play we make about it
+    # WHICH of their bring-4s this verdict is against -- the worst one for us,
+    # since they chose their four after seeing ours. None in sweep mode, where
+    # the enemy is their lead pair alone.
+    bring: tuple | None = None
+    # The same opening played with NOTHING behind their lead (see
+    # `enemy_positions`). Kept beside the calibrated verdict rather than
+    # replaced by it, because the gap between the two IS the answer to "how
+    # much of this opening is their backs".
+    blank: object = None
 
     @property
     def held(self) -> bool:
@@ -1465,7 +1474,8 @@ def _optimised_sets(our4, enemy_roster, world):
     return sets
 
 
-def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
+def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3,
+               enemy4=None, mega_name=None):
     """Items that turn a losing opening into a held one. [(mon, item, play)].
 
     Tries each candidate on each of our four, one at a time -- a single change,
@@ -1475,6 +1485,12 @@ def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
     breadth: this is a search among many candidates, not the final verdict, and
     a candidate worth taking should be re-checked at full breadth (which
     `full_report` already does for whatever bring is eventually chosen).
+
+    `enemy4`/`mega_name` pin the position to test against -- pass the losing
+    opening's own `PairResult.bring` and the Mega it was scored under, so the
+    fix answers the game the report judged. Without them it falls back to their
+    lead pair plus the next two names on the roster, which is at least a legal
+    bring-4.
     """
     from optimize_sets import TYPE_RESIST_BERRY
 
@@ -1482,7 +1498,15 @@ def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
     if not all(n in enemy_roster for n in their_lead):
         return []
     base_sets = _optimised_sets(our4, enemy_roster, world)
-    enemy4 = list(their_lead) + [n for n in enemy_roster if n not in their_lead]
+    # THE POSITION THE REPORT JUDGED, not a different one. `enemy4` is the
+    # bring `full_report` found worst for us behind this lead (`PairResult.
+    # bring`); an item tested against a six-deep bench, which is what this used
+    # to build, is an item tested in a game neither side can play, and a "fix"
+    # for an opening that was never scored that way is not a fix.
+    enemy4, enemy_mega = _as_bring(
+        list(enemy4) if enemy4 else
+        list(their_lead) + [n for n in enemy_roster if n not in their_lead][:2],
+        mega_name)
     lead, back = list(our4[:2]), list(our4[2:])
 
     def run(overrides):
@@ -1490,7 +1514,8 @@ def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
         for name, ov in overrides.items():
             sets.setdefault(name, {}).update(ov)
         battle, movesets, _s = sim.build_position(our4, enemy4, world,
-                                                   our_sets=sets, optimise=False)
+                                                   our_sets=sets, optimise=False,
+                                                   enemy_mega=enemy_mega)
         return plays_for(battle, movesets, lead, back, turns=turns,
                          breadth="cheap")[0]
 
@@ -1499,7 +1524,8 @@ def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
         return []
 
     battle0, movesets0, _s0 = sim.build_position(
-        our4, enemy4, world, our_sets=base_sets, optimise=False)
+        our4, enemy4, world, our_sets=base_sets, optimise=False,
+        enemy_mega=enemy_mega)
     ours0 = battle0.p1.roster
     theirs0 = battle0.p2.roster[:2]
     berries = [TYPE_RESIST_BERRY[t] for t in
@@ -1518,9 +1544,73 @@ def item_fixes(our4, enemy_roster, world, their_lead, turns=2, limit=3):
     return found[:limit]
 
 
+# The enemy rosters an opening is played against, and why there is more than one.
+#
+#     "the openings change vs a given lead depending on what's in the back --
+#      YOU DONT KNOW WHAT'S IN THE BACK UNTIL IT COMES OUT"
+#
+# That report was acted on for the committed-plan path (`committed_plan.
+# enemy_brings`) and never reached this one, which went on handing the enemy
+# their whole SIX behind every lead pair. Six is not a harder version of the
+# matchup, it is a different game -- they bring four, so two of those names are
+# at home and cannot replace anything.
+BLANK, WORST, ROSTER = "blank", "worst", "roster"
+
+
+def _as_bring(names, mega_name):
+    """(names, enemy_mega) for a slice of their roster, with one stone.
+
+    A slice can contain a Mega-capable name that is NOT this team's actual
+    choice (Big 6 can bring both Mega Charizard Y and Mega Floette), or can
+    leave that choice at home entirely. `make_team` only pins which name
+    evolves among the ones it is GIVEN and raises if asked to pin one that is
+    absent, and its `None` default evolves whichever Mega name happens to sort
+    first -- which would hand them a second stone. `species_data.NO_MEGA` is
+    the third answer: nobody evolves, the Mega-named picks run in base form
+    holding their stones, which is `force_base_form` and is exactly the
+    one-stone-per-team rule for a slice of a roster.
+    """
+    names = list(names)
+    return names, (mega_name if mega_name in names else NO_MEGA)
+
+
+def enemy_positions(theirs_all, pair, mega_name, backs=WORST):
+    """Their bring-4s to play this opening against, given what we can see.
+
+    `blank`   their lead pair alone -- the opening with NOTHING behind it. Not a
+              legal bring (they always have two more at home) and never scored
+              as one; it is the reference number, "does our lead beat their lead
+              on its own", which is what makes it readable when the calibrated
+              answer is worse.
+    `worst`   every bring-4 consistent with that lead, i.e. every back pair they
+              could still be holding. Scored on the WORST of them, the same rule
+              the rest of this module ranks by, because they chose their four
+              after seeing ours.
+    `roster`  all six. What this function used to do unconditionally; kept so an
+              older number can be reproduced, not because it is a real game.
+
+    A bring that does NOT contain `mega_name` evolves nobody (`_as_bring`
+    returns `NO_MEGA`), which reads oddly on its own -- they brought a
+    Mega-capable Pokemon and it stayed base. It is right because the caller
+    runs this once per `mega_variants` entry: the variant that pins the OTHER
+    Mega covers the same bring with that one evolving, so every combination of
+    (their stone, their four) is still reached, and none of them is quietly
+    handed two stones.
+    """
+    from committed_plan import enemy_brings
+    pair = list(pair)
+    if backs == BLANK:
+        rosters = [pair]
+    elif backs == ROSTER:
+        rosters = [pair + [n for n in theirs_all if n not in pair]]
+    else:
+        rosters = enemy_brings(theirs_all, enemy_lead=pair)
+    return [_as_bring(r, mega_name) for r in rosters]
+
+
 def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
                 want_logs=True, mega_name=None, plays=True, max_losses=0,
-                sets=None):
+                sets=None, backs=WORST):
     """One bring against one opponent (one Mega choice), with everything.
 
     For each of their lead pairs (every combination of two from `enemy_roster`):
@@ -1536,6 +1626,18 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
     second, hand-rolled damage model. `sets` fixes our moves/items instead of
     optimising them fresh; `item_fixes`/`recommended_items` use this to ask
     "what if this one held a different item" without re-deriving everything.
+
+    THEIR BACKS ARE A BRING, NOT A ROSTER. Each opening is played twice over:
+    once with BLANK backs (their lead pair and nothing else, the reference) and
+    then against every bring-4 consistent with that lead, with the WORST of
+    those as the verdict -- `backs="worst"`, the default. Until this session
+    the enemy was handed all SIX names behind every lead pair, which is not a
+    game either side can play: they bring four, so two of those replacements do
+    not exist. `backs="roster"` reproduces that older number and `backs="blank"`
+    scores the lead pair alone; both are for comparison, not for planning. The
+    cost of the default is one `plays_for` per back pair they could be holding
+    (six for a six-name roster) instead of one, so it is roughly 6x the old
+    detailed pass -- the sweep stage below is untouched.
 
     SWEEP MODE (`plays=False`) skips the optimiser entirely when `sets` is not
     given, using the LEGAL usage-default set instead (`_legal_default_sets`).
@@ -1576,21 +1678,59 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
             report.abandoned = True
             break
         if plays:
-            enemy4 = list(pair) + [n for n in theirs_all if n not in pair]
-            battle, movesets, _s2 = sim.build_position(
-                our4, enemy4, world, our_sets=sets, optimise=False,
-                enemy_mega=mega_name)
-            tie = any(race_speed(o, battle.field, "p1")
-                     == race_speed(e, battle.field, "p2")
-                     for o in battle.p1.active if o is not None
-                     for e in battle.p2.active if e is not None)
-            options = plays_for(battle, movesets, lead, back, turns=turns,
-                                want_log=want_logs)
-            best = options[0]
+            # BLANK BACKS FIRST, THEN CALIBRATE. The reference number is the
+            # opening with nothing behind their lead -- our lead pair against
+            # their lead pair and no more. Then the same opening is played
+            # against each bring-4 they could actually be holding, and the
+            # WORST of those is the verdict, because they picked their four
+            # after seeing ours. Reporting both is the point: when the two
+            # disagree, their backs are what saved the opening, and the row
+            # says so instead of the difference vanishing into one number.
+            #
+            # Blank is a REFERENCE, never a candidate -- they always have two
+            # more at home -- and it is deliberately not used to skip the
+            # calibration either. A back that comes in and takes damage adds to
+            # their side of `lead_sim.outcome`'s margin, so blank is not a
+            # bound on the calibrated number in either direction; measured on
+            # Perish Trap it lands +0.65 above the calibrated number on one
+            # opening and -0.96 below it on another. Screening on it would be
+            # arithmetic that happens to be wrong.
+            blank_names, blank_mega = enemy_positions(
+                theirs_all, pair, mega_name, backs=BLANK)[0]
+            blank_battle, blank_ms, _sb = sim.build_position(
+                our4, blank_names, world, our_sets=sets, optimise=False,
+                enemy_mega=blank_mega)
+            bv, _bo, _bt, bm, bplan, _blog = sim.race(
+                blank_battle, blank_ms, turns=turns, want_log=False)
+            blank_play = Play(kind=STAY, verdict=bv, margin=bm,
+                              their_plan=bplan)
+
+            rank = {WIN: 0, EVEN: 1, LOSS: 2}
+            best, enemy4, tie = None, None, False
+            for names, emega in enemy_positions(theirs_all, pair, mega_name,
+                                                backs=backs):
+                b2, ms2, _s2 = sim.build_position(
+                    our4, names, world, our_sets=sets, optimise=False,
+                    enemy_mega=emega)
+                # A tie in ANY of their brings is a hole in the plan, so this
+                # accumulates rather than following the worst bring: which of
+                # their Mega picks is at home changes their lead's Speed, so
+                # two brings behind the same lead pair genuinely can differ on
+                # whether the exact tie exists.
+                tie = tie or any(race_speed(o, b2.field, "p1")
+                                == race_speed(e, b2.field, "p2")
+                                for o in b2.p1.active if o is not None
+                                for e in b2.p2.active if e is not None)
+                cand = plays_for(b2, ms2, lead, back, turns=turns,
+                                 want_log=want_logs)[0]
+                key = (rank.get(cand.verdict, 3), -cand.margin)
+                if best is None or key > (rank.get(best.verdict, 3), -best.margin):
+                    best, enemy4 = cand, list(names)
             # The mop-up: whatever of ours is left (everyone except whoever
-            # left, if anyone did) against whatever of theirs is left
-            # (everyone not in this opening's pair).
-            their_rest = [n for n in theirs_all if n not in pair]
+            # left, if anyone did) against whatever of theirs is left -- the
+            # two they actually brought behind this lead, not the four names
+            # that happen not to be in the opening.
+            their_rest = [n for n in enemy4 if n not in pair]
             our_rest = [n for n in our4 if n != best.leaving]
             v_mop, _m_mop, text = mop_up(our_rest, their_rest, world,
                                          sets=sets, turns=turns)
@@ -1612,8 +1752,8 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
             # roster's default lead ordering silently scored every OTHER
             # pair's Mega candidate at base-form stats -- "mega floette has
             # mega floette stats" failed for 13 of Big 6's 15 pairs. Building
-            # against the FULL 6-Pokemon roster (the `plays=True` branch's
-            # `enemy4`) was itself a needless cost here: `race_robust` only
+            # against a FULL 6-Pokemon roster (what the `plays=True` branch
+            # used to do) was itself a needless cost here: `race_robust` only
             # ever reads `lead` vs `pair`, so a `ThreatMatrix` over all 6 was
             # computing 6x the threat edges this stage actually uses --
             # profiled at over half of every sweep call. Cheap now because
@@ -1627,20 +1767,14 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
             # sweep's score is a lower bound and the detailed report's (which
             # DOES play `Battle.run_turn`) is the real one.
             from threat import build_threat_matrix
-            # A pair can contain a Mega-capable name that is NOT this team's
-            # actual choice (Big 6 can bring both Mega Charizard Y and Mega
-            # Floette). `enemy_mega` only pins which name evolves among the
-            # ones GIVEN to `make_team` -- it raises if asked to pin a name
-            # that is not present at all -- so the other Mega pick has to be
-            # swapped for its base-form name here rather than left as "Mega
-            # X": it does not hold the team's one stone this game, and
-            # evaluating it as its own plain species is what one stone per
-            # team actually means for a 2-Pokemon slice of the roster.
-            pair_names = [n if not (n.startswith("Mega ") and n != mega_name)
-                         else (base_form_name(n) or n) for n in pair]
+            # Their lead pair alone -- BLANK backs, which is all this stage
+            # ever needed: `race_robust` only reads lead vs pair. The Mega
+            # swap that a slice of their roster needs is `_as_bring`'s job,
+            # shared with the detailed pass above.
+            pair_names, pair_mega = _as_bring(pair, mega_name)
             battle, movesets, _s2 = sim.build_position(
                 our4, pair_names, world, our_sets=sets, optimise=False,
-                enemy_mega=mega_name if mega_name in pair_names else None)
+                enemy_mega=pair_mega)
             tie = any(race_speed(o, battle.field, "p1")
                      == race_speed(e, battle.field, "p2")
                      for o in battle.p1.active if o is not None
@@ -1649,10 +1783,12 @@ def full_report(our4, enemy_roster, world, opponent_name="", turns=2,
             v, _o, _t, m, plan = race_robust(matrix, battle.p1.roster,
                                              battle.p2.roster, turns=turns)
             best = Play(kind=STAY, verdict=v, margin=m, their_plan=plan, log=[])
+            blank_play, enemy4 = best, None
         report.results.append(PairResult(
             enemy_lead=tuple(pair), verdict=best.verdict,
             our_dead=0, their_dead=0, margin=best.margin,
             plan=best.their_plan, tie=tie,
+            bring=tuple(enemy4) if enemy4 else None, blank=blank_play,
             # A patch only counts if it actually SALVAGES the opening. Setting
             # it whenever the best play was a switch made `held` true for
             # openings the switch still loses, so the report read "5 patched, 0
@@ -1713,10 +1849,17 @@ def _held_count(our4, enemy_roster, world, sets, mega_name=None, turns=2):
     theirs_all = list(enemy_roster)
     n = 0
     for pair in itertools.combinations(theirs_all, 2):
-        enemy4 = list(pair) + [x for x in theirs_all if x not in pair]
+        # ONE plausible bring-4 behind the pair, not all six. Sweeping their
+        # back pairs here would multiply a ranking tool by six for a number
+        # that only has to ORDER item candidates against each other; handing
+        # them six, which is what this used to do, is not cheaper than a bring
+        # and is not a game.
+        enemy4, emega = _as_bring(
+            list(pair) + [x for x in theirs_all if x not in pair][:2],
+            mega_name)
         battle, movesets, _s = sim.build_position(
             our4, enemy4, world, our_sets=sets, optimise=False,
-            enemy_mega=mega_name)
+            enemy_mega=emega)
         v, _od, _td, _m, _plan, _log = sim.race(battle, movesets, turns=turns,
                                                 breadth="cheap", want_log=False)
         if v != LOSS:

@@ -324,6 +324,160 @@ class TestLowKickWeightBasedPower(unittest.TestCase):
                 self.assertAlmostEqual(ratio, 1.0, places=2)
 
 
+class TestEruptionHpScaledPower(unittest.TestCase):
+    """"Eruption damage should also scale with health." Showdown's raw data
+    gives Eruption/Water Spout `basePower: 150` (the full-HP ceiling) with a
+    `basePowerCallback` JS function that scales it down as the user takes
+    damage -- unhandled, this simulator dealt full-HP Eruption damage no
+    matter how much the user had already taken."""
+
+    def test_the_raw_move_data_is_the_full_hp_ceiling(self):
+        """The bug's precondition -- if Showdown ever ships a real fixed
+        basePower for this move, the HP_BASED_POWER special case becomes
+        dead code and this whole fix should be revisited."""
+        from damage import move_from_showdown
+        eruption = move_from_showdown(world()["moves"]["eruption"])
+        self.assertEqual(eruption.power, 150)
+
+    def test_full_hp_uses_the_ceiling_power(self):
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        torkoal = make_combatant("Torkoal", w["merged"], w["natures"])
+        torkoal.current_hp = torkoal.max_hp()
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        _lo, _hi, avg_full, _eff = damage_roll(
+            50, eruption.power, torkoal.stats["spa"], kingambit.stats["spd"],
+            torkoal, kingambit, eruption, w["typechart"])
+        self.assertGreater(avg_full, 0.0)
+
+    def test_half_hp_deals_roughly_half_the_damage(self):
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        full = make_combatant("Torkoal", w["merged"], w["natures"])
+        full.current_hp = full.max_hp()
+        half = make_combatant("Torkoal", w["merged"], w["natures"])
+        half.current_hp = half.max_hp() // 2
+        _lo, _hi, avg_full, _eff = damage_roll(
+            50, eruption.power, full.stats["spa"], kingambit.stats["spd"],
+            full, kingambit, eruption, w["typechart"])
+        _lo, _hi, avg_half, _eff = damage_roll(
+            50, eruption.power, half.stats["spa"], kingambit.stats["spd"],
+            half, kingambit, eruption, w["typechart"])
+        self.assertGreater(avg_half, 0.0, "Eruption dealt zero at half HP")
+        self.assertLess(avg_half, avg_full)
+        ratio = avg_half / avg_full
+        self.assertAlmostEqual(ratio, 0.5, places=1)
+
+    def test_near_zero_hp_still_deals_at_least_minimum_power(self):
+        """`max(1, ...)` -- HP-scaled power never rounds all the way down to
+        zero, matching Showdown's own floor for this callback."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        torkoal = make_combatant("Torkoal", w["merged"], w["natures"])
+        torkoal.current_hp = 1
+        _lo, _hi, avg, _eff = damage_roll(
+            50, eruption.power, torkoal.stats["spa"], kingambit.stats["spd"],
+            torkoal, kingambit, eruption, w["typechart"])
+        self.assertGreater(avg, 0.0)
+
+    def test_helping_hand_still_stacks_correctly_with_hp_scaling(self):
+        """`battle.py` pre-multiplies Helping Hand's 1.5x into the power it
+        passes to `damage_roll` -- multiplication commutes, so a half-HP
+        Eruption with Helping Hand must be exactly 1.5x a half-HP Eruption
+        without it, same ratio as at full HP."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        eruption = move_from_showdown(w["moves"]["eruption"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        torkoal = make_combatant("Torkoal", w["merged"], w["natures"])
+        torkoal.current_hp = torkoal.max_hp() // 2
+        _lo, _hi, plain, _eff = damage_roll(
+            50, eruption.power, torkoal.stats["spa"], kingambit.stats["spd"],
+            torkoal, kingambit, eruption, w["typechart"])
+        _lo, _hi, helped, _eff = damage_roll(
+            50, int(eruption.power * 1.5), torkoal.stats["spa"],
+            kingambit.stats["spd"], torkoal, kingambit, eruption,
+            w["typechart"])
+        self.assertAlmostEqual(helped / plain, 1.5, places=1)
+
+    def test_a_reduced_hp_eruption_lands_real_damage_in_a_played_turn(self):
+        """End to end through `Battle.run_turn`: Torkoal takes a hit first,
+        then its own Eruption must reflect the already-reduced HP rather
+        than a static full-HP number."""
+        b = battle(["Torkoal", "Farigiraf"], ["Kingambit", "Garchomp"])
+        torkoal = b.p1.active[0]
+        kingambit = b.p2.active[0]
+        before_hp = kingambit.current_hp
+        b.run_turn(
+            [Action(torkoal, "p1", "move", b.make_move("eruption"),
+                    [kingambit, b.p2.active[1]]),
+             Action(b.p1.active[1], "p1", "protect", b.make_move("protect"),
+                    [b.p1.active[1]])],
+            [Action(kingambit, "p2", "move", b.make_move("tackle"), [torkoal]),
+             Action(b.p2.active[1], "p2", "protect", b.make_move("protect"),
+                    [b.p2.active[1]])])
+        self.assertLess(torkoal.current_hp, torkoal.max_hp(),
+                        "fixture assumes Torkoal took real chip damage first")
+        self.assertLess(kingambit.current_hp, before_hp,
+                        "Eruption dealt zero -- the bug")
+
+
+class TestDragoniteAbilityRule(unittest.TestCase):
+    """"Dragonite also seems to keep multiscale no matter how much damage it
+    takes. As a new rule, make sure base form dragonite always has the
+    ability inner focus, but a dragonite holding a mega stone uses
+    multiscale." Usage data alone would give plain Dragonite Multiscale too
+    (75.9% of recorded sets) -- this is an explicit house rule
+    (`combatants.FORCED_BASE_ABILITY`), not a usage-based default."""
+
+    def test_plain_dragonite_is_always_inner_focus(self):
+        from combatants import make_combatant
+        w = world()
+        d = make_combatant("Dragonite", w["merged"], w["natures"])
+        self.assertEqual(d.ability, "Inner Focus")
+
+    def test_mega_dragonite_evolved_is_multiscale(self):
+        from combatants import make_combatant
+        from engine import mega_evolve
+        w = world()
+        d = make_combatant("Mega Dragonite", w["merged"], w["natures"])
+        d.is_mega_pick = True
+        mega_evolve(d)
+        self.assertEqual(d.ability, "Multiscale")
+
+    def test_mega_dragonite_forced_to_stay_base_still_holds_multiscale(self):
+        """"a dragonite HOLDING a mega stone uses multiscale" -- even one
+        that never actually transforms this game (a teammate is the real
+        Mega) still holds the stone, per `_build_combatant`'s own "still
+        holds its stone" comment, and keeps Multiscale rather than falling
+        back to the Inner Focus rule (that rule is for the roster entry
+        that can never hold the stone at all)."""
+        from combatants import make_combatant
+        w = world()
+        d = make_combatant("Mega Dragonite", w["merged"], w["natures"],
+                           force_base_form=True)
+        self.assertEqual(d.ability, "Multiscale")
+
+    def test_an_explicit_ability_override_still_wins(self):
+        """The forced default only fills in when nothing else is asked
+        for -- an explicit `ability=` pin (as several other tests in this
+        suite already rely on for OTHER species) must still work."""
+        from combatants import make_combatant
+        w = world()
+        d = make_combatant("Dragonite", w["merged"], w["natures"],
+                           ability="Multiscale")
+        self.assertEqual(d.ability, "Multiscale")
+
+
 class TestFakeOutOnlyLegalTurnOne(unittest.TestCase):
     """"Massive error in lead_sweep.py; Sneasler uses fake out turn 2. This
     move can only be used on turn 1. ... The whole point of lead_sweep is it
@@ -414,6 +568,67 @@ class TestFakeOutOnlyLegalTurnOne(unittest.TestCase):
         self.assertIsNotNone(turn2_start, log)
         turn2_lines = "\n".join(log[turn2_start:])
         self.assertNotIn("Sneasler uses Fake Out", turn2_lines, log)
+
+
+class TestSuckerPunchFailsIfTheTargetAlreadyMoved(unittest.TestCase):
+    """"Sucker punch fails if the target outspeeds and use[s] a priority
+    move." The existing check only asked "is the target ALSO using a
+    damaging move THIS turn" against `ordered` -- the turn's full,
+    unmutated action list -- so a target whose OWN damaging move had
+    ALREADY resolved (higher priority, or a tied priority tier won on
+    speed) still counted as "the target was attacking", and Sucker Punch
+    landed anyway. It cannot retroactively read a move that already
+    happened -- the real rule is "the target has not yet moved AND that
+    still-pending move is damaging", checked against `remaining` (what's
+    still queued once the Sucker Punch user's own action was popped off),
+    not the original `ordered` list.
+    """
+
+    def test_extreme_speed_beats_sucker_punch_and_it_fails(self):
+        """Extreme Speed is priority +2, always ahead of Sucker Punch's +1
+        regardless of raw speed -- Dragonite has already moved by the time
+        Kingambit's Sucker Punch would resolve."""
+        b = battle(["Kingambit", "Whimsicott"], ["Dragonite", "Sylveon"])
+        kingambit, dragonite = b.p1.active[0], b.p2.active[0]
+        sucker_punch = b.make_move("suckerpunch")
+        extreme_speed = b.make_move("extremespeed")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(kingambit, "p1", "move", sucker_punch, [dragonite]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(dragonite, "p2", "move", extreme_speed, [kingambit]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("Sucker Punch failed", log, log)
+        self.assertIn("Extreme Speed", log, log)
+
+    def test_a_target_that_has_not_moved_yet_is_still_hit(self):
+        """Contrast: a target using an ordinary (priority 0) damaging move
+        has NOT yet acted when Sucker Punch (priority +1) resolves --
+        Sucker Punch must still land normally, same as before this fix."""
+        b = battle(["Kingambit", "Whimsicott"], ["Corviknight", "Sylveon"])
+        kingambit, corviknight = b.p1.active[0], b.p2.active[0]
+        sucker_punch = b.make_move("suckerpunch")
+        body_press = b.make_move("bodypress")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(kingambit, "p1", "move", sucker_punch, [corviknight]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(corviknight, "p2", "move", body_press, [kingambit]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertNotIn("Sucker Punch failed", log, log)
+        self.assertIn("Kingambit uses Sucker Punch", log, log)
+
+    def test_upper_hand_has_the_same_still_pending_rule(self):
+        """Upper Hand shares the exact same `ordered`-vs-`remaining` bug --
+        confirmed by source inspection rather than a second live battle,
+        since both checks were fixed together for the same reason."""
+        src = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                                "battle.py"), encoding="utf-8").read()
+        block = src[src.index('a.move.name == "Upper Hand"'):][:900]
+        self.assertIn("for o in remaining", block)
+        self.assertNotIn("for o in ordered", block)
 
 
 if __name__ == "__main__":

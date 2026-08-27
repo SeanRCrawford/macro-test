@@ -906,6 +906,12 @@ which composition looks best.
   Guts, Adaptability, the 4 weather setters, the 4 weather speed-boosters,
   Choice Band/Specs/Scarf, Life Orb, Expert Belt, type-boosting held
   items. Anything else has no special effect beyond raw stats/typing.
+  Intimidate is also PRICED, not merely resolved: `src/intimidate.py` plays
+  an opening twice, once with the ability made inert on the same items and
+  movesets, and reports the difference in margin -- for either side, with a
+  joint row when a side brings two holders, and an explicit "unpaid for"
+  when the holder is one of THEIR backs and the window ends before it comes
+  in. `python tools/lead_sweep.py --check "..." --intimidate` prints it.
 - **Only the top 3 usage moves per Pokemon** are considered as candidate
   actions (`TOP_K_MOVES` in `src/solver.py`) -- raise it for a wider
   search at the cost of speed.

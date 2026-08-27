@@ -12,6 +12,20 @@ visible in the table above it.
 The app is driven headless rather than inspected: three of the four defects
 here (the wiped pending edit, the stale Ability column, the optimiser
 discarding hand-set abilities) look completely fine in the source.
+
+Every per-Pokemon editor widget's key is suffixed with a generation number
+(`f"abil_{mon}_{gen}"`, not `f"abil_{mon}"`) -- see `_bump_builder_gen` in
+app.py for why: reported AGAIN later ("the Team Builder app still seems very
+glitchy; it never applies changes"), traced to a second, deeper instance of
+the same class of bug -- Reset/Load/Optimise correctly updated
+`session_state["sets"]`, but the input widgets themselves kept showing
+whatever the user had last typed, because a Streamlit widget's own `key=`
+state (once set) overrides its `value=`/`index=` on every later render
+regardless of what the underlying data says. Bumping a generation counter and
+folding it into every such widget's key forces a fresh widget -- with no
+prior state to cling to -- on exactly the renders where that matters. Tests
+here look widgets up by KEY PREFIX (`_find_one`) rather than an exact key,
+since the generation suffix changes across reruns.
 """
 import os
 import sys
@@ -37,38 +51,58 @@ def click(at, key):
     return [b for b in at.button if b.key == key][0].click().run()
 
 
+def _find_one(widgets, prefix):
+    """The single widget (from an AppTest widget sequence, e.g. `at.selectbox`)
+    whose key is `prefix` followed by `_<generation number>` -- the shape
+    every per-Pokemon editor widget's key has now (see module docstring).
+    Fails loudly, with every candidate key, if that's not exactly one."""
+    cands = [w for w in widgets if w.key and w.key.startswith(prefix + "_")]
+    assert len(cands) == 1, (prefix, [w.key for w in widgets if w.key])
+    return cands[0]
+
+
+def abil_selectbox(at, mon):
+    return _find_one(at.selectbox, f"abil_{mon}")
+
+
+def mv_multiselect(at, mon, any_move=False):
+    return _find_one(at.multiselect, f"mv_{mon}_{'any' if any_move else 'usage'}")
+
+
 class TestTheEditorsExist(unittest.TestCase):
 
     def test_a_pokemon_with_two_abilities_gets_a_picker(self):
         at = app()
-        keys = {s.key for s in at.selectbox}
-        self.assertIn("abil_Arcanine-Hisui", keys)
+        keys = [s.key for s in at.selectbox if s.key]
+        self.assertTrue(any(k.startswith("abil_Arcanine-Hisui_") for k in keys),
+                        keys)
 
     def test_both_of_its_real_abilities_are_offered(self):
         at = app()
-        opts = at.selectbox(key="abil_Arcanine-Hisui").options
+        opts = abil_selectbox(at, "Arcanine-Hisui").options
         self.assertIn("Rock Head", opts)
         self.assertIn("Intimidate", opts)
 
     def test_every_pokemon_gets_a_move_picker(self):
         at = app()
-        keys = {m.key for m in at.multiselect}
+        keys = [m.key for m in at.multiselect if m.key]
         for mon in TEAM:
-            self.assertIn(f"mv_{mon}_usage", keys, mon)
+            self.assertTrue(any(k.startswith(f"mv_{mon}_usage_") for k in keys),
+                            mon)
 
 
 class TestAnEditReachesTheOverrides(unittest.TestCase):
 
     def test_applying_an_ability_writes_it(self):
         at = app()
-        at.selectbox(key="abil_Arcanine-Hisui").select("Intimidate").run()
+        abil_selectbox(at, "Arcanine-Hisui").select("Intimidate").run()
         click(at, "abil_apply")
         self.assertEqual(at.session_state["sets"]["Arcanine-Hisui"]["ability"],
                          "Intimidate")
 
     def test_applying_moves_writes_them(self):
         at = app()
-        at.multiselect(key="mv_Arcanine-Hisui_usage").select("Rock Slide").run()
+        mv_multiselect(at, "Arcanine-Hisui").select("Rock Slide").run()
         click(at, "mv_apply")
         self.assertEqual(at.session_state["sets"]["Arcanine-Hisui"]["moves"],
                          ["Rock Slide"])
@@ -79,10 +113,10 @@ class TestAnEditReachesTheOverrides(unittest.TestCase):
         widgets that did not render. Applying abilities silently discarded a
         pending move edit."""
         at = app()
-        at.multiselect(key="mv_Arcanine-Hisui_usage").select("Rock Slide").run()
-        at.selectbox(key="abil_Arcanine-Hisui").select("Intimidate").run()
-        click(at, "abil_apply")
-        self.assertEqual(at.multiselect(key="mv_Arcanine-Hisui_usage").value,
+        mv_multiselect(at, "Arcanine-Hisui").select("Rock Slide").run()
+        abil_selectbox(at, "Arcanine-Hisui").select("Intimidate").run()
+        at = click(at, "abil_apply")
+        self.assertEqual(mv_multiselect(at, "Arcanine-Hisui").value,
                          ["Rock Slide"])
         click(at, "mv_apply")
         spec = at.session_state["sets"]["Arcanine-Hisui"]
@@ -96,6 +130,55 @@ class TestAnEditReachesTheOverrides(unittest.TestCase):
         spec = at.session_state["sets"]["Arcanine-Hisui"]
         self.assertNotIn("ability", spec)
         self.assertEqual(spec["moves"], ["Rock Slide"])
+
+
+class TestResetActuallyRefreshesTheWidget(unittest.TestCase):
+    """"the Team Builder app still seems very glitchy; it never applies
+    changes" -- the SECOND, deeper bug. Resetting DID correctly clear
+    `session_state["sets"]` (see `TestAnEditReachesTheOverrides` above), but
+    the widget itself silently kept showing the user's last hand-picked
+    value, because its `key=` state overrides `value=`/`index=` once set.
+    That's what "doesn't seem to apply" looks like from the browser even
+    though the data is right underneath."""
+
+    def test_resetting_an_ability_visibly_reverts_the_dropdown(self):
+        at = app()
+        abil_selectbox(at, "Arcanine-Hisui").select("Intimidate").run()
+        at = click(at, "abil_apply")
+        self.assertEqual(abil_selectbox(at, "Arcanine-Hisui").value, "Intimidate")
+        at = click(at, "abil_reset")
+        self.assertEqual(abil_selectbox(at, "Arcanine-Hisui").value, "Rock Head",
+                         "the dropdown must show the usage default again, not "
+                         "the value the user picked before resetting")
+
+    def test_resetting_moves_visibly_clears_the_multiselect(self):
+        at = app()
+        mv_multiselect(at, "Arcanine-Hisui").select("Rock Slide").run()
+        at = click(at, "mv_apply")
+        self.assertEqual(mv_multiselect(at, "Arcanine-Hisui").value, ["Rock Slide"])
+        at = click(at, "mv_reset")
+        self.assertEqual(mv_multiselect(at, "Arcanine-Hisui").value, [],
+                         "the multiselect must go back to empty (usage-standard "
+                         "set), not keep showing the picked move")
+
+    def test_the_load_upload_and_default_paths_also_refresh_widgets(self):
+        """Load/Upload/"Use default 6" all change `sets`/`team` directly
+        rather than through one widget's own interaction -- exactly like
+        Reset -- so a team.json reusing a species with a DIFFERENT override
+        would otherwise leave that species' widgets showing whatever an
+        EARLIER team happened to leave in their key. Checked at the source:
+        driving a real file upload/on-disk saved team through AppTest is
+        its own separate concern already covered by `test_my_teams_upload.py`
+        and the Load/Save round-trip tests; this only needs to confirm the
+        refresh call is actually there at each of the three call sites."""
+        source = open(APP, encoding="utf-8").read()
+        tab_start = source.index("with tab_build:")
+        tab_end = source.index("# ------------------------------------------------------------------ generate")
+        section = source[tab_start:tab_end]
+        for marker in ('st.button("Load"', 'up is not None:', 'st.button("Use default 6"'):
+            idx = section.index(marker)
+            nearby = section[idx:idx + 700]
+            self.assertIn("_bump_builder_gen()", nearby, marker)
 
 
 class TestTheTableShowsWhatIsSimulated(unittest.TestCase):
@@ -112,6 +195,33 @@ class TestTheTableShowsWhatIsSimulated(unittest.TestCase):
         row = at.dataframe[0].value.set_index("Pokemon").loc["Arcanine-Hisui"]
         self.assertIn("Rock Head", row["Ability"])
         self.assertNotIn("(set)", row["Ability"])
+
+    def test_the_table_shows_computed_stats_from_the_evs(self):
+        """"let me see actual stats for my members based on their EVs" --
+        the team overview table, not just the raw EV spread."""
+        at = app()
+        row = at.dataframe[0].value.set_index("Pokemon").loc["Arcanine-Hisui"]
+        col = "Stats (HP/Atk/Def/SpA/SpD/Spe)"
+        self.assertIn(col, row.index)
+        parts = row[col].split("/")
+        self.assertEqual(len(parts), 6)
+        self.assertTrue(all(p.isdigit() for p in parts), row[col])
+
+    def test_a_stat_point_edit_changes_the_reported_stats(self):
+        from _harness import load_world
+        from stats import compute_stats
+        w = load_world()
+        p = w["merged"]["Arcanine-Hisui"]
+        nat = w["natures"][p["nature"].lower()]
+        base_hp = compute_stats(p["base_stats"], nat, p["evs"])["hp"]
+
+        edited_evs = dict(p["evs"])
+        edited_evs["hp"] = edited_evs.get("hp", 0) + 20
+        at = app({"Arcanine-Hisui": {"evs": edited_evs}})
+        row = at.dataframe[0].value.set_index("Pokemon").loc["Arcanine-Hisui"]
+        col = "Stats (HP/Atk/Def/SpA/SpD/Spe)"
+        edited_hp = int(row[col].split("/")[0])
+        self.assertEqual(edited_hp, base_hp + 20)
 
 
 class TestItReachesTheSimulation(unittest.TestCase):
@@ -152,6 +262,53 @@ class TestTheOptimiserDoesNotEatHandEdits(unittest.TestCase):
         self.assertIn("prev.get(n)", call,
                       "optimiser output replaces the sets dict instead of "
                       "merging into it")
+
+
+class TestApplyGivesAVisibleConfirmation(unittest.TestCase):
+    """"the team editing in Team Builder is incredibly buggy and never seems
+    to apply." Every edit was already landing in `st.session_state["sets"]`
+    correctly (see `TestAnEditReachesTheOverrides` above, unaffected by this
+    bug) -- what never happened is the user SEEING it: `st.success(...)`
+    called right before `_defer_rerun()` rendered for exactly the one frame
+    `st.rerun()` immediately discards, so the confirmation never reached a
+    real browser. `_defer_rerun(flash=...)` stashes the message and shows it
+    on the render that actually follows the rerun instead.
+    """
+
+    def test_applying_an_ability_shows_a_success_message(self):
+        at = app()
+        abil_selectbox(at, "Arcanine-Hisui").select("Intimidate").run()
+        at = click(at, "abil_apply")
+        self.assertTrue(at.success, "no confirmation reached the user at all")
+        self.assertTrue(any("Abilities applied" in s.value for s in at.success))
+
+    def test_applying_moves_shows_a_success_message(self):
+        at = app()
+        mv_multiselect(at, "Arcanine-Hisui").select("Rock Slide").run()
+        at = click(at, "mv_apply")
+        self.assertTrue(any("Moves applied" in s.value for s in at.success))
+
+    def test_resetting_also_confirms(self):
+        """Reset buttons never showed any message at all, doomed or not --
+        the same silent-looking-broken symptom applies to them too."""
+        at = app({"Arcanine-Hisui": {"ability": "Intimidate"}})
+        at = click(at, "abil_reset")
+        self.assertTrue(any("reset" in s.value.lower() for s in at.success))
+
+    def test_a_second_apply_overwrites_the_first_confirmation_not_both(self):
+        """Only the LATEST action's message should show -- a stale flash
+        from an earlier click must not linger and be mistaken for feedback
+        on the one just clicked."""
+        at = app()
+        abil_selectbox(at, "Arcanine-Hisui").select("Intimidate").run()
+        at = click(at, "abil_apply")
+        mv_multiselect(at, "Arcanine-Hisui").select("Rock Slide").run()
+        at = click(at, "mv_apply")
+        messages = [s.value for s in at.success]
+        self.assertTrue(any("Moves applied" in m for m in messages))
+        self.assertFalse(any("Abilities applied" in m for m in messages),
+                         "the earlier Apply's confirmation must not still be "
+                         "showing once a different edit has been applied")
 
 
 if __name__ == "__main__":

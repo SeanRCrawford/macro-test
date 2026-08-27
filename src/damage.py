@@ -494,6 +494,15 @@ CHARGE_WEATHER_SKIP = {"Solar Beam": "sun", "Solar Blade": "sun", "Electro Shot"
 # every Low Kick and Grass Knot in this simulator deal exactly zero damage.
 WEIGHT_BASED_POWER = ("Low Kick", "Grass Knot")
 
+# Moves whose real power depends on the USER's own current HP fraction --
+# floor(150 * current_hp / max_hp), minimum 1 -- rather than a fixed number.
+# Unlike Low Kick/Grass Knot, Showdown's raw data gives these `basePower: 150`
+# (the full-HP ceiling) with a `basePowerCallback` computing the real,
+# HP-scaled number at battle time -- which, unhandled, meant every Eruption/
+# Water Spout dealt full-HP damage regardless of how much the user had
+# already taken. "Eruption damage should also scale with health."
+HP_BASED_POWER = ("Eruption", "Water Spout")
+
 # (weight threshold in kg, power below that threshold). The last row has no
 # threshold -- 200kg+ is the final bracket.
 _WEIGHT_POWER_BREAKPOINTS = ((10, 20), (25, 40), (50, 60), (100, 80), (200, 100))
@@ -550,11 +559,26 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     multiplier on top -- if this unconditionally overrode `power`, that
     multiplier (already baked into whatever `battle.py` passed in) would be
     silently discarded.
+
+    Eruption/Water Spout (`HP_BASED_POWER`) are handled differently: their
+    raw `basePower` is already a real, nonzero number (150, the full-HP
+    ceiling), so there's no `power == 0` sentinel to key off -- this always
+    scales whatever `power` it's given by the ATTACKER's current HP
+    fraction, treating the incoming value as "the nominal, pre-HP-scaling
+    number". That's safe for every caller including `battle.py` (which
+    still applies Helping Hand's 1.5x to the nominal 150 before this runs)
+    since multiplication commutes: 150 * 1.5 * frac == 150 * frac * 1.5
+    either way, so there is no double-scaling and no caller needs its own
+    special-cased pre-resolution the way Low Kick needed.
     """
     if move.name in WEIGHT_BASED_POWER and power == 0:
         got = weight_based_power(defender.weight_kg)
         if got is not None:
             power = got
+    if move.name in HP_BASED_POWER:
+        max_hp = attacker.max_hp()
+        if max_hp:
+            power = max(1, int(power * attacker.current_hp / max_hp))
 
     if power == 0 or move.category == "Status":
         return 0, 0, 0, 1.0

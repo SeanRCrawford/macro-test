@@ -386,6 +386,69 @@ play, guaranteed?, the mop-up), **Lines** (damage on every hit, `PINNED` where
 something is removed before it acts), **Switch-ins**, **Loadout**, **Item
 fixes**, and the legend.
 
+#### Their backs are a bring, not a roster — `--backs`
+
+The detailed pass used to put their **whole six** behind every lead pair, so any
+Pokémon that fainted was replaced from a four-deep bench. That is not a game
+either side can play: they bring four, and two of those replacements are at home.
+Corrected, in the order that was asked for — *blank backs, then calibrate*:
+
+* **Blank backs** — their lead pair with nothing behind it. The reference number,
+  shown beside every verdict as `Blank-backs margin`. It answers "does our lead
+  beat their lead, on its own".
+* **Calibrate** — the same opening played against **every bring-4 consistent
+  with that lead** (six of them for a six-name roster), with the **worst** as the
+  verdict, because they chose their four after seeing ours. `Their back two`
+  names the one that produced it.
+
+Where the two columns disagree, their **backs** are winning the opening rather
+than their lead pair, which is a different problem with a different answer.
+Measured on one bring vs Perish Trap, blank landed **both above and below** the
+calibrated number (+0.65 on one opening, −0.96 on another) — so blank is not a
+bound in either direction and is never used to skip the calibration.
+
+`--backs worst` is the default. `--backs blank` is much the fastest and
+`--backs roster` reproduces the old (illegal) six. **The default costs about 6×
+the old detailed pass** — measured on one bring vs Perish Trap: blank/roster 21s,
+worst 99s. The sweep stage is untouched.
+
+#### What an Intimidate is worth — `--check --intimidate`
+
+The engine has always *resolved* Intimidate correctly. What was missing was a
+**number** for it, so it could not be traded against anything else — *"Arcanine-
+Hisui with Intimidate may be much better than Rock Head"* had no answer. `src/
+intimidate.py` prices it by **playing the opening twice**: once as it stands and
+once with the ability made inert, on the same items and the same movesets. The
+difference in margin is the answer.
+
+```
+vs Perish Trap, where Incineroar LEADS:
+  Intimidate, priced by playing the opening twice over 2 turns (once with the ability made inert):
+    their Incineroar (lead)   worth +1.27 to them   win +0.08 -> win +1.35   -- vs Incineroar, Mega Gengar, Sinistcha, Kingambit
+
+vs King, where Incineroar is their SIXTH name:
+    their Incineroar (back)   never reached the field in this window -- unpaid for   -- by turn 4 it is worth +0.00 to them
+```
+
+Three things it is built to say:
+
+* **Their back brings its own.** Of the three library teams that hold an
+  Intimidate user, King's Incineroar is its *sixth* name — a two-turn window
+  never makes you pay for it. That row is reported as `unpaid for` and re-priced
+  over a longer window rather than silently omitted.
+* **Defiant and Competitive need no special case.** The counterfactual prices
+  them automatically, because the simulator applied the boost; the note names
+  the Pokémon so a small number is readable.
+* **Two holders do not add up.** Turning one off leaves the other still dropping
+  Attack, so both marginals can read zero while the pair is worth something. A
+  **joint** row prices a side's holders off together.
+
+Read a worth as *"what this did to the position by turn N"*, with N stated.
+Measured: our Gyarados's Intimidate against Perish Trap prices at **−0.25** over
+two turns and **+0.07** over three, at both search breadths — the sign is not
+noise, it is what a fixed window says. `--intimidate` is off by default because
+it plays games and the rest of `--check` does not.
+
 **Items: the most popular one, by default.** Every Pokémon already holds its
 most-used item — `make_team` reads the usage table, so this needs no flag
 (measured: Ninetales-Alola Never-Melt Ice 29%, Garchomp Life Orb 61%, Rotom-Wash

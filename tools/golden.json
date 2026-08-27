@@ -136,16 +136,24 @@
         "eval": -474.2807,
         "eval_p2": 474.2807,
         "n_our_actions": 20,
-        "score": -219.1651,
+        "score": 46.4987,
         "turn": 3
       },
       {
         "chosen": "Gallade:move:Sacred Sword->Mega Blastoise | Hydreigon:move:Dark Pulse->Sinistcha",
-        "eval": -514.3702,
-        "eval_p2": 514.3702,
+        "eval": -271.8881,
+        "eval_p2": 271.8881,
         "n_our_actions": 4,
-        "score": -10000,
+        "score": 154.2087,
         "turn": 4
+      },
+      {
+        "chosen": "Gallade:move:Sacred Sword->Maushold | Hydreigon:move:Dark Pulse->Sinistcha",
+        "eval": 154.2087,
+        "eval_p2": -154.2087,
+        "n_our_actions": 6,
+        "score": 10000,
+        "turn": 5
       }
     ]
   },

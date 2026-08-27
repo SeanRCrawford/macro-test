@@ -279,19 +279,32 @@ class Battle:
     def _emit(self, **kwargs):
         self.events.append({"turn": self.turn_num, **kwargs})
 
-    def _mega_evolve_now(self, c):
+    def _mega_evolve_now(self, c, mega_decisions=None):
         """Mega Evolve a single Pokemon at the moment it is about to move.
 
         Mega Evolution is declared with the move, so a Pokemon that is KO'd by a
         faster attack before acting never transforms -- and its weather ability
         (Drought, Snow Warning) never comes up. Still at most one per side per
         battle.
+
+        `mega_decisions`: optional {id(combatant): bool} -- when given, an
+        eligible Pokemon transforms ONLY if its id maps to a truthy value
+        (an explicit "yes, now" from whoever is playing this side), instead
+        of the default "the instant it's eligible" rule below. `None`
+        (every existing caller) is that default -- purely additive, so nothing
+        that doesn't pass this changes behaviour. Built for the Battle
+        Simulator: "I need to choose during the battle which of my brings
+        mega evolves... and choose at the start of the turn on which I wish
+        to mega evolve" -- a real per-turn choice, not a team-preview
+        pre-commitment that just fires automatically on first action.
         """
         from engine import mega_evolve
         if c is None or c.fainted or not c.is_mega_pick or c.mega_evolved:
             return
         side = self.side_of(c)
         if side.mega_used:
+            return
+        if mega_decisions is not None and not mega_decisions.get(id(c)):
             return
         before = c.ability
         mega_evolve(c)
@@ -352,12 +365,29 @@ class Battle:
                            ability_after=c.ability, weather_after=self.field.weather)
                 break  # only one Mega per side, ever
 
-    def run_turn(self, p1_actions: list, p2_actions: list):
+    def run_turn(self, p1_actions: list, p2_actions: list, mega_decisions=None,
+                 replacement_choices=None):
         """
         p1_actions / p2_actions: list of Action for each currently-active,
         non-fainted Combatant on that side (switches included). Caller
         (policy/user) is responsible for choosing legal actions; Choice
         lock is enforced here and will raise if violated.
+
+        `mega_decisions`: see `_mega_evolve_now` -- optional {id(combatant):
+        bool}, None preserves the default "transforms the instant it's
+        eligible" behaviour.
+
+        `replacement_choices`: see `_replace_fainted` -- optional
+        {id(currently-active combatant): Combatant to send in if THIS ONE
+        faints this turn}, None preserves the default `_best_replacement`
+        pick. Declared alongside this turn's actions (before the turn
+        resolves), not after the faint happens mid-turn -- `run_turn`
+        plays a whole turn in one call, so "wait and ask once it's dead"
+        would need splitting turn resolution into two phases; declaring a
+        preference for the contingency reaches the same outcome (the bench
+        member you actually wanted arrives) without that much larger,
+        riskier change to a function every other tool in this repo also
+        calls.
         """
         self.turn_num += 1
         self.log.add(f"\n--- Turn {self.turn_num} ---")
@@ -379,6 +409,17 @@ class Battle:
         for a in sorted(switches, key=lambda a: -effective_speed(a.combatant, self.field, a.side)):
             side = self.p1 if a.side == "p1" else self.p2
             opp = self.p2 if a.side == "p1" else self.p1
+            if a.combatant.volatile.pop("must_recharge", False):
+                # Hyper Beam / Giga Impact / the other recharge moves lock
+                # their user in place for the whole following turn -- no
+                # move, no switch, no choice at all (the real games don't
+                # even show an action menu). A switch attempt never reaches
+                # the move-resolution phase's own recharge check below (a
+                # "switch" action is never in move_actions), so the flag
+                # has to be popped and logged here too, not only there.
+                self.log.add(f"{self.tag(a.combatant)} must recharge and cannot switch out!")
+                self._emit(event="recharge", side=a.side, actor=a.combatant.name)
+                continue
             if self.is_trapped(a.combatant):
                 self.log.add(f"{self.tag(a.combatant)} is trapped and cannot switch out!")
                 self._emit(event="trapped", side=a.side, actor=a.combatant.name)
@@ -410,6 +451,20 @@ class Battle:
 
         # 2. Moves resolve in priority/speed order.
         move_actions = [a for a in all_actions if a.kind in ("move", "protect")]
+        # A Pokemon that must recharge (see _resolve_move's own "recharge"
+        # flag set below) gets NO action this turn, regardless of what was
+        # submitted -- filtered out here, before Protect/Wide Guard/redirect
+        # registration even runs, since it is fully vulnerable while
+        # recharging (never protected) and genuinely cannot act. A switch
+        # attempt for it was already blocked and logged above, in the
+        # switches loop -- this only ever fires for a submitted move/protect.
+        still_recharging = [a for a in move_actions if a.combatant.volatile.get("must_recharge")]
+        for a in still_recharging:
+            a.combatant.volatile.pop("must_recharge", None)
+            self.log.add(f"{self.tag(a.combatant)} must recharge!")
+            self._emit(event="recharge", side=a.side, actor=a.combatant.name)
+        recharging_ids = {id(a) for a in still_recharging}
+        move_actions = [a for a in move_actions if id(a) not in recharging_ids]
         # A Pokemon mid-charge on a two-turn move (Solar Beam/Blade, Electro Shot)
         # MUST complete it this turn -- override whatever action was submitted for
         # it, same as the real games not offering a choice on the release turn.
@@ -448,7 +503,7 @@ class Battle:
         # base form until next turn.
         for a in sorted(move_actions,
                          key=lambda x: -effective_speed(x.combatant, self.field, x.side)):
-            self._mega_evolve_now(a.combatant)
+            self._mega_evolve_now(a.combatant, mega_decisions=mega_decisions)
 
         ordered = turn_order(move_actions, self.field)
 
@@ -519,23 +574,33 @@ class Battle:
                 continue  # screens already registered above
             if a.move and a.move.name == "Sucker Punch":
                 # Sucker Punch fails unless the target is using a DAMAGING move this
-                # turn (it whiffs into status, Protect, or a switch).
+                # turn (it whiffs into status, Protect, or a switch) AND has not
+                # already moved -- checked against `remaining` (what's STILL pending
+                # after `a` was popped off above), not the original `ordered` list,
+                # which still contains everyone including actions that already
+                # resolved earlier this turn. A target that outsped Sucker Punch (or
+                # used a tying-or-higher priority move and won the speed tie) has
+                # already acted by this point, and Sucker Punch cannot retroactively
+                # read a move that's already happened -- it fails just the same as
+                # if the target had used a status move, not silently credited with
+                # "the target was attacking" from a hit that's already landed.
                 tgt_ids = {id(x) for x in a.targets}
                 if not any(id(o.combatant) in tgt_ids and o.kind == "move" and o.move
                             and o.move.category != "Status"
-                            for o in ordered if o is not a):
+                            for o in remaining):
                     self.log.add(f"{self.tag(a.combatant)}'s Sucker Punch failed -- "
-                                  f"the target was not attacking.")
+                                  f"the target was not attacking, or already moved.")
                     continue
             if a.move and a.move.name == "Upper Hand":
                 # Upper Hand only connects if the target is itself using a damaging
                 # priority move this turn (it pre-empts Fake Out, Sucker Punch, Aqua
                 # Jet). Being priority itself, it is stopped by Armor Tail / Queenly
-                # Majesty / Dazzling on the other side.
+                # Majesty / Dazzling on the other side. Same "must still be pending"
+                # rule as Sucker Punch above -- checked against `remaining`.
                 tgt_ids = {id(x) for x in a.targets}
                 if not any(id(o.combatant) in tgt_ids and o.move
                             and o.move.priority > 0 and o.move.category != "Status"
-                            for o in ordered if o is not a):
+                            for o in remaining):
                     self.log.add(f"{self.tag(a.combatant)}'s Upper Hand failed -- "
                                   f"the target was not using a priority move.")
                     continue
@@ -550,7 +615,7 @@ class Battle:
 
         # 4. Fainted Pokemon are replaced at the END of the turn, so the incoming
         #    mon is on the field and able to act starting NEXT turn.
-        self._replace_fainted()
+        self._replace_fainted(replacement_choices=replacement_choices)
 
     PRIORITY_BLOCK_ABILITIES = {"Queenly Majesty", "Dazzling", "Armor Tail"}
 
@@ -703,6 +768,15 @@ class Battle:
         if not live_targets:
             self.log.add(f"{attacker.name} uses {move.name}")
             return
+
+        # Recharge moves (Hyper Beam, Giga Impact, the other "Blast Burn"-
+        # family signatures): using one -- landing, missing, or blocked by
+        # Protect makes no difference, only having a real target to use it
+        # against does -- locks the user out of any action next turn (see
+        # the "must_recharge" filter in run_turn, which fires this whether
+        # or not the hit actually connected).
+        if move.flags and move.flags.get("recharge"):
+            attacker.volatile["must_recharge"] = True
 
         num_hit = 0
         # Follow Me / Rage Powder redirection: a single-target move aimed at the
@@ -1168,7 +1242,7 @@ class Battle:
             return s
         return max(alive_bench, key=score)
 
-    def _replace_fainted(self):
+    def _replace_fainted(self, replacement_choices=None):
         """Send in replacements for fainted actives at the END of the turn, so
         they are on the field ready to act on the NEXT turn (they do not get an
         action on the turn they came in). Mega Evolution is NOT resolved here --
@@ -1190,6 +1264,14 @@ class Battle:
         The second phase also runs in SPEED ORDER, which is how simultaneous
         switch-in abilities resolve -- it decides which of two weather setters
         ends up owning the weather.
+
+        `replacement_choices`: optional {id(the active combatant BEFORE it
+        faints): Combatant to send in for it}, checked against the alive
+        bench at the moment of replacement (a choice naming a Pokemon that's
+        no longer available -- already sent in for a different slot, say --
+        is ignored, same as not naming one at all). `None`, or no entry for
+        a given faint, falls back to `_best_replacement` -- the default for
+        every existing caller, unchanged.
         """
         arrivals = []
         for side in (self.p1, self.p2):
@@ -1200,7 +1282,9 @@ class Battle:
                 alive_bench = [b for b in side.bench if not b.fainted]
                 if not alive_bench:
                     continue
-                incoming = self._best_replacement(alive_bench, opp.active)
+                chosen = (replacement_choices or {}).get(id(c))
+                incoming = (chosen if chosen is not None and chosen in alive_bench
+                           else self._best_replacement(alive_bench, opp.active))
                 side.bench[:] = [b for b in side.bench if b is not incoming]
                 side.active[slot] = incoming
                 arrivals.append((side, slot, incoming, c))
