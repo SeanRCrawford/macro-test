@@ -47,6 +47,20 @@ def app(sets=None, team=None):
     return at.run()
 
 
+def nature_selectbox(at, mon):
+    """The nature editor's per-mon selectbox is keyed `f"nature_{mon}_
+    {gen}"` -- suffixed with a widget-key generation (`_bump_builder_gen`
+    in app.py) so Reset/Load/Optimise/Swap actually refresh what's on
+    screen instead of a widget silently keeping the value the user last
+    picked. The generation changes across reruns, so this looks the
+    widget up by prefix rather than an exact key."""
+    exp = next(e for e in at.expander if e.label == "Edit natures")
+    cands = [sb for sb in exp.selectbox
+            if sb.label == "Nature" and sb.key and sb.key.startswith(f"nature_{mon}_")]
+    assert len(cands) == 1, (mon, [sb.key for sb in exp.selectbox if sb.key])
+    return cands[0]
+
+
 class TestNatureEditorUI(unittest.TestCase):
 
     def test_expander_offers_every_nature_for_every_team_member(self):
@@ -59,21 +73,17 @@ class TestNatureEditorUI(unittest.TestCase):
 
     def test_default_shown_is_the_usage_nature(self):
         at = app()
-        exp = next(e for e in at.expander if e.label == "Edit natures")
-        sb = next(sb for sb in exp.selectbox if sb.label == "Nature" and sb.key == "nature_Garchomp")
+        sb = nature_selectbox(at, "Garchomp")
         self.assertEqual(sb.value, world()["merged"]["Garchomp"]["nature"])
 
     def test_a_pinned_nature_is_shown_over_the_usage_default(self):
         at = app(sets={"Garchomp": {"nature": "Timid"}})
-        exp = next(e for e in at.expander if e.label == "Edit natures")
-        sb = next(sb for sb in exp.selectbox if sb.label == "Nature" and sb.key == "nature_Garchomp")
+        sb = nature_selectbox(at, "Garchomp")
         self.assertEqual(sb.value, "Timid")
 
     def test_apply_writes_the_choice_into_session_state_sets(self):
         at = app()
-        exp = next(e for e in at.expander if e.label == "Edit natures")
-        sb = next(sb for sb in exp.selectbox if sb.label == "Nature" and sb.key == "nature_Garchomp")
-        sb.set_value("Timid").run()
+        nature_selectbox(at, "Garchomp").set_value("Timid").run()
         exp = next(e for e in at.expander if e.label == "Edit natures")
         apply_btn = next(b for b in exp.button if b.label == "Apply natures")
         apply_btn.click().run()

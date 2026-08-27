@@ -175,6 +175,15 @@ def team_sheet_df(team, sets=None):
         # spread, the table above them showed the dataset's.
         ev = spec.get("evs") or p["evs"]
         edited = bool(spec.get("evs")) and dict(spec["evs"]) != dict(p["evs"])
+        # "let me see actual stats for my members based on their EVs" --
+        # the raw spread above (the flat house-rule points, not standard
+        # /4 EVs) says nothing about what it actually DOES to the Pokemon;
+        # this is the same `stats.compute_stats` every real battle runs on,
+        # not a separate estimate, so it can never disagree with what a
+        # simulation actually sees.
+        from stats import compute_stats
+        nat = natures[(spec.get("nature") or p["nature"]).lower()]
+        final = compute_stats(p["base_stats"], nat, ev)
         from combatants import _default_ability
         # Same override-or-default rule as item, moves and stat points. Reading
         # the usage default unconditionally here is exactly the bug that was
@@ -188,6 +197,8 @@ def team_sheet_df(team, sets=None):
             "EVs": "/".join(str(ev.get(k, 0))
                             for k in ["hp", "atk", "def", "spa", "spd", "spe"])
                    + (" (edited)" if edited else ""),
+            "Stats (HP/Atk/Def/SpA/SpD/Spe)": "/".join(
+                str(final[k]) for k in ["hp", "atk", "def", "spa", "spd", "spe"]),
             "Moves": ", ".join(mvs), "Score": round(p["score"], 1) if p["score"] else None,
         })
     return pd.DataFrame(rows)
@@ -771,7 +782,50 @@ def get_state_team():
     return st.session_state.get("team", [])
 
 
-def _defer_rerun(flash=None):
+# One independent widget-key generation per editor -- see
+# `_bump_builder_gen`'s docstring for why this has to be per-editor rather
+# than one shared counter.
+_BUILDER_GEN_SCOPES = ("item", "ability", "nature", "moves", "evs")
+
+
+def _bump_builder_gen(scopes=_BUILDER_GEN_SCOPES):
+    """Force the given editors' per-Pokemon widgets in Team Builder (items,
+    abilities, natures, moves, stat points -- all keyed like `f"item_{mon}_
+    {gen_item}"` or `f"ev_{mon}_{stat}_{gen_evs}"`) to be recreated fresh on
+    the next render, instead of silently keeping the value the user last
+    typed into them.
+
+        "the Team Builder app still seems very glitchy; it never applies
+         changes"
+
+    Once a widget's `key=` has appeared in `st.session_state` (i.e. after
+    its first render), Streamlit ignores that widget's own `value=`/`index=`
+    on every later render and just keeps showing whatever is stored under
+    that key -- which only the WIDGET's own on-screen interaction updates.
+    A Reset/Load/Optimise/Swap changes the underlying data (`sets`) through
+    a completely different path, so the widget never found out: the data
+    was correctly reset, but the input box kept showing the stale number,
+    which is exactly what "it never applies changes" looks like from the
+    outside. Suffixing that editor's widgets' keys with a generation
+    counter, and bumping the counter here, makes each of them a brand-new
+    widget next render -- so it has no prior state to cling to and honours
+    the freshly recomputed `value=`/`index=` again.
+
+    `scopes`: which editor(s) to bump -- defaults to ALL FIVE (Load/Upload/
+    "Use default 6"/a Swap all replace the whole team's data at once, so
+    every editor needs a fresh look), but a single editor's own Reset (or
+    Optimise, which only touches item+moves) must bump ONLY that editor's
+    generation. Bumping every editor on every action would itself reproduce
+    the ORIGINAL bug `_defer_rerun` was built to fix: resetting items would
+    also force-refresh the moves widgets, discarding whatever move the user
+    had picked but not yet applied.
+    """
+    for s in scopes:
+        key = f"_builder_gen_{s}"
+        st.session_state[key] = st.session_state.get(key, 0) + 1
+
+
+def _defer_rerun(flash=None, gen_scopes=()):
     """Ask for a rerun AFTER the whole tab has rendered.
 
     Calling st.rerun() straight from an Apply button stops the script where it
@@ -794,7 +848,17 @@ def _defer_rerun(flash=None):
     painted it -- clicking Apply looked like it did nothing. Stashing the
     message here and showing it at the top of the tab, on the render that
     actually follows the rerun, is what makes it visible.
+
+    `gen_scopes`: which editor(s)' widget generation to bump
+    (`_bump_builder_gen`) -- ONLY the editor(s) whose underlying data this
+    call is resetting/replacing from OUTSIDE that editor's own widgets, so
+    a Reset can force its OWN widgets to refresh without wiping a DIFFERENT
+    editor's still-pending, not-yet-applied edit. A plain Apply passes
+    none: the widget IS the value that was just applied, so nothing needs
+    refreshing there.
     """
+    if gen_scopes:
+        _bump_builder_gen(gen_scopes)
     if flash:
         st.session_state["_builder_flash"] = flash
     st.session_state["_builder_rerun"] = True
@@ -1319,6 +1383,8 @@ with tab_build:
             st.session_state["team"] = pool
             st.session_state["sets"] = sets
             st.session_state["team_analysis"] = load_analysis(ROOT / pick)
+            _bump_builder_gen()  # a loaded team can reuse a name with a
+            # different set -- see _bump_builder_gen's own docstring.
             st.success(f"Loaded {len(pool)} Pokemon from {pick}")
         up = st.file_uploader("...or upload a team .json", type="json", key="up_team")
         if up is not None:
@@ -1328,12 +1394,14 @@ with tab_build:
             st.session_state["sets"] = data.get("sets", {}) if isinstance(data, dict) else {}
             st.session_state["team_analysis"] = (data.get("analysis")
                                                   if isinstance(data, dict) else None)
+            _bump_builder_gen()
             st.success(f"Loaded {len(st.session_state['team'])} Pokemon from upload")
         if st.button("Use default 6", width='stretch'):
             st.session_state["team"] = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
                                          "Mega Skarmory", "Gholdengo"]
             st.session_state["sets"] = {}
             st.session_state["team_analysis"] = None
+            _bump_builder_gen()
         only_top = st.checkbox("Only show top-100 by Score", value=False,
                                 help="Off by default -- this is the hand-picking tab, so every "
                                      "Pokemon should be selectable. Turn on to shorten the list "
@@ -1360,6 +1428,16 @@ with tab_build:
 
     if len(team) == 6:
         sets = st.session_state.get("sets", {})
+        # Suffixed onto each editor's own per-Pokemon widget keys below so
+        # a Reset/Load/Optimise/Swap that touches THAT editor's data
+        # (without going through that one widget's own interaction) shows
+        # up on screen, without disturbing any OTHER editor's still-pending
+        # edit -- see _bump_builder_gen's docstring.
+        gen_item = st.session_state.get("_builder_gen_item", 0)
+        gen_abil = st.session_state.get("_builder_gen_ability", 0)
+        gen_nature = st.session_state.get("_builder_gen_nature", 0)
+        gen_mv = st.session_state.get("_builder_gen_moves", 0)
+        gen_ev = st.session_state.get("_builder_gen_evs", 0)
         megas = [n for n in team if find_mega_stone(n, merged)]
         if len(megas) > 1:
             st.info(f"{len(megas)} Mega-capable picks ({', '.join(megas)}). Only one can "
@@ -1416,18 +1494,18 @@ with tab_build:
                 ic1.markdown(f"**{mon}**")
                 if locked:
                     ic2.text_input("Item", value=options[0], disabled=True,
-                                   key=f"item_{mon}_locked",
+                                   key=f"item_{mon}_locked_{gen_item}",
                                    label_visibility="collapsed")
                     continue
                 choice = ic2.selectbox(
                     "Item", options + [OTHER], index=options.index(current),
-                    key=f"item_{mon}", label_visibility="collapsed",
+                    key=f"item_{mon}_{gen_item}", label_visibility="collapsed",
                     help=f"usage default: {default_item}")
                 if choice == OTHER:
                     choice = ic2.selectbox(
                         "Any item", all_items,
                         index=all_items.index(current) if current in all_items else 0,
-                        key=f"item_any_{mon}", label_visibility="collapsed")
+                        key=f"item_any_{mon}_{gen_item}", label_visibility="collapsed")
                 if choice != current:
                     spec["item"] = choice
                     item_sets[mon] = spec
@@ -1442,7 +1520,7 @@ with tab_build:
                     if mon in item_sets:
                         item_sets[mon].pop("item", None)
                 st.session_state["sets"] = item_sets
-                _defer_rerun("Items reset to usage defaults.")
+                _defer_rerun("Items reset to usage defaults.", gen_scopes=("item",))
             if item_changed:
                 st.info("Edited but not applied — press Apply items.")
 
@@ -1480,7 +1558,7 @@ with tab_build:
                                   for a, p in (merged[mon].get("abilities_usage") or []))
                 choice = ac2.selectbox(
                     "Ability", usage, index=usage.index(current),
-                    key=f"abil_{mon}", label_visibility="collapsed",
+                    key=f"abil_{mon}_{gen_abil}", label_visibility="collapsed",
                     help=f"usage: {split}. A Mega pick's Mega-form ability is "
                          "fixed by the species; this sets the BASE form's, "
                          "which is what it has on the turn it comes in, before "
@@ -1499,7 +1577,8 @@ with tab_build:
                     if mon in ab_sets:
                         ab_sets[mon].pop("ability", None)
                 st.session_state["sets"] = ab_sets
-                _defer_rerun("Abilities reset to the most-used option.")
+                _defer_rerun("Abilities reset to the most-used option.",
+                             gen_scopes=("ability",))
             if ab_changed:
                 st.info("Edited but not applied — press Apply abilities.")
 
@@ -1548,7 +1627,7 @@ with tab_build:
                 nc1.markdown(f"**{mon}** ({_nature_desc(current)})")
                 choice = nc2.selectbox(
                     "Nature", nat_options, index=nat_options.index(current),
-                    key=f"nature_{mon}", label_visibility="collapsed",
+                    key=f"nature_{mon}_{gen_nature}", label_visibility="collapsed",
                     help=f"usage default: {default_nature} "
                          f"({_nature_desc(default_nature)})")
                 if choice != current:
@@ -1565,7 +1644,7 @@ with tab_build:
                     if mon in nat_sets:
                         nat_sets[mon].pop("nature", None)
                 st.session_state["sets"] = nat_sets
-                _defer_rerun("Natures reset to usage defaults.")
+                _defer_rerun("Natures reset to usage defaults.", gen_scopes=("nature",))
             if nat_changed:
                 st.info("Edited but not applied — press Apply natures.")
 
@@ -1595,7 +1674,7 @@ with tab_build:
                 options = list(dict.fromkeys(list(options) + current))
                 picked = st.multiselect(
                     mon, options, default=current, max_selections=4,
-                    key=f"mv_{mon}_{'any' if any_move else 'usage'}",
+                    key=f"mv_{mon}_{'any' if any_move else 'usage'}_{gen_mv}",
                     help=f"usage order: {', '.join(usage[:6])}")
                 if picked != current:
                     if picked:
@@ -1614,7 +1693,7 @@ with tab_build:
                     if mon in mv_sets:
                         mv_sets[mon].pop("moves", None)
                 st.session_state["sets"] = mv_sets
-                _defer_rerun("Moves reset to the usage-standard set.")
+                _defer_rerun("Moves reset to the usage-standard set.", gen_scopes=("moves",))
             if mv_changed:
                 st.info("Edited but not applied — press Apply moves.")
 
@@ -1645,7 +1724,7 @@ with tab_build:
                 for col, stat in zip(cols, STATS):
                     new_spread[stat] = col.number_input(
                         stat.upper(), min_value=0, max_value=budget, step=1,
-                        value=int(have.get(stat, 0)), key=f"ev_{mon}_{stat}")
+                        value=int(have.get(stat, 0)), key=f"ev_{mon}_{stat}_{gen_ev}")
                 total = sum(new_spread.values())
                 if total > budget:
                     st.error(f"{total} points — {total - budget} over this "
@@ -1654,6 +1733,21 @@ with tab_build:
                     st.caption(f"{total} / {budget} points"
                                + (f" — {budget - total} unspent"
                                   if total < budget else ""))
+                # "let me see actual stats for my members based on their
+                # EVs, and see how my EVs change them" -- live, off
+                # whatever is currently TYPED (not only what was last
+                # Applied), same `stats.compute_stats` a real battle uses.
+                from stats import compute_stats
+                p = merged[mon]
+                nat = natures[(spec.get("nature") or p["nature"]).lower()]
+                live_stats = compute_stats(p["base_stats"], nat, new_spread)
+                base_stats = compute_stats(p["base_stats"], nat, base)
+                st.caption("Stats: " + "  ".join(
+                    f"{stat.upper()} {live_stats[stat]}"
+                    + (f" ({'+' if live_stats[stat] > base_stats[stat] else ''}"
+                       f"{live_stats[stat] - base_stats[stat]})"
+                       if live_stats[stat] != base_stats[stat] else "")
+                    for stat in STATS))
                 if new_spread != have:
                     spec["evs"] = new_spread
                     cur_sets[mon] = spec
@@ -1668,7 +1762,7 @@ with tab_build:
                     if mon in cur_sets:
                         cur_sets[mon].pop("evs", None)
                 st.session_state["sets"] = cur_sets
-                _defer_rerun("Stat points reset to the dataset spreads.")
+                _defer_rerun("Stat points reset to the dataset spreads.", gen_scopes=("evs",))
             if changed:
                 st.info("Edited but not applied — press Apply stat points.")
 
@@ -1778,7 +1872,8 @@ with tab_build:
                         chosen = next(r for r in better if r["Change"] == pick)
                         st.session_state["team"] = chosen["Team"].split(" / ")
                         st.session_state.pop("sub_rows", None)
-                        _defer_rerun(f"Swap adopted: {pick}.")
+                        _defer_rerun(f"Swap adopted: {pick}.",
+                                     gen_scopes=_BUILDER_GEN_SCOPES)
                 else:
                     st.info("No swap improved the rating — this team is a "
                             "local optimum for these opponents.")
@@ -1800,7 +1895,8 @@ with tab_build:
                         n: {**(prev.get(n) or {}), "item": opt[n]["item"],
                             "moves": opt[n]["moves"]}
                         for n in team}
-                _defer_rerun("Items + movesets optimised against teams.csv — applied.")
+                _defer_rerun("Items + movesets optimised against teams.csv — applied.",
+                             gen_scopes=("item", "moves"))
         with cc2:
             fname = st.text_input("Save as", value="team.json", key="save_name")
             if st.button("Save", width='stretch'):
@@ -2243,7 +2339,8 @@ with tab_gen:
                     for opp_name, opp_roster in teams.items():
                         r_ = verify_with_solver(
                             t, {opp_name: opp_roster}, merged, moves, natures,
-                            typechart, matrix, eps, 12, all_backs=deep).get(opp_name)
+                            typechart, matrix, eps, 12, all_backs=deep,
+                            pilot=PILOT).get(opp_name)
                         if r_ and r_.get("total"):
                             rate = r_["wins"] / r_["total"]
                             if rate < floor_pct / 100:
@@ -2347,7 +2444,7 @@ with tab_gen:
                                 part = verify_with_solver(
                                     t, {opp_name: opp_roster}, merged, moves,
                                     natures, typechart, matrix, eps, 12,
-                                    all_backs=deep, our_sets=sets)
+                                    all_backs=deep, our_sets=sets, pilot=PILOT)
                                 v.update(part)
                                 rec_ = part.get(opp_name)
                                 if not (floor_pct and rec_ and rec_.get("total")):
@@ -2525,9 +2622,34 @@ with tab_gen:
 # ------------------------------------------------------------------ search
 with tab_search:
     st.subheader("Lead / back search")
-    team = get_state_team()
+
+    # "let me run a given preset team(s) as the player in the lead/back
+    # section" -- previously "our" side could only ever be whatever's
+    # currently loaded in Team Builder, so testing a library team meant
+    # loading it there first. Picking a preset here directly also enables
+    # the sanity check the request itself names: select the SAME team as
+    # both "Test as" and one of the Opponents below, for a mirror match --
+    # a team should beat itself more than 50% of the time, since the lead
+    # is picked AFTER seeing the opponent's roster.
+    _CURRENT_TEAM = "(current Team Builder team)"
+    our_source = st.selectbox(
+        "Test as", [_CURRENT_TEAM] + list(teams), index=0, key="search_our_source",
+        help="Defaults to whatever's loaded in Team Builder. Pick a preset "
+             "team here instead to test IT directly against the Opponents "
+             "below -- including itself, for a mirror-match sanity check: "
+             "a team should win more than 50% against a copy of itself, "
+             "since picking the lead happens after seeing the opponent's "
+             "roster. A mirror that doesn't clear 50% is worth investigating.")
+    if our_source == _CURRENT_TEAM:
+        team = get_state_team()
+        our_sets_for_search = st.session_state.get("sets", {})
+    else:
+        team = teams[our_source]
+        our_sets_for_search = team_meta.get(our_source, {}).get("sets") or {}
+
     if len(team) != 6:
-        st.warning("Pick 6 Pokemon in the Team Builder tab first.")
+        st.warning("Pick 6 Pokemon in the Team Builder tab first, or choose "
+                   "a preset team above.")
     else:
         s1, s2, s3 = st.columns(3)
         chosen = s1.multiselect("Opponents", list(teams), default=list(teams))
@@ -2578,7 +2700,7 @@ with tab_search:
             from matchup_search import (search_robust_composition, search_best_composition,
                                          play_out_worst_case, enemy_configs)
             from run_search import find_toughest_lead
-            sets = st.session_state.get("sets", {})
+            sets = our_sets_for_search
             esets = st.session_state.get("enemy_sets_override") or {}
             all_backs = mode.startswith("all")
             results = {}
@@ -2706,7 +2828,7 @@ with tab_search:
 
         res = st.session_state.get("search_results")
         if res:
-            sets = st.session_state.get("sets", {})
+            sets = our_sets_for_search
             rows = []
             for tname, d in res.items():
                 if d["mode"] == "all":

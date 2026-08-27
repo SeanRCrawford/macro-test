@@ -197,6 +197,41 @@ class TestTheFlagsExist(unittest.TestCase):
         self.assertIn("%PILOT%", stage2[:800])
 
 
+class TestGenerateTabPassesThePilot(unittest.TestCase):
+    """Reported: "when I turn equilibrium mode on and use the Generate Team
+    tab, I get teams with 89/90, but then I test them in lead/back search
+    and they get 30/90." Root cause: the Generate tab's own two
+    `verify_with_solver` calls never passed `pilot=` at all, so they always
+    ran the greedy pilot regardless of the sidebar's "Who plays the games"
+    toggle -- unlike Lead/Back Search, which correctly passes `pilot=PILOT`.
+    A team that only "wins" against the greedy pilot's fixed, non-adaptive
+    opponent (measured 78% side bias, `search_effort.py`) looks nothing
+    like the same team audited honestly."""
+
+    APP = os.path.join(ROOT, "src", "app.py")
+
+    def test_every_generate_tab_verify_call_passes_the_pilot(self):
+        import ast
+        with open(self.APP, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                and getattr(n.func, "id", None) == "verify_with_solver"]
+        # Both of the Generate tab's own calls are identifiable by
+        # `all_backs=deep` -- the "verify against every enemy bring" flag
+        # only that tab threads through this way.
+        generate_tab_calls = [c for c in calls
+                              if any(kw.arg == "all_backs" for kw in c.keywords)]
+        self.assertGreaterEqual(len(generate_tab_calls), 2,
+                                "expected both of the Generate tab's "
+                                "verify_with_solver calls to still exist")
+        for c in generate_tab_calls:
+            kw_names = {kw.arg for kw in c.keywords}
+            self.assertIn("pilot", kw_names,
+                          "a Generate tab verify_with_solver call is "
+                          "missing pilot= -- the sidebar's equilibrium "
+                          "toggle would silently do nothing here")
+
+
 class TestTheAppExposesThem(unittest.TestCase):
     """Asked for explicitly: "add all of the features in the table/flags as
     options in the streamlit app"."""
