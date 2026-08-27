@@ -86,11 +86,65 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         test_counter_finder.py for the underlying fix."""
         at = app(team=[])  # nothing loaded in Team Builder
         sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
-        self.assertGreater(len(sb.options), 1, "expected preset teams offered")
-        sb.set_value(sb.options[1]).run()
+        # options[0] is "(current Team Builder team)", options[1] is the
+        # "search a pool" sentinel (its own dedicated test class) -- the
+        # first actual preset TEAM name starts at options[2].
+        self.assertGreater(len(sb.options), 2, "expected preset teams offered")
+        sb.set_value(sb.options[2]).run()
         [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertFalse(any("Pick exactly 6" in w.value for w in at.warning))
+
+
+class TestBring4CanSearchAPoolInsteadOfAFixedSix(unittest.TestCase):
+    """"For bring4, I would like to be able to do it vs just 1 team,
+    searching for the best 4." Reuses the exact same pool search as
+    Multi-bring4 mode (`_run_multi_bring4_search`/`_render_multi_bring4_
+    core`, factored out so the two paths can't drift), just scoped to a
+    single enemy roster -- so there's no new search logic here, only a way
+    to reach the existing one without already having a 6 in hand."""
+
+    SEARCH_POOL = "\U0001f50d Search a pool for the best team"
+
+    def test_the_option_is_offered_alongside_the_current_team_and_presets(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        self.assertIn(self.SEARCH_POOL, sb.options)
+        self.assertIn("(current Team Builder team)", sb.options)
+
+    def test_choosing_it_swaps_in_pool_search_controls(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value(self.SEARCH_POOL).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_b4_pool" for s in at.slider),
+                        "expected a pool-size slider")
+        self.assertTrue(any(b.key == "ct_b4_pool_go" for b in at.button),
+                        "expected a search button")
+        # The old "pick exactly 6" warning must not show -- there's no
+        # fixed 6 to be missing in this mode.
+        self.assertFalse(any("Pick exactly 6" in w.value for w in at.warning))
+
+    def test_a_real_pool_search_against_one_roster_produces_results(self):
+        at = app(team=[])  # no Team Builder team needed for this mode
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value(self.SEARCH_POOL).run()
+        # Loosen the defaults so a small pool actually yields candidates,
+        # the same knobs TestMultiBring4ProducesResults below turns.
+        [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(16).run()
+        [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+        [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        try:
+            rows = at.session_state["ct_b4_pool_rows"]
+        except KeyError:
+            self.fail("expected ct_b4_pool_rows to be set after a real search")
+        self.assertTrue(rows, "expected at least one core back from the search")
+        # Every returned core's own per-enemy breakdown must be scoped to
+        # exactly the one roster this mode is meant for.
+        for r in rows:
+            self.assertEqual(len(r["per_enemy"]), 1)
 
 
 if __name__ == "__main__":
