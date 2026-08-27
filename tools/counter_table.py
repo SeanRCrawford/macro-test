@@ -86,10 +86,11 @@ Eight modes, pick one (or combine --chip-from/--chip-move with --pairs):
               "good" pair when counting how many of a bring-4's 6 clear it.
   --multi-bring4
               Instead of one already-decided 6, SEARCH the pool for the
-              best CORE across SEVERAL enemy rosters at once (--vs-team,
-              repeated 2+ times -- either a comma-separated roster or the
-              name of a saved team from data/teams.csv/data/teams/
-              data/my_teams, the same library --team already searches):
+              best CORE against one enemy roster, or several at once
+              (--vs-team, repeated 1+ times -- either a comma-separated
+              roster or the name of a saved team from data/teams.csv/
+              data/teams/data/my_teams, the same library --team already
+              searches):
               for each enemy, the best bring-4 this
               core can field against it (a bring-4 may differ per
               opponent, real Team Preview); ranked on the WORST of those
@@ -1170,8 +1171,9 @@ def main():
                          "team (a data/teams.csv row, or a pokepaste in "
                          "data/teams/ or data/my_teams/ -- the same library "
                          "--team already searches). Repeat for each enemy "
-                         "team (2+ required), e.g. --vs-team \"Rain\" "
-                         "--vs-team \"Big 6\"")
+                         "team (1+ required -- a single --vs-team searches "
+                         "the best core against just that one roster), e.g. "
+                         "--vs-team \"Rain\" --vs-team \"Big 6\"")
     ap.add_argument("--max-weak", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: hard-drop any candidate CORE "
                          "where more than N of its members are weak to the "
@@ -1216,7 +1218,10 @@ def main():
                          "the exhaustive search's candidate pool once it "
                          "appears in a good pair (--good-threshold) for at "
                          "least N of the named --vs-team enemies (default "
-                         "2). Ignored under --beam, which searches the "
+                         "2, auto-clamped to however many --vs-team entries "
+                         "were actually given if that's fewer -- a single "
+                         "--vs-team never needs this flag). Ignored under "
+                         "--beam, which searches the "
                          "whole pool regardless")
     ap.add_argument("--beam", action="store_true",
                     help="--multi-bring4 only: search the WHOLE pool with "
@@ -1330,9 +1335,8 @@ def main():
                          "which uses --vs-team instead)")
     if args.multi_bring4 and args.vs:
         raise SystemExit("--multi-bring4 uses --vs-team (repeated), not --vs")
-    if args.multi_bring4 and len(args.vs_team) < 2:
-        raise SystemExit("--multi-bring4 needs --vs-team given at least "
-                         "twice (one per enemy roster)")
+    if args.multi_bring4 and len(args.vs_team) < 1:
+        raise SystemExit("--multi-bring4 needs at least one --vs-team")
     if args.vs_team and not args.multi_bring4:
         raise SystemExit("--vs-team requires --multi-bring4")
     if args.deep_dive_core and not args.multi_bring4:
@@ -1426,6 +1430,10 @@ def main():
             if unknown_team:
                 raise SystemExit(f"unknown Pokemon: {', '.join(unknown_team)}")
             vs_teams.append(team)
+        if args.min_enemies == 2 and len(vs_teams) < 2:
+            # Still at the untouched default -- auto-clamp rather than make
+            # a single-roster search jump through an extra flag for it.
+            args.min_enemies = len(vs_teams)
         if not (1 <= args.min_enemies <= len(vs_teams)):
             raise SystemExit(f"--min-enemies must be between 1 and the "
                              f"number of --vs-team entries ({len(vs_teams)})")

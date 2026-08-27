@@ -680,22 +680,37 @@ class TestCounterTablePoolDefault(unittest.TestCase):
     top 40, and Mega Scizor's generic Score doesn't make that cut even though
     it is a strong, correctly-scored answer to specific threats. The default
     pool is now the whole dataset, minus whatever data/preferences.csv Exclude
-    actually names (the shipped file currently excludes "Slurpuff") -- see
-    TestPreferencesReducePool for the include/exclude behaviour itself."""
+    actually names (cascaded to the paired Mega/base form -- see
+    `_apply_preferences`) -- see TestPreferencesReducePool for the
+    include/exclude behaviour itself."""
 
     class _Args:
         team = ""
         pool_size = 0
 
     def test_default_pool_is_the_whole_dataset_minus_shipped_excludes(self):
+        """The expected drop count must be computed with the SAME Mega/base
+        cascade `_apply_preferences` itself applies (a raw
+        `len(exclude list)` undercounts whenever the shipped file names only
+        one half of a Mega/base pair, which the real shipped file does --
+        e.g. "Steelix" without "Mega Steelix" -- cascade correctly drops
+        the paired form too)."""
         import counter_table as ct
         from species_data import load_preferences
         W = world()
-        pool = ct._pool(self._Args(), W["merged"])
-        excluded = set(load_preferences()["exclude"])
-        self.assertEqual(len(pool), len(W["merged"]) - len(excluded))
+        merged = W["merged"]
+        pool = ct._pool(self._Args(), merged)
+        raw_excluded = set(load_preferences()["exclude"])
+        cascaded = set(raw_excluded)
+        for e in list(cascaded):
+            if e.startswith("Mega "):
+                cascaded.add(e[5:])
+            else:
+                cascaded.update({f"Mega {e}", f"Mega {e} X", f"Mega {e} Y"})
+        want_dropped = {n for n in merged if n in cascaded}
+        self.assertEqual(len(pool), len(merged) - len(want_dropped))
         self.assertIn("Mega Scizor", pool)
-        self.assertFalse(excluded & set(pool))
+        self.assertFalse(cascaded & set(pool))
 
     def test_pool_size_still_narrows_when_explicitly_given(self):
         import counter_table as ct
@@ -2208,6 +2223,115 @@ class TestJointPoolSearch(unittest.TestCase):
         self.assertEqual(keys, sorted(keys))
         protect_safe = [r["pairs_protect_safe"] for r in rows]
         self.assertEqual(protect_safe, sorted(protect_safe, reverse=True))
+
+
+class TestPruneBelow(unittest.TestCase):
+    """`joint_pool_search`'s `prune_below` -- once a pair's remaining,
+    not-yet-raced enemy pairs could not possibly push it up to
+    `prune_below` even if every one of them were a win, stop racing it and
+    fill the rest with a "loss" placeholder. Sound (never discards a pair
+    that could still qualify), not a heuristic proxy like the abandoned
+    `prescreen.py` attempt.
+
+        "skip pairs in counter_table if their joint performance is too
+         poor, unless it's a check for a promising bring 4."
+    """
+
+    POOL = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit", "Whimsicott"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.unpruned = cf.joint_pool_search(
+            self.POOL, self.TARGETS, merged, moves, natures, typechart,
+            prune_below=None)
+        self.pruned = cf.joint_pool_search(
+            self.POOL, self.TARGETS, merged, moves, natures, typechart,
+            prune_below=0.75)
+
+    def test_pruning_actually_fires_in_this_fixture(self):
+        """Sanity check that the scenario exercises the mechanism at all --
+        otherwise the soundness checks below would pass vacuously."""
+        any_pruned = any(
+            d.get("_pruned") for r in self.pruned for d in r["detail"].values())
+        self.assertTrue(any_pruned)
+
+    def test_a_pair_that_clears_the_bar_is_never_pruned(self):
+        """SOUND bound: a pair whose true (unpruned) beaten-fraction meets
+        or exceeds `prune_below` must have been raced in full -- pruning
+        can only ever have fired once qualifying was already provably
+        impossible, so a qualifying pair's detail must come back byte-for-
+        byte identical, not just its final counts."""
+        unpruned_by_pair = {frozenset(r["pair"]): r for r in self.unpruned}
+        for r in self.pruned:
+            u = unpruned_by_pair[frozenset(r["pair"])]
+            if cf._pair_beaten_frac(u) >= 0.75:
+                for key, d in r["detail"].items():
+                    self.assertFalse(d.get("_pruned"), key)
+                self.assertEqual(r["pairs_swept"], u["pairs_swept"])
+                self.assertEqual(r["pairs_traded"], u["pairs_traded"])
+                self.assertEqual(r["pairs_lost"], u["pairs_lost"])
+                self.assertEqual(r["pairs_no_ko"], u["pairs_no_ko"])
+
+    def test_pruning_never_overstates_a_pairs_performance(self):
+        """The other direction of soundness: pruning can only make a pair
+        look WORSE (more "loss") than the truth, never better."""
+        unpruned_by_pair = {frozenset(r["pair"]): r for r in self.unpruned}
+        for r in self.pruned:
+            u = unpruned_by_pair[frozenset(r["pair"])]
+            self.assertLessEqual(cf._pair_beaten_frac(r), cf._pair_beaten_frac(u))
+
+    def test_pairs_total_is_unaffected_by_pruning(self):
+        """A pruned row still reports every enemy pair -- pruning fills
+        `detail`, it never shrinks it."""
+        for r in self.pruned:
+            self.assertEqual(r["pairs_total"], len(list(
+                __import__("itertools").combinations(self.TARGETS, 2))))
+
+    def test_bring4_search_stage1_is_never_pruned(self):
+        """`bring4_search` needs each of a fixed 6's exact C(6,2) pair
+        performances -- "a check for a promising bring-4" -- so its Stage
+        1 call must not pass `prune_below` at all, even against a target
+        list large enough that pruning would otherwise fire."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        our6 = self.POOL[:6]
+        pair_rows, _bring4_rows = cf.bring4_search(
+            our6, self.TARGETS, merged, moves, natures, typechart)
+        for r in pair_rows:
+            for d in r["detail"].values():
+                self.assertFalse(d.get("_pruned"))
+
+    def test_multi_bring4_coverage_candidate_pool_matches_unpruned_ground_truth(self):
+        """End-to-end: `multi_bring4_coverage` bakes `prune_below=
+        good_threshold` into its Stage A. Independently recompute the same
+        "good against >= min_enemies rosters" membership from the UNPRUNED
+        `joint_pool_search` output and confirm the two agree exactly --
+        pruning must never change who ends up in `candidate_pool`."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        enemies = [["Sableye", "Ariados", "Froslass"], ["Absol", "Ariados"]]
+        good_threshold = 0.75
+        coverage = cf.multi_bring4_coverage(
+            self.POOL, enemies, merged, moves, natures, typechart,
+            good_threshold=good_threshold, min_enemies=1)
+        appears_good_in = {}
+        for target_names in enemies:
+            rows = cf.joint_pool_search(
+                self.POOL, target_names, merged, moves, natures, typechart,
+                item_overrides=coverage["fixed_items"],
+                move_overrides=coverage["fixed_moves"], prune_below=None)
+            good_names = set()
+            for r in rows:
+                if cf._pair_beaten_frac(r) >= good_threshold:
+                    good_names.update(r["pair"])
+            for n in good_names:
+                appears_good_in[n] = appears_good_in.get(n, 0) + 1
+        want = sorted(n for n, c in appears_good_in.items() if c >= 1)
+        self.assertEqual(coverage["candidate_pool"], want)
 
 
 class TestBring4Search(unittest.TestCase):

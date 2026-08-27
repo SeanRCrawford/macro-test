@@ -3290,7 +3290,7 @@ with tab_counter:
                                  "share of the enemy roster's own C(len,2) pairs.")
 
         if ct_our_source == SEARCH_POOL:
-            pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 80, 34,
+            pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
                                   key="ct_b4_pool")
             c1, c2 = st.columns(2)
             ct_max_weak = c1.slider("Max weaknesses per type", 0, 6, 2, key="ct_b4_maxweak")
@@ -3361,19 +3361,26 @@ with tab_counter:
                    "named enemy rosters at once -- a real team's set is searched "
                    "ONCE (against the union of every enemy) and held fixed, the way "
                    "a real tournament team can't be re-optimised battle to battle.")
-        pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 80, 34,
+        pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
                               key="ct_mb4_pool")
         ct_vs_names = st.multiselect("Enemy rosters", list(teams),
                                      default=list(teams)[:3], key="ct_mb4_vs")
         c1, c2, c3 = st.columns(3)
         ct_good2 = c1.slider("Good-pair bar (%)", 0, 100, 100, key="ct_mb4_good")
-        ct_min_enemies = c2.slider(
-            "Min enemies a member must be 'good' against", 1,
-            max(1, len(ct_vs_names)), min(2, max(1, len(ct_vs_names))),
-            key="ct_mb4_minenemies",
-            help="Narrows the candidate pool to members who appear in a good pair "
-                 "for at least this many of the named rosters, before the "
-                 "expensive team-of-6 sweep.")
+        # A slider needs min < max, which a single selected roster breaks
+        # (both would be 1) -- there's nothing to choose between anyway
+        # when there's only one enemy to be "good against", so just fix it.
+        if len(ct_vs_names) <= 1:
+            ct_min_enemies = 1
+            c2.caption("Min enemies: 1 (only one roster selected)")
+        else:
+            ct_min_enemies = c2.slider(
+                "Min enemies a member must be 'good' against", 1,
+                len(ct_vs_names), min(2, len(ct_vs_names)),
+                key="ct_mb4_minenemies",
+                help="Narrows the candidate pool to members who appear in a good "
+                     "pair for at least this many of the named rosters, before "
+                     "the expensive team-of-6 sweep.")
         ct_max_weak = c3.slider("Max weaknesses per type", 0, 6, 2, key="ct_mb4_maxweak")
         c4, c5 = st.columns(2)
         ct_max_megas = c4.slider("Max Mega-stone users on a team", 0, 6, 2,
@@ -3409,7 +3416,7 @@ with tab_counter:
         st.caption("GENERATE a partner for a fixed Pokemon: every legal pool member "
                    "paired with it, both fully searched (item + moveset), against "
                    "every pair drawn from the enemy roster.")
-        pool_size2 = st.slider("Search pool size (top-Score Pokemon)", 10, 80, 34,
+        pool_size2 = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
                                key="ct_jp_pool")
         j1, j2 = st.columns(2)
         ct_partner = j1.selectbox("Fixed partner", all_names, key="ct_jp_partner")

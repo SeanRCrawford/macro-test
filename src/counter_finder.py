@@ -2149,8 +2149,29 @@ def _ohko_risk(grid):
            for (atk, tgt), h in grid["theirs"].items() if h.hi >= 1.0]
 
 
+def _pruned_entry():
+    """A placeholder `detail[(e1,e2)]` entry for an enemy pair `_pair_vs_
+    targets` never actually raced -- see its `prune_below` parameter.
+    Always "loss": the WORST case, same direction every other minimax in
+    this module already biases toward (mega assignment, enemy Protect/
+    Tailwind choice) -- never makes a pruned pair look better than it can
+    possibly be, only (knowingly) worse than it might actually be. Built
+    fresh each call since `detail`'s own consumers (`_pair_vs_targets`
+    itself, want_grid's cleanup) pop keys off individual entries; a single
+    shared dict reused across every pruned key would let one caller's pop
+    silently affect all the others.
+    """
+    return {
+        "outcome": "loss", "outcome_without_tailwind": "loss",
+        "tailwind_is_real_threat": False, "tailwind_forced": False,
+        "turns_used": 0, "tailwind_outcome": "loss", "tailwind_safe": False,
+        "protect_outcomes": {"E1": "loss", "E2": "loss"}, "protect_safe": False,
+        "log": [], "_pruned": True,
+    }
+
+
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
-                     turns, want_grid=False, merged=None):
+                     turns, want_grid=False, merged=None, prune_below=None):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
@@ -2224,10 +2245,42 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     still uses everywhere. The pre-override result survives either way as
     `outcome_without_tailwind`; `tailwind_forced` says whether the swap
     happened.
+
+    `prune_below`: optional fraction (e.g. `good_threshold`) -- once it is
+    MATHEMATICALLY CERTAIN this pair cannot reach that share of
+    `target_names`'s enemy pairs beaten (even if every remaining, not-yet-
+    raced enemy pair were a win), stop racing and fill the rest of `detail`
+    with `_pruned_entry()` (a "loss" placeholder) instead. This is a SOUND
+    bound, not a heuristic guess -- unlike `prescreen.py`'s own measured,
+    abandoned attempt at this (see its module docstring: a cheap proxy
+    score deleted the eventual winner 85% of the time), it can never
+    discard a pair that could actually still qualify, because it only ever
+    fires once qualifying is already provably impossible. It CAN understate
+    a pruned pair's true performance against the enemy pairs it never
+    raced (their real outcome might have been a win) -- always in the
+    worst-case direction, same bias every other minimax in this module
+    already carries, never the other way. `None` (the default) disables
+    this entirely; every enemy pair is always raced. Left off by
+    `bring4_search`'s own Stage 1 (needs each of a fixed 6's exact C(6,2)
+    pair performances, not an early "this one's definitely bad" verdict --
+    "a check for a promising bring-4" needs the real numbers); turned on by
+    `multi_bring4_coverage`'s own pool-wide Stage A, where the pool can be
+    large (up to 300) and most candidates are mediocre.
     """
     m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
+    all_enemy_pairs = list(itertools.combinations(target_names, 2))
+    total_pairs = len(all_enemy_pairs)
     detail = {}
-    for e1_name, e2_name in itertools.combinations(target_names, 2):
+    for pair_idx, (e1_name, e2_name) in enumerate(all_enemy_pairs):
+        if prune_below is not None and detail:
+            beaten_so_far = sum(1 for d in detail.values()
+                                if d["outcome"] in ("sweep", "out_trade"))
+            remaining = total_pairs - len(detail)
+            best_possible = (beaten_so_far + remaining) / total_pairs
+            if best_possible < prune_below:
+                for e1_r, e2_r in all_enemy_pairs[pair_idx:]:
+                    detail[(e1_r, e2_r)] = _pruned_entry()
+                break
         e1m, e2m = enemy_built[e1_name]["moves"], enemy_built[e2_name]["moves"]
         def _has_tailwind(name):
             return merged is not None and any(
@@ -2398,7 +2451,8 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 
 def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       typechart, turns=2, item_overrides=None,
-                      move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
+                      move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                      prune_below=None):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
     genuinely searched (not one fixed), against every pair drawn from
@@ -2414,6 +2468,10 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     `--pool-size 80` run (3160 our-pairs) is under 20s, but the FULL
     ~270-Pokemon default is minutes, not seconds, unlike every other search
     in this module. Narrow with `--pool-size` for anything but a quick check.
+
+    `prune_below`: passed straight through to `_pair_vs_targets` -- see its
+    own docstring. `None` (the default) races every enemy pair for every
+    our-pair, exactly as before this existed.
 
     Returns rows: {pair: (name1, name2), item1, item2, pairs_swept,
     pairs_traded, pairs_lost, pairs_no_ko, pairs_tailwind_safe,
@@ -2442,7 +2500,7 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     for n1, n2 in itertools.combinations(built, 2):
         detail, summary = _pair_vs_targets(n1, n2, built, target_names,
                                            enemy_built, typechart, turns,
-                                           merged=merged)
+                                           merged=merged, prune_below=prune_below)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                     "item2": built[n2]["item"], "detail": detail, **summary})
     rows.sort(key=_pair_sort_key)
@@ -2671,7 +2729,21 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     once per entry in `target_name_lists`. Then narrows `pool` down to a
     CANDIDATE POOL: only members that appear in a "good" pair (beats
     `good_threshold` or more of that one enemy's own pairs) for at least
-    `min_enemies` of the named enemy rosters.
+    `min_enemies` of the named enemy rosters -- clamped to
+    `len(target_name_lists)` if given larger, since a member can never be
+    "good against N enemies" when fewer than N were even named (the
+    default of 2 would otherwise silently empty `candidate_pool` for
+    every single-roster search).
+
+    Each per-enemy `joint_pool_search` call below passes `prune_below=
+    good_threshold` -- once a pair's remaining, not-yet-raced enemy pairs
+    could not possibly push it up to `good_threshold` even if every one of
+    them were a win, racing that pair against the rest of THIS roster stops
+    (see `_pair_vs_targets`'s docstring for why this bound is sound: it
+    never turns a pair that could still qualify into one that doesn't).
+    This is what keeps a 300-candidate pool's Stage A affordable -- a pair
+    that's already hopeless against one enemy roster doesn't get raced
+    against the rest of that roster's pairs too.
 
         "A good bring of 4 should probably have at least 3-4 good pairs
          out of 6, and there shouldn't actually be many added pairs to
@@ -2724,6 +2796,7 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     module already follows.
     """
     target_name_lists = [list(t) for t in target_name_lists]
+    min_enemies = min(min_enemies, len(target_name_lists))
     any_enemy = {n for t in target_name_lists for n in t}
     pool = [n for n in pool if n not in any_enemy]
     all_enemies = sorted(any_enemy)
@@ -2750,7 +2823,8 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                                  typechart, turns=turns,
                                  item_overrides=fixed_items,
                                  move_overrides=fixed_moves,
-                                 excluded_items=excluded_items)
+                                 excluded_items=excluded_items,
+                                 prune_below=good_threshold)
         per_enemy.append(rows)
         pair_by_key.append({frozenset(r["pair"]): r for r in rows})
         good_names = set()
