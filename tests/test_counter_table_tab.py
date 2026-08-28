@@ -147,5 +147,104 @@ class TestBring4CanSearchAPoolInsteadOfAFixedSix(unittest.TestCase):
             self.assertEqual(len(r["per_enemy"]), 1)
 
 
+class TestBestBring4PairTable(unittest.TestCase):
+    """"In the streamlit app for bring4, I want to see the performance of
+    my best bring 4 by the 6 pairs and their key metrics" -- Stage 2's
+    top-ranked bring-4 (`bring4_rows[0]`, already sorted best-worst-case-
+    first) gets its own 6-pair table, the same shape Stage 1's own table
+    uses, not just the one-line "worst pair" summary Stage 2 shows."""
+
+    def test_best_bring4_gets_its_own_six_pair_table(self):
+        at = app()
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Your best bring-4" in m.value for m in at.markdown))
+        shapes = [d.value.shape[0] for d in at.dataframe]
+        # Stage 1 (15), Stage 2 (15), and now the best bring-4's own 6.
+        self.assertIn(6, shapes, "expected a 6-row best-bring-4 pair table")
+
+    def test_results_survive_a_rerun_from_an_unrelated_widget(self):
+        """Regression: the search used to run and render entirely inside
+        `elif st.button(...)`, so results vanished the instant any OTHER
+        widget on the page triggered a rerun (e.g. the new deep-dive
+        selectbox) -- now stored in session_state like the other two
+        modes already do."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertTrue(any("Your best bring-4" in m.value for m in at.markdown))
+        at = [sb for sb in at.selectbox if sb.key == "ct_b4_deepdive_pick"][0] \
+            .set_value(2).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Your best bring-4" in m.value for m in at.markdown),
+                        "Stage 1/2 results must still be showing")
+
+
+class TestDeepDiveASpecificTeam(unittest.TestCase):
+    """"I want to be able to choose a specific team to deep dive into" --
+    an on-demand `core_deep_dive` call for whichever bring-4/core the user
+    actually picks, not automatic for every result a search returns."""
+
+    def test_fixed_six_bring4_mode_offers_a_deep_dive_picker(self):
+        at = app()
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        picks = [sb for sb in at.selectbox if sb.key == "ct_b4_deepdive_pick"]
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(len(picks[0].options), 15)
+
+    def test_clicking_deep_dive_runs_core_deep_dive_and_shows_a_gameplan(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        self.assertEqual(len(dd_buttons), 1)
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Overall" in m.value for m in at.markdown))
+        self.assertTrue(any("Set:" in c.value for c in at.caption))
+
+    def test_deep_dive_offers_a_teamsheet_download_and_load_button(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dl = [d for d in at.download_button if d.key and d.key.endswith("_dl")]
+        self.assertTrue(dl, "expected a teamsheet download button")
+        loaded = [b for b in at.button if b.key and b.key.endswith("_use")
+                 and b.label == "Load into Team Builder"]
+        self.assertTrue(loaded, "expected a Load into Team Builder button")
+
+    def test_loading_into_team_builder_sets_team_and_sets(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        at = dd_buttons[0].click().run()
+        use_buttons = [b for b in at.button if b.key and b.key.endswith("_use")]
+        at = use_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(len(at.session_state["team"]), 4)
+        self.assertEqual(set(at.session_state["sets"]), set(at.session_state["team"]))
+        for spec in at.session_state["sets"].values():
+            self.assertTrue(spec.get("item") is not None or spec.get("moves"))
+
+    def test_pool_search_cores_also_offer_a_deep_dive(self):
+        """The pool-search Bring-4 path and Multi-bring4 both go through
+        `_render_multi_bring4_core` -- confirm the deep dive reaches that
+        shared renderer too, not just the fixed-6 branch."""
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value("\U0001f50d Search a pool for the best team").run()
+        [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(16).run()
+        [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+        [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4p_")
+                     and b.key.endswith("_go")]
+        self.assertTrue(dd_buttons, "expected a deep-dive button on a pool-search core")
+
+
 if __name__ == "__main__":
     unittest.main()

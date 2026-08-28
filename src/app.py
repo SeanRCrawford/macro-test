@@ -3214,12 +3214,125 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     return coverage, rows
 
 
-def _render_multi_bring4_core(r, shown_vs):
+def _pair_rows_df(pair_rows):
+    """`joint_pool_search`/`bring4_search` Stage-1-shaped rows as the
+    dataframe every pair table in this tab already renders (Pair/Beaten/
+    Swept/Traded/Lost/No KO/Tailwind-safe/Protect-safe) -- factored out so
+    "show the 6 pairs" (a bring-4's own `pair_rows`) and the full Stage-1
+    table share one rendering, not two copies that could drift."""
+    total = pair_rows[0]["pairs_total"] if pair_rows else 0
+    return pd.DataFrame([
+        {"Pair": " + ".join(r["pair"]),
+         "Beaten": f"{r['pairs_swept'] + r['pairs_traded']}/{total}",
+         "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
+         "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
+         "Tailwind-safe": r["pairs_tailwind_safe"],
+         "Protect-safe": r["pairs_protect_safe"]}
+        for r in pair_rows])
+
+
+def _render_teamsheet_export(core, sets, key_prefix):
+    """"I want a way to export the teamsheet for use in the streamlit app"
+    -- `{"pool": [...], "sets": {name: {"item", "moves"}}}` is exactly the
+    format the Team Builder tab's uploader already reads (and what every
+    Generate-tab result already downloads as), so a deep-dive/search
+    result needs no new format of its own: download it, or adopt it into
+    Team Builder directly in this same session, right here."""
+    import json as _json
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "Download teamsheet .json", _json.dumps(
+                {"pool": list(core), "sets": sets}, indent=2),
+            file_name="teamsheet.json", mime="application/json",
+            key=f"{key_prefix}_dl", width='stretch',
+            help="Exactly the format the Team Builder loads -- feed it "
+                 "back via 'upload a team .json' or use the button "
+                 "alongside this one.")
+    with c2:
+        if st.button("Load into Team Builder", key=f"{key_prefix}_use",
+                     width='stretch'):
+            st.session_state["team"] = list(core)
+            st.session_state["sets"] = dict(sets)
+            st.success("Loaded into Team Builder")
+
+
+def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
+                           excluded_items, key_prefix):
+    """"I want to be able to choose a specific team to deep dive into" --
+    an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
+    (any bring-4, or a multi-bring4 core), the app-side counterpart to the
+    CLI's `--deep-dive-core`. Deliberately a button, not automatic: this is
+    the expensive, full per-pair-per-enemy race with turn logs, paid once
+    for the team the user actually wants to inspect, not for every result
+    a search returns (same "given the size, make it an option after the
+    search" reasoning `core_deep_dive` itself documents).
+
+    Also renders the teamsheet export (`_render_teamsheet_export`) for
+    `core` using the deep dive's own `sets` -- one call answers both "show
+    me the gameplan" and "give me a teamsheet I can load", since
+    `core_deep_dive` already computes the fixed item/moveset for every
+    member as part of racing it.
+    """
+    from counter_finder import core_deep_dive
+    if st.button(f"Deep dive: {' / '.join(core)}", key=f"{key_prefix}_go"):
+        with st.spinner("Racing every pair against every named enemy..."):
+            try:
+                dive = core_deep_dive(
+                    core, target_name_lists, merged, moves, natures,
+                    typechart, turns=turns, excluded_items=excluded_items)
+            except ValueError as e:
+                st.error(str(e))
+                dive = None
+        st.session_state[f"{key_prefix}_dive"] = dive
+    dive = st.session_state.get(f"{key_prefix}_dive")
+    if not dive or tuple(dive["core"]) != tuple(core):
+        return
+    st.caption("Set: " + ", ".join(f"{n} @ {s['item'] or '-'}"
+                                   for n, s in dive["sets"].items()))
+    _render_teamsheet_export(core, dive["sets"], key_prefix)
+    ov = dive["overall"]
+    ov_total = ov["pairs_total"]
+    st.markdown(f"**Overall**: {ov['pairs_swept'] + ov['pairs_traded']}/{ov_total} "
+              f"beaten ({ov['pairs_swept']} swept, {ov['pairs_traded']} traded, "
+              f"{ov['pairs_lost']} lost, {ov['pairs_no_ko']} no-KO), "
+              f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
+              f"{ov['pairs_protect_safe']}/{ov_total} protect-safe")
+    for (n1, n2), pair in dive["per_pair"].items():
+        pt = pair["total"]
+        with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"
+                         f"{pt['pairs_total']} beaten, all enemies"):
+            for pe in pair["per_enemy"]:
+                st.markdown(f"vs {', '.join(pe['target_names'])}")
+                role_name = {"C": n1, "P": n2}
+                for (e1, e2), d in pe["detail"].items():
+                    role_name["E1"], role_name["E2"] = e1, e2
+                    tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
+                    pr = "" if d["protect_safe"] else (
+                        f"  [protect: {e1}->{d['protect_outcomes']['E1']}, "
+                        f"{e2}->{d['protect_outcomes']['E2']}]")
+                    st.markdown(f"- **{e1} + {e2}**: {d['outcome']} "
+                              f"(turn {d['turns_used']}){tw}{pr}")
+                    lines = []
+                    for turn_i, turn_hits in enumerate(d["log"], 1):
+                        for role, tgt_role, h in turn_hits:
+                            spread = " (spread)" if h.num_targets_hit > 1 else ""
+                            lines.append(
+                                f"T{turn_i} {role_name[role]} -> "
+                                f"{role_name[tgt_role]}: {h.move_name or '-'} "
+                                f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-"
+                                f"{h.hi * 100:.0f}%{spread}")
+                    if lines:
+                        st.code("\n".join(lines), language=None)
+
+
+def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
+                              key_prefix="mb4"):
     """One core's expander body: weakness synergy, then its own best
     bring-4 (and any enemy pair NONE of that bring-4's pairs can beat)
-    against each roster in `shown_vs`. Shared by both of the pool-search
-    paths that produce `_core_row`-shaped rows -- see
-    `_run_multi_bring4_search`."""
+    against each roster in `shown_vs`, then an opt-in deep dive on this
+    exact core. Shared by both of the pool-search paths that produce
+    `_core_row`-shaped rows -- see `_run_multi_bring4_search`."""
     from counter_finder import member_weakness_summary
     core = r["core"]
     weak = member_weakness_summary(core, merged)
@@ -3240,6 +3353,13 @@ def _render_multi_bring4_core(r, shown_vs):
         if uncovered:
             st.caption("No answer to: " + ", ".join(
                 f"{a}+{b}" for a, b in uncovered))
+        with st.expander(f"Show the 6 pairs (vs {name})"):
+            st.dataframe(_pair_rows_df(pe["best_bring4_row"]["pair_rows"]),
+                        width='stretch', hide_index=True)
+    target_name_lists = [list(teams[n]) for n in shown_vs if n in teams]
+    if target_name_lists:
+        _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
+                               excluded_items, key_prefix=f"{key_prefix}_{'_'.join(core)}")
 
 
 # ------------------------------------------------------------------ counter table
@@ -3317,34 +3437,38 @@ with tab_counter:
                 for i, r in enumerate(rows[:top_n], start=1):
                     with st.expander(f"#{i} ({r['core_size']}) {' / '.join(r['core'])}",
                                      expanded=(i == 1)):
-                        _render_multi_bring4_core(r, shown_vs)
+                        _render_multi_bring4_core(r, shown_vs, turns=ct_turns,
+                                                  excluded_items=ct_excluded,
+                                                  key_prefix=f"ctb4p_{i}")
         else:
             our6 = (get_state_team() if ct_our_source == "(current Team Builder team)"
                    else list(teams[ct_our_source]))
             if len(our6) != 6:
                 st.warning("Pick exactly 6 (load a team in Team Builder, or choose a "
                            "preset above).")
-            elif st.button("Search bring-4s", type="primary", key="ct_b4_go"):
-                try:
-                    with st.spinner("Searching every pair, then every bring-4..."):
-                        pair_rows, bring4_rows = bring4_search(
-                            our6, vs_roster, merged, moves, natures, typechart,
-                            turns=ct_turns, good_threshold=ct_good / 100,
-                            excluded_items=ct_excluded)
-                except ValueError as e:
-                    st.error(str(e))
-                else:
-                    total = pair_rows[0]["pairs_total"] if pair_rows else 0
+            else:
+                if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
+                    try:
+                        with st.spinner("Searching every pair, then every bring-4..."):
+                            pair_rows, bring4_rows = bring4_search(
+                                our6, vs_roster, merged, moves, natures, typechart,
+                                turns=ct_turns, good_threshold=ct_good / 100,
+                                excluded_items=ct_excluded)
+                    except ValueError as e:
+                        st.error(str(e))
+                    else:
+                        st.session_state["ct_b4_pair_rows"] = pair_rows
+                        st.session_state["ct_b4_bring4_rows"] = bring4_rows
+                        st.session_state["ct_b4_our6"] = our6
+                        st.session_state["ct_b4_vs_name"] = ct_vs_name
+
+                pair_rows = st.session_state.get("ct_b4_pair_rows")
+                bring4_rows = st.session_state.get("ct_b4_bring4_rows")
+                if pair_rows and bring4_rows:
+                    total = pair_rows[0]["pairs_total"]
                     st.markdown(f"**Stage 1** -- all {len(pair_rows)} pairs drawn from your 6, "
                                f"vs {ct_vs_name}'s {total} enemy pairs:")
-                    st.dataframe(pd.DataFrame([
-                        {"Pair": " + ".join(r["pair"]),
-                         "Beaten": f"{r['pairs_swept'] + r['pairs_traded']}/{total}",
-                         "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
-                         "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
-                         "Tailwind-safe": r["pairs_tailwind_safe"],
-                         "Protect-safe": r["pairs_protect_safe"]}
-                        for r in pair_rows]), width='stretch', hide_index=True)
+                    st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
                     st.markdown(f"**Stage 2** -- all {len(bring4_rows)} possible bring-4s, "
                                f"ranked best worst-case first:")
                     st.dataframe(pd.DataFrame([
@@ -3355,6 +3479,20 @@ with tab_counter:
                          "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
                                                f"/{total}")}
                         for b in bring4_rows]), width='stretch', hide_index=True)
+
+                    st.markdown("**Your best bring-4, by its own 6 internal pairs:**")
+                    st.caption(" / ".join(bring4_rows[0]["bring4"]))
+                    st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"]),
+                                width='stretch', hide_index=True)
+
+                    st.markdown("**Deep dive a specific bring-4**")
+                    pick = st.selectbox(
+                        "Which bring-4", range(1, len(bring4_rows) + 1),
+                        format_func=lambda i: f"#{i}: {' / '.join(bring4_rows[i - 1]['bring4'])}",
+                        key="ct_b4_deepdive_pick")
+                    _render_core_deep_dive(
+                        bring4_rows[pick - 1]["bring4"], [vs_roster], [ct_vs_name],
+                        ct_turns, ct_excluded, key_prefix=f"ctb4_dd_{pick}")
 
     elif ct_mode == "Multi-bring4 (several enemy rosters)":
         st.caption("Search a whole POOL for the best team-of-4/5/6 across SEVERAL "
@@ -3410,7 +3548,9 @@ with tab_counter:
             for i, r in enumerate(rows[:top_n], start=1):
                 with st.expander(f"#{i} ({r['core_size']}) {' / '.join(r['core'])}",
                                  expanded=(i == 1)):
-                    _render_multi_bring4_core(r, shown_vs)
+                    _render_multi_bring4_core(r, shown_vs, turns=ct_turns,
+                                              excluded_items=ct_excluded,
+                                              key_prefix=f"ctmb4_{i}")
 
     else:  # Joint pair search
         st.caption("GENERATE a partner for a fixed Pokemon: every legal pool member "

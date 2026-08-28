@@ -335,6 +335,45 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestDeepDiveCoreForBring4(unittest.TestCase):
+    """--deep-dive-core now also works with --bring4 (a fixed 6, one enemy
+    roster), not just --multi-bring4 -- "I want to be able to choose a
+    specific team to deep dive into" applies just as much to a bring-4 as
+    to a multi-bring4 core: `core_deep_dive` accepts any core, so this is
+    just wiring the Nth-ranked `bring4_rows` entry into it, the same way
+    `--multi-bring4` already wires its own Nth-ranked core."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+                   "Mega Alakazam,Sharpedo",
+                   "--bring4", "--vs", "Sableye,Ariados"]
+
+    def test_deep_dive_core_prints_the_aggregate_and_gameplans(self):
+        msg, out = run_main(self.argv + ["--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Deep dive:", out)
+        self.assertIn("OVERALL, every pair vs every enemy", out)
+        self.assertIn("tw-safe", out)
+        self.assertIn("pr-safe", out)
+        self.assertRegex(out, r"T\d .+ -> .+: .+ \d+-\d+-\d+%")
+
+    def test_deep_dive_core_out_of_range_is_rejected(self):
+        msg, _out = run_main(self.argv + ["--deep-dive-core", "999"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--deep-dive-core", msg)
+
+    def test_deep_dive_core_is_not_computed_by_default(self):
+        _msg, out = run_main(self.argv)
+        self.assertNotIn("Deep dive:", out)
+
+    def test_deep_dive_core_without_bring4_or_multi_bring4_is_still_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--deep-dive-core", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--deep-dive-core", msg)
+
+
 class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
     """Both `_print_pairs` and `_print_joint` picked their per-row detail
     preview via `sorted(r["detail"].items(), key=...)[:3]`, into a variable

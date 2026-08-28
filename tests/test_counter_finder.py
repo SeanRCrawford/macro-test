@@ -873,16 +873,23 @@ class TestJointPairSearch(unittest.TestCase):
 
     def test_out_trade_wins_the_race_without_a_clean_sweep(self):
         """Mega Scizor + Whimsicott vs Kingambit + Basculegion: both die
-        within the window, but Kingambit gets at least one hit in first."""
+        within the window, but Kingambit gets at least one hit in first.
+        Needs 3 turns, not 2 -- see the priority-tie-break fix (Task 4) in
+        `_choose_move`/`_choose_action`'s own docstrings: Basculegion now
+        finishes off a nearly-fainted Mega Scizor with its own priority
+        move (Aqua Jet) turn 2 instead of a bigger-but-slower Wave Crash,
+        since both already guarantee the kill -- denying Scizor the extra
+        turn-2 action it used to get off before dying, which is what used
+        to let the whole race finish by turn 2."""
         row = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
-                           "Whimsicott", turns=2)
+                           "Whimsicott", turns=3)
         d = row["detail"][("Kingambit", "Basculegion")]
         self.assertEqual(d["outcome"], "out_trade")
         self.assertTrue(d["tailwind_safe"])
 
     def test_turns_extends_the_window(self):
         """The SAME matchup, only the turn cap different: too short a window
-        reports no_ko even though the pair wins it with one more turn."""
+        reports no_ko even though the pair wins it with more turns."""
         row1 = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
                             "Whimsicott", turns=1)
         d1 = row1["detail"][("Kingambit", "Basculegion")]
@@ -890,10 +897,10 @@ class TestJointPairSearch(unittest.TestCase):
         self.assertEqual(d1["turns_used"], 1)
 
         row2 = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
-                            "Whimsicott", turns=2)
+                            "Whimsicott", turns=3)
         d2 = row2["detail"][("Kingambit", "Basculegion")]
         self.assertEqual(d2["outcome"], "out_trade")
-        self.assertEqual(d2["turns_used"], 2)
+        self.assertEqual(d2["turns_used"], 3)
 
     def test_spread_move_still_takes_the_075x_penalty_when_both_are_alive(self):
         """Same rule `TestSpreadMovesInPairSearch` checks for `pair_search`,
@@ -1076,26 +1083,43 @@ class TestTailwindAsARealThreat(unittest.TestCase):
     the very turn it commits to casting Tailwind, same as it would on any
     other unprotected turn.
 
-    Real, verified fixture: Sylveon (95 speed) + Basculegion (139 speed)
-    against Hydreigon (150 speed, a real Tailwind setter per usage data) +
-    Kingambit (70 speed, no real Tailwind access). Normal-speed race is an
-    out-trade win: Hydreigon outspeeds and kills Basculegion turn 1, but
-    Sylveon kills Hydreigon that same turn and finishes Kingambit turn 2.
-    If Hydreigon instead spends turn 1 CASTING Tailwind, it still dies to
-    Sylveon's hit that same turn (Tailwind is a no-op, not a dodge) -- but
-    the boost still reaches its surviving ally from turn 2 onward:
-    Kingambit's doubled speed (140) now outspeeds Sylveon (95) and kills it
-    before Sylveon's own hit lands, turning the same win into a loss.
+    Real, verified fixture, movesets PINNED to one move each (see the
+    priority-tie-break fix, Task 4, in `_choose_move`/`_choose_action`'s
+    own docstrings -- once BOTH the original fixture's attackers could pick
+    between several already-guaranteed kills, which one they picked started
+    mattering, and the original hand-picked pair no longer produced a clean
+    before/after story with a real, unpinned moveset): Sylveon (Hyper
+    Voice) + Garchomp (Dragon Claw) against Whimsicott (a real Tailwind
+    setter per usage data, High Jump Kick-less here -- just casts or does
+    nothing else relevant) + Mudsdale (High Horsepower, no real Tailwind
+    access). Normal-speed race is an out-trade win: Whimsicott chips
+    Garchomp with Moonblast turn 1 and finishes it turn 2, but Sylveon's
+    Hyper Voice (a spread hit) kills both Whimsicott and the already-
+    weakened Mudsdale that same second turn. If Whimsicott instead spends
+    turn 1 CASTING Tailwind, Garchomp is never chipped at all turn 1 -- so
+    by turn 2 Sylveon (softened by Mudsdale's own High Horsepower) is the
+    juicier kos_now target, and Whimsicott's one attacking turn goes to
+    killing Sylveon instead of finishing Garchomp. Mudsdale still dies to
+    Garchomp's second Dragon Claw, but Whimsicott survives (it only ever
+    took one hit) -- the clean win becomes a stalemate (`no_ko`), not
+    because either side plays worse, but because the setter's own single
+    spent turn changes WHOSE death it ends up choosing on turn 2.
     """
 
     def setUp(self):
         self.W = world()
         merged, moves, natures = (self.W["merged"], self.W["moves"],
                                   self.W["natures"])
-        self.our_names = ["Sylveon", "Basculegion"]
-        self.enemy_names = ["Hydreigon", "Kingambit"]
+        self.our_names = ["Sylveon", "Garchomp"]
+        self.enemy_names = ["Whimsicott", "Mudsdale"]
         self.our_built = cf._build_forms(self.our_names, merged, natures, moves)
         self.enemy_built = cf._build_forms(self.enemy_names, merged, natures, moves)
+        self.our_built["Sylveon"]["moves"] = cf._move_infos(
+            "Sylveon", merged, moves, ["Hyper Voice"])
+        self.our_built["Garchomp"]["moves"] = cf._move_infos(
+            "Garchomp", merged, moves, ["Dragon Claw"])
+        self.enemy_built["Mudsdale"]["moves"] = cf._move_infos(
+            "Mudsdale", merged, moves, ["High Horsepower"])
 
     def _race(self, merged):
         typechart = self.W["typechart"]
@@ -1105,14 +1129,14 @@ class TestTailwindAsARealThreat(unittest.TestCase):
             merged=merged)
         return detail[tuple(self.enemy_names)], summary
 
-    def test_hydreigon_really_knows_tailwind_kingambit_does_not(self):
+    def test_whimsicott_really_knows_tailwind_mudsdale_does_not(self):
         """The fixture's precondition, checked against real usage data --
         if this ever stops being true the whole fixture needs revisiting."""
         merged = self.W["merged"]
         self.assertTrue(any(mv == "Tailwind" for mv, _pct in
-                            merged["Hydreigon"]["moves_usage"]))
+                            merged["Whimsicott"]["moves_usage"]))
         self.assertFalse(any(mv == "Tailwind" for mv, _pct in
-                             merged["Kingambit"]["moves_usage"]))
+                             merged["Mudsdale"]["moves_usage"]))
 
     def test_the_normal_race_alone_is_a_win(self):
         d, _summary = self._race(merged=None)
@@ -1122,14 +1146,15 @@ class TestTailwindAsARealThreat(unittest.TestCase):
         d, summary = self._race(merged=self.W["merged"])
         self.assertTrue(d["tailwind_is_real_threat"])
         self.assertTrue(d["tailwind_forced"])
-        self.assertEqual(d["tailwind_outcome"], "loss")
-        self.assertEqual(d["outcome"], "loss",
+        self.assertEqual(d["tailwind_outcome"], "no_ko")
+        self.assertEqual(d["outcome"], "no_ko",
                          "a real Tailwind threat that turns a win into a "
-                         "loss must be the assumed outcome, not a footnote")
+                         "stalemate must be the assumed outcome, not a "
+                         "footnote")
         self.assertEqual(d["outcome_without_tailwind"], "out_trade",
                          "the original no-Tailwind result must still be "
                          "recoverable, not overwritten")
-        self.assertEqual(summary["pairs_lost"], 1)
+        self.assertEqual(summary["pairs_no_ko"], 1)
         self.assertEqual(summary["pairs_swept"] + summary["pairs_traded"], 0)
 
     def test_no_usage_data_leaves_the_old_behaviour_unchanged(self):
@@ -1145,34 +1170,43 @@ class TestTailwindAsARealThreat(unittest.TestCase):
 
     def test_the_log_matches_whichever_race_actually_decided_the_outcome(self):
         """When Tailwind is promoted, `log` must be the Tailwind race's own
-        turns -- Kingambit's boosted speed kills Sylveon (C) on turn 2
-        before Sylveon's own hit lands -- not the normal-speed race's
-        turns, where Sylveon survives to finish Kingambit off. Otherwise
-        the log would show a win while `outcome` says loss."""
+        turns -- Whimsicott (E1), freed up now that Tailwind is already
+        cast, kills Sylveon (C, softened by Mudsdale's turn-1 hit) on turn
+        2, while Garchomp (P) lands its own second Dragon Claw on Mudsdale
+        (E2) that same turn -- not the normal-speed race's turns, where
+        Whimsicott spends BOTH turns on Garchomp instead. Otherwise the log
+        would show a clean win while `outcome` says no_ko."""
         d, _summary = self._race(merged=self.W["merged"])
         last_turn = d["log"][-1]
         actors = [role for role, _tgt, _hit in last_turn]
-        self.assertEqual(actors, ["E2"],
-                         "fixture assumes Kingambit (E2), sped up by the "
-                         "Tailwind its now-dead ally cast, is the only "
-                         "actor left on the final turn -- it kills Sylveon "
-                         "before Sylveon can act")
+        self.assertEqual(sorted(actors), ["E1", "P"],
+                         "fixture assumes Whimsicott (E1) and Garchomp (P) "
+                         "are the only actors left on the final turn -- "
+                         "Whimsicott kills Sylveon, Garchomp kills Mudsdale")
+        self.assertIn(("E1", "C"), [(role, tgt) for role, tgt, _hit in last_turn],
+                     "Whimsicott must be the one finishing off Sylveon, "
+                     "not Garchomp -- that's the actual redirect this "
+                     "fixture demonstrates")
 
     def test_the_setter_still_pays_the_real_cost_of_casting_it(self):
-        """Hydreigon (the setter) spends turn 1 casting Tailwind instead of
-        attacking -- and still dies to Sylveon's hit that same turn, same
-        as it would on any other unprotected turn. This is what separates
-        "realistically cast" from "assumed already up": the setter is not
-        free."""
+        """Whimsicott (the setter) spends turn 1 casting Tailwind instead
+        of attacking -- so Garchomp (P) takes no damage turn 1 at all, same
+        as it would if Whimsicott had simply skipped its turn. This is what
+        separates "realistically cast" from "assumed already up": the
+        setter is not free, and here that cost is exactly what saves
+        Garchomp -- it never gets chipped, so it's never the target
+        Whimsicott's second turn goes after."""
         d, _summary = self._race(merged=self.W["merged"])
         first_turn = d["log"][0]
         actors = [role for role, _tgt, _hit in first_turn]
         self.assertNotIn("E1", actors,
-                         "Hydreigon (E1) must not land a hit turn 1 -- it "
+                         "Whimsicott (E1) must not land a hit turn 1 -- it "
                          "spent the turn casting Tailwind, not attacking")
-        self.assertIn(("C", "E1"), [(role, tgt) for role, tgt, _hit in first_turn],
-                     "Sylveon must still get a hit in on Hydreigon turn 1 "
-                     "-- casting Tailwind doesn't protect the caster")
+        targets_hit = {tgt for _role, tgt, _hit in first_turn}
+        self.assertNotIn("P", targets_hit,
+                         "Garchomp (P) must take no damage turn 1 -- "
+                         "Whimsicott, its only real threat, spent the turn "
+                         "casting Tailwind instead of attacking it")
 
     def test_no_override_when_no_enemy_in_the_pair_knows_tailwind(self):
         """Kingambit alone (no Hydreigon) has no real Tailwind access --
@@ -2075,11 +2109,14 @@ class TestJointDamageLog(unittest.TestCase):
         self.assertEqual(actors, {"C", "P"})
 
     def test_an_out_trade_logs_hits_from_both_sides(self):
+        """turns=3, not 2 -- see the priority-tie-break fix's docstring note
+        on `TestJointPairSearch.test_out_trade_wins_the_race_without_a_
+        clean_sweep`, the same matchup."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         rows = cf.joint_pair_search(["Mega Scizor"], ["Kingambit", "Basculegion"],
                                     "Whimsicott", merged, moves, natures,
-                                    typechart, turns=2)
+                                    typechart, turns=3)
         d = rows[0]["detail"][("Kingambit", "Basculegion")]
         self.assertEqual(d["outcome"], "out_trade")
         actors = {role for turn in d["log"] for role, _tgt, _h in turn}

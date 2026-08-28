@@ -1295,16 +1295,16 @@ def main():
                          "dedicated sheet per pair with that full detail "
                          "plus the turn-by-turn gameplan for every enemy")
     ap.add_argument("--deep-dive-core", type=int, default=0, metavar="N",
-                    help="--multi-bring4 only: after the main search, run a "
-                         "full deep dive on the Nth-ranked core shown (1 = "
-                         "top result) -- every one of its pairs raced "
-                         "against every enemy pair from every named enemy "
-                         "team, with the turn-by-turn gameplan log and an "
-                         "aggregate beaten/swept/traded/lost/no-KO/tw-safe/"
-                         "pr-safe total (both per-pair and for the whole "
-                         "core). Deliberately NOT computed for every core "
-                         "in the main search -- opt in for the one you "
-                         "actually want to inspect")
+                    help="--multi-bring4/--bring4 only: after the main "
+                         "search, run a full deep dive on the Nth-ranked "
+                         "core/bring-4 shown (1 = top result) -- every one "
+                         "of its pairs raced against every enemy pair from "
+                         "every named enemy team, with the turn-by-turn "
+                         "gameplan log and an aggregate beaten/swept/traded/"
+                         "lost/no-KO/tw-safe/pr-safe total (both per-pair "
+                         "and for the whole core). Deliberately NOT "
+                         "computed for every core in the main search -- "
+                         "opt in for the one you actually want to inspect")
     args = ap.parse_args()
 
     if bool(args.chip_from) != bool(args.chip_move):
@@ -1339,8 +1339,8 @@ def main():
         raise SystemExit("--multi-bring4 needs at least one --vs-team")
     if args.vs_team and not args.multi_bring4:
         raise SystemExit("--vs-team requires --multi-bring4")
-    if args.deep_dive_core and not args.multi_bring4:
-        raise SystemExit("--deep-dive-core requires --multi-bring4")
+    if args.deep_dive_core and not (args.multi_bring4 or args.bring4):
+        raise SystemExit("--deep-dive-core requires --multi-bring4 or --bring4")
     if args.xlsx and not args.multi_bring4:
         raise SystemExit("--xlsx requires --multi-bring4")
     if (args.beam or args.beam_width != 40 or args.max_candidates != 30
@@ -1521,6 +1521,17 @@ def main():
             excluded_items=excluded_items)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
+        if args.deep_dive_core:
+            if args.deep_dive_core > len(bring4_rows):
+                raise SystemExit(f"--deep-dive-core {args.deep_dive_core} "
+                                 f"but only {len(bring4_rows)} bring-4(s) "
+                                 f"were found")
+            core_dive = core_deep_dive(
+                bring4_rows[args.deep_dive_core - 1]["bring4"], [targets],
+                merged, moves, natures, typechart, turns=args.turns,
+                item_overrides=item_overrides, move_overrides=move_overrides,
+                excluded_items=excluded_items)
+            _print_core_deep_dive(core_dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
         coverage = multi_bring4_coverage(

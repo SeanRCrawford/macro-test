@@ -637,11 +637,28 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     2-turn kill once ONE-TURN LOOKAHEAD below exists -- priority is not the
     thing that should decide between "barely" and "almost entirely" done).
     A move's priority is still fully honoured in the REAL turn-order
-    computation once chosen (nothing here changes that), and the two cases
-    where priority genuinely needs to drive the CHOICE -- surviving to act
-    at all, or a Sucker Punch pick that would otherwise fail outright --
-    are handled by a dedicated correction afterward
+    computation once chosen (nothing here changes that), and two of the
+    cases where priority genuinely needs to drive the CHOICE -- surviving
+    to act at all, or a Sucker Punch pick that would otherwise fail
+    outright -- are handled by a dedicated correction afterward
     (`_reconsider_for_survival`), not baked into this base ranking.
+
+    ONE NARROW EXCEPTION: when two or more candidates ALREADY guarantee an
+    outright KO this turn (`kos_now`), priority breaks the tie before raw
+    damage does -- "Kingambit picks Kowtow Cleave (more damage) over Sucker
+    Punch when Sucker Punch should guarantee the KO" against a much faster
+    Dragapult: both moves one-shot it, so there is no damage tradeoff left
+    to weigh, and going first (via Sucker Punch) is strictly better than
+    going second with a bigger number on a target that was dying either
+    way -- it can turn what would only ever be an `out_trade` (Dragapult
+    gets to act first and do something before it faints) into a real
+    `sweep`. This does NOT reintroduce the Aqua-Jet-over-Wave-Crash bug
+    above: that bucket is `kos_now=False` for both candidates (neither
+    one-shots), where this exception never applies -- `priority_if_kos_now`
+    is 0 for every such candidate, so the ranking there is exactly as
+    described above, priority-blind. Only among moves that already clear
+    the same "kills it this turn, for certain" bar does a free "and I go
+    first" become worth preferring.
 
     ONE-TURN LOOKAHEAD: "it's important to at least have a one turn
     lookahead -- if wave crash into aqua jet kills ... on the second turn."
@@ -682,7 +699,8 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     for mv, got in candidates:
         kos_now = got.frac >= 1.0
         kos_in_two = kos_now or (got.frac + best_follow_up) >= 1.0
-        key = (kos_now, kos_in_two, got.frac)
+        priority_if_kos_now = mv.priority if kos_now else 0
+        key = (kos_now, kos_in_two, priority_if_kos_now, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hit, best_move = key, got, mv
     return best_hit, best_move
@@ -1510,14 +1528,19 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     own best available follow-up ON THAT SAME TARGET (any move against it,
     computed across every candidate here first) would clear 100%.
 
-    PRIORITY IS NOT A TIE-BREAK HERE, same reasoning as `_choose_move`: it
-    let a weak priority move beat a far stronger slow one whenever both
-    merely cleared the same "reaches a 2-turn kill" bar. Raw damage is the
-    tie-break instead; a chosen move's real priority is still fully
-    honoured in the turn-order computation once picked, and
-    `_reconsider_for_survival` is the dedicated place priority-driven
-    reconsideration actually belongs (surviving to act, or a Sucker Punch
-    pick that would otherwise fail).
+    PRIORITY IS NOT A GENERAL TIE-BREAK HERE, same reasoning and same one
+    narrow exception as `_choose_move`: it let a weak priority move beat a
+    far stronger slow one whenever both merely cleared the same "reaches a
+    2-turn kill" bar, so raw damage is the tie-break there; a chosen move's
+    real priority is still fully honoured in the turn-order computation
+    once picked, and `_reconsider_for_survival` is the dedicated place
+    priority-driven reconsideration otherwise belongs (surviving to act, or
+    a Sucker Punch pick that would otherwise fail). But among candidates
+    that ALREADY guarantee killing everything they hit THIS turn
+    (`kos_now_count` tied at its own max), priority breaks the tie before
+    raw damage does -- there is no damage tradeoff left to weigh between two
+    moves that both finish the job, and going first is strictly better than
+    going second on a target that dies either way.
 
     SPREAD MOVES RANK BY HOW MANY TARGETS THEY GUARANTEE KILLING RIGHT NOW,
     not an all-or-nothing "does it KO every target" flag: a Heat Wave that
@@ -1594,7 +1617,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         kos_now_count = 1 if got.frac >= bar else 0
         kos_in_two_count = 1 if (kos_now_count or
                                  (got.frac + best_frac_by_role[role]) >= bar) else 0
-        key = (kos_now_count, kos_in_two_count, got.frac)
+        priority_if_kos_now = mv.priority if kos_now_count else 0
+        key = (kos_now_count, kos_in_two_count, priority_if_kos_now, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
     for mv, hits in spread_candidates:
@@ -1603,7 +1627,9 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             1 for role, h in hits.items()
             if h.frac >= remaining(role)
             or (h.frac + best_frac_by_role[role]) >= remaining(role))
-        key = (kos_now_count, kos_in_two_count, sum(h.frac for h in hits.values()))
+        priority_if_kos_now = mv.priority if kos_now_count else 0
+        key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
+              sum(h.frac for h in hits.values()))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move
