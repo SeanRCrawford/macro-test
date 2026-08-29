@@ -1396,6 +1396,32 @@ with tab_build:
                                                   if isinstance(data, dict) else None)
             _bump_builder_gen()
             st.success(f"Loaded {len(st.session_state['team'])} Pokemon from upload")
+        with st.expander("...or paste a team .json"):
+            st.caption("From `counter_table.py --teamsheet-json -`: paste its "
+                      "printed JSON here directly -- no need to save a file "
+                      "and upload it, useful when the CLI and this app are in "
+                      "different windows or machines.")
+            pasted_team_json = st.text_area(
+                "Teamsheet JSON", key="paste_team_json", height=150,
+                placeholder='{"pool": ["Name", ...], "sets": {"Name": '
+                           '{"item": "...", "moves": ["...", ...]}}}',
+                label_visibility="collapsed")
+            if st.button("Load pasted JSON", key="paste_team_json_go"):
+                import json as _json
+                try:
+                    data = _json.loads(pasted_team_json)
+                except ValueError as e:
+                    st.error(f"Not valid JSON: {e}")
+                else:
+                    st.session_state["team"] = data.get(
+                        "pool", data if isinstance(data, list) else [])
+                    st.session_state["sets"] = (
+                        data.get("sets", {}) if isinstance(data, dict) else {})
+                    st.session_state["team_analysis"] = (
+                        data.get("analysis") if isinstance(data, dict) else None)
+                    _bump_builder_gen()
+                    st.success(f"Loaded {len(st.session_state['team'])} "
+                              f"Pokemon from pasted JSON")
         if st.button("Use default 6", width='stretch'):
             st.session_state["team"] = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
                                          "Mega Skarmory", "Gholdengo"]
@@ -3165,7 +3191,7 @@ with tab_search:
 
 def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold,
                              min_enemies, max_weak, max_megas, search_kind,
-                             beam_width, excluded_items):
+                             beam_width, excluded_items, max_weak_types=None):
     """Pool-wide search for the best team-of-4/5/6 across `target_name_lists`
     (one enemy roster or several) -- `multi_bring4_coverage` then
     `multi_bring4_exhaustive`/`multi_bring4_beam`, shared by the Counter
@@ -3199,14 +3225,16 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
             try:
                 rows = multi_bring4_exhaustive(
                     coverage, good_threshold=good_threshold,
-                    max_weak=max_weak, max_megas=max_megas)
+                    max_weak=max_weak, max_megas=max_megas,
+                    max_weak_types=max_weak_types)
             except ValueError as e:
                 st.error(f"{e} -- try Beam instead.")
                 return coverage, None
         else:
             rows = multi_bring4_beam(
                 coverage, good_threshold=good_threshold,
-                beam_width=beam_width, max_weak=max_weak, max_megas=max_megas)
+                beam_width=beam_width, max_weak=max_weak, max_megas=max_megas,
+                max_weak_types=max_weak_types)
     if not rows:
         st.error("No core (4, 5, or 6 Pokemon) found -- widen the pool, "
                  "lower the good-pair bar/min-enemies, relax max-weak, "
@@ -3338,9 +3366,11 @@ def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
     weak = member_weakness_summary(core, merged)
     by_type = sorted(((t, c) for t, c in weak["per_type"].items() if c > 0),
                      key=lambda tc: -tc[1])
+    types_2plus = sum(1 for c in weak["per_type"].values() if c >= 2)
     st.caption(f"Weak to 2+ types: {weak['weak_to_2plus']} members -- "
               + (", ".join(f"{t} {c}" for t, c in by_type)
-                 if by_type else "no weaknesses"))
+                 if by_type else "no weaknesses")
+              + f"  |  Types with 2+ weak members: {types_2plus}")
     for e_idx, pe in enumerate(r["per_enemy"]):
         wr = pe["best_bring4_row"]["worst_pair_row"]
         total = wr["pairs_total"]
@@ -3412,10 +3442,18 @@ with tab_counter:
         if ct_our_source == SEARCH_POOL:
             pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
                                   key="ct_b4_pool")
-            c1, c2 = st.columns(2)
+            c1, c2, c2b = st.columns(3)
             ct_max_weak = c1.slider("Max weaknesses per type", 0, 6, 2, key="ct_b4_maxweak")
             ct_max_megas = c2.slider("Max Mega-stone users on a team", 0, 6, 2,
                                      key="ct_b4_maxmegas")
+            ct_max_weak_types_raw = c2b.slider(
+                "Max types with 2+ weaknesses (0 = no cap)", 0, 18, 0,
+                key="ct_b4_maxweaktypes",
+                help="Hard-drops any core where more than this many DIFFERENT "
+                     "types have 2+ members weak to them -- a BREADTH cap, "
+                     "distinct from 'Max weaknesses per type' above (which "
+                     "caps any ONE type's count, not how many types cross it).")
+            ct_max_weak_types = ct_max_weak_types_raw or None
             c3, c4 = st.columns(2)
             ct_search_kind = c3.radio("Search", ["Exhaustive", "Beam (broader pool)"],
                                       key="ct_b4_kind", horizontal=True)
@@ -3426,7 +3464,7 @@ with tab_counter:
                 _coverage, rows = _run_multi_bring4_search(
                     pool_size, [vs_roster], ct_turns, ct_good / 100, 1,
                     ct_max_weak, ct_max_megas, ct_search_kind, ct_beam_width,
-                    ct_excluded)
+                    ct_excluded, max_weak_types=ct_max_weak_types)
                 if rows:
                     st.session_state["ct_b4_pool_rows"] = rows
                     st.session_state["ct_b4_pool_vs"] = [ct_vs_name]
@@ -3443,9 +3481,11 @@ with tab_counter:
         else:
             our6 = (get_state_team() if ct_our_source == "(current Team Builder team)"
                    else list(teams[ct_our_source]))
-            if len(our6) != 6:
-                st.warning("Pick exactly 6 (load a team in Team Builder, or choose a "
-                           "preset above).")
+            if not (4 <= len(our6) <= 6):
+                st.warning("Pick 4, 5, or 6 (load a team in Team Builder, or choose a "
+                           "preset above) -- exactly 4 skips straight to summarising "
+                           "its own 6 internal pairs, since there's only one possible "
+                           "bring-4.")
             else:
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:
@@ -3527,6 +3567,14 @@ with tab_counter:
                                   key="ct_mb4_kind", horizontal=True)
         if ct_search_kind == "Beam (broader pool)":
             ct_beam_width = st.slider("Beam width", 5, 100, 40, key="ct_mb4_beamw")
+        ct_max_weak_types_raw = st.slider(
+            "Max types with 2+ weaknesses (0 = no cap)", 0, 18, 0,
+            key="ct_mb4_maxweaktypes",
+            help="Hard-drops any core where more than this many DIFFERENT "
+                 "types have 2+ members weak to them -- a BREADTH cap, "
+                 "distinct from 'Max weaknesses per type' above (which caps "
+                 "any ONE type's count, not how many types cross it).")
+        ct_max_weak_types = ct_max_weak_types_raw or None
         top_n = st.slider("Show top N cores", 1, 20, 5, key="ct_mb4_topn")
 
         if len(ct_vs_names) < 1:
@@ -3537,7 +3585,7 @@ with tab_counter:
                 pool_size, target_name_lists, ct_turns, ct_good2 / 100,
                 ct_min_enemies, ct_max_weak, ct_max_megas, ct_search_kind,
                 ct_beam_width if ct_search_kind != "Exhaustive" else 40,
-                ct_excluded)
+                ct_excluded, max_weak_types=ct_max_weak_types)
             if rows:
                 st.session_state["ct_mb4_rows"] = rows
                 st.session_state["ct_mb4_vs_names"] = ct_vs_names

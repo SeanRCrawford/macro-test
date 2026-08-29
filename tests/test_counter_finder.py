@@ -2486,15 +2486,43 @@ class TestBring4Search(unittest.TestCase):
             expected = sum(1 for r in b["pair_rows"] if cf._pair_beaten_frac(r) >= 1.0)
             self.assertEqual(b_strict["pairs_good"], expected)
 
-    def test_rejects_a_team_that_is_not_exactly_six(self):
+    def test_rejects_a_team_outside_four_to_six(self):
+        """4, 5, or 6 are all legal -- "in any case, the output should
+        summarise the pair results for the 6 brought pairs in the
+        bring-4" applies whether `our6` is already narrowed to 4 or is a
+        full 6 Stage 2 still has to choose from. Fewer than 4 or more than
+        6 still isn't a real "already-decided team"."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         with self.assertRaises(ValueError):
-            cf.bring4_search(self.OUR6[:5], self.TARGETS, merged, moves,
+            cf.bring4_search(self.OUR6[:3], self.TARGETS, merged, moves,
                              natures, typechart)
         with self.assertRaises(ValueError):
             cf.bring4_search(self.OUR6 + ["Whimsicott"], self.TARGETS, merged,
                              moves, natures, typechart)
+
+    def test_a_team_of_four_degenerates_to_one_bring4_of_its_own_six_pairs(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        our4 = self.OUR6[:4]
+        pair_rows, bring4_rows = cf.bring4_search(
+            our4, self.TARGETS, merged, moves, natures, typechart)
+        self.assertEqual(len(pair_rows), 6)
+        self.assertEqual(len(bring4_rows), 1)
+        self.assertEqual(set(bring4_rows[0]["bring4"]), set(our4))
+        self.assertEqual(len(bring4_rows[0]["pair_rows"]), 6)
+
+    def test_a_team_of_five_offers_five_candidate_bring4s(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        our5 = self.OUR6[:5]
+        pair_rows, bring4_rows = cf.bring4_search(
+            our5, self.TARGETS, merged, moves, natures, typechart)
+        self.assertEqual(len(pair_rows), 10)
+        self.assertEqual(len(bring4_rows), 5)
+        for b in bring4_rows:
+            self.assertTrue(set(b["bring4"]).issubset(set(our5)))
+            self.assertEqual(len(b["pair_rows"]), 6)
 
     def test_rejects_a_mega_alongside_its_own_base_form(self):
         """"You cannot have both a mega and its non-mega form." """
@@ -2503,6 +2531,82 @@ class TestBring4Search(unittest.TestCase):
         our6 = self.OUR6[:5] + ["Alakazam"]  # OUR6 already has Mega Alakazam
         with self.assertRaises(ValueError):
             cf.bring4_search(our6, self.TARGETS, merged, moves, natures, typechart)
+
+
+class TestBring4PairDepth(unittest.TestCase):
+    """`bring4_pair_depth` -- "I would like the csv/xlsx export from the
+    CLI to show the basic details of the 6 pairs for each bring4 (total,
+    3rd best, 4th best, and worst wins, wins under Tailwind ..., under
+    protect safe)": a bring-4 can look fine on just its single worst pair
+    (`_bring4_candidates`'s own ranking) while its middle-of-the-pack pairs
+    are actually mediocre -- this surfaces that."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.pair_rows, self.bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+
+    def test_rejects_unless_the_targets_actually_exist(self):
+        """`TARGETS` here must be real dataset entries -- confirmed once,
+        since a typo would otherwise silently degrade every test below to
+        a smaller, misleading enemy-pair count."""
+        merged = self.W["merged"]
+        for n in self.TARGETS:
+            self.assertIn(n, merged)
+
+    def test_beaten_fields_match_the_pair_sort_key_order(self):
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        ordered = sorted(b["pair_rows"], key=cf._pair_sort_key)
+        beaten = [r["pairs_swept"] + r["pairs_traded"] for r in ordered]
+        self.assertEqual(depth["beaten_total"], sum(beaten))
+        self.assertEqual(depth["beaten_3rd"], beaten[2])
+        self.assertEqual(depth["beaten_4th"], beaten[3])
+        self.assertEqual(depth["beaten_worst"], beaten[-1])
+        self.assertEqual(depth["pairs_total"], ordered[0]["pairs_total"])
+
+    def test_tailwind_and_protect_safe_totals_sum_across_all_six(self):
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        self.assertEqual(depth["tailwind_safe_total"],
+                         sum(r["pairs_tailwind_safe"] for r in b["pair_rows"]))
+        self.assertEqual(depth["protect_safe_total"],
+                         sum(r["pairs_protect_safe"] for r in b["pair_rows"]))
+
+    def test_a_four_member_team_still_produces_one_full_depth_summary(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pair_rows, bring4_rows = cf.bring4_search(
+            self.OUR6[:4], self.TARGETS, merged, moves, natures, typechart)
+        depth = cf.bring4_pair_depth(bring4_rows[0])
+        self.assertIsNotNone(depth["beaten_3rd"])
+        self.assertIsNotNone(depth["beaten_4th"])
+        self.assertIsNotNone(depth["beaten_worst"])
+        self.assertGreaterEqual(depth["beaten_total"], depth["beaten_worst"])
+
+
+class TestEnemyHasRealTailwind(unittest.TestCase):
+    """`enemy_has_real_tailwind` -- "wins under Tailwind, ESPECIALLY IF
+    they have a tailwind user in the 2v2" -- a once-per-roster flag the
+    CLI export reads alongside the aggregated tailwind-safe count, so the
+    reader knows whether that column is worth a second look at all."""
+
+    def test_true_when_a_named_enemy_really_uses_tailwind(self):
+        merged = world()["merged"]
+        self.assertTrue(cf.enemy_has_real_tailwind(
+            ["Whimsicott", "Kingambit"], merged))
+
+    def test_false_when_no_named_enemy_uses_tailwind(self):
+        merged = world()["merged"]
+        self.assertFalse(cf.enemy_has_real_tailwind(
+            ["Kingambit", "Mudsdale"], merged))
 
 
 class TestBring4SearchRejectsOverlap(unittest.TestCase):
@@ -2787,6 +2891,111 @@ class TestMultiBring4MaxMegas(unittest.TestCase):
         for core in newly_allowed:
             n_megas = sum(1 for n in core if n.startswith("Mega "))
             self.assertGreater(n_megas, 2)
+
+
+class TestWeakTypeBreadth(unittest.TestCase):
+    """"I would like to be able to select a cap for the number of types
+    that have 2 weaknesses, such as no more than 3 types that have 2
+    members weak to it." A BREADTH cap, distinct from the existing
+    `max_weak` (a per-type CEILING on how many members may be weak to any
+    ONE type) -- a core could satisfy `max_weak=2` (no type ever exceeds 2
+    weak members) while still being broadly fragile across many different
+    types at once, which `max_weak_types` catches instead."""
+
+    def test_matches_a_hand_count_of_per_type_weak_member_counts(self):
+        merged = world()["merged"]
+        core = ["Mega Charizard Y", "Mega Floette", "Whimsicott", "Corviknight"]
+        per_type = cf.member_weakness_summary(core, merged)["per_type"]
+        want = sum(1 for c in per_type.values() if c >= 2)
+        self.assertEqual(cf.weak_type_breadth(core, merged), want)
+
+    def test_a_lower_threshold_can_only_count_as_many_or_more_types(self):
+        """Lowering the bar (fewer members need to be weak to a type for
+        it to "count") can only ever include MORE types, never fewer."""
+        merged = world()["merged"]
+        core = ["Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Whimsicott", "Corviknight"]
+        self.assertGreaterEqual(cf.weak_type_breadth(core, merged, threshold=1),
+                                cf.weak_type_breadth(core, merged, threshold=2))
+
+    def test_core_passes_hard_filters_rejects_a_core_over_the_cap(self):
+        merged = world()["merged"]
+        core = ("Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Whimsicott", "Corviknight")
+        breadth = cf.weak_type_breadth(list(core), merged)
+        self.assertGreater(breadth, 0, "fixture assumes at least one type "
+                           "already has 2+ weak members")
+        self.assertFalse(cf._core_passes_hard_filters(
+            core, merged, {}, max_megas=3, max_weak_types=breadth - 1))
+        self.assertTrue(cf._core_passes_hard_filters(
+            core, merged, {}, max_megas=3, max_weak_types=breadth))
+
+    def test_none_disables_the_cap_entirely(self):
+        merged = world()["merged"]
+        core = ("Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Whimsicott", "Corviknight")
+        self.assertTrue(cf._core_passes_hard_filters(
+            core, merged, {}, max_megas=3, max_weak_types=None))
+
+    def test_monotonic_growth_never_lowers_the_breadth(self):
+        """Adding a member to a partial core can only add to a type's
+        weak-member count, never remove from it -- so `weak_type_breadth`
+        must never DECREASE as the core grows, the property that makes it
+        safe to prune on during `multi_bring4_beam`'s incremental growth."""
+        merged = world()["merged"]
+        pool = ["Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Whimsicott", "Corviknight", "Sylveon"]
+        prev = 0
+        grown = []
+        for name in pool:
+            grown.append(name)
+            cur = cf.weak_type_breadth(grown, merged)
+            self.assertGreaterEqual(cur, prev)
+            prev = cur
+
+
+class TestMultiBring4MaxWeakTypes(unittest.TestCase):
+    """`max_weak_types` threaded through `multi_bring4_exhaustive`/
+    `multi_bring4_beam`, the same way `max_megas` already is."""
+
+    def setUp(self):
+        self.W = world()
+        self.pool = ["Mega Charizard Y", "Mega Floette", "Mega Metagross",
+                    "Mega Tyranitar", "Whimsicott", "Corviknight"]
+        self.enemies = [["Sableye", "Ariados"], ["Basculegion", "Sinistcha"]]
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.pool, self.enemies, merged, moves, natures, typechart,
+            good_threshold=0.3, min_enemies=1)
+
+    def test_exhaustive_never_returns_a_core_over_the_cap(self):
+        merged = self.W["merged"]
+        rows = cf.multi_bring4_exhaustive(self.coverage, good_threshold=0.3,
+                                          max_megas=4, max_weak_types=2)
+        for r in rows:
+            self.assertLessEqual(cf.weak_type_breadth(list(r["core"]), merged),
+                                 2, r["core"])
+
+    def test_beam_never_returns_a_core_over_the_cap(self):
+        merged = self.W["merged"]
+        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.3,
+                                    beam_width=20, max_megas=4, max_weak_types=2)
+        for r in rows:
+            self.assertLessEqual(cf.weak_type_breadth(list(r["core"]), merged),
+                                 2, r["core"])
+
+    def test_a_tighter_cap_actually_changes_the_result(self):
+        loose_cores = {tuple(sorted(r["core"]))
+                      for r in cf.multi_bring4_exhaustive(
+                          self.coverage, good_threshold=0.3, max_megas=4)}
+        tight_cores = {tuple(sorted(r["core"]))
+                      for r in cf.multi_bring4_exhaustive(
+                          self.coverage, good_threshold=0.3, max_megas=4,
+                          max_weak_types=1)}
+        self.assertTrue(tight_cores.issubset(loose_cores))
+        self.assertLess(len(tight_cores), len(loose_cores),
+                        "fixture assumes the cap actually excludes something")
 
 
 class TestMultiBring4SetsStayFixedAcrossEnemies(unittest.TestCase):

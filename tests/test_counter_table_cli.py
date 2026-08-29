@@ -133,6 +133,16 @@ class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("--multi-bring4", msg)
 
+    def test_max_weak_types_without_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--max-weak-types", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--multi-bring4", msg)
+
+    def test_teamsheet_json_without_bring4_or_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--teamsheet-json", "-"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--teamsheet-json", msg)
+
 
 class TestHelpDocumentsTheNewFlags(unittest.TestCase):
     """A flag missing from `--help` is one nobody can discover; a flag in
@@ -163,6 +173,12 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
 
     def test_xlsx_is_parsed(self):
         self.assertIn("--xlsx", self.help_text)
+
+    def test_max_weak_types_is_parsed(self):
+        self.assertIn("--max-weak-types", self.help_text)
+
+    def test_teamsheet_json_is_parsed(self):
+        self.assertIn("--teamsheet-json", self.help_text)
 
     def test_every_flag_the_module_docstring_shows_is_parsed(self):
         import re
@@ -372,6 +388,275 @@ class TestDeepDiveCoreForBring4(unittest.TestCase):
         msg, _out = run_main(["--vs", "Kingambit", "--deep-dive-core", "1"])
         self.assertIsNotNone(msg)
         self.assertIn("--deep-dive-core", msg)
+
+
+class TestBring4SixPairExportColumns(unittest.TestCase):
+    """"I would like the csv/xlsx export from the CLI to show the basic
+    details of the 6 pairs for each bring4 (total, 3rd best, 4th best, and
+    worst wins, wins under Tailwind ..., under protect safe)" --
+    `bring4_pair_depth`/`enemy_has_real_tailwind`, threaded into --bring4's
+    own CSV export."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+                   "Mega Alakazam,Sharpedo",
+                   "--bring4", "--vs", "Sableye,Ariados"]
+
+    def test_csv_export_has_the_six_pair_depth_columns(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertTrue(rows)
+            header = rows[0].keys()
+            for col in ("6 pairs beaten total", "6 pairs beaten 3rd best",
+                       "6 pairs beaten 4th best", "6 pairs beaten worst",
+                       "enemy has real tailwind",
+                       "6 pairs tailwind safe total",
+                       "6 pairs protect safe total"):
+                self.assertIn(col, header)
+            # Sableye+Ariados carries no real Tailwind user.
+            self.assertEqual(rows[0]["enemy has real tailwind"], "False")
+        finally:
+            os.unlink(path)
+
+    def test_enemy_with_a_real_tailwind_setter_is_flagged_true(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+                   "Mega Alakazam,Sharpedo",
+                   "--bring4", "--vs", "Sableye,Talonflame", "--csv", path]
+            msg, _out = run_main(argv)
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual(rows[0]["enemy has real tailwind"], "True")
+        finally:
+            os.unlink(path)
+
+
+class TestMultiBring4SixPairExportColumns(unittest.TestCase):
+    """The same six-pair depth columns, for --multi-bring4's CSV AND xlsx
+    export (one core row can carry several enemies' worth of them)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "16", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--top", "3"]
+
+    def test_csv_export_has_per_enemy_six_pair_depth_columns(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            for col in ("enemy 1 6 pairs beaten total",
+                       "enemy 1 6 pairs beaten 3rd best",
+                       "enemy 1 6 pairs beaten 4th best",
+                       "enemy 1 6 pairs beaten worst",
+                       "enemy 1 has real tailwind",
+                       "enemy 1 6 pairs tailwind safe total",
+                       "enemy 1 6 pairs protect safe total"):
+                self.assertIn(col, header)
+        finally:
+            os.unlink(path)
+
+    def test_xlsx_export_has_per_enemy_six_pair_depth_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb["Cores"]
+            header = [ws.cell(row=1, column=c).value
+                     for c in range(1, ws.max_column + 1)]
+            for col in ("Enemy 1 6 pairs beaten total",
+                       "Enemy 1 6 pairs beaten 3rd best",
+                       "Enemy 1 6 pairs beaten 4th best",
+                       "Enemy 1 6 pairs beaten worst",
+                       "Enemy 1 has real Tailwind",
+                       "Enemy 1 6 pairs Tailwind-safe total",
+                       "Enemy 1 6 pairs protect-safe total"):
+                self.assertIn(col, header)
+            # Whimsicott is a real Tailwind setter in this fixture's roster.
+            tw_col = header.index("Enemy 1 has real Tailwind") + 1
+            self.assertEqual(ws.cell(row=2, column=tw_col).value, True)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestMaxWeakTypesEndToEnd(unittest.TestCase):
+    """"I would like to be able to select a cap for the number of types
+    that have 2 weaknesses, such as no more than 3 types that have 2
+    members weak to it. Display this measure in the export.\""""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "16", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--good-threshold", "30", "--max-weak", "6", "--top", "3"]
+
+    def test_types_with_2plus_weak_members_line_is_printed(self):
+        msg, out = run_main(self.argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("types with 2+ weak members:", out)
+
+    def test_a_tight_cap_actually_changes_the_printed_result(self):
+        _msg1, out_uncapped = run_main(self.argv)
+        _msg2, out_capped = run_main(self.argv + ["--max-weak-types", "1"])
+        self.assertNotEqual(out_uncapped, out_capped)
+
+    def test_csv_export_has_the_types_with_2plus_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("types with 2+ weak members", header)
+        finally:
+            os.unlink(path)
+
+    def test_xlsx_export_has_the_types_with_2plus_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb["Cores"]
+            header = [ws.cell(row=1, column=c).value
+                     for c in range(1, ws.max_column + 1)]
+            self.assertIn("Types with 2+ weak members", header)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestTeamsheetJsonExport(unittest.TestCase):
+    """"I am primarily using the CLI for counter_table.py and then checking
+    results in the streamlit app, so the export in the CLI needs to be
+    able to export to the streamlit app, whether through a paste or
+    otherwise" -- `--teamsheet-json PATH` (or `-` for stdout) writes
+    exactly the JSON shape the app's Team Builder tab reads/writes."""
+
+    def test_bring4_stdout_prints_a_teamsheet_builder_can_load(self):
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola",
+               "--bring4", "--vs", "Sableye,Ariados", "--teamsheet-json", "-"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("Teamsheet JSON", out)
+        self.assertIn("paste into the Streamlit app", out)
+        start = out.index("{")
+        end = out.rindex("}") + 1
+        import json
+        payload = json.loads(out[start:end])
+        self.assertEqual(set(payload["pool"]),
+                         {"Kingambit", "Dragapult", "Whimsicott",
+                          "Ninetales-Alola"})
+        for name in payload["pool"]:
+            self.assertIn("item", payload["sets"][name])
+            self.assertIn("moves", payload["sets"][name])
+
+    def test_bring4_defaults_to_the_top_result_without_deep_dive_core(self):
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+               "Mega Alakazam,Sharpedo",
+               "--bring4", "--vs", "Sableye,Ariados"]
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".json", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(argv + ["--teamsheet-json", path])
+            self.assertIsNone(msg)
+            import json
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            self.assertEqual(len(payload["pool"]), 4)
+        finally:
+            os.unlink(path)
+
+    def test_multi_bring4_writes_a_loadable_file(self):
+        argv = ["--pool-size", "16", "--multi-bring4",
+               "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+               "--good-threshold", "30"]
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".json", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, out = run_main(argv + ["--teamsheet-json", path])
+            self.assertIsNone(msg, out)
+            import json
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            self.assertTrue(payload["pool"])
+            self.assertEqual(set(payload["pool"]), set(payload["sets"]))
+        finally:
+            os.unlink(path)
+
+    def test_reuses_the_deep_dive_core_pick_rather_than_recomputing(self):
+        """Passing --deep-dive-core alongside --teamsheet-json must export
+        THAT SAME core, not silently fall back to the top result."""
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+               "Mega Alakazam,Sharpedo",
+               "--bring4", "--vs", "Sableye,Ariados",
+               "--deep-dive-core", "2", "--teamsheet-json", "-"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        deep_dive_start = out.index("Deep dive:")
+        teamsheet_start = out.index("Teamsheet JSON")
+        core_line = out[deep_dive_start:teamsheet_start].splitlines()[0]
+        core_names = set(n.strip() for n in
+                         core_line.replace("Deep dive:", "").split("/"))
+        import json
+        start = out.index("{", teamsheet_start)
+        end = out.rindex("}") + 1
+        payload = json.loads(out[start:end])
+        self.assertEqual(set(payload["pool"]), core_names)
+
+    def test_multi_bring4_with_no_core_found_errors_cleanly(self):
+        argv = ["--pool-size", "16", "--multi-bring4",
+               "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+               "--max-weak", "0", "--max-megas", "0",
+               "--teamsheet-json", "-"]
+        msg, _out = run_main(argv)
+        self.assertIsNotNone(msg)
+        self.assertIn("--teamsheet-json", msg)
 
 
 class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):

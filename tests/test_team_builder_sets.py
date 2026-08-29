@@ -311,5 +311,41 @@ class TestApplyGivesAVisibleConfirmation(unittest.TestCase):
                          "showing once a different edit has been applied")
 
 
+class TestPasteTeamsheetJson(unittest.TestCase):
+    """"I am primarily using the CLI for counter_table.py and then checking
+    results in the streamlit app, so the export in the CLI needs to be able
+    to export to the streamlit app, whether through a paste or otherwise" --
+    `counter_table.py --teamsheet-json -` prints exactly this JSON shape
+    (`{"pool": [...], "sets": {...}}`) for copy-pasting here, alongside the
+    existing file-uploader (which `AppTest` itself cannot drive -- there is
+    no existing test coverage for it either, for the same reason)."""
+
+    PAYLOAD = ('{"pool": ["Kingambit", "Dragapult"], '
+              '"sets": {"Kingambit": {"item": "Black Glasses", '
+              '"moves": ["Sucker Punch", "Kowtow Cleave"]}}}')
+
+    def test_pasting_valid_json_loads_team_and_sets(self):
+        at = app()
+        ta = [t for t in at.text_area if t.key == "paste_team_json"][0]
+        ta.set_value(self.PAYLOAD).run()
+        at = click(at, "paste_team_json_go")
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["team"], ["Kingambit", "Dragapult"])
+        self.assertEqual(at.session_state["sets"]["Kingambit"]["item"],
+                         "Black Glasses")
+        self.assertTrue(any("Loaded 2 Pokemon from pasted JSON" in s.value
+                            for s in at.success))
+
+    def test_invalid_json_shows_an_error_not_a_crash(self):
+        at = app()
+        ta = [t for t in at.text_area if t.key == "paste_team_json"][0]
+        ta.set_value("not valid json{{{").run()
+        at = click(at, "paste_team_json_go")
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Not valid JSON" in e.value for e in at.error))
+        # The previously-loaded team must survive an invalid paste.
+        self.assertEqual(at.session_state["team"], TEAM)
+
+
 if __name__ == "__main__":
     unittest.main()

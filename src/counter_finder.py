@@ -334,6 +334,31 @@ def member_weakness_summary(core, merged):
     }
 
 
+def weak_type_breadth(core, merged, threshold=2):
+    """How many DIFFERENT types have at least `threshold` of `core`'s own
+    members weak to them -- "I would like to be able to select a cap for
+    the number of types that have 2 weaknesses, such as no more than 3
+    types that have 2 members weak to it." A complementary question to
+    `member_weakness_summary`'s existing per-type COUNT ("does the team
+    have 3 weaknesses to Fire"): this is about BREADTH of exposure across
+    types, not depth on any one -- a team where Fire, Water, and Grass each
+    have exactly 2 weak members is broadly fragile even if no single type
+    ever exceeds an existing `--max-weak` cap.
+
+    Reuses `member_weakness_summary`'s own `per_type` counts (the same
+    `team_search._weak_resist` split `--max-weak`/`--type-limit` already
+    read), never a second, competing notion of "weak to a type".
+
+    MONOTONIC under core growth, same as `max_weak`: a member's own
+    weaknesses never change, so adding one to a partial core can only ever
+    ADD to a type's weak-member count, never remove from it -- once a type
+    crosses `threshold` it stays crossed. Safe to prune ON during
+    `multi_bring4_beam`'s incremental growth, not just as a final filter.
+    """
+    per_type = member_weakness_summary(core, merged)["per_type"]
+    return sum(1 for c in per_type.values() if c >= threshold)
+
+
 def _build_forms(names, merged, natures, moves_db, items=None):
     """{name: {"mega": Combatant, "base": Combatant, "moves": [MoveInfo,...]}}
     for every name in `names`, built ONCE regardless of how many pairs drawn
@@ -2567,21 +2592,30 @@ def _pair_sort_key(row):
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   turns=2, good_threshold=1.0, item_overrides=None,
                   move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
-    """For an ALREADY-DECIDED team of 6 (from team preview) against one
-    specific enemy roster, which 4 should you actually bring?
+    """For an ALREADY-DECIDED team (4, 5, or 6 Pokemon, from team preview)
+    against one specific enemy roster, which 4 should you actually bring?
 
         "given that I will bring 4 vs a specific enemy, that is 6 pairs I
          will bring. I want the 6 possible pairs of my brings to perform
          very well, or at least to have several perform very well, such
          that I always have options no matter what position I am in."
 
-    STAGE 1 -- every one of the C(6,2)=15 pairs drawn from `our6`, each
-    against every enemy pair drawn from `target_names`: literally
+    Sizes other than 6 aren't a special case: a team of exactly 4 has only
+    ONE possible bring-4 (itself), so Stage 2 below degenerates to a single
+    row summarising its own C(4,2)=6 internal pairs -- "in any case, the
+    output should summarise the pair results for the 6 brought pairs in
+    the bring-4" holds whether `our6` was already narrowed to 4 or is a
+    full 6 Stage 2 still has to choose from. A team of 5 sits in between
+    (C(5,4)=5 candidate bring-4s). Same "4, 5, or 6, no wasted members"
+    convention `multi_bring4_exhaustive`/`multi_bring4_beam` already use.
+
+    STAGE 1 -- every one of `our6`'s C(len(our6),2) pairs, each against
+    every enemy pair drawn from `target_names`: literally
     `joint_pool_search(our6, target_names, ...)`, no new racing. This
     alone answers "searching the top pairs to see how many are in."
 
-    STAGE 2 -- every one of the C(6,4)=15 possible BRING-4 subsets of
-    `our6`: look up its own 6 internal pairs from Stage 1 (pure lookup,
+    STAGE 2 -- every one of `our6`'s C(len(our6),4) possible BRING-4
+    subsets: look up its own 6 internal pairs from Stage 1 (pure lookup,
     still no new racing). Ranked PRIMARILY by how many of `target_names`'s
     enemy pairs NONE of those 6 internal pairs can beat
     (`uncovered_enemy_pairs` -- "having a pair that every pair of yours
@@ -2598,17 +2632,17 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     enemy pairs, default 100% -- "always have options").
 
     Returns (pair_rows, bring4_rows):
-      pair_rows -- `joint_pool_search`'s own 15-row output, unchanged.
+      pair_rows -- `joint_pool_search`'s own row-per-pair output, unchanged.
       bring4_rows -- [{bring4: (4 names), pairs: [(n1,n2), ...6...],
                        pair_rows: [<pair_rows entry>, ...6...],
                        worst_pair: (n1,n2), worst_pair_row: <pair_rows entry>,
                        pairs_good: int, pairs_total: 6,
                        uncovered_enemy_pairs: [(e1,e2), ...]}], best-worst-
-      case first.
+      case first -- a single entry when `our6` is already exactly 4.
     """
     our6 = list(dict.fromkeys(our6))
-    if len(our6) != 6:
-        raise ValueError(f"bring4_search needs exactly 6 distinct Pokemon, "
+    if not (4 <= len(our6) <= 6):
+        raise ValueError(f"bring4_search needs 4, 5, or 6 distinct Pokemon, "
                          f"got {len(our6)}: {our6}")
     overlap = _mega_base_overlap(our6)
     if overlap:
@@ -2689,6 +2723,63 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0):
     bring4_rows.sort(key=lambda b: (len(b["uncovered_enemy_pairs"]),
                                     _pair_sort_key(b["worst_pair_row"]), -b["pairs_good"]))
     return bring4_rows
+
+
+def bring4_pair_depth(bring4_row):
+    """Summarise a bring-4's own 6 internal pairs (`bring4_row["pair_rows"]`,
+    already computed -- no new racing) beyond the single worst pair
+    `_bring4_candidates` already ranks on: "I would like ... the basic
+    details of the 6 pairs for each bring4 (total, 3rd best, 4th best, and
+    worst wins, wins under Tailwind ..., under protect safe)" -- a bring-4
+    can look fine on JUST its worst pair while its middle-of-the-pack pairs
+    (3rd/4th best of 6) are actually mediocre, which the existing ranking
+    never surfaces.
+
+    Pairs are ordered by `_pair_sort_key` (ascending = best first, the same
+    ranking `joint_pool_search`'s own rows already sort by) -- "3rd best"/
+    "4th best" read off that order, not off raw beaten count alone, so they
+    agree with the SAME notion of "better" the rest of this module uses
+    (protect-safe wins first, then beaten count, then tailwind-safe count).
+
+    Returns {"beaten_total": int, "beaten_3rd": int|None, "beaten_4th":
+    int|None, "beaten_worst": int|None, "pairs_total": int (the shared
+    per-pair enemy-pairs-total, e.g. 1 for a single named enemy pair),
+    "tailwind_safe_total": int, "protect_safe_total": int} -- the four
+    "beaten_*" fields and the two "*_total" safety fields are all summed/
+    read across the SAME 6 pairs, so e.g. `beaten_total` compares directly
+    against `6 * pairs_total`. `beaten_3rd`/`beaten_4th` are `None` only if
+    `bring4_row` has fewer than 3/4 pairs (never true for a real bring-4,
+    which always has exactly C(4,2)=6, but this stays honest for a
+    hand-built partial row rather than raising an IndexError).
+    """
+    pairs = sorted(bring4_row["pair_rows"], key=_pair_sort_key)
+    pairs_total = pairs[0]["pairs_total"] if pairs else 0
+    beaten = [r["pairs_swept"] + r["pairs_traded"] for r in pairs]
+    return {
+        "beaten_total": sum(beaten),
+        "beaten_3rd": beaten[2] if len(beaten) > 2 else None,
+        "beaten_4th": beaten[3] if len(beaten) > 3 else None,
+        "beaten_worst": beaten[-1] if beaten else None,
+        "pairs_total": pairs_total,
+        "tailwind_safe_total": sum(r["pairs_tailwind_safe"] for r in pairs),
+        "protect_safe_total": sum(r["pairs_protect_safe"] for r in pairs),
+    }
+
+
+def enemy_has_real_tailwind(target_names, merged):
+    """True if any named enemy actually runs Tailwind in real usage data
+    (`merged[name]["moves_usage"]`) -- the same check `_pair_vs_targets`'s
+    own `_has_tailwind` makes per race, factored out here so a CALLER (the
+    CLI's CSV/xlsx export) can flag "this roster has a real Tailwind
+    threat" once for a whole bring-4 table, instead of re-deriving it from
+    `tailwind_is_real_threat`/`tailwind_forced` on every individual pair
+    row -- "wins under Tailwind, ESPECIALLY IF they have a tailwind user
+    in the 2v2" is exactly this: a flag that tells the reader whether the
+    tailwind-safe column is worth a second look at all, not just its raw
+    number."""
+    return any(
+        any(mv == "Tailwind" for mv, _pct in merged.get(name, {}).get("moves_usage", []))
+        for name in target_names)
 
 
 def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
@@ -2882,7 +2973,8 @@ def _effective_type_limits(max_weak=None, type_limits=None):
     return limits
 
 
-def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2):
+def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
+                              max_weak_types=None):
     """True if `core` (any size) may be proposed as a multi-bring4
     candidate at all: "you cannot have both a mega and its non-mega form"
     (always enforced, `_mega_base_overlap`), "a full team can only have two
@@ -2894,10 +2986,12 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2):
     TEAM COMPOSITION cap, not a per-battle one), plus, when
     `effective_limits` is non-empty, the Advanced weakness limits
     `team_search.hard_violations` already implements -- reused directly,
-    never reimplemented. `max_megas` is checked MONOTONICALLY safe to prune
-    on during partial-core growth too (`multi_bring4_beam`'s own use of this
-    function): a partial core already over the cap can never fix that by
-    adding more members.
+    never reimplemented -- plus, when `max_weak_types` is given, the
+    `weak_type_breadth` cap ("no more than N types may have 2+ weak
+    members"). `max_megas` and `max_weak_types` are both checked
+    MONOTONICALLY safe to prune on during partial-core growth too
+    (`multi_bring4_beam`'s own use of this function): a partial core
+    already over either cap can never fix that by adding more members.
     """
     if _mega_base_overlap(core):
         return False
@@ -2907,6 +3001,8 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2):
         from team_search import hard_violations
         if hard_violations(list(core), merged, type_limits=effective_limits):
             return False
+    if max_weak_types is not None and weak_type_breadth(core, merged) > max_weak_types:
+        return False
     return True
 
 
@@ -2942,7 +3038,8 @@ _CORE_SIZES = (4, 5, 6)
 
 def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_candidates=_EXHAUSTIVE_POOL_CEILING,
-                            max_weak=None, type_limits=None, max_megas=2):
+                            max_weak=None, type_limits=None, max_megas=2,
+                            max_weak_types=None):
     """Every possible CORE (4, 5, or 6 Pokemon, not just exactly 6) drawn
     from `coverage["candidate_pool"]` (`multi_bring4_coverage`), scored and
     ranked by `_core_row`'s worst-case-across-enemies metric -- exhaustive,
@@ -2958,9 +3055,12 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     dropped: the identical-scoring core without that member is already
     enumerated on its own, so keeping the padded version would only ever
     duplicate a real answer with dead weight attached. Also drops any core
-    with both a Mega and its own base form, and (when `max_weak`/
-    `type_limits` are given) any that breaks those Advanced weakness
-    limits (`team_search.hard_violations`, reused).
+    with both a Mega and its own base form, one that breaks
+    `max_weak`/`type_limits` (`team_search.hard_violations`, reused), and
+    (when `max_weak_types` is given) one where more than `max_weak_types`
+    DIFFERENT types have 2+ weak members (`weak_type_breadth`) -- "no more
+    than 3 types that have 2 members weak to it", a breadth cap distinct
+    from `max_weak`'s own per-type ceiling.
 
     Raises if the candidate pool is bigger than `max_candidates` -- narrow
     with a higher `--min-enemies`/`--good-threshold`, or use
@@ -2988,7 +3088,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
             continue
         for core in itertools.combinations(pool, size):
             if not _core_passes_hard_filters(core, merged, effective_limits,
-                                             max_megas=max_megas):
+                                             max_megas=max_megas,
+                                             max_weak_types=max_weak_types):
                 continue
             row = _core_row(core, coverage["pair_by_key"],
                             coverage["target_name_lists"], good_threshold)
@@ -3000,7 +3101,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
 
 
 def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
-                      max_weak=None, type_limits=None, max_megas=2):
+                      max_weak=None, type_limits=None, max_megas=2,
+                      max_weak_types=None):
     """Beam-search a CORE (4, 5, or 6 Pokemon) over the WHOLE pool
     `multi_bring4_coverage` already has pair data for (the raw pool, NOT
     narrowed to `candidate_pool`) -- for when that candidate pool is too
@@ -3035,6 +3137,10 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     # candidate reaches a real core size) -- `max_net` can only be checked
     # once a candidate is a genuine 4-6 core, at the `found`-capture step
     # below, using the FULL `effective_limits`. See `_monotonic_limits`.
+    # `max_weak_types` (a count of TYPES, not a per-type cap) is ALSO
+    # monotonic the same way `max_weak`/`max_megas` are -- see
+    # `weak_type_breadth`'s own docstring -- so it's passed to every
+    # `_core_passes_hard_filters` call below, growth-time and final alike.
     growth_limits = _monotonic_limits(effective_limits)
     pool = sorted({n for pbk in pair_by_key_list for fs in pbk for n in fs})
 
@@ -3056,7 +3162,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
 
     seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
              if _core_passes_hard_filters(p, merged, growth_limits,
-                                          max_megas=max_megas)]
+                                          max_megas=max_megas,
+                                          max_weak_types=max_weak_types)]
     seeds.sort(key=lambda x: x[0])
     beam = [t for _, t in seeds[:beam_width]]
 
@@ -3071,7 +3178,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                 if key in cand:
                     continue
                 if not _core_passes_hard_filters(key, merged, growth_limits,
-                                                 max_megas=max_megas):
+                                                 max_megas=max_megas,
+                                                 max_weak_types=max_weak_types):
                     continue
                 cand[key] = score(list(key))
         ranked = sorted(cand.items(), key=lambda kv: kv[1])[:beam_width]
@@ -3084,7 +3192,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                 if key in found:
                     continue
                 if not _core_passes_hard_filters(key, merged, effective_limits,
-                                                 max_megas=max_megas):
+                                                 max_megas=max_megas,
+                                                 max_weak_types=max_weak_types):
                     continue  # catches a max_net violation growth couldn't see
                 row = _core_row(team, pair_by_key_list, target_name_lists, good_threshold)
                 if not row["unused"]:
