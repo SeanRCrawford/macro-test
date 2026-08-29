@@ -324,7 +324,19 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
             self.assertIn("Cores", wb.sheetnames)
             ws = wb["Cores"]
             self.assertGreater(ws.max_row, 1, "header plus at least one core row")
-            self.assertEqual(ws.cell(row=1, column=1).value, "Core")
+            # A leading "#" rank column -- "the team number [must] be
+            # indexed in the xlsx export" -- with "Core" as the next column.
+            self.assertEqual(ws.cell(row=1, column=1).value, "#")
+            self.assertEqual(ws.cell(row=1, column=2).value, "Core")
+            self.assertEqual(ws.cell(row=2, column=1).value, 1)
+            # "Sets"/"Teamsheets" sheets carry every row's own item+moveset
+            # and a pastable pokepaste/token, not just the deep-dived one.
+            self.assertIn("Sets", wb.sheetnames)
+            self.assertIn("Teamsheets", wb.sheetnames)
+            ts = wb["Teamsheets"]
+            self.assertGreater(ts.max_row, 1)
+            token_col = [c.value for c in ts[1]].index("Teamsheet (base64)") + 1
+            self.assertTrue(ts.cell(row=2, column=token_col).value.startswith("TSHEET1:"))
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -340,12 +352,37 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
             self.assertIsNone(msg)
             from openpyxl import load_workbook
             wb = load_workbook(path)
-            for name in ("Cores", "Deep Dive Sets", "Deep Dive Summary",
-                        "Deep Dive Gameplans"):
+            # Ranked "Dive N ..." sheets (N = the rank actually dived) --
+            # several dives from one run each get their own trio instead of
+            # colliding on one fixed sheet name.
+            for name in ("Cores", "Dive 1 Sets", "Dive 1 Summary",
+                        "Dive 1 Gameplans"):
                 self.assertIn(name, wb.sheetnames)
-            gp = wb["Deep Dive Gameplans"]
+            gp = wb["Dive 1 Gameplans"]
             self.assertGreater(gp.max_row, 1)
             self.assertEqual(gp.cell(row=1, column=1).value, "Pair")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_deep_dive_core_accepts_a_comma_separated_list(self):
+        """"I can deep mode run for promising teams 5, 85, and 16" --
+        several ranks in one run, each printed and each getting its own
+        xlsx sheet trio."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                self.argv + ["--deep-dive-core", "1,2", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            self.assertEqual(out.count("Deep dive:"), 2)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            for name in ("Dive 1 Sets", "Dive 1 Summary", "Dive 1 Gameplans",
+                        "Dive 2 Sets", "Dive 2 Summary", "Dive 2 Gameplans"):
+                self.assertIn(name, wb.sheetnames)
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -447,6 +484,24 @@ class TestBring4SixPairExportColumns(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_csv_export_has_a_teamsheet_base64_column_that_decodes(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertIn("teamsheet base64", rows[0])
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(rows[0]["teamsheet base64"])
+            self.assertTrue(pool)
+        finally:
+            os.unlink(path)
+
 
 class TestMultiBring4SixPairExportColumns(unittest.TestCase):
     """The same six-pair depth columns, for --multi-bring4's CSV AND xlsx
@@ -480,6 +535,24 @@ class TestMultiBring4SixPairExportColumns(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_csv_export_has_a_per_enemy_teamsheet_base64_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertIn("enemy 1 teamsheet base64", rows[0])
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(rows[0]["enemy 1 teamsheet base64"])
+            self.assertTrue(pool)
+        finally:
+            os.unlink(path)
+
     def test_xlsx_export_has_per_enemy_six_pair_depth_columns(self):
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
@@ -493,6 +566,7 @@ class TestMultiBring4SixPairExportColumns(unittest.TestCase):
             ws = wb["Cores"]
             header = [ws.cell(row=1, column=c).value
                      for c in range(1, ws.max_column + 1)]
+            self.assertEqual(header[0], "#")
             for col in ("Enemy 1 6 pairs beaten total",
                        "Enemy 1 6 pairs beaten 3rd best",
                        "Enemy 1 6 pairs beaten 4th best",
@@ -504,6 +578,35 @@ class TestMultiBring4SixPairExportColumns(unittest.TestCase):
             # Whimsicott is a real Tailwind setter in this fixture's roster.
             tw_col = header.index("Enemy 1 has real Tailwind") + 1
             self.assertEqual(ws.cell(row=2, column=tw_col).value, True)
+            self.assertEqual(ws.cell(row=2, column=1).value, 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_xlsx_export_has_sets_and_teamsheets_sheets(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertIn("Sets", wb.sheetnames)
+            self.assertIn("Teamsheets", wb.sheetnames)
+            sets_ws = wb["Sets"]
+            self.assertGreater(sets_ws.max_row, 1)
+            self.assertEqual(
+                [c.value for c in sets_ws[1]],
+                ["#", "Team", "Pokemon", "Item", "Ability", "Nature", "EVs",
+                 "Moves", "Move usage %"])
+            ts = wb["Teamsheets"]
+            token_col = [c.value for c in ts[1]].index("Teamsheet (base64)") + 1
+            token = ts.cell(row=2, column=token_col).value
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(token)
+            self.assertTrue(pool)
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -888,6 +991,84 @@ class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
              "--vs-team", "Big 6"])
         self.assertIsNotNone(msg)
         self.assertIn("needs at least 2 Pokemon", msg)
+
+
+class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
+    """"I need a way, both in the counter_table.py and the streamlit app, to
+    run a bring4 (4-6) vs only ONE named TEAM (--vs-team)" -- --bring4 now
+    accepts a single --vs-team (a saved team.csv row/pokepaste, resolved
+    the same way --multi-bring4's own --vs-team already is) as an
+    alternative to spelling the roster out with --vs."""
+
+    OUR = ("Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+          "Mega Alakazam")
+
+    def test_a_saved_team_name_resolves_to_its_full_roster(self):
+        from _harness import load_world
+        W = load_world()
+        self.assertIn("Rain", W["teams"])
+        msg, out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs-team", "Rain",
+             "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+        for name in W["teams"]["Rain"]:
+            self.assertIn(name, out)
+
+    def test_a_raw_comma_list_still_works_as_a_single_vs_team(self):
+        msg, out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs-team",
+             "Archaludon,Grimmsnarl,Mega Metagross,Pelipper", "--no-prompt",
+             "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Archaludon", out)
+        self.assertIn("Grimmsnarl", out)
+
+    def test_vs_and_vs_team_together_is_rejected(self):
+        msg, _out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs", "Kingambit,Basculegion",
+             "--vs-team", "Rain"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--vs-team", msg)
+
+    def test_neither_vs_nor_vs_team_is_rejected(self):
+        msg, _out = run_main(["--our", self.OUR, "--bring4"])
+        self.assertIsNotNone(msg)
+
+    def test_more_than_one_vs_team_is_rejected(self):
+        msg, _out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs-team", "Rain", "--vs-team",
+             "Big 6"])
+        self.assertIsNotNone(msg)
+        self.assertIn("at most one --vs-team", msg)
+
+    def test_xlsx_export_works_with_bring4(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, _out = run_main(
+                ["--our", self.OUR, "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertIn("Bring-4s", wb.sheetnames)
+            self.assertIn("Sets", wb.sheetnames)
+            self.assertIn("Teamsheets", wb.sheetnames)
+            ws = wb["Bring-4s"]
+            self.assertEqual(ws.cell(row=1, column=1).value, "#")
+            self.assertEqual(ws.cell(row=2, column=1).value, 1)
+            ts = wb["Teamsheets"]
+            token_col = [c.value for c in ts[1]].index("Teamsheet (base64)") + 1
+            token = ts.cell(row=2, column=token_col).value
+            self.assertTrue(token.startswith("TSHEET1:"))
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(token)
+            self.assertTrue(pool)  # decodes to a real, non-empty roster
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):

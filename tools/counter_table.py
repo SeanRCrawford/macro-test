@@ -17,9 +17,11 @@
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --vs "Basculegion,Mega Charizard Y,Mega Floette,Garchomp,Kingambit,Whimsicott" --pool-size 60
     python counter_table.py --our "Mega Scizor,Ninetales-Alola" --deep --switches --bench "Gyarados,Arcanine-Hisui" --vs "Basculegion,Mega Charizard Y"
     python counter_table.py --our "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,Kingambit" --bring4 --vs "Kingambit,Basculegion,Whimsicott,Sinistcha,Mega Charizard Y,Sylveon"
+    python counter_table.py --our "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,Kingambit" --bring4 --vs-team "Rain" --xlsx bring4.xlsx
     python counter_table.py --multi-bring4 --vs-team "Kingambit,Basculegion,Whimsicott,Sinistcha,Mega Charizard Y,Sylveon" --vs-team "Garchomp,Landorus-Therian,Rillaboom,Chien-Pao,Urshifu-Rapid-Strike,Farigiraf" --pool-size 60
     python counter_table.py --multi-bring4 --vs-team "..." --vs-team "..." --max-weak 2 --type-limit "Fire:max_weak=1,max_net=-2" --allow-scarf
     python counter_table.py --multi-bring4 --vs-team "Rain" --vs-team "Big 6" --vs-team "NAIC" --pool-size 60
+    python counter_table.py --multi-bring4 --vs-team "Rain" --vs-team "Big 6" --xlsx multi.xlsx --deep-dive-core "1,3,5"
 
 Eight modes, pick one (or combine --chip-from/--chip-move with --pairs):
 
@@ -286,6 +288,82 @@ def _parse_move_overrides(spec):
         name, moves = entry.split("=", 1)
         out[name.strip()] = [m.strip() for m in moves.split(",") if m.strip()]
     return out
+
+
+def _resolve_vs_team(raw, teams, merged):
+    """One `--vs-team` value -> its resolved roster (list of names),
+    validated. `raw` is EITHER the name of a saved team (a `teams.csv` row,
+    or a pokepaste in `data/teams/`/`data/my_teams/` -- whatever
+    `species_data.load_teams` already indexes under `teams`) OR a raw
+    comma-separated Pokemon list -- shared by `--multi-bring4` (repeated)
+    and `--bring4` (a single one, as an alternative to `--vs`)."""
+    name = raw.strip()
+    team = list(teams[name]) if name in teams else [
+        n.strip() for n in raw.split(",") if n.strip()]
+    if len(team) < 2:
+        raise SystemExit(f"--vs-team {raw!r} needs at least 2 Pokemon to "
+                         f"form any pairs")
+    unknown_team = [n for n in team if n not in merged]
+    if unknown_team:
+        raise SystemExit(f"unknown Pokemon: {', '.join(unknown_team)}")
+    return team
+
+
+def _parse_deep_dive_core(spec):
+    """"5,85,16" (also space- or mixed-separated) -> [5, 85, 16], the ranks
+    to run `core_deep_dive` on -- "I can deep mode run for promising teams
+    5, 85, and 16". Order is preserved as given; a repeated rank is
+    dropped after its first occurrence (each rank becomes an xlsx sheet
+    name -- 'Dive 5 Sets' twice would crash the workbook write, and diving
+    the same core again gives nothing new anyway)."""
+    if not spec:
+        return []
+    parts = [p for p in spec.replace(",", " ").split() if p]
+    out = []
+    for p in parts:
+        try:
+            n = int(p)
+        except ValueError:
+            raise SystemExit(f"--deep-dive-core: {p!r} is not an integer")
+        if n < 1:
+            raise SystemExit(f"--deep-dive-core: {n} must be >= 1 "
+                             f"(1 = top result)")
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _prompt_deep_dive_ranks(n_rows, no_prompt):
+    """After a --multi-bring4/--bring4 search, ask (once) which core/bring-4
+    RANKS (1-based, over the FULL ranked list -- the same numbering the
+    xlsx's '#' column and --deep-dive-core itself use) to deep dive --
+    "there was a prompt after a multi-bring4 that lets me run deep-dive on
+    named cores just generated ... deep mode run for promising teams 5, 85,
+    and 16". Returns [] (no prompt shown at all) whenever there's nothing to
+    pick from, `--no-prompt` was passed, or stdin isn't a real terminal --
+    a scripted or piped run must never block waiting on input it can't get.
+    """
+    if no_prompt or n_rows < 1 or not sys.stdin.isatty():
+        return []
+    while True:
+        try:
+            raw = input(f"\nDeep dive which cores? (1-{n_rows}, e.g. "
+                       f"5,85,16 -- blank to skip): ")
+        except EOFError:
+            return []
+        if not raw.strip():
+            return []
+        try:
+            ranks = _parse_deep_dive_core(raw)
+        except SystemExit as e:
+            print(e)
+            continue
+        bad = [r for r in ranks if r > n_rows]
+        if bad:
+            print(f"Only {n_rows} found -- out of range: "
+                 f"{', '.join(str(b) for b in bad)}")
+            continue
+        return ranks
 
 
 def _pool(args, merged):
@@ -1007,27 +1085,188 @@ def _write_teamsheet_json(path, core_dive):
              f"paste box there.")
 
 
+def _fixed_sets_for(names, fixed_items, fixed_moves, merged, moves_db, natures,
+                    typechart, target_names, item_overrides, move_overrides,
+                    excluded_items):
+    """{name: {"item", "moves"}} for `names`, read from the already-computed
+    FIXED sets when present -- NEVER re-derived, "a real team's set can't be
+    adjusted battle to battle" -- falling back to a fresh `_answer_for` call
+    against `target_names` only for a name the fixed dicts don't cover
+    (mirrors `_print_teamsheet_member`'s own fallback, same reason: not
+    every xlsx export path has a precomputed fixed set to read, e.g.
+    --bring4's, which searches only one team against one roster)."""
+    out = {}
+    for name in names:
+        if name in fixed_items:
+            out[name] = {"item": fixed_items[name],
+                         "moves": fixed_moves.get(name) or []}
+        else:
+            item, move_names, _weather = _answer_for(
+                name, merged, moves_db, natures, typechart, target_names,
+                item_overrides=item_overrides, move_overrides=move_overrides,
+                excluded_items=excluded_items)
+            out[name] = {"item": item, "moves": move_names or []}
+    return out
+
+
+def _teamsheet_export_cells(pool, sets, merged):
+    """(pool, sets) -> (pokepaste text, base64 teamsheet token) -- the two
+    exportable forms an xlsx 'Teamsheets' sheet cell offers: "export any of
+    the teamsheets generated ... maybe with a base64 encoded pokepaste in
+    an excel cell". The token round-trips exactly (paste it into the
+    Streamlit app's Team Builder); the pokepaste is the readable, portable
+    (pokepast.es/Showdown) form of the same team."""
+    from species_data import team_to_showdown_export
+    from team_sheet import encode_teamsheet
+    return team_to_showdown_export(pool, sets, merged), encode_teamsheet(pool, sets)
+
+
+def _write_sets_sheet(wb, rows_by_rank, merged):
+    """A 'Sets' sheet: one row per (rank, Pokemon) -- item, ability, nature,
+    EVs, moves and each move's roster-wide usage%%, "I also need to see
+    what the moves etc are" made visible for EVERY row of the main table,
+    not just an opt-in deep dive. `rows_by_rank`: [(rank, core_or_bring4_label,
+    {name: {"item", "moves"}}), ...] -- name order within each entry is the
+    display order."""
+    from export_excel import _autosize, _style_header
+    from species_data import EV_LABEL, EV_ORDER, resolve_export_fields
+    ws = wb.create_sheet("Sets")
+    ws.append(["#", "Team", "Pokemon", "Item", "Ability", "Nature", "EVs",
+              "Moves", "Move usage %"])
+    _style_header(ws)
+    for rank, label, sets in rows_by_rank:
+        for name, s in sets.items():
+            f = resolve_export_fields(name, s, merged)
+            ev_str = " / ".join(f"{f['evs'][k]} {EV_LABEL[k]}" for k in EV_ORDER
+                                if f["evs"].get(k)) or "-"
+            usage_by_move = dict(merged.get(name, {}).get("moves_usage") or [])
+            moves = s["moves"]
+            ws.append([rank, label, name, f["item"] or "-", f["ability"],
+                      f["nature"], ev_str, ", ".join(moves),
+                      ", ".join(f"{usage_by_move.get(m, 0.0):.0f}%" for m in moves)])
+    _autosize(ws)
+
+
+def _write_teamsheets_sheet(wb, entries, merged):
+    """A 'Teamsheets' sheet: one row per exportable unit -- "export any of
+    the teamsheets generated in the CLI's .xlsx to the streamlit app".
+    `entries`: [(rank, label, scope, members, sets), ...] where `sets` is
+    {name: {"item", "moves"}} for exactly `members`."""
+    from openpyxl.styles import Alignment
+    from export_excel import _autosize, _style_header
+    ws = wb.create_sheet("Teamsheets")
+    ws.append(["#", "Team", "Scope", "Members", "Pokepaste", "Teamsheet (base64)"])
+    _style_header(ws)
+    for rank, label, scope, members, sets in entries:
+        paste, token = _teamsheet_export_cells(members, sets, merged)
+        ws.append([rank, label, scope, " / ".join(members), paste, token])
+        ws.cell(row=ws.max_row, column=5).alignment = Alignment(wrap_text=True)
+    _autosize(ws)
+    # Pokepaste text is long and multi-line -- _autosize's plain "longest
+    # cell text" measure would otherwise blow this column out to hundreds
+    # of characters wide; a fixed, generous width (wrapped, so nothing is
+    # lost) reads far better.
+    ws.column_dimensions["E"].width = 45
+
+
+def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosize):
+    """One 'Dive {rank} Sets'/'Summary'/'Gameplans' sheet trio per
+    `(rank, dive)` in `core_dives` -- `core_deep_dive`'s own return shape,
+    in full, "I also want to see the gameplans for each pair included in a
+    team vs enemies". Shared by --bring4/--multi-bring4's xlsx writers so
+    several dived cores/bring-4s from one run ("deep mode run for promising
+    teams 5, 85, and 16") land in one workbook instead of colliding on a
+    single fixed sheet name."""
+    for rank, dive in core_dives:
+        ws = wb.create_sheet(_safe_sheet_name(f"Dive {rank} Sets"))
+        ws.append(["Pokemon", "Item", "Moves"])
+        _style_header(ws)
+        for name, s in dive["sets"].items():
+            ws.append([name, s["item"] or "-", ", ".join(s["moves"])])
+        _autosize(ws)
+
+        ws = wb.create_sheet(_safe_sheet_name(f"Dive {rank} Summary"))
+        ws.append(["Pair", "Enemy Team", "Beaten", "Total", "Swept", "Traded",
+                   "Lost", "No KO", "Tailwind Safe", "Protect Safe",
+                   "Clean Win Total"])
+        _style_header(ws)
+        ov = dive["overall"]
+        ws.append(["OVERALL", "every pair, every enemy",
+                   ov["pairs_swept"] + ov["pairs_traded"], ov["pairs_total"],
+                   ov["pairs_swept"], ov["pairs_traded"], ov["pairs_lost"],
+                   ov["pairs_no_ko"], ov["pairs_tailwind_safe"],
+                   ov["pairs_protect_safe"], round(ov["pairs_clean_win_total"], 1)])
+        for (n1, n2), pair in dive["per_pair"].items():
+            label = f"{n1} + {n2}"
+            t = pair["total"]
+            ws.append([label, "all enemies", t["pairs_swept"] + t["pairs_traded"],
+                      t["pairs_total"], t["pairs_swept"], t["pairs_traded"],
+                      t["pairs_lost"], t["pairs_no_ko"], t["pairs_tailwind_safe"],
+                      t["pairs_protect_safe"], round(t["pairs_clean_win_total"], 1)])
+            for pe in pair["per_enemy"]:
+                s = pe["summary"]
+                ws.append([label, ", ".join(pe["target_names"]),
+                          s["pairs_swept"] + s["pairs_traded"], s["pairs_total"],
+                          s["pairs_swept"], s["pairs_traded"], s["pairs_lost"],
+                          s["pairs_no_ko"], s["pairs_tailwind_safe"],
+                          s["pairs_protect_safe"], round(s["pairs_clean_win_total"], 1)])
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        _autosize(ws)
+
+        ws = wb.create_sheet(_safe_sheet_name(f"Dive {rank} Gameplans"))
+        ws.append(["Pair", "Enemy Team", "Enemy Pair", "Outcome", "Turn",
+                   "Actor", "Target", "Move", "Damage %", "Type Eff", "Spread"])
+        _style_header(ws)
+        for (n1, n2), pair in dive["per_pair"].items():
+            role_name = {"C": n1, "P": n2}
+            for pe in pair["per_enemy"]:
+                for (e1, e2), d in pe["detail"].items():
+                    role_name["E1"], role_name["E2"] = e1, e2
+                    for turn_i, turn_hits in enumerate(d["log"], 1):
+                        for role, tgt_role, h in turn_hits:
+                            ws.append([f"{n1} + {n2}", ", ".join(pe["target_names"]),
+                                      f"{e1} + {e2}", d["outcome"], turn_i,
+                                      role_name[role], role_name[tgt_role],
+                                      h.move_name or "-", round(h.frac * 100, 1),
+                                      h.eff, h.num_targets_hit > 1])
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        _autosize(ws)
+
+
 def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                              natures, typechart, item_overrides, move_overrides,
-                             excluded_items, fixed_items, fixed_moves, core_dive):
+                             excluded_items, fixed_items, fixed_moves, core_dives):
     """--multi-bring4's table as an Excel workbook -- "it may make more
     sense to make counter_table.py export an xlsx rather than a csv, so
     that I can see the performance vs team ... for each pair, and then vs
     each enemy". A flat CSV row squeezes the per-enemy breakdown into one
-    joined string per cell; real columns (and, with a `core_dive`, a real
+    joined string per cell; real columns (and, with `core_dives`, a real
     per-pair-per-enemy table plus the full gameplan) are the whole point of
     switching format. Reuses `export_excel.py`'s own header/autosize/sheet-
     name styling rather than re-inventing it.
+
+    `core_dives`: [(rank, core_deep_dive's return), ...] for every core the
+    caller opted to deep dive (--deep-dive-core or the interactive prompt)
+    -- zero, one, or several, each getting its own 'Dive N ...' sheet trio.
+
+    The 'Cores' sheet's leading '#' column is the FULL 1-based rank over
+    `rows` (not just the console's --top slice) -- "this will also require
+    the team number to be indexed in the xlsx export" -- and is exactly the
+    number --deep-dive-core/the interactive prompt reads back.
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _safe_sheet_name, _style_header
     wb = Workbook()
+    all_enemies = sorted({n for t in target_name_lists for n in t})
 
     ws = wb.active
     ws.title = "Cores"
-    header = ["Core", "Size", "Bottleneck Enemy", "Weak to 2+ types (members)",
-              "Weak to 1 type (members)", "Weak to 0 types (members)",
-              "Types with 2+ weak members", "Weaknesses by type"]
+    header = ["#", "Core", "Size", "Bottleneck Enemy",
+              "Weak to 2+ types (members)", "Weak to 1 type (members)",
+              "Weak to 0 types (members)", "Types with 2+ weak members",
+              "Weaknesses by type"]
     for i in range(len(target_name_lists)):
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
                    f"Enemy {i + 1} worst pair beaten",
@@ -1042,13 +1281,14 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"Enemy {i + 1} 6 pairs clean win total"]
     ws.append(header)
     _style_header(ws)
-    for r in rows:
+    sets_rows, teamsheet_entries = [], []
+    for rank, r in enumerate(rows, start=1):
         core = r["core"]
         weak = member_weakness_summary(core, merged)
         by_type = sorted(((t, c) for t, c in weak["per_type"].items() if c > 0),
                          key=lambda tc: -tc[1])
         types_2plus = sum(1 for c in weak["per_type"].values() if c >= 2)
-        row = [" / ".join(core), r["core_size"], r["worst_enemy_idx"] + 1,
+        row = [rank, " / ".join(core), r["core_size"], r["worst_enemy_idx"] + 1,
               weak["weak_to_2plus"], weak["weak_to_1"], weak["weak_to_0"],
               types_2plus, ", ".join(f"{t} {c}" for t, c in by_type)]
         for pe in r["per_enemy"]:
@@ -1067,69 +1307,89 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"{depth['protect_safe_total']}/{6 * pt}",
                    f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}"]
         ws.append(row)
+        core_sets = _fixed_sets_for(core, fixed_items, fixed_moves, merged,
+                                    moves_db, natures, typechart, all_enemies,
+                                    item_overrides, move_overrides, excluded_items)
+        sets_rows.append((rank, " / ".join(core), core_sets))
+        teamsheet_entries.append(
+            (rank, " / ".join(core), "full core", core, core_sets))
+        for e_idx, pe in enumerate(r["per_enemy"], start=1):
+            b4 = pe["best_bring4"]
+            b4_sets = {n: core_sets[n] for n in b4}
+            teamsheet_entries.append(
+                (rank, " / ".join(core), f"vs Enemy {e_idx}", b4, b4_sets))
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
 
-    if core_dive is not None:
-        ws = wb.create_sheet("Deep Dive Sets")
-        ws.append(["Pokemon", "Item", "Moves"])
-        _style_header(ws)
-        for name, s in core_dive["sets"].items():
-            ws.append([name, s["item"] or "-", ", ".join(s["moves"])])
-        _autosize(ws)
+    _write_sets_sheet(wb, sets_rows, merged)
+    _write_teamsheets_sheet(wb, teamsheet_entries, merged)
+    if core_dives:
+        _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosize)
 
-        ws = wb.create_sheet("Deep Dive Summary")
-        ws.append(["Pair", "Enemy Team", "Beaten", "Total", "Swept", "Traded",
-                   "Lost", "No KO", "Tailwind Safe", "Protect Safe",
-                   "Clean Win Total"])
-        _style_header(ws)
+    wb.save(path)
+    return path
 
-        ws.append(["OVERALL", "every pair, every enemy",
-                   core_dive["overall"]["pairs_swept"] + core_dive["overall"]["pairs_traded"],
-                   core_dive["overall"]["pairs_total"], core_dive["overall"]["pairs_swept"],
-                   core_dive["overall"]["pairs_traded"], core_dive["overall"]["pairs_lost"],
-                   core_dive["overall"]["pairs_no_ko"],
-                   core_dive["overall"]["pairs_tailwind_safe"],
-                   core_dive["overall"]["pairs_protect_safe"],
-                   round(core_dive["overall"]["pairs_clean_win_total"], 1)])
-        for (n1, n2), pair in core_dive["per_pair"].items():
-            label = f"{n1} + {n2}"
-            t = pair["total"]
-            ws.append([label, "all enemies", t["pairs_swept"] + t["pairs_traded"],
-                      t["pairs_total"], t["pairs_swept"], t["pairs_traded"],
-                      t["pairs_lost"], t["pairs_no_ko"], t["pairs_tailwind_safe"],
-                      t["pairs_protect_safe"], round(t["pairs_clean_win_total"], 1)])
-            for pe in pair["per_enemy"]:
-                s = pe["summary"]
-                ws.append([label, ", ".join(pe["target_names"]),
-                          s["pairs_swept"] + s["pairs_traded"], s["pairs_total"],
-                          s["pairs_swept"], s["pairs_traded"], s["pairs_lost"],
-                          s["pairs_no_ko"], s["pairs_tailwind_safe"],
-                          s["pairs_protect_safe"], round(s["pairs_clean_win_total"], 1)])
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        _autosize(ws)
 
-        ws = wb.create_sheet("Deep Dive Gameplans")
-        ws.append(["Pair", "Enemy Team", "Enemy Pair", "Outcome", "Turn",
-                   "Actor", "Target", "Move", "Damage %", "Type Eff", "Spread"])
-        _style_header(ws)
-        for (n1, n2), pair in core_dive["per_pair"].items():
-            role_name = {"C": n1, "P": n2}
-            for pe in pair["per_enemy"]:
-                for (e1, e2), d in pe["detail"].items():
-                    role_name["E1"], role_name["E2"] = e1, e2
-                    for turn_i, turn_hits in enumerate(d["log"], 1):
-                        for role, tgt_role, h in turn_hits:
-                            ws.append([f"{n1} + {n2}", ", ".join(pe["target_names"]),
-                                      f"{e1} + {e2}", d["outcome"], turn_i,
-                                      role_name[role], role_name[tgt_role],
-                                      h.move_name or "-", round(h.frac * 100, 1),
-                                      h.eff, h.num_targets_hit > 1])
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
-        _autosize(ws)
+def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
+                       moves_db, natures, typechart, item_overrides,
+                       move_overrides, excluded_items, core_dives):
+    """--bring4's table as an Excel workbook -- the single-team/single-enemy-
+    roster counterpart to `_write_multi_bring4_xlsx`, for "run a bring4 vs
+    only ONE named team" with the same xlsx bridge: a ranked '#' column, a
+    'Sets' sheet (our6's own item/moveset, searched once and shared by
+    every bring-4 -- a real team can't re-optimise battle to battle), a
+    'Teamsheets' sheet (pokepaste + base64 token for the full six and every
+    bring-4 subset), and a Dive sheet trio per `core_dives` entry.
+    """
+    from openpyxl import Workbook
+    from export_excel import _autosize, _safe_sheet_name, _style_header
+    wb = Workbook()
+
+    enemy_tw = enemy_has_real_tailwind(targets, merged)
+    ws = wb.active
+    ws.title = "Bring-4s"
+    ws.append(["#", "Bring-4", "Uncovered enemy pairs", "Pairs good",
+              "Pairs total", "Worst pair", "Worst pair beaten",
+              "Worst pair total", "6 pairs beaten total",
+              "6 pairs beaten 3rd best", "6 pairs beaten 4th best",
+              "6 pairs beaten worst", "Enemy has real Tailwind",
+              "6 pairs Tailwind-safe total", "6 pairs protect-safe total",
+              "6 pairs clean win total"])
+    _style_header(ws)
+    for rank, b in enumerate(bring4_rows, start=1):
+        wr = b["worst_pair_row"]
+        depth = bring4_pair_depth(b)
+        pt = depth["pairs_total"]
+        ws.append([rank, " / ".join(b["bring4"]),
+                  ", ".join(f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
+                  b["pairs_good"], b["pairs_total"], " + ".join(b["worst_pair"]),
+                  f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
+                  wr["pairs_total"], f"{depth['beaten_total']}/{6 * pt}",
+                  f"{depth['beaten_3rd']}/{pt}", f"{depth['beaten_4th']}/{pt}",
+                  f"{depth['beaten_worst']}/{pt}", enemy_tw,
+                  f"{depth['tailwind_safe_total']}/{6 * pt}",
+                  f"{depth['protect_safe_total']}/{6 * pt}",
+                  f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}"])
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    _autosize(ws)
+
+    our6_sets = _fixed_sets_for(our6, {}, {}, merged, moves_db, natures,
+                                typechart, targets, item_overrides,
+                                move_overrides, excluded_items)
+    _write_sets_sheet(wb, [(1, " / ".join(our6), our6_sets)], merged)
+
+    teamsheet_entries = [(1, " / ".join(our6), "all 6", our6, our6_sets)]
+    for rank, b in enumerate(bring4_rows, start=1):
+        b4 = b["bring4"]
+        teamsheet_entries.append(
+            (rank, " / ".join(our6), f"bring-4 #{rank}", b4,
+            {n: our6_sets[n] for n in b4}))
+    _write_teamsheets_sheet(wb, teamsheet_entries, merged)
+
+    if core_dives:
+        _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosize)
 
     wb.save(path)
     return path
@@ -1254,14 +1514,18 @@ def main():
                          "exhaustive search over the whole pool instead")
     ap.add_argument("--vs-team", action="append", default=[],
                     metavar="POKEMON,...|TEAM NAME",
-                    help="--multi-bring4 only: one enemy roster, EITHER "
-                         "comma-separated Pokemon, or the name of a saved "
-                         "team (a data/teams.csv row, or a pokepaste in "
-                         "data/teams/ or data/my_teams/ -- the same library "
-                         "--team already searches). Repeat for each enemy "
-                         "team (1+ required -- a single --vs-team searches "
-                         "the best core against just that one roster), e.g. "
-                         "--vs-team \"Rain\" --vs-team \"Big 6\"")
+                    help="--multi-bring4/--bring4 only: an enemy roster, "
+                         "EITHER comma-separated Pokemon, or the name of a "
+                         "saved team (a data/teams.csv row, or a pokepaste "
+                         "in data/teams/ or data/my_teams/ -- the same "
+                         "library --team already searches). --multi-bring4: "
+                         "repeat for each enemy team (1+ required -- a "
+                         "single --vs-team searches the best core against "
+                         "just that one roster), e.g. --vs-team \"Rain\" "
+                         "--vs-team \"Big 6\". --bring4: exactly one, as an "
+                         "alternative to spelling the same roster out with "
+                         "--vs, e.g. --bring4 --vs-team \"Big 6\" instead of "
+                         "--vs \"<Big 6's six names>\"")
     ap.add_argument("--max-weak", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: hard-drop any candidate CORE "
                          "where more than N of its members are weak to the "
@@ -1385,14 +1649,20 @@ def main():
     ap.add_argument("--top", type=int, default=20, help="rows to print")
     ap.add_argument("--csv", default="", help="also write the whole table here")
     ap.add_argument("--xlsx", default="", metavar="PATH",
-                    help="--multi-bring4 only: write the same table to an "
-                         "Excel workbook instead of a flat CSV row -- lets "
-                         "you actually see the full beaten/swept/traded/"
-                         "lost/no-KO/tw-safe/pr-safe breakdown per pair per "
-                         "enemy, not just one squeezed-together cell. With "
-                         "--deep-dive-core also given, the workbook gets a "
-                         "dedicated sheet per pair with that full detail "
-                         "plus the turn-by-turn gameplan for every enemy")
+                    help="--multi-bring4/--bring4 only: write the same "
+                         "table to an Excel workbook instead of a flat CSV "
+                         "row -- lets you actually see the full beaten/"
+                         "swept/traded/lost/no-KO/tw-safe/pr-safe breakdown "
+                         "per pair per enemy, not just one squeezed-"
+                         "together cell, plus a ranked '#' column, every "
+                         "core/bring-4's own item+moveset ('Sets' sheet), "
+                         "and a pastable pokepaste + base64 teamsheet token "
+                         "per core/bring-4 ('Teamsheets' sheet -- paste "
+                         "either into the Streamlit app's Team Builder). "
+                         "With --deep-dive-core also given, the workbook "
+                         "gets a dedicated sheet trio per dived core with "
+                         "that full detail plus the turn-by-turn gameplan "
+                         "for every enemy")
     ap.add_argument("--teamsheet-json", default="", metavar="PATH",
                     help="--multi-bring4/--bring4 only: write the Nth-ranked "
                          "core/bring-4's teamsheet (--deep-dive-core's N, "
@@ -1405,7 +1675,7 @@ def main():
                          "writing a file -- \"the export in the CLI needs "
                          "to be able to export to the streamlit app, "
                          "whether through a paste or otherwise\"")
-    ap.add_argument("--deep-dive-core", type=int, default=0, metavar="N",
+    ap.add_argument("--deep-dive-core", default="", metavar="N[,N,...]",
                     help="--multi-bring4/--bring4 only: after the main "
                          "search, run a full deep dive on the Nth-ranked "
                          "core/bring-4 shown (1 = top result) -- every one "
@@ -1414,8 +1684,20 @@ def main():
                          "gameplan log and an aggregate beaten/swept/traded/"
                          "lost/no-KO/tw-safe/pr-safe total (both per-pair "
                          "and for the whole core). Deliberately NOT "
-                         "computed for every core in the main search -- "
-                         "opt in for the one you actually want to inspect")
+                         "computed for every core in the main search -- opt "
+                         "in for the ones you actually want to inspect. "
+                         "Comma-separated for several at once, e.g. "
+                         "--deep-dive-core \"5,85,16\" -- the xlsx's '#' "
+                         "column (with --xlsx) is the same ranking this "
+                         "reads")
+    ap.add_argument("--no-prompt", action="store_true",
+                    help="--multi-bring4/--bring4 only: skip the interactive "
+                         "'deep dive which cores?' prompt this tool asks "
+                         "after the main search when running in a real "
+                         "terminal and --deep-dive-core wasn't already "
+                         "given. Scripted/piped runs never see the prompt "
+                         "regardless -- this is for an interactive run "
+                         "that wants the search results only")
     args = ap.parse_args()
 
     if bool(args.chip_from) != bool(args.chip_move):
@@ -1441,19 +1723,30 @@ def main():
                               or args.chip_from or args.speed):
         raise SystemExit("--multi-bring4 cannot be combined with --joint/"
                          "--deep/--bring4/--pairs/--chip-from/--speed")
-    if not args.multi_bring4 and not args.vs:
-        raise SystemExit("--vs is required (except with --multi-bring4, "
-                         "which uses --vs-team instead)")
+    if not args.multi_bring4 and not args.bring4 and not args.vs:
+        raise SystemExit("--vs is required (except with --multi-bring4/"
+                         "--bring4, which can use --vs-team instead)")
     if args.multi_bring4 and args.vs:
         raise SystemExit("--multi-bring4 uses --vs-team (repeated), not --vs")
     if args.multi_bring4 and len(args.vs_team) < 1:
         raise SystemExit("--multi-bring4 needs at least one --vs-team")
-    if args.vs_team and not args.multi_bring4:
-        raise SystemExit("--vs-team requires --multi-bring4")
+    if args.bring4:
+        if bool(args.vs) == bool(args.vs_team):
+            raise SystemExit("--bring4 needs exactly one of --vs "
+                             "\"Pokemon,...\" or --vs-team "
+                             "\"Pokemon,...|TEAM NAME\"")
+        if len(args.vs_team) > 1:
+            raise SystemExit("--bring4 takes at most one --vs-team (a "
+                             "single enemy roster) -- --multi-bring4 is "
+                             "for several at once")
+    if args.vs_team and not (args.multi_bring4 or args.bring4):
+        raise SystemExit("--vs-team requires --multi-bring4 or --bring4")
     if args.deep_dive_core and not (args.multi_bring4 or args.bring4):
         raise SystemExit("--deep-dive-core requires --multi-bring4 or --bring4")
-    if args.xlsx and not args.multi_bring4:
-        raise SystemExit("--xlsx requires --multi-bring4")
+    if args.no_prompt and not (args.multi_bring4 or args.bring4):
+        raise SystemExit("--no-prompt requires --multi-bring4 or --bring4")
+    if args.xlsx and not (args.multi_bring4 or args.bring4):
+        raise SystemExit("--xlsx requires --multi-bring4 or --bring4")
     if (args.beam or args.beam_width != 40 or args.max_candidates != 30
             or args.min_enemies != 2) and not args.multi_bring4:
         raise SystemExit("--beam/--beam-width/--max-candidates/--min-enemies "
@@ -1493,10 +1786,15 @@ def main():
     W = load_world()
     merged, moves, natures, typechart = (W["merged"], W["moves"], W["natures"],
                                          W["typechart"])
-    targets = [n.strip() for n in args.vs.split(",") if n.strip()]
-    missing = [n for n in targets if n not in merged]
-    if missing:
-        raise SystemExit(f"unknown Pokemon: {', '.join(missing)}")
+    if args.vs:
+        targets = [n.strip() for n in args.vs.split(",") if n.strip()]
+        missing = [n for n in targets if n not in merged]
+        if missing:
+            raise SystemExit(f"unknown Pokemon: {', '.join(missing)}")
+    elif args.bring4 and args.vs_team:
+        targets = _resolve_vs_team(args.vs_team[0], W["teams"], merged)
+    else:
+        targets = []
     if args.partner and args.partner not in merged:
         raise SystemExit(f"unknown Pokemon: {args.partner}")
     if args.partner and args.partner in targets:
@@ -1533,18 +1831,7 @@ def main():
     vs_teams = []
     if args.multi_bring4:
         for raw in args.vs_team:
-            name = raw.strip()
-            if name in W["teams"]:
-                team = list(W["teams"][name])
-            else:
-                team = [n.strip() for n in raw.split(",") if n.strip()]
-            if len(team) < 2:
-                raise SystemExit(f"--vs-team {raw!r} needs at least 2 Pokemon "
-                                 f"to form any pairs")
-            unknown_team = [n for n in team if n not in merged]
-            if unknown_team:
-                raise SystemExit(f"unknown Pokemon: {', '.join(unknown_team)}")
-            vs_teams.append(team)
+            vs_teams.append(_resolve_vs_team(raw, W["teams"], merged))
         if args.min_enemies == 2 and len(vs_teams) < 2:
             # Still at the untouched default -- auto-clamp rather than make
             # a single-roster search jump through an extra flag for it.
@@ -1636,29 +1923,37 @@ def main():
             excluded_items=excluded_items)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
-        core_dive = None
-        if args.deep_dive_core:
-            if args.deep_dive_core > len(bring4_rows):
-                raise SystemExit(f"--deep-dive-core {args.deep_dive_core} "
-                                 f"but only {len(bring4_rows)} bring-4(s) "
-                                 f"were found")
-            core_dive = core_deep_dive(
-                bring4_rows[args.deep_dive_core - 1]["bring4"], [targets],
-                merged, moves, natures, typechart, turns=args.turns,
+        ranks = _parse_deep_dive_core(args.deep_dive_core)
+        if not ranks:
+            ranks = _prompt_deep_dive_ranks(len(bring4_rows), args.no_prompt)
+        core_dives = []
+        for rank in ranks:
+            if rank > len(bring4_rows):
+                raise SystemExit(f"--deep-dive-core {rank} but only "
+                                 f"{len(bring4_rows)} bring-4(s) were found")
+            dive = core_deep_dive(
+                bring4_rows[rank - 1]["bring4"], [targets], merged, moves,
+                natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items)
-            _print_core_deep_dive(core_dive)
+            _print_core_deep_dive(dive)
+            core_dives.append((rank, dive))
+        if args.xlsx:
+            path = _write_bring4_xlsx(
+                args.xlsx, bring4_rows, our6, targets, merged,
+                moves, natures, typechart, item_overrides, move_overrides,
+                excluded_items, core_dives)
+            print(f"\nExcel workbook: {os.path.abspath(path)}")
         if args.teamsheet_json:
-            if core_dive is None:
-                # No --deep-dive-core given -- default to the top result,
-                # same "1 = top result" convention --deep-dive-core itself
-                # uses.
-                core_dive = core_deep_dive(
-                    bring4_rows[0]["bring4"], [targets], merged, moves,
-                    natures, typechart, turns=args.turns,
-                    item_overrides=item_overrides, move_overrides=move_overrides,
-                    excluded_items=excluded_items)
-            _write_teamsheet_json(args.teamsheet_json, core_dive)
+            # No core was dived (no --deep-dive-core, no interactive pick)
+            # -- default to the top result, same "1 = top result"
+            # convention --deep-dive-core itself uses.
+            dive = core_dives[0][1] if core_dives else core_deep_dive(
+                bring4_rows[0]["bring4"], [targets], merged, moves,
+                natures, typechart, turns=args.turns,
+                item_overrides=item_overrides, move_overrides=move_overrides,
+                excluded_items=excluded_items)
+            _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
         coverage = multi_bring4_coverage(
@@ -1715,23 +2010,26 @@ def main():
                             item_overrides, move_overrides, excluded_items,
                             fixed_items=coverage["fixed_items"],
                             fixed_moves=coverage["fixed_moves"])
-        core_dive = None
-        if args.deep_dive_core:
-            if args.deep_dive_core > len(multi_rows):
-                raise SystemExit(f"--deep-dive-core {args.deep_dive_core} "
-                                 f"but only {len(multi_rows)} core(s) were "
-                                 f"found")
-            core_dive = core_deep_dive(
-                multi_rows[args.deep_dive_core - 1]["core"], vs_teams, merged,
-                moves, natures, typechart, turns=args.turns,
+        ranks = _parse_deep_dive_core(args.deep_dive_core)
+        if not ranks:
+            ranks = _prompt_deep_dive_ranks(len(multi_rows), args.no_prompt)
+        core_dives = []
+        for rank in ranks:
+            if rank > len(multi_rows):
+                raise SystemExit(f"--deep-dive-core {rank} but only "
+                                 f"{len(multi_rows)} core(s) were found")
+            dive = core_deep_dive(
+                multi_rows[rank - 1]["core"], vs_teams, merged, moves,
+                natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items)
-            _print_core_deep_dive(core_dive)
+            _print_core_deep_dive(dive)
+            core_dives.append((rank, dive))
         if args.xlsx:
             path = _write_multi_bring4_xlsx(
                 args.xlsx, multi_rows, vs_teams, merged, moves, natures,
                 typechart, item_overrides, move_overrides, excluded_items,
-                coverage["fixed_items"], coverage["fixed_moves"], core_dive)
+                coverage["fixed_items"], coverage["fixed_moves"], core_dives)
             print(f"\nExcel workbook: {os.path.abspath(path)}")
         if args.teamsheet_json:
             if not multi_rows:
@@ -1740,15 +2038,14 @@ def main():
                                  "--good-threshold/--min-enemies, relax "
                                  "--max-weak/--type-limit/--max-weak-types, "
                                  "or try --beam")
-            if core_dive is None:
-                # No --deep-dive-core given -- default to the top result,
-                # same "1 = top result" convention --deep-dive-core itself
-                # uses.
-                core_dive = core_deep_dive(
-                    multi_rows[0]["core"], vs_teams, merged, moves, natures,
-                    typechart, turns=args.turns, item_overrides=item_overrides,
-                    move_overrides=move_overrides, excluded_items=excluded_items)
-            _write_teamsheet_json(args.teamsheet_json, core_dive)
+            # No core was dived (no --deep-dive-core, no interactive pick)
+            # -- default to the top result, same "1 = top result"
+            # convention --deep-dive-core itself uses.
+            dive = core_dives[0][1] if core_dives else core_deep_dive(
+                multi_rows[0]["core"], vs_teams, merged, moves, natures,
+                typechart, turns=args.turns, item_overrides=item_overrides,
+                move_overrides=move_overrides, excluded_items=excluded_items)
+            _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
         rows = speed_tiers(names, targets, merged, moves, natures, typechart,
@@ -1826,6 +2123,9 @@ def main():
     elif args.csv and args.bring4:
         import csv
         enemy_tw = enemy_has_real_tailwind(targets, merged)
+        our6_sets = _fixed_sets_for(our6, {}, {}, merged, moves, natures,
+                                    typechart, targets, item_overrides,
+                                    move_overrides, excluded_items)
         flat = []
         for b in bring4_rows:
             wr = b["worst_pair_row"]
@@ -1854,6 +2154,9 @@ def main():
                 "6 pairs clean win total": (f"{depth['clean_win_total']:.1f}/"
                                             f"{6 * pt * 2:.0f}"),
             }
+            _paste, token = _teamsheet_export_cells(
+                b["bring4"], {n: our6_sets[n] for n in b["bring4"]}, merged)
+            row["teamsheet base64"] = token
             for i, pr in enumerate(b["pair_rows"], start=1):
                 row[f"pair {i}"] = " + ".join(pr["pair"])
                 row[f"pair {i} beaten"] = (f"{pr['pairs_swept'] + pr['pairs_traded']}"
@@ -1909,6 +2212,7 @@ def main():
                 row[f"enemy {e_idx} 6 pairs clean win total"] = (
                     f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}")
                 teamsheet_bits = []
+                b4_sets = {}
                 for name in pe["best_bring4"]:
                     # Read the same FIXED set every printed number was
                     # computed from (`coverage["fixed_items"/"fixed_moves"]`)
@@ -1923,12 +2227,16 @@ def main():
                             pe["target_names"], item_overrides=item_overrides,
                             move_overrides=move_overrides,
                             excluded_items=excluded_items)
+                    b4_sets[name] = {"item": item, "moves": move_names or []}
                     usage_by_move = dict(merged[name].get("moves_usage") or [])
                     moves_str = ", ".join(
                         f"{m} ({usage_by_move.get(m, 0.0):.0f}%)"
                         for m in (move_names or []))
                     teamsheet_bits.append(f"{name} @ {item or '-'}: {moves_str}")
                 row[f"enemy {e_idx} teamsheet"] = "; ".join(teamsheet_bits)
+                _paste, token = _teamsheet_export_cells(
+                    pe["best_bring4"], b4_sets, merged)
+                row[f"enemy {e_idx} teamsheet base64"] = token
             flat.append(row)
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=list(flat[0]) if flat else [])

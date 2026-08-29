@@ -86,11 +86,15 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         test_counter_finder.py for the underlying fix."""
         at = app(team=[])  # nothing loaded in Team Builder
         sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
-        # options[0] is "(current Team Builder team)", options[1] is the
-        # "search a pool" sentinel (its own dedicated test class) -- the
-        # first actual preset TEAM name starts at options[2].
-        self.assertGreater(len(sb.options), 2, "expected preset teams offered")
-        sb.set_value(sb.options[2]).run()
+        # The leading options are all sentinels ("(current Team Builder
+        # team)", "search a pool", "paste a pokepaste" -- each with its own
+        # dedicated test class); a real preset TEAM name is whatever's left.
+        sentinels = {"(current Team Builder team)",
+                    "\U0001f50d Search a pool for the best team",
+                    "\U0001f4cb Paste a pokepaste"}
+        preset_names = [o for o in sb.options if o not in sentinels]
+        self.assertTrue(preset_names, "expected preset teams offered")
+        sb.set_value(preset_names[0]).run()
         [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertFalse(any("Pick exactly 6" in w.value for w in at.warning))
@@ -269,6 +273,59 @@ class TestDeepDiveASpecificTeam(unittest.TestCase):
         dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4p_")
                      and b.key.endswith("_go")]
         self.assertTrue(dd_buttons, "expected a deep-dive button on a pool-search core")
+
+
+class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):
+    """"I need a way ... in the streamlit app, to run a bring4 (4-6) vs
+    only ONE named TEAM" plus "let the enemy roster be pasted/custom
+    (dropdown) and let our roster be pasted/custom" -- both the enemy
+    roster and our own 4-6 in Bring-4 mode now offer a paste option
+    alongside the saved-team dropdown, not just a fixed library pick."""
+
+    RAIN_PASTE = ("Archaludon @ Assault Vest\nAbility: Stamina\n"
+                 "EVs: 2 HP / 32 SpA / 32 SpD\nModest Nature\n"
+                 "- Draco Meteor\n- Flash Cannon\n- Electro Shot\n- Body Press\n\n"
+                 "Grimmsnarl @ Light Clay\nAbility: Prankster\n"
+                 "EVs: 32 HP / 32 Def\nBold Nature\n"
+                 "- Light Screen\n- Reflect\n- Spirit Break\n- Thunder Wave")
+
+    def test_enemy_roster_offers_a_paste_option(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        self.assertIn("\U0001f4cb Paste a pokepaste", sb.options)
+
+    def test_our_6_offers_a_paste_option(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        self.assertIn("\U0001f4cb Paste a pokepaste", sb.options)
+
+    def test_pasting_an_enemy_roster_reveals_a_text_area(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(t.key == "ct_b4_vs_paste" for t in at.text_area))
+
+    def test_a_valid_pasted_enemy_roster_parses_and_can_search(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.RAIN_PASTE).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Archaludon" in s.value for s in at.success))
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_pasting_our_6_reveals_a_text_area_and_parses(self):
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        self.assertFalse(at.exception, list(at.exception))
+        ta = [t for t in at.text_area if t.key == "ct_b4_our_paste"][0]
+        at = ta.set_value(self.RAIN_PASTE).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Archaludon" in s.value for s in at.success))
 
 
 if __name__ == "__main__":

@@ -256,6 +256,50 @@ def _save_pasted_team(paste_text, raw_name):
     return path
 
 
+def _load_team_text(text, merged):
+    """Sniff pasted/uploaded team text into (pool, sets, analysis) --
+    whichever of the three formats `counter_table.py` can hand back this
+    actually is, detected instead of asked for:
+
+    - a base64 teamsheet TOKEN (`team_sheet.encode_teamsheet`'s own format
+      -- the xlsx export's 'Teamsheet (base64)' column, or `--teamsheet-
+      json`'s printed JSON re-encoded) -- "export any of the teamsheets
+      generated in the CLI's .xlsx to the streamlit app";
+    - plain team .json (`{"pool", "sets", "analysis"}`, or a bare list of
+      names) -- what `--teamsheet-json -`/a saved team.json already prints;
+    - a raw Showdown-export POKEPASTE (the xlsx's 'Pokepaste' column, or
+      anything copied from pokepast.es) -- reuses `custom_team_from_export`,
+      the same parser every other pokepaste box in this app already calls.
+
+    Raises ValueError with a message fit to show the user directly.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("Nothing pasted/uploaded.")
+    from team_sheet import TEAMSHEET_TOKEN_PREFIX, decode_teamsheet
+    if text.startswith(TEAMSHEET_TOKEN_PREFIX):
+        pool, sets = decode_teamsheet(text)
+        return pool, sets, None
+    if text[0] in "{[":
+        import json as _json
+        try:
+            data = _json.loads(text)
+        except ValueError as e:
+            raise ValueError(f"Not valid JSON: {e}")
+        pool = data.get("pool", data if isinstance(data, list) else [])
+        sets = data.get("sets", {}) if isinstance(data, dict) else {}
+        analysis = data.get("analysis") if isinstance(data, dict) else None
+        return list(pool), dict(sets), analysis
+    pool, sets = species_data.custom_team_from_export(text, merged or {})
+    unknown = [n for n in pool if n not in (merged or {})]
+    if unknown:
+        raise ValueError("Unrecognised species (check spelling against "
+                         f"mbsmogon.xlsx): {', '.join(unknown)}")
+    if not pool:
+        raise ValueError("Couldn't parse any Pokemon out of that text.")
+    return pool, sets, None
+
+
 def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     """Where OUR six come from, offered the same way everywhere.
 
@@ -1386,42 +1430,45 @@ with tab_build:
             _bump_builder_gen()  # a loaded team can reuse a name with a
             # different set -- see _bump_builder_gen's own docstring.
             st.success(f"Loaded {len(pool)} Pokemon from {pick}")
-        up = st.file_uploader("...or upload a team .json", type="json", key="up_team")
+        up = st.file_uploader("...or upload a team .json/.txt", type=["json", "txt"],
+                              key="up_team")
         if up is not None:
-            import json as _json
-            data = _json.loads(up.read())
-            st.session_state["team"] = data.get("pool", data if isinstance(data, list) else [])
-            st.session_state["sets"] = data.get("sets", {}) if isinstance(data, dict) else {}
-            st.session_state["team_analysis"] = (data.get("analysis")
-                                                  if isinstance(data, dict) else None)
-            _bump_builder_gen()
-            st.success(f"Loaded {len(st.session_state['team'])} Pokemon from upload")
-        with st.expander("...or paste a team .json"):
-            st.caption("From `counter_table.py --teamsheet-json -`: paste its "
-                      "printed JSON here directly -- no need to save a file "
-                      "and upload it, useful when the CLI and this app are in "
-                      "different windows or machines.")
-            pasted_team_json = st.text_area(
-                "Teamsheet JSON", key="paste_team_json", height=150,
-                placeholder='{"pool": ["Name", ...], "sets": {"Name": '
-                           '{"item": "...", "moves": ["...", ...]}}}',
+            text = up.read().decode("utf-8")
+            try:
+                pool, sets, analysis = _load_team_text(text, merged)
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.session_state["team"] = pool
+                st.session_state["sets"] = sets
+                st.session_state["team_analysis"] = analysis
+                _bump_builder_gen()
+                st.success(f"Loaded {len(pool)} Pokemon from upload")
+        with st.expander("...or paste a teamsheet, pokepaste, or team .json"):
+            st.caption("Any of: a base64 teamsheet TOKEN or the JSON itself "
+                      "from `counter_table.py`'s xlsx export or "
+                      "`--teamsheet-json -`, or a raw Showdown-export "
+                      "POKEPASTE (blank line between each Pokemon) -- "
+                      "detected automatically, no need to say which. Useful "
+                      "when the CLI and this app are in different windows "
+                      "or machines.")
+            pasted_team_text = st.text_area(
+                "Teamsheet / pokepaste", key="paste_team_json", height=150,
+                placeholder='TSHEET1:... or {"pool": [...], "sets": {...}} '
+                           'or a pokepaste (Species @ Item / Ability: ... / '
+                           '- Move / ...)',
                 label_visibility="collapsed")
-            if st.button("Load pasted JSON", key="paste_team_json_go"):
-                import json as _json
+            if st.button("Load pasted text", key="paste_team_json_go"):
                 try:
-                    data = _json.loads(pasted_team_json)
+                    pool, sets, analysis = _load_team_text(pasted_team_text, merged)
                 except ValueError as e:
-                    st.error(f"Not valid JSON: {e}")
+                    st.error(str(e))
                 else:
-                    st.session_state["team"] = data.get(
-                        "pool", data if isinstance(data, list) else [])
-                    st.session_state["sets"] = (
-                        data.get("sets", {}) if isinstance(data, dict) else {})
-                    st.session_state["team_analysis"] = (
-                        data.get("analysis") if isinstance(data, dict) else None)
+                    st.session_state["team"] = pool
+                    st.session_state["sets"] = sets
+                    st.session_state["team_analysis"] = analysis
                     _bump_builder_gen()
-                    st.success(f"Loaded {len(st.session_state['team'])} "
-                              f"Pokemon from pasted JSON")
+                    st.success(f"Loaded {len(pool)} Pokemon from pasted text")
         if st.button("Use default 6", width='stretch'):
             st.session_state["team"] = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
                                          "Mega Skarmory", "Gholdengo"]
@@ -1943,6 +1990,25 @@ with tab_build:
                                 if st.session_state.get("team_analysis") else {})}, indent=2),
                 file_name=(fname if fname.endswith(".json") else fname + ".json"),
                 mime="application/json", width='stretch')
+
+        with st.expander("Teamsheet token / pokepaste — copy this team elsewhere"):
+            st.caption("The same bridge `counter_table.py`'s xlsx export uses, the "
+                       "other direction: a base64 TOKEN round-trips exactly back into "
+                       "this Team Builder (paste it in '...or paste a teamsheet, "
+                       "pokepaste, or team .json' above, on this or any other "
+                       "machine); the POKEPASTE is the readable, portable form, "
+                       "usable on pokepast.es/Showdown too.")
+            # This whole section only renders once `team` has exactly 6
+            # members (the enclosing `if len(team) == 6:` above) -- no
+            # empty-team case to guard here.
+            from team_sheet import encode_teamsheet
+            cur_sets = st.session_state.get("sets", {})
+            st.text_area("Teamsheet token", encode_teamsheet(team, cur_sets),
+                         height=80, key="tb_export_token")
+            st.text_area(
+                "Pokepaste",
+                species_data.team_to_showdown_export(team, cur_sets, merged),
+                height=200, key="tb_export_paste")
 
         with st.expander("Move contributions — which moves are earning their slot"):
             st.caption("Computed live from the current sets, so it refreshes after loading "
@@ -3433,15 +3499,47 @@ with tab_counter:
                    "searched fresh from a whole pool. Both rankings agree: worst "
                    "pair (protect-safe wins first, then beaten count), then how "
                    "many enemy pairs NONE of its pairs can beat.")
-        ct_vs_name = st.selectbox("Enemy roster", list(teams), key="ct_b4_vs")
-        vs_roster = list(teams[ct_vs_name])
+        PASTE_ENEMY = "\U0001f4cb Paste a pokepaste"
+        ct_vs_name = st.selectbox("Enemy roster", list(teams) + [PASTE_ENEMY],
+                                  key="ct_b4_vs")
+        if ct_vs_name == PASTE_ENEMY:
+            vs_paste = st.text_area(
+                "Paste Showdown export text (blank line between each Pokemon)",
+                height=160, key="ct_b4_vs_paste",
+                help="A team just seen, without saving it to data/my_teams "
+                     "first -- the xlsx export's own 'Pokepaste' column "
+                     "pastes straight in here too.")
+            vs_roster, _vs_sets = species_data.custom_team_from_export(
+                vs_paste, merged) if vs_paste.strip() else ([], {})
+            unknown_vs = [n for n in vs_roster if n not in merged]
+            if unknown_vs:
+                st.error(f"Unrecognised species: {', '.join(unknown_vs)}")
+                vs_roster = []
+            elif vs_roster:
+                st.success(f"Parsed: {', '.join(vs_roster)}")
+        else:
+            vs_roster = list(teams[ct_vs_name])
         SEARCH_POOL = "\U0001f50d Search a pool for the best team"
+        PASTE_OUR = "\U0001f4cb Paste a pokepaste"
         ct_our_source = st.selectbox(
-            "Our 6", ["(current Team Builder team)", SEARCH_POOL] + list(teams),
+            "Our 6", ["(current Team Builder team)", SEARCH_POOL, PASTE_OUR] + list(teams),
             key="ct_b4_our",
-            help="An already-decided 6, or search a pool (like Multi-bring4, but "
-                 "scoped to just this one enemy roster) for the best team of "
-                 "4-6 instead of requiring one in hand.")
+            help="An already-decided 6 (loaded, pasted, or saved), or search "
+                 "a pool (like Multi-bring4, but scoped to just this one "
+                 "enemy roster) for the best team of 4-6 instead of "
+                 "requiring one in hand.")
+        if ct_our_source == PASTE_OUR:
+            our_paste = st.text_area(
+                "Paste Showdown export text (blank line between each Pokemon)",
+                height=160, key="ct_b4_our_paste")
+            our_pasted, _our_sets = species_data.custom_team_from_export(
+                our_paste, merged) if our_paste.strip() else ([], {})
+            unknown_our = [n for n in our_pasted if n not in merged]
+            if unknown_our:
+                st.error(f"Unrecognised species: {', '.join(unknown_our)}")
+                our_pasted = []
+            elif our_pasted:
+                st.success(f"Parsed: {', '.join(our_pasted)}")
         ct_good = st.slider("Good-pair bar (%)", 0, 100, 100, key="ct_b4_good",
                             help="A pair 'clears the bar' if it beats at least this "
                                  "share of the enemy roster's own C(len,2) pairs.")
@@ -3468,13 +3566,17 @@ with tab_counter:
                              if ct_search_kind != "Exhaustive" else 40)
             top_n = st.slider("Show top N teams", 1, 20, 5, key="ct_b4_topn")
             if st.button("Search for the best team", type="primary", key="ct_b4_pool_go"):
-                _coverage, rows = _run_multi_bring4_search(
-                    pool_size, [vs_roster], ct_turns, ct_good / 100, 1,
-                    ct_max_weak, ct_max_megas, ct_search_kind, ct_beam_width,
-                    ct_excluded, max_weak_types=ct_max_weak_types)
-                if rows:
-                    st.session_state["ct_b4_pool_rows"] = rows
-                    st.session_state["ct_b4_pool_vs"] = [ct_vs_name]
+                if not vs_roster:
+                    st.warning("Provide an enemy roster (pick a saved team, "
+                              "or paste a valid pokepaste) first.")
+                else:
+                    _coverage, rows = _run_multi_bring4_search(
+                        pool_size, [vs_roster], ct_turns, ct_good / 100, 1,
+                        ct_max_weak, ct_max_megas, ct_search_kind, ct_beam_width,
+                        ct_excluded, max_weak_types=ct_max_weak_types)
+                    if rows:
+                        st.session_state["ct_b4_pool_rows"] = rows
+                        st.session_state["ct_b4_pool_vs"] = [ct_vs_name]
 
             rows = st.session_state.get("ct_b4_pool_rows")
             shown_vs = st.session_state.get("ct_b4_pool_vs") or []
@@ -3486,13 +3588,20 @@ with tab_counter:
                                                   excluded_items=ct_excluded,
                                                   key_prefix=f"ctb4p_{i}")
         else:
-            our6 = (get_state_team() if ct_our_source == "(current Team Builder team)"
-                   else list(teams[ct_our_source]))
+            if ct_our_source == "(current Team Builder team)":
+                our6 = get_state_team()
+            elif ct_our_source == PASTE_OUR:
+                our6 = our_pasted
+            else:
+                our6 = list(teams[ct_our_source])
             if not (4 <= len(our6) <= 6):
-                st.warning("Pick 4, 5, or 6 (load a team in Team Builder, or choose a "
-                           "preset above) -- exactly 4 skips straight to summarising "
-                           "its own 6 internal pairs, since there's only one possible "
-                           "bring-4.")
+                st.warning("Pick 4, 5, or 6 (load a team in Team Builder, paste a "
+                           "pokepaste, or choose a preset above) -- exactly 4 skips "
+                           "straight to summarising its own 6 internal pairs, since "
+                           "there's only one possible bring-4.")
+            elif not vs_roster:
+                st.warning("Provide an enemy roster (pick a saved team, or paste a "
+                           "valid pokepaste) first.")
             else:
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:

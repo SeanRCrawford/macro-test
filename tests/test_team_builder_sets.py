@@ -333,18 +333,111 @@ class TestPasteTeamsheetJson(unittest.TestCase):
         self.assertEqual(at.session_state["team"], ["Kingambit", "Dragapult"])
         self.assertEqual(at.session_state["sets"]["Kingambit"]["item"],
                          "Black Glasses")
-        self.assertTrue(any("Loaded 2 Pokemon from pasted JSON" in s.value
+        self.assertTrue(any("Loaded 2 Pokemon from pasted text" in s.value
                             for s in at.success))
 
     def test_invalid_json_shows_an_error_not_a_crash(self):
         at = app()
         ta = [t for t in at.text_area if t.key == "paste_team_json"][0]
-        ta.set_value("not valid json{{{").run()
+        # Leading "{" is what routes this to the JSON path rather than the
+        # pokepaste one -- see TestPasteAPokepasteOrTeamsheetToken below for
+        # the format-sniffing itself.
+        ta.set_value("{not valid json{{{").run()
         at = click(at, "paste_team_json_go")
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any("Not valid JSON" in e.value for e in at.error))
         # The previously-loaded team must survive an invalid paste.
         self.assertEqual(at.session_state["team"], TEAM)
+
+
+class TestPasteAPokepasteOrTeamsheetToken(unittest.TestCase):
+    """The same paste box also accepts a raw Showdown-export pokepaste, or
+    the base64 teamsheet TOKEN `counter_table.py`'s xlsx export writes --
+    "export any of the teamsheets generated in the CLI's .xlsx to the
+    streamlit app, maybe with a base64 encoded pokepaste in an excel
+    cell" -- sniffed automatically alongside the existing plain-JSON case,
+    no format picker needed."""
+
+    POKEPASTE = ("Kingambit @ Black Glasses\nAbility: Supreme Overlord\n"
+                "EVs: 32 HP / 32 Atk\nAdamant Nature\n"
+                "- Sucker Punch\n- Kowtow Cleave\n- Iron Head\n- Protect")
+
+    def test_pasting_a_raw_pokepaste_loads_team_and_sets(self):
+        at = app()
+        ta = [t for t in at.text_area if t.key == "paste_team_json"][0]
+        ta.set_value(self.POKEPASTE).run()
+        at = click(at, "paste_team_json_go")
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["team"], ["Kingambit"])
+        self.assertEqual(at.session_state["sets"]["Kingambit"]["item"],
+                         "Black Glasses")
+        self.assertIn("Sucker Punch", at.session_state["sets"]["Kingambit"]["moves"])
+
+    def test_an_unrecognised_species_in_a_pokepaste_shows_an_error(self):
+        at = app()
+        ta = [t for t in at.text_area if t.key == "paste_team_json"][0]
+        ta.set_value("Not A Real Species @ Leftovers\n- Tackle").run()
+        at = click(at, "paste_team_json_go")
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Unrecognised species" in e.value for e in at.error))
+        self.assertEqual(at.session_state["team"], TEAM)
+
+    def test_pasting_a_teamsheet_token_loads_team_and_sets(self):
+        from team_sheet import encode_teamsheet
+        token = encode_teamsheet(
+            ["Kingambit", "Dragapult"],
+            {"Kingambit": {"item": "Black Glasses", "moves": ["Sucker Punch"]}})
+        at = app()
+        ta = [t for t in at.text_area if t.key == "paste_team_json"][0]
+        ta.set_value(token).run()
+        at = click(at, "paste_team_json_go")
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["team"], ["Kingambit", "Dragapult"])
+        self.assertEqual(at.session_state["sets"]["Kingambit"]["item"],
+                         "Black Glasses")
+
+    def test_empty_paste_shows_an_error_not_a_crash(self):
+        at = app()
+        ta = [t for t in at.text_area if t.key == "paste_team_json"][0]
+        ta.set_value("   ").run()
+        at = click(at, "paste_team_json_go")
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Nothing pasted" in e.value for e in at.error))
+        self.assertEqual(at.session_state["team"], TEAM)
+
+
+class TestExportTeamsheetTokenAndPokepaste(unittest.TestCase):
+    """The reverse direction of the paste bridge: the currently-loaded team
+    shown as a copy-pasteable teamsheet token and pokepaste, right in the
+    Team Builder tab -- "the export in the CLI needs to be able to export
+    to the streamlit app, whether through a paste or otherwise" implies
+    the app should be able to hand a team back out the same way too."""
+
+    def test_the_token_round_trips_through_decode_teamsheet(self):
+        from team_sheet import decode_teamsheet
+        at = app()
+        ta = [t for t in at.text_area if t.key == "tb_export_token"][0]
+        pool, sets = decode_teamsheet(ta.value)
+        self.assertEqual(pool, TEAM)
+        self.assertEqual(sets, {})
+
+    def test_the_pokepaste_names_every_team_member(self):
+        at = app()
+        ta = [t for t in at.text_area if t.key == "tb_export_paste"][0]
+        for name in TEAM:
+            self.assertIn(name, ta.value)
+
+    def test_with_no_team_the_export_box_is_simply_not_shown(self):
+        """The whole "sets" panel (this export box included) is already
+        gated on a full 6-member team -- nothing new to guard, just confirm
+        it doesn't crash and doesn't show stale/empty export text."""
+        from streamlit.testing.v1 import AppTest
+        at = AppTest.from_file(APP, default_timeout=900)
+        at.session_state["team"] = []
+        at.session_state["sets"] = {}
+        at = at.run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any(t.key == "tb_export_token" for t in at.text_area))
 
 
 if __name__ == "__main__":
