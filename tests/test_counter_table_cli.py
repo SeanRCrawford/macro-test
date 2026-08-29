@@ -659,6 +659,96 @@ class TestTeamsheetJsonExport(unittest.TestCase):
         self.assertIn("--teamsheet-json", msg)
 
 
+class TestCleanWinScoring(unittest.TestCase):
+    """"I would consider losing 1 pokemon and taking a lot of damage and
+    KOing 2 enemies as far inferior to KOing the enemy without taking
+    damage, given the range of possible outcomes. There should be a way to
+    score this to reflect this dynamic." `pairs_clean_win_total` (CLI
+    print, CSV, --bring4/--multi-bring4 CSV+xlsx, --deep-dive-core) is
+    that score."""
+
+    def test_joint_print_shows_the_clean_column(self):
+        msg, out = run_main(["--joint", "--vs", "Sableye,Ariados",
+                             "--pool-size", "10", "--top", "3"])
+        self.assertIsNone(msg, out)
+        self.assertIn("clean", out)
+
+    def test_joint_csv_export_has_the_clean_win_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(["--joint", "--vs", "Sableye,Ariados",
+                                  "--pool-size", "10", "--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("pairs clean win total", header)
+        finally:
+            os.unlink(path)
+
+    def test_bring4_csv_has_the_6_pairs_clean_win_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola",
+                   "--bring4", "--vs", "Sableye,Ariados", "--csv", path]
+            msg, _out = run_main(argv)
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("6 pairs clean win total", header)
+        finally:
+            os.unlink(path)
+
+    def test_multi_bring4_csv_and_xlsx_have_the_clean_win_column(self):
+        import csv
+        import tempfile
+        argv = ["--pool-size", "16", "--multi-bring4",
+               "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+               "--good-threshold", "30", "--max-weak", "6"]
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            csv_path = f.name
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            xlsx_path = f.name
+        os.unlink(xlsx_path)
+        try:
+            msg, _out = run_main(argv + ["--csv", csv_path])
+            self.assertIsNone(msg)
+            with open(csv_path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("enemy 1 6 pairs clean win total", header)
+
+            msg, out = run_main(argv + ["--xlsx", xlsx_path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(xlsx_path)
+            ws = wb["Cores"]
+            xlsx_header = [ws.cell(row=1, column=c).value
+                          for c in range(1, ws.max_column + 1)]
+            self.assertIn("Enemy 1 6 pairs clean win total", xlsx_header)
+        finally:
+            os.unlink(csv_path)
+            if os.path.exists(xlsx_path):
+                os.unlink(xlsx_path)
+
+    def test_deep_dive_core_prints_the_clean_win_figure(self):
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola",
+               "--bring4", "--vs", "Sableye,Ariados",
+               "--deep-dive-core", "1"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("clean win", out)
+
+
 class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
     """Both `_print_pairs` and `_print_joint` picked their per-row detail
     preview via `sorted(r["detail"].items(), key=...)[:3]`, into a variable
@@ -697,7 +787,7 @@ class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
             "name": "Gallade", "item": "Life Orb",
             "pairs_swept": 1, "pairs_traded": 0, "pairs_lost": 1,
             "pairs_no_ko": 0, "pairs_tailwind_safe": 1, "pairs_protect_safe": 1,
-            "pairs_total": 2,
+            "pairs_clean_win_total": 2.0, "pairs_total": 2,
             "detail": {
                 ("Kingambit", "Basculegion"): {
                     "outcome": "sweep", "turns_used": 1,
@@ -739,7 +829,7 @@ class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
         }
         summary = {"pairs_total": 2, "pairs_swept": 1, "pairs_traded": 0,
                   "pairs_lost": 1, "pairs_no_ko": 0, "pairs_tailwind_safe": 1,
-                  "pairs_protect_safe": 1}
+                  "pairs_protect_safe": 1, "pairs_clean_win_total": 2.0}
         buf = io.StringIO()
         with redirect_stdout(buf):
             ct._print_deep("Gallade", "Ninetales-Alola", "Life Orb", None,

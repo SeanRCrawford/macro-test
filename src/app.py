@@ -3245,15 +3245,21 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
 def _pair_rows_df(pair_rows):
     """`joint_pool_search`/`bring4_search` Stage-1-shaped rows as the
     dataframe every pair table in this tab already renders (Pair/Beaten/
-    Swept/Traded/Lost/No KO/Tailwind-safe/Protect-safe) -- factored out so
-    "show the 6 pairs" (a bring-4's own `pair_rows`) and the full Stage-1
-    table share one rendering, not two copies that could drift."""
+    Swept/Traded/Lost/No KO/Clean win/Tailwind-safe/Protect-safe) --
+    factored out so "show the 6 pairs" (a bring-4's own `pair_rows`) and
+    the full Stage-1 table share one rendering, not two copies that could
+    drift. "Clean win" is `pairs_clean_win_total` -- OUR OWN retained HP
+    summed across every enemy pair (0-2.0 each) -- "losing 1 pokemon and
+    taking a lot of damage and KOing 2 enemies [is] far inferior to KOing
+    the enemy without taking damage": a swept pair always scores the max
+    here, a messy out-trade less."""
     total = pair_rows[0]["pairs_total"] if pair_rows else 0
     return pd.DataFrame([
         {"Pair": " + ".join(r["pair"]),
          "Beaten": f"{r['pairs_swept'] + r['pairs_traded']}/{total}",
          "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
          "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
+         "Clean win": f"{r['pairs_clean_win_total']:.1f}/{2 * total}",
          "Tailwind-safe": r["pairs_tailwind_safe"],
          "Protect-safe": r["pairs_protect_safe"]}
         for r in pair_rows])
@@ -3325,7 +3331,8 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
               f"beaten ({ov['pairs_swept']} swept, {ov['pairs_traded']} traded, "
               f"{ov['pairs_lost']} lost, {ov['pairs_no_ko']} no-KO), "
               f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
-              f"{ov['pairs_protect_safe']}/{ov_total} protect-safe")
+              f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
+              f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} clean win")
     for (n1, n2), pair in dive["per_pair"].items():
         pt = pair["total"]
         with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"

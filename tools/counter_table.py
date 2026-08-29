@@ -543,6 +543,7 @@ def _print_joint(rows, targets, top, partner, turns):
               f"{turns} turns, average rolls:\n")
     header = (f"{'#':>3} {'Pair':34s} {'items':30s} {'beaten':>7s} "
               f"{'swept':>6s} {'traded':>7s} {'lost':>5s} {'no KO':>6s} "
+              f"{'clean':>10s} "
               f"{'tw-safe':>8s} {'pr-safe':>8s}")
     print(header)
     print("-" * len(header))
@@ -550,10 +551,12 @@ def _print_joint(rows, targets, top, partner, turns):
         c_name, p_name, items = _row_pair(r, partner)
         pair_str = f"{c_name} + {p_name}"
         beaten = r["pairs_swept"] + r["pairs_traded"]
+        clean_max = 2 * total
         print(f"{i:>3} {pair_str[:34]:34s} {items[:30]:30s} "
               f"{beaten:>4d}/{total:<2d} {r['pairs_swept']:>3d}/{total:<2d} "
               f"{r['pairs_traded']:>4d}/{total:<2d} {r['pairs_lost']:>2d}/{total:<2d} "
               f"{r['pairs_no_ko']:>3d}/{total:<2d} "
+              f"{r['pairs_clean_win_total']:>5.1f}/{clean_max:<3d} "
               f"{r['pairs_tailwind_safe']:>5d}/{total:<2d} "
               f"{r['pairs_protect_safe']:>5d}/{total:<2d}")
     print()
@@ -571,6 +574,14 @@ def _print_joint(rows, targets, top, partner, turns):
     print("lost       one of ours fainted before both of the pair did.")
     print("no KO      the turn window elapsed with neither side finished.")
     print("beaten     swept + traded -- pairs where the joint fight is won.")
+    print("clean      OUR OWN retained HP across every enemy pair (0-2.0")
+    print("           each, C+P), summed -- \"losing 1 pokemon and taking a")
+    print("           lot of damage and KOing 2 enemies [is] far inferior to")
+    print("           KOing the enemy without taking damage\": a swept pair")
+    print("           always scores the max here (zero damage taken, by")
+    print("           definition); a messy out-trade scores less, the more")
+    print("           it cost. Two equally-beaten pairs are ranked by THIS")
+    print("           when protect-safe and raw beaten count both tie.")
     print("tw-safe    the SAME race, replayed with the enemy pair's speed")
     print("           doubled (a Tailwind hypothesis) -- still swept or")
     print("           traded, not lost or no-KO'd, once they move first.")
@@ -633,7 +644,8 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
          f"{summary['pairs_traded']} traded), {summary['pairs_lost']} lost, "
          f"{summary['pairs_no_ko']} no-KO, "
          f"{summary['pairs_tailwind_safe']}/{total} tailwind-safe, "
-         f"{summary['pairs_protect_safe']}/{total} protect-safe\n")
+         f"{summary['pairs_protect_safe']}/{total} protect-safe, "
+         f"{summary['pairs_clean_win_total']:.1f}/{total * 2} clean win\n")
 
     def sort_key(kv):
         (_e1, _e2), d = kv
@@ -916,7 +928,8 @@ def _row_line(row, label):
     return (f"{label}: {beaten}/{total} beaten ({row['pairs_swept']} swept, "
            f"{row['pairs_traded']} traded, {row['pairs_lost']} lost, "
            f"{row['pairs_no_ko']} no-KO), {row['pairs_tailwind_safe']}/{total} "
-           f"tw-safe, {row['pairs_protect_safe']}/{total} pr-safe")
+           f"tw-safe, {row['pairs_protect_safe']}/{total} pr-safe, "
+           f"{row['pairs_clean_win_total']:.1f}/{total * 2} clean win")
 
 
 def _print_core_deep_dive(dive, top_gameplans=None):
@@ -1025,7 +1038,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"Enemy {i + 1} 6 pairs beaten worst",
                    f"Enemy {i + 1} has real Tailwind",
                    f"Enemy {i + 1} 6 pairs Tailwind-safe total",
-                   f"Enemy {i + 1} 6 pairs protect-safe total"]
+                   f"Enemy {i + 1} 6 pairs protect-safe total",
+                   f"Enemy {i + 1} 6 pairs clean win total"]
     ws.append(header)
     _style_header(ws)
     for r in rows:
@@ -1050,7 +1064,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"{depth['beaten_worst']}/{pt}",
                    enemy_has_real_tailwind(pe["target_names"], merged),
                    f"{depth['tailwind_safe_total']}/{6 * pt}",
-                   f"{depth['protect_safe_total']}/{6 * pt}"]
+                   f"{depth['protect_safe_total']}/{6 * pt}",
+                   f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}"]
         ws.append(row)
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
@@ -1066,7 +1081,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
 
         ws = wb.create_sheet("Deep Dive Summary")
         ws.append(["Pair", "Enemy Team", "Beaten", "Total", "Swept", "Traded",
-                   "Lost", "No KO", "Tailwind Safe", "Protect Safe"])
+                   "Lost", "No KO", "Tailwind Safe", "Protect Safe",
+                   "Clean Win Total"])
         _style_header(ws)
 
         ws.append(["OVERALL", "every pair, every enemy",
@@ -1075,21 +1091,22 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    core_dive["overall"]["pairs_traded"], core_dive["overall"]["pairs_lost"],
                    core_dive["overall"]["pairs_no_ko"],
                    core_dive["overall"]["pairs_tailwind_safe"],
-                   core_dive["overall"]["pairs_protect_safe"]])
+                   core_dive["overall"]["pairs_protect_safe"],
+                   round(core_dive["overall"]["pairs_clean_win_total"], 1)])
         for (n1, n2), pair in core_dive["per_pair"].items():
             label = f"{n1} + {n2}"
             t = pair["total"]
             ws.append([label, "all enemies", t["pairs_swept"] + t["pairs_traded"],
                       t["pairs_total"], t["pairs_swept"], t["pairs_traded"],
                       t["pairs_lost"], t["pairs_no_ko"], t["pairs_tailwind_safe"],
-                      t["pairs_protect_safe"]])
+                      t["pairs_protect_safe"], round(t["pairs_clean_win_total"], 1)])
             for pe in pair["per_enemy"]:
                 s = pe["summary"]
                 ws.append([label, ", ".join(pe["target_names"]),
                           s["pairs_swept"] + s["pairs_traded"], s["pairs_total"],
                           s["pairs_swept"], s["pairs_traded"], s["pairs_lost"],
                           s["pairs_no_ko"], s["pairs_tailwind_safe"],
-                          s["pairs_protect_safe"]])
+                          s["pairs_protect_safe"], round(s["pairs_clean_win_total"], 1)])
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         _autosize(ws)
@@ -1834,6 +1851,8 @@ def main():
                 "enemy has real tailwind": enemy_tw,
                 "6 pairs tailwind safe total": f"{depth['tailwind_safe_total']}/{6 * pt}",
                 "6 pairs protect safe total": f"{depth['protect_safe_total']}/{6 * pt}",
+                "6 pairs clean win total": (f"{depth['clean_win_total']:.1f}/"
+                                            f"{6 * pt * 2:.0f}"),
             }
             for i, pr in enumerate(b["pair_rows"], start=1):
                 row[f"pair {i}"] = " + ".join(pr["pair"])
@@ -1887,6 +1906,8 @@ def main():
                     f"{depth['tailwind_safe_total']}/{6 * pt}")
                 row[f"enemy {e_idx} 6 pairs protect safe total"] = (
                     f"{depth['protect_safe_total']}/{6 * pt}")
+                row[f"enemy {e_idx} 6 pairs clean win total"] = (
+                    f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}")
                 teamsheet_bits = []
                 for name in pe["best_bring4"]:
                     # Read the same FIXED set every printed number was
@@ -1957,6 +1978,7 @@ def main():
                 row["pairs no KO"] = r["pairs_no_ko"]
                 row["pairs tailwind-safe"] = r["pairs_tailwind_safe"]
                 row["pairs protect-safe"] = r["pairs_protect_safe"]
+                row["pairs clean win total"] = round(r["pairs_clean_win_total"], 2)
                 row["pairs total"] = r["pairs_total"]
             else:
                 row["pairs clean"] = r["pairs_clean"]

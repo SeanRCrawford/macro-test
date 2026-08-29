@@ -2218,6 +2218,7 @@ def _pruned_entry():
         "turns_used": 0, "tailwind_outcome": "loss", "tailwind_safe": False,
         "protect_outcomes": {"E1": "loss", "E2": "loss"}, "protect_safe": False,
         "log": [], "_pruned": True,
+        "our_hp": {"C": 0.0, "P": 0.0}, "clean_win_value": 0.0,
     }
 
 
@@ -2317,6 +2318,25 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     "a check for a promising bring-4" needs the real numbers); turned on by
     `multi_bring4_coverage`'s own pool-wide Stage A, where the pool can be
     large (up to 300) and most candidates are mediocre.
+
+    WIN QUALITY, not just win/loss: "losing 1 pokemon and taking a lot of
+    damage and KOing 2 enemies [is] far inferior to KOing the enemy without
+    taking damage" -- `sweep` and `out_trade` are both "beaten" for
+    `pairs_swept`/`pairs_traded`/ranking-by-raw-count purposes, but a messy
+    `out_trade` (one of ours fainted, the other badly chipped) and a clean
+    `sweep` (neither of ours ever took a hit) used to score identically.
+    Each `detail` entry also carries `our_hp` ({"C": frac, "P": frac}, read
+    from the CHOSEN race's own final `hp` -- the Tailwind race's if
+    `tailwind_forced`, the normal one otherwise) and `clean_win_value`
+    (`our_hp["C"] + our_hp["P"]`, 0.0-2.0): exactly 2.0 for every `sweep`
+    (a sweep is BY DEFINITION zero damage taken), lower for a chippy
+    `out_trade`, at or near 0 for one that cost a whole Pokemon. Always 0.0
+    for `loss`/`no_ko` -- whatever HP happened to survive a real loss isn't
+    a quality signal worth ranking on, the outcome bucket itself already
+    says "bad". `pairs_clean_win_total` (the summary's own sum of this
+    across every enemy pair) is what `_pair_sort_key` uses to tell two
+    equally-"beaten" pairs apart -- see its own docstring for where in the
+    ranking this sits.
     """
     m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
     all_enemy_pairs = list(itertools.combinations(target_names, 2))
@@ -2348,16 +2368,16 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
                 moves_by_role = {"C": m1, "P": m2, "E1": e1m, "E2": e2m}
                 weather = _field_weather(combatants)
-                outcome, turns_used, _hp, log = _joint_race(
+                outcome, turns_used, hp, log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns)
                 if tailwind_setter_roles:
-                    tw_outcome, tw_turns_used, _tw_hp, tw_log = max(
+                    tw_outcome, tw_turns_used, tw_hp, tw_log = max(
                         (_joint_race(combatants, moves_by_role, typechart, weather,
                                     turns, first_turn_tailwind_role=role)
                          for role in tailwind_setter_roles),
                         key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
                 else:
-                    tw_outcome, tw_turns_used, _tw_hp, tw_log = _joint_race(
+                    tw_outcome, tw_turns_used, tw_hp, tw_log = _joint_race(
                         combatants, moves_by_role, typechart, weather, turns,
                         enemy_speed_mult=2.0)
                 pr_e1_outcome, _pr1_t, _pr1_hp, _pr1_log = _joint_race(
@@ -2370,8 +2390,21 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 tailwind_forced = (real_tailwind_threat and
                                    _JOINT_OUTCOME_RANK[tw_outcome] >
                                    _JOINT_OUTCOME_RANK[outcome])
+                chosen_outcome = tw_outcome if tailwind_forced else outcome
+                chosen_hp = tw_hp if tailwind_forced else hp
+                # Retained HP is only a meaningful QUALITY signal for an
+                # actual win -- for loss/no_ko the outcome bucket alone
+                # already says "bad", and `hp` can go slightly negative on
+                # an overkill hit (damage isn't clamped at 0 when applied,
+                # only the "fainted" check reads it as <=0), so a real loss
+                # must not leak a garbage-but-technically-positive value in.
+                if chosen_outcome in ("sweep", "out_trade"):
+                    our_hp = {"C": max(0.0, chosen_hp["C"]),
+                             "P": max(0.0, chosen_hp["P"])}
+                else:
+                    our_hp = {"C": 0.0, "P": 0.0}
                 entry = {
-                    "outcome": tw_outcome if tailwind_forced else outcome,
+                    "outcome": chosen_outcome,
                     "outcome_without_tailwind": outcome,
                     "tailwind_is_real_threat": real_tailwind_threat,
                     "tailwind_forced": tailwind_forced,
@@ -2382,6 +2415,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     "protect_safe": all(o in ("sweep", "out_trade")
                                         for o in protect_outcomes.values()),
                     "log": tw_log if tailwind_forced else log,
+                    "our_hp": our_hp,
+                    "clean_win_value": our_hp["C"] + our_hp["P"],
                     "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
                 }
                 if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
@@ -2408,6 +2443,7 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         "pairs_no_ko": sum(1 for d in detail.values() if d["outcome"] == "no_ko"),
         "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
         "pairs_protect_safe": sum(1 for d in detail.values() if d["protect_safe"]),
+        "pairs_clean_win_total": sum(d["clean_win_value"] for d in detail.values()),
         "pairs_total": len(detail),
     }
     return detail, summary
@@ -2583,10 +2619,25 @@ def _pair_sort_key(row):
     `protect_outcomes`/`protect_safe` exists to catch (the real doubles
     50/50 the user described), so it leads the ranking rather than being a
     tie-break buried behind it. Raw beaten count (swept+traded) is the
-    second criterion, tailwind-safe count third.
+    second criterion -- winning more matchups always outranks winning fewer
+    ones more cleanly, the same "uncovered enemy pairs dominate" priority
+    `_bring4_candidates` gives an unconditional loss over a bring-4's
+    average quality.
+
+    THIRD: `pairs_clean_win_total` (`_pair_vs_targets`'s own "WIN QUALITY"
+    field) -- "losing 1 pokemon and taking a lot of damage and KOing 2
+    enemies [is] far inferior to KOing the enemy without taking damage".
+    Two pairs that win the exact same NUMBER of matchups are told apart by
+    how cleanly they won them (2.0 per enemy pair for a true sweep, less
+    for a chippy out-trade, near 0 for one that cost a whole Pokemon) --
+    strictly after raw count (a pair with an unconditional loss to some
+    enemy composition is still worse than one that wins everywhere, however
+    messily), strictly before tailwind-safe count (a real Tailwind-boosted
+    loss is a more concrete, binary risk than an average-case quality
+    difference). Tailwind-safe count is the fourth and final criterion.
     """
     return (-row["pairs_protect_safe"], -(row["pairs_swept"] + row["pairs_traded"]),
-           -row["pairs_tailwind_safe"])
+           -row["pairs_clean_win_total"], -row["pairs_tailwind_safe"])
 
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
@@ -2744,13 +2795,16 @@ def bring4_pair_depth(bring4_row):
     Returns {"beaten_total": int, "beaten_3rd": int|None, "beaten_4th":
     int|None, "beaten_worst": int|None, "pairs_total": int (the shared
     per-pair enemy-pairs-total, e.g. 1 for a single named enemy pair),
-    "tailwind_safe_total": int, "protect_safe_total": int} -- the four
-    "beaten_*" fields and the two "*_total" safety fields are all summed/
-    read across the SAME 6 pairs, so e.g. `beaten_total` compares directly
-    against `6 * pairs_total`. `beaten_3rd`/`beaten_4th` are `None` only if
-    `bring4_row` has fewer than 3/4 pairs (never true for a real bring-4,
-    which always has exactly C(4,2)=6, but this stays honest for a
-    hand-built partial row rather than raising an IndexError).
+    "tailwind_safe_total": int, "protect_safe_total": int,
+    "clean_win_total": float} -- the four "beaten_*" fields and the three
+    "*_total" fields are all summed/read across the SAME 6 pairs, so e.g.
+    `beaten_total` compares directly against `6 * pairs_total`, and
+    `clean_win_total` against `6 * pairs_total * 2.0` (see `_pair_vs_
+    targets`'s own "WIN QUALITY" docstring paragraph for what 2.0 per pair
+    means: a true sweep, zero damage taken). `beaten_3rd`/`beaten_4th` are
+    `None` only if `bring4_row` has fewer than 3/4 pairs (never true for a
+    real bring-4, which always has exactly C(4,2)=6, but this stays honest
+    for a hand-built partial row rather than raising an IndexError).
     """
     pairs = sorted(bring4_row["pair_rows"], key=_pair_sort_key)
     pairs_total = pairs[0]["pairs_total"] if pairs else 0
@@ -2763,6 +2817,7 @@ def bring4_pair_depth(bring4_row):
         "pairs_total": pairs_total,
         "tailwind_safe_total": sum(r["pairs_tailwind_safe"] for r in pairs),
         "protect_safe_total": sum(r["pairs_protect_safe"] for r in pairs),
+        "clean_win_total": sum(r["pairs_clean_win_total"] for r in pairs),
     }
 
 
@@ -3250,7 +3305,8 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
 
 
 _ROW_TOTAL_FIELDS = ("pairs_swept", "pairs_traded", "pairs_lost", "pairs_no_ko",
-                     "pairs_tailwind_safe", "pairs_protect_safe", "pairs_total")
+                     "pairs_tailwind_safe", "pairs_protect_safe",
+                     "pairs_clean_win_total", "pairs_total")
 
 
 def _sum_rows(rows):

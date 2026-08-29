@@ -967,6 +967,91 @@ class TestJointPairSearch(unittest.TestCase):
         self.assertEqual(beaten, sorted(beaten, reverse=True))
 
 
+class TestWinQualityScoring(unittest.TestCase):
+    """"I would consider losing 1 pokemon and taking a lot of damage and
+    KOing 2 enemies as far inferior to KOing the enemy without taking
+    damage, given the range of possible outcomes. There should be a way to
+    score this to reflect this dynamic." `our_hp`/`clean_win_value` (per
+    enemy pair) and `pairs_clean_win_total` (summed) are that score --
+    reusing the exact real fixtures `TestJointPairSearch` already verified
+    (a clean sweep, and a chippy out-trade), not new hand-derived guesses.
+    """
+
+    def setUp(self):
+        self.W = world()
+
+    def _search(self, cand, targets, partner, **kw):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rows = cf.joint_pair_search([cand], targets, partner, merged, moves,
+                                    natures, typechart, **kw)
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_a_clean_sweep_scores_the_maximum_2_point_0(self):
+        """A sweep is BY DEFINITION zero damage taken (both enemies die
+        before either ever acts) -- `clean_win_value` must be exactly 2.0,
+        not just "high"."""
+        row = self._search("Mega Gengar", ["Sableye", "Ariados"],
+                           "Mega Alakazam")
+        d = row["detail"][("Sableye", "Ariados")]
+        self.assertEqual(d["outcome"], "sweep")
+        self.assertEqual(d["clean_win_value"], 2.0)
+        self.assertEqual(d["our_hp"], {"C": 1.0, "P": 1.0})
+
+    def test_a_chippy_out_trade_scores_less_than_a_clean_sweep(self):
+        """Mega Gengar + Mega Alakazam vs Sharpedo + Rampardos: Sharpedo's
+        Focus Sash keeps it alive to land a hit back before dying -- a real
+        win (`out_trade`), but NOT a free one. `clean_win_value` must be
+        strictly less than the 2.0 a sweep scores, and `our_hp` must show
+        which of ours actually took the damage."""
+        row = self._search("Mega Gengar", ["Sharpedo", "Rampardos"],
+                           "Mega Alakazam")
+        d = row["detail"][("Sharpedo", "Rampardos")]
+        self.assertEqual(d["outcome"], "out_trade")
+        self.assertLess(d["clean_win_value"], 2.0)
+        self.assertGreaterEqual(d["clean_win_value"], 0.0)
+        self.assertEqual(d["our_hp"]["C"] + d["our_hp"]["P"], d["clean_win_value"])
+        self.assertTrue(d["our_hp"]["C"] < 1.0 or d["our_hp"]["P"] < 1.0,
+                        "at least one of ours must show real damage taken")
+
+    def test_a_loss_scores_zero_not_whatever_hp_happened_to_survive(self):
+        """A real loss must never leak a positive clean_win_value just
+        because a doomed Pokemon happened to still be sitting on some HP
+        when the race ended -- the outcome bucket alone already says
+        'bad', so this stays a clean, unambiguous floor."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        our_built = cf._build_forms(["Whimsicott", "Aromatisse"], merged,
+                                    natures, moves)
+        enemy_built = cf._build_forms(["Kingambit", "Mega Tyranitar"],
+                                      merged, natures, moves)
+        detail, summary = cf._pair_vs_targets(
+            "Whimsicott", "Aromatisse", our_built,
+            ["Kingambit", "Mega Tyranitar"], enemy_built, typechart, turns=2)
+        d = detail[("Kingambit", "Mega Tyranitar")]
+        if d["outcome"] in ("loss", "no_ko"):
+            self.assertEqual(d["clean_win_value"], 0.0)
+            self.assertEqual(d["our_hp"], {"C": 0.0, "P": 0.0})
+        else:
+            self.skipTest("fixture assumes Whimsicott+Aromatisse loses or "
+                          "stalls against Kingambit+Mega Tyranitar")
+
+    def test_pairs_clean_win_total_sums_across_every_enemy_pair(self):
+        row = self._search("Mega Gengar", ["Sableye", "Ariados"],
+                           "Mega Alakazam")
+        self.assertEqual(row["pairs_clean_win_total"],
+                         sum(d["clean_win_value"] for d in row["detail"].values()))
+
+    def test_pruned_entries_score_zero_clean_win(self):
+        """`prune_below`'s conservative "loss" placeholder must not leak a
+        positive clean_win_value either -- same worst-case-only bias every
+        other minimax in this module already carries."""
+        d = cf._pruned_entry()
+        self.assertEqual(d["clean_win_value"], 0.0)
+        self.assertEqual(d["our_hp"], {"C": 0.0, "P": 0.0})
+
+
 class TestJointProtectRobustness(unittest.TestCase):
     """A turn-1 scouting Protect from either enemy is the classic doubles
     50/50 -- "it must be robust to either enemy protecting on turn 1, for
@@ -2160,11 +2245,11 @@ class TestPairSortKeyRanksProtectSafeFirst(unittest.TestCase):
     def test_more_protect_safe_wins_beats_more_raw_wins(self):
         fewer_wins_more_protect_safe = {
             "pairs_swept": 0, "pairs_traded": 3, "pairs_protect_safe": 3,
-            "pairs_tailwind_safe": 3,
+            "pairs_tailwind_safe": 3, "pairs_clean_win_total": 3.0,
         }
         more_wins_fewer_protect_safe = {
             "pairs_swept": 0, "pairs_traded": 5, "pairs_protect_safe": 1,
-            "pairs_tailwind_safe": 5,
+            "pairs_tailwind_safe": 5, "pairs_clean_win_total": 5.0,
         }
         self.assertLess(cf._pair_sort_key(fewer_wins_more_protect_safe),
                         cf._pair_sort_key(more_wins_fewer_protect_safe),
@@ -2174,14 +2259,33 @@ class TestPairSortKeyRanksProtectSafeFirst(unittest.TestCase):
     def test_beaten_count_is_the_tiebreak_when_protect_safe_ties(self):
         tied_protect_safe_fewer_wins = {
             "pairs_swept": 0, "pairs_traded": 2, "pairs_protect_safe": 2,
-            "pairs_tailwind_safe": 2,
+            "pairs_tailwind_safe": 2, "pairs_clean_win_total": 2.0,
         }
         tied_protect_safe_more_wins = {
             "pairs_swept": 0, "pairs_traded": 4, "pairs_protect_safe": 2,
-            "pairs_tailwind_safe": 4,
+            "pairs_tailwind_safe": 4, "pairs_clean_win_total": 4.0,
         }
         self.assertLess(cf._pair_sort_key(tied_protect_safe_more_wins),
                         cf._pair_sort_key(tied_protect_safe_fewer_wins))
+
+    def test_clean_win_total_is_the_tiebreak_when_protect_safe_and_beaten_tie(self):
+        """"losing 1 pokemon and taking a lot of damage and KOing 2
+        enemies [is] far inferior to KOing the enemy without taking
+        damage" -- same protect-safe count, same raw beaten count: the
+        pair that won more CLEANLY (higher `pairs_clean_win_total`) must
+        rank ahead, strictly before tailwind-safe count decides anything."""
+        messy_wins = {
+            "pairs_swept": 0, "pairs_traded": 3, "pairs_protect_safe": 3,
+            "pairs_tailwind_safe": 3, "pairs_clean_win_total": 1.5,
+        }
+        clean_wins = {
+            "pairs_swept": 3, "pairs_traded": 0, "pairs_protect_safe": 3,
+            "pairs_tailwind_safe": 0, "pairs_clean_win_total": 6.0,
+        }
+        self.assertLess(cf._pair_sort_key(clean_wins),
+                        cf._pair_sort_key(messy_wins),
+                        "cleaner wins (higher pairs_clean_win_total) must "
+                        "rank ahead even with a WORSE tailwind-safe count")
 
 
 class TestJointPoolSearch(unittest.TestCase):
@@ -3173,6 +3277,11 @@ def _fake_pair_row(pair, beats, target_names):
            "pairs_swept": 0, "pairs_traded": n_win,
            "pairs_lost": len(enemy_pairs) - n_win, "pairs_no_ko": 0,
            "pairs_tailwind_safe": n_win, "pairs_protect_safe": n_win,
+           # Every out_trade win here is "worth" the same 2.0 clean-win
+           # value -- keeps `_pair_sort_key` tied whenever `n_win` matches,
+           # same as every other field here, so this fixture's whole point
+           # (tie on everything but coverage) still holds.
+           "pairs_clean_win_total": n_win * 2.0,
            "pairs_total": len(enemy_pairs)}
 
 

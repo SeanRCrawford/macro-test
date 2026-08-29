@@ -179,6 +179,31 @@ class TestBestBring4PairTable(unittest.TestCase):
                         "Stage 1/2 results must still be showing")
 
 
+class TestCleanWinScoringIsVisible(unittest.TestCase):
+    """"I would consider losing 1 pokemon and taking a lot of damage and
+    KOing 2 enemies as far inferior to KOing the enemy without taking
+    damage ... There should be a way to score this to reflect this
+    dynamic." The app must surface `pairs_clean_win_total`, not just use
+    it silently in the ranking."""
+
+    def test_pair_tables_have_a_clean_win_column(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        cols = [set(d.value.columns) for d in at.dataframe]
+        self.assertTrue(any("Clean win" in c for c in cols),
+                        "expected a 'Clean win' column in a pair table")
+
+    def test_deep_dive_shows_the_overall_clean_win_figure(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("clean win" in m.value for m in at.markdown))
+
+
 class TestDeepDiveASpecificTeam(unittest.TestCase):
     """"I want to be able to choose a specific team to deep dive into" --
     an on-demand `core_deep_dive` call for whichever bring-4/core the user
