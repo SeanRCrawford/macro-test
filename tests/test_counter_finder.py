@@ -94,10 +94,12 @@ class TestThresholdSearch(unittest.TestCase):
             W["natures"], W["typechart"], threshold=0.9)
         self.by_name = {r["name"]: r for r in self.rows}
 
-    def test_targets_are_excluded_from_the_pool(self):
+    def test_a_named_target_is_a_legal_mirror_pick(self):
         """Basculegion is IN the pool but is also a named target here --
-        answering "does Basculegion beat Basculegion" is not the question."""
-        self.assertNotIn("Basculegion", self.by_name)
+        "does Basculegion beat Basculegion" (i.e. the mirror) is a legal
+        question now, not silently dropped -- "you should be allowed to
+        bring the same pokemon as the enemy"."""
+        self.assertIn("Basculegion", self.by_name)
 
     def test_ranked_on_the_worst_target_not_the_best(self):
         """A row that OHKOes Kingambit but does little to Basculegion must not
@@ -949,13 +951,15 @@ class TestJointPairSearch(unittest.TestCase):
             "Mega Alakazam", merged, moves, natures, typechart)
         self.assertNotIn("Mega Alakazam", [r["name"] for r in rows])
 
-    def test_a_named_target_is_excluded_from_the_pool_too(self):
+    def test_a_named_target_is_a_legal_mirror_pick(self):
+        """Sableye is in the pool AND a named target -- a legal mirror pick
+        now, not silently dropped."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         rows = cf.joint_pair_search(
             ["Mega Gengar", "Sableye"], ["Sableye", "Ariados"],
             "Mega Alakazam", merged, moves, natures, typechart)
-        self.assertNotIn("Sableye", [r["name"] for r in rows])
+        self.assertIn("Sableye", [r["name"] for r in rows])
 
     def test_rows_are_ranked_beaten_first_then_tailwind_safe(self):
         merged, moves = self.W["merged"], self.W["moves"]
@@ -2325,14 +2329,19 @@ class TestJointPoolSearch(unittest.TestCase):
         want = {frozenset(p) for p in _it.combinations(pool, 2)}
         self.assertEqual(got, want)
 
-    def test_a_named_target_is_excluded_from_the_pool(self):
+    def test_a_named_target_is_a_legal_mirror_pick(self):
+        """Sableye is in the pool AND a named target -- a legal mirror pick
+        now: every combination of the pool, Sableye pairs included, is
+        still covered exactly once."""
+        pool = ["Mega Gengar", "Sableye", "Mega Alakazam"]
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         rows = cf.joint_pool_search(
-            ["Mega Gengar", "Sableye", "Mega Alakazam"], ["Sableye", "Ariados"],
-            merged, moves, natures, typechart)
-        for r in rows:
-            self.assertNotIn("Sableye", r["pair"])
+            pool, ["Sableye", "Ariados"], merged, moves, natures, typechart)
+        got = {frozenset(r["pair"]) for r in rows}
+        import itertools as _it
+        want = {frozenset(p) for p in _it.combinations(pool, 2)}
+        self.assertEqual(got, want)
 
     def test_matches_joint_pair_search_when_one_slot_is_effectively_fixed(self):
         """Same machinery, so the pool search's own (candidate, partner) row
@@ -2590,16 +2599,15 @@ class TestBring4Search(unittest.TestCase):
             expected = sum(1 for r in b["pair_rows"] if cf._pair_beaten_frac(r) >= 1.0)
             self.assertEqual(b_strict["pairs_good"], expected)
 
-    def test_rejects_a_team_outside_four_to_six(self):
-        """4, 5, or 6 are all legal -- "in any case, the output should
-        summarise the pair results for the 6 brought pairs in the
-        bring-4" applies whether `our6` is already narrowed to 4 or is a
-        full 6 Stage 2 still has to choose from. Fewer than 4 or more than
-        6 still isn't a real "already-decided team"."""
+    def test_rejects_a_team_outside_three_to_six(self):
+        """3, 4, 5, or 6 are all legal -- a core of exactly 3 degenerates to
+        one possible "bring" (itself, 3 pairs), the same way a core of 4
+        already degenerates to one bring of its own 6 pairs. Fewer than 3
+        or more than 6 still isn't a real "already-decided team"."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         with self.assertRaises(ValueError):
-            cf.bring4_search(self.OUR6[:3], self.TARGETS, merged, moves,
+            cf.bring4_search(self.OUR6[:2], self.TARGETS, merged, moves,
                              natures, typechart)
         with self.assertRaises(ValueError):
             cf.bring4_search(self.OUR6 + ["Whimsicott"], self.TARGETS, merged,
@@ -2635,6 +2643,115 @@ class TestBring4Search(unittest.TestCase):
         our6 = self.OUR6[:5] + ["Alakazam"]  # OUR6 already has Mega Alakazam
         with self.assertRaises(ValueError):
             cf.bring4_search(our6, self.TARGETS, merged, moves, natures, typechart)
+
+
+class TestResolveUniqueItems(unittest.TestCase):
+    """`_resolve_unique_items` -- the VGC Item Clause helper ("Only one
+    pokemon in each team may use a specific item"). Build-order dependent
+    by design: whichever name resolves first keeps its independently-best
+    item; a later name that collides gets re-searched with every
+    already-claimed item ALSO excluded."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_real_collision_is_resolved_in_build_order(self):
+        """Ninetales-Alola and Rampardos both independently pick Life Orb
+        against this target -- confirmed via a plain (non-unique) search
+        first, then resolved distinct, first-listed name keeping it."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        names = ["Ninetales-Alola", "Rampardos"]
+        targets = ["Sableye", "Ariados"]
+        # Confirm the collision exists without the clause.
+        plain = {n: cf._answer_for(n, merged, moves, natures, typechart,
+                                   targets)[0] for n in names}
+        self.assertEqual(plain["Ninetales-Alola"], plain["Rampardos"])
+        resolved = cf._resolve_unique_items(
+            names, merged, moves, natures, typechart, targets)
+        self.assertEqual(resolved["Ninetales-Alola"], plain["Ninetales-Alola"])
+        self.assertNotEqual(resolved["Rampardos"], plain["Rampardos"])
+        self.assertEqual(len(set(resolved.values())), len(resolved))
+
+    def test_a_pinned_item_override_is_never_touched(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        names = ["Ninetales-Alola", "Rampardos"]
+        targets = ["Sableye", "Ariados"]
+        resolved = cf._resolve_unique_items(
+            names, merged, moves, natures, typechart, targets,
+            item_overrides={"Rampardos": "Life Orb"})
+        self.assertEqual(resolved["Rampardos"], "Life Orb")
+
+    def test_no_collision_leaves_every_choice_unchanged(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        names = ["Mega Gengar", "Mega Alakazam", "Kingambit"]
+        targets = ["Sableye", "Ariados"]
+        plain = {n: cf._answer_for(n, merged, moves, natures, typechart,
+                                   targets)[0] for n in names}
+        resolved = cf._resolve_unique_items(
+            names, merged, moves, natures, typechart, targets)
+        self.assertEqual(resolved, plain)
+
+
+class TestBring4SearchItemClauseIsOptIn(unittest.TestCase):
+    """"make the item uniqueness an option, but by default items will
+    remain non-unique to reduce search time" -- `enforce_item_clause`
+    defaults to False on both `bring4_search` and `core_deep_dive`; the
+    Ninetales-Alola/Rampardos Life Orb collision (see
+    TestResolveUniqueItems) must still show up by default, and disappear
+    only when explicitly requested."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados"]
+
+    def setUp(self):
+        self.W = world()
+
+    def _items_by_name(self, pair_rows):
+        items = {}
+        for r in pair_rows:
+            n1, n2 = r["pair"]
+            items[n1] = r["item1"]
+            items[n2] = r["item2"]
+        return items
+
+    def test_default_bring4_search_still_shows_the_collision(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pair_rows, _br = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart)
+        items = self._items_by_name(pair_rows)
+        self.assertEqual(items["Ninetales-Alola"], items["Rampardos"])
+
+    def test_enforce_item_clause_resolves_the_collision(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pair_rows, _br = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            enforce_item_clause=True)
+        items = self._items_by_name(pair_rows)
+        self.assertNotEqual(items["Ninetales-Alola"], items["Rampardos"])
+        self.assertEqual(len(set(items.values())), len(items))
+
+    def test_default_core_deep_dive_still_shows_the_collision(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        dive = cf.core_deep_dive(
+            self.OUR6, [self.TARGETS], merged, moves, natures, typechart)
+        items = {n: s["item"] for n, s in dive["sets"].items()}
+        self.assertEqual(items["Ninetales-Alola"], items["Rampardos"])
+
+    def test_enforce_item_clause_resolves_the_collision_in_core_deep_dive(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        dive = cf.core_deep_dive(
+            self.OUR6, [self.TARGETS], merged, moves, natures, typechart,
+            enforce_item_clause=True)
+        items = {n: s["item"] for n, s in dive["sets"].items()}
+        self.assertNotEqual(items["Ninetales-Alola"], items["Rampardos"])
 
 
 class TestBring4PairDepth(unittest.TestCase):
@@ -2713,16 +2830,17 @@ class TestEnemyHasRealTailwind(unittest.TestCase):
             ["Kingambit", "Mudsdale"], merged))
 
 
-class TestBring4SearchRejectsOverlap(unittest.TestCase):
-    """Two DIFFERENT preset teams (e.g. picked from a library in a UI) can
-    legitimately share a Pokemon -- `joint_pool_search` silently excludes any
-    pool member also named as an enemy (the right call for
-    `multi_bring4_coverage`'s own "this candidate is someone else's named
-    enemy" case), but `bring4_search`'s `our6` is a FIXED, complete 6 that
-    Stage 2 needs a pair for every member of. Left unchecked this used to
-    crash deep inside `_bring4_candidates` with a bare `KeyError` instead of
-    failing at the door with a clear message, the same way the Mega/base
-    overlap already does."""
+class TestBring4SearchAllowsMirrorMatches(unittest.TestCase):
+    """"you should be allowed to bring the same pokemon as the enemy" -- a
+    real VGC mirror ("our team may include a Pokemon the enemy also
+    brings") is legal, and used to crash: `bring4_search`'s `our6` is a
+    FIXED, complete 6 that Stage 2 needs a pair for every member of, but
+    `joint_pool_search` used to silently drop any pool member also named as
+    an enemy, so Stage 2 hit a bare `KeyError` looking up a pair that was
+    never computed. Both the silent exclusion and the (later-added, since
+    the exclusion made it look "safe") hard `ValueError` are gone now --
+    `our6` and `target_names` may overlap freely, including sharing the
+    exact same name on both sides."""
 
     OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
            "Rampardos", "Kingambit"]
@@ -2730,13 +2848,14 @@ class TestBring4SearchRejectsOverlap(unittest.TestCase):
     def setUp(self):
         self.W = world()
 
-    def test_a_shared_name_is_rejected_with_a_clear_message(self):
+    def test_a_shared_name_is_accepted_and_races_normally(self):
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         targets = ["Sableye", "Kingambit"]  # Kingambit is also in OUR6
-        with self.assertRaises(ValueError) as ctx:
-            cf.bring4_search(self.OUR6, targets, merged, moves, natures, typechart)
-        self.assertIn("Kingambit", str(ctx.exception))
+        pair_rows, bring4_rows = cf.bring4_search(
+            self.OUR6, targets, merged, moves, natures, typechart)
+        self.assertEqual(len(pair_rows), 15)
+        self.assertEqual(len(bring4_rows), 15)
 
     def test_no_overlap_still_works(self):
         merged, moves = self.W["merged"], self.W["moves"]
@@ -2746,6 +2865,50 @@ class TestBring4SearchRejectsOverlap(unittest.TestCase):
             self.OUR6, targets, merged, moves, natures, typechart)
         self.assertEqual(len(pair_rows), 15)
         self.assertEqual(len(bring4_rows), 15)
+
+    def test_same_name_both_sides_is_a_legal_mirror_and_roles_dont_collide(self):
+        """Kingambit is on OUR6 AND is the (only) named enemy -- a true
+        same-name-both-sides mirror. `combatants`/`plan`/`hp` are keyed by
+        fixed role labels ("C"/"P"/"E1"/"E2"), never by species name, so our
+        Kingambit and their Kingambit can never clobber each other's entry;
+        confirm this on the actual race output rather than just trusting
+        the role-keying design."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        targets = ["Kingambit", "Sableye"]
+        pair_rows, bring4_rows = cf.bring4_search(
+            self.OUR6, targets, merged, moves, natures, typechart)
+        row = next(r for r in pair_rows if "Kingambit" in r["pair"])
+        detail = row["detail"][("Kingambit", "Sableye")]
+        # our_hp is role-keyed ("C"/"P"), not name-keyed -- if it collapsed
+        # our and their Kingambit into one entry this would have the wrong
+        # shape or a missing role.
+        self.assertEqual(set(detail["our_hp"].keys()), {"C", "P"})
+        # The log itself references both a "C"/"P" (ours) and "E1" (theirs)
+        # role acting -- both Kingambits actually took actions, not just one
+        # shared entry silently standing in for both. `log` is a list of
+        # turns, each a list of (attacker_role, defender_role, Hit) triples.
+        roles_seen = {role for turn in detail["log"] for hit in turn
+                     for role in (hit[0], hit[1])}
+        self.assertTrue(roles_seen & {"C", "P"})
+        self.assertIn("E1", roles_seen)
+
+    def test_mirror_speed_tie_still_resolves_against_us(self):
+        """The pre-existing "ties resolve against us" turn-order convention
+        (see `TestSpeedTiers.test_a_speed_tie_does_not_count_as_
+        outspeeding`) is name-agnostic -- it keys off role ("E1"/"E2" vs
+        "C"/"P"), not species -- so it already covers a same-name mirror at
+        an exact speed tie with no extra code. Confirmed directly: an
+        identically-built same-species pair (same nature, no item) is a
+        genuine effective_speed tie, same as any other exact tie."""
+        from engine import FieldState, effective_speed
+        merged, natures = self.W["merged"], self.W["natures"]
+        ours = cf._build("Kingambit", merged, natures)
+        theirs = cf._build("Kingambit", merged, natures)
+        our_spd = effective_speed(ours, FieldState(), "p1")
+        their_spd = effective_speed(theirs, FieldState(), "p2")
+        self.assertEqual(our_spd, their_spd)
+        self.assertFalse(our_spd > their_spd)
 
 
 class TestMultiBring4Search(unittest.TestCase):
@@ -2776,15 +2939,16 @@ class TestMultiBring4Search(unittest.TestCase):
             self.POOL, self.ENEMIES, merged, moves, natures, typechart,
             good_threshold=0.5, min_enemies=1)
 
-    def test_a_pool_member_that_is_also_an_enemy_elsewhere_is_dropped_everywhere(self):
-        """Regression: Basculegion is a pool candidate here AND one of
-        Enemy 1's own team members. `joint_pool_search` already excludes a
-        name from its OWN race when that name is in ITS target_names, but
-        a name excluded from only ONE enemy's pair table left
-        `_bring4_candidates` unable to find its pairs (KeyError) the
-        moment a team-of-6 containing it was checked against a DIFFERENT
-        enemy that never excluded it. Must be dropped from the pool
-        entirely, for every enemy, not just the one it's named on."""
+    def test_a_pool_member_that_is_also_an_enemy_elsewhere_is_a_legal_mirror(self):
+        """Basculegion is a pool candidate here AND one of Enemy 2's own
+        team members -- a real VGC mirror, legal everywhere now ("Apply
+        everywhere" -- our copy just always loses an exact speed tie
+        against its enemy twin, unchanged machinery, see
+        TestBring4SearchAllowsMirrorMatches). Confirmed present, and raced,
+        consistently for EVERY enemy (not just the ones that didn't name
+        it) -- the old KeyError this guarded against came from a name being
+        silently dropped for only SOME enemies' pair tables, which no
+        longer happens since nothing is silently dropped at all."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         pool_with_overlap = self.POOL + ["Basculegion"]
@@ -2792,16 +2956,13 @@ class TestMultiBring4Search(unittest.TestCase):
         cov = cf.multi_bring4_coverage(
             pool_with_overlap, enemies, merged, moves, natures, typechart,
             good_threshold=0.5, min_enemies=1)
+        self.assertIn("Basculegion", cov["candidate_pool"])
         for rows in cov["per_enemy"]:
-            for r in rows:
-                self.assertNotIn("Basculegion", r["pair"])
-        self.assertNotIn("Basculegion", cov["candidate_pool"])
-        # Must not crash, and must never recommend bringing the enemy's
-        # own Pokemon.
-        if len(cov["candidate_pool"]) >= 4:
-            rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
-            for r in rows:
-                self.assertNotIn("Basculegion", r["core"])
+            got_names = {n for r in rows for n in r["pair"]}
+            self.assertIn("Basculegion", got_names)
+        # Must not crash, and may legally recommend the mirror pick.
+        rows = cf.multi_bring4_exhaustive(cov, good_threshold=0.5)
+        self.assertTrue(rows)
 
     def test_stage_a_runs_once_per_enemy_over_the_whole_pool(self):
         import itertools as _it
@@ -2930,6 +3091,71 @@ class TestMultiBring4Search(unittest.TestCase):
         rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.5, beam_width=20)
         all_picked = {n for r in rows for n in r["core"]}
         self.assertTrue(all_picked.issubset(set(self.POOL)))
+
+
+class TestMultiBring4CoreSizes(unittest.TestCase):
+    """"I would like to output the best 3-pokemon cores against each team"
+    -- `core_sizes` widens `multi_bring4_exhaustive`/`multi_bring4_beam`
+    down to 3 (default stays (4, 5, 6), unchanged for every existing
+    caller). A 3-member core has exactly one possible bring (itself, 3
+    pairs), the same degenerate case a 4-member core already is."""
+
+    POOL = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit", "Whimsicott"]
+    ENEMIES = [["Sableye", "Ariados"], ["Basculegion", "Mega Floette"]]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1)
+
+    def test_default_core_sizes_is_unchanged(self):
+        default_rows = cf.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.5)
+        explicit_rows = cf.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.5, core_sizes=(4, 5, 6))
+        self.assertEqual(default_rows, explicit_rows)
+
+    def test_exhaustive_with_core_sizes_three_returns_only_size_three(self):
+        rows = cf.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.5, core_sizes=(3,))
+        self.assertTrue(rows)
+        self.assertEqual({r["core_size"] for r in rows}, {3})
+        for r in rows:
+            self.assertEqual(len(r["core"]), 3)
+
+    def test_a_three_member_core_has_one_bring_of_three_pairs(self):
+        rows = cf.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.5, core_sizes=(3,))
+        for r in rows:
+            for pe in r["per_enemy"]:
+                b4 = pe["best_bring4_row"]
+                self.assertEqual(set(b4["bring4"]), set(r["core"]))
+                self.assertEqual(len(b4["pair_rows"]), 3)
+
+    def test_beam_with_core_sizes_three_returns_only_size_three(self):
+        rows = cf.multi_bring4_beam(
+            self.coverage, good_threshold=0.5, beam_width=20, core_sizes=(3,))
+        self.assertTrue(rows)
+        self.assertEqual({len(r["core"]) for r in rows}, {3})
+
+    def test_beam_default_core_sizes_is_unchanged(self):
+        default_rows = cf.multi_bring4_beam(
+            self.coverage, good_threshold=0.5, beam_width=20)
+        explicit_rows = cf.multi_bring4_beam(
+            self.coverage, good_threshold=0.5, beam_width=20,
+            core_sizes=(4, 5, 6))
+        self.assertEqual(default_rows, explicit_rows)
+
+    def test_mixed_core_sizes_can_return_both(self):
+        rows = cf.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.5, core_sizes=(3, 4))
+        sizes = {r["core_size"] for r in rows}
+        self.assertTrue(sizes, "expected at least one core")
+        self.assertTrue(sizes.issubset({3, 4}))
 
 
 class TestMultiBring4MaxMegas(unittest.TestCase):
@@ -3359,6 +3585,74 @@ class TestUncoveredEnemyPairsDominateRanking(unittest.TestCase):
                         "ABCE (no unconditional loss) must rank above ABCD "
                         "(loses Y+Z no matter which pair is sent out), even "
                         "though they tie on raw beaten count")
+
+
+class TestBring4CandidatesRespectsMegaConsistency(unittest.TestCase):
+    """`_bring4_candidates`'s `megas`/`pair_lookup_forced_base` params --
+    "for a bring 4, across all six pairs only one mega may be considered
+    as a mega, the other as base form." A hand-built fixture (`_fake_
+    pair_row`, no real racing) with two synthetic stone-holders isolates
+    just the "pick the better of the two consistent hypotheses" logic,
+    independent of any real race."""
+
+    TARGETS = ("E1", "E2")  # a single enemy pair: (E1, E2)
+    WIN = {("E1", "E2")}
+    LOSS = set()
+
+    def setUp(self):
+        six = ["Mega A", "Mega B", "C", "D"]
+        import itertools as _it
+        # Default (free-choice) lookup: every pair loses. Only ever used as
+        # a fallback for a pair that touches NEITHER forced-base name (here,
+        # just C+D).
+        self.pair_lookup = {
+            frozenset(p): _fake_pair_row(p, self.LOSS, self.TARGETS)
+            for p in _it.combinations(six, 2)}
+        # Hypothesis "Mega A is the team's mega, Mega B stays base":
+        # every pair TOUCHING Mega B wins.
+        touching_b = [("Mega A", "Mega B"), ("Mega B", "C"), ("Mega B", "D")]
+        # Hypothesis "Mega B is the team's mega, Mega A stays base":
+        # every pair touching Mega A loses (stays at the default).
+        touching_a = [("Mega A", "Mega B"), ("Mega A", "C"), ("Mega A", "D")]
+        self.pair_lookup_forced_base = {
+            "Mega B": {frozenset(p): _fake_pair_row(p, self.WIN, self.TARGETS)
+                      for p in touching_b},
+            "Mega A": {frozenset(p): _fake_pair_row(p, self.LOSS, self.TARGETS)
+                      for p in touching_a},
+        }
+        self.six = six
+
+    def test_picks_the_strictly_better_consistent_hypothesis(self):
+        """"Mega A is the mega" (3/6 pairs win) strictly beats "Mega B is
+        the mega" (0/6 pairs win) here -- `_bring4_candidates` must pick
+        the winning hypothesis, not just the first/arbitrary one."""
+        rows = cf._bring4_candidates(
+            self.six, self.pair_lookup, self.TARGETS, good_threshold=1.0,
+            megas=["Mega A", "Mega B"],
+            pair_lookup_forced_base=self.pair_lookup_forced_base)
+        self.assertEqual(len(rows), 1)  # a 4-member core has one bring
+        row = rows[0]
+        self.assertEqual(row["pairs_good"], 3)
+        won_pairs = {r["pair"] for r in row["pair_rows"]
+                    if cf._pair_beaten_frac(r) >= 1.0}
+        self.assertEqual(won_pairs, {("Mega A", "Mega B"), ("Mega B", "C"),
+                                     ("Mega B", "D")})
+
+    def test_a_bring4_with_only_one_stone_holder_is_untouched(self):
+        """No `megas`/`pair_lookup_forced_base` conflict for a bring-4 that
+        carries only ONE of the two stone-holders -- same result whether or
+        not the mega-consistency params are even passed."""
+        six_one_mega = ["Mega A", "C", "D", "Kingambit"]
+        import itertools as _it
+        pair_lookup = {
+            frozenset(p): _fake_pair_row(p, self.LOSS, self.TARGETS)
+            for p in _it.combinations(six_one_mega, 2)}
+        without_megas = cf._bring4_candidates(
+            six_one_mega, pair_lookup, self.TARGETS, good_threshold=1.0)
+        with_megas = cf._bring4_candidates(
+            six_one_mega, pair_lookup, self.TARGETS, good_threshold=1.0,
+            megas=["Mega A", "Mega B"], pair_lookup_forced_base={})
+        self.assertEqual(without_megas, with_megas)
 
 
 class TestDeepDive(unittest.TestCase):

@@ -3532,7 +3532,7 @@ with tab_counter:
             our_paste = st.text_area(
                 "Paste Showdown export text (blank line between each Pokemon)",
                 height=160, key="ct_b4_our_paste")
-            our_pasted, _our_sets = species_data.custom_team_from_export(
+            our_pasted, our_pasted_sets = species_data.custom_team_from_export(
                 our_paste, merged) if our_paste.strip() else ([], {})
             unknown_our = [n for n in our_pasted if n not in merged]
             if unknown_our:
@@ -3590,26 +3590,41 @@ with tab_counter:
         else:
             if ct_our_source == "(current Team Builder team)":
                 our6 = get_state_team()
+                our_sets = st.session_state.get("sets") or {}
             elif ct_our_source == PASTE_OUR:
                 our6 = our_pasted
+                our_sets = our_pasted_sets
             else:
                 our6 = list(teams[ct_our_source])
-            if not (4 <= len(our6) <= 6):
-                st.warning("Pick 4, 5, or 6 (load a team in Team Builder, paste a "
-                           "pokepaste, or choose a preset above) -- exactly 4 skips "
-                           "straight to summarising its own 6 internal pairs, since "
-                           "there's only one possible bring-4.")
+                our_sets = team_meta.get(ct_our_source, {}).get("sets") or {}
+            if not (3 <= len(our6) <= 6):
+                st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
+                           "a pokepaste, or choose a preset above) -- 3 or 4 skips "
+                           "straight to summarising its own internal pairs, since "
+                           "there's only one possible bring.")
             elif not vs_roster:
                 st.warning("Provide an enemy roster (pick a saved team, or paste a "
                            "valid pokepaste) first.")
             else:
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
+                    # "In the CLI the bring4 beat 55/90, but the streamlit
+                    # counter table was 27/90. They must mirror rather than
+                    # contradict." -- a loaded/pasted/preset team's own
+                    # pinned item/moveset must be respected here exactly
+                    # like the CLI's own --item/--moves overrides, not
+                    # silently re-searched from scratch.
+                    item_overrides = {n: s["item"] for n, s in our_sets.items()
+                                      if s.get("item")}
+                    move_overrides = {n: s["moves"] for n, s in our_sets.items()
+                                      if s.get("moves")}
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
                             pair_rows, bring4_rows = bring4_search(
                                 our6, vs_roster, merged, moves, natures, typechart,
                                 turns=ct_turns, good_threshold=ct_good / 100,
-                                excluded_items=ct_excluded)
+                                excluded_items=ct_excluded,
+                                item_overrides=item_overrides,
+                                move_overrides=move_overrides)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -3622,15 +3637,18 @@ with tab_counter:
                 bring4_rows = st.session_state.get("ct_b4_bring4_rows")
                 if pair_rows and bring4_rows:
                     total = pair_rows[0]["pairs_total"]
-                    st.markdown(f"**Stage 1** -- all {len(pair_rows)} pairs drawn from your 6, "
+                    shown_our6 = st.session_state.get("ct_b4_our6") or our6
+                    st.markdown(f"**Stage 1** -- all {len(pair_rows)} pairs drawn from "
+                               f"your {len(shown_our6)}, "
                                f"vs {ct_vs_name}'s {total} enemy pairs:")
                     st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
                     st.markdown(f"**Stage 2** -- all {len(bring4_rows)} possible bring-4s, "
                                f"ranked best worst-case first:")
+                    n_pairs = len(bring4_rows[0]["pair_rows"]) if bring4_rows else 6
                     st.dataframe(pd.DataFrame([
                         {"Bring-4": " / ".join(b["bring4"]),
                          "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
-                         "Good pairs": f"{b['pairs_good']}/6",
+                         "Good pairs": f"{b['pairs_good']}/{n_pairs}",
                          "Worst pair": " + ".join(b["worst_pair"]),
                          "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
                                                f"/{total}")}

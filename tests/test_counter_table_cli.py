@@ -93,6 +93,73 @@ class TestParseTypeLimits(unittest.TestCase):
         self.assertIn("integer", str(caught.exception))
 
 
+class TestStrictWeakTypesShorthand(unittest.TestCase):
+    """"a new type weakness limiter where I name specific types that may
+    have no more than 1 weakness, I can define types but default if I use
+    the argument is 'fire, water, fairy, steel, dark, ghost, ground', if I
+    don't use the argument then none are applied" -- a convenience
+    shorthand over the existing --type-limit mechanism, not a new
+    enforcement path (`_merge_strict_weak_types` folds it into the exact
+    same {type: {"max_weak": N}} shape `_parse_type_limits` already
+    produces)."""
+
+    def test_omitted_flag_resolves_to_no_types(self):
+        self.assertEqual(ct._resolve_strict_weak_types(None), [])
+
+    def test_bare_flag_resolves_to_the_default_list(self):
+        self.assertEqual(
+            ct._resolve_strict_weak_types("__DEFAULT__"),
+            ["Fire", "Water", "Fairy", "Steel", "Dark", "Ghost", "Ground"])
+
+    def test_an_explicit_list_is_used_verbatim(self):
+        self.assertEqual(ct._resolve_strict_weak_types("Fire,Ice"),
+                         ["Fire", "Ice"])
+
+    def test_an_unknown_type_is_rejected(self):
+        with self.assertRaises(SystemExit) as caught:
+            ct._resolve_strict_weak_types("Bogus")
+        self.assertIn("unknown type", str(caught.exception))
+
+    def test_no_types_leaves_type_limits_unchanged(self):
+        self.assertIsNone(ct._merge_strict_weak_types(None, []))
+        self.assertEqual(ct._merge_strict_weak_types({"Ice": {"max_net": 0}}, []),
+                         {"Ice": {"max_net": 0}})
+
+    def test_each_named_type_gets_max_weak_one(self):
+        self.assertEqual(ct._merge_strict_weak_types(None, ["Fire", "Water"]),
+                         {"Fire": {"max_weak": 1}, "Water": {"max_weak": 1}})
+
+    def test_an_explicit_type_limit_for_the_same_type_wins(self):
+        """More specific/intentional always beats the shorthand -- Fire's
+        own explicit --type-limit entry replaces the shorthand's bare
+        max_weak=1 outright, while Water (only named by the shorthand)
+        still gets it."""
+        merged = ct._merge_strict_weak_types(
+            {"Fire": {"max_weak": 2, "max_net": -1}}, ["Fire", "Water"])
+        self.assertEqual(merged, {"Fire": {"max_weak": 2, "max_net": -1},
+                                  "Water": {"max_weak": 1}})
+
+    def test_only_applies_to_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--strict-weak-types"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--strict-weak-types", msg)
+
+    def test_end_to_end_no_printed_core_has_two_weak_to_a_named_type(self):
+        """A real --multi-bring4 run with an explicit --strict-weak-types
+        list: every printed core's own weaknesses-by-type line must never
+        show 2+ for Fire (the only named type here)."""
+        msg, out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+             "--good-threshold", "0", "--min-enemies", "1",
+             "--strict-weak-types", "Fire", "--top", "30"])
+        self.assertIsNone(msg, out)
+        import re
+        fire_counts = re.findall(r"weaknesses by type: [^\n]*Fire (\d+)", out)
+        self.assertTrue(fire_counts, "expected at least one printed core")
+        self.assertTrue(all(int(c) <= 1 for c in fire_counts), fire_counts)
+
+
 class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
     """--max-weak/--type-limit only mean something under --multi-bring4 --
     same "reject loudly rather than silently ignore" convention every other
@@ -143,6 +210,134 @@ class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("--teamsheet-json", msg)
 
+    def test_unique_items_without_bring4_or_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--unique-items"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--unique-items", msg)
+
+
+class TestCliAcceptsMirrorMatches(unittest.TestCase):
+    """"you should be allowed to bring the same pokemon as the enemy" --
+    the CLI used to hard-reject --deep/--bring4/--joint --partner whenever
+    --our/--partner shared a name with --vs, on top of counter_finder.py's
+    own (now-also-removed) ValueError. All three are legal VGC mirrors now;
+    only the pre-existing "unknown Pokemon" checks remain."""
+
+    def test_deep_accepts_a_shared_name(self):
+        msg, out = run_main(
+            ["--vs", "Kingambit,Sableye", "--our", "Kingambit,Garchomp",
+             "--deep"])
+        self.assertIsNone(msg, out)
+
+    def test_bring4_accepts_a_shared_name(self):
+        msg, out = run_main(
+            ["--vs", "Kingambit,Sableye", "--our",
+             "Kingambit,Garchomp,Incineroar,Gallade", "--bring4",
+             "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+
+    def test_joint_partner_accepts_a_shared_name(self):
+        msg, out = run_main(
+            ["--vs", "Kingambit,Sableye", "--joint", "--partner",
+             "Kingambit"])
+        self.assertIsNone(msg, out)
+
+
+class TestUniqueItemsFlag(unittest.TestCase):
+    """"make the item uniqueness an option, but by default items will
+    remain non-unique to reduce search time" -- `--unique-items` threads
+    into `enforce_item_clause` on `bring4_search`/`core_deep_dive`. Off by
+    default: a known real collision (Ninetales-Alola and Rampardos both
+    independently pick Life Orb against this fixture -- see
+    TestResolveUniqueItems in test_counter_finder.py) shows up in the
+    printed deep-dive "set: ..." line unless the flag is passed."""
+
+    OUR6 = ("Mega Gengar,Mega Alakazam,Ninetales-Alola,Sharpedo,Rampardos,"
+           "Kingambit")
+
+    def _set_line(self, out):
+        idx = out.find("set: ")
+        self.assertGreaterEqual(idx, 0, out)
+        return out[idx:out.find("\n", idx)]
+
+    def test_off_by_default_the_known_collision_still_shows(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Sableye,Ariados",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertIn("Ninetales-Alola @ Life Orb", line)
+        self.assertIn("Rampardos @ Life Orb", line)
+
+    def test_resolves_the_collision_in_bring4_deep_dive(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Sableye,Ariados",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--unique-items"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertIn("Ninetales-Alola @ Life Orb", line)
+        self.assertNotIn("Rampardos @ Life Orb", line)
+
+    def test_resolves_the_collision_in_multi_bring4_deep_dive_core(self):
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+                "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+                "--good-threshold", "0", "--min-enemies", "1",
+                "--deep-dive-core", "1", "--unique-items"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        # Whichever core was actually chosen, no two of its members may
+        # share an item under --unique-items.
+        items = [part.split(" @ ")[1] for part in
+                line[len("set: "):].split(", ")]
+        self.assertEqual(len(items), len(set(items)), line)
+
+
+class TestCoreSizesFlag(unittest.TestCase):
+    """"I would like to output the best 3-pokemon cores against each team"
+    -- `--core-sizes` (comma-separated, default "4,5,6", each 3-6) threads
+    into `multi_bring4_exhaustive`/`multi_bring4_beam`'s own `core_sizes`
+    parameter. `--bring4 --our` also accepts exactly 3 names now."""
+
+    def test_only_applies_to_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--core-sizes", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--core-sizes", msg)
+
+    def test_rejects_a_non_integer(self):
+        msg, _out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--core-sizes", "x"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--core-sizes", msg)
+
+    def test_rejects_a_size_outside_three_to_six(self):
+        msg, _out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--core-sizes", "2"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--core-sizes", msg)
+
+    def test_core_sizes_three_only_prints_three_pokemon_cores(self):
+        msg, out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+             "--good-threshold", "0", "--min-enemies", "1",
+             "--core-sizes", "3", "--top", "5"])
+        self.assertIsNone(msg, out)
+        # Every printed core's leading "(N)" rank marker must read "(3)".
+        import re
+        core_sizes_seen = set(re.findall(r"^\s+\d+ \((\d)\)", out, re.MULTILINE))
+        self.assertEqual(core_sizes_seen, {"3"})
+
+    def test_bring4_our_accepts_exactly_three_names(self):
+        msg, out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade", "--bring4",
+             "--vs", "Sableye,Ariados", "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("all 3 pairs drawn from your 3", out)
+
 
 class TestHelpDocumentsTheNewFlags(unittest.TestCase):
     """A flag missing from `--help` is one nobody can discover; a flag in
@@ -173,6 +368,15 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
 
     def test_xlsx_is_parsed(self):
         self.assertIn("--xlsx", self.help_text)
+
+    def test_core_sizes_is_parsed(self):
+        self.assertIn("--core-sizes", self.help_text)
+
+    def test_strict_weak_types_is_parsed(self):
+        self.assertIn("--strict-weak-types", self.help_text)
+
+    def test_unique_items_is_parsed(self):
+        self.assertIn("--unique-items", self.help_text)
 
     def test_max_weak_types_is_parsed(self):
         self.assertIn("--max-weak-types", self.help_text)
@@ -454,11 +658,11 @@ class TestBring4SixPairExportColumns(unittest.TestCase):
                 rows = list(csv.DictReader(fh))
             self.assertTrue(rows)
             header = rows[0].keys()
-            for col in ("6 pairs beaten total", "6 pairs beaten 3rd best",
-                       "6 pairs beaten 4th best", "6 pairs beaten worst",
+            for col in ("pairs beaten total", "pairs beaten 3rd best",
+                       "pairs beaten 4th best", "pairs beaten worst",
                        "enemy has real tailwind",
-                       "6 pairs tailwind safe total",
-                       "6 pairs protect safe total"):
+                       "pairs tailwind safe total",
+                       "pairs protect safe total"):
                 self.assertIn(col, header)
             # Sableye+Ariados carries no real Tailwind user.
             self.assertEqual(rows[0]["enemy has real tailwind"], "False")
@@ -524,13 +728,13 @@ class TestMultiBring4SixPairExportColumns(unittest.TestCase):
             self.assertIsNone(msg)
             with open(path, newline="", encoding="utf-8") as fh:
                 header = next(csv.reader(fh))
-            for col in ("enemy 1 6 pairs beaten total",
-                       "enemy 1 6 pairs beaten 3rd best",
-                       "enemy 1 6 pairs beaten 4th best",
-                       "enemy 1 6 pairs beaten worst",
+            for col in ("enemy 1 pairs beaten total",
+                       "enemy 1 pairs beaten 3rd best",
+                       "enemy 1 pairs beaten 4th best",
+                       "enemy 1 pairs beaten worst",
                        "enemy 1 has real tailwind",
-                       "enemy 1 6 pairs tailwind safe total",
-                       "enemy 1 6 pairs protect safe total"):
+                       "enemy 1 pairs tailwind safe total",
+                       "enemy 1 pairs protect safe total"):
                 self.assertIn(col, header)
         finally:
             os.unlink(path)
@@ -567,13 +771,13 @@ class TestMultiBring4SixPairExportColumns(unittest.TestCase):
             header = [ws.cell(row=1, column=c).value
                      for c in range(1, ws.max_column + 1)]
             self.assertEqual(header[0], "#")
-            for col in ("Enemy 1 6 pairs beaten total",
-                       "Enemy 1 6 pairs beaten 3rd best",
-                       "Enemy 1 6 pairs beaten 4th best",
-                       "Enemy 1 6 pairs beaten worst",
+            for col in ("Enemy 1 pairs beaten total",
+                       "Enemy 1 pairs beaten 3rd best",
+                       "Enemy 1 pairs beaten 4th best",
+                       "Enemy 1 pairs beaten worst",
                        "Enemy 1 has real Tailwind",
-                       "Enemy 1 6 pairs Tailwind-safe total",
-                       "Enemy 1 6 pairs protect-safe total"):
+                       "Enemy 1 pairs Tailwind-safe total",
+                       "Enemy 1 pairs protect-safe total"):
                 self.assertIn(col, header)
             # Whimsicott is a real Tailwind setter in this fixture's roster.
             tw_col = header.index("Enemy 1 has real Tailwind") + 1
@@ -806,7 +1010,7 @@ class TestCleanWinScoring(unittest.TestCase):
             self.assertIsNone(msg)
             with open(path, newline="", encoding="utf-8") as fh:
                 header = next(csv.reader(fh))
-            self.assertIn("6 pairs clean win total", header)
+            self.assertIn("pairs clean win total", header)
         finally:
             os.unlink(path)
 
@@ -827,7 +1031,7 @@ class TestCleanWinScoring(unittest.TestCase):
             self.assertIsNone(msg)
             with open(csv_path, newline="", encoding="utf-8") as fh:
                 header = next(csv.reader(fh))
-            self.assertIn("enemy 1 6 pairs clean win total", header)
+            self.assertIn("enemy 1 pairs clean win total", header)
 
             msg, out = run_main(argv + ["--xlsx", xlsx_path])
             self.assertIsNone(msg, out)
@@ -836,7 +1040,7 @@ class TestCleanWinScoring(unittest.TestCase):
             ws = wb["Cores"]
             xlsx_header = [ws.cell(row=1, column=c).value
                           for c in range(1, ws.max_column + 1)]
-            self.assertIn("Enemy 1 6 pairs clean win total", xlsx_header)
+            self.assertIn("Enemy 1 pairs clean win total", xlsx_header)
         finally:
             os.unlink(csv_path)
             if os.path.exists(xlsx_path):

@@ -76,18 +76,18 @@ Eight modes, pick one (or combine --chip-from/--chip-move with --pairs):
               switch (the incoming Pokemon can't act that turn, same as a
               real doubles switch), ranked by least damage taken switching
               in among candidates that actually fix the loss.
-  --bring4    For an ALREADY-DECIDED team (--our, 4, 5, or 6 names) vs one
+  --bring4    For an ALREADY-DECIDED team (--our, 3, 4, 5, or 6 names) vs one
               enemy roster (--vs): every one of its C(len,2) pairs (the
               same table --joint's own pool search prints), then every one
-              of its C(len,4) possible BRING-4 subsets, ranked by how bad
-              its WORST internal pair does (maximin -- "I always have
+              of its C(len,min(4,len)) possible BRING subsets, ranked by how
+              bad its WORST internal pair does (maximin -- "I always have
               options no matter what position I am in", not just one great
-              pair propping up a hole behind it). Exactly 4 names is not a
-              special case -- it degenerates to the single bring-4 that IS
-              your team, still summarised by its own 6 internal pairs.
+              pair propping up a hole behind it). Exactly 3 or 4 names is
+              not a special case -- it degenerates to the single bring that
+              IS your team, still summarised by its own internal pairs.
               --good-threshold sets the bar (default 100%% -- must beat
               every enemy pair drawn from --vs) for what counts as a
-              "good" pair when counting how many of a bring-4's 6 clear it.
+              "good" pair when counting how many of a bring's pairs clear it.
   --multi-bring4
               Instead of one already-decided 6, SEARCH the pool for the
               best CORE against one enemy roster, or several at once
@@ -272,6 +272,50 @@ def _parse_type_limits(entries):
                 raise SystemExit(f"--type-limit: {k}={v!r} must be an integer")
         out[type_name] = limits
     return out
+
+
+# "if I don't use the argument then none are applied" -- the default list
+# only kicks in when --strict-weak-types is passed BARE (no value); omitted
+# entirely, nothing here is used at all.
+_STRICT_WEAK_TYPES_DEFAULT = ("Fire", "Water", "Fairy", "Steel", "Dark",
+                              "Ghost", "Ground")
+
+
+def _resolve_strict_weak_types(raw):
+    """--strict-weak-types's own three-way argument: `None` (flag omitted)
+    -> no types at all; `"__DEFAULT__"` (flag given bare, via `nargs="?",
+    const="__DEFAULT__"`) -> `_STRICT_WEAK_TYPES_DEFAULT`; otherwise -> the
+    given comma-separated list, validated against `species_data.TYPES`.
+    Returns a list of type names (possibly empty).
+    """
+    if raw is None:
+        return []
+    if raw == "__DEFAULT__":
+        return list(_STRICT_WEAK_TYPES_DEFAULT)
+    from species_data import TYPES
+    names = [t.strip() for t in raw.split(",") if t.strip()]
+    unknown = [t for t in names if t not in TYPES]
+    if unknown:
+        raise SystemExit(f"--strict-weak-types: unknown type(s) "
+                         f"{', '.join(unknown)}")
+    return names
+
+
+def _merge_strict_weak_types(type_limits, strict_types):
+    """Fold `strict_types` into `type_limits` as `max_weak=1` each -- an
+    explicit `--type-limit` entry for the SAME type wins outright (its own
+    full {max_weak, max_net} dict replaces the shorthand's bare max_weak=1,
+    "more specific/intentional always beats the shorthand"). `type_limits`
+    may be `None` (no --type-limit given); returns `None` only when both
+    inputs are empty, matching `_parse_type_limits`'s own "no limits at
+    all" convention downstream code already expects.
+    """
+    if not strict_types:
+        return type_limits
+    merged = {t: {"max_weak": 1} for t in strict_types}
+    if type_limits:
+        merged.update(type_limits)
+    return merged
 
 
 def _parse_move_overrides(spec):
@@ -804,10 +848,12 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
              f"{r['pairs_tailwind_safe']:>5d}/{total:<2d} "
              f"{r['pairs_protect_safe']:>5d}/{total:<2d}")
 
+    n_pairs = bring4_rows[0]["pairs_total"] if bring4_rows else 6
     print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked by "
-         f"how many enemy pairs\nNONE of its 6 pairs can beat (fewest first), "
-         f"then by how their WORST pair does\n(best worst-case first), then "
-         f"by how many of its 6 pairs clear the good-pair bar:")
+         f"how many enemy pairs\nNONE of its {n_pairs} pairs can beat (fewest "
+         f"first), then by how their WORST pair does\n(best worst-case "
+         f"first), then by how many of its {n_pairs} pairs clear the "
+         f"good-pair bar:")
     header2 = (f"  {'#':>3} {'Bring-4':46s} {'uncov':>6s} {'good':>6s} "
               f"{'worst pair':34s} {'worst beaten':>13s}")
     print(header2)
@@ -818,7 +864,7 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
         wr = b["worst_pair_row"]
         uncov = len(b["uncovered_enemy_pairs"])
         print(f"  {i:>3} {bring4_str[:46]:46s} {uncov:>3d}/{total:<2d} "
-             f"{b['pairs_good']:>3d}/6  "
+             f"{b['pairs_good']:>3d}/{n_pairs:<2d}"
              f"{worst_str[:34]:34s} "
              f"{wr['pairs_swept'] + wr['pairs_traded']:>4d}/{total:<2d}")
         if b["uncovered_enemy_pairs"]:
@@ -827,17 +873,22 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
     print()
     print("beaten     swept + traded -- how many of the enemy pairs drawn")
     print("           from --vs this OUR pair actually beats.")
-    print("uncov      (Stage 2) enemy pairs that NONE of this bring-4's 6")
-    print("           pairs beat -- a real, unconditional loss whichever of")
-    print("           the 4 you're forced to send out. Ranked on THIS")
+    bring_size = len(bring4_rows[0]["bring4"]) if bring4_rows else 4
+    print(f"uncov      (Stage 2) enemy pairs that NONE of this bring-4's "
+         f"{n_pairs}")
+    print(f"           pairs beat -- a real, unconditional loss whichever of")
+    print(f"           the {bring_size} you're forced to send out. Ranked "
+         f"on THIS")
     print("           FIRST: a bring-4 with one such pair loses to one that")
     print("           merely has a lower average, even at an equal beaten")
     print("           fraction -- \"having a pair that every pair of yours")
     print("           loses against is terrible.\"")
-    print("good       (Stage 2) how many of this bring-4's 6 internal pairs")
+    print(f"good       (Stage 2) how many of this bring-4's {n_pairs} "
+         f"internal pairs")
     print("           clear the good-pair bar above -- \"several perform")
     print("           very well\" rather than relying on just one.")
-    print("worst pair (Stage 2) the WEAKEST of this bring-4's 6 pairs, ranked")
+    print(f"worst pair (Stage 2) the WEAKEST of this bring-4's {n_pairs} "
+         f"pairs, ranked")
     print("           protect-safe wins first, then beaten count -- the one")
     print("           you're stuck with if the game forces exactly that")
     print("           board state. Ranked on THIS, not the average: a")
@@ -909,11 +960,13 @@ def _print_teamsheet_member(name, target_names, merged, moves_db, natures,
 def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold,
                         candidate_pool_size, pool_size, merged, moves_db,
                         natures, typechart, item_overrides, move_overrides,
-                        excluded_items, fixed_items=None, fixed_moves=None):
+                        excluded_items, fixed_items=None, fixed_moves=None,
+                        core_sizes=(4, 5, 6)):
     """`multi_bring4_exhaustive`/`multi_bring4_beam`'s own row shape --
-    every printed CORE (4, 5, or 6 Pokemon -- "a full team of only 4-5
-    members is not a problem, in some ways it is actually better and more
-    efficient" -- `unused` is always empty by the time a row gets here, both
+    every printed CORE (`core_sizes`, default 4/5/6 Pokemon -- "a full team
+    of only 4-5 members is not a problem, in some ways it is actually
+    better and more efficient" -- `unused` is always empty by the time a
+    row gets here, both
     search functions already drop any core with dead weight) shows its best
     bring-4 against EACH enemy (they can differ), with the BOTTLENECK enemy
     (the worst of those best cases -- what the core is actually ranked on)
@@ -927,10 +980,10 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
         print(f"  Enemy {i}: {', '.join(targets)}")
     print()
     if not rows:
-        print("No core (4, 5, or 6 Pokemon) found -- widen the pool, lower "
-             "--good-threshold/--min-enemies, relax --max-weak/"
-             "--type-limit, or pass --beam for a broader (non-exhaustive) "
-             "search.\n")
+        print(f"No core ({', '.join(str(s) for s in core_sizes)} Pokemon) "
+             f"found -- widen the pool, lower --good-threshold/--min-enemies, "
+             f"relax --max-weak/--type-limit, or pass --beam for a broader "
+             f"(non-exhaustive) search.\n")
         return
     for i, r in enumerate(rows[:top], start=1):
         core = r["core"]
@@ -975,7 +1028,7 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
     print("           ('no answer to') outranks everything else here --")
     print("           an equal beaten fraction with no unconditional loss")
     print("           is always preferred.")
-    print("worst pair the WEAKEST of that bring-4's own 6 internal pairs,")
+    print("worst pair the WEAKEST of that bring-4's own internal pairs,")
     print("           ranked protect-safe wins first, then beaten count")
     print("           (same reading as --bring4's own 'worst pair') -- the")
     print("           bring-4 shown is the one with fewest enemy pairs it")
@@ -1271,14 +1324,14 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
                    f"Enemy {i + 1} worst pair beaten",
                    f"Enemy {i + 1} uncovered enemy pairs",
-                   f"Enemy {i + 1} 6 pairs beaten total",
-                   f"Enemy {i + 1} 6 pairs beaten 3rd best",
-                   f"Enemy {i + 1} 6 pairs beaten 4th best",
-                   f"Enemy {i + 1} 6 pairs beaten worst",
+                   f"Enemy {i + 1} pairs beaten total",
+                   f"Enemy {i + 1} pairs beaten 3rd best",
+                   f"Enemy {i + 1} pairs beaten 4th best",
+                   f"Enemy {i + 1} pairs beaten worst",
                    f"Enemy {i + 1} has real Tailwind",
-                   f"Enemy {i + 1} 6 pairs Tailwind-safe total",
-                   f"Enemy {i + 1} 6 pairs protect-safe total",
-                   f"Enemy {i + 1} 6 pairs clean win total"]
+                   f"Enemy {i + 1} pairs Tailwind-safe total",
+                   f"Enemy {i + 1} pairs protect-safe total",
+                   f"Enemy {i + 1} pairs clean win total"]
     ws.append(header)
     _style_header(ws)
     sets_rows, teamsheet_entries = [], []
@@ -1296,16 +1349,17 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
             uncovered = pe["best_bring4_row"]["uncovered_enemy_pairs"]
             depth = bring4_pair_depth(pe["best_bring4_row"])
             pt = depth["pairs_total"]
+            n_pairs = len(pe["best_bring4_row"]["pair_rows"])
             row += [", ".join(pe["target_names"]), " / ".join(pe["best_bring4"]),
                    f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
                    ", ".join(f"{e1}+{e2}" for e1, e2 in uncovered),
-                   f"{depth['beaten_total']}/{6 * pt}",
+                   f"{depth['beaten_total']}/{n_pairs * pt}",
                    f"{depth['beaten_3rd']}/{pt}", f"{depth['beaten_4th']}/{pt}",
                    f"{depth['beaten_worst']}/{pt}",
                    enemy_has_real_tailwind(pe["target_names"], merged),
-                   f"{depth['tailwind_safe_total']}/{6 * pt}",
-                   f"{depth['protect_safe_total']}/{6 * pt}",
-                   f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}"]
+                   f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
+                   f"{depth['protect_safe_total']}/{n_pairs * pt}",
+                   f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}"]
         ws.append(row)
         core_sets = _fixed_sets_for(core, fixed_items, fixed_moves, merged,
                                     moves_db, natures, typechart, all_enemies,
@@ -1351,26 +1405,27 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
     ws.title = "Bring-4s"
     ws.append(["#", "Bring-4", "Uncovered enemy pairs", "Pairs good",
               "Pairs total", "Worst pair", "Worst pair beaten",
-              "Worst pair total", "6 pairs beaten total",
-              "6 pairs beaten 3rd best", "6 pairs beaten 4th best",
-              "6 pairs beaten worst", "Enemy has real Tailwind",
-              "6 pairs Tailwind-safe total", "6 pairs protect-safe total",
-              "6 pairs clean win total"])
+              "Worst pair total", "pairs beaten total",
+              "pairs beaten 3rd best", "pairs beaten 4th best",
+              "pairs beaten worst", "Enemy has real Tailwind",
+              "pairs Tailwind-safe total", "pairs protect-safe total",
+              "pairs clean win total"])
     _style_header(ws)
     for rank, b in enumerate(bring4_rows, start=1):
         wr = b["worst_pair_row"]
         depth = bring4_pair_depth(b)
         pt = depth["pairs_total"]
+        n_pairs = len(b["pair_rows"])
         ws.append([rank, " / ".join(b["bring4"]),
                   ", ".join(f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
                   b["pairs_good"], b["pairs_total"], " + ".join(b["worst_pair"]),
                   f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
-                  wr["pairs_total"], f"{depth['beaten_total']}/{6 * pt}",
+                  wr["pairs_total"], f"{depth['beaten_total']}/{n_pairs * pt}",
                   f"{depth['beaten_3rd']}/{pt}", f"{depth['beaten_4th']}/{pt}",
                   f"{depth['beaten_worst']}/{pt}", enemy_tw,
-                  f"{depth['tailwind_safe_total']}/{6 * pt}",
-                  f"{depth['protect_safe_total']}/{6 * pt}",
-                  f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}"])
+                  f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
+                  f"{depth['protect_safe_total']}/{n_pairs * pt}",
+                  f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}"])
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
@@ -1481,15 +1536,15 @@ def main():
                          "possible enemy leads'")
     ap.add_argument("--our", default="", metavar="POKEMON,POKEMON",
                     help="--deep: the exact pair to check (required). "
-                         "--bring4: your already-decided team (required, 4, "
-                         "5, or 6 names -- exactly 4 skips straight to "
-                         "summarising its own 6 internal pairs, since "
-                         "there's only one possible bring-4)")
+                         "--bring4: your already-decided team (required, 3, "
+                         "4, 5, or 6 names -- 3 or 4 skips straight to "
+                         "summarising its own internal pairs, since "
+                         "there's only one possible bring)")
     ap.add_argument("--bring4", action="store_true",
-                    help="for an ALREADY-DECIDED team (--our, 4-6 names) "
+                    help="for an ALREADY-DECIDED team (--our, 3-6 names) "
                          "against one enemy roster (--vs): every one of its "
                          "C(len,2) pairs (same table --joint prints), then "
-                         "every one of its C(len,4) possible bring-4 "
+                         "every one of its C(len,min(4,len)) possible bring "
                          "subsets, ranked by how bad its WORST internal "
                          "pair does (maximin) -- 'I always have options no "
                          "matter what position I am in', not just a strong "
@@ -1546,6 +1601,15 @@ def main():
                          "-- e.g. --type-limit \"Fire:max_weak=1,max_net=-2\" "
                          "for 'only 1 member may be weak to Fire, Fire must "
                          "have net 2 resistances'. Either key may be omitted")
+    ap.add_argument("--strict-weak-types", nargs="?", const="__DEFAULT__",
+                    default=None, metavar="TYPE,TYPE,...",
+                    help="--multi-bring4 only: shorthand that hard-caps "
+                         "max_weak=1 for the named types (comma-separated), "
+                         "on top of --max-weak/--type-limit -- an explicit "
+                         "--type-limit for the same type wins over this. "
+                         "Bare (no value) uses the default list: Fire, "
+                         "Water, Fairy, Steel, Dark, Ghost, Ground. Omit "
+                         "the flag entirely for no constraint from this")
     ap.add_argument("--max-weak-types", type=int, default=None, metavar="N",
                     help="--multi-bring4 only: hard-drop any candidate CORE "
                          "where more than N DIFFERENT types have 2+ members "
@@ -1557,6 +1621,14 @@ def main():
                          "still being broadly fragile across many types at "
                          "once, which this catches instead. Off by default "
                          "(no breadth cap)")
+    ap.add_argument("--core-sizes", default="4,5,6", metavar="N,N,...",
+                    help="--multi-bring4 only: which candidate CORE sizes "
+                         "to search, comma-separated (default \"4,5,6\"). "
+                         "Each must be 3-6 -- \"I would like to output the "
+                         "best 3-pokemon cores against each team\" widens "
+                         "this down to 3; a 3-member core has exactly one "
+                         "possible bring (itself, 3 pairs), the same "
+                         "degenerate case a 4-member core already is")
     ap.add_argument("--max-megas", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: hard cap on how many "
                          "Mega-stone-capable members a candidate CORE may "
@@ -1576,6 +1648,17 @@ def main():
                          "Pass this to let the search consider it again; an "
                          "explicit --item pin already bypasses the "
                          "exclusion regardless")
+    ap.add_argument("--unique-items", action="store_true",
+                    help="--bring4/--multi-bring4 only: enforce the VGC "
+                         "Item Clause (no two of the team's own Pokemon may "
+                         "hold the same item) when resolving items. Off by "
+                         "default -- items are searched per-member in "
+                         "isolation, same as always, to keep search fast; "
+                         "this is meant for verifying a specific team, not "
+                         "for bulk ranking. Under --multi-bring4 this only "
+                         "affects --deep-dive-core's own per-core re-race "
+                         "-- the exhaustive/beam sweep itself never enforces "
+                         "this, regardless of this flag")
     ap.add_argument("--min-enemies", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: a pool member only enters "
                          "the exhaustive search's candidate pool once it "
@@ -1755,6 +1838,12 @@ def main():
         raise SystemExit("--max-weak/--type-limit only apply to --multi-bring4")
     if args.max_weak_types is not None and not args.multi_bring4:
         raise SystemExit("--max-weak-types only applies to --multi-bring4")
+    if args.strict_weak_types is not None and not args.multi_bring4:
+        raise SystemExit("--strict-weak-types only applies to --multi-bring4")
+    if args.core_sizes != "4,5,6" and not args.multi_bring4:
+        raise SystemExit("--core-sizes only applies to --multi-bring4")
+    if args.unique_items and not (args.multi_bring4 or args.bring4):
+        raise SystemExit("--unique-items only applies to --bring4/--multi-bring4")
     if args.teamsheet_json and not (args.multi_bring4 or args.bring4):
         raise SystemExit("--teamsheet-json requires --multi-bring4 or --bring4")
     if args.partner and not args.joint:
@@ -1797,8 +1886,6 @@ def main():
         targets = []
     if args.partner and args.partner not in merged:
         raise SystemExit(f"unknown Pokemon: {args.partner}")
-    if args.partner and args.partner in targets:
-        raise SystemExit("--partner can't also be a --vs target")
     our_pair = [n.strip() for n in args.our.split(",") if n.strip()]
     if args.deep:
         if len(our_pair) != 2:
@@ -1807,22 +1894,14 @@ def main():
         unknown_our = [n for n in our_pair if n not in merged]
         if unknown_our:
             raise SystemExit(f"unknown Pokemon: {', '.join(unknown_our)}")
-        in_targets = [n for n in our_pair if n in targets]
-        if in_targets:
-            raise SystemExit(f"--our can't also be a --vs target: "
-                             f"{', '.join(in_targets)}")
     if args.bring4:
         our6 = list(dict.fromkeys(our_pair))
-        if not (4 <= len(our6) <= 6):
-            raise SystemExit(f"--bring4 needs 4, 5, or 6 distinct Pokemon in "
-                             f"--our (got {len(our6)}: {our6})")
+        if not (3 <= len(our6) <= 6):
+            raise SystemExit(f"--bring4 needs 3, 4, 5, or 6 distinct Pokemon "
+                             f"in --our (got {len(our6)}: {our6})")
         unknown_our6 = [n for n in our6 if n not in merged]
         if unknown_our6:
             raise SystemExit(f"unknown Pokemon: {', '.join(unknown_our6)}")
-        in_targets6 = [n for n in our6 if n in targets]
-        if in_targets6:
-            raise SystemExit(f"--our can't also be a --vs target: "
-                             f"{', '.join(in_targets6)}")
     bench = [n.strip() for n in args.bench.split(",") if n.strip()]
     if bench:
         unknown_bench = [n for n in bench if n not in merged]
@@ -1850,6 +1929,17 @@ def main():
     move_overrides = _parse_move_overrides(args.moves)
     excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
     type_limits = _parse_type_limits(args.type_limit)
+    strict_weak_types = _resolve_strict_weak_types(args.strict_weak_types)
+    type_limits = _merge_strict_weak_types(type_limits, strict_weak_types)
+    try:
+        core_sizes = tuple(int(p.strip()) for p in args.core_sizes.split(",")
+                           if p.strip())
+    except ValueError:
+        raise SystemExit(f"--core-sizes {args.core_sizes!r}: must be "
+                         f"comma-separated integers")
+    if not core_sizes or any(not (3 <= s <= 6) for s in core_sizes):
+        raise SystemExit(f"--core-sizes {args.core_sizes!r}: each size must "
+                         f"be between 3 and 6")
     banned = [i for i in (item_overrides or {}).values() if i in BANNED_ITEMS]
     if banned:
         raise SystemExit(f"--item: not legal in Regulation MB: {', '.join(banned)}")
@@ -1920,7 +2010,8 @@ def main():
             our6, targets, merged, moves, natures, typechart,
             turns=args.turns, good_threshold=good_threshold,
             item_overrides=item_overrides, move_overrides=move_overrides,
-            excluded_items=excluded_items)
+            excluded_items=excluded_items,
+            enforce_item_clause=args.unique_items)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
         ranks = _parse_deep_dive_core(args.deep_dive_core)
@@ -1935,7 +2026,8 @@ def main():
                 bring4_rows[rank - 1]["bring4"], [targets], merged, moves,
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
-                excluded_items=excluded_items)
+                excluded_items=excluded_items,
+                enforce_item_clause=args.unique_items)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -1952,7 +2044,8 @@ def main():
                 bring4_rows[0]["bring4"], [targets], merged, moves,
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
-                excluded_items=excluded_items)
+                excluded_items=excluded_items,
+                enforce_item_clause=args.unique_items)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
@@ -1977,7 +2070,7 @@ def main():
                 coverage, good_threshold=good_threshold,
                 beam_width=args.beam_width, max_weak=args.max_weak,
                 type_limits=type_limits, max_megas=args.max_megas,
-                max_weak_types=args.max_weak_types)
+                max_weak_types=args.max_weak_types, core_sizes=core_sizes)
             mode_label = f"beam, width {args.beam_width}"
         else:
             try:
@@ -1985,7 +2078,7 @@ def main():
                     coverage, good_threshold=good_threshold,
                     max_candidates=args.max_candidates, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types)
+                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
                 mode_label = "exhaustive"
             except ValueError as e:
                 # "It should be very quick to compute the sets of 4 brings
@@ -2002,14 +2095,15 @@ def main():
                     coverage, good_threshold=good_threshold,
                     beam_width=args.beam_width, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types)
+                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
                 mode_label = f"beam, width {args.beam_width} (auto-fallback)"
         _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
                             good_threshold, len(coverage["candidate_pool"]),
                             len(pool), merged, moves, natures, typechart,
                             item_overrides, move_overrides, excluded_items,
                             fixed_items=coverage["fixed_items"],
-                            fixed_moves=coverage["fixed_moves"])
+                            fixed_moves=coverage["fixed_moves"],
+                            core_sizes=core_sizes)
         ranks = _parse_deep_dive_core(args.deep_dive_core)
         if not ranks:
             ranks = _prompt_deep_dive_ranks(len(multi_rows), args.no_prompt)
@@ -2022,7 +2116,8 @@ def main():
                 multi_rows[rank - 1]["core"], vs_teams, merged, moves,
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
-                excluded_items=excluded_items)
+                excluded_items=excluded_items,
+                enforce_item_clause=args.unique_items)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2044,7 +2139,8 @@ def main():
             dive = core_dives[0][1] if core_dives else core_deep_dive(
                 multi_rows[0]["core"], vs_teams, merged, moves, natures,
                 typechart, turns=args.turns, item_overrides=item_overrides,
-                move_overrides=move_overrides, excluded_items=excluded_items)
+                move_overrides=move_overrides, excluded_items=excluded_items,
+                enforce_item_clause=args.unique_items)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
@@ -2131,6 +2227,7 @@ def main():
             wr = b["worst_pair_row"]
             depth = bring4_pair_depth(b)
             pt = depth["pairs_total"]
+            n_pairs = len(b["pair_rows"])
             row = {
                 "bring4": " / ".join(b["bring4"]),
                 "uncovered enemy pairs": "; ".join(
@@ -2144,15 +2241,15 @@ def main():
                 "worst pair tailwind safe": wr["pairs_tailwind_safe"],
                 "worst pair protect safe": wr["pairs_protect_safe"],
                 "worst pair total": wr["pairs_total"],
-                "6 pairs beaten total": f"{depth['beaten_total']}/{6 * pt}",
-                "6 pairs beaten 3rd best": f"{depth['beaten_3rd']}/{pt}",
-                "6 pairs beaten 4th best": f"{depth['beaten_4th']}/{pt}",
-                "6 pairs beaten worst": f"{depth['beaten_worst']}/{pt}",
+                "pairs beaten total": f"{depth['beaten_total']}/{n_pairs * pt}",
+                "pairs beaten 3rd best": f"{depth['beaten_3rd']}/{pt}",
+                "pairs beaten 4th best": f"{depth['beaten_4th']}/{pt}",
+                "pairs beaten worst": f"{depth['beaten_worst']}/{pt}",
                 "enemy has real tailwind": enemy_tw,
-                "6 pairs tailwind safe total": f"{depth['tailwind_safe_total']}/{6 * pt}",
-                "6 pairs protect safe total": f"{depth['protect_safe_total']}/{6 * pt}",
-                "6 pairs clean win total": (f"{depth['clean_win_total']:.1f}/"
-                                            f"{6 * pt * 2:.0f}"),
+                "pairs tailwind safe total": f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
+                "pairs protect safe total": f"{depth['protect_safe_total']}/{n_pairs * pt}",
+                "pairs clean win total": (f"{depth['clean_win_total']:.1f}/"
+                                         f"{n_pairs * pt * 2:.0f}"),
             }
             _paste, token = _teamsheet_export_cells(
                 b["bring4"], {n: our6_sets[n] for n in b["bring4"]}, merged)
@@ -2191,6 +2288,7 @@ def main():
                 wr = pe["best_bring4_row"]["worst_pair_row"]
                 depth = bring4_pair_depth(pe["best_bring4_row"])
                 pt = depth["pairs_total"]
+                n_pairs = len(pe["best_bring4_row"]["pair_rows"])
                 row[f"enemy {e_idx}"] = ", ".join(pe["target_names"])
                 row[f"enemy {e_idx} best bring4"] = " / ".join(pe["best_bring4"])
                 row[f"enemy {e_idx} worst pair beaten"] = (
@@ -2198,19 +2296,19 @@ def main():
                 row[f"enemy {e_idx} uncovered enemy pairs"] = "; ".join(
                     f"{e1}+{e2}" for e1, e2 in
                     pe["best_bring4_row"]["uncovered_enemy_pairs"])
-                row[f"enemy {e_idx} 6 pairs beaten total"] = (
-                    f"{depth['beaten_total']}/{6 * pt}")
-                row[f"enemy {e_idx} 6 pairs beaten 3rd best"] = f"{depth['beaten_3rd']}/{pt}"
-                row[f"enemy {e_idx} 6 pairs beaten 4th best"] = f"{depth['beaten_4th']}/{pt}"
-                row[f"enemy {e_idx} 6 pairs beaten worst"] = f"{depth['beaten_worst']}/{pt}"
+                row[f"enemy {e_idx} pairs beaten total"] = (
+                    f"{depth['beaten_total']}/{n_pairs * pt}")
+                row[f"enemy {e_idx} pairs beaten 3rd best"] = f"{depth['beaten_3rd']}/{pt}"
+                row[f"enemy {e_idx} pairs beaten 4th best"] = f"{depth['beaten_4th']}/{pt}"
+                row[f"enemy {e_idx} pairs beaten worst"] = f"{depth['beaten_worst']}/{pt}"
                 row[f"enemy {e_idx} has real tailwind"] = enemy_has_real_tailwind(
                     pe["target_names"], merged)
-                row[f"enemy {e_idx} 6 pairs tailwind safe total"] = (
-                    f"{depth['tailwind_safe_total']}/{6 * pt}")
-                row[f"enemy {e_idx} 6 pairs protect safe total"] = (
-                    f"{depth['protect_safe_total']}/{6 * pt}")
-                row[f"enemy {e_idx} 6 pairs clean win total"] = (
-                    f"{depth['clean_win_total']:.1f}/{6 * pt * 2:.0f}")
+                row[f"enemy {e_idx} pairs tailwind safe total"] = (
+                    f"{depth['tailwind_safe_total']}/{n_pairs * pt}")
+                row[f"enemy {e_idx} pairs protect safe total"] = (
+                    f"{depth['protect_safe_total']}/{n_pairs * pt}")
+                row[f"enemy {e_idx} pairs clean win total"] = (
+                    f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}")
                 teamsheet_bits = []
                 b4_sets = {}
                 for name in pe["best_bring4"]:

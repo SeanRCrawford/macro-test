@@ -19,11 +19,11 @@ TEAM = ["Arcanine-Hisui", "Hydreigon", "Gallade", "Gholdengo",
         "Incineroar", "Farigiraf"]
 
 
-def app(team=None):
+def app(team=None, sets=None):
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(APP, default_timeout=250)
     at.session_state["team"] = list(team if team is not None else TEAM)
-    at.session_state["sets"] = {}
+    at.session_state["sets"] = dict(sets) if sets is not None else {}
     return at.run()
 
 
@@ -78,11 +78,27 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         shapes = [d.value.shape[0] for d in dfs]
         self.assertIn(15, shapes, "expected a 15-row Stage 1 or Stage 2 table")
 
+    def test_a_team_of_three_is_accepted_not_warned_about(self):
+        """"I would like to output the best 3-pokemon cores against each
+        team" -- the tab's own fixed-team floor relaxed from 4 to 3,
+        matching `bring4_search`'s own CLI-level relaxation. A 3-member
+        team degenerates to one possible bring (itself, 3 pairs)."""
+        at = app(team=["Garchomp", "Incineroar", "Gallade"])
+        # Other tabs' own "need 6 Pokemon" widgets render regardless (the
+        # whole app renders every tab at once) -- only the Bring-4 tab's
+        # OWN size-floor warning is what this fix touches.
+        self.assertFalse(any("Pick 3, 4, 5, or 6" in w.value for w in at.warning))
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = at.dataframe
+        shapes = [d.value.shape[0] for d in dfs]
+        self.assertIn(3, shapes, "expected a 3-row Stage 1 or Stage 2 table")
+
     def test_a_preset_team_can_be_used_instead_of_team_builders(self):
         """A preset "our 6" can legitimately share a Pokemon with the
         selected enemy roster (two library teams both running e.g.
-        Grimmsnarl) -- that must surface as a clean st.error, never crash
-        the page. See TestBring4SearchRejectsOverlap in
+        Grimmsnarl) -- a real VGC mirror, now a normal accepted search, not
+        an error. See TestBring4SearchAllowsMirrorMatches in
         test_counter_finder.py for the underlying fix."""
         at = app(team=[])  # nothing loaded in Team Builder
         sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
@@ -98,6 +114,63 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertFalse(any("Pick exactly 6" in w.value for w in at.warning))
+
+
+class TestBring4TabMirrorsTheCliExactly(unittest.TestCase):
+    """"When I loaded a given teamsheet from the xlsx to the streamlit app,
+    I got completely different results. In the CLI the bring4 beat 55/90,
+    but the streamlit counter table was 27/90. They must mirror rather
+    than contradict." Root cause: the tab's `bring4_search` call only ever
+    passed `our6` (names) -- a loaded/pasted/preset team's own pinned
+    item/moveset (`sets`) was silently dropped, so the app free-searched
+    from scratch instead of respecting it, same as an unpinned CLI run
+    would. Fixed by threading `our_sets` through as `item_overrides`/
+    `move_overrides`, exactly like the CLI's own --item/--moves. Confirmed
+    here against a direct `bring4_search(..., item_overrides=...,
+    move_overrides=...)` call using the SAME pinned sets -- the app and
+    the library function must agree."""
+
+    def test_a_loaded_teams_pinned_sets_reproduce_the_direct_call(self):
+        team = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+        sets = {
+            "Garchomp": {"item": "Rocky Helmet",
+                        "moves": ["Earthquake", "Protect", "Dragon Claw",
+                                 "Stealth Rock"]},
+            "Incineroar": {"item": "Sitrus Berry",
+                          "moves": ["Fake Out", "Flare Blitz", "Knock Off",
+                                   "Protect"]},
+        }
+        at = app(team=team, sets=sets)
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        app_pair_rows = at.session_state["ct_b4_pair_rows"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_search
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        item_overrides = {n: s["item"] for n, s in sets.items() if s.get("item")}
+        move_overrides = {n: s["moves"] for n, s in sets.items() if s.get("moves")}
+        direct_pair_rows, _direct_bring4_rows = bring4_search(
+            team, vs_roster, W["merged"], W["moves"], W["natures"],
+            W["typechart"], item_overrides=item_overrides,
+            move_overrides=move_overrides)
+
+        app_items = {r["pair"]: (r["item1"], r["item2"]) for r in app_pair_rows}
+        direct_items = {r["pair"]: (r["item1"], r["item2"]) for r in direct_pair_rows}
+        self.assertEqual(app_items, direct_items)
+        # The pinned items themselves must actually show up, not just
+        # happen to match a coincidental free-search result.
+        self.assertTrue(any("Rocky Helmet" in v for v in app_items.values()))
+        self.assertTrue(any("Sitrus Berry" in v for v in app_items.values()))
+
+        app_beaten = {r["pair"]: r["pairs_swept"] + r["pairs_traded"]
+                     for r in app_pair_rows}
+        direct_beaten = {r["pair"]: r["pairs_swept"] + r["pairs_traded"]
+                         for r in direct_pair_rows}
+        self.assertEqual(app_beaten, direct_beaten)
 
 
 class TestBring4CanSearchAPoolInsteadOfAFixedSix(unittest.TestCase):

@@ -387,7 +387,7 @@ def _build_forms(names, merged, natures, moves_db, items=None):
     return out
 
 
-def _resolve_forms(names, built):
+def _resolve_forms(names, built, forced_base_names=frozenset()):
     """For `names` (one candidate alone, or a real pair) drawn from `built`
     (a `_build_forms` dict), every legal way to honour "only one Mega per
     side" -- yields (mega_transforms, [combatant_for_each_name]) for each of
@@ -395,8 +395,20 @@ def _resolve_forms(names, built):
     still works (`_mega_choices` only ever looks for "Mega "-prefixed
     entries, regardless of how many names it's given) -- `pair_search` uses
     that for a candidate with no partner.
+
+    `forced_base_names`: names that must NEVER be the one who transforms,
+    even though `_mega_choices` would otherwise offer it -- e.g. a bring-4
+    that carries BOTH of a core's two allowed Mega-stone holders needs a
+    SINGLE one of them designated "the team's mega" for the whole bring
+    (VGC's real "only one Mega Evolution per team per game" rule), with the
+    other locked to base form in every one of that bring's own pairs, not
+    just within whichever single pair it happens to share with the other
+    stone-holder. Default empty set changes nothing -- every existing
+    caller/test is unaffected.
     """
     for mt in _mega_choices(names):
+        if mt in forced_base_names:
+            continue
         _evolves, forced_base = resolve_team_mega_slot(list(names),
                                                         mega_transforms=mt)
         cs = [built[n]["base" if n in forced_base else "mega"] for n in names]
@@ -747,6 +759,53 @@ def _answer_for(name, merged, moves_db, natures, typechart, target_names,
                        item=item, move_names=moves, excluded_items=excluded_items)
 
 
+def _resolve_unique_items(names, merged, moves_db, natures, typechart,
+                          target_names, item_overrides=None, move_overrides=None,
+                          excluded_items=DEFAULT_EXCLUDED_ITEMS):
+    """VGC's real Item Clause: no two of `names` may hold the same item.
+    OPT-IN -- callers only reach for this when asked to (`bring4_search`/
+    `core_deep_dive`'s own `enforce_item_clause` flag); it is never applied
+    silently.
+
+    Each name's best legal item is searched independently, in the given
+    order -- a name whose independently-best item was already claimed by an
+    earlier name in this same list is re-searched with every already-claimed
+    item ALSO excluded (`_answer_for`'s existing `excluded_items` mechanism),
+    falling back to its own next-best legal item. Build-order dependent by
+    design (per product decision): whichever name resolves first keeps its
+    top choice. A name already pinned via `item_overrides` is respected
+    verbatim, never re-resolved -- an explicit pin always wins.
+
+    `_answer_for`'s own fallback already handles "every legal item excluded"
+    gracefully (returns `item=None`, moveset still searched under no item)
+    -- no special-casing needed here for that, or for Mega Stones (each
+    holds a uniquely-named stone, so two different Megas' stones never
+    collide as strings in the first place).
+
+    Returns a NEW item_overrides dict (a superset of the input) with every
+    name in `names` pinned to its (possibly reassigned) item -- pass it
+    straight into a downstream `_answer_for`/`joint_pool_search` call so
+    items are computed exactly once, not searched twice.
+    """
+    resolved = dict(item_overrides or {})
+    taken = set()
+    for name in names:
+        if name not in resolved:
+            item, _mv, _w = _answer_for(
+                name, merged, moves_db, natures, typechart, target_names,
+                item_overrides=item_overrides, move_overrides=move_overrides,
+                excluded_items=excluded_items)
+            if item and item in taken:
+                item, _mv, _w = _answer_for(
+                    name, merged, moves_db, natures, typechart, target_names,
+                    item_overrides=item_overrides, move_overrides=move_overrides,
+                    excluded_items=excluded_items | taken)
+            resolved[name] = item
+        if resolved[name]:
+            taken.add(resolved[name])
+    return resolved
+
+
 def _scarf_speed(combatant):
     """`combatant`'s effective speed AS IF it held Choice Scarf -- a
     hypothesis for `threshold_search`'s `outspeed="scarf"` filter,
@@ -856,7 +915,6 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
     bool}}. `incoming[t].frac`/`.hi` are the same number (their best roll);
     `.lo`/`.avg` are their worst/average roll on you, still worth showing.
     """
-    targets = set(target_names)
     need_screen = max_taken is not None or outspeed is not None
     # Each named target's own set is searched ONCE (against the whole pool,
     # the same "what does this threat generally run" question `speed_tiers`
@@ -875,8 +933,6 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
 
     rows = []
     for name in pool:
-        if name in targets:
-            continue
         item, move_names, weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
             item_overrides=item_overrides, move_overrides=move_overrides,
@@ -1047,7 +1103,7 @@ def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
 
     rows = []
     for name in pool:
-        if name in target_names or name == partner_name:
+        if name == partner_name:
             continue
         item, move_names, weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
@@ -1414,7 +1470,7 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
 
     rows = []
     for name in pool:
-        if name in target_names or name == partner_name:
+        if name == partner_name:
             continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
@@ -2223,12 +2279,18 @@ def _pruned_entry():
 
 
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
-                     turns, want_grid=False, merged=None, prune_below=None):
+                     turns, want_grid=False, merged=None, prune_below=None,
+                     forced_base_names=frozenset()):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
     (partner fixed) and `joint_pool_search` (both slots searched) can never
     drift apart on what "beats" means.
+
+    `forced_base_names`: passed straight through to `_resolve_forms` for OUR
+    side only (the enemy's own mega choice stays unconstrained) -- a name in
+    here is locked to base form for this whole race, never offered as the
+    transformer. Default empty set changes nothing.
 
     ONLY ONE MEGA PER SIDE, the same minimax `pair_search` uses: every legal
     mega assignment on OUR side (`_resolve_forms`/`_mega_choices`) is tried
@@ -2362,7 +2424,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         real_tailwind_threat = bool(tailwind_setter_roles)
 
         best = None
-        for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built):
+        for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built,
+                                                forced_base_names=forced_base_names):
             worst = None
             for _enemy_mt, (e1c, e2c) in _resolve_forms((e1_name, e2_name), enemy_built):
                 combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
@@ -2510,7 +2573,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 
     rows = []
     for name in pool:
-        if name in target_names or name == partner_name:
+        if name == partner_name:
             continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
@@ -2539,7 +2602,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       typechart, turns=2, item_overrides=None,
                       move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
-                      prune_below=None):
+                      prune_below=None, extra_forced_base=frozenset()):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
     genuinely searched (not one fixed), against every pair drawn from
@@ -2560,16 +2623,29 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     own docstring. `None` (the default) races every enemy pair for every
     our-pair, exactly as before this existed.
 
+    `extra_forced_base`: for each name in it, EVERY pair containing that name
+    is raced a SECOND time with `forced_base_names={that name}` (locking it
+    to base form), and the extra row appended with `"forced_base": <name>`
+    (every other row gets `"forced_base": None`) -- `bring4_search` uses this
+    to get a per-name "what if this stone-holder never transforms" pair
+    table, for the bring-4s that carry it alongside the core's OTHER allowed
+    stone-holder (VGC's real "only one Mega Evolution per team per game"
+    rule needs one of the two consistently picked, across ALL of that
+    bring's own pairs, not just within whichever pair happens to contain
+    both). Default empty set costs nothing extra and changes no returned row
+    -- every existing caller is unaffected.
+
     Returns rows: {pair: (name1, name2), item1, item2, pairs_swept,
     pairs_traded, pairs_lost, pairs_no_ko, pairs_tailwind_safe,
-    pairs_protect_safe, pairs_total, detail} -- `detail` is
+    pairs_protect_safe, pairs_total, detail, forced_base} -- `detail` is
     `_pair_vs_targets`'s own shape (damage log included), ranked the same
-    way `joint_pair_search` ranks.
+    way `joint_pair_search` ranks. `forced_base` is `None` for every row
+    except the `extra_forced_base` extras described above -- a caller that
+    doesn't pass `extra_forced_base` only ever sees `None` here, unchanged
+    from before this field existed.
     """
     built = {}
     for name in pool:
-        if name in target_names:
-            continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
             item_overrides=item_overrides, move_overrides=move_overrides,
@@ -2589,7 +2665,22 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                                            enemy_built, typechart, turns,
                                            merged=merged, prune_below=prune_below)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
-                    "item2": built[n2]["item"], "detail": detail, **summary})
+                    "item2": built[n2]["item"], "detail": detail,
+                    "forced_base": None, **summary})
+    for forced_name in extra_forced_base:
+        if forced_name not in built:
+            continue
+        for other in built:
+            if other == forced_name:
+                continue
+            n1, n2 = (forced_name, other) if forced_name < other else (other, forced_name)
+            detail, summary = _pair_vs_targets(
+                n1, n2, built, target_names, enemy_built, typechart, turns,
+                merged=merged, prune_below=prune_below,
+                forced_base_names=frozenset({forced_name}))
+            rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
+                        "item2": built[n2]["item"], "detail": detail,
+                        "forced_base": forced_name, **summary})
     rows.sort(key=_pair_sort_key)
     return rows
 
@@ -2642,8 +2733,9 @@ def _pair_sort_key(row):
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   turns=2, good_threshold=1.0, item_overrides=None,
-                  move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
-    """For an ALREADY-DECIDED team (4, 5, or 6 Pokemon, from team preview)
+                  move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                  enforce_item_clause=False):
+    """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
         "given that I will bring 4 vs a specific enemy, that is 6 pairs I
@@ -2657,18 +2749,23 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     output should summarise the pair results for the 6 brought pairs in
     the bring-4" holds whether `our6` was already narrowed to 4 or is a
     full 6 Stage 2 still has to choose from. A team of 5 sits in between
-    (C(5,4)=5 candidate bring-4s). Same "4, 5, or 6, no wasted members"
-    convention `multi_bring4_exhaustive`/`multi_bring4_beam` already use.
+    (C(5,4)=5 candidate bring-4s). A team of exactly 3 is the same
+    degenerate case one size further down -- there's nothing to bring BUT
+    the whole 3 ("output the best 3-Pokemon cores... 3 total pairs"), so
+    Stage 2 yields one row summarising its own C(3,2)=3 internal pairs. Same
+    "no wasted members" convention `multi_bring4_exhaustive`/
+    `multi_bring4_beam` already use.
 
     STAGE 1 -- every one of `our6`'s C(len(our6),2) pairs, each against
     every enemy pair drawn from `target_names`: literally
     `joint_pool_search(our6, target_names, ...)`, no new racing. This
     alone answers "searching the top pairs to see how many are in."
 
-    STAGE 2 -- every one of `our6`'s C(len(our6),4) possible BRING-4
-    subsets: look up its own 6 internal pairs from Stage 1 (pure lookup,
-    still no new racing). Ranked PRIMARILY by how many of `target_names`'s
-    enemy pairs NONE of those 6 internal pairs can beat
+    STAGE 2 -- every one of `our6`'s C(len(our6),min(4,len(our6))) possible
+    BRING subsets: look up its own internal pairs from Stage 1 (pure lookup,
+    still no new racing, EXCEPT for a bring that carries BOTH of a 2-Mega
+    core's stone-holders -- see below). Ranked PRIMARILY by how many of
+    `target_names`'s enemy pairs NONE of those internal pairs can beat
     (`uncovered_enemy_pairs` -- "having a pair that every pair of yours
     loses against is terrible, and this is an important factor": two
     bring-4s can have the identical raw beaten fraction while one of them
@@ -2679,45 +2776,79 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     ranking `joint_pool_search` already uses) -- "searching the given top
     teams and searching for how bad their worst pair performs," maximin:
     the bring-4 whose worst case is LEAST bad wins. THEN by how many of its
-    6 pairs are "good" (beat at least `good_threshold` of `target_names`'s
+    pairs are "good" (beat at least `good_threshold` of `target_names`'s
     enemy pairs, default 100% -- "always have options").
 
+    BRING-4-CONSISTENT MEGA CHOICE: when `our6` carries exactly 2 Mega-stone
+    holders (the existing `--max-megas` composition cap, unaffected by any
+    of this), VGC's real "only one Mega Evolution per team per game" rule
+    means a SPECIFIC bring-4 subset that happens to carry BOTH of them can't
+    freely let each transform independently across its own 6 pairs (today's
+    per-pair minimax already correctly restricts "at most one of THESE TWO"
+    within any single pair, but that's not the same as "the SAME one, for
+    this bring's whole 6 pairs"). For exactly those bring-4 subsets (0 or 1
+    of the core's own stone-holders needs no such consistency -- there's
+    nothing to be inconsistent WITH, and forcing one anyway would make that
+    member look artificially worse than reality), `_bring4_candidates`
+    builds the row under BOTH "which one gets to be this bring's mega"
+    hypotheses and keeps whichever ranks better -- see its own docstring.
+
+    `enforce_item_clause`: off by default (real search cost concern, not a
+    correctness one) -- when `True`, pre-resolves `our6`'s items with VGC's
+    real Item Clause enforced (`_resolve_unique_items`) before any racing,
+    so no two of `our6` end up holding the same item. Useful for verifying
+    an already-decided team; leave off for anything performance-sensitive.
+
     Returns (pair_rows, bring4_rows):
-      pair_rows -- `joint_pool_search`'s own row-per-pair output, unchanged.
-      bring4_rows -- [{bring4: (4 names), pairs: [(n1,n2), ...6...],
-                       pair_rows: [<pair_rows entry>, ...6...],
+      pair_rows -- `joint_pool_search`'s own row-per-pair output (its
+        `forced_base` bookkeeping field stripped back out -- this stays
+        exactly the C(len(our6),2) unique pairs it always was).
+      bring4_rows -- [{bring4: (names), pairs: [(n1,n2), ...],
+                       pair_rows: [<pair_rows entry>, ...],
                        worst_pair: (n1,n2), worst_pair_row: <pair_rows entry>,
-                       pairs_good: int, pairs_total: 6,
+                       pairs_good: int, pairs_total: int,
                        uncovered_enemy_pairs: [(e1,e2), ...]}], best-worst-
-      case first -- a single entry when `our6` is already exactly 4.
+      case first -- a single entry when `our6` is already at the bring size
+      (3 or 4).
     """
     our6 = list(dict.fromkeys(our6))
-    if not (4 <= len(our6) <= 6):
-        raise ValueError(f"bring4_search needs 4, 5, or 6 distinct Pokemon, "
-                         f"got {len(our6)}: {our6}")
+    if not (3 <= len(our6) <= 6):
+        raise ValueError(f"bring4_search needs 3, 4, 5, or 6 distinct "
+                         f"Pokemon, got {len(our6)}: {our6}")
     overlap = _mega_base_overlap(our6)
     if overlap:
         raise ValueError(f"can't bring both a Mega and its own base form: "
                          f"{', '.join(sorted(overlap))}")
-    shared = set(our6) & set(target_names)
-    if shared:
-        # joint_pool_search silently excludes any pool member also named as
-        # an enemy (the right call for multi_bring4_coverage's own "this
-        # candidate is someone else's named enemy" case) -- but `our6` here
-        # is a FIXED, complete 6, every member of which Stage 2 needs a
-        # pair for. Left unchecked this doesn't fail here; it fails deep
-        # inside `_bring4_candidates` with a bare KeyError once Stage 2
-        # tries to look up a pair that was silently never computed.
-        raise ValueError(f"our6 and target_names share a Pokemon, which "
-                         f"can't be both ours and the enemy's: "
-                         f"{', '.join(sorted(shared))}")
-    pair_rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
-                                  typechart, turns=turns,
-                                  item_overrides=item_overrides,
-                                  move_overrides=move_overrides,
-                                  excluded_items=excluded_items)
+    if enforce_item_clause:
+        item_overrides = _resolve_unique_items(
+            our6, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
+    megas = [n for n in our6 if n.startswith("Mega ")]
+    extra_forced_base = frozenset(megas) if len(megas) == 2 else frozenset()
+    rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
+                             typechart, turns=turns,
+                             item_overrides=item_overrides,
+                             move_overrides=move_overrides,
+                             excluded_items=excluded_items,
+                             extra_forced_base=extra_forced_base)
+    pair_lookup_forced_base = None
+    if extra_forced_base:
+        # Built BEFORE popping "forced_base" below -- that pop mutates the
+        # same dict objects `rows` still references, so this must read the
+        # field first.
+        pair_lookup_forced_base = {
+            name: {frozenset(r["pair"]): r for r in rows
+                  if r["forced_base"] == name}
+            for name in megas}
+    pair_rows = [r for r in rows if r["forced_base"] is None]
+    for r in pair_rows:
+        r.pop("forced_base", None)
     pair_by_key = {frozenset(r["pair"]): r for r in pair_rows}
-    bring4_rows = _bring4_candidates(our6, pair_by_key, target_names, good_threshold)
+    bring4_rows = _bring4_candidates(
+        our6, pair_by_key, target_names, good_threshold,
+        megas=megas if extra_forced_base else None,
+        pair_lookup_forced_base=pair_lookup_forced_base)
     return pair_rows, bring4_rows
 
 
@@ -2738,41 +2869,74 @@ def _uncovered_enemy_pairs(pairs, target_names):
                       for r in pairs)]
 
 
-def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0):
-    """Every one of the C(len(six),4) possible bring-4 subsets of `six`
-    (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this also
-    runs for a 4- or 5-member PARTIAL team-of-6 during `multi_bring4_beam`'s
-    growth, where it degenerates to 1 or 5 subsets respectively -- the
-    combinatorics don't care), using an ALREADY-COMPUTED `pair_lookup`
-    ({frozenset(pair): row}) rather than racing anything. Shared by
-    `bring4_search`'s own Stage 2 and the multi-enemy search, which builds
-    the same shape of lookup per enemy from one shared pool-wide pair table.
-    `target_names` is the exact enemy list `pair_lookup`'s own rows were
-    raced against -- needed here only to enumerate its enemy pairs for
-    `_uncovered_enemy_pairs`.
+def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
+                       megas=None, pair_lookup_forced_base=None):
+    """Every one of the C(len(six),min(4,len(six))) possible bring subsets of
+    `six` (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this
+    also runs for a 3-, 4-, or 5-member PARTIAL team during
+    `multi_bring4_beam`'s growth or a `--core-sizes 3` core, where it
+    degenerates to 1, 1, or 5 subsets respectively -- the combinatorics
+    don't care), using an ALREADY-COMPUTED `pair_lookup` ({frozenset(pair):
+    row}) rather than racing anything. Shared by `bring4_search`'s own
+    Stage 2 and the multi-enemy search, which builds the same shape of
+    lookup per enemy from one shared pool-wide pair table. `target_names` is
+    the exact enemy list `pair_lookup`'s own rows were raced against --
+    needed here only to enumerate its enemy pairs for `_uncovered_enemy_pairs`.
 
     RANKED PRIMARILY BY UNCOVERED ENEMY PAIRS -- see `_uncovered_enemy_pairs`
-    -- THEN by the WORST of the 6 internal pairs' own rank (`_pair_sort_key`,
-    maximin: the bring-4 whose worst case is LEAST bad wins), THEN by how
-    many of the 6 clear the good-pair bar.
+    -- THEN by the WORST of the bring's own internal pairs' own rank
+    (`_pair_sort_key`, maximin: the bring whose worst case is LEAST bad
+    wins), THEN by how many of them clear the good-pair bar.
+
+    `megas`/`pair_lookup_forced_base`: BRING-4-CONSISTENT MEGA CHOICE, opt-in
+    (both `None` by default -- ordinary lookup, exactly as before this
+    existed). `megas`: the core's own (at most 2) Mega-stone-holder names.
+    `pair_lookup_forced_base`: {name: {frozenset(pair): row}} for each name
+    in `megas` -- the SAME pairs as `pair_lookup`, but raced with that name
+    locked to base form (`joint_pool_search`'s `extra_forced_base` rows).
+    For a bring subset containing BOTH `megas`, the row is built TWICE --
+    once with megas[1] locked to base (so megas[0] is free, "the team's
+    mega" for this bring) and once the mirror image -- and the
+    better-ranked of the two, by the exact same key used to rank every
+    other bring, is kept. A bring with 0 or 1 of `megas` needs no such
+    consistency (nothing to be inconsistent WITH) and uses the ordinary
+    unconstrained `pair_lookup`, unchanged.
 
     Returns bring4_rows in `bring4_search`'s own shape, best-worst-case
-    first -- `[0]` is always "the best bring-4 available from `six`."
+    first -- `[0]` is always "the best bring available from `six`."
     """
-    bring4_rows = []
-    for bring4 in itertools.combinations(six, 4):
-        pairs = [pair_lookup[frozenset(p)] for p in itertools.combinations(bring4, 2)]
+    bring_size = min(4, len(six))
+
+    def _row_for(bring4, lookup):
+        pairs = [lookup(p) for p in itertools.combinations(bring4, 2)]
         worst = max(pairs, key=_pair_sort_key)
         pairs_good = sum(1 for r in pairs if _pair_beaten_frac(r) >= good_threshold)
         uncovered = _uncovered_enemy_pairs(pairs, target_names)
-        bring4_rows.append({
+        return {
             "bring4": bring4, "pairs": [r["pair"] for r in pairs],
             "pair_rows": pairs, "worst_pair": worst["pair"], "worst_pair_row": worst,
-            "pairs_good": pairs_good, "pairs_total": 6,
+            "pairs_good": pairs_good, "pairs_total": len(pairs),
             "uncovered_enemy_pairs": uncovered,
-        })
-    bring4_rows.sort(key=lambda b: (len(b["uncovered_enemy_pairs"]),
-                                    _pair_sort_key(b["worst_pair_row"]), -b["pairs_good"]))
+        }
+
+    def _rank_key(b):
+        return (len(b["uncovered_enemy_pairs"]), _pair_sort_key(b["worst_pair_row"]),
+                -b["pairs_good"])
+
+    bring4_rows = []
+    for bring4 in itertools.combinations(six, bring_size):
+        if megas and len(set(bring4) & set(megas)) == 2:
+            m1, m2 = megas
+            row_m1_is_mega = _row_for(
+                bring4, lambda p, forced=m2: pair_lookup_forced_base[forced].get(
+                    frozenset(p), pair_lookup[frozenset(p)]))
+            row_m2_is_mega = _row_for(
+                bring4, lambda p, forced=m1: pair_lookup_forced_base[forced].get(
+                    frozenset(p), pair_lookup[frozenset(p)]))
+            bring4_rows.append(min(row_m1_is_mega, row_m2_is_mega, key=_rank_key))
+        else:
+            bring4_rows.append(_row_for(bring4, lambda p: pair_lookup[frozenset(p)]))
+    bring4_rows.sort(key=_rank_key)
     return bring4_rows
 
 
@@ -2797,14 +2961,18 @@ def bring4_pair_depth(bring4_row):
     per-pair enemy-pairs-total, e.g. 1 for a single named enemy pair),
     "tailwind_safe_total": int, "protect_safe_total": int,
     "clean_win_total": float} -- the four "beaten_*" fields and the three
-    "*_total" fields are all summed/read across the SAME 6 pairs, so e.g.
-    `beaten_total` compares directly against `6 * pairs_total`, and
-    `clean_win_total` against `6 * pairs_total * 2.0` (see `_pair_vs_
-    targets`'s own "WIN QUALITY" docstring paragraph for what 2.0 per pair
-    means: a true sweep, zero damage taken). `beaten_3rd`/`beaten_4th` are
-    `None` only if `bring4_row` has fewer than 3/4 pairs (never true for a
-    real bring-4, which always has exactly C(4,2)=6, but this stays honest
-    for a hand-built partial row rather than raising an IndexError).
+    "*_total" fields are all summed/read across the SAME `n_pairs` =
+    `len(bring4_row["pair_rows"])` pairs (6 for a bring of 4, the common
+    case, but only 3 for a 3-Pokemon core -- "I would like to output the
+    best 3-pokemon cores against each team", which has just one possible
+    bring, itself), so e.g. `beaten_total` compares directly against
+    `n_pairs * pairs_total`, and `clean_win_total` against `n_pairs *
+    pairs_total * 2.0` (see `_pair_vs_targets`'s own "WIN QUALITY"
+    docstring paragraph for what 2.0 per pair means: a true sweep, zero
+    damage taken). `beaten_3rd`/`beaten_4th` are `None` only if
+    `bring4_row` has fewer than 3/4 pairs (true for a 3-Pokemon core's own
+    3 pairs, not just a hand-built partial row -- this stays honest rather
+    than raising an IndexError).
     """
     pairs = sorted(bring4_row["pair_rows"], key=_pair_sort_key)
     pairs_total = pairs[0]["pairs_total"] if pairs else 0
@@ -2970,7 +3138,6 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     target_name_lists = [list(t) for t in target_name_lists]
     min_enemies = min(min_enemies, len(target_name_lists))
     any_enemy = {n for t in target_name_lists for n in t}
-    pool = [n for n in pool if n not in any_enemy]
     all_enemies = sorted(any_enemy)
     fixed_items, fixed_moves = {}, {}
     for name in pool:
@@ -3094,8 +3261,10 @@ _CORE_SIZES = (4, 5, 6)
 def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_candidates=_EXHAUSTIVE_POOL_CEILING,
                             max_weak=None, type_limits=None, max_megas=2,
-                            max_weak_types=None):
-    """Every possible CORE (4, 5, or 6 Pokemon, not just exactly 6) drawn
+                            max_weak_types=None, core_sizes=_CORE_SIZES):
+    """Every possible CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
+    can widen this down to 3, "I would like to output the best 3-pokemon
+    cores against each team" -- not just exactly 6) drawn
     from `coverage["candidate_pool"]` (`multi_bring4_coverage`), scored and
     ranked by `_core_row`'s worst-case-across-enemies metric -- exhaustive,
     so (within that candidate pool) provably optimal, not a heuristic
@@ -3125,10 +3294,11 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     """
     pool = coverage["candidate_pool"]
     n = len(pool)
-    if n < 4:
+    min_size = min(core_sizes)
+    if n < min_size:
         raise ValueError(f"only {n} candidate(s) appear in a good pair for "
-                         f"enough enemies to form even a 4-member core -- "
-                         f"widen the pool, or lower "
+                         f"enough enemies to form even a {min_size}-member "
+                         f"core -- widen the pool, or lower "
                          f"--good-threshold/--min-enemies")
     if n > max_candidates:
         raise ValueError(f"{n} candidates is too many for an exhaustive "
@@ -3138,7 +3308,7 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     effective_limits = _effective_type_limits(max_weak, type_limits)
     merged = coverage["merged"]
     rows = []
-    for size in _CORE_SIZES:
+    for size in core_sizes:
         if size > n:
             continue
         for core in itertools.combinations(pool, size):
@@ -3157,8 +3327,9 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
 
 def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                       max_weak=None, type_limits=None, max_megas=2,
-                      max_weak_types=None):
-    """Beam-search a CORE (4, 5, or 6 Pokemon) over the WHOLE pool
+                      max_weak_types=None, core_sizes=_CORE_SIZES):
+    """Beam-search a CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
+    can widen this down to 3) over the WHOLE pool
     `multi_bring4_coverage` already has pair data for (the raw pool, NOT
     narrowed to `candidate_pool`) -- for when that candidate pool is too
     large for `multi_bring4_exhaustive`, or a broader search is wanted
@@ -3241,7 +3412,7 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
         beam = [list(k) for k, _ in ranked]
         if not beam:
             break
-        if len(beam[0]) in _CORE_SIZES:
+        if len(beam[0]) in core_sizes:
             for team in beam:
                 key = tuple(sorted(team))
                 if key in found:
@@ -3317,9 +3488,33 @@ def _sum_rows(rows):
     return {f: sum(r[f] for r in rows) for f in _ROW_TOTAL_FIELDS}
 
 
+def _core_deep_dive_race(core, target_name_lists, our_built, enemy_built_by_team,
+                         typechart, turns, merged, sets, forced_base_names):
+    """`core_deep_dive`'s own racing body, factored out so it can be run
+    TWICE (once per mega hypothesis) when the core carries 2 stone-holders
+    -- see `core_deep_dive`'s own docstring."""
+    per_pair = {}
+    all_summaries = []
+    for n1, n2 in itertools.combinations(core, 2):
+        per_enemy = []
+        for target_names, enemy_built in zip(target_name_lists, enemy_built_by_team):
+            detail, summary = _pair_vs_targets(
+                n1, n2, our_built, target_names, enemy_built, typechart,
+                turns, merged=merged, forced_base_names=forced_base_names)
+            per_enemy.append({"target_names": target_names, "detail": detail,
+                             "summary": summary})
+        pair_total = _sum_rows([pe["summary"] for pe in per_enemy])
+        per_pair[(n1, n2)] = {"per_enemy": per_enemy, "total": pair_total}
+        all_summaries.append(pair_total)
+    overall = _sum_rows(all_summaries)
+    return {"core": tuple(core), "sets": sets, "per_pair": per_pair,
+           "overall": overall}
+
+
 def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart,
                    turns=2, item_overrides=None, move_overrides=None,
-                   excluded_items=DEFAULT_EXCLUDED_ITEMS):
+                   excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                   enforce_item_clause=False):
     """The full report for an ALREADY-CHOSEN core (the `--multi-bring4`
     result the user actually wants to inspect, not a fresh search): every
     one of its C(size,2) pairs, raced against every enemy pair drawn from
@@ -3343,6 +3538,22 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     across `target_name_lists`, then reused for every enemy team's races
     below (never a different item/moveset per enemy).
 
+    `enforce_item_clause`: off by default -- when `True`, resolves `core`'s
+    items with VGC's real Item Clause enforced (`_resolve_unique_items`)
+    before any racing, so `sets` never shows two members holding the same
+    item. See `bring4_search`'s own docstring for why this is opt-in.
+
+    BRING-4-CONSISTENT MEGA CHOICE: when `core` carries exactly 2 Mega-stone
+    holders, this function (unlike `bring4_search`) doesn't do bring-4
+    subsetting -- it reports every one of the core's own C(size,2) pairs
+    directly, so there is no "which subset" question, only "which of the
+    (at most 2) team-wide hypotheses is better for this core as a whole."
+    The whole racing pass runs TWICE, once per hypothesis (`_pair_
+    sort_key`'s existing "lower is better" ranking on each `overall` decides
+    the winner), and only that winning hypothesis is returned. A core with
+    0 or 1 stone-holders needs no such choice and races once, unconstrained,
+    exactly as before this existed.
+
     Returns {"core": tuple(core), "sets": {name: {"item", "moves"}},
     "per_pair": {(n1, n2): {"per_enemy": [{"target_names", "detail",
     "summary"}, ... one entry per `target_name_lists` member ...],
@@ -3354,6 +3565,11 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     core = list(dict.fromkeys(core))
     target_name_lists = [list(t) for t in target_name_lists]
     all_enemies = sorted({n for t in target_name_lists for n in t})
+    if enforce_item_clause:
+        item_overrides = _resolve_unique_items(
+            core, merged, moves_db, natures, typechart, all_enemies,
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
     sets = {}
     for name in core:
         item, move_names, _weather = _answer_for(
@@ -3371,22 +3587,19 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     enemy_built_by_team = [_build_forms(t, merged, natures, moves_db)
                            for t in target_name_lists]
 
-    per_pair = {}
-    all_summaries = []
-    for n1, n2 in itertools.combinations(core, 2):
-        per_enemy = []
-        for target_names, enemy_built in zip(target_name_lists, enemy_built_by_team):
-            detail, summary = _pair_vs_targets(
-                n1, n2, our_built, target_names, enemy_built, typechart,
-                turns, merged=merged)
-            per_enemy.append({"target_names": target_names, "detail": detail,
-                             "summary": summary})
-        pair_total = _sum_rows([pe["summary"] for pe in per_enemy])
-        per_pair[(n1, n2)] = {"per_enemy": per_enemy, "total": pair_total}
-        all_summaries.append(pair_total)
-    overall = _sum_rows(all_summaries)
-    return {"core": tuple(core), "sets": sets, "per_pair": per_pair,
-           "overall": overall}
+    megas = [n for n in core if n.startswith("Mega ")]
+    if len(megas) == 2:
+        dive_a = _core_deep_dive_race(
+            core, target_name_lists, our_built, enemy_built_by_team, typechart,
+            turns, merged, sets, forced_base_names=frozenset({megas[1]}))
+        dive_b = _core_deep_dive_race(
+            core, target_name_lists, our_built, enemy_built_by_team, typechart,
+            turns, merged, sets, forced_base_names=frozenset({megas[0]}))
+        return dive_a if (_pair_sort_key(dive_a["overall"])
+                          <= _pair_sort_key(dive_b["overall"])) else dive_b
+    return _core_deep_dive_race(core, target_name_lists, our_built,
+                                enemy_built_by_team, typechart, turns, merged,
+                                sets, forced_base_names=frozenset())
 
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
