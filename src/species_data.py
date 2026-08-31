@@ -128,7 +128,7 @@ def load_mbsmogon():
     # the other under the base species name (if that name has no row already),
     # so it can be used for the pre-transform form.
     def _has_stone(rec):
-        return any((i.lower().endswith(("ite", "ite x", "ite y", "itex", "itey")) and pct >= 50.0)
+        return any(is_mega_stone_name(i) and pct >= 50.0
                    for i, pct in rec["items_usage"])
 
     for pname, extras in duplicates.items():
@@ -140,7 +140,7 @@ def load_mbsmogon():
         if pname.startswith("Mega ") and other_rows:
             base = pname[5:]
             parts = base.split()
-            if len(parts) >= 2 and parts[-1] in ("X", "Y"):
+            if len(parts) >= 2 and parts[-1] in ("X", "Y", "Z"):
                 base = " ".join(parts[:-1])
             if base not in records:
                 rec = dict(other_rows[0])
@@ -383,7 +383,8 @@ def custom_team_from_export(text: str, merged: dict) -> tuple[list, dict]:
         species, item = mon["species"], mon["item"]
         name = species
         if item:
-            for cand in (f"Mega {species}", f"Mega {species} X", f"Mega {species} Y"):
+            for cand in (f"Mega {species}", f"Mega {species} X", f"Mega {species} Y",
+                        f"Mega {species} Z"):
                 if cand in merged and find_mega_stone(cand, merged) == item:
                     name = cand
                     break
@@ -519,6 +520,21 @@ def build_merged_dataset():
     return merged, unresolved, moves, natures, typechart
 
 
+def is_mega_stone_name(item_name: str) -> bool:
+    """True if `item_name` LOOKS like a Mega Stone by its own naming
+    convention (ends in "ite"/"ite x"/"ite y"/"itex"/"itey", or the "Z"
+    alternate-forme suffix Regulation M-C introduced -- e.g. "Absolite Z",
+    "Garchompite Z", "Lucarionite Z" -- since the base name is already
+    claimed by that species' regular Mega). The one shared check, used by
+    `find_mega_stone`, `load_mbsmogon`'s duplicate-row resolution, and
+    `damage.py`'s Knock Off stone-exemption -- previously duplicated three
+    times, which is how the "Z" suffix went unrecognized in two of them.
+    """
+    low = item_name.lower()
+    return low.endswith(("ite", "ite x", "ite y", "itex", "itey",
+                         "ite z", "itez"))
+
+
 def find_mega_stone(name: str, merged: dict) -> str | None:
     """Return this Pokemon's Mega Stone if its usage data actually shows one.
 
@@ -533,9 +549,7 @@ def find_mega_stone(name: str, merged: dict) -> str | None:
     if not rec:
         return None
     for item, pct in rec.get("items_usage", []):
-        low = item.lower()
-        if (low.endswith("ite") or low.endswith("ite x") or low.endswith("ite y")
-                or low.endswith("itex") or low.endswith("itey")) and pct >= 50.0:
+        if is_mega_stone_name(item) and pct >= 50.0:
             return item
     return None
 
@@ -597,13 +611,15 @@ def build_generation_map(names, pokedex) -> dict:
 
 
 def base_form_name(name: str) -> str | None:
-    """'Mega Charizard Y' -> 'Charizard', 'Mega Skarmory' -> 'Skarmory'.
+    """'Mega Charizard Y' -> 'Charizard', 'Mega Skarmory' -> 'Skarmory',
+    'Mega Garchomp Z' -> 'Garchomp' (the "Z" alternate-forme suffix, e.g.
+    Regulation M-C's Mega Absol Z/Garchomp Z/Lucario Z, same pattern as X/Y).
     Returns None if `name` isn't a Mega pick."""
     if not name.startswith("Mega "):
         return None
     rest = name[5:]
     parts = rest.split()
-    if len(parts) >= 2 and parts[-1] in ("X", "Y"):
+    if len(parts) >= 2 and parts[-1] in ("X", "Y", "Z"):
         return " ".join(parts[:-1])
     return rest
 

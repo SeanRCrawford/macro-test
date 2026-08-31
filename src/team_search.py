@@ -34,7 +34,7 @@ rather than getting one opaque number.
 import itertools
 from collections import defaultdict
 
-from species_data import TYPES, load_preferences, mega_variants
+from species_data import TYPES, base_form_name, load_preferences, mega_variants
 from fast_eval import fast_pair_score
 
 # The user-supplied complementary type cores (best-first).
@@ -94,9 +94,14 @@ def build_candidate_pool(merged, top_n=40, prefs=None, min_non_mega_frac=0.6,
     excluded = set(prefs["exclude"])
     for e in list(excluded):
         if e.startswith("Mega "):
-            excluded.add(e[5:])
+            # `base_form_name` strips a trailing "X"/"Y"/"Z" alternate-forme
+            # token (Regulation M-C's Mega Absol Z/Garchomp Z/Lucario Z) --
+            # a plain `e[5:]` slice used to leave "Garchomp Z" behind
+            # instead of "Garchomp", so excluding "Mega Garchomp Z" silently
+            # failed to also exclude the base species.
+            excluded.add(base_form_name(e) or e[5:])
         else:
-            excluded.update({f"Mega {e}", f"Mega {e} X", f"Mega {e} Y"})
+            excluded.update({f"Mega {e}", f"Mega {e} X", f"Mega {e} Y", f"Mega {e} Z"})
     if allowed_generations:
         gen_map = generation_map or {}
         excluded |= {n for n in merged if gen_map.get(n) not in allowed_generations}

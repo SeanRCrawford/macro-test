@@ -155,8 +155,8 @@ from dataclasses import dataclass
 from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, WEIGHT_BASED_POWER, MoveInfo,
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
-                    is_spread_move, move_from_showdown)
-from engine import FieldState, WEATHER_SETTERS, effective_speed
+                    is_spread_move, move_from_showdown, grassy_glide_priority_bonus)
+from engine import FieldState, WEATHER_SETTERS, TERRAIN_SETTERS, effective_speed
 from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
 from solver import build_moveset
 from species_data import NO_MEGA, resolve_team_mega_slot
@@ -423,6 +423,11 @@ def _resolve_forms(names, built, forced_base_names=frozenset()):
 # frozenset()` through every search function below to opt back in.
 DEFAULT_EXCLUDED_ITEMS = frozenset({"Choice Scarf"})
 
+# Regulation M-C additions to the pool (Rillaboom, Baxcalibur, Mega Absol Z,
+# Mega Garchomp Z, Mega Lucario Z) are documented alongside `lead_sim.
+# BANNED_ITEMS`, not here -- see that comment. Nothing here needs to change
+# for them.
+
 
 def best_answer(name, merged, moves_db, natures, typechart, target_names,
                 item=None, move_names=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
@@ -525,7 +530,7 @@ NO_HIT = Hit(move_name=None, frac=0.0, lo=0.0, avg=0.0, hi=0.0, eff=1.0)
 
 def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
             num_targets_hit=1, attacker_hp_frac=None, defender_hp_frac=None,
-            auras=None):
+            auras=None, terrain=None):
     """The full `Hit` `move` (already on `attacker`, item applied by the
     caller via `_build`) does to `defender`.
 
@@ -534,6 +539,11 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     already knows how to apply it (`aura_multiplier`). `None` (every caller
     outside the 2v2 board functions, which have no board to gather auras
     from at all) means no aura boost/dampening, same as before this existed.
+
+    `terrain`: the board's active terrain (see `_field_terrain`, mirrors
+    `weather`) -- passed straight through to `damage_roll`'s own Grassy
+    Terrain handling. `None` (default, same as `weather`) means no terrain
+    boost/reduction.
 
     `roll`: "lo" (the default) is the WORST roll -- what `threshold_search`
     and `chip_then_ko` search on, because those answer "does this GUARANTEE
@@ -611,7 +621,7 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
         dmg_defender.current_hp = max(1, round(defender_hp_frac * defender.max_hp()))
     lo, hi, avg, eff = damage_roll(50, move.power, atk, dfn, dmg_attacker, dmg_defender,
                                    move, typechart, weather=weather, auras=auras,
-                                   num_targets_hit=num_targets_hit)
+                                   num_targets_hit=num_targets_hit, terrain=terrain)
     hits = hit_count_for(move.name, attacker)
     cur = defender.current_hp or 1
     lo_f, avg_f, hi_f = (lo * hits) / cur, (avg * hits) / cur, (hi * hits) / cur
@@ -620,13 +630,13 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
               eff=eff, num_targets_hit=num_targets_hit)
 
 
-def _best_hit(attacker, moves, defender, typechart, weather=None):
+def _best_hit(attacker, moves, defender, typechart, weather=None, terrain=None):
     """The best `Hit` among `moves` against `defender`, searched worst-roll
     (see `_raw_hit`). Single-target only -- for a spread-aware search see
     `_choose_move` (average-roll, used by `pair_search`)."""
     best = NO_HIT
     for mv in moves:
-        got = _raw_hit(attacker, mv, defender, typechart, weather=weather)
+        got = _raw_hit(attacker, mv, defender, typechart, weather=weather, terrain=terrain)
         if got.frac > best.frac:
             best = got
     return best
@@ -657,7 +667,7 @@ def _priority_blocked(attacker, mv, defending_side):
 
 
 def _choose_move(attacker, moves, defender, typechart, weather=None,
-                 defending_side=None, auras=None):
+                 defending_side=None, auras=None, terrain=None):
     """The move `attacker` would actually use against `defender`, searched on
     the AVERAGE roll: prefer one that KOes outright; failing that, prefer one
     that sets up a KO within a FOLLOW-UP turn (below); failing THAT, prefer
@@ -725,7 +735,7 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
         got = _raw_hit(attacker, mv, defender, typechart, weather=weather, roll="avg",
-                       auras=auras)
+                       auras=auras, terrain=terrain)
         if _priority_blocked(attacker, mv, defending_side):
             got = NO_HIT
         candidates.append((mv, got))
@@ -851,6 +861,21 @@ def _field_weather(combatants):
         if c is not None and c.ability in WEATHER_SETTERS:
             weather = WEATHER_SETTERS[c.ability]
     return weather
+
+
+def _field_terrain(combatants):
+    """The ONE shared field terrain for a 2v2 board -- Regulation M-C's
+    Grassy Surge, mirrors `_field_weather` exactly (same "checked against
+    every combatant, last setter in `combatants`' own order wins" rule,
+    same no-fainted-filter: a terrain-setter that later faints doesn't
+    retroactively un-set the terrain it already put up). Terrain is NOT
+    exclusive with weather -- both can be active on the same board -- so
+    this is a fully separate lookup, not folded into `_field_weather`."""
+    terrain = None
+    for c in combatants.values():
+        if c is not None and c.ability in TERRAIN_SETTERS:
+            terrain = TERRAIN_SETTERS[c.ability]
+    return terrain
 
 
 _AURA_ABILITIES = frozenset(AURA_TYPES) | {"Aura Break"}
@@ -1142,7 +1167,8 @@ _JOINT_OUTCOME_RANK = {"sweep": 0, "out_trade": 1, "no_ko": 2, "loss": 3}
 
 
 def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
-                   weather=None, roll="avg", defending_side=None, auras=None):
+                   weather=None, roll="avg", defending_side=None, auras=None,
+                   terrain=None):
     """{role: Hit} for whatever `mv` actually damages: every role in
     `defenders` if it's a spread move landing on more than one of them (the
     doubles 0.75x penalty applied via `num_targets_hit`), else just
@@ -1158,6 +1184,9 @@ def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`), passed straight through to `_raw_hit`.
+
+    `terrain`: the board's active terrain (`_field_terrain`), passed straight
+    through to `_raw_hit`.
     """
     if mv is None:
         return {}
@@ -1168,10 +1197,11 @@ def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
     if is_spread_move(mv.target) and len(defenders) > 1:
         n = len(defenders)
         return {role: _raw_hit(attacker, mv, d, typechart, weather=weather,
-                               roll=roll, num_targets_hit=n, auras=auras)
+                               roll=roll, num_targets_hit=n, auras=auras,
+                               terrain=terrain)
                for role, d in defenders.items()}
     got = _raw_hit(attacker, mv, defenders[intended_role], typechart,
-                   weather=weather, roll=roll, auras=auras)
+                   weather=weather, roll=roll, auras=auras, terrain=terrain)
     return {intended_role: got}
 
 
@@ -1222,8 +1252,9 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     if partner is not None:
         combatants["P"] = partner
     weather = _field_weather(combatants)
+    terrain = _field_terrain(combatants)
     auras = _active_auras(combatants)
-    field = FieldState(weather=weather)
+    field = FieldState(weather=weather, terrain=terrain)
     hp = {k: 1.0 for k in combatants}
     defenders = {"E1": e1, "E2": e2}
     target_role = "E1" if e1_name == candidate_target else "E2"
@@ -1232,23 +1263,26 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
 
     plan = {}
     got, mv = _choose_move(attacker, atk_moves, combatants[target_role], typechart,
-                           weather=weather, defending_side=[e1, e2], auras=auras)
+                           weather=weather, defending_side=[e1, e2], auras=auras,
+                           terrain=terrain)
     plan["C"] = (_hit_or_spread(attacker, mv, target_role, defenders, typechart,
-                                weather=weather, auras=auras), mv)
+                                weather=weather, auras=auras, terrain=terrain), mv)
     for role, e, e_moves in (("E1", e1, e1_moves), ("E2", e2, e2_moves)):
         got, mv = _choose_move(e, e_moves, attacker, typechart, weather=weather,
-                               defending_side=our_side, auras=auras)
+                               defending_side=our_side, auras=auras, terrain=terrain)
         plan[role] = (_hit_or_spread(e, mv, "C", {"C": attacker}, typechart,
                                      weather=weather, defending_side=our_side,
-                                     auras=auras), mv)
+                                     auras=auras, terrain=terrain), mv)
     if partner is not None:
         p_target_role = "E1" if (partner_target or candidate_target) == e1_name else "E2"
         plan["P"] = (_hit_or_spread(partner, partner_move, p_target_role, defenders,
-                                    typechart, weather=weather, auras=auras), partner_move)
+                                    typechart, weather=weather, auras=auras,
+                                    terrain=terrain), partner_move)
 
     def speed_key(role):
         mv = plan[role][1]
         prio = mv.priority if mv is not None else 0
+        prio += grassy_glide_priority_bonus(combatants[role], mv, field.terrain)
         side = "p1" if role in ("C", "P") else "p2"
         spd = effective_speed(combatants[role], field, side)
         theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
@@ -1273,6 +1307,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         def pl_speed_key(role):
             mv = pl[role][1]
             prio = mv.priority if mv is not None else 0
+            prio += grassy_glide_priority_bonus(combatants[role], mv, field.terrain)
             side = "p1" if role in ("C", "P") else "p2"
             spd = effective_speed(combatants[role], field, side)
             theirs_first = 0 if role in ("E1", "E2") else 1
@@ -1317,10 +1352,11 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     def build_hits(role, e, new_mv):
         if role == "C":
             return _hit_or_spread(attacker, new_mv, target_role, defenders,
-                                  typechart, weather=weather, auras=auras)
+                                  typechart, weather=weather, auras=auras,
+                                  terrain=terrain)
         return _hit_or_spread(e, new_mv, "C", {"C": attacker}, typechart,
                               weather=weather, defending_side=our_side,
-                              auras=auras)
+                              auras=auras, terrain=terrain)
 
     move_source = {"C": atk_moves, "E1": e1_moves, "E2": e2_moves}
     doomed, sp_wasted = doomed_roles(plan)
@@ -1342,7 +1378,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         _got2, new_mv = _choose_move(e, faster, target_for, typechart,
                                      weather=weather,
                                      defending_side=defending_side_for,
-                                     auras=auras)
+                                     auras=auras, terrain=terrain)
         if new_mv is None:
             continue
         trial_plan = dict(plan)
@@ -1363,7 +1399,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         _got2, new_mv = _choose_move(e, alternatives, target_for, typechart,
                                      weather=weather,
                                      defending_side=defending_side_for,
-                                     auras=auras)
+                                     auras=auras, terrain=terrain)
         if new_mv is None:
             continue
         plan[role] = (build_hits(role, e, new_mv), new_mv)
@@ -1569,7 +1605,7 @@ def _tailwind_move_for(combatant):
 
 def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None, attacker_hp_frac=None,
-                   target_hp_fracs=None, auras=None):
+                   target_hp_fracs=None, auras=None, terrain=None):
     """Best (hits: {role: Hit}, MoveInfo) for `attacker` against whichever of
     `live_targets` ({role: Combatant}) it ends up hitting.
 
@@ -1583,6 +1619,9 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`) -- passed straight through to `_raw_hit`.
+
+    `terrain`: the board's active terrain (`_field_terrain`) -- passed
+    straight through to `_raw_hit`.
 
     A spread move that's actually live (more than one target still standing)
     always hits EVERY entry in `live_targets` at once (doubles 0.75x penalty,
@@ -1660,7 +1699,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                                    roll="avg", num_targets_hit=n_live,
                                    attacker_hp_frac=attacker_hp_frac,
                                    defender_hp_frac=(target_hp_fracs or {}).get(role),
-                                   auras=auras))
+                                   auras=auras, terrain=terrain))
                    for role, d in live_targets.items()}
             spread_candidates.append((mv, hits))
             for role, h in hits.items():
@@ -1672,7 +1711,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             got = NO_HIT if blocked else _raw_hit(
                 attacker, mv, live_targets[role], typechart, weather=weather,
                 roll="avg", attacker_hp_frac=attacker_hp_frac,
-                defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras)
+                defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras,
+                terrain=terrain)
             single_candidates.append((mv, role, got))
             best_frac_by_role[role] = max(best_frac_by_role[role], got.frac)
 
@@ -1748,6 +1788,8 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     def speed_key(role):
         mv = plan[role][1]
         prio = mv.priority if mv is not None else 0
+        if mv is not None:
+            prio += grassy_glide_priority_bonus(combatants[role], mv, field.terrain)
         side = "p1" if role in ("C", "P") else "p2"
         spd = effective_speed(combatants[role], field, side)
         if role in ("E1", "E2"):
@@ -1870,7 +1912,7 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   weather=weather,
                                   hinted_target=(hint_by_role or {}).get(role),
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
-                                  auras=auras)
+                                  auras=auras, terrain=field.terrain)
         if mv is None:
             continue
         trial_plan = dict(new_plan)
@@ -1892,7 +1934,7 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   weather=weather,
                                   hinted_target=(hint_by_role or {}).get(role),
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
-                                  auras=auras)
+                                  auras=auras, terrain=field.terrain)
         if mv is None:
             continue
         new_plan[role] = (hits, mv)
@@ -1901,7 +1943,8 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
 
 def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   enemy_speed_mult=1.0, protected_roles=frozenset(),
-                  recharging_roles=frozenset(), tailwind_setter_role=None):
+                  recharging_roles=frozenset(), tailwind_setter_role=None,
+                  terrain=None):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
     enemy side chooses independently and greedily (`_choose_action` with no
     hint), same "no coordination" behaviour `_sequential_pair_outcome`
@@ -1958,6 +2001,11 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     Chlorophyll/Sand Rush/Slush Rush all key off the field, not off who
     happens to be attacking).
 
+    `terrain` is the same idea for the ONE shared field terrain
+    (`_field_terrain`'s own return) -- applied to both sides' damage (the
+    Grass boost/Earthquake reduction) and, via the same `FieldState`, to
+    turn order (Grassy Glide's priority bump for a grounded user).
+
     SURVIVAL-AWARE RECONSIDERATION: after the provisional plan is built, any
     role about to die before its own turn comes up gets one chance to
     reconsider toward a faster move that would actually land, and any role
@@ -1971,7 +2019,7 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     hp = dict(hp)
     ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
     theirs_live = {r: combatants[r] for r in ("E1", "E2") if hp[r] > 0}
-    field = FieldState(weather=weather)
+    field = FieldState(weather=weather, terrain=terrain)
     auras = _active_auras(combatants, hp)
 
     plan = {}
@@ -1983,7 +2031,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                         typechart, weather=weather,
                                         hinted_target=our_hints.get(role),
                                         attacker_hp_frac=hp[role],
-                                        target_hp_fracs=hp, auras=auras)
+                                        target_hp_fracs=hp, auras=auras,
+                                        terrain=terrain)
     for role, c in theirs_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
@@ -1995,7 +2044,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = _choose_action(c, moves_by_role[role], ours_live,
                                         typechart, weather=weather,
                                         attacker_hp_frac=hp[role],
-                                        target_hp_fracs=hp, auras=auras)
+                                        target_hp_fracs=hp, auras=auras,
+                                        terrain=terrain)
 
     hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
         plan, combatants, hp, protected_roles, enemy_speed_mult, field)
@@ -2017,7 +2067,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
 
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               enemy_speed_mult=1.0, protected_roles=frozenset(),
-              recharging_roles=frozenset(), tailwind_setter_role=None):
+              recharging_roles=frozenset(), tailwind_setter_role=None,
+              terrain=None):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -2050,7 +2101,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
             combatants, moves_by_role, hp, typechart, weather, hints,
             enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
             recharging_roles=recharging_roles,
-            tailwind_setter_role=tailwind_setter_role)
+            tailwind_setter_role=tailwind_setter_role, terrain=terrain)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
@@ -2065,7 +2116,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0, first_turn_moves_override=None,
-                first_turn_protected_role=None, first_turn_tailwind_role=None):
+                first_turn_protected_role=None, first_turn_tailwind_role=None,
+                terrain=None):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -2137,7 +2189,8 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
         hp, turn_log, enemy_acted, wiped, recharging = _best_turn(
             combatants, turn_moves, hp, typechart, weather,
             enemy_speed_mult=mult_this_turn, protected_roles=protected,
-            recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn)
+            recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn,
+            terrain=terrain)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
@@ -2156,7 +2209,7 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
 
 
 def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
-              auras=None):
+              auras=None, terrain=None):
     """The best `Hit` `attacker`'s own moveset can land on `target`
     SPECIFICALLY -- one cell of the 2x2 damage grid, not the move a
     target-choosing AI would actually pick (that's `_choose_action`).
@@ -2204,7 +2257,8 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
         else:
             n = 2 if (is_spread_move(mv.target) and other_live is not None) else 1
             got = _raw_hit(attacker, mv, target, typechart, weather=weather,
-                           roll="avg", num_targets_hit=n, auras=auras)
+                           roll="avg", num_targets_hit=n, auras=auras,
+                           terrain=terrain)
         candidates.append((mv, got))
     if not candidates:
         return NO_HIT
@@ -2219,7 +2273,8 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
     return best_hit
 
 
-def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather):
+def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather,
+                 terrain=None):
     """Every one of the 8 attacker-vs-specific-defender `Hit`s on this board
     -- "see if and how I out-trade (2x2 damage)" asks for the actual numbers,
     not just which line the race happened to choose. Returns {"ours": {("C",
@@ -2228,16 +2283,16 @@ def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather):
     """
     auras = _active_auras({"C": c1, "P": c2, "E1": e1c, "E2": e2c})
     ours = {
-        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras),
-        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras),
-        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras),
-        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras),
+        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain),
+        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain),
+        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain),
+        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain),
     }
     theirs = {
-        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras),
-        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras),
-        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras),
-        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras),
+        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain),
+        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain),
+        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain),
+        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain),
     }
     return {"ours": ours, "theirs": theirs}
 
@@ -2431,24 +2486,27 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
                 moves_by_role = {"C": m1, "P": m2, "E1": e1m, "E2": e2m}
                 weather = _field_weather(combatants)
+                terrain = _field_terrain(combatants)
                 outcome, turns_used, hp, log = _joint_race(
-                    combatants, moves_by_role, typechart, weather, turns)
+                    combatants, moves_by_role, typechart, weather, turns,
+                    terrain=terrain)
                 if tailwind_setter_roles:
                     tw_outcome, tw_turns_used, tw_hp, tw_log = max(
                         (_joint_race(combatants, moves_by_role, typechart, weather,
-                                    turns, first_turn_tailwind_role=role)
+                                    turns, first_turn_tailwind_role=role,
+                                    terrain=terrain)
                          for role in tailwind_setter_roles),
                         key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
                 else:
                     tw_outcome, tw_turns_used, tw_hp, tw_log = _joint_race(
                         combatants, moves_by_role, typechart, weather, turns,
-                        enemy_speed_mult=2.0)
+                        enemy_speed_mult=2.0, terrain=terrain)
                 pr_e1_outcome, _pr1_t, _pr1_hp, _pr1_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="E1")
+                    first_turn_protected_role="E1", terrain=terrain)
                 pr_e2_outcome, _pr2_t, _pr2_hp, _pr2_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="E2")
+                    first_turn_protected_role="E2", terrain=terrain)
                 protect_outcomes = {"E1": pr_e1_outcome, "E2": pr_e2_outcome}
                 tailwind_forced = (real_tailwind_threat and
                                    _JOINT_OUTCOME_RANK[tw_outcome] >
@@ -2490,10 +2548,12 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 best = worst
 
         if want_grid:
-            weather = _field_weather({"C": best["_c1"], "P": best["_c2"],
-                                      "E1": best["_e1c"], "E2": best["_e2c"]})
+            grid_combatants = {"C": best["_c1"], "P": best["_c2"],
+                               "E1": best["_e1c"], "E2": best["_e2c"]}
+            weather = _field_weather(grid_combatants)
+            terrain = _field_terrain(grid_combatants)
             grid = _damage_grid(best["_c1"], best["_c2"], best["_e1c"], best["_e2c"],
-                               m1, m2, e1m, e2m, typechart, weather)
+                               m1, m2, e1m, e2m, typechart, weather, terrain=terrain)
             best["grid"] = grid
             best["ohko_risk"] = _ohko_risk(grid)
         for k in ("_c1", "_c2", "_e1c", "_e2c"):
@@ -3697,14 +3757,16 @@ def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
                     # Drought/Snow Warning candidate) applies on entry
                     # regardless of whether it gets to ACT this turn --
                     # `_field_weather` already covers this, since
-                    # `combatants` has it in its normal slot.
+                    # `combatants` has it in its normal slot. Same for a
+                    # Grassy Surge candidate and `_field_terrain`.
                     race_weather = _field_weather(combatants)
+                    race_terrain = _field_terrain(combatants)
                     outcome, turns_used, _hp, log = _joint_race(
                         combatants, moves_by_role, typechart, race_weather, turns,
-                        first_turn_moves_override=override)
+                        first_turn_moves_override=override, terrain=race_terrain)
                     entry = {"outcome": outcome, "turns_used": turns_used, "log": log,
                              "_combatants": combatants, "_moves_by_role": moves_by_role,
-                             "_weather": race_weather}
+                             "_weather": race_weather, "_terrain": race_terrain}
                     if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
                             > _JOINT_OUTCOME_RANK[worst["outcome"]]):
                         worst = entry
@@ -3717,7 +3779,7 @@ def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
             tw_outcome, _tw_t, _tw_hp, _tw_log = _joint_race(
                 best["_combatants"], best["_moves_by_role"], typechart,
                 best["_weather"], turns, enemy_speed_mult=2.0,
-                first_turn_moves_override=override)
+                first_turn_moves_override=override, terrain=best["_terrain"])
             log = best["log"]
             switch_in_taken = (sum(h.avg for role, _tgt, h in log[0]
                                    if role in ("E1", "E2")

@@ -129,5 +129,119 @@ class TestResolveExportFields(unittest.TestCase):
         self.assertEqual(f["moves"], [m for m, _ in rec["moves_usage"][:4]])
 
 
+class TestRegulationMCAdditions(unittest.TestCase):
+    """"There are new mons coming to the new regulation M-C ... with sample
+    moves" -- Rillaboom, Baxcalibur, and the three Mega-Z formes (Mega
+    Absol Z, Mega Garchomp Z, Mega Lucario Z). The three Mega-Z formes were
+    already fully statted in the bundled pokedex; what was actually missing
+    was two real bugs that silently broke them (`base_form_name` only
+    stripped a trailing "X"/"Y", not "Z"; mega-stone detection didn't
+    recognize the "...ite Z" naming Regulation M-C had to use since
+    "Garchompite"/"Lucarionite" were already claimed by the non-Z megas) --
+    these tests pin both fixes plus that the pool actually reaches them.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+        cls.merged = cls.W["merged"]
+
+    def test_base_form_name_strips_a_trailing_z(self):
+        from species_data import base_form_name
+        self.assertEqual(base_form_name("Mega Garchomp Z"), "Garchomp")
+        self.assertEqual(base_form_name("Mega Absol Z"), "Absol")
+        self.assertEqual(base_form_name("Mega Lucario Z"), "Lucario")
+
+    def test_base_form_name_still_strips_x_and_y(self):
+        """The fix widened the trailing-token check, not replaced it."""
+        from species_data import base_form_name
+        self.assertEqual(base_form_name("Mega Charizard Y"), "Charizard")
+        self.assertEqual(base_form_name("Mega Charizard X"), "Charizard")
+
+    def test_base_form_name_a_plain_mega_is_unaffected(self):
+        from species_data import base_form_name
+        self.assertEqual(base_form_name("Mega Skarmory"), "Skarmory")
+
+    def test_ite_z_is_recognized_as_a_mega_stone(self):
+        from species_data import is_mega_stone_name
+        for stone in ("Garchompite Z", "Absolite Z", "Lucarionite Z"):
+            self.assertTrue(is_mega_stone_name(stone), stone)
+
+    def test_plain_ite_stones_are_still_recognized(self):
+        """The fix widened the shared check, not replaced it -- the three
+        previously-duplicated call sites (`find_mega_stone`,
+        `load_mbsmogon`'s dedup, `damage.py`'s Knock Off exemption) all now
+        share this one function."""
+        from species_data import is_mega_stone_name
+        for stone in ("Garchompite", "Lucarionite", "Charizardite X",
+                     "Charizardite Y"):
+            self.assertTrue(is_mega_stone_name(stone), stone)
+
+    def test_an_ordinary_item_is_not_a_mega_stone(self):
+        from species_data import is_mega_stone_name
+        self.assertFalse(is_mega_stone_name("Life Orb"))
+
+    def test_mega_garchomp_z_round_trips_through_a_showdown_export(self):
+        from species_data import custom_team_from_export, team_to_showdown_export
+        text = team_to_showdown_export(["Mega Garchomp Z"], {}, self.merged)
+        self.assertTrue(text.startswith("Garchomp @ Garchompite Z")
+                        or text.startswith("Mega Garchomp Z"))
+        roster, _sets = custom_team_from_export(text, self.merged)
+        self.assertEqual(roster, ["Mega Garchomp Z"])
+
+    def test_all_five_new_mons_resolve_with_the_given_stats(self):
+        """The user's own stat table, cross-checked against what
+        `build_merged_dataset` actually resolves each name to."""
+        expected = {
+            "Mega Absol Z": (dict(hp=65, atk=154, defe=60, spa=75, spd=60, spe=151),
+                             ["Dark", "Ghost"]),
+            "Mega Garchomp Z": (dict(hp=108, atk=130, defe=85, spa=141, spd=85, spe=151),
+                               ["Dragon"]),
+            "Mega Lucario Z": (dict(hp=70, atk=100, defe=70, spa=164, spd=70, spe=151),
+                              ["Fighting", "Steel"]),
+            "Rillaboom": (dict(hp=100, atk=125, defe=90, spa=60, spd=70, spe=85),
+                         ["Grass"]),
+            "Baxcalibur": (dict(hp=115, atk=145, defe=92, spa=75, spd=86, spe=87),
+                          ["Dragon", "Ice"]),
+        }
+        for name, (stats, types) in expected.items():
+            self.assertIn(name, self.merged, name)
+            rec = self.merged[name]
+            base = rec["base_stats"]
+            self.assertEqual(base["hp"], stats["hp"], name)
+            self.assertEqual(base["atk"], stats["atk"], name)
+            self.assertEqual(base["def"], stats["defe"], name)
+            self.assertEqual(base["spa"], stats["spa"], name)
+            self.assertEqual(base["spd"], stats["spd"], name)
+            self.assertEqual(base["spe"], stats["spe"], name)
+            self.assertEqual(rec["types"], types, name)
+
+    def test_all_five_carry_their_given_ability(self):
+        expected = {
+            "Mega Absol Z": "Sharpness",
+            "Mega Garchomp Z": "Levitate",
+            "Mega Lucario Z": "Aura Break",
+            "Rillaboom": "Grassy Surge",
+            "Baxcalibur": "Thermal Exchange",
+        }
+        for name, ability in expected.items():
+            abilities = dict(self.merged[name]["abilities_usage"])
+            self.assertIn(ability, abilities, name)
+
+    def test_all_five_have_a_score_and_are_not_silently_excluded(self):
+        """Without a `roster.csv` row, `score` is `None` and
+        `team_search.build_candidate_pool` silently drops the mon from
+        every pool-based search -- this is the actual "added to the pool"
+        requirement, not just "resolves with the right stats"."""
+        from team_search import build_candidate_pool
+        names = ["Mega Absol Z", "Mega Garchomp Z", "Mega Lucario Z",
+                 "Rillaboom", "Baxcalibur"]
+        for name in names:
+            self.assertIsNotNone(self.merged[name].get("score"), name)
+        pool = build_candidate_pool(self.merged, top_n=1000)
+        for name in names:
+            self.assertIn(name, pool, name)
+
+
 if __name__ == "__main__":
     unittest.main()

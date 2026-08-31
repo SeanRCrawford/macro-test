@@ -4130,6 +4130,159 @@ class TestFairyAuraAndDarkAura(unittest.TestCase):
         self.assertAlmostEqual(boosted / plain, 5461 / 4096, places=3)
 
 
+class TestMegaLucarioZAuraBreak(unittest.TestCase):
+    """Regulation M-C's Mega Lucario Z carries the literal ability string
+    "Aura Break" -- already a real, tested, board-wide effect in this
+    codebase (Fairy Aura/Dark Aura inversion, `TestFairyAuraAndDarkAura`
+    above). The user separately described "Aura Break" as halving damage
+    from incoming contact moves; resolved (via `AskUserQuestion`, since the
+    two descriptions genuinely conflict) as an ADDITIONAL, MON-SCOPED
+    effect layered on top for Mega Lucario Z specifically -- every other
+    "Aura Break" holder keeps the real, unchanged aura-inversion mechanic
+    and gets no contact-damage discount.
+    """
+
+    def setUp(self):
+        self.W = world()
+
+    def test_mega_lucario_z_takes_half_damage_from_a_contact_move(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        lucario_z = cf._build("Mega Lucario Z", merged, natures)
+        close_combat = cf._lookup_move("Close Combat", moves)
+        self.assertTrue((close_combat.flags or {}).get("contact"))
+        normal_defender = cf._build("Milotic", merged, natures)  # not Ghost-type -- Fighting connects
+        no_break = cf._raw_hit(kingambit, close_combat, normal_defender,
+                               typechart, roll="avg")
+        with_break = cf._raw_hit(kingambit, close_combat, lucario_z,
+                                 typechart, roll="avg")
+        # Not a clean 0.5x ratio against a DIFFERENT defender (their base
+        # stats/typing differ) -- so pin it directly against Mega Lucario Z
+        # itself, ability on vs off, rather than comparing across mons.
+        lucario_z_no_ability = cf._build("Mega Lucario Z", merged, natures)
+        lucario_z_no_ability.ability = "Steadfast"  # any non-Aura-Break ability
+        without_ability = cf._raw_hit(kingambit, close_combat, lucario_z_no_ability,
+                                      typechart, roll="avg")
+        self.assertAlmostEqual(with_break.frac / without_ability.frac, 0.5, places=3)
+        self.assertGreater(no_break.frac, 0)  # sanity: the probe move itself connects
+
+    def test_a_non_contact_move_is_unaffected(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        lucario_z = cf._build("Mega Lucario Z", merged, natures)
+        dark_pulse = cf._lookup_move("Dark Pulse", moves)  # Dark, special, non-contact
+        self.assertFalse((dark_pulse.flags or {}).get("contact"))
+        lucario_z_no_ability = cf._build("Mega Lucario Z", merged, natures)
+        lucario_z_no_ability.ability = "Steadfast"
+        with_break = cf._raw_hit(kingambit, dark_pulse, lucario_z, typechart, roll="avg")
+        without_ability = cf._raw_hit(kingambit, dark_pulse, lucario_z_no_ability,
+                                      typechart, roll="avg")
+        self.assertAlmostEqual(with_break.frac, without_ability.frac, places=3)
+
+    def test_a_different_aura_break_holder_gets_no_contact_discount(self):
+        """The mon-scoping itself: a SYNTHETIC combatant carrying the exact
+        same ability string ("Aura Break") but a different `name` must NOT
+        get the halving -- proving this is a per-mon override keyed on
+        `defender.name`, not a blanket rewrite of what "Aura Break" means
+        for every holder."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        close_combat = cf._lookup_move("Close Combat", moves)
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        whimsicott.ability = "Aura Break"  # same string, different species
+        no_ability = cf._build("Whimsicott", merged, natures)
+        with_break = cf._raw_hit(kingambit, close_combat, whimsicott, typechart, roll="avg")
+        without = cf._raw_hit(kingambit, close_combat, no_ability, typechart, roll="avg")
+        self.assertAlmostEqual(with_break.frac, without.frac, places=3)
+
+    def test_the_real_aura_inversion_still_works_for_mega_lucario_z(self):
+        """The existing, untouched board-wide mechanic -- Mega Lucario Z's
+        Aura Break still inverts Fairy Aura/Dark Aura into a REDUCTION for
+        everyone on the field, same as any other Aura Break holder, since
+        this is still the literal string "Aura Break" throughout."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        kingambit = cf._build("Kingambit", merged, natures)
+        moonblast = cf._lookup_move("Moonblast", moves)
+        no_aura = cf._raw_hit(whimsicott, moonblast, kingambit, typechart, roll="avg")
+        with_break = cf._raw_hit(whimsicott, moonblast, kingambit, typechart,
+                                 roll="avg", auras={"Fairy Aura", "Aura Break"})
+        self.assertAlmostEqual(with_break.frac / no_aura.frac, 0.75, places=3)
+
+
+class TestGrassyTerrainCheapModel(unittest.TestCase):
+    """Regulation M-C's Grassy Terrain, threaded through this module's cheap
+    2v2-race model -- `weather`'s existing full treatment here (`_field_
+    weather`, `damage_roll`'s per-hit multiplier, the speed-key priority
+    bump) mirrored at every touch point, same as the real engine's own
+    version in `battle.py`/`engine.py`."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_field_terrain_reads_a_setters_ability(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        rilla = cf._build("Rillaboom", merged, natures)
+        kingambit = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": rilla, "P": kingambit, "E1": kingambit, "E2": e2}
+        self.assertEqual(cf._field_terrain(combatants), "grassy")
+
+    def test_field_terrain_is_none_without_a_setter(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        combatants = {"C": cf._build("Kingambit", merged, natures),
+                     "P": cf._build("Garchomp", merged, natures),
+                     "E1": cf._build("Milotic", merged, natures),
+                     "E2": cf._build("Sinistcha", merged, natures)}
+        self.assertIsNone(cf._field_terrain(combatants))
+
+    def test_raw_hit_applies_the_grass_boost_under_terrain(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        rilla = cf._build("Rillaboom", merged, natures)
+        target = cf._build("Kingambit", merged, natures)
+        wood_hammer = cf._lookup_move("Wood Hammer", moves)
+        no_terrain = cf._raw_hit(rilla, wood_hammer, target, typechart, roll="avg")
+        grassy = cf._raw_hit(rilla, wood_hammer, target, typechart, roll="avg",
+                             terrain="grassy")
+        self.assertAlmostEqual(grassy.frac / no_terrain.frac, 1.3, places=3)
+
+    def test_grassy_glide_gets_the_priority_bump_in_the_joint_race(self):
+        """Baxcalibur (87 Speed) outpaces Rillaboom (85) on raw speed, so
+        without terrain Rillaboom's Grassy Glide goes second; under the
+        terrain Rillaboom's own Grassy Surge sets, the +1 priority sends
+        Grassy Glide first instead. `_apply_plan` appends to `log` in actual
+        resolution order, so this checks ORDER, not just that both hits
+        happen -- an end-to-end check through `_resolve_turn`, not just the
+        speed-key closure in isolation."""
+        merged, moves_db, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+
+        def race(terrain):
+            rilla = cf._build("Rillaboom", merged, natures)
+            bax = cf._build("Baxcalibur", merged, natures)
+            e2 = cf._build("Sinistcha", merged, natures)
+            combatants = {"C": rilla, "P": e2, "E1": bax, "E2": e2}
+            glide = cf._lookup_move("Grassy Glide", moves_db)
+            iron_head = cf._lookup_move("Iron Head", moves_db)
+            protect = cf._lookup_move("Protect", moves_db)
+            moves_by_role = {"C": [glide], "P": [protect],
+                             "E1": [iron_head], "E2": [protect]}
+            hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+            _hp2, log, _ea, _w, _rc = cf._resolve_turn(
+                combatants, moves_by_role, hp, typechart, None, {"C": "E1"},
+                terrain=terrain)
+            actors = [role for role, _tgt, _h in log]
+            return actors.index("C") < actors.index("E1")
+
+        self.assertTrue(race("grassy"))
+        self.assertFalse(race(None))
+
+
 class TestPreferencesReducePool(unittest.TestCase):
     """"Make sure preferences.csv is taken into account (includes, excludes)
     so that it reduces the pool of eligible mons." """

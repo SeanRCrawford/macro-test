@@ -7,7 +7,7 @@ only -- move restriction is a battle-state concern, not a damage concern),
 Life Orb, weather-boosting items, crit, and the 16-step random roll.
 """
 from dataclasses import dataclass, field
-from species_data import TYPES
+from species_data import TYPES, is_mega_stone_name
 
 STAGE_MULT = {
     -6: 2/8, -5: 2/7, -4: 2/6, -3: 2/5, -2: 2/4, -1: 2/3,
@@ -399,6 +399,28 @@ def ability_type_immunity(defender: "Combatant", move_type: str) -> bool:
     return TYPE_IMMUNITY_ABILITIES.get(defender.ability) == move_type
 
 
+def is_grounded(combatant: "Combatant") -> bool:
+    """True if `combatant` is touching the ground -- Grassy/Electric/Psychic/
+    Misty Terrain (and Spikes/Toxic Spikes, not modeled) only affect grounded
+    Pokemon. Not a Flying-type, and not Levitate -- this engine doesn't model
+    Air Balloon or Magnet Rise, so those two checks are the whole rule."""
+    return "Flying" not in combatant.types and combatant.ability != "Levitate"
+
+
+def grassy_glide_priority_bonus(combatant: "Combatant", move: "MoveInfo",
+                                terrain: str | None) -> int:
+    """+1 for Grassy Glide, used by a grounded Pokemon, while Grassy Terrain
+    is up -- else 0. A separate `if` (not folded into an ability-priority
+    elif chain) since this is move+terrain gated, independent of ability;
+    shared by `engine.py`'s two turn-order functions and
+    `counter_finder.py`'s three cheap-model speed-key closures so the rule
+    is defined exactly once."""
+    if terrain == "grassy" and move is not None and move.name == "Grassy Glide" \
+            and is_grounded(combatant):
+        return 1
+    return 0
+
+
 def _offensive_ability_mult(attacker: "Combatant", move: "MoveInfo", type_eff: float,
                              weather: str | None, power: int | None = None) -> float:
     """Attacker-side ability damage multipliers.
@@ -447,6 +469,16 @@ def _defensive_ability_mult(defender: "Combatant", move: "MoveInfo", type_eff: f
     if ab in ("Fur Coat",) and move.category == "Physical":
         mult *= 0.5
     if ab == "Ice Scales" and move.category == "Special":
+        mult *= 0.5
+    # Regulation M-C: Mega Lucario Z's own "Aura Break" is scoped -- besides
+    # the real, unchanged board-wide aura-inversion effect every "Aura
+    # Break" holder gets (see `aura_multiplier`/`_AURA_ABILITIES`, untouched
+    # by this), THIS ONE SPECIES additionally halves damage from contact
+    # moves. A per-mon override, not a redefinition of what "Aura Break"
+    # means for anyone else -- e.g. Zygarde's real Aura Break stays exactly
+    # as before, since `defender.name` there is never "Mega Lucario Z".
+    if (ab == "Aura Break" and defender.name == "Mega Lucario Z"
+            and (move.flags or {}).get("contact")):
         mult *= 0.5
     return mult
 
@@ -534,12 +566,15 @@ def hit_count_for(move_name: str, attacker: "Combatant") -> float:
     return entry[2] if entry else 1
 
 
+EARTHQUAKE_FAMILY = ("Earthquake", "Bulldoze", "Magnitude")
+
+
 def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
                  attacker: Combatant, defender: Combatant, move: MoveInfo,
                  typechart: dict, weather: str | None = None, auras=None,
                  num_targets_hit: int = 1, is_crit: bool = False,
                  screens: bool = False, tera_type: str | None = None,
-                 roll_index: int | None = None):
+                 roll_index: int | None = None, terrain: str | None = None):
     """
     Returns (min_dmg, max_dmg, avg_dmg, type_eff_mult) as raw HP damage
     (16-step roll, 0.85x-1.00x), following the standard formula:
@@ -603,6 +638,16 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
         elif move.move_type == "Water":
             modifier *= 0.5
 
+    # Grassy Terrain (Regulation M-C: Rillaboom's Grassy Surge): grounded
+    # Grass moves get +30% power; the Earthquake family gets -50% power
+    # against a grounded defender (real-game "terrain absorbs the shockwave"
+    # rule). Terrain is not exclusive with weather -- both can be active.
+    if terrain == "grassy":
+        if move.move_type == "Grass" and is_grounded(attacker):
+            modifier *= 1.3
+        if move.name in EARTHQUAKE_FAMILY and is_grounded(defender):
+            modifier *= 0.5
+
     # Crit (gen6+: flat 1.5x; stage resets handled by caller via stat selection)
     if is_crit:
         modifier *= 1.5
@@ -657,10 +702,7 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     # actually removed in battle.py's move resolution -- this function only computes
     # the damage multiplier, it doesn't mutate state.
     if move.name == "Knock Off" and defender.item:
-        low = defender.item.lower()
-        is_stone = (low.endswith("ite") or low.endswith("ite x") or low.endswith("ite y")
-                    or low.endswith("itex") or low.endswith("itey"))
-        if not is_stone:
+        if not is_mega_stone_name(defender.item):
             modifier *= 1.5
 
     # Weather Ball: becomes the weather's type at 100 BP.

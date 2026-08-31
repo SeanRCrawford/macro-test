@@ -713,7 +713,13 @@ class TestMultiBring4SixPairExportColumns(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.argv = ["--pool-size", "16", "--multi-bring4",
+        # pool-size 16 stopped reliably finding a core once Regulation M-C's
+        # very-high-Score additions (Mega Garchomp Z in particular) started
+        # crowding the top of the candidate pool -- widened per the tool's
+        # own suggested remedy ("widen the pool") rather than tuning Score
+        # estimates to dodge a small, exhaustive-search fixture; this test
+        # only cares that the export columns exist, not which core is found.
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
                    "--top", "3"]
 

@@ -139,6 +139,18 @@ class TestTheCopyKeepsOneObjectPerPokemon(unittest.TestCase):
         self.copy.field.screens_p1["reflect"] = 5
         self.assertEqual(self.battle.field.screens_p1["reflect"], 0)
 
+    def test_the_field_terrain_is_copied_not_shared(self):
+        """Regulation M-C's Grassy Terrain -- a new `FieldState` field added
+        alongside `weather`, easy to forget in the hand-written `__deepcopy__`
+        (a forgotten field silently vanishes on every copy on this ~11M-call/
+        search hot path, per this file's own module docstring)."""
+        self.copy.field.terrain = "grassy"
+        self.assertNotEqual(self.battle.field.terrain, "grassy")
+
+    def test_the_field_terrain_turns_left_is_copied_not_shared(self):
+        self.copy.field.terrain_turns_left = 3
+        self.assertNotEqual(self.battle.field.terrain_turns_left, 3)
+
 
 class TestBothHotPathsAreHandWritten(unittest.TestCase):
     """The point of the change: nothing in the copy path falls back to the
