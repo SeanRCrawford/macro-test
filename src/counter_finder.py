@@ -155,10 +155,11 @@ from dataclasses import dataclass
 from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, WEIGHT_BASED_POWER, MoveInfo,
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
-                    is_spread_move, move_from_showdown, grassy_glide_priority_bonus)
+                    hits_ally, is_spread_move, move_from_showdown,
+                    grassy_glide_priority_bonus)
 from engine import FieldState, WEATHER_SETTERS, TERRAIN_SETTERS, effective_speed
 from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
-from solver import build_moveset
+from solver import FIRST_TURN_ONLY_MOVES, build_moveset
 from species_data import NO_MEGA, resolve_team_mega_slot
 
 
@@ -646,6 +647,23 @@ PRIORITY_BLOCK_ABILITIES = frozenset({"Queenly Majesty", "Dazzling", "Armor Tail
 _PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset(
     {"Mold Breaker", "Teravolt", "Turboblaze"})
 
+# The real -2 SpA "nuke" family (verified against each move's raw `self.
+# boosts` data: exactly these five carry `{"spa": -2}`). A LOW-COST stand-in
+# for general stat-stage tracking (which this module deliberately has none
+# of, see its own module docstring) -- rather than tracking the actual -2
+# SpA stage, a role that has used one of these earlier in the SAME race has
+# ALL its own outgoing damage halved from then on (a flat approximation, not
+# gated to Special moves only). Close Combat/Superpower (-1/-1) are
+# deliberately excluded -- too mild a drop for this approximation to fit.
+SELF_HALVING_MOVES = frozenset({"Draco Meteor", "Overheat", "Leaf Storm",
+                                "Psycho Boost", "Fleur Cannon"})
+
+# Abilities that block Intimidate outright (Clear Body/White Smoke/Full
+# Metal Body block ANY opponent-inflicted stat drop; Hyper Cutter blocks
+# Attack drops specifically; Inner Focus blocks Intimidate specifically).
+INTIMIDATE_BLOCKED = frozenset({"Clear Body", "White Smoke", "Full Metal Body",
+                                "Hyper Cutter", "Inner Focus"})
+
 
 def _priority_blocked(attacker, mv, defending_side):
     """True if `mv` would fail outright against `defending_side` (an
@@ -876,6 +894,45 @@ def _field_terrain(combatants):
         if c is not None and c.ability in TERRAIN_SETTERS:
             terrain = TERRAIN_SETTERS[c.ability]
     return terrain
+
+
+_SIDE_OF = {"C": ("C", "P"), "P": ("C", "P"), "E1": ("E1", "E2"), "E2": ("E1", "E2")}
+_OPPOSING_OF = {"C": ("E1", "E2"), "P": ("E1", "E2"), "E1": ("C", "P"), "E2": ("C", "P")}
+
+
+def _intimidate_mult_by_role(combatants):
+    """{role: {"physical": mult}} or {role: {"special": mult}} for every
+    role whose OPPOSING side has a live Intimidate holder -- computed ONCE
+    from the INITIAL `combatants` (the real -1 Atk stage Intimidate applies
+    on switch-in PERSISTS even if the holder later faints mid-race, so this
+    is correct to compute once at race start, not re-checked every turn).
+
+    A -1 Atk stage is x(2/3) on the stat -- and, since the damage formula
+    multiplies by the attack stat directly, x(2/3) on damage output is
+    mathematically EXACT for this, not an approximation. `INTIMIDATE_
+    BLOCKED` abilities are unaffected; Defiant/Competitive invert it into a
+    real +2 stage (x2.0) SELF-boost on the matching damage category instead
+    of a drop -- also exact, not approximated.
+
+    A role with no entry here means "unaffected" (multiplier 1.0), matching
+    every other optional per-role map in this module's convention.
+    """
+    out = {}
+    for role, c in combatants.items():
+        if c is None:
+            continue
+        if not any(combatants[r] is not None and combatants[r].ability == "Intimidate"
+                   for r in _OPPOSING_OF[role]):
+            continue
+        if c.ability in INTIMIDATE_BLOCKED:
+            continue
+        if c.ability == "Defiant":
+            out[role] = {"physical": 2.0}
+        elif c.ability == "Competitive":
+            out[role] = {"special": 2.0}
+        else:
+            out[role] = {"physical": 2 / 3}
+    return out
 
 
 _AURA_ABILITIES = frozenset(AURA_TYPES) | {"Aura Break"}
@@ -1605,9 +1662,26 @@ def _tailwind_move_for(combatant):
 
 def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None, attacker_hp_frac=None,
-                   target_hp_fracs=None, auras=None, terrain=None):
+                   target_hp_fracs=None, auras=None, terrain=None,
+                   attacker_role=None, dmg_mult_by_role=None,
+                   half_damage_roles=frozenset()):
     """Best (hits: {role: Hit}, MoveInfo) for `attacker` against whichever of
     `live_targets` ({role: Combatant}) it ends up hitting.
+
+    `attacker_role`/`dmg_mult_by_role`/`half_damage_roles`: the attacker's
+    OWN role string, plus two low-cost stand-ins for general stat-stage
+    tracking (which this module deliberately has none of -- see the module
+    docstring) -- `dmg_mult_by_role` is `_intimidate_mult_by_role`'s static,
+    computed-once-per-race map (Intimidate's exact -1 Atk x(2/3), or its
+    Defiant/Competitive x2.0 inversion); `half_damage_roles` is `_joint_
+    race`'s own turn-to-turn set of roles that have already used a
+    `SELF_HALVING_MOVES` move earlier in this race. Both are applied to a
+    Hit's damage fields the moment it's computed, BEFORE ranking -- so a
+    halved/Intimidate-suppressed attacker is correctly deprioritized in its
+    own KO-lookahead too, not just in the number it reports afterward.
+    `attacker_role=None` (every caller outside `_resolve_turn`'s real
+    joint-race engine) means neither applies at all, matching every other
+    optional per-role map in this module.
 
     `attacker_hp_frac`/`target_hp_fracs` ({role: fraction}): the attacker's
     and each live target's REAL current HP as of the start of this turn --
@@ -1680,6 +1754,25 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     defending_side = list(live_targets.values())
     n_live = len(live_targets)
 
+    def _scaled(got, mv):
+        """Apply the Intimidate/Defiant/Competitive static multiplier and
+        the Draco-Meteor-family halving to a freshly-computed Hit, before
+        it's used for ranking. A no-op (returns `got` unchanged) whenever
+        `attacker_role` wasn't given, or nothing applies to this attacker."""
+        if attacker_role is None or got is NO_HIT:
+            return got
+        mult = 1.0
+        if dmg_mult_by_role:
+            cat = "physical" if mv.category == "Physical" else "special"
+            mult *= dmg_mult_by_role.get(attacker_role, {}).get(cat, 1.0)
+        if attacker_role in half_damage_roles:
+            mult *= 0.5
+        if mult == 1.0:
+            return got
+        return Hit(move_name=got.move_name, frac=got.frac * mult,
+                  lo=got.lo * mult, avg=got.avg * mult, hi=got.hi * mult,
+                  eff=got.eff, num_targets_hit=got.num_targets_hit)
+
     # Two passes: gather every candidate action's raw hits FIRST (tracking
     # the best single-hit damage this attacker can put on each target,
     # across every move here), then rank -- the lookahead below needs to
@@ -1694,12 +1787,12 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             continue
         blocked = _priority_blocked(attacker, mv, defending_side)
         if is_spread_move(mv.target) and n_live > 1:
-            hits = {role: (NO_HIT if blocked else
+            hits = {role: _scaled(NO_HIT if blocked else
                           _raw_hit(attacker, mv, d, typechart, weather=weather,
                                    roll="avg", num_targets_hit=n_live,
                                    attacker_hp_frac=attacker_hp_frac,
                                    defender_hp_frac=(target_hp_fracs or {}).get(role),
-                                   auras=auras, terrain=terrain))
+                                   auras=auras, terrain=terrain), mv)
                    for role, d in live_targets.items()}
             spread_candidates.append((mv, hits))
             for role, h in hits.items():
@@ -1708,11 +1801,11 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         candidates = ([hinted_target] if hinted_target in live_targets
                       else list(live_targets))
         for role in candidates:
-            got = NO_HIT if blocked else _raw_hit(
+            got = _scaled(NO_HIT if blocked else _raw_hit(
                 attacker, mv, live_targets[role], typechart, weather=weather,
                 roll="avg", attacker_hp_frac=attacker_hp_frac,
                 defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras,
-                terrain=terrain)
+                terrain=terrain), mv)
             single_candidates.append((mv, role, got))
             best_frac_by_role[role] = max(best_frac_by_role[role], got.frac)
 
@@ -1784,6 +1877,13 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     ("Kingambit has no reason to target Arcanine [with Sucker Punch]" --
     a whole turn spent on a move that was never going to land, when a
     normal attack sitting in the same moveset would have).
+
+    RECOIL / LIFE ORB / ROUGH SKIN-IRON BARBS: applied to the ATTACKER's own
+    `hp[role]` right after its hits this move land, mirroring `battle.py`'s
+    own post-hit "attacker-side consequences" block -- see the inline
+    comments below for the exact rules. All three can self-KO (real
+    mechanic), and are applied BEFORE the `wiped` check below so a
+    recoil/Rough-Skin KO correctly registers as a wipe.
     """
     def speed_key(role):
         mv = plan[role][1]
@@ -1820,6 +1920,10 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
             if hits and not filtered:
                 sucker_punch_wasted.add(role)
             hits = filtered
+        attacker_c = combatants[role]
+        contact = bool((mv.flags or {}).get("contact"))
+        raw_dmg_dealt = 0.0  # for recoil, mirrors battle.py's total_damage_dealt
+        rough_skin_loss = 0.0
         for tgt_role, got in hits.items():
             if tgt_role in protected_roles:
                 continue  # Protect blocks this hit entirely
@@ -1844,6 +1948,39 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
                 new_hp = 1.0 / target_c.max_hp()
             hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))
+            # `got.frac` is a fraction of the DEFENDER's max HP (`_raw_hit`'s
+            # own convention); recoil/Life Orb need raw HP relative to the
+            # ATTACKER's own max HP, so convert through the target's max HP
+            # first, same two-step `battle.py` does implicitly via real HP.
+            if got.frac > 0:
+                raw_dmg_dealt += got.frac * target_c.max_hp()
+                # Rough Skin / Iron Barbs: punishes the ATTACKER for making
+                # contact, even if this same hit faints the holder (real
+                # mechanic -- the ability reacts to the contact itself, not
+                # to the holder surviving it). Cheap-model only -- not
+                # threaded into `battle.py` (not what was reported).
+                if (contact and target_c.ability in ("Rough Skin", "Iron Barbs")
+                        and attacker_c.ability != "Magic Guard"):
+                    rough_skin_loss += 1 / 8
+        if raw_dmg_dealt > 0:
+            # Recoil (Flare Blitz/Wave Crash 33%, Head Smash 50%, ...) as a
+            # fraction of TOTAL damage dealt this move -- Rock Head/Magic
+            # Guard negate it. Mirrors `battle.py:980-989` exactly.
+            if mv.recoil and attacker_c.ability not in ("Rock Head", "Magic Guard"):
+                num, den = mv.recoil
+                recoil_raw = raw_dmg_dealt * num / den
+                hp[role] = max(0.0, hp[role] - recoil_raw / attacker_c.max_hp())
+            # Life Orb: flat 10% max HP recoil on any damaging move that
+            # connected -- Magic Guard blocks it, Sheer Force cancels it
+            # when the boosted move has a secondary effect (its signature
+            # interaction). Mirrors `battle.py:1001-1017`.
+            sheer_force_cancels_lo = (attacker_c.ability == "Sheer Force"
+                                      and bool(mv.secondary))
+            if (attacker_c.item == "Life Orb" and attacker_c.ability != "Magic Guard"
+                    and not sheer_force_cancels_lo):
+                hp[role] = max(0.0, hp[role] - 0.10)
+        if rough_skin_loss:
+            hp[role] = max(0.0, hp[role] - rough_skin_loss)
         if wiped is None:
             if hp["E1"] <= 0 and hp["E2"] <= 0:
                 wiped = "theirs"
@@ -1855,7 +1992,8 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
 def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                              moves_by_role, hp, typechart, weather, field,
                              live_targets_by_role, hint_by_role,
-                             enemy_speed_mult, protected_roles, auras=None):
+                             enemy_speed_mult, protected_roles, auras=None,
+                             dmg_mult_by_role=None, half_damage_roles=frozenset()):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk" -- a provisional `plan` chooses every
     actor's move independently, unaware of the others, so an actor can end
@@ -1912,7 +2050,9 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   weather=weather,
                                   hinted_target=(hint_by_role or {}).get(role),
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
-                                  auras=auras, terrain=field.terrain)
+                                  auras=auras, terrain=field.terrain,
+                                  attacker_role=role, dmg_mult_by_role=dmg_mult_by_role,
+                                  half_damage_roles=half_damage_roles)
         if mv is None:
             continue
         trial_plan = dict(new_plan)
@@ -1934,17 +2074,60 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   weather=weather,
                                   hinted_target=(hint_by_role or {}).get(role),
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
-                                  auras=auras, terrain=field.terrain)
+                                  auras=auras, terrain=field.terrain,
+                                  attacker_role=role, dmg_mult_by_role=dmg_mult_by_role,
+                                  half_damage_roles=half_damage_roles)
         if mv is None:
             continue
         new_plan[role] = (hits, mv)
     return new_plan
 
 
+_ALLY_OF = {"C": "P", "P": "C", "E1": "E2", "E2": "E1"}
+
+
+def _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras):
+    """`allAdjacent` moves (Earthquake, Surf, Discharge, Bulldoze, Explosion
+    -- `damage.hits_ally`) also hit the user's own live partner. `_choose_
+    action` itself still picks the best move purely against the OPPOSING
+    side (hitting your own ally is a real cost applied AFTER the choice is
+    made, never a reason its own ranking would pick a different move) -- so
+    this runs as a small post-process on `plan`, right before `_apply_plan`,
+    rather than inside `_choose_action`'s scoring. That also sidesteps the
+    one real hazard here: a spread-hit ranking that didn't know "enemy" from
+    "own ally" could credit a self-KO as a win. Called on the FINAL `plan`
+    (after `_reconsider_for_survival` too, if it ran), so it's always the
+    role's actually-chosen move being checked.
+
+    DOCUMENTED SIMPLIFICATION: when exactly one enemy is alive, the existing
+    enemy-hit in `hits` was already computed by `_choose_action` at
+    `num_targets_hit=1` (no 0.75x, since `is_spread_move(...) and n_live > 1`
+    didn't fire there). This does not retroactively recompute that hit once
+    adding the ally makes it a real 2-target spread -- only the ally's OWN
+    new hit gets the correct `num_targets_hit`. Both-enemies-alive (the
+    common case) was already correct and is untouched.
+    """
+    new_plan = dict(plan)
+    for role, (hits, mv) in plan.items():
+        if mv is None or not hits_ally(mv.target):
+            continue
+        ally_role = _ALLY_OF[role]
+        if hp.get(ally_role, 0.0) <= 0:
+            continue
+        n = max(2, len(hits) + 1)  # already-hit enemies + the ally
+        got = _raw_hit(combatants[role], mv, combatants[ally_role], typechart,
+                       weather=weather, roll="avg", num_targets_hit=n,
+                       defender_hp_frac=hp.get(ally_role), auras=auras,
+                       terrain=terrain)
+        new_plan[role] = ({**hits, ally_role: got}, mv)
+    return new_plan
+
+
 def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   enemy_speed_mult=1.0, protected_roles=frozenset(),
                   recharging_roles=frozenset(), tailwind_setter_role=None,
-                  terrain=None):
+                  terrain=None, dmg_mult_by_role=None,
+                  half_damage_roles=frozenset()):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
     enemy side chooses independently and greedily (`_choose_action` with no
     hint), same "no coordination" behaviour `_sequential_pair_outcome`
@@ -2015,6 +2198,16 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     cheap `_apply_plan` pass) when the provisional plan actually leaves
     someone doomed or Sucker-Punch-wasted, so an ordinary turn costs
     exactly what it always did.
+
+    An `allAdjacent` move (Earthquake and friends) also hits the user's own
+    live partner -- see `_with_ally_splash`, applied to `plan` right before
+    each `_apply_plan` call so it always reflects the FINAL chosen move.
+
+    `dmg_mult_by_role`/`half_damage_roles`: Intimidate/Defiant/Competitive's
+    static per-role multiplier and the Draco-Meteor-family's turn-to-turn
+    halving set -- both `_joint_race`'s own board-level state, threaded
+    straight through to every `_choose_action` call (both sides) so ranking
+    itself already reflects them (see `_choose_action`'s own docstring).
     """
     hp = dict(hp)
     ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
@@ -2032,7 +2225,9 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                         hinted_target=our_hints.get(role),
                                         attacker_hp_frac=hp[role],
                                         target_hp_fracs=hp, auras=auras,
-                                        terrain=terrain)
+                                        terrain=terrain, attacker_role=role,
+                                        dmg_mult_by_role=dmg_mult_by_role,
+                                        half_damage_roles=half_damage_roles)
     for role, c in theirs_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
@@ -2045,8 +2240,11 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                         typechart, weather=weather,
                                         attacker_hp_frac=hp[role],
                                         target_hp_fracs=hp, auras=auras,
-                                        terrain=terrain)
+                                        terrain=terrain, attacker_role=role,
+                                        dmg_mult_by_role=dmg_mult_by_role,
+                                        half_damage_roles=half_damage_roles)
 
+    plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
     hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
         plan, combatants, hp, protected_roles, enemy_speed_mult, field)
     final_doomed = doomed
@@ -2056,7 +2254,9 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
         plan = _reconsider_for_survival(
             plan, doomed, sp_wasted, combatants, moves_by_role, hp, typechart,
             weather, field, live_targets_by_role, our_hints, enemy_speed_mult,
-            protected_roles, auras)
+            protected_roles, auras, dmg_mult_by_role=dmg_mult_by_role,
+            half_damage_roles=half_damage_roles)
+        plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
         hp2, log, enemy_acted, wiped, final_doomed, _sp2 = _apply_plan(
             plan, combatants, hp, protected_roles, enemy_speed_mult, field)
     recharging_next = {role for role, (_hits, mv) in plan.items()
@@ -2068,7 +2268,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               enemy_speed_mult=1.0, protected_roles=frozenset(),
               recharging_roles=frozenset(), tailwind_setter_role=None,
-              terrain=None):
+              terrain=None, dmg_mult_by_role=None,
+              half_damage_roles=frozenset()):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -2101,7 +2302,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
             combatants, moves_by_role, hp, typechart, weather, hints,
             enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
             recharging_roles=recharging_roles,
-            tailwind_setter_role=tailwind_setter_role, terrain=terrain)
+            tailwind_setter_role=tailwind_setter_role, terrain=terrain,
+            dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
@@ -2132,6 +2334,16 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     call is the Tailwind-robustness replay (`enemy_speed_mult=2.0`) -- a
     caller that wants both shows the outcome difference, not two logs to
     reconcile.
+
+    FAKE OUT / FIRST IMPRESSION (`FIRST_TURN_ONLY_MOVES`) are legal ONLY the
+    turn a role is genuinely fresh (see `still_fresh` below) -- this is the
+    one piece of real per-role state this loop enforces on `moves_by_role`
+    itself (not `_resolve_turn`'s recharge/reconsideration machinery), since
+    it has to be applied before a role's moveset is ever offered to
+    `_choose_action`. Previously unenforced here at all (`_sequential_pair_
+    outcome`, `pair_search`'s single-turn hypothesis, needs no such gate --
+    it only ever plays exactly one turn, so Fake Out is always legal there
+    by construction).
 
     `first_turn_moves_override`: optional `{role: [MoveInfo, ...]}` applied
     ONLY to the first turn, then dropped -- `switch_in_search` uses this to
@@ -2168,18 +2380,50 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     threads through, since `_resolve_turn`'s own doomed/Sucker-Punch-wasted
     reconsideration is entirely resolved within a single turn and needs
     nothing carried.
+
+    INTIMIDATE / DEFIANT / COMPETITIVE: `_intimidate_mult_by_role`'s static
+    per-role multiplier, computed ONCE here from the INITIAL `combatants` --
+    correct to compute once, not re-checked every turn, since the real -1
+    Atk stage Intimidate applies on switch-in persists even after the
+    holder itself later faints mid-race.
+
+    DRACO METEOR FAMILY (`SELF_HALVING_MOVES`): `half_damage`, a role set
+    that starts empty and is threaded turn-to-turn exactly like
+    `recharging` above -- after each turn, any role whose move this turn
+    was in `SELF_HALVING_MOVES` (read straight off `turn_log`, no extra
+    `_best_turn`/`_resolve_turn` return value needed) is added for every
+    turn AFTER this one (first use still deals full damage, matching the
+    real self-effect's timing).
     """
     hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
     any_enemy_acted = False
     wiped_side, turns_used = None, 0
     full_log = []
     recharging = frozenset()
+    dmg_mult_by_role = _intimidate_mult_by_role(combatants)
+    half_damage = frozenset()
+    # Fake Out / First Impression are only legal the turn a Pokemon is sent
+    # out. Every role starts "fresh"; a role loses freshness the first turn
+    # it's actually OFFERED a real (non-empty) moveset -- not simply
+    # `turn_i == 0`, since `switch_in_search`'s `first_turn_moves_override`
+    # can hand a role an EMPTY list on turn 0 (it hasn't switched in with
+    # anything to choose yet), meaning ITS real first active turn -- and so
+    # its own Fake-Out-legal turn -- is turn_i == 1, not turn_i == 0.
+    still_fresh = set(moves_by_role.keys())
     for turn_i in range(max(1, turns)):
         if (hp["E1"] <= 0 and hp["E2"] <= 0) or (hp["C"] <= 0 and hp["P"] <= 0):
             break
         turn_moves = moves_by_role
         if turn_i == 0 and first_turn_moves_override:
             turn_moves = {**moves_by_role, **first_turn_moves_override}
+        turn_moves = {
+            role: ([m for m in mvs if m.name not in FIRST_TURN_ONLY_MOVES]
+                  if role not in still_fresh else mvs)
+            for role, mvs in turn_moves.items()
+        }
+        for role, mvs in turn_moves.items():
+            if mvs:
+                still_fresh.discard(role)
         protected = ({first_turn_protected_role}
                     if turn_i == 0 and first_turn_protected_role else frozenset())
         tailwind_role_this_turn = (first_turn_tailwind_role
@@ -2190,10 +2434,13 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             combatants, turn_moves, hp, typechart, weather,
             enemy_speed_mult=mult_this_turn, protected_roles=protected,
             recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn,
-            terrain=terrain)
+            terrain=terrain, dmg_mult_by_role=dmg_mult_by_role,
+            half_damage_roles=half_damage)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
+        half_damage |= {role for role, _tgt, h in turn_log
+                        if h.move_name in SELF_HALVING_MOVES}
         if wiped is not None:
             wiped_side = wiped
             break

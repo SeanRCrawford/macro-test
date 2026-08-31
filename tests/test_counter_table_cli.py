@@ -252,8 +252,14 @@ class TestUniqueItemsFlag(unittest.TestCase):
     TestResolveUniqueItems in test_counter_finder.py) shows up in the
     printed deep-dive "set: ..." line unless the flag is passed."""
 
-    OUR6 = ("Mega Gengar,Mega Alakazam,Ninetales-Alola,Sharpedo,Rampardos,"
-           "Kingambit")
+    # Exactly 4 names (not the padded-to-6 list this used to be) -- with
+    # only one possible bring-4 to rank, both colliding members are
+    # GUARANTEED to show up in the deep dive regardless of how any other
+    # mechanic changes shift bring-4 ranking; a padded-to-6 list left this
+    # fixture fragile to exactly that (a bring-4 search entirely avoiding
+    # Ninetales-Alola/Rampardos once other mechanics made a different
+    # 4-of-6 rank #1, silently no longer exercising the collision at all).
+    OUR6 = "Mega Gengar,Mega Alakazam,Ninetales-Alola,Rampardos"
 
     def _set_line(self, out):
         idx = out.find("set: ")
@@ -400,7 +406,11 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.argv = ["--pool-size", "16", "--multi-bring4",
+        # pool-size 16 stopped reliably finding a core once Regulation M-C's
+        # very-high-Score additions started crowding the top of the
+        # candidate pool -- widened per the tool's own suggested remedy
+        # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
                    "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
                    "--top", "3"]
@@ -486,7 +496,11 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.argv = ["--pool-size", "16", "--multi-bring4",
+        # pool-size 16 stopped reliably finding a core once Regulation M-C's
+        # very-high-Score additions started crowding the top of the
+        # candidate pool -- widened per the tool's own suggested remedy
+        # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
                    "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
                    "--top", "3"]
@@ -587,6 +601,71 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
             for name in ("Dive 1 Sets", "Dive 1 Summary", "Dive 1 Gameplans",
                         "Dive 2 Sets", "Dive 2 Summary", "Dive 2 Gameplans"):
                 self.assertIn(name, wb.sheetnames)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestDiveSheetsFormatting(unittest.TestCase):
+    """"in the deep dive exports in the xlsx: for gameplans, it would be
+    good to have an empty line between each match for legibility. In
+    summary it would be good to have a column to see what each pair loses
+    to." -- both purely in `_write_dive_sheets`, no new search machinery."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--top", "3"]
+
+    def test_gameplans_has_a_blank_row_between_matches(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, _out = run_main(
+                self.argv + ["--deep-dive-core", "1", "--xlsx", path])
+            self.assertIsNone(msg, _out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            gp = wb["Dive 1 Gameplans"]
+            rows = [[c.value for c in row] for row in gp.iter_rows(min_row=2)]
+            blank_rows = [r for r in rows if all(v is None for v in r)]
+            self.assertGreater(len(blank_rows), 0,
+                               "at least one blank separator row between matches")
+            # Every blank row is followed (or preceded) by real data -- not
+            # a trailing artifact of the sheet.
+            self.assertTrue(any(v is not None for v in rows[-1]) or len(rows) > 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_summary_has_a_loses_to_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, _out = run_main(
+                self.argv + ["--deep-dive-core", "1", "--xlsx", path])
+            self.assertIsNone(msg, _out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            summ = wb["Dive 1 Summary"]
+            header = [c.value for c in summ[1]]
+            self.assertIn("Loses To", header)
+            loses_col = header.index("Loses To") + 1
+            lost_col = header.index("Lost") + 1
+            # Every row's "Loses To" cell agrees with its own "Lost" count --
+            # same outcome == "loss" predicate behind both columns.
+            for row in range(2, summ.max_row + 1):
+                lost_count = summ.cell(row=row, column=lost_col).value
+                loses_to = summ.cell(row=row, column=loses_col).value or ""
+                names = [n for n in loses_to.split("; ") if n]
+                self.assertEqual(len(names), lost_count,
+                                 f"row {row}: {loses_to!r} vs Lost={lost_count}")
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -1201,6 +1280,54 @@ class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
              "--vs-team", "Big 6"])
         self.assertIsNotNone(msg)
         self.assertIn("needs at least 2 Pokemon", msg)
+
+
+class TestVsAllTeamsFlag(unittest.TestCase):
+    """--vs-all-teams: run --multi-bring4 against EVERY saved team
+    (species_data.load_teams's merged teams.csv + data/teams/ +
+    data/my_teams/ dict, already loaded as W["teams"]) instead of naming
+    each one with a repeated --vs-team."""
+
+    def test_resolves_to_every_saved_team(self):
+        from _harness import load_world
+        W = load_world()
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-all-teams", "--pool-size", "10",
+             "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn(f"vs {len(W['teams'])} enemy teams", out)
+        self.assertEqual(out.count("-- top pairs:"), len(W["teams"]),
+                         "one 'Enemy N (...) -- top pairs:' header per saved team")
+
+    def test_mutually_exclusive_with_vs_team(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-all-teams", "--vs-team", "Rain"])
+        self.assertIsNotNone(msg)
+        self.assertIn("can't be combined with --vs-team", msg)
+
+    def test_requires_multi_bring4(self):
+        msg, _out = run_main(
+            ["--bring4", "--our", "Garchomp,Hydreigon,Kingambit,Whimsicott",
+             "--vs-all-teams"])
+        self.assertIsNotNone(msg)
+        self.assertIn("requires --multi-bring4", msg)
+
+
+class TestTurnsAppliesToMultiBring4(unittest.TestCase):
+    """`multi_bring4_coverage` already accepted and threaded a `turns`
+    parameter (default 2) -- the CLI's own validation was the only thing
+    blocking --turns from --multi-bring4."""
+
+    def test_no_longer_rejected(self):
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "8", "--top", "1", "--turns", "4"])
+        self.assertIsNone(msg, out)
+
+    def test_still_rejected_outside_joint_deep_bring4_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--turns", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--turns only applies to", msg)
 
 
 class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):

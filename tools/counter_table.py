@@ -1222,6 +1222,16 @@ def _write_teamsheets_sheet(wb, entries, merged):
     ws.column_dimensions["E"].width = 45
 
 
+def _loses_to(detail_dicts):
+    """Enemy pairs this pair actually LOSES to, across one or more
+    `pe["detail"]` mappings (`{(e1,e2): d, ...}`) -- the NAMES behind the
+    "Lost" count column, same `outcome == "loss"` predicate, so the two
+    columns always agree on count."""
+    names = [f"{e1} + {e2}" for detail in detail_dicts
+            for (e1, e2), d in detail.items() if d["outcome"] == "loss"]
+    return "; ".join(names)
+
+
 def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosize):
     """One 'Dive {rank} Sets'/'Summary'/'Gameplans' sheet trio per
     `(rank, dive)` in `core_dives` -- `core_deep_dive`'s own return shape,
@@ -1241,28 +1251,34 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
         ws = wb.create_sheet(_safe_sheet_name(f"Dive {rank} Summary"))
         ws.append(["Pair", "Enemy Team", "Beaten", "Total", "Swept", "Traded",
                    "Lost", "No KO", "Tailwind Safe", "Protect Safe",
-                   "Clean Win Total"])
+                   "Clean Win Total", "Loses To"])
         _style_header(ws)
         ov = dive["overall"]
+        all_details = [pe["detail"] for pair in dive["per_pair"].values()
+                       for pe in pair["per_enemy"]]
         ws.append(["OVERALL", "every pair, every enemy",
                    ov["pairs_swept"] + ov["pairs_traded"], ov["pairs_total"],
                    ov["pairs_swept"], ov["pairs_traded"], ov["pairs_lost"],
                    ov["pairs_no_ko"], ov["pairs_tailwind_safe"],
-                   ov["pairs_protect_safe"], round(ov["pairs_clean_win_total"], 1)])
+                   ov["pairs_protect_safe"], round(ov["pairs_clean_win_total"], 1),
+                   _loses_to(all_details)])
         for (n1, n2), pair in dive["per_pair"].items():
             label = f"{n1} + {n2}"
             t = pair["total"]
+            pair_details = [pe["detail"] for pe in pair["per_enemy"]]
             ws.append([label, "all enemies", t["pairs_swept"] + t["pairs_traded"],
                       t["pairs_total"], t["pairs_swept"], t["pairs_traded"],
                       t["pairs_lost"], t["pairs_no_ko"], t["pairs_tailwind_safe"],
-                      t["pairs_protect_safe"], round(t["pairs_clean_win_total"], 1)])
+                      t["pairs_protect_safe"], round(t["pairs_clean_win_total"], 1),
+                      _loses_to(pair_details)])
             for pe in pair["per_enemy"]:
                 s = pe["summary"]
                 ws.append([label, ", ".join(pe["target_names"]),
                           s["pairs_swept"] + s["pairs_traded"], s["pairs_total"],
                           s["pairs_swept"], s["pairs_traded"], s["pairs_lost"],
                           s["pairs_no_ko"], s["pairs_tailwind_safe"],
-                          s["pairs_protect_safe"], round(s["pairs_clean_win_total"], 1)])
+                          s["pairs_protect_safe"], round(s["pairs_clean_win_total"], 1),
+                          _loses_to([pe["detail"]])])
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         _autosize(ws)
@@ -1283,6 +1299,10 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
                                       role_name[role], role_name[tgt_role],
                                       h.move_name or "-", round(h.frac * 100, 1),
                                       h.eff, h.num_targets_hit > 1])
+                    # A blank row between each enemy-pair "match" -- purely
+                    # for legibility once several matches sit one after
+                    # another in the same sheet.
+                    ws.append([])
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         _autosize(ws)
@@ -1581,6 +1601,11 @@ def main():
                          "alternative to spelling the same roster out with "
                          "--vs, e.g. --bring4 --vs-team \"Big 6\" instead of "
                          "--vs \"<Big 6's six names>\"")
+    ap.add_argument("--vs-all-teams", action="store_true",
+                    help="--multi-bring4 only: run against EVERY saved team "
+                         "(data/teams.csv plus any pokepaste in data/teams/ "
+                         "or data/my_teams/) instead of naming each one with "
+                         "--vs-team -- mutually exclusive with --vs-team")
     ap.add_argument("--max-weak", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: hard-drop any candidate CORE "
                          "where more than N of its members are weak to the "
@@ -1811,8 +1836,14 @@ def main():
                          "--bring4, which can use --vs-team instead)")
     if args.multi_bring4 and args.vs:
         raise SystemExit("--multi-bring4 uses --vs-team (repeated), not --vs")
-    if args.multi_bring4 and len(args.vs_team) < 1:
-        raise SystemExit("--multi-bring4 needs at least one --vs-team")
+    if args.vs_all_teams and args.vs_team:
+        raise SystemExit("--vs-all-teams can't be combined with --vs-team -- "
+                         "it already runs against every saved team")
+    if args.vs_all_teams and not args.multi_bring4:
+        raise SystemExit("--vs-all-teams requires --multi-bring4")
+    if args.multi_bring4 and len(args.vs_team) < 1 and not args.vs_all_teams:
+        raise SystemExit("--multi-bring4 needs at least one --vs-team "
+                         "(or --vs-all-teams)")
     if args.bring4:
         if bool(args.vs) == bool(args.vs_team):
             raise SystemExit("--bring4 needs exactly one of --vs "
@@ -1848,8 +1879,9 @@ def main():
         raise SystemExit("--teamsheet-json requires --multi-bring4 or --bring4")
     if args.partner and not args.joint:
         raise SystemExit("--partner requires --joint")
-    if args.turns != 2 and not (args.joint or args.deep or args.bring4):
-        raise SystemExit("--turns only applies to --joint/--deep/--bring4")
+    if args.turns != 2 and not (args.joint or args.deep or args.bring4
+                                or args.multi_bring4):
+        raise SystemExit("--turns only applies to --joint/--deep/--bring4/--multi-bring4")
     if args.deep and not args.our:
         raise SystemExit("--deep requires --our \"Pokemon,Pokemon\"")
     if args.bring4 and not args.our:
@@ -1909,7 +1941,8 @@ def main():
             raise SystemExit(f"unknown Pokemon: {', '.join(unknown_bench)}")
     vs_teams = []
     if args.multi_bring4:
-        for raw in args.vs_team:
+        vs_team_names = list(W["teams"]) if args.vs_all_teams else args.vs_team
+        for raw in vs_team_names:
             vs_teams.append(_resolve_vs_team(raw, W["teams"], merged))
         if args.min_enemies == 2 and len(vs_teams) < 2:
             # Still at the untouched default -- auto-clamp rather than make

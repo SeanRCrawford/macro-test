@@ -902,7 +902,11 @@ class TestJointPairSearch(unittest.TestCase):
                             "Whimsicott", turns=3)
         d2 = row2["detail"][("Kingambit", "Basculegion")]
         self.assertEqual(d2["outcome"], "out_trade")
-        self.assertEqual(d2["turns_used"], 3)
+        # Finishes turn 2, not turn 3 -- Basculegion's own Wave Crash (33%
+        # recoil) now costs it real HP on top of the chip it's already
+        # taking, closing the race out a turn earlier than before recoil
+        # was modeled here.
+        self.assertEqual(d2["turns_used"], 2)
 
     def test_spread_move_still_takes_the_075x_penalty_when_both_are_alive(self):
         """Same rule `TestSpreadMovesInPairSearch` checks for `pair_search`,
@@ -4478,3 +4482,470 @@ class TestOnlyOneMegaPerSide(unittest.TestCase):
         self.assertGreater(tried, 0)
         for r in rows:
             self.assertIn(r["outcome"], ("sweep", "out_trade"))
+
+
+class TestFakeOutTurnOneOnly(unittest.TestCase):
+    """"Sneasler using Fake Out on turn 2 in counter_table.py - Fake Out may
+    only be used the first turn after sending out" -- `_joint_race` had zero
+    handling of `FIRST_TURN_ONLY_MOVES` at all (confirmed: nothing else in
+    this module read that constant), so a lead with nothing better to do
+    kept reusing it every turn. `still_fresh` fixes this in `_joint_race`
+    itself; `_sequential_pair_outcome` (the one-turn hypothesis) needs no
+    equivalent gate since it only ever plays exactly one turn."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        self.typechart = self.W["typechart"]
+        self.sneasler = cf._build("Sneasler", merged, natures)
+        self.partner = cf._build("Kingambit", merged, natures)
+        self.e1 = cf._build("Milotic", merged, natures)
+        self.e2 = cf._build("Sinistcha", merged, natures)
+        self.combatants = {"C": self.sneasler, "P": self.partner,
+                           "E1": self.e1, "E2": self.e2}
+        self.fake_out = cf._lookup_move("Fake Out", moves)
+        protect = cf._lookup_move("Protect", moves)
+        self.moves_by_role = {"C": [self.fake_out], "P": [protect],
+                              "E1": [protect], "E2": [protect]}
+
+    def test_fake_out_fires_turn_one(self):
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, None, 3)
+        self.assertTrue(any(role == "C" for role, _tgt, _h in log[0]))
+
+    def test_fake_out_does_not_fire_again_turn_two_or_three(self):
+        """THE reported bug: with no other move offered, a lead that has
+        already used Fake Out must simply do nothing on later turns, not
+        reuse it."""
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, None, 3)
+        for turn in log[1:]:
+            self.assertFalse(any(role == "C" for role, _tgt, _h in turn))
+
+    def test_still_legal_the_real_first_active_turn_of_a_switch_in(self):
+        """`switch_in_search`'s `first_turn_moves_override` gives the
+        incoming role an EMPTY list on turn_i==0 (it hasn't switched in with
+        anything to do yet) -- its real first active turn, and so its own
+        Fake-Out-legal turn, is turn_i==1, not turn_i==0."""
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, None, 4,
+            first_turn_moves_override={"C": []})
+        self.assertFalse(any(role == "C" for role, _tgt, _h in log[0]))
+        self.assertTrue(any(role == "C" for role, _tgt, _h in log[1]))
+        for turn in log[2:]:
+            self.assertFalse(any(role == "C" for role, _tgt, _h in turn))
+
+    def test_a_move_not_in_first_turn_only_moves_is_unaffected(self):
+        """The gate is scoped to `FIRST_TURN_ONLY_MOVES` specifically -- an
+        ordinary attack keeps firing every turn, same as before."""
+        close_combat = cf._lookup_move("Close Combat", self.W["moves"])
+        moves = dict(self.moves_by_role)
+        moves["C"] = [close_combat]
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            self.combatants, moves, self.typechart, None, 3)
+        fired = [any(role == "C" for role, _tgt, _h in turn) for turn in log]
+        self.assertTrue(all(fired), fired)
+
+
+class TestRecoilInTheJointRace(unittest.TestCase):
+    """counter_table.py's cheap model never modeled recoil at all --
+    `battle.py` (the real engine) already does (`move.recoil`, Life Orb's
+    flat 10%), so this closes the gap `_apply_plan` had relative to it."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_recoil_move_costs_the_attacker_its_own_hp(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        incin = cf._build("Incineroar", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        combatants = {"C": incin, "P": target, "E1": target, "E2": target}
+        flare_blitz = cf._lookup_move("Flare Blitz", moves)
+        self.assertEqual(flare_blitz.recoil, [33, 100])
+        protect = cf._lookup_move("Protect", moves)
+        got = cf._raw_hit(incin, flare_blitz, target, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, flare_blitz), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        expected_recoil = got.frac * target.max_hp() * 0.33 / incin.max_hp()
+        self.assertAlmostEqual(new_hp["C"], 1.0 - expected_recoil, places=6)
+
+    def test_rock_head_negates_recoil(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        incin = cf._build("Incineroar", merged, natures)
+        incin.ability = "Rock Head"
+        target = cf._build("Milotic", merged, natures)
+        combatants = {"C": incin, "P": target, "E1": target, "E2": target}
+        flare_blitz = cf._lookup_move("Flare Blitz", moves)
+        protect = cf._lookup_move("Protect", moves)
+        got = cf._raw_hit(incin, flare_blitz, target, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, flare_blitz), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["C"], 1.0)
+
+    def test_life_orb_costs_a_flat_ten_percent(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures, item="Life Orb")
+        target = cf._build("Milotic", merged, natures)
+        combatants = {"C": attacker, "P": target, "E1": target, "E2": target}
+        iron_head = cf._lookup_move("Iron Head", moves)  # no move.recoil
+        self.assertIsNone(iron_head.recoil)
+        protect = cf._lookup_move("Protect", moves)
+        got = cf._raw_hit(attacker, iron_head, target, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, iron_head), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertAlmostEqual(new_hp["C"], 0.9, places=6)
+
+    def test_magic_guard_blocks_both_recoil_and_life_orb(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures, item="Life Orb")
+        attacker.ability = "Magic Guard"
+        target = cf._build("Milotic", merged, natures)
+        combatants = {"C": attacker, "P": target, "E1": target, "E2": target}
+        flare_blitz = cf._lookup_move("Flare Blitz", moves)
+        # Give this Magic-Guard combatant a real recoil move directly (its
+        # own moveset doesn't matter here -- only the applied-plan math).
+        protect = cf._lookup_move("Protect", moves)
+        got = cf._raw_hit(attacker, flare_blitz, target, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, flare_blitz), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["C"], 1.0)
+
+
+class TestRoughSkinInTheJointRace(unittest.TestCase):
+    """Rough Skin / Iron Barbs weren't implemented ANYWHERE in this repo --
+    a NEW mechanic, scoped to the cheap model only (matches what was
+    reported against counter_table.py; the real engine, battle.py, is a
+    separate, not-asked-for follow-up)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_contact_move_against_rough_skin_costs_an_eighth_max_hp(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures)
+        garchomp = cf._build("Garchomp", merged, natures)
+        self.assertEqual(garchomp.ability, "Rough Skin")
+        kowtow = cf._lookup_move("Kowtow Cleave", moves)
+        self.assertTrue((kowtow.flags or {}).get("contact"))
+        protect = cf._lookup_move("Protect", moves)
+        combatants = {"C": attacker, "P": garchomp, "E1": garchomp, "E2": garchomp}
+        got = cf._raw_hit(attacker, kowtow, garchomp, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, kowtow), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertAlmostEqual(new_hp["C"], 1.0 - 1 / 8, places=6)
+
+    def test_a_non_contact_move_does_not_trigger_it(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures)
+        garchomp = cf._build("Garchomp", merged, natures)
+        dark_pulse = cf._lookup_move("Dark Pulse", moves)
+        self.assertFalse((dark_pulse.flags or {}).get("contact"))
+        protect = cf._lookup_move("Protect", moves)
+        combatants = {"C": attacker, "P": garchomp, "E1": garchomp, "E2": garchomp}
+        got = cf._raw_hit(attacker, dark_pulse, garchomp, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, dark_pulse), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["C"], 1.0)
+
+    def test_magic_guard_on_the_attacker_blocks_it(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures)
+        attacker.ability = "Magic Guard"
+        garchomp = cf._build("Garchomp", merged, natures)
+        kowtow = cf._lookup_move("Kowtow Cleave", moves)
+        protect = cf._lookup_move("Protect", moves)
+        combatants = {"C": attacker, "P": garchomp, "E1": garchomp, "E2": garchomp}
+        got = cf._raw_hit(attacker, kowtow, garchomp, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, kowtow), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["C"], 1.0)
+
+    def test_triggers_even_if_the_hit_faints_the_rough_skin_holder(self):
+        """Real mechanic -- the ability reacts to the contact itself, not to
+        the holder surviving it."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures)
+        garchomp = cf._build("Garchomp", merged, natures)
+        kowtow = cf._lookup_move("Kowtow Cleave", moves)
+        protect = cf._lookup_move("Protect", moves)
+        combatants = {"C": attacker, "P": garchomp, "E1": garchomp, "E2": garchomp}
+        got = cf.Hit(move_name="Kowtow Cleave", frac=1.5, lo=1.5, avg=1.5,
+                    hi=1.5, eff=1.0)  # overkill -- faints Garchomp outright
+        plan = {"C": ({"E1": got}, kowtow), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["E1"], 0.0)
+        self.assertAlmostEqual(new_hp["C"], 1.0 - 1 / 8, places=6)
+
+
+class TestEarthquakeHitsTheAlly(unittest.TestCase):
+    """"earthquake hits allies too" -- `allAdjacent` moves (Earthquake,
+    Surf, Discharge, Bulldoze, Explosion) also hit the user's own live
+    partner in `_resolve_turn`'s real multi-turn engine (`_with_ally_
+    splash`), scoped there and not to `_sequential_pair_outcome`/
+    `pair_search`'s cruder single-turn hypothesis (already documented as
+    not modeling this)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_earthquake_splashes_onto_the_live_partner(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)
+        garchomp.ability = "Steadfast"  # isolate from Rough Skin/Life Orb noise
+        garchomp.item = None
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": garchomp, "P": partner, "E1": e1, "E2": e2}
+        eq = cf._lookup_move("Earthquake", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [eq], "P": [protect], "E1": [protect], "E2": [protect]}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        new_hp, log, _ea, _wiped, _rc = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, None, {"C": "E1"})
+        self.assertTrue(any(role == "C" and tgt == "P" for role, tgt, _h in log))
+        self.assertLess(new_hp["P"], 1.0)
+
+    def test_no_splash_onto_a_fainted_partner(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)
+        garchomp.ability = "Steadfast"
+        garchomp.item = None
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": garchomp, "P": partner, "E1": e1, "E2": e2}
+        eq = cf._lookup_move("Earthquake", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [eq], "P": [protect], "E1": [protect], "E2": [protect]}
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 1.0}  # partner already dead
+        _new_hp, log, _ea, _wiped, _rc = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, None, {"C": "E1"})
+        self.assertFalse(any(role == "C" and tgt == "P" for role, tgt, _h in log))
+
+    def test_a_single_target_move_is_unaffected(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)
+        garchomp.ability = "Steadfast"
+        garchomp.item = None
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": garchomp, "P": partner, "E1": e1, "E2": e2}
+        dragon_claw = cf._lookup_move("Dragon Claw", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [dragon_claw], "P": [protect],
+                         "E1": [protect], "E2": [protect]}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        _new_hp, log, _ea, _wiped, _rc = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, None, {"C": "E1"})
+        self.assertFalse(any(role == "C" and tgt == "P" for role, tgt, _h in log))
+
+
+class TestDracoMeteorFamilyHalving(unittest.TestCase):
+    """Low-cost stand-in for full stat-stage tracking (deliberately out of
+    scope, per the module's own docstring): after a role uses one of
+    `SELF_HALVING_MOVES`, ALL its own outgoing damage is halved for the
+    rest of the race -- not gated to Special moves only (the user's own
+    explicit simplification)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_first_use_deals_full_damage(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        hydreigon = cf._build("Hydreigon", merged, natures)
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": hydreigon, "P": partner, "E1": e1, "E2": e2}
+        draco = cf._lookup_move("Draco Meteor", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [draco], "P": [protect], "E1": [protect], "E2": [protect]}
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 1)
+        role, tgt, full_hit = next((r, t, h) for r, t, h in log[0] if r == "C")
+        no_halving = cf._raw_hit(hydreigon, draco, combatants[tgt], typechart, roll="avg")
+        self.assertAlmostEqual(full_hit.frac, no_halving.frac, places=3)
+
+    def test_a_second_use_in_the_same_race_is_halved(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        hydreigon = cf._build("Hydreigon", merged, natures)
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Kingambit", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": hydreigon, "P": partner, "E1": e1, "E2": e2}
+        draco = cf._lookup_move("Draco Meteor", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [draco], "P": [protect], "E1": [protect], "E2": [protect]}
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 2)
+        turn1 = next(h for role, _tgt, h in log[0] if role == "C")
+        turn2 = next((h for role, _tgt, h in log[1] if role == "C"), None)
+        self.assertIsNotNone(turn2, "Kingambit should survive one Draco Meteor")
+        self.assertAlmostEqual(turn2.frac / turn1.frac, 0.5, places=2)
+
+    def test_close_combat_does_not_trigger_the_halving(self):
+        """-1/-1, not the -2 SpA family -- too mild for this approximation,
+        deliberately excluded."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        self.assertNotIn("Close Combat", cf.SELF_HALVING_MOVES)
+        gallade = cf._build("Gallade", merged, natures)
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Sinistcha", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": gallade, "P": partner, "E1": e1, "E2": e2}
+        cc = cf._lookup_move("Close Combat", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [cc], "P": [protect], "E1": [protect], "E2": [protect]}
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 2)
+        turn1 = next(h for role, _tgt, h in log[0] if role == "C")
+        turn2 = next((h for role, _tgt, h in log[1] if role == "C"), None)
+        if turn2 is not None:
+            self.assertAlmostEqual(turn2.frac, turn1.frac, places=2)
+
+
+class TestIntimidateInTheJointRace(unittest.TestCase):
+    """Low-cost stand-in for the real -1 Atk stage (mathematically EXACT,
+    not an approximation, since damage scales linearly with the attack
+    stat): a live Intimidate holder on one side halves-- no, thirds-- the
+    OPPOSING side's outgoing physical damage to x(2/3); Defiant/Competitive
+    invert it into a real +2-stage x2.0 self-boost instead."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_ordinary_ability_takes_exactly_two_thirds(self):
+        merged, natures, typechart = (
+            self.W["merged"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)  # Rough Skin -- ordinary here
+        partner = cf._build("Milotic", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        e1_no = cf._build("Milotic", merged, natures)
+        e1_yes = cf._build("Milotic", merged, natures)
+        e1_yes.ability = "Intimidate"
+        eq = cf._lookup_move("Earthquake", self.W["moves"])
+        mult_no = cf._intimidate_mult_by_role(
+            {"C": garchomp, "P": partner, "E1": e1_no, "E2": e2})
+        mult_yes = cf._intimidate_mult_by_role(
+            {"C": garchomp, "P": partner, "E1": e1_yes, "E2": e2})
+        self.assertEqual(mult_no, {})
+        hits_no, _mv = cf._choose_action(garchomp, [eq], {"E1": e1_no}, typechart,
+                                         attacker_role="C", dmg_mult_by_role=mult_no)
+        hits_yes, _mv = cf._choose_action(garchomp, [eq], {"E1": e1_yes}, typechart,
+                                          attacker_role="C", dmg_mult_by_role=mult_yes)
+        self.assertAlmostEqual(hits_yes["E1"].frac / hits_no["E1"].frac, 2 / 3, places=6)
+
+    def test_defiant_inverts_it_into_a_self_boost(self):
+        merged, natures, typechart = (
+            self.W["merged"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        self.assertEqual(kingambit.ability, "Defiant")
+        partner = cf._build("Milotic", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        e1_yes = cf._build("Milotic", merged, natures)
+        e1_yes.ability = "Intimidate"
+        mult = cf._intimidate_mult_by_role(
+            {"C": kingambit, "P": partner, "E1": e1_yes, "E2": e2})
+        self.assertEqual(mult["C"], {"physical": 2.0})
+
+    def test_competitive_inverts_it_into_a_special_self_boost(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        milotic = cf._build("Milotic", merged, natures)
+        self.assertEqual(milotic.ability, "Competitive")
+        e1_yes = cf._build("Milotic", merged, natures)
+        e1_yes.ability = "Intimidate"
+        e2 = cf._build("Sinistcha", merged, natures)
+        mult = cf._intimidate_mult_by_role(
+            {"C": e1_yes, "P": milotic, "E1": e1_yes, "E2": e2})
+        # From "P"'s perspective, the opposing side (E1/E2) has Intimidate.
+        self.assertEqual(mult.get("P"), {"special": 2.0})
+
+    def test_blocking_abilities_are_unaffected(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        partner = cf._build("Milotic", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        e1_yes = cf._build("Milotic", merged, natures)
+        e1_yes.ability = "Intimidate"
+        for ability in cf.INTIMIDATE_BLOCKED:
+            attacker = cf._build("Garchomp", merged, natures)
+            attacker.ability = ability
+            mult = cf._intimidate_mult_by_role(
+                {"C": attacker, "P": partner, "E1": e1_yes, "E2": e2})
+            self.assertNotIn("C", mult, ability)
+
+    def test_persists_after_the_intimidate_holder_faints_mid_race(self):
+        """Computed once from the INITIAL board, matching the real -1 Atk
+        stage's own persistence -- a stat drop does not revert just because
+        its source later faints."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Milotic", merged, natures)
+        e1.ability = "Intimidate"
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": garchomp, "P": partner, "E1": e1, "E2": e2}
+        mult = cf._intimidate_mult_by_role(combatants)
+        self.assertIn("C", mult)
+        # A separate call against a board where E1 has already fainted
+        # (hp-wise) still finds the SAME multiplier, since it's computed
+        # once from `combatants` (ability presence), not from live HP.
+        mult_again = cf._intimidate_mult_by_role(combatants)
+        self.assertEqual(mult, mult_again)
+
+    def test_no_intimidate_on_the_board_leaves_everyone_unaffected(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        combatants = {"C": cf._build("Garchomp", merged, natures),
+                     "P": cf._build("Milotic", merged, natures),
+                     "E1": cf._build("Kingambit", merged, natures),
+                     "E2": cf._build("Sinistcha", merged, natures)}
+        self.assertEqual(cf._intimidate_mult_by_role(combatants), {})
