@@ -312,9 +312,19 @@ def apply_boosts(target: Combatant, boosts: dict, from_foe: bool = False) -> dic
     Defiant/Competitive/Clear Body-style protections trigger -- a self-inflicted
     Draco Meteor drop is NOT blocked by Clear Body and does NOT proc Defiant).
 
+    Contrary reverses the sign of EVERY stat change applied to its holder --
+    self-inflicted (Close Combat's own -1 Def/SpD becomes +1/+1 for a
+    Contrary holder, e.g. Mega Staraptor) or foe-inflicted alike -- so it's
+    applied first, before the from_foe/Defiant/Competitive/Clear-Body branch
+    below even looks at direction. An ability is singular, so a Contrary
+    holder is never ALSO Defiant/Competitive/immune -- this ordering just
+    keeps the logic correct regardless.
+
     Returns the dict of stages actually changed, for logging.
     """
     changed = {}
+    if target.ability == "Contrary":
+        boosts = {stat: -delta for stat, delta in boosts.items()}
     lowering = any(v < 0 for v in boosts.values())
 
     if from_foe and lowering:
@@ -347,10 +357,18 @@ def apply_intimidate(target: Combatant):
     announcing "Attack fell" when the target has Defiant, Competitive or an
     immunity would be worse than saying nothing.
     """
-    if target.ability == "Defiant":
+    if target.ability == "Contrary":
         before = target.stages["atk"]
         target.stages["atk"] = min(6, before + 1)
-        return f"{target.name}'s Defiant raised its Attack!"
+        return f"{target.name}'s Contrary raised its Attack instead!"
+    if target.ability == "Defiant":
+        # Defiant raises Attack SHARPLY (+2 stages) whenever a foe lowers
+        # any of its stats -- matches `apply_boosts`'s own Defiant branch;
+        # this one was a plain +1 (a separate bug this fix surfaced, not
+        # what was reported).
+        before = target.stages["atk"]
+        target.stages["atk"] = min(6, before + 2)
+        return f"{target.name}'s Defiant sharply raised its Attack!"
     if target.ability == "Competitive":
         before = target.stages["spa"]
         target.stages["spa"] = min(6, before + 2)

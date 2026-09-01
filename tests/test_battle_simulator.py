@@ -633,5 +633,67 @@ def seed_movesets(name):
     return build_moveset(W["merged"][name], W["moves"], top_k=TOP_K_MOVES)
 
 
+class TestResetBattle(unittest.TestCase):
+    """"an option to just reset a battle in the battle simulator and go
+    back to the selection screen" -- a button on the in-progress view that
+    clears every `sim_*` piece of battle state, so the SAME `if st.session_
+    state.get("sim_battle") is None:` check that shows the setup widgets on
+    a fresh load shows them again."""
+
+    def test_reset_button_is_present_once_a_battle_is_running(self):
+        at = fresh_app()
+        at = seed_battle(at, ["Garchomp", "Hydreigon"], ["Kingambit", "Whimsicott"])
+        tab = sim_tab(at)
+        labels = {b.label for b in tab.button}
+        self.assertIn("🔄 Reset battle (back to team selection)", labels)
+
+    def test_clicking_it_returns_to_the_setup_screen(self):
+        at = fresh_app()
+        at = seed_battle(at, ["Garchomp", "Hydreigon"], ["Kingambit", "Whimsicott"])
+        self.assertIn("sim_battle", at.session_state)
+        tab = sim_tab(at)
+        reset = next(b for b in tab.button
+                    if b.label == "🔄 Reset battle (back to team selection)")
+        at = reset.click().run()
+        self.assertEqual(len(at.exception), 0)
+        self.assertNotIn("sim_battle", at.session_state)
+        tab = sim_tab(at)
+        labels = {r.label for r in tab.radio}
+        self.assertIn("Their bring", labels, "setup widgets are showing again")
+
+    def test_clicking_it_clears_every_battle_state_key(self):
+        """Not just `sim_battle` -- a stale `sim_pending_turn`/`sim_leads`/
+        etc. left behind would corrupt the NEXT battle started from the
+        setup screen."""
+        at = fresh_app()
+        at = seed_battle(at, ["Garchomp", "Hydreigon"], ["Kingambit", "Whimsicott"])
+        at.session_state["sim_pending_turn"] = {"fake": "state"}
+        at.session_state["sim_leads"] = [("margin", ["a"], ["b"])]
+        at.session_state["sim_lead_idx"] = 3
+        at = at.run()
+        tab = sim_tab(at)
+        reset = next(b for b in tab.button
+                    if b.label == "🔄 Reset battle (back to team selection)")
+        at = reset.click().run()
+        for key in ("sim_battle", "sim_movesets", "sim_our4", "sim_our_sets",
+                   "sim_our_mega", "sim_their4", "sim_mode", "sim_turn_log",
+                   "sim_leads", "sim_lead_idx", "sim_pending_turn"):
+            self.assertNotIn(key, at.session_state, key)
+
+    def test_a_fresh_battle_can_be_started_after_a_reset(self):
+        """The reset must not just clear state but leave the setup screen
+        actually usable -- not stuck disabled on stale widget defaults."""
+        at = fresh_app()
+        at = seed_battle(at, ["Garchomp", "Hydreigon"], ["Kingambit", "Whimsicott"])
+        tab = sim_tab(at)
+        reset = next(b for b in tab.button
+                    if b.label == "🔄 Reset battle (back to team selection)")
+        at = reset.click().run()
+        at = seed_battle(at, ["Whimsicott", "Sinistcha"], ["Milotic", "Kingambit"])
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        self.assertEqual({c.name for c in battle.p1.active}, {"Whimsicott", "Sinistcha"})
+
+
 if __name__ == "__main__":
     unittest.main()

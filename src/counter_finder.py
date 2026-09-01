@@ -912,7 +912,9 @@ def _intimidate_mult_by_role(combatants):
     mathematically EXACT for this, not an approximation. `INTIMIDATE_
     BLOCKED` abilities are unaffected; Defiant/Competitive invert it into a
     real +2 stage (x2.0) SELF-boost on the matching damage category instead
-    of a drop -- also exact, not approximated.
+    of a drop -- also exact, not approximated. Contrary reverses the SAME
+    -1 magnitude into a +1 (x1.5), not a +2 -- it flips direction, not size
+    (mirrors `damage.apply_intimidate`'s own Contrary branch).
 
     A role with no entry here means "unaffected" (multiplier 1.0), matching
     every other optional per-role map in this module's convention.
@@ -930,6 +932,8 @@ def _intimidate_mult_by_role(combatants):
             out[role] = {"physical": 2.0}
         elif c.ability == "Competitive":
             out[role] = {"special": 2.0}
+        elif c.ability == "Contrary":
+            out[role] = {"physical": 1.5}
         else:
             out[role] = {"physical": 2 / 3}
     return out

@@ -5125,6 +5125,13 @@ with tab_sim:
         battle = st.session_state["sim_battle"]
         movesets = st.session_state["sim_movesets"]
 
+        if st.button("🔄 Reset battle (back to team selection)"):
+            for key in ("sim_battle", "sim_movesets", "sim_our4", "sim_our_sets",
+                       "sim_our_mega", "sim_their4", "sim_mode", "sim_turn_log",
+                       "sim_leads", "sim_lead_idx", "sim_pending_turn"):
+                st.session_state.pop(key, None)
+            st.rerun()
+
         def _sim_mon_line(c):
             hp = c.current_hp / c.max_hp() if c.max_hp() else 0.0
             tag = "FAINTED" if c.fainted else f"{hp * 100:.0f}% HP"
