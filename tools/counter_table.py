@@ -1606,6 +1606,17 @@ def main():
                          "(data/teams.csv plus any pokepaste in data/teams/ "
                          "or data/my_teams/) instead of naming each one with "
                          "--vs-team -- mutually exclusive with --vs-team")
+    ap.add_argument("--jobs", type=int, default=1, metavar="N",
+                    help="--multi-bring4 only: search N enemy rosters in "
+                         "parallel worker processes instead of one after "
+                         "another (0 = one per CPU core). Each worker loads "
+                         "the dataset once (~14s) and reuses it, so this is "
+                         "close to a linear speedup on a run with several "
+                         "--vs-team entries or --vs-all-teams -- no effect "
+                         "with only one enemy roster (nothing to split "
+                         "across workers). Memory is the limit, not CPU: "
+                         "budget roughly 1GB per worker, same as "
+                         "search_teams.py's --jobs.")
     ap.add_argument("--max-weak", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: hard-drop any candidate CORE "
                          "where more than N of its members are weak to the "
@@ -1873,6 +1884,8 @@ def main():
         raise SystemExit("--strict-weak-types only applies to --multi-bring4")
     if args.core_sizes != "4,5,6" and not args.multi_bring4:
         raise SystemExit("--core-sizes only applies to --multi-bring4")
+    if args.jobs != 1 and not args.multi_bring4:
+        raise SystemExit("--jobs only applies to --multi-bring4")
     if args.unique_items and not (args.multi_bring4 or args.bring4):
         raise SystemExit("--unique-items only applies to --bring4/--multi-bring4")
     if args.teamsheet_json and not (args.multi_bring4 or args.bring4):
@@ -1951,6 +1964,7 @@ def main():
         if not (1 <= args.min_enemies <= len(vs_teams)):
             raise SystemExit(f"--min-enemies must be between 1 and the "
                              f"number of --vs-team entries ({len(vs_teams)})")
+        args.jobs, _jobs_warning = blas_limits.workers_advice(args.jobs)
     # --deep/--bring4 alone need no pool at all (a fixed pair/six); --switches
     # needs one UNLESS --bench already named the exact candidates to try.
     pool = (_pool(args, merged)
@@ -1995,7 +2009,12 @@ def main():
         print(f"Bring-4 search: {' / '.join(our6)} vs {', '.join(targets)}\n")
     elif args.multi_bring4:
         print(f"Multi-bring4 search: {len(pool)} Pokemon vs "
-             f"{len(vs_teams)} enemy teams\n")
+             f"{len(vs_teams)} enemy teams")
+        if args.jobs > 1 and len(vs_teams) > 1:
+            print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
+            if _jobs_warning:
+                print(f"WARNING  : {_jobs_warning}")
+        print()
     else:
         print(f"Searching {len(pool)} Pokemon vs {', '.join(targets)}\n")
 
@@ -2086,7 +2105,8 @@ def main():
             pool, vs_teams, merged, moves, natures, typechart,
             turns=args.turns, good_threshold=good_threshold,
             min_enemies=args.min_enemies, item_overrides=item_overrides,
-            move_overrides=move_overrides, excluded_items=excluded_items)
+            move_overrides=move_overrides, excluded_items=excluded_items,
+            jobs=args.jobs)
         print(f"Candidate pool (appears in a good pair for >= "
              f"{args.min_enemies} of {len(vs_teams)} enemies): "
              f"{len(coverage['candidate_pool'])} of {len(pool)}\n")

@@ -1330,6 +1330,63 @@ class TestTurnsAppliesToMultiBring4(unittest.TestCase):
         self.assertIn("--turns only applies to", msg)
 
 
+class TestJobsAppliesToMultiBring4(unittest.TestCase):
+    """"Is there a way to optionally devote more resources to
+    counter_table.py for parallel calculations, such as with the --jobs
+    argument in [generate_]overnight?" -- --jobs mirrors search_teams.py's
+    own flag: N enemy rosters' pool-wide pair searches run in parallel
+    worker processes instead of one after another. Only meaningful for
+    --multi-bring4, since that's the only mode with more than one such
+    independent search to split across workers."""
+
+    def test_still_rejected_outside_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--jobs", "2"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--jobs only applies to --multi-bring4", msg)
+
+    def test_jobs_1_explicit_on_multi_bring4_still_works(self):
+        """--jobs defaults to 1 -- passing it explicitly on --multi-bring4
+        must behave exactly like the default (serial, no process pool)."""
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "8", "--top", "1", "--no-prompt", "--jobs", "1"])
+        self.assertIsNone(msg, out)
+
+    def test_a_multi_bring4_run_with_jobs_2_produces_the_same_result_as_serial(self):
+        """Parallelism is purely a speed knob -- everything but the extra
+        "workers" progress line (only --jobs > 1 prints that) must match."""
+        args = ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                "--vs-team", "Garchomp,Incineroar", "--pool-size", "8",
+                "--top", "3", "--no-prompt"]
+        msg_serial, out_serial = run_main(args)
+        msg_parallel, out_parallel = run_main(args + ["--jobs", "2"])
+        self.assertIsNone(msg_serial, out_serial)
+        self.assertIsNone(msg_parallel, out_parallel)
+        strip_workers = lambda s: "\n".join(   # noqa: E731
+            l for l in s.splitlines() if not l.startswith("workers  :")
+            and not l.startswith("WARNING  :"))
+        self.assertEqual(strip_workers(out_serial), strip_workers(out_parallel))
+
+    def test_jobs_2_prints_a_workers_line(self):
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--vs-team", "Garchomp,Incineroar", "--pool-size", "8",
+             "--top", "1", "--no-prompt", "--jobs", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("workers  : 2 of", out)
+
+    def test_jobs_2_with_only_one_vs_team_prints_no_workers_line(self):
+        """Nothing to split across workers with a single enemy roster --
+        the CLI's own "> 1 enemy" guard (mirrors multi_bring4_coverage's
+        own len(target_name_lists) > 1 fallback) keeps the workers line
+        from claiming parallelism that never actually ran."""
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "8", "--top", "1", "--no-prompt", "--jobs", "2"])
+        self.assertIsNone(msg, out)
+        self.assertNotIn("workers  :", out)
+
+
 class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
     """"I need a way, both in the counter_table.py and the streamlit app, to
     run a bring4 (4-6) vs only ONE named TEAM (--vs-team)" -- --bring4 now

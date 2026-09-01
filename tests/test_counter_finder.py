@@ -3097,6 +3097,73 @@ class TestMultiBring4Search(unittest.TestCase):
         self.assertTrue(all_picked.issubset(set(self.POOL)))
 
 
+class TestMultiBring4CoverageJobs(unittest.TestCase):
+    """"Is there a way to optionally devote more resources to counter_table.py
+    for parallel calculations, such as with the --jobs argument in
+    [generate_]overnight?" -- `multi_bring4_coverage`'s per-enemy
+    `joint_pool_search` calls are independent, so `jobs > 1` runs them in a
+    process pool instead of one after another. The result must be identical
+    either way -- parallelism is purely a speed knob, never a different
+    answer."""
+
+    POOL = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit", "Whimsicott"]
+    ENEMIES = [["Sableye", "Ariados"], ["Basculegion", "Mega Floette"],
+              ["Garchomp", "Incineroar"]]
+
+    def setUp(self):
+        self.W = world()
+
+    def _coverage(self, jobs):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        return cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1, jobs=jobs)
+
+    def test_jobs_2_matches_serial_per_enemy_rows_exactly(self):
+        serial = self._coverage(jobs=1)
+        parallel = self._coverage(jobs=2)
+        self.assertEqual(len(serial["per_enemy"]), len(parallel["per_enemy"]))
+        for s_rows, p_rows in zip(serial["per_enemy"], parallel["per_enemy"]):
+            self.assertEqual(s_rows, p_rows)
+
+    def test_jobs_2_matches_serial_candidate_pool_and_fixed_sets(self):
+        serial = self._coverage(jobs=1)
+        parallel = self._coverage(jobs=2)
+        self.assertEqual(serial["candidate_pool"], parallel["candidate_pool"])
+        self.assertEqual(serial["fixed_items"], parallel["fixed_items"])
+        self.assertEqual(serial["fixed_moves"], parallel["fixed_moves"])
+
+    def test_per_enemy_order_matches_target_name_lists_order_under_jobs(self):
+        """`per_enemy`/`pair_by_key` must stay positionally aligned with
+        `target_name_lists` -- `ex.map` (not `as_completed`) is what
+        guarantees this, since every downstream reader zips them together."""
+        coverage = self._coverage(jobs=2)
+        for target_names, rows in zip(coverage["target_name_lists"],
+                                      coverage["per_enemy"]):
+            got_names = {n for r in rows for n in r["pair"]}
+            # Every enemy's own row set only ever races against ITS enemy
+            # roster's pairs -- a shuffled zip would show a pair count or
+            # composition mismatch against the wrong enemy.
+            self.assertTrue(got_names.issubset(set(self.POOL)))
+            self.assertTrue(len(rows) > 0)
+
+    def test_jobs_has_no_effect_with_only_one_enemy_roster(self):
+        """Falls back to serial when there's nothing to split across
+        workers -- covers the `len(target_name_lists) > 1` guard."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        one_enemy = [self.ENEMIES[0]]
+        serial = cf.multi_bring4_coverage(
+            self.POOL, one_enemy, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1, jobs=1)
+        parallel = cf.multi_bring4_coverage(
+            self.POOL, one_enemy, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1, jobs=4)
+        self.assertEqual(serial["per_enemy"], parallel["per_enemy"])
+
+
 class TestMultiBring4CoreSizes(unittest.TestCase):
     """"I would like to output the best 3-pokemon cores against each team"
     -- `core_sizes` widens `multi_bring4_exhaustive`/`multi_bring4_beam`

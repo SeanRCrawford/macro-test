@@ -3363,10 +3363,46 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
            "unused": tuple(sorted(set(core) - used))}
 
 
+# `multi_bring4_coverage`'s per-enemy `joint_pool_search` calls are fully
+# independent (same `pool`/`fixed_items`/`fixed_moves` read, nothing written
+# back and forth) -- a `--jobs` process pool, same shape as
+# `roster_rating.rate_many`'s own worker_init/_WORKER_WORLD pair. Each worker
+# builds its OWN copy of the dataset once (~14s) and reuses it for every
+# enemy roster handed to it, rather than paying that cost per task or
+# pickling the (large) merged/moves/natures/typechart objects through
+# ProcessPoolExecutor on every submit.
+_WORKER_WORLD = None
+
+
+def _multi_bring4_worker_init():
+    """Build this worker's dataset once, not once per enemy roster."""
+    global _WORKER_WORLD
+    from species_data import build_merged_dataset
+    merged, _usage, moves, natures, typechart = build_merged_dataset()
+    _WORKER_WORLD = {"merged": merged, "moves": moves, "natures": natures,
+                     "typechart": typechart}
+
+
+def _multi_bring4_coverage_job(job):
+    """One enemy roster's pool-wide pair search, for `multi_bring4_coverage`'s
+    `jobs` > 1 path. Top-level and plain-typed: the pool may use spawn, so
+    both ends of this call cross a pickle boundary."""
+    (pool, target_names, turns, fixed_items, fixed_moves, excluded_items,
+     good_threshold) = job
+    global _WORKER_WORLD
+    if _WORKER_WORLD is None:
+        _multi_bring4_worker_init()
+    w = _WORKER_WORLD
+    return joint_pool_search(pool, target_names, w["merged"], w["moves"],
+                             w["natures"], w["typechart"], turns=turns,
+                             item_overrides=fixed_items, move_overrides=fixed_moves,
+                             excluded_items=excluded_items, prune_below=good_threshold)
+
+
 def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                           typechart, turns=2, good_threshold=1.0,
                           min_enemies=2, item_overrides=None, move_overrides=None,
-                          excluded_items=DEFAULT_EXCLUDED_ITEMS):
+                          excluded_items=DEFAULT_EXCLUDED_ITEMS, jobs=1):
     """Stage A, shared by `multi_bring4_exhaustive` and `multi_bring4_beam`:
     run the existing pool-wide pair search once per enemy roster.
 
@@ -3445,6 +3481,15 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     `move_overrides` pin for a name still wins over this computed default,
     same "an explicit pin always wins" rule every other override in this
     module already follows.
+
+    `jobs`: run N enemy rosters' `joint_pool_search` calls in parallel
+    worker processes instead of one after another (1, the default: serial,
+    no process pool spun up at all). The per-enemy searches below are
+    independent -- same `pool`/`fixed_items`/`fixed_moves` read by every
+    one of them, nothing written back and forth -- so this is a plain
+    process-pool map, same shape as `roster_rating.rate_many`. Falls back to
+    serial when there is only one enemy roster to search (nothing to gain
+    from a pool for one task) regardless of what `jobs` asks for.
     """
     target_name_lists = [list(t) for t in target_name_lists]
     min_enemies = min(min_enemies, len(target_name_lists))
@@ -3466,16 +3511,30 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     # per-battle-adjusted-set problem this whole block exists to prevent,
     # just for the one name that happened to have no global answer.
     pool = [n for n in pool if n in fixed_moves]
-    per_enemy, pair_by_key = [], []
+    if jobs > 1 and len(target_name_lists) > 1:
+        import concurrent.futures as cf
+        jobs_list = [(pool, target_names, turns, fixed_items, fixed_moves,
+                     excluded_items, good_threshold)
+                    for target_names in target_name_lists]
+        with cf.ProcessPoolExecutor(
+                max_workers=min(jobs, len(jobs_list)),
+                initializer=_multi_bring4_worker_init) as ex:
+            # map, not as_completed: per_enemy must stay in target_name_lists
+            # order -- every downstream reader (candidate_pool below,
+            # multi_bring4_exhaustive/beam, the xlsx writer) zips it against
+            # target_name_lists positionally.
+            per_enemy = list(ex.map(_multi_bring4_coverage_job, jobs_list))
+    else:
+        per_enemy = [joint_pool_search(pool, target_names, merged, moves_db,
+                                       natures, typechart, turns=turns,
+                                       item_overrides=fixed_items,
+                                       move_overrides=fixed_moves,
+                                       excluded_items=excluded_items,
+                                       prune_below=good_threshold)
+                    for target_names in target_name_lists]
+    pair_by_key = []
     appears_good_in = {}
-    for target_names in target_name_lists:
-        rows = joint_pool_search(pool, target_names, merged, moves_db, natures,
-                                 typechart, turns=turns,
-                                 item_overrides=fixed_items,
-                                 move_overrides=fixed_moves,
-                                 excluded_items=excluded_items,
-                                 prune_below=good_threshold)
-        per_enemy.append(rows)
+    for rows in per_enemy:
         pair_by_key.append({frozenset(r["pair"]): r for r in rows})
         good_names = set()
         for r in rows:
