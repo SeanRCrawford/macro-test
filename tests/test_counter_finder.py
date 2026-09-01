@@ -2816,6 +2816,84 @@ class TestBring4PairDepth(unittest.TestCase):
         self.assertIsNotNone(depth["beaten_worst"])
         self.assertGreaterEqual(depth["beaten_total"], depth["beaten_worst"])
 
+    def test_tailwind_and_protect_best_3rd_read_off_the_same_sorted_order(self):
+        """"the best and third best pair under tailwind and under enemy
+        protect" -- read off the SAME `_pair_sort_key` order `beaten_3rd`/
+        `beaten_4th` already use, not re-sorted by the tailwind/protect
+        value itself (so "best"/"3rd best" always means the SAME two pairs
+        across every one of these fields, matching how the rest of this
+        module defines "better")."""
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        ordered = sorted(b["pair_rows"], key=cf._pair_sort_key)
+        tw = [r["pairs_tailwind_safe"] for r in ordered]
+        pr = [r["pairs_protect_safe"] for r in ordered]
+        self.assertEqual(depth["tailwind_safe_best"], tw[0])
+        self.assertEqual(depth["tailwind_safe_3rd"], tw[2])
+        self.assertEqual(depth["protect_safe_best"], pr[0])
+        self.assertEqual(depth["protect_safe_3rd"], pr[2])
+
+    def test_no_faint_best_3rd_and_total_match_pairs_beaten_without_fainting(self):
+        """"the best and third best number of pairs beaten without having
+        either of own pair faint" -- `no_faint_total`/`_best`/`_3rd` must
+        match a direct, from-scratch count via `_pairs_beaten_without_
+        fainting`, not just be internally self-consistent."""
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        ordered = sorted(b["pair_rows"], key=cf._pair_sort_key)
+        no_faint = [cf._pairs_beaten_without_fainting(r) for r in ordered]
+        self.assertEqual(depth["no_faint_total"], sum(no_faint))
+        self.assertEqual(depth["no_faint_best"], no_faint[0])
+        self.assertEqual(depth["no_faint_3rd"], no_faint[2])
+        # A win that costs one of our own two Pokemon its life is never
+        # counted here -- this must never exceed the ordinary beaten count.
+        beaten = [r["pairs_swept"] + r["pairs_traded"] for r in ordered]
+        for nf, bt in zip(no_faint, beaten):
+            self.assertLessEqual(nf, bt)
+
+
+class TestPairsBeatenWithoutFainting(unittest.TestCase):
+    """`_pairs_beaten_without_fainting` in isolation -- a hand-built
+    `detail` fixture (no real racing) covering every outcome/HP combination
+    it must tell apart."""
+
+    def _row(self, detail):
+        return {"detail": detail}
+
+    def test_a_sweep_with_full_hp_retained_counts(self):
+        row = self._row({("E1", "E2"): {"outcome": "sweep",
+                                        "our_hp": {"C": 1.0, "P": 1.0}}})
+        self.assertEqual(cf._pairs_beaten_without_fainting(row), 1)
+
+    def test_a_trade_where_one_of_ours_fainted_does_not_count(self):
+        """"beaten without having either of own pair faint" -- an
+        `out_trade` win where ONE of our two retained 0 HP (it fainted)
+        must not count, even though the outcome bucket says we won."""
+        row = self._row({("E1", "E2"): {"outcome": "out_trade",
+                                        "our_hp": {"C": 0.0, "P": 0.4}}})
+        self.assertEqual(cf._pairs_beaten_without_fainting(row), 0)
+
+    def test_a_trade_where_both_retain_some_hp_counts(self):
+        row = self._row({("E1", "E2"): {"outcome": "out_trade",
+                                        "our_hp": {"C": 0.2, "P": 0.4}}})
+        self.assertEqual(cf._pairs_beaten_without_fainting(row), 1)
+
+    def test_a_loss_never_counts_even_with_a_stale_positive_our_hp(self):
+        """A non-win outcome's `our_hp` is always `{"C": 0.0, "P": 0.0}` in
+        practice (`_pair_vs_targets`'s own rule), but the outcome check
+        stays a real, explicit safeguard rather than trusting that."""
+        row = self._row({("E1", "E2"): {"outcome": "loss",
+                                        "our_hp": {"C": 1.0, "P": 1.0}}})
+        self.assertEqual(cf._pairs_beaten_without_fainting(row), 0)
+
+    def test_sums_across_several_enemy_pairs(self):
+        row = self._row({
+            ("E1", "E2"): {"outcome": "sweep", "our_hp": {"C": 1.0, "P": 1.0}},
+            ("E1", "E3"): {"outcome": "out_trade", "our_hp": {"C": 0.0, "P": 0.5}},
+            ("E2", "E3"): {"outcome": "loss", "our_hp": {"C": 0.0, "P": 0.0}},
+        })
+        self.assertEqual(cf._pairs_beaten_without_fainting(row), 1)
+
 
 class TestEnemyHasRealTailwind(unittest.TestCase):
     """`enemy_has_real_tailwind` -- "wins under Tailwind, ESPECIALLY IF
@@ -3299,16 +3377,16 @@ class TestMultiBring4CoverageMegaConsistency(unittest.TestCase):
                         "ONE consistent hypothesis, not a mix of both")
 
     def test_forcing_a_mega_to_base_measurably_weakens_its_own_pairs(self):
-        """A concrete real-data regression guard: with Mega Scizor forced to
-        base, Garchomp+Mega Scizor's own beaten count must drop below what
-        the plain, unconstrained (both-simultaneously-mega) lookup shows --
-        proving the forced-base hypothesis isn't a silent no-op."""
+        """A concrete real-data regression guard: with Mega Floette forced
+        to base, Kingambit+Mega Floette's own beaten count must drop below
+        what the plain, unconstrained (both-simultaneously-mega) lookup
+        shows -- proving the forced-base hypothesis isn't a silent no-op."""
         fb = self.coverage["pair_by_key_forced_base"][0]
         normal = self.coverage["pair_by_key"][0]
-        pair = frozenset({"Garchomp", "Mega Scizor"})
+        pair = frozenset({"Kingambit", "Mega Floette"})
         uncorrected = normal[pair]["pairs_swept"] + normal[pair]["pairs_traded"]
-        scizor_forced_base = fb["Mega Scizor"][pair]
-        forced = scizor_forced_base["pairs_swept"] + scizor_forced_base["pairs_traded"]
+        floette_forced_base = fb["Mega Floette"][pair]
+        forced = floette_forced_base["pairs_swept"] + floette_forced_base["pairs_traded"]
         self.assertLess(forced, uncorrected)
 
 
@@ -4845,6 +4923,131 @@ class TestRecoilInTheJointRace(unittest.TestCase):
         new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
             plan, combatants, hp, frozenset(), 1.0, FieldState())
         self.assertEqual(new_hp["C"], 1.0)
+
+
+class TestRecoilCappedAtTargetsActualHp(unittest.TestCase):
+    """"Floette should take max half of its target HP" -- recoil must scale
+    off the HP the TARGET actually lost, not `got.frac` directly (which is
+    always computed against the target's FULL max HP and can exceed 1.0 for
+    an "overkill" hit well past what the target even had). Cross-checked
+    directly against `battle.py` (the real engine) as ground truth: Mega
+    Floette's Light of Ruin on Baxcalibur is a real 452-damage overkill
+    (192 max HP) that the real engine still only charges 96 HP of recoil
+    for (50% of Baxcalibur's OWN max HP, not 50% of 452)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_matches_the_real_engines_own_overkill_capped_recoil(self):
+        """`battle.py` (verified separately, not re-derived here) charges
+        Mega Floette exactly 96 HP of recoil for this exact matchup -- the
+        cheap model must land on the same number, not the uncapped one."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        floette = cf._build("Mega Floette", merged, natures)
+        baxcalibur = cf._build("Baxcalibur", merged, natures)
+        light_of_ruin = cf._lookup_move("Light of Ruin", moves)
+        self.assertEqual(light_of_ruin.recoil, [1, 2])
+        got = cf._raw_hit(floette, light_of_ruin, baxcalibur, typechart, roll="avg")
+        # A genuine overkill: the raw hit is well beyond Baxcalibur's own
+        # max HP (frac > 1.0), which is exactly the case that exposes the
+        # bug if `raw_dmg_dealt` isn't capped at what the target had left.
+        self.assertGreater(got.frac, 1.0)
+        protect = cf._lookup_move("Protect", moves)
+        combatants = {"C": floette, "P": None, "E1": baxcalibur, "E2": None}
+        plan = {"C": ({"E1": got}, light_of_ruin)}
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        lost_hp = (1.0 - new_hp["C"]) * floette.max_hp()
+        self.assertAlmostEqual(lost_hp, 96.0, delta=1.0)
+
+    def test_a_non_overkill_recoil_hit_is_unaffected(self):
+        """The capping fix must not change anything for the ordinary case
+        (recoil move doesn't overkill) -- same value as the ALREADY-PASSING
+        `TestRecoilInTheJointRace.test_a_recoil_move_costs_the_attacker_
+        its_own_hp` computation, re-derived here to guard against the cap
+        accidentally clamping a hit that never needed it."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        incin = cf._build("Incineroar", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        flare_blitz = cf._lookup_move("Flare Blitz", moves)
+        got = cf._raw_hit(incin, flare_blitz, target, typechart, roll="avg")
+        self.assertLess(got.frac, 1.0, "fixture must NOT be an overkill hit")
+        combatants = {"C": incin, "P": None, "E1": target, "E2": None}
+        plan = {"C": ({"E1": got}, flare_blitz)}
+        hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        expected_recoil = got.frac * target.max_hp() * 0.33 / incin.max_hp()
+        self.assertAlmostEqual(new_hp["C"], 1.0 - expected_recoil, places=6)
+
+
+class TestChooseActionAvoidsNeedlessRecoil(unittest.TestCase):
+    """"no point in using the recoil move because Moonblast would also kill
+    rather than Light of Ruin, and it would take no recoil and make it a
+    win" -- `_choose_action` only applied recoil AFTER a move was already
+    chosen (`_apply_plan`), never weighing it INTO the choice itself, so a
+    higher-power recoil move could beat an equally kill-securing recoil-free
+    one on raw overkill damage alone. `_self_cost` is a late tie-break
+    (after kos_now_count/kos_in_two_count/priority, before raw damage) that
+    fixes exactly this."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_prefers_the_recoil_free_move_when_both_guarantee_the_kill(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        floette = cf._build("Mega Floette", merged, natures)
+        baxcalibur = cf._build("Baxcalibur", merged, natures)
+        light_of_ruin = cf._lookup_move("Light of Ruin", moves)
+        moonblast = cf._lookup_move("Moonblast", moves)
+        hits, chosen = cf._choose_action(
+            floette, [light_of_ruin, moonblast], {"E": baxcalibur}, typechart)
+        self.assertEqual(chosen.name, "Moonblast")
+        self.assertGreaterEqual(hits["E"].frac, 1.0, "fixture must be a real KO")
+
+    def test_the_recoil_move_still_wins_when_it_is_the_only_guaranteed_kill(self):
+        """Recoil-awareness is a TIE-break, not a blanket penalty -- a
+        recoil move that's the only one clearing the KO bar must still be
+        chosen over a weaker recoil-free move that doesn't."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        floette = cf._build("Mega Floette", merged, natures)
+        weak_target = cf._build("Umbreon", merged, natures)
+        light_of_ruin = cf._lookup_move("Light of Ruin", moves)
+        moonblast = cf._lookup_move("Moonblast", moves)
+        hits_lor, chosen_lor = cf._choose_action(
+            floette, [light_of_ruin], {"E": weak_target}, typechart)
+        hits_mb, chosen_mb = cf._choose_action(
+            floette, [moonblast], {"E": weak_target}, typechart)
+        if hits_lor["E"].frac >= 1.0 and hits_mb["E"].frac < 1.0:
+            hits, chosen = cf._choose_action(
+                floette, [light_of_ruin, moonblast], {"E": weak_target}, typechart)
+            self.assertEqual(chosen.name, "Light of Ruin")
+        else:
+            self.skipTest("fixture no longer isolates 'only Light of Ruin KOs' "
+                          "on the current dataset -- not what this test checks")
+
+    def test_rock_head_holder_is_unaffected_by_the_recoil_tie_break(self):
+        """Rock Head negates recoil entirely -- `_self_cost` must read 0.0
+        for it, same as `_apply_plan`'s own Rock Head branch, so the
+        tie-break never second-guesses a Rock Head holder's higher-power
+        move in favour of a weaker one."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        floette = cf._build("Mega Floette", merged, natures)
+        floette.ability = "Rock Head"
+        baxcalibur = cf._build("Baxcalibur", merged, natures)
+        light_of_ruin = cf._lookup_move("Light of Ruin", moves)
+        moonblast = cf._lookup_move("Moonblast", moves)
+        hits, chosen = cf._choose_action(
+            floette, [light_of_ruin, moonblast], {"E": baxcalibur}, typechart)
+        self.assertEqual(chosen.name, "Light of Ruin")
 
 
 class TestRoughSkinInTheJointRace(unittest.TestCase):

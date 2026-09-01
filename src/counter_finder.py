@@ -1752,6 +1752,15 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     spread move; 0 or 1 for a single-target one) are compared before raw
     damage for exactly this reason -- an outright kill on even one target
     is worth more than any amount of un-lethal chip.
+
+    RECOIL IS A LATE TIE-BREAK TOO, right after priority and before raw
+    damage (`_self_cost` below): "no point in using the recoil move because
+    [a no-recoil move] would also kill ... it would take no recoil and
+    make it a win" -- among candidates already tied on kos_now_count/
+    kos_in_two_count/priority, the one that costs the ATTACKER less of its
+    own HP wins, so a higher-power recoil move never beats an equally
+    kill-securing recoil-free one purely because it does more (moot, once
+    both already guarantee the kill) overkill damage.
     """
     if not live_targets:
         return {}, None
@@ -1829,6 +1838,33 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         """
         return (target_hp_fracs or {}).get(role, 1.0)
 
+    def _self_cost(mv, hits):
+        """Recoil cost as a fraction of the ATTACKER's own max HP -- 0.0 for
+        a move with no recoil, or when Rock Head/Magic Guard negates it.
+        Summed across every target `hits` covers (one for a single-target
+        candidate, every live target for a spread one), each capped at what
+        that target ACTUALLY has left (`remaining(role)`) -- mirrors
+        `_apply_plan`'s own overkill-capping fix ("Floette should take max
+        half of its target HP"): ranking a move on an inflated overkill
+        figure would make it look more self-costly than it really is,
+        same bug either way.
+
+        Used ONLY as a late tie-break in the ranking below -- it never
+        overrides a real difference in kos_now_count/kos_in_two_count/
+        priority, it just stops a needlessly self-costly move from beating
+        an equally good free one on raw damage alone ("no point in using
+        the recoil move because Moonblast would also kill ... it would
+        take no recoil and make it a win" -- both guarantee the kill here,
+        so this tie-break, not raw damage, decides between them).
+        """
+        if not mv.recoil or attacker.ability in ("Rock Head", "Magic Guard"):
+            return 0.0
+        num, den = mv.recoil
+        dmg = sum(min(h.frac, remaining(role)) * live_targets[role].max_hp()
+                 for role, h in hits.items())
+        atk_max = attacker.max_hp()
+        return (dmg * num / den) / atk_max if atk_max else 0.0
+
     best_key, best_hits, best_move = None, {}, None
     for mv, role, got in single_candidates:
         bar = remaining(role)
@@ -1836,7 +1872,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         kos_in_two_count = 1 if (kos_now_count or
                                  (got.frac + best_frac_by_role[role]) >= bar) else 0
         priority_if_kos_now = mv.priority if kos_now_count else 0
-        key = (kos_now_count, kos_in_two_count, priority_if_kos_now, got.frac)
+        key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
+              -_self_cost(mv, {role: got}), got.frac)
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
     for mv, hits in spread_candidates:
@@ -1847,7 +1884,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             or (h.frac + best_frac_by_role[role]) >= remaining(role))
         priority_if_kos_now = mv.priority if kos_now_count else 0
         key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
-              sum(h.frac for h in hits.values()))
+              -_self_cost(mv, hits), sum(h.frac for h in hits.values()))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move
@@ -1934,7 +1971,8 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
             if hp.get(tgt_role, 0.0) <= 0:
                 continue
             target_c = combatants[tgt_role]
-            new_hp = hp[tgt_role] - got.frac
+            pre_hit_hp = hp[tgt_role]
+            new_hp = pre_hit_hp - got.frac
             # Focus Sash / Sturdy: survive a would-be KO at 1 HP, but only
             # from FULL HP -- mirrors `battle.py`'s own rule exactly
             # (`target.current_hp == target.max_hp()`). Checked against
@@ -1952,12 +1990,20 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
                 new_hp = 1.0 / target_c.max_hp()
             hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))
-            # `got.frac` is a fraction of the DEFENDER's max HP (`_raw_hit`'s
-            # own convention); recoil/Life Orb need raw HP relative to the
-            # ATTACKER's own max HP, so convert through the target's max HP
-            # first, same two-step `battle.py` does implicitly via real HP.
+            # Recoil/Rough Skin must scale off the HP the target ACTUALLY
+            # lost, never off `got.frac` directly -- `got.frac` is the RAW
+            # calculated hit (`_raw_hit`'s own convention, always divided by
+            # the target's FULL max HP), which can exceed what the target
+            # even had left (an "overkill" hit). Real Pokemon recoil scales
+            # off the HP removed, not a theoretical overkill amount --
+            # "Floette should take max half of its target HP", not half of
+            # a hit calculated to do 20% more than the target even had.
+            # `pre_hit_hp - hp[tgt_role]` is exactly that removed amount,
+            # already correctly capped by both the overkill clamp above and
+            # any Focus Sash/Sturdy survival.
             if got.frac > 0:
-                raw_dmg_dealt += got.frac * target_c.max_hp()
+                actual_hp_lost = pre_hit_hp - hp[tgt_role]
+                raw_dmg_dealt += actual_hp_lost * target_c.max_hp()
                 # Rough Skin / Iron Barbs: punishes the ATTACKER for making
                 # contact, even if this same hit faints the holder (real
                 # mechanic -- the ability reacts to the contact itself, not
@@ -3284,20 +3330,58 @@ def bring4_pair_depth(bring4_row):
     `bring4_row` has fewer than 3/4 pairs (true for a 3-Pokemon core's own
     3 pairs, not just a hand-built partial row -- this stays honest rather
     than raising an IndexError).
+
+    ALSO returns the BEST/3RD-BEST breakdown (same `_pair_sort_key` order,
+    same `None`-if-too-few-pairs rule as `beaten_3rd`/`beaten_4th`) for two
+    more per-pair fields, plus a whole-bring SUM to match: "best and third
+    best pair under tailwind and under enemy protect" --
+    "tailwind_safe_best"/"tailwind_safe_3rd", "protect_safe_best"/
+    "protect_safe_3rd". And "best and third best number of pairs beaten
+    without having either of own pair faint" -- a discrete, stricter cousin
+    of `clean_win_total`'s continuous HP-retained score (0.0-2.0 per enemy
+    pair): `no_faint_total`/`no_faint_best`/`no_faint_3rd`, from
+    `_pairs_beaten_without_fainting` below, which reads each matchup's
+    `detail[...]["our_hp"]` directly -- a real win (`sweep`/`out_trade`)
+    where NEITHER of the pair's own two Pokemon actually fainted.
     """
     pairs = sorted(bring4_row["pair_rows"], key=_pair_sort_key)
     pairs_total = pairs[0]["pairs_total"] if pairs else 0
     beaten = [r["pairs_swept"] + r["pairs_traded"] for r in pairs]
+    tw = [r["pairs_tailwind_safe"] for r in pairs]
+    pr = [r["pairs_protect_safe"] for r in pairs]
+    no_faint = [_pairs_beaten_without_fainting(r) for r in pairs]
     return {
         "beaten_total": sum(beaten),
         "beaten_3rd": beaten[2] if len(beaten) > 2 else None,
         "beaten_4th": beaten[3] if len(beaten) > 3 else None,
         "beaten_worst": beaten[-1] if beaten else None,
         "pairs_total": pairs_total,
-        "tailwind_safe_total": sum(r["pairs_tailwind_safe"] for r in pairs),
-        "protect_safe_total": sum(r["pairs_protect_safe"] for r in pairs),
+        "tailwind_safe_total": sum(tw),
+        "tailwind_safe_best": tw[0] if tw else None,
+        "tailwind_safe_3rd": tw[2] if len(tw) > 2 else None,
+        "protect_safe_total": sum(pr),
+        "protect_safe_best": pr[0] if pr else None,
+        "protect_safe_3rd": pr[2] if len(pr) > 2 else None,
         "clean_win_total": sum(r["pairs_clean_win_total"] for r in pairs),
+        "no_faint_total": sum(no_faint),
+        "no_faint_best": no_faint[0] if no_faint else None,
+        "no_faint_3rd": no_faint[2] if len(no_faint) > 2 else None,
     }
+
+
+def _pairs_beaten_without_fainting(row):
+    """How many of `row`'s own enemy pairs it beats (`sweep`/`out_trade`)
+    WITHOUT either of its own two Pokemon fainting -- a discrete, stricter
+    cousin of `pairs_clean_win_total`'s continuous HP-retained score.
+    `d["our_hp"]` is `{"C": 0.0, "P": 0.0}` for every non-win outcome
+    already (`_pair_vs_targets`'s own "a real loss must not leak a
+    garbage-but-technically-positive value in" rule), so checking the
+    outcome first isn't strictly required for correctness, but keeps the
+    intent explicit at the call site.
+    """
+    return sum(1 for d in row["detail"].values()
+              if d["outcome"] in ("sweep", "out_trade")
+              and d["our_hp"]["C"] > 0 and d["our_hp"]["P"] > 0)
 
 
 def enemy_has_real_tailwind(target_names, merged):

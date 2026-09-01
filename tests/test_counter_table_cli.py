@@ -1465,6 +1465,113 @@ class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestXlsxNewSummaryColumns(unittest.TestCase):
+    """"I would like the best and third best pair under tailwind and under
+    enemy protect. I would also like to see best and third best number of
+    pairs beaten without having either of own pair faint. I also want new
+    columns that have Avg Wins/90, Avg Wins under tailwind/90, Avg wins
+    under protect/90, Clean wins /90, and the average score ... of the
+    team" -- both `--bring4`'s "Bring-4s" sheet and `--multi-bring4`'s
+    "Cores" sheet must carry every one of these."""
+
+    NEW_COLUMNS = ("Average Score", "Avg Wins/90", "Avg Wins under Tailwind/90",
+                  "Avg Wins under Protect/90", "Clean wins/90")
+    NEW_PER_ENEMY_SUFFIXES = ("pairs Tailwind-safe best", "pairs Tailwind-safe 3rd best",
+                              "pairs protect-safe best", "pairs protect-safe 3rd best",
+                              "pairs beaten without fainting best",
+                              "pairs beaten without fainting 3rd best")
+
+    def test_bring4_xlsx_has_every_new_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            for col in self.NEW_COLUMNS:
+                self.assertIn(col, header)
+            for suffix in self.NEW_PER_ENEMY_SUFFIXES:
+                self.assertIn(suffix, header)
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            for col in self.NEW_COLUMNS:
+                self.assertIsNotNone(row2[col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_xlsx_has_every_new_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            for col in self.NEW_COLUMNS:
+                self.assertIn(col, header)
+            for suffix in self.NEW_PER_ENEMY_SUFFIXES:
+                self.assertTrue(any(h and h.endswith(suffix) for h in header),
+                                f"no per-enemy column ending in {suffix!r}")
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            for col in self.NEW_COLUMNS:
+                self.assertIsNotNone(row2[col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_avg_wins_per_90_matches_a_from_scratch_recomputation(self):
+        """Cross-check the xlsx cell against `bring4_pair_depth`/`_per_90`
+        computed directly from the same search results, not just "is it a
+        number" -- catches a wrong column, a wrong `_per_90` scale, or an
+        averaging-across-the-wrong-things bug."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "1"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            from counter_finder import bring4_search, bring4_pair_depth
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            from _harness import load_world
+            W = load_world()
+            merged, moves = W["merged"], W["moves"]
+            natures, typechart = W["natures"], W["typechart"]
+            our6 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
+                   "Whimsicott", "Mega Alakazam"]
+            targets = list(W["teams"]["Rain"])
+            _pair_rows, bring4_rows = bring4_search(
+                our6, targets, merged, moves, natures, typechart, good_threshold=0.0)
+            depth = bring4_pair_depth(bring4_rows[0])
+            n_pairs, pt = len(bring4_rows[0]["pair_rows"]), depth["pairs_total"]
+            expected = round(depth["beaten_total"] / (n_pairs * pt) * 90, 1)
+            self.assertAlmostEqual(row2["Avg Wins/90"], expected, places=1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
     """"When a sweep of --vs-team gets too many results it doesn't even
     output the results or anything to CSV. I want to at least see the

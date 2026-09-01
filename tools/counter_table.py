@@ -1308,6 +1308,34 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
         _autosize(ws)
 
 
+def _avg_score(names, merged):
+    """Mean roster.csv Score across `names` -- "the average score (score
+    from roster.csv) of the team". `species_data.build_merged_dataset`
+    already merges roster.csv's Score onto every record as `merged[name]
+    ["score"]`, so this is a plain lookup, not a new data source. A name
+    roster.csv doesn't carry a Score for (`None`) is skipped rather than
+    treated as 0, so one missing entry doesn't drag the average down for
+    no real reason. `None` if nothing in `names` has a Score at all.
+    """
+    scores = [merged[n]["score"] for n in names
+             if merged.get(n, {}).get("score") is not None]
+    return sum(scores) / len(scores) if scores else None
+
+
+def _per_90(count, n_pairs, pairs_total, scale=1.0):
+    """`count` (out of `n_pairs * pairs_total * scale`) normalised to a
+    fixed /90 unit -- "Avg Wins/90", "Clean wins/90" -- so the column stays
+    comparable across cores of different sizes (a 3-Pokemon core has only 3
+    pairs, not 6) and enemy rosters of different sizes (fewer than 6 named
+    enemies means fewer than 15 enemy pairs, not the full 90), instead of
+    silently mislabeling a smaller raw scale as "/90". `scale` is 2.0 for
+    `pairs_clean_win_total`'s own 0.0-2.0-per-pair units, 1.0 (the default)
+    for a plain beaten/tailwind-safe/protect-safe/no-faint COUNT.
+    """
+    denom = n_pairs * pairs_total * scale
+    return (count / denom) * 90 if denom else 0.0
+
+
 def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                              natures, typechart, item_overrides, move_overrides,
                              excluded_items, fixed_items, fixed_moves, core_dives):
@@ -1339,7 +1367,9 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     header = ["#", "Core", "Size", "Bottleneck Enemy",
               "Weak to 2+ types (members)", "Weak to 1 type (members)",
               "Weak to 0 types (members)", "Types with 2+ weak members",
-              "Weaknesses by type"]
+              "Weaknesses by type", "Average Score",
+              "Avg Wins/90", "Avg Wins under Tailwind/90",
+              "Avg Wins under Protect/90", "Clean wins/90"]
     for i in range(len(target_name_lists)):
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
                    f"Enemy {i + 1} worst pair beaten",
@@ -1350,8 +1380,14 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"Enemy {i + 1} pairs beaten worst",
                    f"Enemy {i + 1} has real Tailwind",
                    f"Enemy {i + 1} pairs Tailwind-safe total",
+                   f"Enemy {i + 1} pairs Tailwind-safe best",
+                   f"Enemy {i + 1} pairs Tailwind-safe 3rd best",
                    f"Enemy {i + 1} pairs protect-safe total",
-                   f"Enemy {i + 1} pairs clean win total"]
+                   f"Enemy {i + 1} pairs protect-safe best",
+                   f"Enemy {i + 1} pairs protect-safe 3rd best",
+                   f"Enemy {i + 1} pairs clean win total",
+                   f"Enemy {i + 1} pairs beaten without fainting best",
+                   f"Enemy {i + 1} pairs beaten without fainting 3rd best"]
     ws.append(header)
     _style_header(ws)
     sets_rows, teamsheet_entries = [], []
@@ -1361,13 +1397,38 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
         by_type = sorted(((t, c) for t, c in weak["per_type"].items() if c > 0),
                          key=lambda tc: -tc[1])
         types_2plus = sum(1 for c in weak["per_type"].values() if c >= 2)
+        # One `bring4_pair_depth` call per enemy, reused for BOTH the
+        # core-level "Avg .../90" columns (averaged across every named
+        # enemy below) and that enemy's own per-enemy columns further
+        # right -- never re-derived.
+        per_enemy_depths = [(pe, bring4_pair_depth(pe["best_bring4_row"]))
+                            for pe in r["per_enemy"]]
+        avg_wins = avg_wins_tw = avg_wins_pr = avg_clean = 0.0
+        if per_enemy_depths:
+            rates = [
+                (_per_90(d["beaten_total"], len(pe["best_bring4_row"]["pair_rows"]),
+                        d["pairs_total"]),
+                 _per_90(d["tailwind_safe_total"], len(pe["best_bring4_row"]["pair_rows"]),
+                        d["pairs_total"]),
+                 _per_90(d["protect_safe_total"], len(pe["best_bring4_row"]["pair_rows"]),
+                        d["pairs_total"]),
+                 _per_90(d["no_faint_total"], len(pe["best_bring4_row"]["pair_rows"]),
+                        d["pairs_total"]))
+                for pe, d in per_enemy_depths]
+            avg_wins = sum(x[0] for x in rates) / len(rates)
+            avg_wins_tw = sum(x[1] for x in rates) / len(rates)
+            avg_wins_pr = sum(x[2] for x in rates) / len(rates)
+            avg_clean = sum(x[3] for x in rates) / len(rates)
+        avg_score = _avg_score(core, merged)
         row = [rank, " / ".join(core), r["core_size"], r["worst_enemy_idx"] + 1,
               weak["weak_to_2plus"], weak["weak_to_1"], weak["weak_to_0"],
-              types_2plus, ", ".join(f"{t} {c}" for t, c in by_type)]
-        for pe in r["per_enemy"]:
+              types_2plus, ", ".join(f"{t} {c}" for t, c in by_type),
+              round(avg_score, 1) if avg_score is not None else "",
+              round(avg_wins, 1), round(avg_wins_tw, 1),
+              round(avg_wins_pr, 1), round(avg_clean, 1)]
+        for pe, depth in per_enemy_depths:
             wr = pe["best_bring4_row"]["worst_pair_row"]
             uncovered = pe["best_bring4_row"]["uncovered_enemy_pairs"]
-            depth = bring4_pair_depth(pe["best_bring4_row"])
             pt = depth["pairs_total"]
             n_pairs = len(pe["best_bring4_row"]["pair_rows"])
             row += [", ".join(pe["target_names"]), " / ".join(pe["best_bring4"]),
@@ -1378,8 +1439,14 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"{depth['beaten_worst']}/{pt}",
                    enemy_has_real_tailwind(pe["target_names"], merged),
                    f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
+                   f"{depth['tailwind_safe_best']}/{pt}",
+                   f"{depth['tailwind_safe_3rd']}/{pt}",
                    f"{depth['protect_safe_total']}/{n_pairs * pt}",
-                   f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}"]
+                   f"{depth['protect_safe_best']}/{pt}",
+                   f"{depth['protect_safe_3rd']}/{pt}",
+                   f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
+                   f"{depth['no_faint_best']}/{pt}",
+                   f"{depth['no_faint_3rd']}/{pt}"]
         ws.append(row)
         core_sets = _fixed_sets_for(core, fixed_items, fixed_moves, merged,
                                     moves_db, natures, typechart, all_enemies,
@@ -1425,27 +1492,47 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
     ws.title = "Bring-4s"
     ws.append(["#", "Bring-4", "Uncovered enemy pairs", "Pairs good",
               "Pairs total", "Worst pair", "Worst pair beaten",
-              "Worst pair total", "pairs beaten total",
+              "Worst pair total", "Average Score",
+              "Avg Wins/90", "Avg Wins under Tailwind/90",
+              "Avg Wins under Protect/90", "Clean wins/90",
+              "pairs beaten total",
               "pairs beaten 3rd best", "pairs beaten 4th best",
               "pairs beaten worst", "Enemy has real Tailwind",
-              "pairs Tailwind-safe total", "pairs protect-safe total",
-              "pairs clean win total"])
+              "pairs Tailwind-safe total", "pairs Tailwind-safe best",
+              "pairs Tailwind-safe 3rd best", "pairs protect-safe total",
+              "pairs protect-safe best", "pairs protect-safe 3rd best",
+              "pairs clean win total",
+              "pairs beaten without fainting best",
+              "pairs beaten without fainting 3rd best"])
     _style_header(ws)
     for rank, b in enumerate(bring4_rows, start=1):
         wr = b["worst_pair_row"]
         depth = bring4_pair_depth(b)
         pt = depth["pairs_total"]
         n_pairs = len(b["pair_rows"])
+        avg_score = _avg_score(b["bring4"], merged)
         ws.append([rank, " / ".join(b["bring4"]),
                   ", ".join(f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
                   b["pairs_good"], b["pairs_total"], " + ".join(b["worst_pair"]),
                   f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
-                  wr["pairs_total"], f"{depth['beaten_total']}/{n_pairs * pt}",
+                  wr["pairs_total"],
+                  round(avg_score, 1) if avg_score is not None else "",
+                  round(_per_90(depth["beaten_total"], n_pairs, pt), 1),
+                  round(_per_90(depth["tailwind_safe_total"], n_pairs, pt), 1),
+                  round(_per_90(depth["protect_safe_total"], n_pairs, pt), 1),
+                  round(_per_90(depth["no_faint_total"], n_pairs, pt), 1),
+                  f"{depth['beaten_total']}/{n_pairs * pt}",
                   f"{depth['beaten_3rd']}/{pt}", f"{depth['beaten_4th']}/{pt}",
                   f"{depth['beaten_worst']}/{pt}", enemy_tw,
                   f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
+                  f"{depth['tailwind_safe_best']}/{pt}",
+                  f"{depth['tailwind_safe_3rd']}/{pt}",
                   f"{depth['protect_safe_total']}/{n_pairs * pt}",
-                  f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}"])
+                  f"{depth['protect_safe_best']}/{pt}",
+                  f"{depth['protect_safe_3rd']}/{pt}",
+                  f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
+                  f"{depth['no_faint_best']}/{pt}",
+                  f"{depth['no_faint_3rd']}/{pt}"])
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
