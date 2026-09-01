@@ -371,6 +371,19 @@ def _default_item(rec: dict) -> str:
     return items[0][0] if items else ""
 
 
+SPECIES_ALIASES = {
+    # Showdown's own dex names this forme "Floette-Eternal" (no item/stone
+    # involved -- it's its own species entry, unlike an ordinary Mega).
+    # This roster's usage data (mbsmogon.xlsx) instead calls the same
+    # Pokemon "Mega Floette" (see resolve_export_fields's comment: a Mega
+    # row with no recorded stone has nothing for the stone-holding-base
+    # lookup below to invert through), so a paste naming it "Floette-Eternal"
+    # needs a direct alias rather than going through that stone lookup.
+    "Floette-Eternal": "Mega Floette",
+    "Floette Eternal": "Mega Floette",
+}
+
+
 def custom_team_from_export(text: str, merged: dict) -> tuple[list, dict]:
     """Turn parsed Showdown-export mons into (roster_names, sets) in this
     codebase's convention: a base species holding its Mega Stone becomes the
@@ -381,6 +394,7 @@ def custom_team_from_export(text: str, merged: dict) -> tuple[list, dict]:
     names, sets = [], {}
     for mon in mons:
         species, item = mon["species"], mon["item"]
+        species = SPECIES_ALIASES.get(species, species)
         name = species
         if item:
             for cand in (f"Mega {species}", f"Mega {species} X", f"Mega {species} Y",

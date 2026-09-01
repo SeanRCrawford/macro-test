@@ -77,6 +77,31 @@ class TestTeamToShowdownExportRoundTrips(unittest.TestCase):
         roster, _sets = custom_team_from_export(text, self.merged)
         self.assertEqual(roster, ["Mega Floette"])
 
+    def test_floette_eternal_is_recognised_as_mega_floette(self):
+        """"unknown Pokemon: Floette-Eternal" -- a real pokepaste (e.g. one
+        exported straight from Showdown, which has its own "Floette-Eternal"
+        dex entry) names this Pokemon differently than this roster's usage
+        data does ("Mega Floette", per the no-recorded-stone case above).
+        A paste using either name must resolve to the roster's own name."""
+        from species_data import custom_team_from_export
+        if "Mega Floette" not in self.merged:
+            self.skipTest("Mega Floette not in this dataset")
+        text = ("Floette-Eternal @ Choice Scarf\n"
+               "- Moonblast\n- Aromatherapy\n- Wish\n- Protect")
+        roster, sets = custom_team_from_export(text, self.merged)
+        self.assertEqual(roster, ["Mega Floette"])
+        self.assertEqual(sets["Mega Floette"]["item"], "Choice Scarf")
+        self.assertEqual(sets["Mega Floette"]["moves"],
+                         ["Moonblast", "Aromatherapy", "Wish", "Protect"])
+
+    def test_floette_eternal_with_no_item_still_resolves(self):
+        from species_data import custom_team_from_export
+        if "Mega Floette" not in self.merged:
+            self.skipTest("Mega Floette not in this dataset")
+        text = "Floette-Eternal\n- Moonblast"
+        roster, _sets = custom_team_from_export(text, self.merged)
+        self.assertEqual(roster, ["Mega Floette"])
+
     def test_a_whole_team_round_trips_in_order(self):
         from species_data import custom_team_from_export, team_to_showdown_export
         names = ["Incineroar", "Gallade", "Whimsicott"]
