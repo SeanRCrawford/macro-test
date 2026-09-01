@@ -1502,6 +1502,42 @@ class Battle:
         return "p1" if share[0] > share[1] else "p2"
 
 
+PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset({"Mold Breaker", "Teravolt", "Turboblaze"})
+
+
+def priority_blocked_by_side(attacker_ability, move, defending_side_actives):
+    """True if `move` (used by a Pokemon with `attacker_ability`) would be
+    blocked outright by Queenly Majesty / Dazzling / Armor Tail held by any
+    living member of `defending_side_actives` -- "priority blocking
+    abilities ... lead to the enemy trying to click priority moves anyway.
+    They should not attempt to use priority moves if these abilities are
+    present."
+
+    The AI-facing sibling of `Battle._blocked_by_guard`'s own ability-block
+    branch: that method ALSO checks `target.protecting`/Wide Guard/Quick
+    Guard, which only make sense mid-resolution once actions are already
+    locked in; this is the narrower, ability-only check a move-CHOICE
+    heuristic needs BEFORE any of that is decided, so `solver.py`'s greedy
+    opponent AI and `fast_eval.py`'s fast screening playouts can see "this
+    priority move will do nothing" before they ever value or pick it --
+    exactly the gap that let them keep clicking a doomed Fake Out/Sucker
+    Punch/etc. into a Farigiraf or Tsareena. `counter_finder.py`'s own
+    `_priority_blocked` mirrors this same narrower scope for its cheap
+    model; kept as a separate, smaller copy there rather than imported,
+    since that module doesn't otherwise depend on `battle.py`.
+
+    Ignored by Mold Breaker/Teravolt/Turboblaze, matching real game rules
+    and `_blocked_by_guard`'s own ignoring-abilities branch.
+    """
+    if move is None or move.priority <= 0:
+        return False
+    if attacker_ability in PRIORITY_BLOCK_IGNORING_ABILITIES:
+        return False
+    return any(c is not None and not c.fainted
+              and c.ability in Battle.PRIORITY_BLOCK_ABILITIES
+              for c in defending_side_actives)
+
+
 if __name__ == "__main__":
     from species_data import build_merged_dataset
     from stats import compute_stats

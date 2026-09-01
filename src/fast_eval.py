@@ -21,7 +21,7 @@ Never present a fast_eval number as a final answer on its own.
 from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_boosts,
                      effective_stat, CHARGE_WEATHER_SKIP)
 from engine import FieldState, Action, on_switch_in, turn_order
-from battle import Battle, PROTECT_MOVES
+from battle import Battle, PROTECT_MOVES, priority_blocked_by_side
 from solver import build_moveset, quick_damage_estimate, FIRST_TURN_ONLY_MOVES, CHOICE_ITEMS
 
 FAST_MAX_TURNS = 8
@@ -95,6 +95,14 @@ def _pick_greedy_action(battle: Battle, c: Combatant, side_key: str, foes: list,
         # the same scale as the status-move values above. Using raw HP damage here made
         # every attack outrank every status move regardless of board state.
         def _pct(target, nhit):
+            # Queenly Majesty / Dazzling / Armor Tail on the TARGET's own side
+            # block this outright if it's priority -- checked against whichever
+            # side `target` actually belongs to, since a spread move can hit
+            # both an ally and a foe in the same turn ("the enemy trying to
+            # click priority moves anyway" against one of these).
+            side_roster = allies if (allies and target in allies) else live_foes
+            if priority_blocked_by_side(c.ability, move, side_roster):
+                return 0.0, 0.0
             dmg = quick_damage_estimate(c, target, move, battle.typechart, battle.field,
                                          num_hit=nhit, battle=battle)
             pct = 100.0 * min(dmg, target.current_hp) / target.max_hp() if target.max_hp() else 0.0

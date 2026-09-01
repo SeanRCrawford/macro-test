@@ -258,7 +258,22 @@ def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None
         # (use Super Fang or similar instead), same rule as the <80%-accuracy filter.
         if mv == "Population Bomb" and item != "Wide Lens":
             continue
-        out.append((_mk_move(moves_db[k]), pct))
+        mi = _mk_move(moves_db[k])
+        # "There are certain moves which should be banned, like High Jump
+        # Kick, given it causes massive damage if it misses (including vs
+        # enemy protect)" -- High Jump Kick/Jump Kick/Axe Kick/Supercell
+        # Slam "crash" (lose ~50% of the USER'S OWN max HP) on a miss, and
+        # -- unlike an ordinary move, which just deals no damage -- crash
+        # even when Protect blocks them. Neither this cheap model nor the
+        # real engine simulates misses or the crash itself (`MoveInfo.
+        # has_crash`'s own field comment: "not modeled"), so a search that
+        # cannot see that risk must never be allowed to recommend planning
+        # around one of these moves -- excluded from the candidate pool
+        # entirely, the same "can't model it, so don't offer it" reasoning
+        # `_accuracy_ok` already applies to a shaky <80%-accuracy move.
+        if mi.has_crash:
+            continue
+        out.append((mi, pct))
     return out[:max_candidates]
 
 

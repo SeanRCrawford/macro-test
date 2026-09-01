@@ -208,7 +208,8 @@ import argparse  # noqa: E402
 import _harness  # noqa: E402,F401
 
 from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
-                            _pair_sort_key, bring4_pair_depth, bring4_search,
+                            _fixed_sets_from_pair_rows, _pair_sort_key,
+                            bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, deep_dive,
                             enemy_has_real_tailwind, joint_pair_search,
                             joint_pool_search, member_weakness_summary,
@@ -1000,6 +1001,9 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
                          key=lambda tc: -tc[1])
         print("        weaknesses by type: " + (
             ", ".join(f"{t} {c}" for t, c in by_type) if by_type else "none"))
+        core_fixed_items = fixed_items
+        if r.get("item_clause_resolved_items"):
+            core_fixed_items = {**(fixed_items or {}), **r["item_clause_resolved_items"]}
         for e_idx, pe in enumerate(r["per_enemy"], start=1):
             wr = pe["best_bring4_row"]["worst_pair_row"]
             total = wr["pairs_total"]
@@ -1017,7 +1021,7 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
                 _print_teamsheet_member(
                     name, pe["target_names"], merged, moves_db, natures,
                     typechart, item_overrides, move_overrides, excluded_items,
-                    fixed_items=fixed_items, fixed_moves=fixed_moves)
+                    fixed_items=core_fixed_items, fixed_moves=fixed_moves)
         print()
     print("bottleneck the enemy this core is WEAKEST against, even using")
     print("           its own best available bring-4 there -- what the")
@@ -1239,8 +1243,15 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
     team vs enemies". Shared by --bring4/--multi-bring4's xlsx writers so
     several dived cores/bring-4s from one run ("deep mode run for promising
     teams 5, 85, and 16") land in one workbook instead of colliding on a
-    single fixed sheet name."""
+    single fixed sheet name.
+
+    The Summary and Gameplans sheets both carry a "Mega Used" column --
+    `dive["mega_used"]`, constant for every row of one dive -- "note which
+    one is used" whenever `core` carried 2 Mega-stone holders and the
+    bring-4-consistent-mega choice had to pick one."""
     for rank, dive in core_dives:
+        mega_used = dive.get("mega_used") or ""
+
         ws = wb.create_sheet(_safe_sheet_name(f"Dive {rank} Sets"))
         ws.append(["Pokemon", "Item", "Moves"])
         _style_header(ws)
@@ -1251,7 +1262,7 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
         ws = wb.create_sheet(_safe_sheet_name(f"Dive {rank} Summary"))
         ws.append(["Pair", "Enemy Team", "Beaten", "Total", "Swept", "Traded",
                    "Lost", "No KO", "Tailwind Safe", "Protect Safe",
-                   "Clean Win Total", "Loses To"])
+                   "Clean Win Total", "Loses To", "Mega Used"])
         _style_header(ws)
         ov = dive["overall"]
         all_details = [pe["detail"] for pair in dive["per_pair"].values()
@@ -1261,7 +1272,7 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
                    ov["pairs_swept"], ov["pairs_traded"], ov["pairs_lost"],
                    ov["pairs_no_ko"], ov["pairs_tailwind_safe"],
                    ov["pairs_protect_safe"], round(ov["pairs_clean_win_total"], 1),
-                   _loses_to(all_details)])
+                   _loses_to(all_details), mega_used])
         for (n1, n2), pair in dive["per_pair"].items():
             label = f"{n1} + {n2}"
             t = pair["total"]
@@ -1270,7 +1281,7 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
                       t["pairs_total"], t["pairs_swept"], t["pairs_traded"],
                       t["pairs_lost"], t["pairs_no_ko"], t["pairs_tailwind_safe"],
                       t["pairs_protect_safe"], round(t["pairs_clean_win_total"], 1),
-                      _loses_to(pair_details)])
+                      _loses_to(pair_details), mega_used])
             for pe in pair["per_enemy"]:
                 s = pe["summary"]
                 ws.append([label, ", ".join(pe["target_names"]),
@@ -1278,14 +1289,15 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
                           s["pairs_swept"], s["pairs_traded"], s["pairs_lost"],
                           s["pairs_no_ko"], s["pairs_tailwind_safe"],
                           s["pairs_protect_safe"], round(s["pairs_clean_win_total"], 1),
-                          _loses_to([pe["detail"]])])
+                          _loses_to([pe["detail"]]), mega_used])
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         _autosize(ws)
 
         ws = wb.create_sheet(_safe_sheet_name(f"Dive {rank} Gameplans"))
         ws.append(["Pair", "Enemy Team", "Enemy Pair", "Outcome", "Turn",
-                   "Actor", "Target", "Move", "Damage %", "Type Eff", "Spread"])
+                   "Actor", "Target", "Move", "Damage %", "Type Eff", "Spread",
+                   "Mega Used"])
         _style_header(ws)
         for (n1, n2), pair in dive["per_pair"].items():
             role_name = {"C": n1, "P": n2}
@@ -1298,7 +1310,7 @@ def _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosiz
                                       f"{e1} + {e2}", d["outcome"], turn_i,
                                       role_name[role], role_name[tgt_role],
                                       h.move_name or "-", round(h.frac * 100, 1),
-                                      h.eff, h.num_targets_hit > 1])
+                                      h.eff, h.num_targets_hit > 1, mega_used])
                     # A blank row between each enemy-pair "match" -- purely
                     # for legibility once several matches sit one after
                     # another in the same sheet.
@@ -1320,6 +1332,17 @@ def _avg_score(names, merged):
     scores = [merged[n]["score"] for n in names
              if merged.get(n, {}).get("score") is not None]
     return sum(scores) / len(scores) if scores else None
+
+
+def _pairs_note(pair_rows):
+    """A compact "name+name beaten/total" note for EVERY one of a bring-4's
+    own internal pairs (6 for a 4-Pokemon bring, fewer for a 3-Pokemon
+    core), not just the single worst one the main columns already track --
+    "keep a note of the 6 pairs for each enemy team and their overall
+    performance along with the full summary"."""
+    return "; ".join(
+        f"{' + '.join(r['pair'])} {r['pairs_swept'] + r['pairs_traded']}/{r['pairs_total']}"
+        for r in pair_rows)
 
 
 def _per_90(count, n_pairs, pairs_total, scale=1.0):
@@ -1356,6 +1379,15 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     `rows` (not just the console's --top slice) -- "this will also require
     the team number to be indexed in the xlsx export" -- and is exactly the
     number --deep-dive-core/the interactive prompt reads back.
+
+    Each enemy's own column block also carries "Enemy N mega used" (the
+    single Mega-stone holder that enemy's own best bring-4 treats as
+    transformed, `pe["best_bring4_row"]["mega_used"]` -- "note which one is
+    used" once a core's 2 stone holders needed the bring-4-consistent
+    choice) and "Enemy N 6 pairs" (`_pairs_note`: every one of that bring's
+    own internal pairs, by name, with its own beaten fraction -- "keep a
+    note of the 6 pairs for each enemy team and their overall performance
+    along with the full summary").
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _safe_sheet_name, _style_header
@@ -1372,6 +1404,7 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               "Avg Wins under Protect/90", "Clean wins/90"]
     for i in range(len(target_name_lists)):
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
+                   f"Enemy {i + 1} mega used",
                    f"Enemy {i + 1} worst pair beaten",
                    f"Enemy {i + 1} uncovered enemy pairs",
                    f"Enemy {i + 1} pairs beaten total",
@@ -1387,7 +1420,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"Enemy {i + 1} pairs protect-safe 3rd best",
                    f"Enemy {i + 1} pairs clean win total",
                    f"Enemy {i + 1} pairs beaten without fainting best",
-                   f"Enemy {i + 1} pairs beaten without fainting 3rd best"]
+                   f"Enemy {i + 1} pairs beaten without fainting 3rd best",
+                   f"Enemy {i + 1} 6 pairs"]
     ws.append(header)
     _style_header(ws)
     sets_rows, teamsheet_entries = [], []
@@ -1432,6 +1466,7 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
             pt = depth["pairs_total"]
             n_pairs = len(pe["best_bring4_row"]["pair_rows"])
             row += [", ".join(pe["target_names"]), " / ".join(pe["best_bring4"]),
+                   pe["best_bring4_row"].get("mega_used") or "",
                    f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
                    ", ".join(f"{e1}+{e2}" for e1, e2 in uncovered),
                    f"{depth['beaten_total']}/{n_pairs * pt}",
@@ -1446,9 +1481,13 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"{depth['protect_safe_3rd']}/{pt}",
                    f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
                    f"{depth['no_faint_best']}/{pt}",
-                   f"{depth['no_faint_3rd']}/{pt}"]
+                   f"{depth['no_faint_3rd']}/{pt}",
+                   _pairs_note(pe["best_bring4_row"]["pair_rows"])]
         ws.append(row)
-        core_sets = _fixed_sets_for(core, fixed_items, fixed_moves, merged,
+        core_fixed_items = fixed_items
+        if r.get("item_clause_resolved_items"):
+            core_fixed_items = {**fixed_items, **r["item_clause_resolved_items"]}
+        core_sets = _fixed_sets_for(core, core_fixed_items, fixed_moves, merged,
                                     moves_db, natures, typechart, all_enemies,
                                     item_overrides, move_overrides, excluded_items)
         sets_rows.append((rank, " / ".join(core), core_sets))
@@ -1474,7 +1513,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
 
 def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
                        moves_db, natures, typechart, item_overrides,
-                       move_overrides, excluded_items, core_dives):
+                       move_overrides, excluded_items, core_dives,
+                       fixed_items=None, fixed_moves=None):
     """--bring4's table as an Excel workbook -- the single-team/single-enemy-
     roster counterpart to `_write_multi_bring4_xlsx`, for "run a bring4 vs
     only ONE named team" with the same xlsx bridge: a ranked '#' column, a
@@ -1482,6 +1522,24 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
     every bring-4 -- a real team can't re-optimise battle to battle), a
     'Teamsheets' sheet (pokepaste + base64 token for the full six and every
     bring-4 subset), and a Dive sheet trio per `core_dives` entry.
+
+    `fixed_items`/`fixed_moves`: the sets `bring4_rows` was ACTUALLY raced
+    with (`counter_finder._fixed_sets_from_pair_rows`, read back from
+    `pair_rows`) -- when given, the 'Sets'/'Teamsheets' sheets read these
+    instead of independently re-deriving each member's item/moveset, so
+    Item Clause (`--unique-items`) reassignments the race already applied
+    are never silently missing from what's displayed ("when unique-items
+    are enforced, it is crucial these are reflected in the sets, summary,
+    and gameplan for each team"). `None` (the default) falls back to the
+    old independent-re-derivation behaviour, for a caller that never
+    raced anything and has no `pair_rows` to read back from.
+
+    Also carries "Mega used" (`b["mega_used"]` -- "note which one is used"
+    once a bring's own 2 stone holders needed the bring-4-consistent
+    choice) and "6 pairs" (`_pairs_note`: every one of this bring's own
+    internal pairs, by name, with its own beaten fraction -- "keep a note
+    of the 6 pairs ... and their overall performance along with the full
+    summary").
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _safe_sheet_name, _style_header
@@ -1490,7 +1548,7 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
     enemy_tw = enemy_has_real_tailwind(targets, merged)
     ws = wb.active
     ws.title = "Bring-4s"
-    ws.append(["#", "Bring-4", "Uncovered enemy pairs", "Pairs good",
+    ws.append(["#", "Bring-4", "Mega used", "Uncovered enemy pairs", "Pairs good",
               "Pairs total", "Worst pair", "Worst pair beaten",
               "Worst pair total", "Average Score",
               "Avg Wins/90", "Avg Wins under Tailwind/90",
@@ -1503,7 +1561,7 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
               "pairs protect-safe best", "pairs protect-safe 3rd best",
               "pairs clean win total",
               "pairs beaten without fainting best",
-              "pairs beaten without fainting 3rd best"])
+              "pairs beaten without fainting 3rd best", "6 pairs"])
     _style_header(ws)
     for rank, b in enumerate(bring4_rows, start=1):
         wr = b["worst_pair_row"]
@@ -1511,7 +1569,7 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
         pt = depth["pairs_total"]
         n_pairs = len(b["pair_rows"])
         avg_score = _avg_score(b["bring4"], merged)
-        ws.append([rank, " / ".join(b["bring4"]),
+        ws.append([rank, " / ".join(b["bring4"]), b.get("mega_used") or "",
                   ", ".join(f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
                   b["pairs_good"], b["pairs_total"], " + ".join(b["worst_pair"]),
                   f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
@@ -1532,12 +1590,14 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
                   f"{depth['protect_safe_3rd']}/{pt}",
                   f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
                   f"{depth['no_faint_best']}/{pt}",
-                  f"{depth['no_faint_3rd']}/{pt}"])
+                  f"{depth['no_faint_3rd']}/{pt}",
+                  _pairs_note(b["pair_rows"])])
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
 
-    our6_sets = _fixed_sets_for(our6, {}, {}, merged, moves_db, natures,
+    our6_sets = _fixed_sets_for(our6, fixed_items or {}, fixed_moves or {},
+                                merged, moves_db, natures,
                                 typechart, targets, item_overrides,
                                 move_overrides, excluded_items)
     _write_sets_sheet(wb, [(1, " / ".join(our6), our6_sets)], merged)
@@ -2170,10 +2230,13 @@ def main():
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
+            fixed_items, fixed_moves = _fixed_sets_from_pair_rows(
+                pair_rows, merged, moves, natures, typechart, targets, excluded_items)
             path = _write_bring4_xlsx(
                 args.xlsx, bring4_rows, our6, targets, merged,
                 moves, natures, typechart, item_overrides, move_overrides,
-                excluded_items, core_dives)
+                excluded_items, core_dives,
+                fixed_items=fixed_items, fixed_moves=fixed_moves)
             print(f"\nExcel workbook: {os.path.abspath(path)}")
         if args.teamsheet_json:
             # No core was dived (no --deep-dive-core, no interactive pick)
@@ -2210,7 +2273,8 @@ def main():
                 coverage, good_threshold=good_threshold,
                 beam_width=args.beam_width, max_weak=args.max_weak,
                 type_limits=type_limits, max_megas=args.max_megas,
-                max_weak_types=args.max_weak_types, core_sizes=core_sizes)
+                max_weak_types=args.max_weak_types, core_sizes=core_sizes,
+                enforce_item_clause=args.unique_items)
             mode_label = f"beam, width {args.beam_width}"
         else:
             try:
@@ -2218,7 +2282,8 @@ def main():
                     coverage, good_threshold=good_threshold,
                     max_candidates=args.max_candidates, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
+                    max_weak_types=args.max_weak_types, core_sizes=core_sizes,
+                    enforce_item_clause=args.unique_items)
                 mode_label = "exhaustive"
             except ValueError as e:
                 # "It should be very quick to compute the sets of 4 brings
@@ -2235,7 +2300,8 @@ def main():
                     coverage, good_threshold=good_threshold,
                     beam_width=args.beam_width, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
+                    max_weak_types=args.max_weak_types, core_sizes=core_sizes,
+                    enforce_item_clause=args.unique_items)
                 mode_label = f"beam, width {args.beam_width} (auto-fallback)"
         _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
                             good_threshold, len(coverage["candidate_pool"]),
@@ -2451,12 +2517,18 @@ def main():
                     f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}")
                 teamsheet_bits = []
                 b4_sets = {}
+                core_resolved = r.get("item_clause_resolved_items") or {}
                 for name in pe["best_bring4"]:
                     # Read the same FIXED set every printed number was
-                    # computed from (`coverage["fixed_items"/"fixed_moves"]`)
-                    # rather than re-deriving one per enemy -- "for a team,
-                    # the moves must stay the same".
-                    if name in coverage["fixed_items"]:
+                    # computed from (`coverage["fixed_items"/"fixed_moves"]`,
+                    # or -- when this core's own pool-wide items collided --
+                    # `r["item_clause_resolved_items"]`, the core-scoped
+                    # re-race's own set) rather than re-deriving one per
+                    # enemy -- "for a team, the moves must stay the same".
+                    if name in core_resolved:
+                        item = core_resolved[name]
+                        move_names = coverage["fixed_moves"].get(name)
+                    elif name in coverage["fixed_items"]:
                         item = coverage["fixed_items"][name]
                         move_names = coverage["fixed_moves"].get(name)
                     else:

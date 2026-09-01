@@ -34,7 +34,7 @@ from damage import (Combatant, MoveInfo, is_spread_move, effective_stat, damage_
                     defensive_stat, move_from_showdown, CHARGE_WEATHER_SKIP,
                     WEIGHT_BASED_POWER)
 from engine import FieldState, Action, on_switch_in, effective_speed
-from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS
+from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS, priority_blocked_by_side
 from projection import mega_view, projected_field
 
 TOP_K_MOVES = 4   # real sets run 4 moves; 3 systematically under-armed the AI
@@ -44,7 +44,21 @@ FIRST_TURN_ONLY_MOVES = {"Fake Out", "First Impression"}
 def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES,
                    only_moves: list | None = None):
     """Turn mbsmogon usage-% move list into a list of (MoveInfo, usage_pct),
-    skipping the 'Other' bucket and non-resolvable move names."""
+    skipping the 'Other' bucket and non-resolvable move names.
+
+    Also skips a High Jump Kick/Jump Kick/Axe Kick/Supercell Slam-style
+    "crash" move (`MoveInfo.has_crash`) from this AUTOMATIC, usage-derived
+    pick -- "there are certain moves which should be banned, like High Jump
+    Kick, given it causes massive damage if it misses (including vs enemy
+    protect)": neither this engine nor the cheap model (`optimize_sets.
+    candidate_moves`'s own identical filter) simulates misses or the crash
+    itself, so letting the AUTO-search recommend one risk-free is worse than
+    not offering it. `only_moves` (an explicit hand-built/pasted set,
+    checked below) is deliberately NOT filtered -- that path represents a
+    REAL team the caller is asking to evaluate, same "still a move you can
+    pick by hand" reasoning its own comment below already gives for an
+    unrecorded move, not something this search invented on its own.
+    """
     out = []
     for mv_name, pct in pokemon_record["moves_usage"]:
         if mv_name == "Other":
@@ -52,7 +66,10 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
         key = mv_name.lower().replace(" ", "").replace("-", "").replace("'", "")
         if key not in moves_db:
             continue
-        out.append((move_from_showdown(moves_db[key]), pct))
+        mi = move_from_showdown(moves_db[key])
+        if mi.has_crash:
+            continue
+        out.append((mi, pct))
     if only_moves:
         # Explicit set supplied (e.g. an optimised team sheet) -- use exactly these,
         # preserving the given order, ignoring usage ranking and top_k.
@@ -229,8 +246,10 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
             # FINISHES it, which is a different kind of value from chip and is
             # exactly what raw damage cannot express. Costs at most one extra
             # action per move, and only where a KO is actually on.
-            scored = [(quick_damage_estimate(attacker, f, move, typechart, field), f)
-                      for f in live_foes]
+            blocked = priority_blocked_by_side(attacker.ability, move, live_foes)
+            scored = [(0.0 if blocked else
+                      quick_damage_estimate(attacker, f, move, typechart, field), f)
+                     for f in live_foes]
             best_target = max(scored, key=lambda pair: pair[0])[1]
             chosen = [best_target]
             for estimate, foe in scored:
@@ -302,10 +321,18 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
             own_side = battle.side_of(c)
             total_dealt = 0.0
             for t in a.targets:
-                dmg = quick_damage_estimate(mega_view(battle, c), t, a.move,
-                                             battle.typechart, decision_field,
-                                             num_hit=len(a.targets) if is_spread_move(a.move.target) else 1,
-                                             battle=battle)
+                # Queenly Majesty / Dazzling / Armor Tail on the target's side
+                # block this outright if it's priority -- the AI must see that
+                # BEFORE valuing the move, not just have `battle.py`'s real
+                # resolution zero it out after the fact ("the enemy trying to
+                # click priority moves anyway" against one of these).
+                if priority_blocked_by_side(c.ability, a.move, battle.side_of(t).active):
+                    dmg = 0.0
+                else:
+                    dmg = quick_damage_estimate(mega_view(battle, c), t, a.move,
+                                                 battle.typechart, decision_field,
+                                                 num_hit=len(a.targets) if is_spread_move(a.move.target) else 1,
+                                                 battle=battle)
                 pct = 100.0 * min(dmg, t.current_hp) / t.max_hp() if t.max_hp() else 0.0
                 # An allAdjacent move (Earthquake, Surf, Discharge) also hits our own
                 # partner -- that damage counts AGAINST the move, not for it.

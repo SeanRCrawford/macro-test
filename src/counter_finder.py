@@ -834,6 +834,46 @@ def _resolve_unique_items(names, merged, moves_db, natures, typechart,
     return resolved
 
 
+def _fixed_sets_from_pair_rows(pair_rows, merged, moves_db, natures, typechart,
+                               target_names, excluded_items=DEFAULT_EXCLUDED_ITEMS):
+    """{name: item}, {name: [move, ...]} read back from `pair_rows` (a
+    `bring4_search`/`joint_pool_search` result) -- the ITEM each name was
+    ACTUALLY raced with (`bring4_search`'s own Item-Clause-resolved
+    `item_overrides` if `enforce_item_clause` was on, unmodified otherwise
+    -- either way, whatever the race really used), never re-derived
+    independently. "When unique-items are enforced, it is crucial these
+    are reflected in the sets, summary, and gameplan for each team" --
+    `bring4_search` itself already resolves Item Clause correctly for its
+    OWN ranking, but (unlike `multi_bring4_coverage`, which returns
+    `fixed_items`/`fixed_moves` directly) never exposed that resolution to
+    its caller, so a caller building a Sets/Teamsheets display from a
+    FRESH, independent `_answer_for` call could silently disagree with
+    what was actually raced once Item Clause reassigned something away
+    from its independently-best pick.
+
+    Every name in `pair_rows` appears in at least one row (each pair_rows
+    entry already carries `item1`/`item2`, `joint_pool_search`'s own
+    convention), so this needs no new racing for items. Moves aren't
+    carried on a pair row, so they're searched FOR that pinned item (one
+    `_answer_for` call per name, `item_overrides` pinning it exactly the
+    way an explicit `--item` override already does) -- matches what the
+    original race's own move search would have produced for that same
+    item, never a different one.
+    """
+    fixed_items = {}
+    for r in pair_rows:
+        n1, n2 = r["pair"]
+        fixed_items[n1] = r["item1"]
+        fixed_items[n2] = r["item2"]
+    fixed_moves = {}
+    for name, item in fixed_items.items():
+        _item, move_names, _weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=fixed_items, excluded_items=excluded_items)
+        fixed_moves[name] = move_names or []
+    return fixed_items, fixed_moves
+
+
 def _scarf_speed(combatant):
     """`combatant`'s effective speed AS IF it held Choice Scarf -- a
     hypothesis for `threshold_search`'s `outspeed="scarf"` filter,
@@ -3260,20 +3300,34 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
     unconstrained `pair_lookup`, unchanged.
 
     Returns bring4_rows in `bring4_search`'s own shape, best-worst-case
-    first -- `[0]` is always "the best bring available from `six`."
+    first -- `[0]` is always "the best bring available from `six`." Each
+    row also carries `mega_used`: the single Mega-stone holder this
+    specific bring treats as transformed (`None` if it carries none) --
+    "note which one is used" when a bring's own 2 stone holders were
+    resolved via the consistency check above.
     """
     bring_size = min(4, len(six))
 
-    def _row_for(bring4, lookup):
+    def _row_for(bring4, lookup, forced_base_name=None):
         pairs = [lookup(p) for p in itertools.combinations(bring4, 2)]
         worst = max(pairs, key=_pair_sort_key)
         pairs_good = sum(1 for r in pairs if _pair_beaten_frac(r) >= good_threshold)
         uncovered = _uncovered_enemy_pairs(pairs, target_names)
+        mega_members = [n for n in bring4
+                        if n.startswith("Mega ") and n != forced_base_name]
         return {
             "bring4": bring4, "pairs": [r["pair"] for r in pairs],
             "pair_rows": pairs, "worst_pair": worst["pair"], "worst_pair_row": worst,
             "pairs_good": pairs_good, "pairs_total": len(pairs),
             "uncovered_enemy_pairs": uncovered,
+            # The single Mega-stone holder THIS bring actually treats as
+            # transformed -- `None` if the bring carries no stone holder at
+            # all, or (only possible when a caller skips the
+            # bring-4-consistent-mega machinery below entirely) BOTH of a
+            # core's 2 stone holders are still simultaneously assumed mega,
+            # an already-flagged-elsewhere inconsistent state this never
+            # claims to resolve on its own.
+            "mega_used": mega_members[0] if len(mega_members) == 1 else None,
         }
 
     def _rank_key(b):
@@ -3286,10 +3340,12 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
             m1, m2 = megas
             row_m1_is_mega = _row_for(
                 bring4, lambda p, forced=m2: pair_lookup_forced_base[forced].get(
-                    frozenset(p), pair_lookup[frozenset(p)]))
+                    frozenset(p), pair_lookup[frozenset(p)]),
+                forced_base_name=m2)
             row_m2_is_mega = _row_for(
                 bring4, lambda p, forced=m1: pair_lookup_forced_base[forced].get(
-                    frozenset(p), pair_lookup[frozenset(p)]))
+                    frozenset(p), pair_lookup[frozenset(p)]),
+                forced_base_name=m1)
             bring4_rows.append(min(row_m1_is_mega, row_m2_is_mega, key=_rank_key))
         else:
             bring4_rows.append(_row_for(bring4, lambda p: pair_lookup[frozenset(p)]))
@@ -3400,8 +3456,70 @@ def enemy_has_real_tailwind(target_names, merged):
         for name in target_names)
 
 
+def _core_item_clause_pair_by_key(core, target_name_lists, item_clause_context):
+    """Re-race JUST `core`'s own C(size,2) pairs, once, with VGC's real Item
+    Clause enforced across `core`'s own members -- used by `_core_row` only
+    for a core whose pool-wide `fixed_items` picks collide (2+ members
+    independently want the SAME item), which the pool-wide Stage A search
+    (one fixed item per POOL member, searched once against every enemy,
+    with no notion of "who else is on this specific 4-6 member team") can
+    never catch by construction: "When unique-items are enforced, it is
+    crucial these are reflected in the sets, summary, and gameplan for each
+    team" -- three Pokemon can each independently want Focus Sash, and the
+    pool-wide table would show ALL THREE holding it if they ever get
+    grouped into the same core together, which is illegal.
+
+    Resolved ONCE (`_resolve_unique_items`, the exact same build-order-
+    dependent resolution `bring4_search`/`core_deep_dive` already use for
+    a single fixed team) against the UNION of every named enemy, then
+    raced against EACH enemy roster in turn -- same "a real team's set is
+    fixed for the whole event" rule the pool-wide computation already
+    follows, just re-derived at CORE (not pool) scope.
+
+    Returns `(pair_by_key_per_enemy, resolved_items)`:
+    `pair_by_key_per_enemy` is {tuple(target_names): {frozenset(pair): row}},
+    one table per enemy roster -- `_core_row` swaps this in wholesale for a
+    conflicting core (every pair `_bring4_candidates` looks up for a bring
+    drawn from `core` is, by construction, a pair entirely within `core`).
+    `resolved_items` is `core`'s own {name: item} -- Item-Clause-legal
+    across `core`'s members, unlike `item_clause_context["fixed_items"]`
+    (pool-wide, and exactly what collided) -- `_core_row` carries it back up
+    so a caller displaying this core's set (a teamsheet, an xlsx Sets/
+    Summary/Gameplans sheet) can show the SAME set the numbers next to it
+    were actually computed from, not the illegal pool-wide one.
+
+    KNOWN LIMITATION, stated plainly: does not compose with `_bring4_
+    candidates`'s own "bring-4-consistent mega choice" hypothesis testing
+    -- a core that ALSO carries 2 Mega-stone holders skips that
+    consistency check when an item conflict triggers this path (see
+    `_core_row`). Narrow (needs both conditions on the SAME core at once)
+    and a known, accepted gap rather than a silent one.
+    """
+    fixed_items = item_clause_context["fixed_items"]
+    fixed_moves = item_clause_context["fixed_moves"]
+    merged = item_clause_context["merged"]
+    moves_db = item_clause_context["moves_db"]
+    natures = item_clause_context["natures"]
+    typechart = item_clause_context["typechart"]
+    turns = item_clause_context["turns"]
+    excluded_items = item_clause_context["excluded_items"]
+    all_enemies = sorted({n for t in target_name_lists for n in t})
+    resolved_items = _resolve_unique_items(
+        list(core), merged, moves_db, natures, typechart, all_enemies,
+        move_overrides=fixed_moves, excluded_items=excluded_items)
+    out = {}
+    for target_names in target_name_lists:
+        rows = joint_pool_search(list(core), target_names, merged, moves_db,
+                                 natures, typechart, turns=turns,
+                                 item_overrides=resolved_items,
+                                 move_overrides=fixed_moves,
+                                 excluded_items=excluded_items)
+        out[tuple(target_names)] = {frozenset(r["pair"]): r for r in rows}
+    return out, resolved_items
+
+
 def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
-              pair_by_key_forced_base_list=None):
+              pair_by_key_forced_base_list=None, item_clause_context=None):
     """For a candidate CORE (4, 5, or 6 Pokemon -- see `multi_bring4_
     exhaustive`'s own note on why fewer than 6 is a real, often BETTER
     answer, not a fallback) against SEVERAL enemy rosters: the BEST bring-4
@@ -3439,9 +3557,40 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
     transforms independently ("you cannot vary your mega choice if both are
     brought" to one battle). `None` (the default) reproduces the old,
     inconsistent behaviour -- every caller that can supply it now does.
+
+    `item_clause_context` (from `multi_bring4_coverage`'s returned dict,
+    plus `turns`/`excluded_items` -- see `multi_bring4_exhaustive`/
+    `multi_bring4_beam`'s own `enforce_item_clause`): when `core`'s own
+    members' pool-wide `fixed_items` picks collide (2+ of THIS core's
+    members independently want the same item -- undetectable at Stage A,
+    which only ever searches one pool member's set at a time against the
+    enemy union, never against its actual teammates), `pair_by_key_list` is
+    swapped out wholesale for a core-scoped re-race
+    (`_core_item_clause_pair_by_key`) that enforces VGC's real Item Clause
+    across `core`'s own members. `None` (the default) skips the conflict
+    check entirely, reproducing the old behaviour -- cheap (an O(core_size)
+    scan) in the common, non-conflicting case, since the check itself is
+    just comparing `len` of a list against `len` of a `set`. See
+    `_core_item_clause_pair_by_key`'s own docstring for the accepted gap
+    against `pair_by_key_forced_base_list` when both trigger on the same
+    core at once. When a conflict was resolved, the returned dict's
+    `item_clause_resolved_items` carries `core`'s own Item-Clause-legal
+    {name: item} (`None` when no conflict was found, or when
+    `item_clause_context` itself was `None`) -- a caller displaying this
+    core's set should prefer this over the pool-wide `fixed_items` whenever
+    it is not `None`, so what's shown always matches what was raced.
     """
     core = tuple(sorted(core))
     megas = tuple(n for n in core if n.startswith("Mega "))
+    core_resolved_items = None
+    if item_clause_context is not None:
+        fixed_items = item_clause_context["fixed_items"]
+        held = [fixed_items[n] for n in core if fixed_items.get(n)]
+        if len(held) != len(set(held)):
+            conflict_pair_by_key, core_resolved_items = _core_item_clause_pair_by_key(
+                core, target_name_lists, item_clause_context)
+            pair_by_key_list = [conflict_pair_by_key[tuple(target_names)]
+                                for target_names in target_name_lists]
     per_enemy = []
     worst_key, worst_idx = None, None
     used = set()
@@ -3461,7 +3610,8 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
             worst_key, worst_idx = key, i
     return {"core": core, "core_size": len(core), "per_enemy": per_enemy,
            "worst_enemy_idx": worst_idx, "worst_enemy_score_key": worst_key,
-           "unused": tuple(sorted(set(core) - used))}
+           "unused": tuple(sorted(set(core) - used)),
+           "item_clause_resolved_items": core_resolved_items}
 
 
 # `multi_bring4_coverage`'s per-enemy `joint_pool_search` calls are fully
@@ -3686,7 +3836,9 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     return {"per_enemy": per_enemy, "pair_by_key": pair_by_key,
            "pair_by_key_forced_base": pair_by_key_forced_base,
            "target_name_lists": target_name_lists, "candidate_pool": candidate_pool,
-           "merged": merged, "fixed_items": fixed_items, "fixed_moves": fixed_moves}
+           "merged": merged, "fixed_items": fixed_items, "fixed_moves": fixed_moves,
+           "moves_db": moves_db, "natures": natures, "typechart": typechart,
+           "turns": turns, "excluded_items": excluded_items}
 
 
 def _effective_type_limits(max_weak=None, type_limits=None):
@@ -3769,10 +3921,23 @@ _EXHAUSTIVE_POOL_CEILING = 30
 _CORE_SIZES = (4, 5, 6)
 
 
+def _item_clause_context_from_coverage(coverage):
+    """Build `_core_row`'s `item_clause_context` from `multi_bring4_coverage`'s
+    own returned dict -- the one place `multi_bring4_exhaustive`/
+    `multi_bring4_beam` assemble it, so both stay in sync if that shape ever
+    changes."""
+    return {"fixed_items": coverage["fixed_items"],
+           "fixed_moves": coverage["fixed_moves"],
+           "merged": coverage["merged"], "moves_db": coverage["moves_db"],
+           "natures": coverage["natures"], "typechart": coverage["typechart"],
+           "turns": coverage["turns"], "excluded_items": coverage["excluded_items"]}
+
+
 def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_candidates=_EXHAUSTIVE_POOL_CEILING,
                             max_weak=None, type_limits=None, max_megas=2,
-                            max_weak_types=None, core_sizes=_CORE_SIZES):
+                            max_weak_types=None, core_sizes=_CORE_SIZES,
+                            enforce_item_clause=False):
     """Every possible CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3, "I would like to output the best 3-pokemon
     cores against each team" -- not just exactly 6) drawn
@@ -3801,6 +3966,13 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     with a higher `--min-enemies`/`--good-threshold`, or use
     `multi_bring4_beam` instead.
 
+    `enforce_item_clause`: when True, every candidate core is checked for
+    an Item Clause conflict among its own members (`_core_row`'s own
+    `item_clause_context` path) and re-raced core-scoped when one is found
+    -- "When unique-items are enforced, it is crucial these are reflected
+    in the sets, summary, and gameplan for each team." False (the default)
+    reproduces the old, pool-wide-only behaviour.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first.
     """
     pool = coverage["candidate_pool"]
@@ -3818,6 +3990,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                          f"--beam instead")
     effective_limits = _effective_type_limits(max_weak, type_limits)
     merged = coverage["merged"]
+    item_clause_context = (_item_clause_context_from_coverage(coverage)
+                           if enforce_item_clause else None)
     rows = []
     for size in core_sizes:
         if size > n:
@@ -3829,7 +4003,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                 continue
             row = _core_row(core, coverage["pair_by_key"],
                             coverage["target_name_lists"], good_threshold,
-                            pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"])
+                            pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
+                            item_clause_context=item_clause_context)
             if row["unused"]:
                 continue
             rows.append(row)
@@ -3839,7 +4014,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
 
 def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                       max_weak=None, type_limits=None, max_megas=2,
-                      max_weak_types=None, core_sizes=_CORE_SIZES):
+                      max_weak_types=None, core_sizes=_CORE_SIZES,
+                      enforce_item_clause=False):
     """Beam-search a CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3) over the WHOLE pool
     `multi_bring4_coverage` already has pair data for (the raw pool, NOT
@@ -3863,6 +4039,13 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     them" applies here too. A core with an unused member is dropped, same
     as `multi_bring4_exhaustive`.
 
+    `enforce_item_clause`: same as `multi_bring4_exhaustive`'s own -- a
+    candidate core's Item Clause conflicts are checked (and, if found,
+    re-raced core-scoped) both while SCORING growth candidates (`score()`
+    below) and at the final `found`-capture step, so the beam's own
+    ranking during growth already reflects a conflicting core's real,
+    Item-Clause-legal performance rather than its illegal pool-wide one.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first, for
     whichever cores the beam actually reached (not exhaustive, so not
     guaranteed globally optimal).
@@ -3871,6 +4054,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     pair_by_key_forced_base_list = coverage["pair_by_key_forced_base"]
     target_name_lists = coverage["target_name_lists"]
     merged = coverage["merged"]
+    item_clause_context = (_item_clause_context_from_coverage(coverage)
+                           if enforce_item_clause else None)
     effective_limits = _effective_type_limits(max_weak, type_limits)
     # Only `max_weak` is monotonic (safe to prune ON during growth, before a
     # candidate reaches a real core size) -- `max_net` can only be checked
@@ -3898,7 +4083,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
             return (-total,)
         return _core_row(team, pair_by_key_list, target_name_lists,
                          good_threshold,
-                         pair_by_key_forced_base_list=pair_by_key_forced_base_list
+                         pair_by_key_forced_base_list=pair_by_key_forced_base_list,
+                         item_clause_context=item_clause_context
                          )["worst_enemy_score_key"]
 
     seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
@@ -3938,7 +4124,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                     continue  # catches a max_net violation growth couldn't see
                 row = _core_row(team, pair_by_key_list, target_name_lists,
                                 good_threshold,
-                                pair_by_key_forced_base_list=pair_by_key_forced_base_list)
+                                pair_by_key_forced_base_list=pair_by_key_forced_base_list,
+                                item_clause_context=item_clause_context)
                 if not row["unused"]:
                     found[key] = row
 
@@ -4077,7 +4264,10 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     "total": <summed pairs_swept/traded/lost/no_ko/tailwind_safe/
     protect_safe/total across every enemy team, for this ONE pair>}, ...
     one entry per pair in `core`...}, "overall": <the same summed shape,
-    across EVERY pair and EVERY enemy team>}.
+    across EVERY pair and EVERY enemy team>, "mega_used": the single
+    Mega-stone holder this dive's winning hypothesis treats as transformed
+    (`None` if `core` carries none) -- "note which one is used" once a
+    core's own 2 stone holders needed the consistency choice above}.
     """
     core = list(dict.fromkeys(core))
     target_name_lists = [list(t) for t in target_name_lists]
@@ -4109,14 +4299,18 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
         dive_a = _core_deep_dive_race(
             core, target_name_lists, our_built, enemy_built_by_team, typechart,
             turns, merged, sets, forced_base_names=frozenset({megas[1]}))
+        dive_a["mega_used"] = megas[0]
         dive_b = _core_deep_dive_race(
             core, target_name_lists, our_built, enemy_built_by_team, typechart,
             turns, merged, sets, forced_base_names=frozenset({megas[0]}))
+        dive_b["mega_used"] = megas[1]
         return dive_a if (_pair_sort_key(dive_a["overall"])
                           <= _pair_sort_key(dive_b["overall"])) else dive_b
-    return _core_deep_dive_race(core, target_name_lists, our_built,
-                                enemy_built_by_team, typechart, turns, merged,
-                                sets, forced_base_names=frozenset())
+    result = _core_deep_dive_race(core, target_name_lists, our_built,
+                                  enemy_built_by_team, typechart, turns, merged,
+                                  sets, forced_base_names=frozenset())
+    result["mega_used"] = megas[0] if len(megas) == 1 else None
+    return result
 
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,

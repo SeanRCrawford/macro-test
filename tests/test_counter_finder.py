@@ -3389,6 +3389,150 @@ class TestMultiBring4CoverageMegaConsistency(unittest.TestCase):
         forced = floette_forced_base["pairs_swept"] + floette_forced_base["pairs_traded"]
         self.assertLess(forced, uncorrected)
 
+    def test_best_bring4_row_reports_which_mega_was_actually_used(self):
+        """"note which one is used" -- the winning bring's own `mega_used`
+        must name exactly the ONE of the core's 2 stone holders whose
+        hypothesis actually won (i.e. the one NOT locked to base in
+        whichever of `floette_forced`/`scizor_forced` matched the winning
+        pairs, per the consistency test above)."""
+        core = ("Garchomp", "Kingambit", "Mega Floette", "Mega Scizor")
+        row = cf._core_row(
+            core, self.coverage["pair_by_key"], self.coverage["target_name_lists"],
+            good_threshold=0.0,
+            pair_by_key_forced_base_list=self.coverage["pair_by_key_forced_base"])
+        best = row["per_enemy"][0]["best_bring4_row"]
+        self.assertIn(best["mega_used"], ("Mega Floette", "Mega Scizor"))
+        got = {frozenset(pr["pair"]): pr for pr in best["pair_rows"]}
+        pairs = list(got)
+        floette_forced = self._hypothesis_rows("Mega Floette", pairs)
+        scizor_forced = self._hypothesis_rows("Mega Scizor", pairs)
+        if got == floette_forced:
+            self.assertEqual(best["mega_used"], "Mega Scizor")
+        else:
+            self.assertTrue(got == scizor_forced)
+            self.assertEqual(best["mega_used"], "Mega Floette")
+
+
+class TestMultiBring4CoverageItemClause(unittest.TestCase):
+    """`multi_bring4_coverage`/`_core_row`'s Item Clause fix ("Fix B"):
+    Stage A's pool-wide `fixed_items` (one item per POOL member, searched
+    once, with no notion of "who else is on this specific core") can pick
+    the SAME item for two names that only collide once they land on the
+    same 4-6 member core together -- undetectable at Stage A by
+    construction. "When unique-items are enforced, it is crucial these are
+    reflected in the sets, summary, and gameplan for each team."
+
+    Ninetales-Alola and Rampardos both independently want Life Orb against
+    this fixture (the exact collision `TestResolveUniqueItems`/
+    `TestBring4SearchItemClauseIsOptIn` already use), so a core containing
+    both is guaranteed to trigger `_core_row`'s conflict check."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.OUR6, [self.TARGETS], merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+
+    def test_pool_wide_fixed_items_do_collide_without_enforcement(self):
+        """Confirms the fixture: Stage A's OWN pool-wide search picks the
+        same item for both names, exactly the illegal state a real core
+        containing both would otherwise silently show."""
+        self.assertEqual(self.coverage["fixed_items"]["Ninetales-Alola"],
+                         self.coverage["fixed_items"]["Rampardos"])
+
+    def test_core_row_without_item_clause_context_reproduces_old_behaviour(self):
+        row = cf._core_row(
+            self.OUR6, self.coverage["pair_by_key"],
+            self.coverage["target_name_lists"], good_threshold=0.0,
+            pair_by_key_forced_base_list=self.coverage["pair_by_key_forced_base"])
+        self.assertIsNone(row["item_clause_resolved_items"])
+
+    def test_core_row_with_item_clause_context_resolves_the_conflict(self):
+        ctx = cf._item_clause_context_from_coverage(self.coverage)
+        row = cf._core_row(
+            self.OUR6, self.coverage["pair_by_key"],
+            self.coverage["target_name_lists"], good_threshold=0.0,
+            pair_by_key_forced_base_list=self.coverage["pair_by_key_forced_base"],
+            item_clause_context=ctx)
+        resolved = row["item_clause_resolved_items"]
+        self.assertIsNotNone(resolved)
+        self.assertNotEqual(resolved["Ninetales-Alola"], resolved["Rampardos"])
+        self.assertEqual(len(set(resolved.values())), len(resolved))
+
+    def test_a_non_conflicting_core_skips_the_re_race_entirely(self):
+        """The cheap common case: a core that doesn't carry BOTH colliding
+        names never triggers the core-scoped re-race at all."""
+        ctx = cf._item_clause_context_from_coverage(self.coverage)
+        core = [n for n in self.OUR6 if n != "Rampardos"]
+        row = cf._core_row(
+            core, self.coverage["pair_by_key"],
+            self.coverage["target_name_lists"], good_threshold=0.0,
+            pair_by_key_forced_base_list=self.coverage["pair_by_key_forced_base"],
+            item_clause_context=ctx)
+        self.assertIsNone(row["item_clause_resolved_items"])
+
+    def test_core_item_clause_pair_by_key_returns_a_legal_per_enemy_table(self):
+        ctx = cf._item_clause_context_from_coverage(self.coverage)
+        pair_by_key_per_enemy, resolved_items = cf._core_item_clause_pair_by_key(
+            tuple(sorted(self.OUR6)), self.coverage["target_name_lists"], ctx)
+        self.assertNotEqual(resolved_items["Ninetales-Alola"],
+                            resolved_items["Rampardos"])
+        table = pair_by_key_per_enemy[tuple(self.TARGETS)]
+        pair = frozenset({"Ninetales-Alola", "Rampardos"})
+        self.assertIn(pair, table)
+        self.assertEqual(table[pair]["item1"] if table[pair]["pair"][0] ==
+                         "Ninetales-Alola" else table[pair]["item2"],
+                         resolved_items["Ninetales-Alola"])
+
+    # A separate, exactly-4-member pool for the `multi_bring4_exhaustive`/
+    # `multi_bring4_beam` tests below: with a size-4 core and `core_sizes=
+    # (4,)`, the WHOLE core is necessarily the bring-4 against a single
+    # enemy roster, so `_core_row`'s own `unused` never fires and drops the
+    # row -- keeps these tests decoupled from which 4-of-6 subset
+    # `_bring4_candidates` would otherwise have picked.
+    FOUR = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Rampardos"]
+
+    def _four_coverage(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        return cf.multi_bring4_coverage(
+            self.FOUR, [self.TARGETS], merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+
+    def test_multi_bring4_exhaustive_default_leaves_conflict_unresolved(self):
+        coverage = self._four_coverage()
+        rows = cf.multi_bring4_exhaustive(
+            coverage, good_threshold=0.0, core_sizes=(4,))
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["item_clause_resolved_items"])
+
+    def test_multi_bring4_exhaustive_enforce_item_clause_resolves_it(self):
+        coverage = self._four_coverage()
+        rows = cf.multi_bring4_exhaustive(
+            coverage, good_threshold=0.0, core_sizes=(4,),
+            enforce_item_clause=True)
+        self.assertEqual(len(rows), 1)
+        resolved = rows[0]["item_clause_resolved_items"]
+        self.assertIsNotNone(resolved)
+        self.assertNotEqual(resolved["Ninetales-Alola"], resolved["Rampardos"])
+
+    def test_multi_bring4_beam_enforce_item_clause_resolves_it(self):
+        coverage = self._four_coverage()
+        rows = cf.multi_bring4_beam(
+            coverage, good_threshold=0.0, core_sizes=(4,),
+            enforce_item_clause=True)
+        matches = [r for r in rows if set(r["core"]) == set(self.FOUR)]
+        self.assertTrue(matches)
+        resolved = matches[0]["item_clause_resolved_items"]
+        self.assertIsNotNone(resolved)
+        self.assertNotEqual(resolved["Ninetales-Alola"], resolved["Rampardos"])
+
 
 class TestMultiBring4CoreSizes(unittest.TestCase):
     """"I would like to output the best 3-pokemon cores against each team"
@@ -4128,6 +4272,38 @@ class TestCoreDeepDive(unittest.TestCase):
             self.CORE, self.ENEMIES, merged, moves, natures, typechart,
             turns=2, item_overrides={"Kingambit": "Life Orb"})
         self.assertEqual(dive["sets"]["Kingambit"]["item"], "Life Orb")
+
+    def test_mega_used_is_none_when_the_core_carries_no_stone_holder(self):
+        self.assertIsNone(self.dive["mega_used"])
+
+
+class TestCoreDeepDiveMegaUsed(unittest.TestCase):
+    """`core_deep_dive`'s own "note which one is used" -- when `core`
+    carries exactly 2 Mega-stone holders, the winning hypothesis's
+    `mega_used` must name the one NOT locked to base, and a core with just
+    ONE stone holder reports that single one unambiguously (no consistency
+    choice needed)."""
+
+    ENEMIES = [["Kingambit", "Basculegion", "Sableye", "Ariados"]]
+
+    def setUp(self):
+        self.W = world()
+
+    def test_two_stone_holders_reports_exactly_one_as_used(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        core = ["Garchomp", "Kingambit", "Mega Floette", "Mega Scizor"]
+        dive = cf.core_deep_dive(core, self.ENEMIES, merged, moves, natures,
+                                 typechart, turns=2)
+        self.assertIn(dive["mega_used"], ("Mega Floette", "Mega Scizor"))
+
+    def test_a_single_stone_holder_is_reported_directly(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        core = ["Garchomp", "Kingambit", "Mega Floette", "Whimsicott"]
+        dive = cf.core_deep_dive(core, self.ENEMIES, merged, moves, natures,
+                                 typechart, turns=2)
+        self.assertEqual(dive["mega_used"], "Mega Floette")
 
 
 class TestSwitchInSearch(unittest.TestCase):

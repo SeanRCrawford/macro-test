@@ -1572,6 +1572,87 @@ class TestXlsxNewSummaryColumns(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestXlsxMegaUsedAndSixPairsColumns(unittest.TestCase):
+    """"In the xlsx where use of a single mega is enforced when both are
+    brought, note which one is used in the cores sheet and the Summary/
+    Gameplans sheet. Also keep a note of the 6 pairs for each enemy team
+    and their overall performance along with the full summary." -- the
+    "Bring-4s"/"Cores" sheets get a "Mega used" column plus a per-bring "6
+    pairs" note; the "Dive N Summary"/"Dive N Gameplans" sheets get a
+    "Mega Used" column."""
+
+    def test_bring4_xlsx_has_mega_used_and_six_pairs_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            self.assertIn("Mega used", header)
+            self.assertIn("6 pairs", header)
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            self.assertTrue(row2["6 pairs"])
+            self.assertIn("+", row2["6 pairs"])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_xlsx_has_per_enemy_mega_used_and_six_pairs_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            self.assertTrue(any(h and h.endswith("mega used") for h in header))
+            self.assertTrue(any(h and h.endswith("6 pairs") for h in header))
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            pairs_col = next(h for h in header if h.endswith("6 pairs"))
+            self.assertTrue(row2[pairs_col])
+            self.assertIn("+", row2[pairs_col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_dive_summary_and_gameplans_sheets_have_mega_used_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "1",
+                 "--deep-dive-core", "1"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            summary_header = [c.value for c in wb["Dive 1 Summary"][1]]
+            gameplans_header = [c.value for c in wb["Dive 1 Gameplans"][1]]
+            self.assertIn("Mega Used", summary_header)
+            self.assertIn("Mega Used", gameplans_header)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
     """"When a sweep of --vs-team gets too many results it doesn't even
     output the results or anything to CSV. I want to at least see the
