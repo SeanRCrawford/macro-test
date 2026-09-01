@@ -3316,7 +3316,8 @@ def enemy_has_real_tailwind(target_names, merged):
         for name in target_names)
 
 
-def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
+def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
+              pair_by_key_forced_base_list=None):
     """For a candidate CORE (4, 5, or 6 Pokemon -- see `multi_bring4_
     exhaustive`'s own note on why fewer than 6 is a real, often BETTER
     answer, not a fallback) against SEVERAL enemy rosters: the BEST bring-4
@@ -3344,13 +3345,29 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
     `multi_bring4_exhaustive`/`multi_bring4_beam` both drop any row where
     this is non-empty, since the identical-scoring smaller core is already
     enumerated on its own.
+
+    `pair_by_key_forced_base_list` (one `{name: {frozenset(pair): row}}` per
+    enemy, from `multi_bring4_coverage`): when `core` carries exactly 2
+    Mega-stone holders, passed down to `_bring4_candidates` as its own
+    `megas`/`pair_lookup_forced_base` so a bring subset containing BOTH is
+    scored under a single self-consistent "which one is this bring's
+    actual mega" hypothesis, not each pair assuming its own member
+    transforms independently ("you cannot vary your mega choice if both are
+    brought" to one battle). `None` (the default) reproduces the old,
+    inconsistent behaviour -- every caller that can supply it now does.
     """
     core = tuple(sorted(core))
+    megas = tuple(n for n in core if n.startswith("Mega "))
     per_enemy = []
     worst_key, worst_idx = None, None
     used = set()
     for i, (pair_lookup, target_names) in enumerate(zip(pair_by_key_list, target_name_lists)):
-        candidates = _bring4_candidates(core, pair_lookup, target_names, good_threshold)
+        forced_base = (pair_by_key_forced_base_list[i]
+                      if pair_by_key_forced_base_list is not None else None)
+        candidates = _bring4_candidates(
+            core, pair_lookup, target_names, good_threshold,
+            megas=megas if len(megas) == 2 and forced_base else None,
+            pair_lookup_forced_base=forced_base)
         best = candidates[0]
         key = (len(best["uncovered_enemy_pairs"]),) + _pair_sort_key(best["worst_pair_row"])
         per_enemy.append({"target_names": list(target_names),
@@ -3388,7 +3405,7 @@ def _multi_bring4_coverage_job(job):
     `jobs` > 1 path. Top-level and plain-typed: the pool may use spawn, so
     both ends of this call cross a pickle boundary."""
     (pool, target_names, turns, fixed_items, fixed_moves, excluded_items,
-     good_threshold) = job
+     good_threshold, pool_megas) = job
     global _WORKER_WORLD
     if _WORKER_WORLD is None:
         _multi_bring4_worker_init()
@@ -3396,7 +3413,8 @@ def _multi_bring4_coverage_job(job):
     return joint_pool_search(pool, target_names, w["merged"], w["moves"],
                              w["natures"], w["typechart"], turns=turns,
                              item_overrides=fixed_items, move_overrides=fixed_moves,
-                             excluded_items=excluded_items, prune_below=good_threshold)
+                             excluded_items=excluded_items, prune_below=good_threshold,
+                             extra_forced_base=pool_megas)
 
 
 def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
@@ -3490,6 +3508,24 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     process-pool map, same shape as `roster_rating.rate_many`. Falls back to
     serial when there is only one enemy roster to search (nothing to gain
     from a pool for one task) regardless of what `jobs` asks for.
+
+    BRING-4-CONSISTENT MEGA CHOICE, same rule `bring4_search` already
+    enforces for its own fixed 6: "you cannot vary your mega choice if both
+    [mega-stone holders] are brought" to one specific battle. Every mega in
+    `pool` (after the drop above) is raced a SECOND time per enemy, locked
+    to base form (`joint_pool_search`'s `extra_forced_base`), so `_core_row`
+    can later self-consistently pick "which ONE of a core's (at most 2)
+    stone-holders is this bring's actual mega" instead of letting each of a
+    bring's internal pairs assume its own member transforms independently
+    -- exactly the gap that let a bring like "Arcanine-Hisui / Lycanroc-Dusk
+    / Mega Floette / Mega Scizor" get scored as if BOTH megas were
+    simultaneously live, which is illegal (VGC's real "only one Mega
+    Evolution per team per game" rule). Eager, not lazy: every mega in the
+    pool gets this treatment up front here, not only the ones that end up
+    paired together in some candidate core -- doubles the racing cost for
+    any pair involving a mega (across every enemy), a deliberate trade of
+    search cost for correctness, same one `bring4_search` already pays for
+    its own (at most 2) stone-holders.
     """
     target_name_lists = [list(t) for t in target_name_lists]
     min_enemies = min(min_enemies, len(target_name_lists))
@@ -3511,30 +3547,50 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     # per-battle-adjusted-set problem this whole block exists to prevent,
     # just for the one name that happened to have no global answer.
     pool = [n for n in pool if n in fixed_moves]
+    pool_megas = frozenset(n for n in pool if n.startswith("Mega "))
     if jobs > 1 and len(target_name_lists) > 1:
         import concurrent.futures as cf
         jobs_list = [(pool, target_names, turns, fixed_items, fixed_moves,
-                     excluded_items, good_threshold)
+                     excluded_items, good_threshold, pool_megas)
                     for target_names in target_name_lists]
         with cf.ProcessPoolExecutor(
                 max_workers=min(jobs, len(jobs_list)),
                 initializer=_multi_bring4_worker_init) as ex:
-            # map, not as_completed: per_enemy must stay in target_name_lists
-            # order -- every downstream reader (candidate_pool below,
-            # multi_bring4_exhaustive/beam, the xlsx writer) zips it against
-            # target_name_lists positionally.
-            per_enemy = list(ex.map(_multi_bring4_coverage_job, jobs_list))
+            # map, not as_completed: raw_per_enemy must stay in
+            # target_name_lists order -- every downstream reader
+            # (candidate_pool below, multi_bring4_exhaustive/beam, the xlsx
+            # writer) zips it against target_name_lists positionally.
+            raw_per_enemy = list(ex.map(_multi_bring4_coverage_job, jobs_list))
     else:
-        per_enemy = [joint_pool_search(pool, target_names, merged, moves_db,
-                                       natures, typechart, turns=turns,
-                                       item_overrides=fixed_items,
-                                       move_overrides=fixed_moves,
-                                       excluded_items=excluded_items,
-                                       prune_below=good_threshold)
-                    for target_names in target_name_lists]
-    pair_by_key = []
+        raw_per_enemy = [joint_pool_search(pool, target_names, merged, moves_db,
+                                           natures, typechart, turns=turns,
+                                           item_overrides=fixed_items,
+                                           move_overrides=fixed_moves,
+                                           excluded_items=excluded_items,
+                                           prune_below=good_threshold,
+                                           extra_forced_base=pool_megas)
+                        for target_names in target_name_lists]
+    # Split each enemy's raw rows into the ordinary per-pair table
+    # (`per_enemy`/`pair_by_key`, exactly the shape this returned before the
+    # forced-base mega rows existed -- every existing reader, e.g.
+    # `_print_pair_summary`, still sees one row per pair) and a SEPARATE
+    # per-mega forced-base lookup (`pair_by_key_forced_base`) `_core_row`
+    # reads from when a candidate core carries 2 stone-holders together.
+    per_enemy, pair_by_key, pair_by_key_forced_base = [], [], []
     appears_good_in = {}
-    for rows in per_enemy:
+    for raw_rows in raw_per_enemy:
+        # Built BEFORE popping "forced_base" below -- that pop mutates the
+        # same dict objects `raw_rows` still references (mirrors
+        # `bring4_search`'s own identical warning), so this must read the
+        # field first.
+        pair_by_key_forced_base.append({
+            name: {frozenset(r["pair"]): r for r in raw_rows
+                  if r["forced_base"] == name}
+            for name in pool_megas})
+        rows = [r for r in raw_rows if r["forced_base"] is None]
+        for r in rows:
+            r.pop("forced_base", None)
+        per_enemy.append(rows)
         pair_by_key.append({frozenset(r["pair"]): r for r in rows})
         good_names = set()
         for r in rows:
@@ -3544,6 +3600,7 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
             appears_good_in[n] = appears_good_in.get(n, 0) + 1
     candidate_pool = sorted(n for n, c in appears_good_in.items() if c >= min_enemies)
     return {"per_enemy": per_enemy, "pair_by_key": pair_by_key,
+           "pair_by_key_forced_base": pair_by_key_forced_base,
            "target_name_lists": target_name_lists, "candidate_pool": candidate_pool,
            "merged": merged, "fixed_items": fixed_items, "fixed_moves": fixed_moves}
 
@@ -3687,7 +3744,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                                              max_weak_types=max_weak_types):
                 continue
             row = _core_row(core, coverage["pair_by_key"],
-                            coverage["target_name_lists"], good_threshold)
+                            coverage["target_name_lists"], good_threshold,
+                            pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"])
             if row["unused"]:
                 continue
             rows.append(row)
@@ -3726,6 +3784,7 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     guaranteed globally optimal).
     """
     pair_by_key_list = coverage["pair_by_key"]
+    pair_by_key_forced_base_list = coverage["pair_by_key_forced_base"]
     target_name_lists = coverage["target_name_lists"]
     merged = coverage["merged"]
     effective_limits = _effective_type_limits(max_weak, type_limits)
@@ -3754,7 +3813,9 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                        if frozenset(p) in pbk)
             return (-total,)
         return _core_row(team, pair_by_key_list, target_name_lists,
-                         good_threshold)["worst_enemy_score_key"]
+                         good_threshold,
+                         pair_by_key_forced_base_list=pair_by_key_forced_base_list
+                         )["worst_enemy_score_key"]
 
     seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
              if _core_passes_hard_filters(p, merged, growth_limits,
@@ -3791,7 +3852,9 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                                                  max_megas=max_megas,
                                                  max_weak_types=max_weak_types):
                     continue  # catches a max_net violation growth couldn't see
-                row = _core_row(team, pair_by_key_list, target_name_lists, good_threshold)
+                row = _core_row(team, pair_by_key_list, target_name_lists,
+                                good_threshold,
+                                pair_by_key_forced_base_list=pair_by_key_forced_base_list)
                 if not row["unused"]:
                     found[key] = row
 

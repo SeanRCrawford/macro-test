@@ -3164,6 +3164,154 @@ class TestMultiBring4CoverageJobs(unittest.TestCase):
         self.assertEqual(serial["per_enemy"], parallel["per_enemy"])
 
 
+class TestCoreRowRespectsMegaConsistency(unittest.TestCase):
+    """"these MUST commit to only ever mega one vs all enemy pairs if both
+    are brought to a specific battle ... You cannot vary your mega choice
+    if both are brought." `_bring4_candidates` already enforced this for
+    `bring4_search`'s own fixed six (`TestBring4CandidatesRespectsMega
+    Consistency` above), but `_core_row` -- the ranking function
+    `multi_bring4_exhaustive`/`multi_bring4_beam` (i.e. --multi-bring4)
+    actually run -- called it with no `megas`/`pair_lookup_forced_base` at
+    all, so a bring-4 carrying 2 mega-stone holders was scored as if BOTH
+    could transform simultaneously across different pairs, which is
+    illegal. A hand-built fixture (`_fake_pair_row`, no real racing)
+    isolates just the threading of `pair_by_key_forced_base_list` through
+    `_core_row` into `_bring4_candidates`."""
+
+    TARGETS = ("E1", "E2")
+    WIN = {("E1", "E2")}
+    LOSS = set()
+
+    def setUp(self):
+        import itertools as _it
+        self.six = ["Mega A", "Mega B", "C", "D"]
+        self.pair_lookup = {
+            frozenset(p): _fake_pair_row(p, self.LOSS, self.TARGETS)
+            for p in _it.combinations(self.six, 2)}
+        touching_b = [("Mega A", "Mega B"), ("Mega B", "C"), ("Mega B", "D")]
+        touching_a = [("Mega A", "Mega B"), ("Mega A", "C"), ("Mega A", "D")]
+        self.pair_lookup_forced_base = {
+            "Mega B": {frozenset(p): _fake_pair_row(p, self.WIN, self.TARGETS)
+                      for p in touching_b},
+            "Mega A": {frozenset(p): _fake_pair_row(p, self.LOSS, self.TARGETS)
+                      for p in touching_a},
+        }
+
+    def test_core_row_picks_the_strictly_better_consistent_hypothesis(self):
+        """Same fixture/assertions as `_bring4_candidates`'s own direct
+        test, but through `_core_row` (with `pair_by_key_forced_base_list`
+        supplied) -- proving the wiring, not re-testing the underlying
+        hypothesis-comparison logic itself."""
+        row = cf._core_row(
+            self.six, [self.pair_lookup], [self.TARGETS], good_threshold=1.0,
+            pair_by_key_forced_base_list=[self.pair_lookup_forced_base])
+        best = row["per_enemy"][0]["best_bring4_row"]
+        self.assertEqual(best["pairs_good"], 3)
+        won_pairs = {r["pair"] for r in best["pair_rows"]
+                    if cf._pair_beaten_frac(r) >= 1.0}
+        self.assertEqual(won_pairs, {("Mega A", "Mega B"), ("Mega B", "C"),
+                                     ("Mega B", "D")})
+
+    def test_without_pair_by_key_forced_base_list_reproduces_the_old_bug(self):
+        """The regression this whole class guards against: omitting
+        `pair_by_key_forced_base_list` (the old call shape, before this fix)
+        lets the plain, unconstrained lookup answer every pair independently
+        -- so Mega A's own touching pairs (which lose under every real
+        hypothesis in this fixture) show as losses while Mega B's touching
+        pairs simultaneously show as wins, as if both were live at once."""
+        row = cf._core_row(self.six, [self.pair_lookup], [self.TARGETS],
+                           good_threshold=1.0)
+        best = row["per_enemy"][0]["best_bring4_row"]
+        self.assertEqual(best["pairs_good"], 0)  # the unconstrained lookup: every pair loses
+
+    def test_a_core_with_only_one_stone_holder_is_unaffected(self):
+        """No consistency question when a core carries at most 1 mega --
+        same result with or without `pair_by_key_forced_base_list`."""
+        import itertools as _it
+        six_one_mega = ["Mega A", "C", "D", "Kingambit"]
+        pair_lookup = {
+            frozenset(p): _fake_pair_row(p, self.LOSS, self.TARGETS)
+            for p in _it.combinations(six_one_mega, 2)}
+        without = cf._core_row(six_one_mega, [pair_lookup], [self.TARGETS],
+                               good_threshold=1.0)
+        with_fb = cf._core_row(
+            six_one_mega, [pair_lookup], [self.TARGETS], good_threshold=1.0,
+            pair_by_key_forced_base_list=[{"Mega A": {}, "Mega B": {}}])
+        self.assertEqual(without, with_fb)
+
+
+class TestMultiBring4CoverageMegaConsistency(unittest.TestCase):
+    """End-to-end through `multi_bring4_coverage` -> `multi_bring4_exhaustive`
+    with REAL megas (not the hand-built fixture above) -- the actual
+    `--multi-bring4` path a user runs, reproducing "Arcanine-Hisui /
+    Lycanroc-Dusk / Mega Floette / Mega Scizor"-shaped output and confirming
+    it no longer double-counts both stone-holders as simultaneously live."""
+
+    POOL = ["Mega Scizor", "Mega Floette", "Garchomp", "Kingambit",
+           "Whimsicott", "Sinistcha"]
+    ENEMIES = [["Kingambit", "Basculegion", "Sableye", "Ariados"]]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+
+    def test_coverage_computes_forced_base_rows_for_every_pool_mega(self):
+        fb = self.coverage["pair_by_key_forced_base"][0]
+        self.assertEqual(set(fb), {"Mega Floette", "Mega Scizor"})
+        # Every pair CONTAINING a forced name got a locked-to-base row --
+        # C(pool,1 fixed, others free) = len(pool)-1 partners each.
+        self.assertEqual(len(fb["Mega Floette"]), len(self.POOL) - 1)
+        self.assertEqual(len(fb["Mega Scizor"]), len(self.POOL) - 1)
+
+    def _hypothesis_rows(self, forced_name, pairs):
+        """Replicates `_bring4_candidates`'s own per-pair lookup for the
+        "`forced_name` stays base, the other stone-holder is this bring's
+        actual mega" hypothesis -- {frozenset(pair): row}, built the exact
+        same way `_row_for`'s lambda does internally."""
+        fb = self.coverage["pair_by_key_forced_base"][0]
+        normal = self.coverage["pair_by_key"][0]
+        return {frozenset(p): fb[forced_name].get(frozenset(p), normal[frozenset(p)])
+               for p in pairs}
+
+    def test_a_two_mega_core_is_scored_under_one_consistent_hypothesis(self):
+        """The exact regression this session's report was about: a core
+        carrying both Mega Floette and Mega Scizor must not let a pair
+        involving ONE assume it transforms while the OTHER independently
+        also assumes it transforms elsewhere in the same bring -- every
+        pair in the winning bring must come from the SAME one of the two
+        single-consistent hypotheses, never a mix of both."""
+        core = ("Garchomp", "Kingambit", "Mega Floette", "Mega Scizor")
+        row = cf._core_row(
+            core, self.coverage["pair_by_key"], self.coverage["target_name_lists"],
+            good_threshold=0.0,
+            pair_by_key_forced_base_list=self.coverage["pair_by_key_forced_base"])
+        best = row["per_enemy"][0]["best_bring4_row"]
+        got = {frozenset(pr["pair"]): pr for pr in best["pair_rows"]}
+        pairs = list(got)
+        floette_forced = self._hypothesis_rows("Mega Floette", pairs)
+        scizor_forced = self._hypothesis_rows("Mega Scizor", pairs)
+        self.assertTrue(got == floette_forced or got == scizor_forced,
+                        "the winning bring's own pairs must all come from "
+                        "ONE consistent hypothesis, not a mix of both")
+
+    def test_forcing_a_mega_to_base_measurably_weakens_its_own_pairs(self):
+        """A concrete real-data regression guard: with Mega Scizor forced to
+        base, Garchomp+Mega Scizor's own beaten count must drop below what
+        the plain, unconstrained (both-simultaneously-mega) lookup shows --
+        proving the forced-base hypothesis isn't a silent no-op."""
+        fb = self.coverage["pair_by_key_forced_base"][0]
+        normal = self.coverage["pair_by_key"][0]
+        pair = frozenset({"Garchomp", "Mega Scizor"})
+        uncorrected = normal[pair]["pairs_swept"] + normal[pair]["pairs_traded"]
+        scizor_forced_base = fb["Mega Scizor"][pair]
+        forced = scizor_forced_base["pairs_swept"] + scizor_forced_base["pairs_traded"]
+        self.assertLess(forced, uncorrected)
+
+
 class TestMultiBring4CoreSizes(unittest.TestCase):
     """"I would like to output the best 3-pokemon cores against each team"
     -- `core_sizes` widens `multi_bring4_exhaustive`/`multi_bring4_beam`
