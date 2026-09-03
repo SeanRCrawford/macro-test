@@ -2706,6 +2706,7 @@ def _pruned_entry():
         "protect_outcomes": {"E1": "loss", "E2": "loss"}, "protect_safe": False,
         "log": [], "_pruned": True,
         "our_hp": {"C": 0.0, "P": 0.0}, "clean_win_value": 0.0,
+        "our_damage_output": 0.0,
     }
 
 
@@ -2739,7 +2740,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
 
     `detail`: {(e1, e2): {outcome, turns_used, tailwind_outcome,
     tailwind_safe, own_tailwind_is_real_threat, own_tailwind_used,
-    own_tailwind_outcome, protect_outcomes, protect_safe, log}}. `log` is
+    own_tailwind_outcome, protect_outcomes, protect_safe, log,
+    our_damage_output}}. `log` is
     `_joint_race`'s own per-turn hit list -- "what the damage roll is", not
     just the win/loss classification -- for the NORMAL-speed race (the one
     that decided `outcome`); the Tailwind and Protect replays' logs aren't
@@ -2858,6 +2860,25 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     across every enemy pair) is what `_pair_sort_key` uses to tell two
     equally-"beaten" pairs apart -- see its own docstring for where in the
     ranking this sits.
+
+    RAW DAMAGE OUTPUT, a separate axis from win/loss entirely: "Spread
+    damage is highly preferable in this format ... I want to mathematically
+    output the most damage possible (ideally neutral or super effective)
+    while surviving for long enough to keep dishing it out." Each `detail`
+    entry's `our_damage_output` sums every hit OUR side landed in the
+    CHOSEN race (`chosen_log`, whichever hypothesis above actually won),
+    weighted by `h.num_targets_hit` (a spread hit already counts for both
+    targets it lands on) -- unlike `spread_power.py`'s own per-species
+    benchmark score, `h.frac` here is computed against the REAL enemy, so a
+    resisted hit already contributes less and a super-effective one more,
+    with no separate type-effectiveness gate needed. Survival is free: a
+    fainted attacker simply stops appearing in later turns of the log, so
+    "keep dishing it out" is already priced in by construction, not a
+    separate multiplier. `pairs_damage_output_total` (the summary's own sum
+    across every enemy pair) is NOT part of `_pair_sort_key`'s own ranking
+    -- it's a separate, opt-in lens `--tailwind-focus` (`counter_table.py`)
+    re-sorts its own final results by, on top of (not instead of) the
+    existing win/loss-based search.
     """
     m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
     all_enemy_pairs = list(itertools.combinations(target_names, 2))
@@ -2955,6 +2976,22 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                              "P": max(0.0, chosen_hp["P"])}
                 else:
                     our_hp = {"C": 0.0, "P": 0.0}
+                # REAL DAMAGE OUTPUT, not the abstract per-species benchmark
+                # `spread_power.py` scores with -- every hit OUR side landed
+                # in the CHOSEN race (whichever hypothesis won), weighted by
+                # `num_targets_hit` (a spread hit already counts for both
+                # targets) and already reflecting the REAL type matchup
+                # (`h.frac` is computed against the actual defender, so a
+                # resisted hit contributes less, a super-effective one
+                # more -- "mathematically output the most damage possible
+                # (ideally neutral or super effective) while surviving long
+                # enough to keep dishing it out": survival is free here too,
+                # since a fainted attacker simply stops appearing in later
+                # turns of `chosen_log`.
+                our_damage_output = sum(
+                    h.frac * h.num_targets_hit
+                    for turn_hits in chosen_log for role, _tgt, h in turn_hits
+                    if role in ("C", "P"))
                 entry = {
                     "outcome": chosen_outcome,
                     "outcome_without_tailwind": outcome,
@@ -2972,6 +3009,7 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     "log": chosen_log,
                     "our_hp": our_hp,
                     "clean_win_value": our_hp["C"] + our_hp["P"],
+                    "our_damage_output": our_damage_output,
                     "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
                 }
                 if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
@@ -3003,6 +3041,7 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                                        if d["own_tailwind_used"]),
         "pairs_protect_safe": sum(1 for d in detail.values() if d["protect_safe"]),
         "pairs_clean_win_total": sum(d["clean_win_value"] for d in detail.values()),
+        "pairs_damage_output_total": sum(d["our_damage_output"] for d in detail.values()),
         "pairs_total": len(detail),
     }
     return detail, summary
@@ -3590,6 +3629,69 @@ def own_pair_has_real_tailwind(n1, n2, merged):
     return any(
         any(mv == "Tailwind" for mv, _pct in merged.get(name, {}).get("moves_usage", []))
         for name in (n1, n2))
+
+
+def tailwind_focus_pool(pool, merged):
+    """`pool` (whatever --pool-size/--team already narrowed it to) PLUS any
+    real Tailwind setter (usage-data check, same as `own_pair_has_real_
+    tailwind`) NOT already in it -- "checks for teams by running tailwind
+    setter (who ideally can do good damage too) + attacker."
+
+    STRICTLY ADDITIVE, not a restriction: a generic-Score-based --pool-size
+    cut can easily miss a bulky support Tailwind setter (low raw stats),
+    so this guarantees the archetype's own essential opener role is always
+    a real candidate -- but it never REMOVES a name `pool` already had. An
+    ordinary single-target attacker (Kingambit, Rampardos, ...) that
+    --pool-size already included for the "attacker"/"back two mop up"
+    roles stays exactly as available as before; only setters `pool` was
+    MISSING get added on top.
+
+    Deliberately NOT also union'd with real spread attackers
+    (`spread_power.spread_moves`'s own eligibility, checked empirically):
+    a 70+ BP spread move is common enough in this dataset (roughly 190 of
+    ~270 species) that adding every eligible name back in from the WHOLE
+    dataset would swallow most of whatever --pool-size just narrowed to,
+    the exact opposite of "lightweight" -- "bearing in mind that just
+    outputting a lot of spread damage is very good" is instead handled
+    entirely on the RANKING side (`core_damage_output`, which already
+    weights a landed spread hit for both targets), not by widening who
+    gets searched at all.
+    """
+    def _has_tailwind(name):
+        return any(mv == "Tailwind"
+                  for mv, _pct in merged.get(name, {}).get("moves_usage", []))
+    have = set(pool)
+    extra = [n for n in merged if n not in have and _has_tailwind(n)]
+    return list(pool) + extra
+
+
+def bring4_damage_output(bring4_row):
+    """Total real damage output (`pairs_damage_output_total`, see
+    `_pair_vs_targets`) across ONE bring-4's own 6 internal pairs (already
+    on every `pair_rows` entry via `**summary`) -- the building block
+    `core_damage_output` sums across every named enemy's own best bring,
+    and what a `--bring4`/single-enemy xlsx export reads directly."""
+    return sum(pr["pairs_damage_output_total"] for pr in bring4_row["pair_rows"])
+
+
+def core_damage_output(core_row):
+    """Total real damage output across EVERY enemy roster's own best
+    bring-4 for this `_core_row`-shaped `core_row` -- summed, not
+    averaged, so a core that's strong against MORE named enemies scores
+    higher, matching the rest of this module's own "more coverage is
+    better" convention.
+
+    `--tailwind-focus` (`counter_table.py`) re-sorts its final `multi_rows`
+    by this, ON TOP OF (not instead of) the underlying win/loss-based
+    search that decided which cores were even considered -- "I want to
+    mathematically output the most damage possible ... while surviving for
+    long enough to keep dishing it out" becomes the PRESENTATION order,
+    without discarding the legality/robustness filtering
+    (`good_threshold`/`min_enemies`/protect-safety) the search already did
+    to decide what counts as a real candidate at all.
+    """
+    return sum(bring4_damage_output(pe["best_bring4_row"])
+              for pe in core_row["per_enemy"])
 
 
 def _core_item_clause_pair_by_key(core, target_name_lists, item_clause_context):

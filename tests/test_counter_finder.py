@@ -1411,6 +1411,114 @@ class TestOwnTailwindAsAMatchingAnswer(unittest.TestCase):
         self.assertFalse(cf.own_pair_has_real_tailwind(
             "Sableye", "Arcanine-Hisui", merged))
 
+    def test_our_damage_output_matches_a_from_scratch_sum_of_the_log(self):
+        """"I want to mathematically output the most damage possible ...
+        while surviving for long enough to keep dishing it out" --
+        `our_damage_output` must equal a direct, from-scratch sum of every
+        hit OUR side landed in `log` (weighted by `num_targets_hit`, a
+        spread hit already counting for both targets), not just be
+        internally self-consistent."""
+        d, summary = self._race(merged=self.W["merged"])
+        expected = sum(h.frac * h.num_targets_hit
+                      for turn_hits in d["log"] for role, _tgt, h in turn_hits
+                      if role in ("C", "P"))
+        self.assertAlmostEqual(d["our_damage_output"], expected)
+        self.assertGreater(d["our_damage_output"], 0.0,
+                           "this fixture's own race lands real hits before "
+                           "stalling out -- 0 output would mean the log "
+                           "was empty or damage_output isn't reading it")
+        self.assertAlmostEqual(summary["pairs_damage_output_total"],
+                               d["our_damage_output"],
+                               msg="only one enemy pair is named here, so "
+                                   "the summary's own total must equal "
+                                   "this single matchup's own figure")
+
+
+class TestTailwindFocusPool(unittest.TestCase):
+    """`tailwind_focus_pool` -- the pool-curation half of `--tailwind-focus`
+    (`counter_table.py`): "checks for teams by running tailwind setter
+    (who ideally can do good damage too) + attacker." STRICTLY ADDITIVE,
+    not a restriction (a --pool-size cut by generic Score can miss a bulky
+    support Tailwind setter) -- must never drop a name the caller's own
+    `pool` already had."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_never_removes_a_name_already_in_pool(self):
+        """Kingambit/Rampardos/Sableye carry no real Tailwind (confirmed
+        via TestOwnTailwindAsAMatchingAnswer's own precondition test) --
+        an EXCLUSION-style filter would have dropped them; this must not."""
+        merged = self.W["merged"]
+        base_pool = ["Kingambit", "Rampardos", "Sableye"]
+        focus = cf.tailwind_focus_pool(base_pool, merged)
+        self.assertTrue(set(base_pool).issubset(set(focus)))
+
+    def test_adds_a_real_tailwind_setter_missing_from_the_pool(self):
+        merged = self.W["merged"]
+        base_pool = ["Kingambit", "Rampardos"]
+        focus = cf.tailwind_focus_pool(base_pool, merged)
+        self.assertIn("Talonflame", focus)
+        self.assertIn("Whimsicott", focus)
+
+    def test_a_name_already_in_pool_is_not_duplicated(self):
+        merged = self.W["merged"]
+        base_pool = ["Kingambit", "Talonflame"]
+        focus = cf.tailwind_focus_pool(base_pool, merged)
+        self.assertEqual(focus.count("Talonflame"), 1)
+
+    def test_every_added_name_really_does_know_tailwind(self):
+        merged = self.W["merged"]
+        base_pool = ["Kingambit"]
+        focus = cf.tailwind_focus_pool(base_pool, merged)
+        added = [n for n in focus if n not in base_pool]
+        self.assertTrue(added)
+        for n in added:
+            self.assertTrue(
+                any(mv == "Tailwind" for mv, _pct in
+                   merged[n]["moves_usage"]),
+                f"{n} was added but has no real Tailwind access")
+
+
+class TestBring4AndCoreDamageOutput(unittest.TestCase):
+    """`bring4_damage_output`/`core_damage_output` -- the aggregation
+    `--tailwind-focus` re-sorts `multi_rows` by. Must match a from-scratch
+    sum of `pairs_damage_output_total` across the same pair rows, not just
+    be internally self-consistent."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.pair_rows, self.bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+
+    def test_bring4_damage_output_matches_a_from_scratch_sum(self):
+        b = self.bring4_rows[0]
+        expected = sum(pr["pairs_damage_output_total"] for pr in b["pair_rows"])
+        self.assertAlmostEqual(cf.bring4_damage_output(b), expected)
+
+    def test_core_damage_output_sums_every_enemys_own_best_bring(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Mega Scizor", "Mega Floette", "Garchomp", "Kingambit",
+               "Whimsicott", "Sinistcha"]
+        enemies = [["Kingambit", "Basculegion", "Sableye", "Ariados"]]
+        coverage = cf.multi_bring4_coverage(
+            pool, enemies, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+        rows = cf.multi_bring4_exhaustive(coverage, good_threshold=0.0)
+        self.assertTrue(rows)
+        row = rows[0]
+        expected = sum(cf.bring4_damage_output(pe["best_bring4_row"])
+                      for pe in row["per_enemy"])
+        self.assertAlmostEqual(cf.core_damage_output(row), expected)
+
 
 class TestChargeMovesNeedTheirWeather(unittest.TestCase):
     """"Electro shot needs rain and solar beam needs sun to be a 1-turn

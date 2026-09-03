@@ -1795,6 +1795,87 @@ class TestXlsxSum3rdBestAndLeadBackupColumns(unittest.TestCase):
         self.assertIn("own-tw", out)
 
 
+class TestTailwindFocusFlag(unittest.TestCase):
+    """"Is it possible to create a lighter weight counter_table.py that
+    just checks for teams by running tailwind setter ... + attacker ...
+    Bearing in mind that just outputting a lot of spread damage is very
+    good." -- `--tailwind-focus` (--multi-bring4 only): adds any real
+    Tailwind setter --pool-size's own cut left out (never removing an
+    existing candidate), then re-sorts the final cores by total real
+    damage output instead of the usual win/loss-first order."""
+
+    def test_only_applies_to_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--tailwind-focus"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--tailwind-focus", msg)
+
+    def test_flag_is_parsed(self):
+        _msg, out = run_main(["--help"])
+        self.assertIn("--tailwind-focus", out)
+
+    def test_real_run_adds_setters_and_reorders_by_damage_output(self):
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+             "--good-threshold", "0", "--min-enemies", "1", "--top", "2",
+             "--no-prompt", "--tailwind-focus"])
+        self.assertIsNone(msg, out)
+        self.assertIn("tailwind-focus:", out)
+        self.assertIn("tailwind-focus damage-output order", out)
+        # "Multi-bring4 search: N Pokemon vs ..." -- N must be >= the
+        # --pool-size cut (20), never smaller: additive, not restrictive.
+        pool_line = next(l for l in out.splitlines()
+                         if l.startswith("Multi-bring4 search:"))
+        pool_size = int(pool_line.split()[2])
+        self.assertGreaterEqual(pool_size, 20)
+
+    def test_xlsx_has_total_damage_output_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1", "--top", "2",
+                 "--no-prompt", "--tailwind-focus", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            self.assertIn("Total Damage Output", header)
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            self.assertIsInstance(row2["Total Damage Output"], (int, float))
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bring4_xlsx_also_carries_the_column_regardless_of_flag(self):
+        """The "Total Damage Output" column on --bring4's own "Bring-4s"
+        sheet isn't gated by --tailwind-focus (that flag only applies to
+        --multi-bring4) -- it's always there, same as the other metrics
+        added alongside it this session."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            self.assertIn("Total Damage Output", header)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
     """"When a sweep of --vs-team gets too many results it doesn't even
     output the results or anything to CSV. I want to at least see the

@@ -209,14 +209,14 @@ import _harness  # noqa: E402,F401
 
 from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
                             _fixed_sets_from_pair_rows, _pair_sort_key,
-                            bring4_pair_depth, bring4_search,
-                            chip_then_ko, core_deep_dive, deep_dive,
-                            enemy_has_real_tailwind, joint_pair_search,
+                            bring4_damage_output, bring4_pair_depth, bring4_search,
+                            chip_then_ko, core_deep_dive, core_damage_output,
+                            deep_dive, enemy_has_real_tailwind, joint_pair_search,
                             joint_pool_search, member_weakness_summary,
                             multi_bring4_beam, multi_bring4_coverage,
                             multi_bring4_exhaustive, own_pair_has_real_tailwind,
                             pair_search, recommended_lead, speed_tiers,
-                            switch_in_search, threshold_search)
+                            switch_in_search, tailwind_focus_pool, threshold_search)
 
 
 def _parse_item_overrides(spec):
@@ -1418,7 +1418,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               "Avg Wins/90", "Avg Wins under Tailwind/90",
               "Avg Wins under Protect/90", "Clean wins/90",
               "Sum 3rd Best Pairs Beaten", "Sum 3rd Best Tailwind-Safe",
-              "Sum 3rd Best Protect-Safe", "Sum 3rd Best No-Faint"]
+              "Sum 3rd Best Protect-Safe", "Sum 3rd Best No-Faint",
+              "Total Damage Output"]
     for i in range(len(target_name_lists)):
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
                    f"Enemy {i + 1} mega used",
@@ -1490,7 +1491,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               round(avg_score, 1) if avg_score is not None else "",
               round(avg_wins, 1), round(avg_wins_tw, 1),
               round(avg_wins_pr, 1), round(avg_clean, 1),
-              sum_3rd_beaten, sum_3rd_tw, sum_3rd_pr, sum_3rd_nf]
+              sum_3rd_beaten, sum_3rd_tw, sum_3rd_pr, sum_3rd_nf,
+              round(core_damage_output(r), 2)]
         for pe, depth in per_enemy_depths:
             wr = pe["best_bring4_row"]["worst_pair_row"]
             uncovered = pe["best_bring4_row"]["uncovered_enemy_pairs"]
@@ -1597,7 +1599,8 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
               "pairs protect-safe best", "pairs protect-safe 3rd best",
               "pairs clean win total",
               "pairs beaten without fainting best",
-              "pairs beaten without fainting 3rd best", "6 pairs"])
+              "pairs beaten without fainting 3rd best", "6 pairs",
+              "Total Damage Output"])
     _style_header(ws)
     for rank, b in enumerate(bring4_rows, start=1):
         wr = b["worst_pair_row"]
@@ -1629,7 +1632,8 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
                   f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
                   f"{depth['no_faint_best']}/{pt}",
                   f"{depth['no_faint_3rd']}/{pt}",
-                  _pairs_note(b["pair_rows"])])
+                  _pairs_note(b["pair_rows"]),
+                  round(bring4_damage_output(b), 2)])
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
@@ -1874,12 +1878,36 @@ def main():
                          "Item Clause (no two of the team's own Pokemon may "
                          "hold the same item) when resolving items. Off by "
                          "default -- items are searched per-member in "
-                         "isolation, same as always, to keep search fast; "
-                         "this is meant for verifying a specific team, not "
-                         "for bulk ranking. Under --multi-bring4 this only "
-                         "affects --deep-dive-core's own per-core re-race "
-                         "-- the exhaustive/beam sweep itself never enforces "
-                         "this, regardless of this flag")
+                         "isolation, same as always, to keep search fast. "
+                         "Under --multi-bring4 this also makes the "
+                         "exhaustive/beam sweep itself re-race any core "
+                         "whose pool-wide items collide, so the ranking "
+                         "and every xlsx/CSV sheet reflect the real, "
+                         "Item-Clause-legal set for that core, not just "
+                         "--deep-dive-core's own follow-up")
+    ap.add_argument("--tailwind-focus", action="store_true",
+                    help="--multi-bring4 only: a LIGHTWEIGHT lens for the "
+                         "hyper-offense 'Tailwind opener into spread "
+                         "mop-up' archetype -- \"a team of 6 that has "
+                         "overwhelmingly favourable matchups vs each enemy "
+                         "team just by using tailwind on turn 1, letting "
+                         "the partner attack, then letting the back two "
+                         "mop up.\" Adds any real Tailwind setter "
+                         "--pool-size/--team's own cut left out "
+                         "(counter_finder.tailwind_focus_pool -- never "
+                         "REMOVES a candidate, so every attacker already "
+                         "in the pool stays just as available for the "
+                         "'partner'/'back two' roles), and re-sorts the "
+                         "final results by TOTAL REAL DAMAGE OUTPUT "
+                         "(counter_finder.core_damage_output -- every hit "
+                         "actually landed in each core's own races, not "
+                         "an abstract per-species benchmark) instead of "
+                         "the usual win/loss-first ranking. The underlying "
+                         "search itself (--good-threshold/--min-enemies "
+                         "candidate narrowing, --max-weak/--type-limit) is "
+                         "unchanged -- this only curates the pool and "
+                         "re-orders what's already found, on top of, not "
+                         "instead of, that search")
     ap.add_argument("--min-enemies", type=int, default=2, metavar="N",
                     help="--multi-bring4 only: a pool member only enters "
                          "the exhaustive search's candidate pool once it "
@@ -2069,6 +2097,8 @@ def main():
         raise SystemExit("--strict-weak-types only applies to --multi-bring4")
     if args.core_sizes != "4,5,6" and not args.multi_bring4:
         raise SystemExit("--core-sizes only applies to --multi-bring4")
+    if args.tailwind_focus and not args.multi_bring4:
+        raise SystemExit("--tailwind-focus only applies to --multi-bring4")
     if args.jobs != 1 and not args.multi_bring4:
         raise SystemExit("--jobs only applies to --multi-bring4")
     if args.unique_items and not (args.multi_bring4 or args.bring4):
@@ -2155,6 +2185,14 @@ def main():
     pool = (_pool(args, merged)
            if (not (args.deep or args.bring4) or (args.switches and not bench))
            else [])
+    _tailwind_focus_pool_before = None
+    if args.multi_bring4 and args.tailwind_focus:
+        # Applied to whatever --pool-size/--team already narrowed `pool`
+        # to, and BEFORE the --item/--moves pin-addition below, so an
+        # explicit pin still always gets tested regardless of this filter
+        # (the existing "a pin always wins" rule elsewhere in this file).
+        _tailwind_focus_pool_before = len(pool)
+        pool = tailwind_focus_pool(pool, merged)
     threshold = args.threshold / 100.0
 
     item_overrides = _parse_item_overrides(args.item)
@@ -2195,6 +2233,11 @@ def main():
     elif args.multi_bring4:
         print(f"Multi-bring4 search: {len(pool)} Pokemon vs "
              f"{len(vs_teams)} enemy teams")
+        if _tailwind_focus_pool_before is not None:
+            added = len(pool) - _tailwind_focus_pool_before
+            print(f"tailwind-focus: +{added} real Tailwind setter(s) not "
+                 f"already in the pool -- {len(pool)} total (nothing "
+                 f"already there was removed)")
         if args.jobs > 1 and len(vs_teams) > 1:
             print(f"workers  : {args.jobs} of {os.cpu_count()} cores")
             if _jobs_warning:
@@ -2341,6 +2384,12 @@ def main():
                     max_weak_types=args.max_weak_types, core_sizes=core_sizes,
                     enforce_item_clause=args.unique_items)
                 mode_label = f"beam, width {args.beam_width} (auto-fallback)"
+        if args.tailwind_focus:
+            # Re-sort what the search already found, ON TOP OF (not instead
+            # of) its own win/loss-based candidate generation -- see
+            # counter_finder.core_damage_output's own docstring.
+            multi_rows.sort(key=core_damage_output, reverse=True)
+            mode_label += ", tailwind-focus damage-output order"
         _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
                             good_threshold, len(coverage["candidate_pool"]),
                             len(pool), merged, moves, natures, typechart,
