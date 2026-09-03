@@ -1930,7 +1930,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     return best_hits, best_move
 
 
-def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
+def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+                own_speed_mult=1.0):
     """Resolve `plan` ({role: (hits, MoveInfo)}) in priority-then-speed
     order and apply every hit (Focus Sash/Sturdy honoured, a hit aimed at a
     protected role dropped) -- the one place `_resolve_turn`'s real
@@ -1938,6 +1939,11 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     (`_reconsider_for_survival`) share the EXACT same rules, so "would this
     role survive to act" can never quietly diverge from what actually
     happens when the plan is applied for real.
+
+    `own_speed_mult`: the exact mirror of `enemy_speed_mult`, applied to
+    OUR OWN side ("C"/"P") instead of theirs -- see `_pair_vs_targets`'s
+    "OUR OWN TAILWIND AS A MATCHING ANSWER". Default 1.0 (no-op) leaves
+    every existing caller unaffected.
 
     Returns (hp, log, enemy_acted, wiped, doomed, sucker_punch_wasted) --
     `doomed`: roles whose hp was already <=0 by the time their own position
@@ -1975,6 +1981,8 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
         spd = effective_speed(combatants[role], field, side)
         if role in ("E1", "E2"):
             spd *= enemy_speed_mult
+        elif role in ("C", "P"):
+            spd *= own_speed_mult
         theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
         return (-prio, -spd, theirs_first)
 
@@ -2083,7 +2091,8 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                              moves_by_role, hp, typechart, weather, field,
                              live_targets_by_role, hint_by_role,
                              enemy_speed_mult, protected_roles, auras=None,
-                             dmg_mult_by_role=None, half_damage_roles=frozenset()):
+                             dmg_mult_by_role=None, half_damage_roles=frozenset(),
+                             own_speed_mult=1.0):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk" -- a provisional `plan` chooses every
     actor's move independently, unaware of the others, so an actor can end
@@ -2148,7 +2157,8 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
         trial_plan = dict(new_plan)
         trial_plan[role] = (hits, mv)
         _hp2, _log2, _ea2, _w2, doomed2, _sp2 = _apply_plan(
-            trial_plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+            trial_plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+            own_speed_mult=own_speed_mult)
         if role not in doomed2:
             new_plan[role] = (hits, mv)
     for role in sucker_punch_wasted:
@@ -2217,7 +2227,7 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   enemy_speed_mult=1.0, protected_roles=frozenset(),
                   recharging_roles=frozenset(), tailwind_setter_role=None,
                   terrain=None, dmg_mult_by_role=None,
-                  half_damage_roles=frozenset()):
+                  half_damage_roles=frozenset(), own_speed_mult=1.0):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
     enemy side chooses independently and greedily (`_choose_action` with no
     hint), same "no coordination" behaviour `_sequential_pair_outcome`
@@ -2258,14 +2268,21 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     protected role simply scores no KO and no damage for that hit, so a combo
     that targets the other, unprotected enemy naturally ranks higher.
 
-    `tailwind_setter_role`: one enemy role ("E1"/"E2") that casts Tailwind
-    THIS turn instead of attacking -- `_tailwind_move_for` substituted
-    directly, same "still a real action, lands no hit" pattern
-    `protected_roles` uses. `_joint_race`'s own turn loop is what actually
-    makes this mean anything speed-wise (only passing this on turn 1, and
-    only applying the real `enemy_speed_mult` from turn 2 onward) -- see
-    its own docstring for the full "test the setter actually choosing to
-    set it, not an instant free boost" reasoning.
+    `tailwind_setter_role`: one role -- "E1"/"E2" for the enemy-tailwind
+    check, or "C"/"P" for `_pair_vs_targets`'s own-tailwind mirror -- that
+    casts Tailwind THIS turn instead of attacking -- `_tailwind_move_for`
+    substituted directly, same "still a real action, lands no hit" pattern
+    `protected_roles` uses; checked in BOTH the `ours_live` and
+    `theirs_live` loops below (a role string can only ever match one side,
+    so this is a single check that naturally applies to whichever side the
+    caller names). `_joint_race`'s own turn loop is what actually makes
+    this mean anything speed-wise (only passing this on turn 1, and only
+    applying the real `enemy_speed_mult`/`own_speed_mult` from turn 2
+    onward) -- see its own docstring for the full "test the setter actually
+    choosing to set it, not an instant free boost" reasoning.
+
+    `own_speed_mult`: the exact mirror of `enemy_speed_mult`, for OUR OWN
+    side. Default 1.0 (no-op).
 
     `weather` is the ONE shared field value (`_field_weather`'s own return)
     -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
@@ -2309,6 +2326,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     for role, c in ours_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
+        elif role == tailwind_setter_role:
+            plan[role] = ({}, _tailwind_move_for(c))
         else:
             plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
                                         typechart, weather=weather,
@@ -2336,7 +2355,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
 
     plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
     hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
-        plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+        plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+        own_speed_mult=own_speed_mult)
     final_doomed = doomed
     if (doomed - protected_roles) or (sp_wasted - protected_roles):
         live_targets_by_role = {r: theirs_live for r in ours_live}
@@ -2345,10 +2365,11 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan, doomed, sp_wasted, combatants, moves_by_role, hp, typechart,
             weather, field, live_targets_by_role, our_hints, enemy_speed_mult,
             protected_roles, auras, dmg_mult_by_role=dmg_mult_by_role,
-            half_damage_roles=half_damage_roles)
+            half_damage_roles=half_damage_roles, own_speed_mult=own_speed_mult)
         plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
         hp2, log, enemy_acted, wiped, final_doomed, _sp2 = _apply_plan(
-            plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+            plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+            own_speed_mult=own_speed_mult)
     recharging_next = {role for role, (_hits, mv) in plan.items()
                        if role not in final_doomed and mv is not None
                        and mv.flags and mv.flags.get("recharge")}
@@ -2359,7 +2380,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               enemy_speed_mult=1.0, protected_roles=frozenset(),
               recharging_roles=frozenset(), tailwind_setter_role=None,
               terrain=None, dmg_mult_by_role=None,
-              half_damage_roles=frozenset()):
+              half_damage_roles=frozenset(), own_speed_mult=1.0):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -2393,7 +2414,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
             enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
             recharging_roles=recharging_roles,
             tailwind_setter_role=tailwind_setter_role, terrain=terrain,
-            dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles)
+            dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
+            own_speed_mult=own_speed_mult)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
@@ -2409,7 +2431,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0, first_turn_moves_override=None,
                 first_turn_protected_role=None, first_turn_tailwind_role=None,
-                terrain=None):
+                terrain=None, own_speed_mult=1.0):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -2451,18 +2473,26 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     can still turn our sweep/out-trade into something worse. See
     `_resolve_turn`'s own docstring for the mechanics.
 
-    `first_turn_tailwind_role`: optional single enemy role that spends turn 1
-    CASTING Tailwind (a no-op action, same shape as `first_turn_protected_role`)
+    `first_turn_tailwind_role`: optional single role -- an enemy role
+    ("E1"/"E2") for the enemy-tailwind check, or one of OURS ("C"/"P") for
+    `_pair_vs_targets`'s own-tailwind mirror -- that spends turn 1 CASTING
+    Tailwind (a no-op action, same shape as `first_turn_protected_role`)
     instead of attacking -- modeling the real cost of actually setting it,
-    rather than assuming it is simply already up. `enemy_speed_mult` (the
-    caller-supplied Tailwind multiplier) is only applied from turn 2 onward;
-    turn 1 always races at normal speed, since the boost doesn't exist until
-    the setter's own action resolves. This module has no intra-turn re-sort
-    (`battle.py`'s real engine does re-sort so a same-turn Tailwind can still
-    help a not-yet-acted teammate that turn -- see its comment near the
-    Tailwind field-effect application), so this is a deliberate, documented
-    simplification: the boost is available strictly starting the turn after
-    it's cast.
+    rather than assuming it is simply already up. Whichever of
+    `enemy_speed_mult`/`own_speed_mult` belongs to THAT role's side (the
+    caller-supplied Tailwind multiplier) is only applied from turn 2
+    onward; turn 1 always races at normal speed, since the boost doesn't
+    exist until the setter's own action resolves. This module has no
+    intra-turn re-sort (`battle.py`'s real engine does re-sort so a
+    same-turn Tailwind can still help a not-yet-acted teammate that turn --
+    see its comment near the Tailwind field-effect application), so this is
+    a deliberate, documented simplification: the boost is available
+    strictly starting the turn after it's cast.
+
+    `own_speed_mult`: the exact mirror of `enemy_speed_mult`, for OUR OWN
+    side -- `_pair_vs_targets`'s own-tailwind check passes 2.0 here (and
+    `first_turn_tailwind_role="C"` or `"P"`) instead of `enemy_speed_mult`.
+    Default 1.0 (no-op) leaves every existing caller unaffected.
 
     RECHARGE (Hyper Beam, Giga Impact, ...): `_best_turn`'s own
     `recharging_next` return is carried forward as the NEXT call's
@@ -2518,14 +2548,21 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                     if turn_i == 0 and first_turn_protected_role else frozenset())
         tailwind_role_this_turn = (first_turn_tailwind_role
                                    if turn_i == 0 and first_turn_tailwind_role else None)
-        mult_this_turn = (1.0 if (first_turn_tailwind_role and turn_i == 0)
-                          else enemy_speed_mult)
+        # Whichever SIDE is actually casting this turn races at normal
+        # speed (the boost doesn't exist until the cast resolves); the
+        # OTHER side's own multiplier (usually just 1.0, unused) is
+        # unaffected -- these are two independent scalars now, not one
+        # shared "the enemy" assumption.
+        enemy_mult_this_turn = (1.0 if (turn_i == 0 and tailwind_role_this_turn
+                                        in ("E1", "E2")) else enemy_speed_mult)
+        own_mult_this_turn = (1.0 if (turn_i == 0 and tailwind_role_this_turn
+                                      in ("C", "P")) else own_speed_mult)
         hp, turn_log, enemy_acted, wiped, recharging = _best_turn(
             combatants, turn_moves, hp, typechart, weather,
-            enemy_speed_mult=mult_this_turn, protected_roles=protected,
+            enemy_speed_mult=enemy_mult_this_turn, protected_roles=protected,
             recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn,
             terrain=terrain, dmg_mult_by_role=dmg_mult_by_role,
-            half_damage_roles=half_damage)
+            half_damage_roles=half_damage, own_speed_mult=own_mult_this_turn)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
@@ -2664,6 +2701,8 @@ def _pruned_entry():
         "outcome": "loss", "outcome_without_tailwind": "loss",
         "tailwind_is_real_threat": False, "tailwind_forced": False,
         "turns_used": 0, "tailwind_outcome": "loss", "tailwind_safe": False,
+        "own_tailwind_is_real_threat": False, "own_tailwind_used": False,
+        "own_tailwind_outcome": None,
         "protect_outcomes": {"E1": "loss", "E2": "loss"}, "protect_safe": False,
         "log": [], "_pruned": True,
         "our_hp": {"C": 0.0, "P": 0.0}, "clean_win_value": 0.0,
@@ -2699,7 +2738,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     `target_names`' C(n,2) pairings.
 
     `detail`: {(e1, e2): {outcome, turns_used, tailwind_outcome,
-    tailwind_safe, protect_outcomes, protect_safe, log}}. `log` is
+    tailwind_safe, own_tailwind_is_real_threat, own_tailwind_used,
+    own_tailwind_outcome, protect_outcomes, protect_safe, log}}. `log` is
     `_joint_race`'s own per-turn hit list -- "what the damage roll is", not
     just the win/loss classification -- for the NORMAL-speed race (the one
     that decided `outcome`); the Tailwind and Protect replays' logs aren't
@@ -2751,6 +2791,33 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     still uses everywhere. The pre-override result survives either way as
     `outcome_without_tailwind`; `tailwind_forced` says whether the swap
     happened.
+
+    OUR OWN TAILWIND AS A MATCHING ANSWER, the mirror image of the above:
+    "I think it's important to be able to withstand tailwind versus
+    opponents with Tailwind (or match with your own)". A hyper-offensive
+    setter+attacker pair (Whimsicott/Talonflame's priority Tailwind,
+    Aerodactyl/Dragonite's non-priority one, and so on) that opens with
+    Tailwind turn 1 and attacks turn 2+ once sped up is a real, biddable
+    plan of OURS, not something imposed on us the way the enemy's own
+    Tailwind is -- so unlike the pessimistic enemy check above, this one is
+    OPTIMISTIC: when either `n1` or `n2` has real usage-data access to
+    Tailwind, the race is replayed once per real setter of OURS with that
+    role casting Tailwind turn 1 (BEST-for-us kept, `min` by
+    `_JOINT_OUTCOME_RANK`, mirroring the enemy check's own `max`), and if
+    that beats whatever the enemy-tailwind-adjusted outcome above already
+    is, IT replaces `outcome`/`turns_used`/`log` as the final chosen result
+    -- "we would choose to counter their speed control with ours if it
+    actually turns the tables," never a reason a pair looks WORSE than its
+    already-decided baseline. `own_tailwind_is_real_threat` says whether
+    `n1`/`n2` carries a real setter at all; `own_tailwind_used` says
+    whether using it actually changed this specific matchup's outcome (a
+    LIMITED, per-matchup "does this tailwind-opener plan actually sweep a
+    hole in their team" check, not a full standalone search); `own_
+    tailwind_outcome` is the race's own outcome under that plan, `None`
+    when there's no real setter to check. `pairs_own_tailwind_used` (the
+    summary's own count, mirroring `pairs_tailwind_safe`) is how many of
+    `target_names`'s enemy pairs this specific answer actually mattered
+    for.
 
     `prune_below`: optional fraction (e.g. `good_threshold`) -- once it is
     MATHEMATICALLY CERTAIN this pair cannot reach that share of
@@ -2814,6 +2881,9 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         tailwind_setter_roles = [role for role, name in (("E1", e1_name), ("E2", e2_name))
                                  if _has_tailwind(name)]
         real_tailwind_threat = bool(tailwind_setter_roles)
+        own_tailwind_setter_roles = [role for role, name in (("C", n1), ("P", n2))
+                                     if _has_tailwind(name)]
+        own_real_tailwind_threat = bool(own_tailwind_setter_roles)
 
         best = None
         for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built,
@@ -2850,6 +2920,30 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                                    _JOINT_OUTCOME_RANK[outcome])
                 chosen_outcome = tw_outcome if tailwind_forced else outcome
                 chosen_hp = tw_hp if tailwind_forced else hp
+                chosen_turns_used = tw_turns_used if tailwind_forced else turns_used
+                chosen_log = tw_log if tailwind_forced else log
+                # OUR OWN TAILWIND AS A MATCHING ANSWER (see docstring):
+                # a real setter of OURS is a choice we'd only make if it
+                # actually helps, so -- mirroring `tailwind_forced`'s
+                # pessimistic swap but in the OPTIMISTIC direction -- try
+                # it and keep it only when it beats whatever the enemy-
+                # tailwind-adjusted baseline above already is.
+                if own_tailwind_setter_roles:
+                    own_tw_outcome, own_tw_turns_used, own_tw_hp, own_tw_log = min(
+                        (_joint_race(combatants, moves_by_role, typechart, weather,
+                                    turns, first_turn_tailwind_role=role,
+                                    own_speed_mult=2.0, terrain=terrain)
+                         for role in own_tailwind_setter_roles),
+                        key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                else:
+                    own_tw_outcome, own_tw_turns_used, own_tw_hp, own_tw_log = (
+                        None, 0, None, [])
+                own_tailwind_used = (own_real_tailwind_threat and
+                                     _JOINT_OUTCOME_RANK[own_tw_outcome] <
+                                     _JOINT_OUTCOME_RANK[chosen_outcome])
+                if own_tailwind_used:
+                    chosen_outcome, chosen_hp = own_tw_outcome, own_tw_hp
+                    chosen_turns_used, chosen_log = own_tw_turns_used, own_tw_log
                 # Retained HP is only a meaningful QUALITY signal for an
                 # actual win -- for loss/no_ko the outcome bucket alone
                 # already says "bad", and `hp` can go slightly negative on
@@ -2866,13 +2960,16 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     "outcome_without_tailwind": outcome,
                     "tailwind_is_real_threat": real_tailwind_threat,
                     "tailwind_forced": tailwind_forced,
-                    "turns_used": tw_turns_used if tailwind_forced else turns_used,
+                    "turns_used": chosen_turns_used,
                     "tailwind_outcome": tw_outcome,
                     "tailwind_safe": tw_outcome in ("sweep", "out_trade"),
+                    "own_tailwind_is_real_threat": own_real_tailwind_threat,
+                    "own_tailwind_used": own_tailwind_used,
+                    "own_tailwind_outcome": own_tw_outcome,
                     "protect_outcomes": protect_outcomes,
                     "protect_safe": all(o in ("sweep", "out_trade")
                                         for o in protect_outcomes.values()),
-                    "log": tw_log if tailwind_forced else log,
+                    "log": chosen_log,
                     "our_hp": our_hp,
                     "clean_win_value": our_hp["C"] + our_hp["P"],
                     "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
@@ -2902,6 +2999,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         "pairs_lost": sum(1 for d in detail.values() if d["outcome"] == "loss"),
         "pairs_no_ko": sum(1 for d in detail.values() if d["outcome"] == "no_ko"),
         "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
+        "pairs_own_tailwind_used": sum(1 for d in detail.values()
+                                       if d["own_tailwind_used"]),
         "pairs_protect_safe": sum(1 for d in detail.values() if d["protect_safe"]),
         "pairs_clean_win_total": sum(d["clean_win_value"] for d in detail.values()),
         "pairs_total": len(detail),
@@ -3425,6 +3524,32 @@ def bring4_pair_depth(bring4_row):
     }
 
 
+def recommended_lead(bring4_row):
+    """Which of `bring4_row`'s own C(4,2)=6 internal pairs to send out
+    FIRST ("lead") against this specific enemy roster, and which 2 members
+    stay back ("backup") -- "Is there a way to assess the best lead vs a
+    given enemy team? Just the best pair + their backup."
+
+    No new racing: `bring4_row["pair_rows"]` is already fully raced against
+    every enemy pair drawn from this specific roster (the same table
+    `_bring4_candidates` picked its own "worst pair" from) -- the BEST-
+    ranked of those 6 pairs by `_pair_sort_key` (protect-safe wins, then
+    beaten count, then win quality, then tailwind-safe count -- the exact
+    same ranking that decides everything else in this module) is simply
+    "send out your best-performing matchup first," and the other 2 members
+    of the bring are what's left to bring in as the situation develops.
+
+    A 3-Pokemon core's own bring (only 3 pairs, C(3,2)=3) still works the
+    same way -- there's just one fewer "backup" member (only 1, not 2).
+
+    Returns {"lead": (n1, n2), "backup": (n3, n4, ...)}.
+    """
+    best_pair = min(bring4_row["pair_rows"], key=_pair_sort_key)
+    lead = best_pair["pair"]
+    backup = tuple(n for n in bring4_row["bring4"] if n not in lead)
+    return {"lead": lead, "backup": backup}
+
+
 def _pairs_beaten_without_fainting(row):
     """How many of `row`'s own enemy pairs it beats (`sweep`/`out_trade`)
     WITHOUT either of its own two Pokemon fainting -- a discrete, stricter
@@ -3454,6 +3579,17 @@ def enemy_has_real_tailwind(target_names, merged):
     return any(
         any(mv == "Tailwind" for mv, _pct in merged.get(name, {}).get("moves_usage", []))
         for name in target_names)
+
+
+def own_pair_has_real_tailwind(n1, n2, merged):
+    """True if either of OUR own pair (`n1`, `n2`) actually runs Tailwind in
+    real usage data -- the mirror image of `enemy_has_real_tailwind`, same
+    factoring-out reason: a CALLER can flag "this pair has a real Tailwind
+    answer of its own" once, without re-deriving it from every individual
+    `detail` entry's own `own_tailwind_is_real_threat`."""
+    return any(
+        any(mv == "Tailwind" for mv, _pct in merged.get(name, {}).get("moves_usage", []))
+        for name in (n1, n2))
 
 
 def _core_item_clause_pair_by_key(core, target_name_lists, item_clause_context):

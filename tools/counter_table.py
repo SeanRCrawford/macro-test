@@ -214,7 +214,8 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
                             enemy_has_real_tailwind, joint_pair_search,
                             joint_pool_search, member_weakness_summary,
                             multi_bring4_beam, multi_bring4_coverage,
-                            multi_bring4_exhaustive, pair_search, speed_tiers,
+                            multi_bring4_exhaustive, own_pair_has_real_tailwind,
+                            pair_search, recommended_lead, speed_tiers,
                             switch_in_search, threshold_search)
 
 
@@ -837,7 +838,7 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
          f"{len(our6)}:")
     header = (f"  {'#':>3} {'Pair':34s} {'beaten':>7s} {'swept':>6s} "
              f"{'traded':>7s} {'lost':>5s} {'no KO':>6s} {'tw-safe':>8s} "
-             f"{'pr-safe':>8s}")
+             f"{'pr-safe':>8s} {'own-tw':>7s}")
     print(header)
     print("  " + "-" * (len(header) - 2))
     for i, r in enumerate(pair_rows, start=1):
@@ -847,7 +848,8 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
              f"{r['pairs_swept']:>3d}/{total:<2d} {r['pairs_traded']:>4d}/{total:<2d} "
              f"{r['pairs_lost']:>2d}/{total:<2d} {r['pairs_no_ko']:>3d}/{total:<2d} "
              f"{r['pairs_tailwind_safe']:>5d}/{total:<2d} "
-             f"{r['pairs_protect_safe']:>5d}/{total:<2d}")
+             f"{r['pairs_protect_safe']:>5d}/{total:<2d} "
+             f"{r['pairs_own_tailwind_used']:>4d}/{total:<2d}")
 
     n_pairs = bring4_rows[0]["pairs_total"] if bring4_rows else 6
     print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked by "
@@ -874,6 +876,10 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
     print()
     print("beaten     swept + traded -- how many of the enemy pairs drawn")
     print("           from --vs this OUR pair actually beats.")
+    print("own-tw     (Stage 1) how many of the enemy pairs this OUR pair")
+    print("           only beats by choosing to open with ITS OWN real")
+    print("           Tailwind (a setter + attacker hyper-offense answer) --")
+    print("           0 for a pair with no real Tailwind setter of its own.")
     bring_size = len(bring4_rows[0]["bring4"]) if bring4_rows else 4
     print(f"uncov      (Stage 2) enemy pairs that NONE of this bring-4's "
          f"{n_pairs}")
@@ -1384,10 +1390,19 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     single Mega-stone holder that enemy's own best bring-4 treats as
     transformed, `pe["best_bring4_row"]["mega_used"]` -- "note which one is
     used" once a core's 2 stone holders needed the bring-4-consistent
-    choice) and "Enemy N 6 pairs" (`_pairs_note`: every one of that bring's
-    own internal pairs, by name, with its own beaten fraction -- "keep a
-    note of the 6 pairs for each enemy team and their overall performance
-    along with the full summary").
+    choice), "Enemy N lead"/"Enemy N backup" (`recommended_lead`: that
+    enemy's own best bring's best-ranked pair, and the 2 members left over
+    -- "is there a way to assess the best lead vs a given enemy team? Just
+    the best pair + their backup"), and "Enemy N 6 pairs" (`_pairs_note`:
+    every one of that bring's own internal pairs, by name, with its own
+    beaten fraction -- "keep a note of the 6 pairs for each enemy team and
+    their overall performance along with the full summary").
+
+    The core-level "Sum 3rd Best ..." columns are a plain SUM (not the
+    "Avg .../90" columns' per-90 normalisation) of each enemy's own
+    `bring4_pair_depth` 3rd-best-pair reading, across every named enemy --
+    "sum-of 3rd best pair for each of the relevant metrics across every
+    enemy team in the summary".
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _safe_sheet_name, _style_header
@@ -1401,10 +1416,13 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               "Weak to 0 types (members)", "Types with 2+ weak members",
               "Weaknesses by type", "Average Score",
               "Avg Wins/90", "Avg Wins under Tailwind/90",
-              "Avg Wins under Protect/90", "Clean wins/90"]
+              "Avg Wins under Protect/90", "Clean wins/90",
+              "Sum 3rd Best Pairs Beaten", "Sum 3rd Best Tailwind-Safe",
+              "Sum 3rd Best Protect-Safe", "Sum 3rd Best No-Faint"]
     for i in range(len(target_name_lists)):
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
                    f"Enemy {i + 1} mega used",
+                   f"Enemy {i + 1} lead", f"Enemy {i + 1} backup",
                    f"Enemy {i + 1} worst pair beaten",
                    f"Enemy {i + 1} uncovered enemy pairs",
                    f"Enemy {i + 1} pairs beaten total",
@@ -1454,19 +1472,34 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
             avg_wins_pr = sum(x[2] for x in rates) / len(rates)
             avg_clean = sum(x[3] for x in rates) / len(rates)
         avg_score = _avg_score(core, merged)
+        # "sum-of 3rd best pair for each of the relevant metrics across
+        # every enemy team" -- unlike the "Avg .../90" columns above (which
+        # normalise so cores/enemies of different sizes stay comparable),
+        # this is a plain sum of each enemy's own `bring4_pair_depth`
+        # 3rd-best-pair reading (`None` only for a core too small to HAVE a
+        # 3rd pair, e.g. a 3-Pokemon core's 3-pair bring -- treated as 0,
+        # not skipped, so a core that can't even field a 3rd pair reads as
+        # weaker here rather than silently shrinking the sum's own count).
+        sum_3rd_beaten = sum((d["beaten_3rd"] or 0) for _pe, d in per_enemy_depths)
+        sum_3rd_tw = sum((d["tailwind_safe_3rd"] or 0) for _pe, d in per_enemy_depths)
+        sum_3rd_pr = sum((d["protect_safe_3rd"] or 0) for _pe, d in per_enemy_depths)
+        sum_3rd_nf = sum((d["no_faint_3rd"] or 0) for _pe, d in per_enemy_depths)
         row = [rank, " / ".join(core), r["core_size"], r["worst_enemy_idx"] + 1,
               weak["weak_to_2plus"], weak["weak_to_1"], weak["weak_to_0"],
               types_2plus, ", ".join(f"{t} {c}" for t, c in by_type),
               round(avg_score, 1) if avg_score is not None else "",
               round(avg_wins, 1), round(avg_wins_tw, 1),
-              round(avg_wins_pr, 1), round(avg_clean, 1)]
+              round(avg_wins_pr, 1), round(avg_clean, 1),
+              sum_3rd_beaten, sum_3rd_tw, sum_3rd_pr, sum_3rd_nf]
         for pe, depth in per_enemy_depths:
             wr = pe["best_bring4_row"]["worst_pair_row"]
             uncovered = pe["best_bring4_row"]["uncovered_enemy_pairs"]
             pt = depth["pairs_total"]
             n_pairs = len(pe["best_bring4_row"]["pair_rows"])
+            lead_backup = recommended_lead(pe["best_bring4_row"])
             row += [", ".join(pe["target_names"]), " / ".join(pe["best_bring4"]),
                    pe["best_bring4_row"].get("mega_used") or "",
+                   " + ".join(lead_backup["lead"]), " + ".join(lead_backup["backup"]),
                    f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
                    ", ".join(f"{e1}+{e2}" for e1, e2 in uncovered),
                    f"{depth['beaten_total']}/{n_pairs * pt}",
@@ -1536,10 +1569,12 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
 
     Also carries "Mega used" (`b["mega_used"]` -- "note which one is used"
     once a bring's own 2 stone holders needed the bring-4-consistent
-    choice) and "6 pairs" (`_pairs_note`: every one of this bring's own
+    choice), "6 pairs" (`_pairs_note`: every one of this bring's own
     internal pairs, by name, with its own beaten fraction -- "keep a note
     of the 6 pairs ... and their overall performance along with the full
-    summary").
+    summary"), and "Lead"/"Backup" (`recommended_lead`: the single best-
+    ranked of this bring's own pairs -- "is there a way to assess the best
+    lead vs a given enemy team? Just the best pair + their backup").
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _safe_sheet_name, _style_header
@@ -1548,7 +1583,8 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
     enemy_tw = enemy_has_real_tailwind(targets, merged)
     ws = wb.active
     ws.title = "Bring-4s"
-    ws.append(["#", "Bring-4", "Mega used", "Uncovered enemy pairs", "Pairs good",
+    ws.append(["#", "Bring-4", "Mega used", "Lead", "Backup",
+              "Uncovered enemy pairs", "Pairs good",
               "Pairs total", "Worst pair", "Worst pair beaten",
               "Worst pair total", "Average Score",
               "Avg Wins/90", "Avg Wins under Tailwind/90",
@@ -1569,7 +1605,9 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
         pt = depth["pairs_total"]
         n_pairs = len(b["pair_rows"])
         avg_score = _avg_score(b["bring4"], merged)
+        lead_backup = recommended_lead(b)
         ws.append([rank, " / ".join(b["bring4"]), b.get("mega_used") or "",
+                  " + ".join(lead_backup["lead"]), " + ".join(lead_backup["backup"]),
                   ", ".join(f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
                   b["pairs_good"], b["pairs_total"], " + ".join(b["worst_pair"]),
                   f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",

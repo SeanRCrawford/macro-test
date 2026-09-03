@@ -1653,6 +1653,148 @@ class TestXlsxMegaUsedAndSixPairsColumns(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestXlsxSum3rdBestAndLeadBackupColumns(unittest.TestCase):
+    """"I would also like to see sum-of 3rd best pair for each of the
+    relevant metrics across every enemy team in the summary .xlsx" -- the
+    "Cores" sheet gets 4 core-level "Sum 3rd Best ..." columns. "Is there a
+    way to assess the best lead vs a given enemy team? Just the best pair +
+    their backup" -- the "Bring-4s"/"Cores" sheets get "Lead"/"Backup"
+    columns, and --bring4's own Stage-1 pair table gets an "own-tw" column."""
+
+    SUM_3RD_COLUMNS = ("Sum 3rd Best Pairs Beaten", "Sum 3rd Best Tailwind-Safe",
+                      "Sum 3rd Best Protect-Safe", "Sum 3rd Best No-Faint")
+
+    def test_multi_bring4_xlsx_has_sum_3rd_best_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            for col in self.SUM_3RD_COLUMNS:
+                self.assertIn(col, header)
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            for col in self.SUM_3RD_COLUMNS:
+                self.assertIsInstance(row2[col], int)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_sum_3rd_beaten_matches_a_from_scratch_recomputation(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "1", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            from counter_finder import (bring4_pair_depth, multi_bring4_coverage,
+                                        multi_bring4_exhaustive)
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Cores"][1]]
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            from _harness import load_world
+            W = load_world()
+            merged, moves = W["merged"], W["moves"]
+            natures, typechart = W["natures"], W["typechart"]
+            pool = [n for n in W["merged"] if n not in ("Kingambit", "Basculegion",
+                                                         "Garchomp", "Incineroar")]
+            # Same --pool-size 20 narrowing `main()` itself applies -- reuse
+            # the SAME candidate names the CLI run actually used (its own
+            # "Core" cell), not a fresh, potentially-different top-20 cut.
+            core = row2["Core"].split(" / ")
+            targets = [["Kingambit", "Basculegion"], ["Garchomp", "Incineroar"]]
+            coverage = multi_bring4_coverage(
+                core, targets, merged, moves, natures, typechart,
+                good_threshold=0.0, min_enemies=1)
+            rows = multi_bring4_exhaustive(coverage, good_threshold=0.0,
+                                           core_sizes=(len(core),))
+            self.assertEqual(len(rows), 1)
+            expected = sum(
+                (bring4_pair_depth(pe["best_bring4_row"])["beaten_3rd"] or 0)
+                for pe in rows[0]["per_enemy"])
+            self.assertEqual(row2["Sum 3rd Best Pairs Beaten"], expected)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bring4_xlsx_has_lead_and_backup_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            self.assertIn("Lead", header)
+            self.assertIn("Backup", header)
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            self.assertIn("+", row2["Lead"])
+            bring4_names = set(row2["Bring-4"].split(" / "))
+            lead_names = set(row2["Lead"].split(" + "))
+            backup_names = set(row2["Backup"].split(" + "))
+            self.assertTrue(lead_names.issubset(bring4_names))
+            self.assertTrue(backup_names.issubset(bring4_names))
+            self.assertEqual(lead_names | backup_names, bring4_names)
+            self.assertEqual(lead_names & backup_names, set())
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_xlsx_has_per_enemy_lead_and_backup_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            self.assertTrue(any(h and h.endswith("lead") for h in header))
+            self.assertTrue(any(h and h.endswith("backup") for h in header))
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            lead_col = next(h for h in header if h.endswith("lead"))
+            self.assertIn("+", row2[lead_col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bring4_stage1_table_shows_an_own_tw_column(self):
+        msg, out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                      "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+             "--no-prompt", "--top", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("own-tw", out)
+
+
 class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
     """"When a sweep of --vs-team gets too many results it doesn't even
     output the results or anything to CSV. I want to at least see the

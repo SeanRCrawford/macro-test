@@ -1317,6 +1317,101 @@ class TestTailwindAsARealThreat(unittest.TestCase):
         self.assertFalse(d["tailwind_forced"])
         self.assertEqual(d["outcome"], d["outcome_without_tailwind"])
 
+
+class TestOwnTailwindAsAMatchingAnswer(unittest.TestCase):
+    """"I think it's important to be able to withstand tailwind versus
+    opponents with Tailwind (or match with your own)" -- the mirror image
+    of `TestTailwindAsARealThreat`: when OUR pair carries a real Tailwind
+    setter, `_pair_vs_targets` tries the same "spend turn 1 actually
+    casting it" replay, OPTIMISTICALLY this time (keep it only when it
+    HELPS), since it's a choice we'd make ourselves, not one imposed on us.
+
+    Real, verified, fully pinned fixture: Talonflame (Tailwind, Brave Bird)
+    + Kingambit (Kowtow Cleave, Sucker Punch) against Sableye (its own real
+    usage moveset: Rain Dance/Light Screen/Reflect/Encore -- no offense at
+    all) + Arcanine-Hisui (Flare Blitz/Protect/Rock Slide/Extreme Speed).
+    At normal speed Kingambit is outsped and worn down without ever
+    finishing Arcanine-Hisui off -- a real LOSS. If Talonflame instead
+    spends turn 1 casting Tailwind, both of ours outspeed from turn 2 on,
+    turning the same matchup into a stalemate (no_ko) instead -- not a full
+    win, but a real, concrete improvement `own_tailwind_used` should catch.
+    """
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        self.our_names = ["Talonflame", "Kingambit"]
+        self.enemy_names = ["Sableye", "Arcanine-Hisui"]
+        self.our_built = cf._build_forms(
+            self.our_names, merged, natures, moves,
+            items={"Talonflame": "Focus Sash", "Kingambit": "Life Orb"})
+        self.enemy_built = cf._build_forms(self.enemy_names, merged, natures, moves)
+        self.our_built["Talonflame"]["moves"] = cf._move_infos(
+            "Talonflame", merged, moves, ["Tailwind", "Brave Bird"])
+        self.our_built["Kingambit"]["moves"] = cf._move_infos(
+            "Kingambit", merged, moves, ["Kowtow Cleave", "Sucker Punch"])
+        self.enemy_built["Sableye"]["moves"] = cf._move_infos(
+            "Sableye", merged, moves,
+            ["Rain Dance", "Light Screen", "Reflect", "Encore"])
+        self.enemy_built["Arcanine-Hisui"]["moves"] = cf._move_infos(
+            "Arcanine-Hisui", merged, moves,
+            ["Flare Blitz", "Protect", "Rock Slide", "Extreme Speed"])
+
+    def _race(self, merged):
+        typechart = self.W["typechart"]
+        detail, summary = cf._pair_vs_targets(
+            self.our_names[0], self.our_names[1], self.our_built,
+            self.enemy_names, self.enemy_built, typechart, turns=2,
+            merged=merged)
+        return detail[tuple(self.enemy_names)], summary
+
+    def test_talonflame_really_knows_tailwind_sableye_and_arcanine_do_not(self):
+        """The fixture's precondition, checked against real usage data."""
+        merged = self.W["merged"]
+        self.assertTrue(any(mv == "Tailwind" for mv, _pct in
+                            merged["Talonflame"]["moves_usage"]))
+        for n in self.enemy_names:
+            self.assertFalse(any(mv == "Tailwind" for mv, _pct in
+                                 merged[n]["moves_usage"]), n)
+
+    def test_the_normal_race_alone_is_a_loss(self):
+        d, _summary = self._race(merged=None)
+        self.assertEqual(d["outcome"], "loss")
+        self.assertFalse(d["own_tailwind_is_real_threat"])
+        self.assertFalse(d["own_tailwind_used"])
+        self.assertIsNone(d["own_tailwind_outcome"])
+
+    def test_our_own_real_tailwind_answer_improves_the_outcome(self):
+        d, summary = self._race(merged=self.W["merged"])
+        self.assertTrue(d["own_tailwind_is_real_threat"])
+        self.assertTrue(d["own_tailwind_used"])
+        self.assertEqual(d["own_tailwind_outcome"], "no_ko")
+        self.assertEqual(d["outcome"], "no_ko",
+                         "a real Tailwind answer of OURS that turns a loss "
+                         "into a stalemate must be the assumed outcome")
+        self.assertEqual(d["outcome_without_tailwind"], "loss",
+                         "the original no-Tailwind result must still be "
+                         "recoverable, not overwritten")
+        self.assertEqual(summary["pairs_own_tailwind_used"], 1)
+        self.assertEqual(summary["pairs_lost"], 0)
+        self.assertEqual(summary["pairs_no_ko"], 1)
+
+    def test_never_makes_a_pair_look_worse_than_its_baseline(self):
+        """OUR tailwind is a choice we'd only make if it helps -- it must
+        never replace a chosen outcome with a WORSE one."""
+        d, _summary = self._race(merged=self.W["merged"])
+        self.assertLessEqual(cf._JOINT_OUTCOME_RANK[d["outcome"]],
+                             cf._JOINT_OUTCOME_RANK[d["outcome_without_tailwind"]])
+
+    def test_own_pair_has_real_tailwind_helper(self):
+        merged = self.W["merged"]
+        self.assertTrue(cf.own_pair_has_real_tailwind(
+            "Talonflame", "Kingambit", merged))
+        self.assertFalse(cf.own_pair_has_real_tailwind(
+            "Sableye", "Arcanine-Hisui", merged))
+
+
 class TestChargeMovesNeedTheirWeather(unittest.TestCase):
     """"Electro shot needs rain and solar beam needs sun to be a 1-turn
     move, otherwise they are 2-turn moves." `_raw_hit` (the one place every
@@ -2850,6 +2945,47 @@ class TestBring4PairDepth(unittest.TestCase):
         beaten = [r["pairs_swept"] + r["pairs_traded"] for r in ordered]
         for nf, bt in zip(no_faint, beaten):
             self.assertLessEqual(nf, bt)
+
+
+class TestRecommendedLead(unittest.TestCase):
+    """`recommended_lead` -- "is there a way to assess the best lead vs a
+    given enemy team? Just the best pair + their backup" -- the single
+    best-ranked (`_pair_sort_key`) of a bring-4's own 6 internal pairs is
+    the lead, the other 2 members are the backup. No new racing: reads
+    straight off `bring4_row["pair_rows"]`, already fully computed."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.pair_rows, self.bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+
+    def test_lead_is_the_best_ranked_pair(self):
+        b = self.bring4_rows[0]
+        result = cf.recommended_lead(b)
+        best_pair = min(b["pair_rows"], key=cf._pair_sort_key)
+        self.assertEqual(set(result["lead"]), set(best_pair["pair"]))
+
+    def test_backup_is_the_other_two_members(self):
+        b = self.bring4_rows[0]
+        result = cf.recommended_lead(b)
+        self.assertEqual(set(result["lead"]) | set(result["backup"]),
+                         set(b["bring4"]))
+        self.assertEqual(len(set(result["lead"]) & set(result["backup"])), 0)
+        self.assertEqual(len(result["backup"]), len(b["bring4"]) - 2)
+
+    def test_every_bring4_row_gets_a_legal_lead_and_backup(self):
+        for b in self.bring4_rows:
+            result = cf.recommended_lead(b)
+            self.assertEqual(len(result["lead"]), 2)
+            self.assertEqual(set(result["lead"]) | set(result["backup"]),
+                             set(b["bring4"]))
 
 
 class TestPairsBeatenWithoutFainting(unittest.TestCase):
