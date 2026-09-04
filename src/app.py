@@ -3358,7 +3358,8 @@ def _render_teamsheet_export(core, sets, key_prefix):
 
 
 def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
-                           excluded_items, key_prefix):
+                           excluded_items, key_prefix, item_overrides=None,
+                           move_overrides=None):
     """"I want to be able to choose a specific team to deep dive into" --
     an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
     (any bring-4, or a multi-bring4 core), the app-side counterpart to the
@@ -3367,6 +3368,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     for the team the user actually wants to inspect, not for every result
     a search returns (same "given the size, make it an option after the
     search" reasoning `core_deep_dive` itself documents).
+
+    `item_overrides`/`move_overrides`: an already-decided team's own pinned
+    item/moveset (same shape `bring4_search`'s own overrides use) -- when
+    given, the dive respects them instead of independently re-searching
+    `core`'s sets from scratch, so a loaded team's deep dive can never
+    silently show a DIFFERENT set than what actually ranked it ("the
+    Counter Table doesn't use the actual moveset of the loaded team").
+    `None` (the default) reproduces the old behaviour, correct for a
+    freshly pool-searched core that has no pre-decided set to respect.
 
     Also renders the teamsheet export (`_render_teamsheet_export`) for
     `core` using the deep dive's own `sets` -- one call answers both "show
@@ -3380,7 +3390,8 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
             try:
                 dive = core_deep_dive(
                     core, target_name_lists, merged, moves, natures,
-                    typechart, turns=turns, excluded_items=excluded_items)
+                    typechart, turns=turns, excluded_items=excluded_items,
+                    item_overrides=item_overrides, move_overrides=move_overrides)
             except ValueError as e:
                 st.error(str(e))
                 dive = None
@@ -3597,6 +3608,17 @@ with tab_counter:
             else:
                 our6 = list(teams[ct_our_source])
                 our_sets = team_meta.get(ct_our_source, {}).get("sets") or {}
+            # "In the CLI the bring4 beat 55/90, but the streamlit counter
+            # table was 27/90. They must mirror rather than contradict." --
+            # an already-decided team's own pinned item/moveset must be
+            # respected everywhere in this branch (the search itself AND
+            # any deep dive of it below), exactly like the CLI's own
+            # --item/--moves overrides, not silently re-searched from
+            # scratch at each step.
+            item_overrides = {n: s["item"] for n, s in our_sets.items()
+                              if s.get("item")}
+            move_overrides = {n: s["moves"] for n, s in our_sets.items()
+                              if s.get("moves")}
             if not (3 <= len(our6) <= 6):
                 st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
                            "a pokepaste, or choose a preset above) -- 3 or 4 skips "
@@ -3607,16 +3629,6 @@ with tab_counter:
                            "valid pokepaste) first.")
             else:
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
-                    # "In the CLI the bring4 beat 55/90, but the streamlit
-                    # counter table was 27/90. They must mirror rather than
-                    # contradict." -- a loaded/pasted/preset team's own
-                    # pinned item/moveset must be respected here exactly
-                    # like the CLI's own --item/--moves overrides, not
-                    # silently re-searched from scratch.
-                    item_overrides = {n: s["item"] for n, s in our_sets.items()
-                                      if s.get("item")}
-                    move_overrides = {n: s["moves"] for n, s in our_sets.items()
-                                      if s.get("moves")}
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
                             pair_rows, bring4_rows = bring4_search(
@@ -3666,7 +3678,75 @@ with tab_counter:
                         key="ct_b4_deepdive_pick")
                     _render_core_deep_dive(
                         bring4_rows[pick - 1]["bring4"], [vs_roster], [ct_vs_name],
-                        ct_turns, ct_excluded, key_prefix=f"ctb4_dd_{pick}")
+                        ct_turns, ct_excluded, key_prefix=f"ctb4_dd_{pick}",
+                        item_overrides=item_overrides, move_overrides=move_overrides)
+
+                st.markdown("**Full deep dive: all of `Our 6`, every configuration**")
+                st.caption("Every C(6,2) pair `our6` can form -- covers every "
+                          "possible bring-4's own internal pairs at once, "
+                          "raced with the SAME pinned item/moveset as above "
+                          "-- no need to search/pick a bring-4 first.")
+                _render_core_deep_dive(
+                    our6, [vs_roster], [ct_vs_name], ct_turns, ct_excluded,
+                    key_prefix="ctb4_dd_all6_one",
+                    item_overrides=item_overrides, move_overrides=move_overrides)
+                if st.button(f"Full deep dive: all of Our 6 vs ALL "
+                            f"{len(teams)} saved enemy teams",
+                            key="ctb4_dd_all6_allteams_go"):
+                    all_target_lists = [list(t) for t in teams.values()]
+                    with st.spinner(f"Racing every pair against every team "
+                                    f"pair, across all {len(teams)} enemy "
+                                    f"teams -- this is the expensive one..."):
+                        from counter_finder import core_deep_dive
+                        try:
+                            dive = core_deep_dive(
+                                our6, all_target_lists, merged, moves, natures,
+                                typechart, turns=ct_turns,
+                                excluded_items=ct_excluded,
+                                item_overrides=item_overrides,
+                                move_overrides=move_overrides)
+                        except ValueError as e:
+                            st.error(str(e))
+                            dive = None
+                    st.session_state["ctb4_dd_all6_allteams_dive"] = dive
+                    st.session_state["ctb4_dd_all6_allteams_our6"] = our6
+                all_dive = st.session_state.get("ctb4_dd_all6_allteams_dive")
+                if all_dive and tuple(st.session_state.get(
+                        "ctb4_dd_all6_allteams_our6") or []) == tuple(our6):
+                    all_shown_vs = list(teams)
+                    st.caption("Set: " + ", ".join(
+                        f"{n} @ {s['item'] or '-'}"
+                        for n, s in all_dive["sets"].items()))
+                    _render_teamsheet_export(our6, all_dive["sets"],
+                                             "ctb4_dd_all6_allteams")
+                    ov = all_dive["overall"]
+                    ov_total = ov["pairs_total"]
+                    st.markdown(
+                        f"**Overall, vs all {len(teams)} enemy teams**: "
+                        f"{ov['pairs_swept'] + ov['pairs_traded']}/{ov_total} "
+                        f"beaten ({ov['pairs_swept']} swept, "
+                        f"{ov['pairs_traded']} traded, {ov['pairs_lost']} lost, "
+                        f"{ov['pairs_no_ko']} no-KO), "
+                        f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
+                        f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
+                        f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} "
+                        f"clean win")
+                    for (n1, n2), pair in all_dive["per_pair"].items():
+                        pt = pair["total"]
+                        with st.expander(
+                                f"{n1} + {n2} -- "
+                                f"{pt['pairs_swept'] + pt['pairs_traded']}/"
+                                f"{pt['pairs_total']} beaten, all "
+                                f"{len(teams)} enemy teams"):
+                            for e_idx, pe in enumerate(pair["per_enemy"]):
+                                s = pe["summary"]
+                                enemy_label = (all_shown_vs[e_idx]
+                                              if e_idx < len(all_shown_vs)
+                                              else ", ".join(pe["target_names"]))
+                                st.markdown(
+                                    f"vs **{enemy_label}**: "
+                                    f"{s['pairs_swept'] + s['pairs_traded']}/"
+                                    f"{s['pairs_total']} beaten")
 
     elif ct_mode == "Multi-bring4 (several enemy rosters)":
         st.caption("Search a whole POOL for the best team-of-4/5/6 across SEVERAL "
