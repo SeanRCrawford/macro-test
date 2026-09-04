@@ -50,13 +50,13 @@ def _best_damaging_action(battle, attacker, targets):
     script (see the `battle._movesets` assignments in matchup_search.py /
     committed_plan.py). Returns (damage, MoveInfo, target) or None."""
     ms = getattr(battle, "_movesets", None) or {}
-    from damage import WEIGHT_BASED_POWER
+    from damage import ZERO_BASE_POWER_MOVES
     from solver import quick_damage_estimate
     best = None
     for move, _pct in ms.get(attacker.name, []):
         if move.category == "Status":
             continue
-        if move.power == 0 and move.name not in WEIGHT_BASED_POWER:
+        if move.power == 0 and move.name not in ZERO_BASE_POWER_MOVES:
             continue
         for tgt in targets:
             dmg = quick_damage_estimate(attacker, tgt, move, battle.typechart, battle.field)

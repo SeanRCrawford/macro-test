@@ -553,6 +553,24 @@ WEIGHT_BASED_POWER = ("Low Kick", "Grass Knot")
 # already taken. "Eruption damage should also scale with health."
 HP_BASED_POWER = ("Eruption", "Water Spout")
 
+# Moves whose real power depends on the TARGET's current HP fraction --
+# floor(100 * target_current_hp / target_max_hp), minimum 1 -- the opposite
+# direction from Eruption/Water Spout (`HP_BASED_POWER`, scales off the
+# USER's own HP): "Hard Press has base power equal to the enemy % health
+# (100bp at 100%)". Like Low Kick/Grass Knot (`WEIGHT_BASED_POWER`),
+# Showdown's raw data gives this `basePower: 0` with a `basePowerCallback`
+# computing the real number at battle time -- unhandled, it dealt zero
+# damage every time.
+DEFENDER_HP_BASED_POWER = ("Hard Press",)
+
+# Every move whose raw `basePower` is 0 in Showdown's data but resolves to
+# something real at battle time (`WEIGHT_BASED_POWER` + `DEFENDER_HP_BASED_
+# POWER` -- both families share this "0 looks like a no-op, isn't" shape).
+# The union every "is this move actually worth considering" guard across
+# this codebase checks against, so a THIRD such move only ever needs
+# touching here, not every guard site individually.
+ZERO_BASE_POWER_MOVES = WEIGHT_BASED_POWER + DEFENDER_HP_BASED_POWER
+
 # (weight threshold in kg, power below that threshold). The last row has no
 # threshold -- 200kg+ is the final bracket.
 _WEIGHT_POWER_BREAKPOINTS = ((10, 20), (25, 40), (50, 60), (100, 80), (200, 100))
@@ -569,6 +587,17 @@ def weight_based_power(weight_kg: float | None) -> int | None:
         if weight_kg < threshold:
             return power
     return 120
+
+
+def defender_hp_based_power(defender: "Combatant") -> int:
+    """Hard Press's real power against `defender` right now -- floor(100 *
+    current_hp / max_hp), minimum 1 (never truly 0, matching this whole
+    "0 basePower callback" family's usual floor -- a move that could deal
+    true zero damage isn't meaningfully a move at all)."""
+    max_hp = defender.max_hp()
+    if not max_hp:
+        return 1
+    return max(1, int(100 * defender.current_hp / max_hp))
 
 
 def hit_count_for(move_name: str, attacker: "Combatant") -> float:
@@ -613,6 +642,13 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     multiplier (already baked into whatever `battle.py` passed in) would be
     silently discarded.
 
+    Hard Press (`DEFENDER_HP_BASED_POWER`) is the SAME `power == 0` sentinel
+    shape as Low Kick/Grass Knot -- resolved here from the DEFENDER's
+    CURRENT HP fraction (floor(100 * current_hp / max_hp), min 1: "Hard
+    Press has base power equal to the enemy % health (100bp at 100%)"),
+    with the identical `battle.py` pre-resolution exception for the same
+    Helping Hand reason.
+
     Eruption/Water Spout (`HP_BASED_POWER`) are handled differently: their
     raw `basePower` is already a real, nonzero number (150, the full-HP
     ceiling), so there's no `power == 0` sentinel to key off -- this always
@@ -628,6 +664,8 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
         got = weight_based_power(defender.weight_kg)
         if got is not None:
             power = got
+    if move.name in DEFENDER_HP_BASED_POWER and power == 0:
+        power = defender_hp_based_power(defender)
     if move.name in HP_BASED_POWER:
         max_hp = attacker.max_hp()
         if max_hp:

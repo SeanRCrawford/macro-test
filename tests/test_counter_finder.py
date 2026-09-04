@@ -5787,3 +5787,91 @@ class TestIntimidateInTheJointRace(unittest.TestCase):
                      "E1": cf._build("Kingambit", merged, natures),
                      "E2": cf._build("Sinistcha", merged, natures)}
         self.assertEqual(cf._intimidate_mult_by_role(combatants), {})
+
+
+class TestBring4FromDeepDive(unittest.TestCase):
+    """`bring4_from_deep_dive` -- "I may as well calculate for all 6 of my
+    pokemon rather than just 4, to see the best bring4": Stage 2's own
+    "which 4 should you actually bring" ranking, sourced from an
+    ALREADY-COMPUTED `core_deep_dive` result instead of `joint_pool_
+    search`'s cheap single-turn hypothesis. Uses the SAME `_bring4_
+    candidates` ranking `bring4_search` itself uses, so it should usually
+    (not provably always -- one is a cheap single-turn hypothesis, the
+    other a full multi-turn race) agree with the cheap version on the
+    SAME pinned set."""
+
+    CORE = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.dive = cf.core_deep_dive(
+            self.CORE, [self.TARGETS], merged, moves, natures, typechart)
+
+    def test_returns_every_possible_bring4(self):
+        rows = cf.bring4_from_deep_dive(self.CORE, self.dive, self.TARGETS)
+        import itertools
+        self.assertEqual(len(rows), len(list(itertools.combinations(self.CORE, 4))))
+        self.assertEqual({frozenset(r["bring4"]) for r in rows},
+                         {frozenset(c) for c in itertools.combinations(self.CORE, 4)})
+
+    def test_best_worst_case_first_matches_bring4_search_ranking_order(self):
+        """Not a byte-for-byte match against the cheap hypothesis (the two
+        engines can legitimately disagree on close calls), but both must
+        sort their OWN rows by the exact same `_bring4_candidates`
+        ranking key, so `bring4_rows[0]` is always the least-bad worst
+        case within each engine's own numbers."""
+        rows = cf.bring4_from_deep_dive(self.CORE, self.dive, self.TARGETS)
+        keys = [cf._pair_sort_key(r["worst_pair_row"]) for r in rows]
+        uncovered = [len(r["uncovered_enemy_pairs"]) for r in rows]
+        for i in range(len(rows) - 1):
+            self.assertLessEqual(
+                (uncovered[i], keys[i]), (uncovered[i + 1], keys[i + 1]))
+
+    def test_pair_rows_carry_the_real_matchup_detail(self):
+        """Every pair in the winning bring's own `pair_rows` must carry a
+        real `detail` dict (`_pair_vs_targets`'s own per-enemy-pair shape,
+        straight out of the deep dive) -- not just the summary totals --
+        so a caller can render the SAME matchup-by-matchup breakdown
+        `core_deep_dive`'s own display already does, scoped to just this
+        bring's pairs."""
+        rows = cf.bring4_from_deep_dive(self.CORE, self.dive, self.TARGETS)
+        for pr in rows[0]["pair_rows"]:
+            self.assertIn("detail", pr)
+            n1, n2 = pr["pair"]
+            expected = next(
+                pe["detail"] for pe in self.dive["per_pair"][(n1, n2)]["per_enemy"]
+                if set(pe["target_names"]) == set(self.TARGETS))
+            self.assertIs(pr["detail"], expected)
+
+    def test_rejects_a_roster_the_dive_was_never_raced_against(self):
+        with self.assertRaises(ValueError):
+            cf.bring4_from_deep_dive(self.CORE, self.dive,
+                                     ["Garchomp", "Incineroar"])
+
+    def test_matches_across_several_enemy_rosters_scored_one_at_a_time(self):
+        """A `dive` covering SEVERAL enemy rosters at once (the "vs all
+        enemy teams" shape) can be scored roster-by-roster -- "I should
+        look team by team for the best brings" -- each call scoped to
+        exactly one roster's own `target_names`, agreeing with a dive
+        built for JUST that one roster."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        other_targets = ["Garchomp", "Incineroar", "Gallade"]
+        multi_dive = cf.core_deep_dive(
+            self.CORE, [self.TARGETS, other_targets], merged, moves,
+            natures, typechart)
+        rows_a = cf.bring4_from_deep_dive(self.CORE, multi_dive, self.TARGETS)
+        rows_b = cf.bring4_from_deep_dive(self.CORE, multi_dive, other_targets)
+        self.assertNotEqual(rows_a[0]["worst_pair_row"]["detail"],
+                            rows_b[0]["worst_pair_row"]["detail"])
+        # And matches a dive built for just that ONE roster in isolation.
+        solo_dive = cf.core_deep_dive(
+            self.CORE, [self.TARGETS], merged, moves, natures, typechart,
+            item_overrides={n: s["item"] for n, s in multi_dive["sets"].items()},
+            move_overrides={n: s["moves"] for n, s in multi_dive["sets"].items()})
+        rows_solo = cf.bring4_from_deep_dive(self.CORE, solo_dive, self.TARGETS)
+        self.assertEqual(rows_a[0]["bring4"], rows_solo[0]["bring4"])

@@ -28,7 +28,8 @@ import random
 from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
                     defensive_stat, move_from_showdown,
                      apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
-                     WEIGHT_BASED_POWER, weight_based_power, is_grounded)
+                     WEIGHT_BASED_POWER, weight_based_power, DEFENDER_HP_BASED_POWER,
+                     defender_hp_based_power, is_grounded)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS, TERRAIN_NAMES)
 
@@ -837,6 +838,12 @@ class Battle:
             got = weight_based_power(hit_targets[0].weight_kg)
             if got is not None:
                 base_power = got
+        elif move.name in DEFENDER_HP_BASED_POWER and hit_targets:
+            # Hard Press: resolved from the target's CURRENT HP fraction
+            # HERE, before Helping Hand's multiplier below, for the same
+            # reason as Low Kick/Grass Knot just above -- otherwise a
+            # Helping-Handed Hard Press loses its 1.5x boost entirely.
+            base_power = defender_hp_based_power(hit_targets[0])
         # Helping Hand: a partner's Helping Hand this same turn boosts this move's
         # power by 1.5x, once, regardless of how many targets it hits.
         move_power = base_power * 1.5 if attacker.volatile.pop("helping_hand", False) else base_power

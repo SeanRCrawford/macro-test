@@ -940,7 +940,7 @@ def move_plans(actor, moveset, foes, allies, typechart, field, battle):
     foes for a spread move and the ALLY too for an `allAdjacent` one. Worst-roll
     damage, as a fraction of each target's max HP.
     """
-    from damage import WEIGHT_BASED_POWER, damage_roll, defensive_stat, effective_stat
+    from damage import ZERO_BASE_POWER_MOVES, damage_roll, defensive_stat, effective_stat
 
     def dmg(move, defender, n_targets):
         physical = move.category == "Physical"
@@ -960,7 +960,7 @@ def move_plans(actor, moveset, foes, allies, typechart, field, battle):
     for move, _usage in moveset:
         if move.category == "Status":
             continue
-        if not move.power and move.name not in WEIGHT_BASED_POWER:
+        if not move.power and move.name not in ZERO_BASE_POWER_MOVES:
             continue
         spread = is_spread_move(move.target)
         live_foes = [f for f in foes if not f.fainted]

@@ -506,5 +506,284 @@ class TestFullDeepDiveAllOfOur6VsAllEnemyTeams(unittest.TestCase):
         self.assertTrue(any("Overall, vs all" in m.value for m in at.markdown))
 
 
+class TestBestBring4FromDeepDive(unittest.TestCase):
+    """"I may as well calculate for all 6 of my pokemon rather than just 4,
+    to see the best bring4" -- once the "Full deep dive: all of Our 6"
+    dive has already raced every C(6,2) pair, `_render_core_deep_dive`
+    derives the best bring-4 from those ACCURATE results (`bring4_from_
+    deep_dive`) instead of leaving that choice to the cheap Stage 1/2
+    hypothesis."""
+
+    def test_the_all6_one_dive_shows_a_best_bring4_section(self):
+        at = app()  # default TEAM has 6 members
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Best bring-4 (from this deep dive)" in m.value
+                            for m in at.markdown))
+        dfs = [d.value for d in at.dataframe]
+        shapes = [df.shape[0] for df in dfs]
+        self.assertIn(15, shapes, "expected a 15-row bring-4 candidate table")
+        self.assertIn(6, shapes, "expected the winning bring-4's own 6-pair table")
+
+    def test_the_picked_bring4_deep_dive_has_no_best_bring4_section(self):
+        """A bring-4 already picked from Stage 2 is exactly at the bring
+        size (4) -- nothing left to choose between, so this section must
+        not appear there (it would be a trivial no-op)."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any("Best bring-4 (from this deep dive)" in m.value
+                             for m in at.markdown))
+
+    def test_best_bring4_matches_a_direct_bring4_from_deep_dive_call(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        expected = bring4_from_deep_dive(TEAM, dive, vs_roster)
+        shown_bring4 = " / ".join(expected[0]["bring4"])
+        self.assertTrue(any(c.value == shown_bring4 for c in at.caption))
+
+    def test_shows_the_recommended_lead_and_back_for_the_winning_bring4(self):
+        """"after doing a full six deep dive, output the best bring 4 from
+        that (lead / back)" -- `recommended_lead` applied to the winning
+        `bring4_from_deep_dive` row, not just the bare 4-name list."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive, recommended_lead
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        expected = bring4_from_deep_dive(TEAM, dive, vs_roster)
+        lb = recommended_lead(expected[0])
+        expected_caption = (f"Lead: {' + '.join(lb['lead'])}  |  "
+                            f"Back: {' + '.join(lb['backup'])}")
+        self.assertTrue(any(c.value == expected_caption for c in at.caption))
+
+
+class TestOnlyShowLossesFilter(unittest.TestCase):
+    """"I also want an option to just see the specific enemy pairs my
+    given pair loses against" -- a checkbox that filters each pair's own
+    matchup list down to just the unconditional losses (`outcome ==
+    "loss"`), instead of scrolling past every sweep/trade/no-KO to find
+    them."""
+
+    def test_the_checkbox_is_offered_on_a_deep_dive(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(c.key == "ctb4_dd_all6_one_onlyloss"
+                            for c in at.checkbox))
+
+    def test_toggling_it_never_raises_and_narrows_the_shown_matchups(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        # A real fixture must actually contain at least one non-loss
+        # matchup for "narrows" to be a meaningful assertion.
+        any_non_loss = any(
+            d["outcome"] != "loss"
+            for pair in dive["per_pair"].values()
+            for pe in pair["per_enemy"] for d in pe["detail"].values())
+        self.assertTrue(any_non_loss, "fixture needs at least one non-loss "
+                                      "matchup to make this test meaningful")
+        codes_before = len(at.code)
+        cb = [c for c in at.checkbox if c.key == "ctb4_dd_all6_one_onlyloss"][0]
+        at = cb.set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        codes_after = len(at.code)
+        self.assertLess(codes_after, codes_before)
+
+    def test_a_pair_with_zero_losses_says_so_when_filtered(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        # Find a pair (vs the one enemy roster here) with zero losses.
+        clean_pair = None
+        for (n1, n2), pair in dive["per_pair"].items():
+            detail = pair["per_enemy"][0]["detail"]
+            if not any(d["outcome"] == "loss" for d in detail.values()):
+                clean_pair = (n1, n2)
+                break
+        self.assertIsNotNone(clean_pair, "fixture needs a pair with zero "
+                                         "losses to make this test meaningful")
+        cb = [c for c in at.checkbox if c.key == "ctb4_dd_all6_one_onlyloss"][0]
+        at = cb.set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        n1, n2 = clean_pair
+        expanders = [e for e in at.expander if e.label.startswith(f"{n1} + {n2} ")]
+        self.assertTrue(expanders)
+        captions = [c.value for c in expanders[0].caption]
+        self.assertIn("No losses.", captions)
+
+
+class TestBestBring4TeamByTeam(unittest.TestCase):
+    """"When I see the overall deep dive result vs all enemy teams, I
+    should look team by team for the best brings, rather than just
+    individual pair performance versus all enemies" -- the "vs ALL saved
+    enemy teams" dive is now organised per enemy team, each with its own
+    best bring-4 (`bring4_from_deep_dive`, scored against just that one
+    roster)."""
+
+    def test_shows_one_best_bring4_line_per_enemy_team(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Best bring-4, team by team" in m.value
+                            for m in at.markdown))
+        team_lines = [m.value for m in at.markdown if m.value.startswith("**vs ")]
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        self.assertEqual(len(team_lines), len(W["teams"]))
+
+    def test_each_teams_best_bring4_matches_a_direct_call(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        dive = at.session_state["ctb4_dd_all6_allteams_dive"]
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive, recommended_lead
+        W = load_world()
+        name0 = list(W["teams"])[0]
+        expected = bring4_from_deep_dive(TEAM, dive, list(W["teams"][name0]))
+        lb = recommended_lead(expected[0])
+        expected_line = (f"**vs {name0}**: bring "
+                         f"{' / '.join(expected[0]['bring4'])} "
+                         f"(worst pair beats "
+                         f"{expected[0]['worst_pair_row']['pairs_swept'] + expected[0]['worst_pair_row']['pairs_traded']}"
+                         f"/{expected[0]['worst_pair_row']['pairs_total']}) -- lead "
+                         f"{' + '.join(lb['lead'])}, back "
+                         f"{' + '.join(lb['backup'])}")
+        self.assertTrue(any(m.value == expected_line for m in at.markdown))
+
+    def test_only_losses_checkbox_is_offered_and_toggles_cleanly(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertTrue(any(c.key == "ctb4_dd_all6_allteams_onlyloss"
+                            for c in at.checkbox))
+        cb = [c for c in at.checkbox
+             if c.key == "ctb4_dd_all6_allteams_onlyloss"][0]
+        at = cb.set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+
+
+class TestMegaEvolutionVisibility(unittest.TestCase):
+    """"I'm not sure enemy pokemon or my pokemon are mega evolving in
+    Counter Table in the streamlit app, it should match the CLI" -- every
+    turn log already prints a Mega-stone holder's literal pool name
+    ("Mega Metagross") whether or not it actually transformed for THIS
+    specific race (VGC allows only one Mega per side, so a core carrying 2
+    stone holders has one forced to base form for the whole dive), so the
+    name alone never answered "is it actually mega evolving". Fixed by
+    surfacing `core_deep_dive`'s own `mega_used` field (already computed,
+    already used for the CLI's xlsx "Mega Used" column) as a plain
+    sentence in every Streamlit deep-dive display."""
+
+    TWO_MEGAS = ["Mega Metagross", "Mega Swampert", "Incineroar",
+                "Farigiraf", "Gallade", "Hydreigon"]
+    ONE_MEGA = ["Mega Metagross", "Incineroar", "Farigiraf", "Gallade",
+               "Hydreigon", "Whimsicott"]
+    NO_MEGA = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
+              "Whimsicott", "Kingambit"]
+
+    def test_a_core_with_two_mega_picks_names_the_one_that_evolves(self):
+        at = app(team=self.TWO_MEGAS)
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        used = dive["mega_used"]
+        self.assertIn(used, self.TWO_MEGAS)
+        other = next(n for n in ("Mega Metagross", "Mega Swampert") if n != used)
+        expected = (f"Mega Evolution: {used} evolves this whole dive -- "
+                   f"{other} stays in base form (VGC: only one Mega per side).")
+        self.assertTrue(any(c.value == expected for c in at.caption))
+
+    def test_a_core_with_one_mega_pick_says_it_evolves_with_no_ambiguity(self):
+        at = app(team=self.ONE_MEGA)
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(c.value == "Mega Evolution: Mega Metagross evolves."
+                            for c in at.caption))
+
+    def test_a_core_with_no_mega_pick_shows_no_mega_caption_at_all(self):
+        at = app(team=self.NO_MEGA)
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any(c.value.startswith("Mega Evolution")
+                             for c in at.caption))
+
+    def test_the_per_bring4_pick_deep_dive_also_shows_it(self):
+        """Shared by every `_render_core_deep_dive` call site, not just the
+        all-6 one -- confirmed via the ordinary Stage 1/2 pick, which is
+        exactly at the bring size (4, no longer 6) and so exercises a
+        DIFFERENT `core` than the all-6 tests above. Whether a caption is
+        expected at all depends on how many Megas Stage 2's own pick
+        happens to carry (0, 1, or both) -- read straight off the same
+        `bring4_rows` the app itself picked from, rather than assuming."""
+        at = app(team=self.TWO_MEGAS)
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+        picked_bring4 = bring4_rows[0]["bring4"]
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dive = at.session_state["ctb4_dd_1_dive"]
+        megas_here = [n for n in picked_bring4 if n.startswith("Mega ")]
+        mega_captions = [c.value for c in at.caption
+                        if c.value.startswith("Mega Evolution")]
+        if not megas_here:
+            self.assertEqual(mega_captions, [])
+        elif len(megas_here) == 1:
+            self.assertEqual(mega_captions,
+                            [f"Mega Evolution: {megas_here[0]} evolves."])
+        else:
+            used = dive["mega_used"]
+            other = next(n for n in megas_here if n != used)
+            self.assertEqual(mega_captions, [
+                f"Mega Evolution: {used} evolves this whole dive -- "
+                f"{other} stays in base form (VGC: only one Mega per side)."])
+
+    def test_the_vs_all_enemy_teams_dive_also_shows_it(self):
+        at = app(team=self.TWO_MEGAS)
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        all_dive = at.session_state["ctb4_dd_all6_allteams_dive"]
+        used = all_dive["mega_used"]
+        other = next(n for n in ("Mega Metagross", "Mega Swampert") if n != used)
+        expected = (f"Mega Evolution: {used} evolves this whole dive -- "
+                   f"{other} stays in base form (VGC: only one Mega per side).")
+        self.assertTrue(any(c.value == expected for c in at.caption))
+
+
 if __name__ == "__main__":
     unittest.main()

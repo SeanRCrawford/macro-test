@@ -431,6 +431,128 @@ class TestEruptionHpScaledPower(unittest.TestCase):
                         "Eruption dealt zero -- the bug")
 
 
+class TestHardPressDefenderHpScaledPower(unittest.TestCase):
+    """"Hard Press has base power equal to the enemy % health (100bp at
+    100%)." Showdown's raw data gives Hard Press `basePower: 0` (a
+    `basePowerCallback` computes the real number from the TARGET's current
+    HP fraction at battle time), the exact same shape as Low Kick/Grass
+    Knot's own bug (`WEIGHT_BASED_POWER`) -- unhandled, every Hard Press
+    would deal exactly zero damage. Opposite scaling direction from
+    Eruption/Water Spout (`HP_BASED_POWER`, which scales off the USER's
+    own HP): Hard Press scales off the DEFENDER's."""
+
+    def test_the_raw_move_data_is_zero_power(self):
+        """The bug's precondition -- if Showdown ever ships a real basePower
+        for this move, `defender_hp_based_power` becomes dead code and this
+        whole fix should be revisited."""
+        from damage import move_from_showdown
+        hp_press = move_from_showdown(world()["moves"]["hardpress"])
+        self.assertEqual(hp_press.power, 0)
+
+    def test_full_hp_defender_gives_the_full_100_power(self):
+        from damage import defender_hp_based_power
+        from combatants import make_combatant
+        w = world()
+        garchomp = make_combatant("Garchomp", w["merged"], w["natures"])
+        garchomp.current_hp = garchomp.max_hp()
+        self.assertEqual(defender_hp_based_power(garchomp), 100)
+
+    def test_half_hp_defender_roughly_halves_both_power_and_damage(self):
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown, defender_hp_based_power
+        w = world()
+        hp_press = move_from_showdown(w["moves"]["hardpress"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        full = make_combatant("Garchomp", w["merged"], w["natures"])
+        full.current_hp = full.max_hp()
+        half = make_combatant("Garchomp", w["merged"], w["natures"])
+        half.current_hp = half.max_hp() // 2
+        self.assertAlmostEqual(
+            defender_hp_based_power(half) / defender_hp_based_power(full),
+            0.5, places=1)
+        _lo, _hi, avg_full, _eff = damage_roll(
+            50, hp_press.power, kingambit.stats["atk"], full.stats["def"],
+            kingambit, full, hp_press, w["typechart"])
+        _lo, _hi, avg_half, _eff = damage_roll(
+            50, hp_press.power, kingambit.stats["atk"], half.stats["def"],
+            kingambit, half, hp_press, w["typechart"])
+        self.assertGreater(avg_half, 0.0, "Hard Press dealt zero -- the bug")
+        self.assertLess(avg_half, avg_full)
+        self.assertAlmostEqual(avg_half / avg_full, 0.5, places=1)
+
+    def test_near_zero_hp_defender_still_gives_at_least_minimum_power(self):
+        """`max(1, ...)` -- HP-scaled power never rounds all the way down
+        to zero, matching Showdown's own floor for this callback."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        hp_press = move_from_showdown(w["moves"]["hardpress"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        garchomp = make_combatant("Garchomp", w["merged"], w["natures"])
+        garchomp.current_hp = 1
+        _lo, _hi, avg, _eff = damage_roll(
+            50, hp_press.power, kingambit.stats["atk"], garchomp.stats["def"],
+            kingambit, garchomp, hp_press, w["typechart"])
+        self.assertGreater(avg, 0.0)
+
+    def test_helping_hand_still_stacks_correctly_with_hp_scaling(self):
+        """`battle.py` pre-multiplies Helping Hand's 1.5x into the power it
+        passes to `damage_roll` -- multiplication commutes, so a half-HP
+        Hard Press with Helping Hand must be exactly 1.5x a half-HP Hard
+        Press without it, same ratio as at full HP."""
+        from combatants import make_combatant
+        from damage import damage_roll, move_from_showdown
+        w = world()
+        hp_press = move_from_showdown(w["moves"]["hardpress"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        garchomp = make_combatant("Garchomp", w["merged"], w["natures"])
+        garchomp.current_hp = garchomp.max_hp() // 2
+        _lo, _hi, plain, _eff = damage_roll(
+            50, hp_press.power, kingambit.stats["atk"], garchomp.stats["def"],
+            kingambit, garchomp, hp_press, w["typechart"])
+        _lo, _hi, helped, _eff = damage_roll(
+            50, int(50 * 1.5), kingambit.stats["atk"],
+            garchomp.stats["def"], kingambit, garchomp, hp_press,
+            w["typechart"])
+        self.assertAlmostEqual(helped / plain, 1.5, places=1)
+
+    def test_a_reduced_hp_target_takes_less_hard_press_in_a_played_turn(self):
+        """End to end through `Battle.run_turn`: Garchomp takes a hit first,
+        then Kingambit's Hard Press against it must reflect the
+        already-reduced HP rather than a static full-HP number."""
+        b = battle(["Kingambit", "Farigiraf"], ["Garchomp", "Whimsicott"])
+        kingambit = b.p1.active[0]
+        garchomp = b.p2.active[0]
+        garchomp.current_hp = garchomp.max_hp() // 4
+        before_hp = garchomp.current_hp
+        b.run_turn(
+            [Action(kingambit, "p1", "move", b.make_move("hardpress"),
+                    [garchomp]),
+             Action(b.p1.active[1], "p1", "protect", b.make_move("protect"),
+                    [b.p1.active[1]])],
+            [Action(garchomp, "p2", "move", b.make_move("tailwind"),
+                    [garchomp]),
+             Action(b.p2.active[1], "p2", "protect", b.make_move("protect"),
+                    [b.p2.active[1]])])
+        self.assertLess(garchomp.current_hp, before_hp,
+                        "Hard Press dealt zero -- the bug")
+
+    def test_hard_press_is_a_legal_candidate_in_the_cheap_model(self):
+        """`counter_finder._raw_hit` (the cheap 2v2-board model this repo's
+        search tools all sit on) has its own "is this move a real attack"
+        guard, a separate copy of the SAME `power == 0` shape -- verify it
+        was widened too, not just `damage_roll` itself."""
+        from combatants import make_combatant
+        from damage import move_from_showdown
+        from counter_finder import _raw_hit
+        w = world()
+        hp_press = move_from_showdown(w["moves"]["hardpress"])
+        kingambit = make_combatant("Kingambit", w["merged"], w["natures"])
+        garchomp = make_combatant("Garchomp", w["merged"], w["natures"])
+        hit = _raw_hit(kingambit, hp_press, garchomp, w["typechart"])
+        self.assertGreater(hit.frac, 0.0, "treated as a no-op move -- the bug")
+
+
 class TestDragoniteAbilityRule(unittest.TestCase):
     """"Dragonite also seems to keep multiscale no matter how much damage it
     takes. As a new rule, make sure base form dragonite always has the

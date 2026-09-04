@@ -153,7 +153,7 @@ import itertools
 from dataclasses import dataclass
 
 from combatants import make_combatant
-from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, WEIGHT_BASED_POWER, MoveInfo,
+from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, MoveInfo,
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
                     hits_ally, is_spread_move, move_from_showdown,
                     grassy_glide_priority_bonus)
@@ -599,7 +599,7 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     """
     if move.category == "Status":
         return NO_HIT
-    if not move.power and move.name not in WEIGHT_BASED_POWER:
+    if not move.power and move.name not in ZERO_BASE_POWER_MOVES:
         return NO_HIT
     if move.flags and move.flags.get("charge"):
         skip_weather = CHARGE_WEATHER_SKIP.get(move.name)
@@ -750,7 +750,7 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     for mv in moves:
         if mv.category == "Status":
             continue
-        if not mv.power and mv.name not in WEIGHT_BASED_POWER:
+        if not mv.power and mv.name not in ZERO_BASE_POWER_MOVES:
             continue
         got = _raw_hit(attacker, mv, defender, typechart, weather=weather, roll="avg",
                        auras=auras, terrain=terrain)
@@ -1469,7 +1469,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
             continue
         faster = [m for m in move_source[role]
                  if m.category != "Status"
-                 and (m.power or m.name in WEIGHT_BASED_POWER)
+                 and (m.power or m.name in ZERO_BASE_POWER_MOVES)
                  and m.priority > cur_mv.priority]
         if not faster:
             continue
@@ -1491,7 +1491,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
             continue
         alternatives = [m for m in move_source[role]
                        if m.name != "Sucker Punch" and m.category != "Status"
-                       and (m.power or m.name in WEIGHT_BASED_POWER)]
+                       and (m.power or m.name in ZERO_BASE_POWER_MOVES)]
         if not alternatives:
             continue
         e = combatants[role]
@@ -1836,7 +1836,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     for mv in moves:
         if mv.category == "Status":
             continue
-        if not mv.power and mv.name not in WEIGHT_BASED_POWER:
+        if not mv.power and mv.name not in ZERO_BASE_POWER_MOVES:
             continue
         blocked = _priority_blocked(attacker, mv, defending_side)
         if is_spread_move(mv.target) and n_live > 1:
@@ -2140,7 +2140,7 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
             continue
         faster = [mv for mv in (moves_by_role.get(role) or [])
                  if mv.category != "Status"
-                 and (mv.power or mv.name in WEIGHT_BASED_POWER)
+                 and (mv.power or mv.name in ZERO_BASE_POWER_MOVES)
                  and mv.priority > cur_mv.priority]
         if not faster:
             continue
@@ -2166,7 +2166,7 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
             continue
         alternatives = [mv for mv in (moves_by_role.get(role) or [])
                        if mv.name != "Sucker Punch" and mv.category != "Status"
-                       and (mv.power or mv.name in WEIGHT_BASED_POWER)]
+                       and (mv.power or mv.name in ZERO_BASE_POWER_MOVES)]
         if not alternatives:
             continue
         hits, mv = _choose_action(combatants[role], alternatives,
@@ -2624,7 +2624,7 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
     for mv in moves:
         if mv.category == "Status":
             continue
-        if not mv.power and mv.name not in WEIGHT_BASED_POWER:
+        if not mv.power and mv.name not in ZERO_BASE_POWER_MOVES:
             continue
         if _priority_blocked(attacker, mv, defending_side):
             got = NO_HIT
@@ -4549,6 +4549,59 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
                                   sets, forced_base_names=frozenset())
     result["mega_used"] = megas[0] if len(megas) == 1 else None
     return result
+
+
+def bring4_from_deep_dive(core, dive, target_names, good_threshold=1.0):
+    """`bring4_search`'s own Stage 2 ("which 4 should you actually bring"),
+    but sourced from an ALREADY-COMPUTED `core_deep_dive` result instead of
+    `joint_pool_search`'s cheap single-turn hypothesis --
+
+        "I may as well calculate for all 6 of my pokemon rather than just
+         4, to see the best bring4"
+
+    Once the full, accurate multi-turn race has already been paid for by a
+    deep dive covering the WHOLE `core`, there's no reason to fall back to
+    the cheap approximation to decide which `min(4, len(core))` of those
+    members to actually bring -- this calls the exact same ranking
+    `_bring4_candidates` gives `bring4_search`'s own Stage 2 (uncovered
+    enemy pairs first, then worst-pair rank, then good-pair count), just
+    fed real per-pair `detail`/`summary` rows straight out of `dive`
+    instead of a fresh pool search.
+
+    `target_names`: which ONE of `dive`'s own enemy rosters (an entry in
+    the `target_name_lists` `core_deep_dive` was built from) to score
+    against -- every one of `core`'s own pairs must carry a `per_enemy`
+    entry for a roster with this exact same SET of names (order-independent,
+    since `core_deep_dive` itself only ever used it as a Pokemon set). A
+    `ValueError` otherwise -- e.g. a stale/mismatched `dive`, or a roster
+    that dive was never actually raced against. To get "team by team"
+    bring-4s from a dive covering several enemy rosters at once (`dive`
+    built with a multi-entry `target_name_lists`), call this once per
+    roster.
+
+    Returns bring4_rows in `bring4_search`'s own Stage 2 shape (see
+    `_bring4_candidates`'s docstring for exactly what each row carries),
+    best-worst-case first -- each row's own `pair_rows` entries carry a
+    real `"detail"` dict too (`_pair_vs_targets`'s own per-enemy-pair
+    shape), so a caller can render the same matchup-by-matchup breakdown
+    `core_deep_dive`'s own per-pair display already does, scoped to just
+    the WINNING bring's own pairs.
+    """
+    core = list(dict.fromkeys(core))
+    wanted = set(target_names)
+    pair_lookup = {}
+    for pair, pair_entry in dive["per_pair"].items():
+        match = next((pe for pe in pair_entry["per_enemy"]
+                     if set(pe["target_names"]) == wanted), None)
+        if match is None:
+            raise ValueError(
+                f"dive has no per-enemy entry for {pair} vs {target_names} "
+                f"-- was this dive built with that exact roster?")
+        row = dict(match["summary"])
+        row["pair"] = pair
+        row["detail"] = match["detail"]
+        pair_lookup[frozenset(pair)] = row
+    return _bring4_candidates(core, pair_lookup, target_names, good_threshold)
 
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
