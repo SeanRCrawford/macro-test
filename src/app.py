@@ -3331,6 +3331,86 @@ def _pair_rows_df(pair_rows):
         for r in pair_rows])
 
 
+def _bring4_rows_df(bring4_rows, total):
+    """Stage 2's own dataframe shape (Bring-4/Uncovered enemy pairs/Good
+    pairs/Worst pair/Worst pair beaten) -- factored out so `bring4_search`'s
+    cheap Stage 2 and `bring4_from_deep_dive`'s accurate, already-raced
+    version render identically instead of drifting apart."""
+    n_pairs = len(bring4_rows[0]["pair_rows"]) if bring4_rows else 6
+    return pd.DataFrame([
+        {"Bring-4": " / ".join(b["bring4"]),
+         "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
+         "Good pairs": f"{b['pairs_good']}/{n_pairs}",
+         "Worst pair": " + ".join(b["worst_pair"]),
+         "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
+                               f"/{total}")}
+        for b in bring4_rows])
+
+
+def _mega_evolution_caption(core, dive):
+    """"I'm not sure enemy pokemon or my pokemon are mega evolving in
+    Counter Table in the streamlit app" -- every turn log always prints a
+    Mega-stone holder's literal pool name ("Mega Metagross") whether or not
+    THIS specific race hypothesis actually transformed it (VGC allows only
+    ONE Mega per side, so a `core` carrying 2 stone holders has one of them
+    forced to base form for the whole dive -- see `core_deep_dive`'s own
+    "BRING-4-CONSISTENT MEGA CHOICE" paragraph), so the name alone can't
+    answer "is it actually mega evolving" the way the CLI's xlsx "Mega
+    Used" column already does. Surfaces `dive["mega_used"]` (already
+    computed, just never shown in this app before) as a plain sentence,
+    or `None` if `core` holds no Mega-stone member at all (nothing to say)."""
+    megas = [n for n in core if n.startswith("Mega ")]
+    if not megas:
+        return None
+    used = dive.get("mega_used")
+    if len(megas) == 1:
+        return f"Mega Evolution: {megas[0]} evolves."
+    other = ", ".join(n for n in megas if n != used)
+    return (f"Mega Evolution: {used} evolves this whole dive -- {other} "
+           f"stays in base form (VGC: only one Mega per side).")
+
+
+def _render_pair_matchup_detail(n1, n2, detail, only_losses):
+    """One pair's own `detail` dict (`_pair_vs_targets`'s shape, keyed by
+    (e1, e2) enemy pair) as the matchup-by-matchup breakdown every deep-dive
+    display renders -- factored out so the per-bring4/all-6/per-enemy-team
+    deep dives can't drift apart, and so `only_losses` ("I also want an
+    option to just see the specific enemy pairs my given pair loses
+    against") filters all of them identically.
+
+    `only_losses`: when `True`, skips every `(e1, e2)` whose `outcome`
+    isn't `"loss"` -- a real, unconditional loss for this pair, not a
+    Tailwind/Protect-conditional risk on an otherwise-won matchup (those
+    stay visible via the existing `[tailwind: ...]`/`[protect: ...]` tags
+    on a SHOWN win, same as before this existed)."""
+    role_name = {"C": n1, "P": n2}
+    shown = 0
+    for (e1, e2), d in detail.items():
+        if only_losses and d["outcome"] != "loss":
+            continue
+        shown += 1
+        role_name["E1"], role_name["E2"] = e1, e2
+        tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
+        pr = "" if d["protect_safe"] else (
+            f"  [protect: {e1}->{d['protect_outcomes']['E1']}, "
+            f"{e2}->{d['protect_outcomes']['E2']}]")
+        st.markdown(f"- **{e1} + {e2}**: {d['outcome']} "
+                  f"(turn {d['turns_used']}){tw}{pr}")
+        lines = []
+        for turn_i, turn_hits in enumerate(d["log"], 1):
+            for role, tgt_role, h in turn_hits:
+                spread = " (spread)" if h.num_targets_hit > 1 else ""
+                lines.append(
+                    f"T{turn_i} {role_name[role]} -> "
+                    f"{role_name[tgt_role]}: {h.move_name or '-'} "
+                    f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-"
+                    f"{h.hi * 100:.0f}%{spread}")
+        if lines:
+            st.code("\n".join(lines), language=None)
+    if only_losses and shown == 0:
+        st.caption("No losses.")
+
+
 def _render_teamsheet_export(core, sets, key_prefix):
     """"I want a way to export the teamsheet for use in the streamlit app"
     -- `{"pool": [...], "sets": {name: {"item", "moves"}}}` is exactly the
@@ -3383,8 +3463,22 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     me the gameplan" and "give me a teamsheet I can load", since
     `core_deep_dive` already computes the fixed item/moveset for every
     member as part of racing it.
+
+    When `core` has more than 4 members AND `target_name_lists` is exactly
+    ONE enemy roster, also shows a "Best bring-4 (from this deep dive)"
+    section (`bring4_from_deep_dive`) -- "I may as well calculate for all 6
+    of my pokemon rather than just 4, to see the best bring4": once the
+    full, accurate race is already paid for, there's no reason Stage 2's
+    OWN pick still has to rely on the cheap single-turn hypothesis. Skipped
+    for a `core` already AT the bring size (nothing to choose between) and
+    for a multi-roster dive (no single "best bring4" without picking which
+    roster to score against -- see `bring4_from_deep_dive`'s own docstring
+    for scoring one roster at a time instead). That section also shows the
+    recommended lead/back split (`recommended_lead`) for the winning
+    bring-4 -- "after doing a full six deep dive, output the best bring 4
+    from that (lead / back)".
     """
-    from counter_finder import core_deep_dive
+    from counter_finder import core_deep_dive, bring4_from_deep_dive, recommended_lead
     if st.button(f"Deep dive: {' / '.join(core)}", key=f"{key_prefix}_go"):
         with st.spinner("Racing every pair against every named enemy..."):
             try:
@@ -3401,6 +3495,9 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
         return
     st.caption("Set: " + ", ".join(f"{n} @ {s['item'] or '-'}"
                                    for n, s in dive["sets"].items()))
+    mega_caption = _mega_evolution_caption(core, dive)
+    if mega_caption:
+        st.caption(mega_caption)
     _render_teamsheet_export(core, dive["sets"], key_prefix)
     ov = dive["overall"]
     ov_total = ov["pairs_total"]
@@ -3410,32 +3507,29 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
               f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
               f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
               f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} clean win")
+    if len(core) > 4 and len(target_name_lists) == 1:
+        bring4_rows = bring4_from_deep_dive(core, dive, target_name_lists[0])
+        st.markdown("**Best bring-4 (from this deep dive)**")
+        st.caption(" / ".join(bring4_rows[0]["bring4"]))
+        lb = recommended_lead(bring4_rows[0])
+        st.caption(f"Lead: {' + '.join(lb['lead'])}  |  "
+                  f"Back: {' + '.join(lb['backup'])}")
+        st.dataframe(_bring4_rows_df(bring4_rows, ov_total), width='stretch',
+                    hide_index=True)
+        st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"]),
+                    width='stretch', hide_index=True)
+    only_losses = st.checkbox(
+        "Only show enemy pairs each pair loses to", key=f"{key_prefix}_onlyloss",
+        help="\"I also want an option to just see the specific enemy pairs "
+             "my given pair loses against\" -- filters every matchup list "
+             "below to just the unconditional losses.")
     for (n1, n2), pair in dive["per_pair"].items():
         pt = pair["total"]
         with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"
                          f"{pt['pairs_total']} beaten, all enemies"):
             for pe in pair["per_enemy"]:
                 st.markdown(f"vs {', '.join(pe['target_names'])}")
-                role_name = {"C": n1, "P": n2}
-                for (e1, e2), d in pe["detail"].items():
-                    role_name["E1"], role_name["E2"] = e1, e2
-                    tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
-                    pr = "" if d["protect_safe"] else (
-                        f"  [protect: {e1}->{d['protect_outcomes']['E1']}, "
-                        f"{e2}->{d['protect_outcomes']['E2']}]")
-                    st.markdown(f"- **{e1} + {e2}**: {d['outcome']} "
-                              f"(turn {d['turns_used']}){tw}{pr}")
-                    lines = []
-                    for turn_i, turn_hits in enumerate(d["log"], 1):
-                        for role, tgt_role, h in turn_hits:
-                            spread = " (spread)" if h.num_targets_hit > 1 else ""
-                            lines.append(
-                                f"T{turn_i} {role_name[role]} -> "
-                                f"{role_name[tgt_role]}: {h.move_name or '-'} "
-                                f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-"
-                                f"{h.hi * 100:.0f}%{spread}")
-                    if lines:
-                        st.code("\n".join(lines), language=None)
+                _render_pair_matchup_detail(n1, n2, pe["detail"], only_losses)
 
 
 def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
@@ -3714,9 +3808,13 @@ with tab_counter:
                 if all_dive and tuple(st.session_state.get(
                         "ctb4_dd_all6_allteams_our6") or []) == tuple(our6):
                     all_shown_vs = list(teams)
+                    all_target_lists = [list(teams[n]) for n in all_shown_vs]
                     st.caption("Set: " + ", ".join(
                         f"{n} @ {s['item'] or '-'}"
                         for n, s in all_dive["sets"].items()))
+                    mega_caption = _mega_evolution_caption(our6, all_dive)
+                    if mega_caption:
+                        st.caption(mega_caption)
                     _render_teamsheet_export(our6, all_dive["sets"],
                                              "ctb4_dd_all6_allteams")
                     ov = all_dive["overall"]
@@ -3731,22 +3829,49 @@ with tab_counter:
                         f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
                         f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} "
                         f"clean win")
-                    for (n1, n2), pair in all_dive["per_pair"].items():
-                        pt = pair["total"]
+                    only_losses = st.checkbox(
+                        "Only show enemy pairs each pair loses to",
+                        key="ctb4_dd_all6_allteams_onlyloss",
+                        help="\"I also want an option to just see the "
+                             "specific enemy pairs my given pair loses "
+                             "against\" -- filters every matchup list "
+                             "below to just the unconditional losses.")
+                    st.markdown("**Best bring-4, team by team**")
+                    st.caption("\"I should look team by team for the best "
+                              "brings, rather than just individual pair "
+                              "performance versus all enemies\" -- each "
+                              "enemy team's own best bring-4 "
+                              "(`bring4_from_deep_dive`), scored against "
+                              "JUST that roster from the same all-6 race "
+                              "above -- no separate search, no re-racing.")
+                    from counter_finder import bring4_from_deep_dive, recommended_lead
+                    for e_idx, team_name in enumerate(all_shown_vs):
+                        best = bring4_from_deep_dive(
+                            our6, all_dive, all_target_lists[e_idx])[0]
+                        wr = best["worst_pair_row"]
+                        total = wr["pairs_total"]
+                        beaten = wr["pairs_swept"] + wr["pairs_traded"]
+                        lb = recommended_lead(best)
+                        st.markdown(
+                            f"**vs {team_name}**: bring "
+                            f"{' / '.join(best['bring4'])} (worst pair "
+                            f"beats {beaten}/{total}) -- lead "
+                            f"{' + '.join(lb['lead'])}, back "
+                            f"{' + '.join(lb['backup'])}")
+                        if best["uncovered_enemy_pairs"]:
+                            st.caption("No answer to: " + ", ".join(
+                                f"{a}+{b}" for a, b
+                                in best["uncovered_enemy_pairs"]))
                         with st.expander(
-                                f"{n1} + {n2} -- "
-                                f"{pt['pairs_swept'] + pt['pairs_traded']}/"
-                                f"{pt['pairs_total']} beaten, all "
-                                f"{len(teams)} enemy teams"):
-                            for e_idx, pe in enumerate(pair["per_enemy"]):
-                                s = pe["summary"]
-                                enemy_label = (all_shown_vs[e_idx]
-                                              if e_idx < len(all_shown_vs)
-                                              else ", ".join(pe["target_names"]))
-                                st.markdown(
-                                    f"vs **{enemy_label}**: "
-                                    f"{s['pairs_swept'] + s['pairs_traded']}/"
-                                    f"{s['pairs_total']} beaten")
+                                f"Show the pairs and matchups "
+                                f"(vs {team_name})"):
+                            st.dataframe(_pair_rows_df(best["pair_rows"]),
+                                        width='stretch', hide_index=True)
+                            for row in best["pair_rows"]:
+                                n1, n2 = row["pair"]
+                                st.markdown(f"**{n1} + {n2}**")
+                                _render_pair_matchup_detail(
+                                    n1, n2, row["detail"], only_losses)
 
     elif ct_mode == "Multi-bring4 (several enemy rosters)":
         st.caption("Search a whole POOL for the best team-of-4/5/6 across SEVERAL "
