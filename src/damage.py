@@ -769,11 +769,19 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
             power = 100
             base = ((2 * level / 5 + 2) * power * atk_stat / def_stat) / 50 + 2
 
-    # Sand boosts Rock-types' Sp. Def; snow boosts Ice-types' Defence, both 1.5x.
-    if weather == "sand" and "Rock" in defender.types and move.category == "Special":
-        modifier /= 1.5
-    if weather == "snow" and "Ice" in defender.types and move.category == "Physical":
-        modifier /= 1.5
+    # Sand boosts Rock-types' Sp. Def; snow boosts Ice-types' Defence, both
+    # 1.5x -- applied ONCE, by `defensive_stat` (via `weather_defence_boost`)
+    # baked into the `def_stat` this function was CALLED with. There used to
+    # be a second copy of this exact check here, applied again as its own
+    # damage `modifier` -- every caller that (correctly) pre-resolves
+    # `def_stat` through `defensive_stat(..., weather=...)` before calling
+    # this function, and ALSO passes its own `weather=...` through (needed
+    # for the rain/sun offensive boosts and Weather Ball just above, which
+    # DO belong here) was silently applying the 1.5x defensive boost TWICE:
+    # "0 SpA Mega Raichu Y Focus Blast vs. Tyranitar in Sand ... guaranteed
+    # OHKO" was actually landing at 82-97%, roughly 2/3 of the real number,
+    # because Tyranitar's sand-boosted bulk was counted twice. Removed --
+    # `defensive_stat` is the one place this boost belongs.
 
     modifier *= aura_multiplier(move.move_type, auras)
 
