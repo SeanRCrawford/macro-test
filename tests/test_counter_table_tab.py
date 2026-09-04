@@ -524,7 +524,9 @@ class TestBestBring4FromDeepDive(unittest.TestCase):
         dfs = [d.value for d in at.dataframe]
         shapes = [df.shape[0] for df in dfs]
         self.assertIn(15, shapes, "expected a 15-row bring-4 candidate table")
-        self.assertIn(6, shapes, "expected the winning bring-4's own 6-pair table")
+        # 6 pair rows + 1 appended TOTAL row (see TestPairRowsDfTotalsRow).
+        self.assertIn(7, shapes,
+                     "expected the winning bring-4's own 6-pair table plus a TOTAL row")
 
     def test_the_picked_bring4_deep_dive_has_no_best_bring4_section(self):
         """A bring-4 already picked from Stage 2 is exactly at the bring
@@ -575,6 +577,79 @@ class TestBestBring4FromDeepDive(unittest.TestCase):
         expected_caption = (f"Lead: {' + '.join(lb['lead'])}  |  "
                             f"Back: {' + '.join(lb['backup'])}")
         self.assertTrue(any(c.value == expected_caption for c in at.caption))
+
+
+class TestPairRowsDfTotalsRow(unittest.TestCase):
+    """"It shows the six pairs on the deep dive option, but not the totals
+    for the six pairs" -- the winning bring-4's own 6-pair table (Beaten/
+    Swept/Traded/Lost/No KO/Clean win/Tailwind-safe/Protect-safe) gets one
+    extra summary row across all 6, instead of leaving the reader to add
+    them up by hand."""
+
+    def _totals_row(self, at):
+        dfs = [d.value for d in at.dataframe]
+        # The winning bring-4's own 6-pair table is the one with 7 rows
+        # (6 pairs + 1 TOTAL row) -- the only other tables on this page are
+        # the 15-row Stage-1-shaped candidate table and the per-enemy-team
+        # pair/matchup tables, neither of which is 7 rows for this fixture.
+        seven_row = [df for df in dfs if df.shape[0] == 7]
+        self.assertEqual(len(seven_row), 1, [df.shape for df in dfs])
+        df = seven_row[0]
+        self.assertTrue(str(df.iloc[-1]["Pair"]).startswith("TOTAL"))
+        return df
+
+    def test_the_total_row_sums_every_column_across_the_six_pairs(self):
+        at = app()  # default TEAM has 6 members
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        df = self._totals_row(at)
+
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        expected = bring4_from_deep_dive(TEAM, dive, vs_roster)
+        pair_rows = expected[0]["pair_rows"]
+        total = pair_rows[0]["pairs_total"]
+        n = len(pair_rows)
+        swept = sum(r["pairs_swept"] for r in pair_rows)
+        traded = sum(r["pairs_traded"] for r in pair_rows)
+        lost = sum(r["pairs_lost"] for r in pair_rows)
+        no_ko = sum(r["pairs_no_ko"] for r in pair_rows)
+        clean = sum(r["pairs_clean_win_total"] for r in pair_rows)
+        tw_safe = sum(r["pairs_tailwind_safe"] for r in pair_rows)
+        pr_safe = sum(r["pairs_protect_safe"] for r in pair_rows)
+
+        last = df.iloc[-1]
+        self.assertEqual(last["Beaten"], f"{swept + traded}/{n * total}")
+        self.assertEqual(last["Swept"], swept)
+        self.assertEqual(last["Traded"], traded)
+        self.assertEqual(last["Lost"], lost)
+        self.assertEqual(last["No KO"], no_ko)
+        self.assertEqual(last["Clean win"], f"{clean:.1f}/{2 * n * total}")
+        self.assertEqual(last["Tailwind-safe"], tw_safe)
+        self.assertEqual(last["Protect-safe"], pr_safe)
+
+    def test_the_stage1_all_pairs_table_has_no_total_row(self):
+        """Only a bring-4's own FIXED set of pairs gets a total -- the
+        Stage-1 table (every pair drawn from a larger pool, not yet
+        narrowed to one bring-4) stays exactly as many rows as pairs.
+        Identified by its "Pair" column (Stage 2's own 15-row "all
+        possible bring-4s" table -- C(6,4)=15, same row count as Stage 1's
+        C(6,2)=15 pairs for a 6-member team -- has a "Bring-4" column
+        instead, so row count alone can't tell the two apart)."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe]
+        stage1 = [df for df in dfs if "Pair" in df.columns and df.shape[0] == 15]
+        self.assertEqual(len(stage1), 1)
+        self.assertFalse(
+            any(str(v).startswith("TOTAL") for v in stage1[0]["Pair"]))
 
 
 class TestWinningBring4OwnPairsSection(unittest.TestCase):

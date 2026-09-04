@@ -3308,7 +3308,7 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     return coverage, rows
 
 
-def _pair_rows_df(pair_rows):
+def _pair_rows_df(pair_rows, include_total=False):
     """`joint_pool_search`/`bring4_search` Stage-1-shaped rows as the
     dataframe every pair table in this tab already renders (Pair/Beaten/
     Swept/Traded/Lost/No KO/Clean win/Tailwind-safe/Protect-safe) --
@@ -3318,9 +3318,24 @@ def _pair_rows_df(pair_rows):
     summed across every enemy pair (0-2.0 each) -- "losing 1 pokemon and
     taking a lot of damage and KOing 2 enemies [is] far inferior to KOing
     the enemy without taking damage": a swept pair always scores the max
-    here, a messy out-trade less."""
+    here, a messy out-trade less.
+
+    `include_total`: "it shows the six pairs, but not the totals for the
+    six pairs" -- appends one extra summary row across every row in
+    `pair_rows` (every metric this table already tracks: Swept/Traded/
+    Lost/No KO/Clean win/Tailwind-safe/Protect-safe, each just summed
+    across the pairs shown). Tailwind-safe/Protect-safe stay bare summed
+    ints, matching their own column's type in every OTHER row -- mixing an
+    int and an "X/Y" string in one column leaves pandas with a dtype the
+    dataframe widget's Arrow serialization can't convert (`ArrowInvalid:
+    Could not convert 'X/Y' ... to int64`), the one column-shape mismatch
+    that actually crashes the render rather than just reading oddly; Beaten/
+    Clean win are already "X/Y" strings in every row, so no such crash
+    there. Meaningful only for a table that IS one bring-4's own fixed set
+    of pairs, not the Stage-1 table listing every possible pair drawn from
+    a larger pool -- callers opt in."""
     total = pair_rows[0]["pairs_total"] if pair_rows else 0
-    return pd.DataFrame([
+    rows = [
         {"Pair": " + ".join(r["pair"]),
          "Beaten": f"{r['pairs_swept'] + r['pairs_traded']}/{total}",
          "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
@@ -3328,7 +3343,24 @@ def _pair_rows_df(pair_rows):
          "Clean win": f"{r['pairs_clean_win_total']:.1f}/{2 * total}",
          "Tailwind-safe": r["pairs_tailwind_safe"],
          "Protect-safe": r["pairs_protect_safe"]}
-        for r in pair_rows])
+        for r in pair_rows]
+    if include_total and pair_rows:
+        n = len(pair_rows)
+        swept = sum(r["pairs_swept"] for r in pair_rows)
+        traded = sum(r["pairs_traded"] for r in pair_rows)
+        lost = sum(r["pairs_lost"] for r in pair_rows)
+        no_ko = sum(r["pairs_no_ko"] for r in pair_rows)
+        clean = sum(r["pairs_clean_win_total"] for r in pair_rows)
+        tw_safe = sum(r["pairs_tailwind_safe"] for r in pair_rows)
+        pr_safe = sum(r["pairs_protect_safe"] for r in pair_rows)
+        rows.append({
+            "Pair": f"TOTAL ({n} pairs)",
+            "Beaten": f"{swept + traded}/{n * total}",
+            "Swept": swept, "Traded": traded, "Lost": lost, "No KO": no_ko,
+            "Clean win": f"{clean:.1f}/{2 * n * total}",
+            "Tailwind-safe": tw_safe,
+            "Protect-safe": pr_safe})
+    return pd.DataFrame(rows)
 
 
 def _bring4_rows_df(bring4_rows, total):
@@ -3521,7 +3553,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                   f"Back: {' + '.join(lb['backup'])}")
         st.dataframe(_bring4_rows_df(bring4_rows, ov_total), width='stretch',
                     hide_index=True)
-        st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"]),
+        st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                     width='stretch', hide_index=True)
         st.markdown("**Deep dive: just the winning bring-4's own pairs**")
         st.caption("\"When all pairs are deep dived and the best bring4 is "
@@ -3575,7 +3607,8 @@ def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
             st.caption("No answer to: " + ", ".join(
                 f"{a}+{b}" for a, b in uncovered))
         with st.expander(f"Show the 6 pairs (vs {name})"):
-            st.dataframe(_pair_rows_df(pe["best_bring4_row"]["pair_rows"]),
+            st.dataframe(_pair_rows_df(pe["best_bring4_row"]["pair_rows"],
+                                       include_total=True),
                         width='stretch', hide_index=True)
     target_name_lists = [list(teams[n]) for n in shown_vs if n in teams]
     if target_name_lists:
@@ -3775,7 +3808,7 @@ with tab_counter:
 
                     st.markdown("**Your best bring-4, by its own 6 internal pairs:**")
                     st.caption(" / ".join(bring4_rows[0]["bring4"]))
-                    st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"]),
+                    st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                                 width='stretch', hide_index=True)
 
                     st.markdown("**Deep dive a specific bring-4**")
@@ -3878,7 +3911,7 @@ with tab_counter:
                         with st.expander(
                                 f"Show the pairs and matchups "
                                 f"(vs {team_name})"):
-                            st.dataframe(_pair_rows_df(best["pair_rows"]),
+                            st.dataframe(_pair_rows_df(best["pair_rows"], include_total=True),
                                         width='stretch', hide_index=True)
                             for row in best["pair_rows"]:
                                 n1, n2 = row["pair"]

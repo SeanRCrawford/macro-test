@@ -658,6 +658,25 @@ _PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset(
 SELF_HALVING_MOVES = frozenset({"Draco Meteor", "Overheat", "Leaf Storm",
                                 "Psycho Boost", "Fleur Cannon"})
 
+# Close Combat's -1 Def/-1 SpD and Superpower's -1 Atk/-1 Def (verified
+# against each move's raw `self.boosts` data) are the exact drops
+# SELF_HALVING_MOVES's own comment calls "too mild" to approximate for an
+# ordinary user -- but a Contrary holder (Mega Staraptor's classic Close
+# Combat set is the canonical case) turns that same mild drop into a real,
+# sizeable +1/+1 BOOST instead, which the cheap model has never modeled at
+# all. Scoped to Contrary specifically: for everyone else the drop stays
+# deliberately unmodeled, exactly as before -- this only ever fires for a
+# Contrary user, mirroring `_intimidate_mult_by_role`'s own Contrary branch.
+CONTRARY_SELF_DROP_MOVES = {
+    "Close Combat": {"def": -1, "spd": -1},
+    "Superpower": {"atk": -1, "def": -1},
+}
+
+# A single real stat stage's exact damage multiplier (the only magnitude
+# either move's data carries): -1 is x(2/3), +1 is x1.5 -- same table
+# `_intimidate_mult_by_role` uses for its own -1 Atk / Contrary +1 cases.
+_STAGE_MULT = {-1: 2 / 3, 1: 1.5}
+
 # Abilities that block Intimidate outright (Clear Body/White Smoke/Full
 # Metal Body block ANY opponent-inflicted stat drop; Hyper Cutter blocks
 # Attack drops specifically; Inner Focus blocks Intimidate specifically).
@@ -1708,7 +1727,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None, attacker_hp_frac=None,
                    target_hp_fracs=None, auras=None, terrain=None,
                    attacker_role=None, dmg_mult_by_role=None,
-                   half_damage_roles=frozenset()):
+                   half_damage_roles=frozenset(), def_mult_by_role=None):
     """Best (hits: {role: Hit}, MoveInfo) for `attacker` against whichever of
     `live_targets` ({role: Combatant}) it ends up hitting.
 
@@ -1726,6 +1745,16 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     `attacker_role=None` (every caller outside `_resolve_turn`'s real
     joint-race engine) means neither applies at all, matching every other
     optional per-role map in this module.
+
+    `def_mult_by_role`: the mirror of `dmg_mult_by_role`, but keyed by the
+    TARGET's own role and applied to a Hit's INCOMING damage instead of the
+    attacker's outgoing damage -- `_joint_race`'s own turn-to-turn map of a
+    Contrary holder's real Def/SpD boost after using a `CONTRARY_SELF_DROP_
+    MOVES` move (Mega Staraptor's classic Close Combat set: Def/SpD end up
+    +1/+1, x1.5 bulkier, instead of -1/-1). Applied the same way and at the
+    same point as `dmg_mult_by_role` -- before ranking, not just in the
+    number reported afterward -- so a Contrary-boosted target is correctly
+    read as harder to KO in the attacker's OWN lookahead too.
 
     `attacker_hp_frac`/`target_hp_fracs` ({role: fraction}): the attacker's
     and each live target's REAL current HP as of the start of this turn --
@@ -1824,19 +1853,23 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     defending_side = list(live_targets.values())
     n_live = len(live_targets)
 
-    def _scaled(got, mv):
-        """Apply the Intimidate/Defiant/Competitive static multiplier and
-        the Draco-Meteor-family halving to a freshly-computed Hit, before
-        it's used for ranking. A no-op (returns `got` unchanged) whenever
-        `attacker_role` wasn't given, or nothing applies to this attacker."""
-        if attacker_role is None or got is NO_HIT:
+    def _scaled(got, mv, target_role=None):
+        """Apply the Intimidate/Defiant/Competitive static multiplier, the
+        Draco-Meteor-family halving, and a Contrary target's own Def/SpD
+        boost to a freshly-computed Hit, before it's used for ranking. A
+        no-op (returns `got` unchanged) whenever neither `attacker_role` nor
+        `def_mult_by_role` applies here."""
+        if got is NO_HIT:
             return got
         mult = 1.0
-        if dmg_mult_by_role:
-            cat = "physical" if mv.category == "Physical" else "special"
-            mult *= dmg_mult_by_role.get(attacker_role, {}).get(cat, 1.0)
-        if attacker_role in half_damage_roles:
-            mult *= 0.5
+        cat = "physical" if mv.category == "Physical" else "special"
+        if attacker_role is not None:
+            if dmg_mult_by_role:
+                mult *= dmg_mult_by_role.get(attacker_role, {}).get(cat, 1.0)
+            if attacker_role in half_damage_roles:
+                mult *= 0.5
+        if def_mult_by_role and target_role is not None:
+            mult *= def_mult_by_role.get(target_role, {}).get(cat, 1.0)
         if mult == 1.0:
             return got
         return Hit(move_name=got.move_name, frac=got.frac * mult,
@@ -1862,7 +1895,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                                    roll="avg", num_targets_hit=n_live,
                                    attacker_hp_frac=attacker_hp_frac,
                                    defender_hp_frac=(target_hp_fracs or {}).get(role),
-                                   auras=auras, terrain=terrain), mv)
+                                   auras=auras, terrain=terrain), mv, role)
                    for role, d in live_targets.items()}
             spread_candidates.append((mv, hits))
             for role, h in hits.items():
@@ -1875,7 +1908,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                 attacker, mv, live_targets[role], typechart, weather=weather,
                 roll="avg", attacker_hp_frac=attacker_hp_frac,
                 defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras,
-                terrain=terrain), mv)
+                terrain=terrain), mv, role)
             single_candidates.append((mv, role, got))
             best_frac_by_role[role] = max(best_frac_by_role[role], got.frac)
 
@@ -2118,7 +2151,7 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                              live_targets_by_role, hint_by_role,
                              enemy_speed_mult, protected_roles, auras=None,
                              dmg_mult_by_role=None, half_damage_roles=frozenset(),
-                             own_speed_mult=1.0):
+                             own_speed_mult=1.0, def_mult_by_role=None):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk" -- a provisional `plan` chooses every
     actor's move independently, unaware of the others, so an actor can end
@@ -2177,7 +2210,8 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
                                   auras=auras, terrain=field.terrain,
                                   attacker_role=role, dmg_mult_by_role=dmg_mult_by_role,
-                                  half_damage_roles=half_damage_roles)
+                                  half_damage_roles=half_damage_roles,
+                                  def_mult_by_role=def_mult_by_role)
         if mv is None:
             continue
         trial_plan = dict(new_plan)
@@ -2202,7 +2236,8 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
                                   auras=auras, terrain=field.terrain,
                                   attacker_role=role, dmg_mult_by_role=dmg_mult_by_role,
-                                  half_damage_roles=half_damage_roles)
+                                  half_damage_roles=half_damage_roles,
+                                  def_mult_by_role=def_mult_by_role)
         if mv is None:
             continue
         new_plan[role] = (hits, mv)
@@ -2253,7 +2288,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   enemy_speed_mult=1.0, protected_roles=frozenset(),
                   recharging_roles=frozenset(), tailwind_setter_role=None,
                   terrain=None, dmg_mult_by_role=None,
-                  half_damage_roles=frozenset(), own_speed_mult=1.0):
+                  half_damage_roles=frozenset(), own_speed_mult=1.0,
+                  def_mult_by_role=None):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
     enemy side chooses independently and greedily (`_choose_action` with no
     hint), same "no coordination" behaviour `_sequential_pair_outcome`
@@ -2341,6 +2377,11 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     halving set -- both `_joint_race`'s own board-level state, threaded
     straight through to every `_choose_action` call (both sides) so ranking
     itself already reflects them (see `_choose_action`'s own docstring).
+
+    `def_mult_by_role`: `_joint_race`'s own turn-to-turn map of a role's
+    Contrary-boosted incoming-damage multiplier (`CONTRARY_SELF_DROP_MOVES`)
+    -- same threading as `dmg_mult_by_role`, but applied to the DEFENDING
+    role instead of the attacker (see `_choose_action`'s own docstring).
     """
     hp = dict(hp)
     ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
@@ -2362,7 +2403,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                         target_hp_fracs=hp, auras=auras,
                                         terrain=terrain, attacker_role=role,
                                         dmg_mult_by_role=dmg_mult_by_role,
-                                        half_damage_roles=half_damage_roles)
+                                        half_damage_roles=half_damage_roles,
+                                        def_mult_by_role=def_mult_by_role)
     for role, c in theirs_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
@@ -2377,7 +2419,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                         target_hp_fracs=hp, auras=auras,
                                         terrain=terrain, attacker_role=role,
                                         dmg_mult_by_role=dmg_mult_by_role,
-                                        half_damage_roles=half_damage_roles)
+                                        half_damage_roles=half_damage_roles,
+                                        def_mult_by_role=def_mult_by_role)
 
     plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
     hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
@@ -2391,7 +2434,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan, doomed, sp_wasted, combatants, moves_by_role, hp, typechart,
             weather, field, live_targets_by_role, our_hints, enemy_speed_mult,
             protected_roles, auras, dmg_mult_by_role=dmg_mult_by_role,
-            half_damage_roles=half_damage_roles, own_speed_mult=own_speed_mult)
+            half_damage_roles=half_damage_roles, own_speed_mult=own_speed_mult,
+            def_mult_by_role=def_mult_by_role)
         plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
         hp2, log, enemy_acted, wiped, final_doomed, _sp2 = _apply_plan(
             plan, combatants, hp, protected_roles, enemy_speed_mult, field,
@@ -2406,7 +2450,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               enemy_speed_mult=1.0, protected_roles=frozenset(),
               recharging_roles=frozenset(), tailwind_setter_role=None,
               terrain=None, dmg_mult_by_role=None,
-              half_damage_roles=frozenset(), own_speed_mult=1.0):
+              half_damage_roles=frozenset(), own_speed_mult=1.0,
+              def_mult_by_role=None):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -2441,7 +2486,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
             recharging_roles=recharging_roles,
             tailwind_setter_role=tailwind_setter_role, terrain=terrain,
             dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
-            own_speed_mult=own_speed_mult)
+            own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
@@ -2540,6 +2585,20 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     `_best_turn`/`_resolve_turn` return value needed) is added for every
     turn AFTER this one (first use still deals full damage, matching the
     real self-effect's timing).
+
+    CONTRARY (`CONTRARY_SELF_DROP_MOVES`): `dmg_mult_by_role`/`def_mult_by_
+    role` both start as computed above (Intimidate static, defense empty)
+    and are updated turn-to-turn the same way `half_damage` is -- any role
+    whose move this turn is in `CONTRARY_SELF_DROP_MOVES` AND whose ability
+    is Contrary has its move's own drop inverted into a real stage GAIN
+    (Mega Staraptor's Close Combat: Def/SpD end up +1/+1 instead of -1/-1),
+    folded in for every turn AFTER this one -- an Atk/SpA gain multiplies
+    `dmg_mult_by_role` (this role's own future outgoing damage, same field
+    Intimidate already uses); a Def/SpD gain multiplies `def_mult_by_role`
+    (this role's own future INCOMING damage, a new field with no other
+    writer). Scoped to Contrary specifically, matching `_intimidate_mult_
+    by_role`'s own Contrary branch -- a non-Contrary user's drop from one of
+    these moves stays deliberately unmodeled, exactly as before.
     """
     hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
     any_enemy_acted = False
@@ -2547,6 +2606,7 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     full_log = []
     recharging = frozenset()
     dmg_mult_by_role = _intimidate_mult_by_role(combatants)
+    def_mult_by_role = {}
     half_damage = frozenset()
     # Fake Out / First Impression are only legal the turn a Pokemon is sent
     # out. Every role starts "fresh"; a role loses freshness the first turn
@@ -2588,12 +2648,30 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             enemy_speed_mult=enemy_mult_this_turn, protected_roles=protected,
             recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn,
             terrain=terrain, dmg_mult_by_role=dmg_mult_by_role,
-            half_damage_roles=half_damage, own_speed_mult=own_mult_this_turn)
+            half_damage_roles=half_damage, own_speed_mult=own_mult_this_turn,
+            def_mult_by_role=def_mult_by_role)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
         half_damage |= {role for role, _tgt, h in turn_log
                         if h.move_name in SELF_HALVING_MOVES}
+        for role, _tgt, h in turn_log:
+            stat_changes = CONTRARY_SELF_DROP_MOVES.get(h.move_name)
+            if (not stat_changes or combatants[role] is None
+                    or combatants[role].ability != "Contrary"):
+                continue
+            off = dmg_mult_by_role.setdefault(role, {})
+            deff = def_mult_by_role.setdefault(role, {})
+            for stat, raw_delta in stat_changes.items():
+                mult = _STAGE_MULT[-raw_delta]  # Contrary flips the move's own drop
+                if stat == "atk":
+                    off["physical"] = off.get("physical", 1.0) * mult
+                elif stat == "spa":
+                    off["special"] = off.get("special", 1.0) * mult
+                elif stat == "def":
+                    deff["physical"] = deff.get("physical", 1.0) / mult
+                elif stat == "spd":
+                    deff["special"] = deff.get("special", 1.0) / mult
         if wiped is not None:
             wiped_side = wiped
             break
