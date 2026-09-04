@@ -17,14 +17,22 @@ this format, and is meant to be extended incrementally.
 """
 from dataclasses import dataclass, field
 from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
-                    effective_stat, defensive_stat)
+                    effective_stat, defensive_stat, is_grounded,
+                    grassy_glide_priority_bonus)
 
 # Display names, so the log reads like the game rather than like the code.
 WEATHER_NAMES = {"rain": "a rainstorm", "sun": "harsh sunlight",
                  "sand": "a sandstorm", "snow": "snow"}
+TERRAIN_NAMES = {"grassy": "Grassy Terrain"}
 
 WEATHER_SETTERS = {
     "Drizzle": "rain", "Drought": "sun", "Sand Stream": "sand", "Snow Warning": "snow",
+}
+# Regulation M-C: Rillaboom's Grassy Surge. Same shape as WEATHER_SETTERS,
+# a separate table (and a separate FieldState slot) because terrain and
+# weather are NOT exclusive -- both can be active at once in the real games.
+TERRAIN_SETTERS = {
+    "Grassy Surge": "grassy",
 }
 WEATHER_SPEED_BOOST = {
     # ability -> (weather required, multiplier)
@@ -45,6 +53,10 @@ class FieldState:
     tailwind_p2: int = 0
     screens_p1: dict = field(default_factory=lambda: {"reflect": 0, "lightscreen": 0})
     screens_p2: dict = field(default_factory=lambda: {"reflect": 0, "lightscreen": 0})
+    # Regulation M-C: Grassy Terrain. A separate slot from `weather` -- not
+    # exclusive with it, both can be up at once.
+    terrain: str | None = None
+    terrain_turns_left: int = 0
 
     def __deepcopy__(self, memo):
         """Every field is a scalar or a flat dict of ints, so the reflective
@@ -65,6 +77,8 @@ class FieldState:
         new.tailwind_p2 = self.tailwind_p2
         new.screens_p1 = dict(self.screens_p1)
         new.screens_p2 = dict(self.screens_p2)
+        new.terrain = self.terrain
+        new.terrain_turns_left = self.terrain_turns_left
         return new
 
 
@@ -156,6 +170,22 @@ def on_switch_in(entering: Combatant, opposing_active: list[Combatant], field_st
             if log is not None:
                 log.add(f"{entering.name}'s {entering.ability} whipped up "
                         f"{WEATHER_NAMES.get(new_weather, new_weather)}!")
+    if entering.ability in TERRAIN_SETTERS:
+        new_terrain = TERRAIN_SETTERS[entering.ability]
+        # Same same-terrain-doesn't-refresh rule as weather, above.
+        # GAP: this only fires from a BASE-form switch-in ability, matching
+        # `WEATHER_SETTERS` here -- a hypothetical future Mega whose MEGA
+        # form (not base) carries Grassy Surge would need the same fix
+        # `battle.py`'s own two separate mega-transform weather blocks
+        # would (`_mega_evolve_one`/`_resolve_mega_evolutions`). None of
+        # Regulation M-C's new mons need that: Rillaboom's Grassy Surge is
+        # a base-form ability, not a Mega's.
+        if field_state.terrain != new_terrain:
+            field_state.terrain = new_terrain
+            field_state.terrain_turns_left = 5
+            if log is not None:
+                log.add(f"{entering.name}'s {entering.ability} kicked up "
+                        f"{TERRAIN_NAMES.get(new_terrain, new_terrain)}!")
 
 
 def effective_speed(c: Combatant, field_state: FieldState, side: str) -> float:
@@ -212,6 +242,7 @@ def turn_order(actions: list[Action], field_state: FieldState) -> list[Action]:
             pri += 1
         elif ab == "Triage" and a.move.drain:
             pri += 3
+        pri += grassy_glide_priority_bonus(a.combatant, a.move, field_state.terrain)
         return pri
 
     others.sort(key=lambda a: (-move_priority(a), spd_key(a)))
@@ -242,6 +273,7 @@ def find_speed_ties(actions: list, field_state: FieldState):
             p += 1
         elif ab == "Triage" and a.move.drain:
             p += 3
+        p += grassy_glide_priority_bonus(a.combatant, a.move, field_state.terrain)
         return p
 
     ties = []
@@ -293,7 +325,8 @@ def resolve_damage_action(action: Action, field_state: FieldState, typechart: di
         # screens_lightscreen/screens_auroraveil + Battle._set_screen).
         mn, mx, avg, eff = damage_roll(
             50, action.move.power, atk_stat, def_stat, attacker, target, action.move,
-            typechart, weather=field_state.weather, num_targets_hit=num_hit,
+            typechart, weather=field_state.weather, terrain=field_state.terrain,
+            num_targets_hit=num_hit,
         )
         dmg = {"min": mn, "max": mx, "avg": avg}[roll]
         results[target.name] = {"damage": dmg, "type_eff": eff}

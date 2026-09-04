@@ -28,9 +28,9 @@ import random
 from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
                     defensive_stat, move_from_showdown,
                      apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
-                     WEIGHT_BASED_POWER, weight_based_power)
+                     WEIGHT_BASED_POWER, weight_based_power, is_grounded)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
-                     WEATHER_SETTERS)
+                     WEATHER_SETTERS, TERRAIN_NAMES)
 
 CHOICE_ITEMS = {"Choice Band", "Choice Specs", "Choice Scarf"}
 PROTECT_MOVES = {"Protect", "Detect", "Spiky Shield", "Baneful Bunker", "Silk Trap"}
@@ -877,7 +877,8 @@ class Battle:
 
             mn, mx, avg, eff = damage_roll(
                 50, move_power, atk_stat, def_stat, attacker, target, move, self.typechart,
-                auras=self._active_auras(), weather=self.field.weather, num_targets_hit=num_hit, screens=screens_active,
+                auras=self._active_auras(), weather=self.field.weather,
+                terrain=self.field.terrain, num_targets_hit=num_hit, screens=screens_active,
                 roll_index=getattr(self, "force_roll_index", None),
             )
             # Multi-hit moves (Bullet Seed, Population Bomb, ...): aggregate total
@@ -1067,6 +1068,18 @@ class Battle:
                 self.field.tailwind_p2 = 4
             self.log.add(f"Tailwind blew from behind {attacker.name}'s side!")
             self._emit(event="tailwind", side=action.side, actor=attacker.name)
+        elif move.name == "Grassy Terrain":
+            # Regulation M-C. A move-cast terrain always (re)sets the full
+            # duration -- unlike `on_switch_in`'s Grassy Surge, which
+            # deliberately does NOT refresh a same-terrain re-switch (see
+            # its own comment); there's no equivalent "re-using the exact
+            # same move" concern here.
+            self.field.terrain = "grassy"
+            self.field.terrain_turns_left = 5
+            self.log.add(f"{attacker.name} made the ground turn to grass! "
+                         f"{TERRAIN_NAMES['grassy']} active.")
+            self._emit(event="terrain", side=action.side, actor=attacker.name,
+                       terrain_now=self.field.terrain)
         elif move.name == "Perish Song":
             # Every Pokemon on the field that can hear it faints in 3 turns.
             # Soundproof is immune. The counter follows the Pokemon, so switching
@@ -1345,6 +1358,26 @@ class Battle:
                 self._emit(event="weather_damage", side=side.name, actor=c.name,
                            detail="sandstorm", fainted=c.fainted)
 
+    def _grassy_terrain_heal(self):
+        """Regulation M-C: 1/16 max HP to every grounded ACTIVE Pokemon while
+        Grassy Terrain is up -- the real-game counterpart to sandstorm's
+        chip, and skipped for the exact same reason sand's chip was added:
+        an unmodeled recurring field effect is worth zero to the search
+        (see `_sandstorm_damage`'s own docstring/history). Active only, same
+        as sand. A fainted Pokemon in mid-turn isn't healed."""
+        if self.field.terrain != "grassy":
+            return
+        for side in (self.p1, self.p2):
+            for c in side.active:
+                if c is None or c.fainted or not is_grounded(c) or c.current_hp >= c.max_hp():
+                    continue
+                before = c.current_hp
+                c.current_hp = min(c.max_hp(), c.current_hp + int(round(c.max_hp() / 16)))
+                healed = c.current_hp - before
+                self.log.add(f"{self.tag(c)} is healed by the grassy terrain!")
+                self._emit(event="terrain_heal", side=side.name, actor=c.name,
+                           detail="grassy", amount=healed)
+
     def _end_of_turn(self):
         # Carry this turn's successful Protect into next turn's "no double Protect" check.
         # (Set for every roster member, not just actives, so a mon that protected and then
@@ -1366,6 +1399,7 @@ class Battle:
                     self._emit(event="stat_change", side=self.side_of(c).name, actor=c.name,
                                detail=self._fmt_boosts(changed), source="Speed Boost")
         self._sandstorm_damage()
+        self._grassy_terrain_heal()
 
         for c in self.p1.roster + self.p2.roster:
             if c.fainted:
@@ -1417,6 +1451,11 @@ class Battle:
             self.field.tailwind_p1 -= 1
         if self.field.tailwind_p2 > 0:
             self.field.tailwind_p2 -= 1
+        if self.field.terrain_turns_left > 0:
+            self.field.terrain_turns_left -= 1
+            if self.field.terrain_turns_left == 0:
+                self.log.add(f"The {TERRAIN_NAMES.get(self.field.terrain, self.field.terrain)} faded.")
+                self.field.terrain = None
 
     def is_over(self):
         return self.p1.has_lost() or self.p2.has_lost()
@@ -1461,6 +1500,42 @@ class Battle:
         if abs(share[0] - share[1]) < 1e-9:
             return "draw"
         return "p1" if share[0] > share[1] else "p2"
+
+
+PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset({"Mold Breaker", "Teravolt", "Turboblaze"})
+
+
+def priority_blocked_by_side(attacker_ability, move, defending_side_actives):
+    """True if `move` (used by a Pokemon with `attacker_ability`) would be
+    blocked outright by Queenly Majesty / Dazzling / Armor Tail held by any
+    living member of `defending_side_actives` -- "priority blocking
+    abilities ... lead to the enemy trying to click priority moves anyway.
+    They should not attempt to use priority moves if these abilities are
+    present."
+
+    The AI-facing sibling of `Battle._blocked_by_guard`'s own ability-block
+    branch: that method ALSO checks `target.protecting`/Wide Guard/Quick
+    Guard, which only make sense mid-resolution once actions are already
+    locked in; this is the narrower, ability-only check a move-CHOICE
+    heuristic needs BEFORE any of that is decided, so `solver.py`'s greedy
+    opponent AI and `fast_eval.py`'s fast screening playouts can see "this
+    priority move will do nothing" before they ever value or pick it --
+    exactly the gap that let them keep clicking a doomed Fake Out/Sucker
+    Punch/etc. into a Farigiraf or Tsareena. `counter_finder.py`'s own
+    `_priority_blocked` mirrors this same narrower scope for its cheap
+    model; kept as a separate, smaller copy there rather than imported,
+    since that module doesn't otherwise depend on `battle.py`.
+
+    Ignored by Mold Breaker/Teravolt/Turboblaze, matching real game rules
+    and `_blocked_by_guard`'s own ignoring-abilities branch.
+    """
+    if move is None or move.priority <= 0:
+        return False
+    if attacker_ability in PRIORITY_BLOCK_IGNORING_ABILITIES:
+        return False
+    return any(c is not None and not c.fainted
+              and c.ability in Battle.PRIORITY_BLOCK_ABILITIES
+              for c in defending_side_actives)
 
 
 if __name__ == "__main__":

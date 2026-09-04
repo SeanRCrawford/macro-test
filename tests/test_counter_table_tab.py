@@ -19,11 +19,11 @@ TEAM = ["Arcanine-Hisui", "Hydreigon", "Gallade", "Gholdengo",
         "Incineroar", "Farigiraf"]
 
 
-def app(team=None):
+def app(team=None, sets=None):
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(APP, default_timeout=250)
     at.session_state["team"] = list(team if team is not None else TEAM)
-    at.session_state["sets"] = {}
+    at.session_state["sets"] = dict(sets) if sets is not None else {}
     return at.run()
 
 
@@ -78,19 +78,327 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         shapes = [d.value.shape[0] for d in dfs]
         self.assertIn(15, shapes, "expected a 15-row Stage 1 or Stage 2 table")
 
+    def test_a_team_of_three_is_accepted_not_warned_about(self):
+        """"I would like to output the best 3-pokemon cores against each
+        team" -- the tab's own fixed-team floor relaxed from 4 to 3,
+        matching `bring4_search`'s own CLI-level relaxation. A 3-member
+        team degenerates to one possible bring (itself, 3 pairs)."""
+        at = app(team=["Garchomp", "Incineroar", "Gallade"])
+        # Other tabs' own "need 6 Pokemon" widgets render regardless (the
+        # whole app renders every tab at once) -- only the Bring-4 tab's
+        # OWN size-floor warning is what this fix touches.
+        self.assertFalse(any("Pick 3, 4, 5, or 6" in w.value for w in at.warning))
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = at.dataframe
+        shapes = [d.value.shape[0] for d in dfs]
+        self.assertIn(3, shapes, "expected a 3-row Stage 1 or Stage 2 table")
+
     def test_a_preset_team_can_be_used_instead_of_team_builders(self):
         """A preset "our 6" can legitimately share a Pokemon with the
         selected enemy roster (two library teams both running e.g.
-        Grimmsnarl) -- that must surface as a clean st.error, never crash
-        the page. See TestBring4SearchRejectsOverlap in
+        Grimmsnarl) -- a real VGC mirror, now a normal accepted search, not
+        an error. See TestBring4SearchAllowsMirrorMatches in
         test_counter_finder.py for the underlying fix."""
         at = app(team=[])  # nothing loaded in Team Builder
         sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
-        self.assertGreater(len(sb.options), 1, "expected preset teams offered")
-        sb.set_value(sb.options[1]).run()
+        # The leading options are all sentinels ("(current Team Builder
+        # team)", "search a pool", "paste a pokepaste" -- each with its own
+        # dedicated test class); a real preset TEAM name is whatever's left.
+        sentinels = {"(current Team Builder team)",
+                    "\U0001f50d Search a pool for the best team",
+                    "\U0001f4cb Paste a pokepaste"}
+        preset_names = [o for o in sb.options if o not in sentinels]
+        self.assertTrue(preset_names, "expected preset teams offered")
+        sb.set_value(preset_names[0]).run()
         [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertFalse(any("Pick exactly 6" in w.value for w in at.warning))
+
+
+class TestBring4TabMirrorsTheCliExactly(unittest.TestCase):
+    """"When I loaded a given teamsheet from the xlsx to the streamlit app,
+    I got completely different results. In the CLI the bring4 beat 55/90,
+    but the streamlit counter table was 27/90. They must mirror rather
+    than contradict." Root cause: the tab's `bring4_search` call only ever
+    passed `our6` (names) -- a loaded/pasted/preset team's own pinned
+    item/moveset (`sets`) was silently dropped, so the app free-searched
+    from scratch instead of respecting it, same as an unpinned CLI run
+    would. Fixed by threading `our_sets` through as `item_overrides`/
+    `move_overrides`, exactly like the CLI's own --item/--moves. Confirmed
+    here against a direct `bring4_search(..., item_overrides=...,
+    move_overrides=...)` call using the SAME pinned sets -- the app and
+    the library function must agree."""
+
+    def test_a_loaded_teams_pinned_sets_reproduce_the_direct_call(self):
+        team = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+        sets = {
+            "Garchomp": {"item": "Rocky Helmet",
+                        "moves": ["Earthquake", "Protect", "Dragon Claw",
+                                 "Stealth Rock"]},
+            "Incineroar": {"item": "Sitrus Berry",
+                          "moves": ["Fake Out", "Flare Blitz", "Knock Off",
+                                   "Protect"]},
+        }
+        at = app(team=team, sets=sets)
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        app_pair_rows = at.session_state["ct_b4_pair_rows"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_search
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        item_overrides = {n: s["item"] for n, s in sets.items() if s.get("item")}
+        move_overrides = {n: s["moves"] for n, s in sets.items() if s.get("moves")}
+        direct_pair_rows, _direct_bring4_rows = bring4_search(
+            team, vs_roster, W["merged"], W["moves"], W["natures"],
+            W["typechart"], item_overrides=item_overrides,
+            move_overrides=move_overrides)
+
+        app_items = {r["pair"]: (r["item1"], r["item2"]) for r in app_pair_rows}
+        direct_items = {r["pair"]: (r["item1"], r["item2"]) for r in direct_pair_rows}
+        self.assertEqual(app_items, direct_items)
+        # The pinned items themselves must actually show up, not just
+        # happen to match a coincidental free-search result.
+        self.assertTrue(any("Rocky Helmet" in v for v in app_items.values()))
+        self.assertTrue(any("Sitrus Berry" in v for v in app_items.values()))
+
+        app_beaten = {r["pair"]: r["pairs_swept"] + r["pairs_traded"]
+                     for r in app_pair_rows}
+        direct_beaten = {r["pair"]: r["pairs_swept"] + r["pairs_traded"]
+                         for r in direct_pair_rows}
+        self.assertEqual(app_beaten, direct_beaten)
+
+
+class TestBring4CanSearchAPoolInsteadOfAFixedSix(unittest.TestCase):
+    """"For bring4, I would like to be able to do it vs just 1 team,
+    searching for the best 4." Reuses the exact same pool search as
+    Multi-bring4 mode (`_run_multi_bring4_search`/`_render_multi_bring4_
+    core`, factored out so the two paths can't drift), just scoped to a
+    single enemy roster -- so there's no new search logic here, only a way
+    to reach the existing one without already having a 6 in hand."""
+
+    SEARCH_POOL = "\U0001f50d Search a pool for the best team"
+
+    def test_the_option_is_offered_alongside_the_current_team_and_presets(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        self.assertIn(self.SEARCH_POOL, sb.options)
+        self.assertIn("(current Team Builder team)", sb.options)
+
+    def test_choosing_it_swaps_in_pool_search_controls(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value(self.SEARCH_POOL).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_b4_pool" for s in at.slider),
+                        "expected a pool-size slider")
+        self.assertTrue(any(b.key == "ct_b4_pool_go" for b in at.button),
+                        "expected a search button")
+        # The old "pick exactly 6" warning must not show -- there's no
+        # fixed 6 to be missing in this mode.
+        self.assertFalse(any("Pick exactly 6" in w.value for w in at.warning))
+
+    def test_a_real_pool_search_against_one_roster_produces_results(self):
+        at = app(team=[])  # no Team Builder team needed for this mode
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value(self.SEARCH_POOL).run()
+        # Loosen the defaults so a small pool actually yields candidates,
+        # the same knobs TestMultiBring4ProducesResults below turns.
+        [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(16).run()
+        [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+        [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        try:
+            rows = at.session_state["ct_b4_pool_rows"]
+        except KeyError:
+            self.fail("expected ct_b4_pool_rows to be set after a real search")
+        self.assertTrue(rows, "expected at least one core back from the search")
+        # Every returned core's own per-enemy breakdown must be scoped to
+        # exactly the one roster this mode is meant for.
+        for r in rows:
+            self.assertEqual(len(r["per_enemy"]), 1)
+
+
+class TestBestBring4PairTable(unittest.TestCase):
+    """"In the streamlit app for bring4, I want to see the performance of
+    my best bring 4 by the 6 pairs and their key metrics" -- Stage 2's
+    top-ranked bring-4 (`bring4_rows[0]`, already sorted best-worst-case-
+    first) gets its own 6-pair table, the same shape Stage 1's own table
+    uses, not just the one-line "worst pair" summary Stage 2 shows."""
+
+    def test_best_bring4_gets_its_own_six_pair_table(self):
+        at = app()
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Your best bring-4" in m.value for m in at.markdown))
+        shapes = [d.value.shape[0] for d in at.dataframe]
+        # Stage 1 (15), Stage 2 (15), and now the best bring-4's own 6.
+        self.assertIn(6, shapes, "expected a 6-row best-bring-4 pair table")
+
+    def test_results_survive_a_rerun_from_an_unrelated_widget(self):
+        """Regression: the search used to run and render entirely inside
+        `elif st.button(...)`, so results vanished the instant any OTHER
+        widget on the page triggered a rerun (e.g. the new deep-dive
+        selectbox) -- now stored in session_state like the other two
+        modes already do."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertTrue(any("Your best bring-4" in m.value for m in at.markdown))
+        at = [sb for sb in at.selectbox if sb.key == "ct_b4_deepdive_pick"][0] \
+            .set_value(2).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Your best bring-4" in m.value for m in at.markdown),
+                        "Stage 1/2 results must still be showing")
+
+
+class TestCleanWinScoringIsVisible(unittest.TestCase):
+    """"I would consider losing 1 pokemon and taking a lot of damage and
+    KOing 2 enemies as far inferior to KOing the enemy without taking
+    damage ... There should be a way to score this to reflect this
+    dynamic." The app must surface `pairs_clean_win_total`, not just use
+    it silently in the ranking."""
+
+    def test_pair_tables_have_a_clean_win_column(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        cols = [set(d.value.columns) for d in at.dataframe]
+        self.assertTrue(any("Clean win" in c for c in cols),
+                        "expected a 'Clean win' column in a pair table")
+
+    def test_deep_dive_shows_the_overall_clean_win_figure(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("clean win" in m.value for m in at.markdown))
+
+
+class TestDeepDiveASpecificTeam(unittest.TestCase):
+    """"I want to be able to choose a specific team to deep dive into" --
+    an on-demand `core_deep_dive` call for whichever bring-4/core the user
+    actually picks, not automatic for every result a search returns."""
+
+    def test_fixed_six_bring4_mode_offers_a_deep_dive_picker(self):
+        at = app()
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        picks = [sb for sb in at.selectbox if sb.key == "ct_b4_deepdive_pick"]
+        self.assertEqual(len(picks), 1)
+        self.assertEqual(len(picks[0].options), 15)
+
+    def test_clicking_deep_dive_runs_core_deep_dive_and_shows_a_gameplan(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        self.assertEqual(len(dd_buttons), 1)
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Overall" in m.value for m in at.markdown))
+        self.assertTrue(any("Set:" in c.value for c in at.caption))
+
+    def test_deep_dive_offers_a_teamsheet_download_and_load_button(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dl = [d for d in at.download_button if d.key and d.key.endswith("_dl")]
+        self.assertTrue(dl, "expected a teamsheet download button")
+        loaded = [b for b in at.button if b.key and b.key.endswith("_use")
+                 and b.label == "Load into Team Builder"]
+        self.assertTrue(loaded, "expected a Load into Team Builder button")
+
+    def test_loading_into_team_builder_sets_team_and_sets(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go")]
+        at = dd_buttons[0].click().run()
+        use_buttons = [b for b in at.button if b.key and b.key.endswith("_use")]
+        at = use_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(len(at.session_state["team"]), 4)
+        self.assertEqual(set(at.session_state["sets"]), set(at.session_state["team"]))
+        for spec in at.session_state["sets"].values():
+            self.assertTrue(spec.get("item") is not None or spec.get("moves"))
+
+    def test_pool_search_cores_also_offer_a_deep_dive(self):
+        """The pool-search Bring-4 path and Multi-bring4 both go through
+        `_render_multi_bring4_core` -- confirm the deep dive reaches that
+        shared renderer too, not just the fixed-6 branch."""
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value("\U0001f50d Search a pool for the best team").run()
+        [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(16).run()
+        [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+        [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4p_")
+                     and b.key.endswith("_go")]
+        self.assertTrue(dd_buttons, "expected a deep-dive button on a pool-search core")
+
+
+class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):
+    """"I need a way ... in the streamlit app, to run a bring4 (4-6) vs
+    only ONE named TEAM" plus "let the enemy roster be pasted/custom
+    (dropdown) and let our roster be pasted/custom" -- both the enemy
+    roster and our own 4-6 in Bring-4 mode now offer a paste option
+    alongside the saved-team dropdown, not just a fixed library pick."""
+
+    RAIN_PASTE = ("Archaludon @ Assault Vest\nAbility: Stamina\n"
+                 "EVs: 2 HP / 32 SpA / 32 SpD\nModest Nature\n"
+                 "- Draco Meteor\n- Flash Cannon\n- Electro Shot\n- Body Press\n\n"
+                 "Grimmsnarl @ Light Clay\nAbility: Prankster\n"
+                 "EVs: 32 HP / 32 Def\nBold Nature\n"
+                 "- Light Screen\n- Reflect\n- Spirit Break\n- Thunder Wave")
+
+    def test_enemy_roster_offers_a_paste_option(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        self.assertIn("\U0001f4cb Paste a pokepaste", sb.options)
+
+    def test_our_6_offers_a_paste_option(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        self.assertIn("\U0001f4cb Paste a pokepaste", sb.options)
+
+    def test_pasting_an_enemy_roster_reveals_a_text_area(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(t.key == "ct_b4_vs_paste" for t in at.text_area))
+
+    def test_a_valid_pasted_enemy_roster_parses_and_can_search(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.RAIN_PASTE).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Archaludon" in s.value for s in at.success))
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_pasting_our_6_reveals_a_text_area_and_parses(self):
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        self.assertFalse(at.exception, list(at.exception))
+        ta = [t for t in at.text_area if t.key == "ct_b4_our_paste"][0]
+        at = ta.set_value(self.RAIN_PASTE).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Archaludon" in s.value for s in at.success))
 
 
 if __name__ == "__main__":

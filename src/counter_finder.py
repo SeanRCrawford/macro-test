@@ -155,10 +155,11 @@ from dataclasses import dataclass
 from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, WEIGHT_BASED_POWER, MoveInfo,
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
-                    is_spread_move, move_from_showdown)
-from engine import FieldState, WEATHER_SETTERS, effective_speed
+                    hits_ally, is_spread_move, move_from_showdown,
+                    grassy_glide_priority_bonus)
+from engine import FieldState, WEATHER_SETTERS, TERRAIN_SETTERS, effective_speed
 from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
-from solver import build_moveset
+from solver import FIRST_TURN_ONLY_MOVES, build_moveset
 from species_data import NO_MEGA, resolve_team_mega_slot
 
 
@@ -334,6 +335,31 @@ def member_weakness_summary(core, merged):
     }
 
 
+def weak_type_breadth(core, merged, threshold=2):
+    """How many DIFFERENT types have at least `threshold` of `core`'s own
+    members weak to them -- "I would like to be able to select a cap for
+    the number of types that have 2 weaknesses, such as no more than 3
+    types that have 2 members weak to it." A complementary question to
+    `member_weakness_summary`'s existing per-type COUNT ("does the team
+    have 3 weaknesses to Fire"): this is about BREADTH of exposure across
+    types, not depth on any one -- a team where Fire, Water, and Grass each
+    have exactly 2 weak members is broadly fragile even if no single type
+    ever exceeds an existing `--max-weak` cap.
+
+    Reuses `member_weakness_summary`'s own `per_type` counts (the same
+    `team_search._weak_resist` split `--max-weak`/`--type-limit` already
+    read), never a second, competing notion of "weak to a type".
+
+    MONOTONIC under core growth, same as `max_weak`: a member's own
+    weaknesses never change, so adding one to a partial core can only ever
+    ADD to a type's weak-member count, never remove from it -- once a type
+    crosses `threshold` it stays crossed. Safe to prune ON during
+    `multi_bring4_beam`'s incremental growth, not just as a final filter.
+    """
+    per_type = member_weakness_summary(core, merged)["per_type"]
+    return sum(1 for c in per_type.values() if c >= threshold)
+
+
 def _build_forms(names, merged, natures, moves_db, items=None):
     """{name: {"mega": Combatant, "base": Combatant, "moves": [MoveInfo,...]}}
     for every name in `names`, built ONCE regardless of how many pairs drawn
@@ -362,7 +388,7 @@ def _build_forms(names, merged, natures, moves_db, items=None):
     return out
 
 
-def _resolve_forms(names, built):
+def _resolve_forms(names, built, forced_base_names=frozenset()):
     """For `names` (one candidate alone, or a real pair) drawn from `built`
     (a `_build_forms` dict), every legal way to honour "only one Mega per
     side" -- yields (mega_transforms, [combatant_for_each_name]) for each of
@@ -370,8 +396,20 @@ def _resolve_forms(names, built):
     still works (`_mega_choices` only ever looks for "Mega "-prefixed
     entries, regardless of how many names it's given) -- `pair_search` uses
     that for a candidate with no partner.
+
+    `forced_base_names`: names that must NEVER be the one who transforms,
+    even though `_mega_choices` would otherwise offer it -- e.g. a bring-4
+    that carries BOTH of a core's two allowed Mega-stone holders needs a
+    SINGLE one of them designated "the team's mega" for the whole bring
+    (VGC's real "only one Mega Evolution per team per game" rule), with the
+    other locked to base form in every one of that bring's own pairs, not
+    just within whichever single pair it happens to share with the other
+    stone-holder. Default empty set changes nothing -- every existing
+    caller/test is unaffected.
     """
     for mt in _mega_choices(names):
+        if mt in forced_base_names:
+            continue
         _evolves, forced_base = resolve_team_mega_slot(list(names),
                                                         mega_transforms=mt)
         cs = [built[n]["base" if n in forced_base else "mega"] for n in names]
@@ -385,6 +423,11 @@ def _resolve_forms(names, built):
 # legality check, not a rule change: `--allow-scarf` passes `excluded_items=
 # frozenset()` through every search function below to opt back in.
 DEFAULT_EXCLUDED_ITEMS = frozenset({"Choice Scarf"})
+
+# Regulation M-C additions to the pool (Rillaboom, Baxcalibur, Mega Absol Z,
+# Mega Garchomp Z, Mega Lucario Z) are documented alongside `lead_sim.
+# BANNED_ITEMS`, not here -- see that comment. Nothing here needs to change
+# for them.
 
 
 def best_answer(name, merged, moves_db, natures, typechart, target_names,
@@ -488,7 +531,7 @@ NO_HIT = Hit(move_name=None, frac=0.0, lo=0.0, avg=0.0, hi=0.0, eff=1.0)
 
 def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
             num_targets_hit=1, attacker_hp_frac=None, defender_hp_frac=None,
-            auras=None):
+            auras=None, terrain=None):
     """The full `Hit` `move` (already on `attacker`, item applied by the
     caller via `_build`) does to `defender`.
 
@@ -497,6 +540,11 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     already knows how to apply it (`aura_multiplier`). `None` (every caller
     outside the 2v2 board functions, which have no board to gather auras
     from at all) means no aura boost/dampening, same as before this existed.
+
+    `terrain`: the board's active terrain (see `_field_terrain`, mirrors
+    `weather`) -- passed straight through to `damage_roll`'s own Grassy
+    Terrain handling. `None` (default, same as `weather`) means no terrain
+    boost/reduction.
 
     `roll`: "lo" (the default) is the WORST roll -- what `threshold_search`
     and `chip_then_ko` search on, because those answer "does this GUARANTEE
@@ -574,7 +622,7 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
         dmg_defender.current_hp = max(1, round(defender_hp_frac * defender.max_hp()))
     lo, hi, avg, eff = damage_roll(50, move.power, atk, dfn, dmg_attacker, dmg_defender,
                                    move, typechart, weather=weather, auras=auras,
-                                   num_targets_hit=num_targets_hit)
+                                   num_targets_hit=num_targets_hit, terrain=terrain)
     hits = hit_count_for(move.name, attacker)
     cur = defender.current_hp or 1
     lo_f, avg_f, hi_f = (lo * hits) / cur, (avg * hits) / cur, (hi * hits) / cur
@@ -583,13 +631,13 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
               eff=eff, num_targets_hit=num_targets_hit)
 
 
-def _best_hit(attacker, moves, defender, typechart, weather=None):
+def _best_hit(attacker, moves, defender, typechart, weather=None, terrain=None):
     """The best `Hit` among `moves` against `defender`, searched worst-roll
     (see `_raw_hit`). Single-target only -- for a spread-aware search see
     `_choose_move` (average-roll, used by `pair_search`)."""
     best = NO_HIT
     for mv in moves:
-        got = _raw_hit(attacker, mv, defender, typechart, weather=weather)
+        got = _raw_hit(attacker, mv, defender, typechart, weather=weather, terrain=terrain)
         if got.frac > best.frac:
             best = got
     return best
@@ -598,6 +646,23 @@ def _best_hit(attacker, moves, defender, typechart, weather=None):
 PRIORITY_BLOCK_ABILITIES = frozenset({"Queenly Majesty", "Dazzling", "Armor Tail"})
 _PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset(
     {"Mold Breaker", "Teravolt", "Turboblaze"})
+
+# The real -2 SpA "nuke" family (verified against each move's raw `self.
+# boosts` data: exactly these five carry `{"spa": -2}`). A LOW-COST stand-in
+# for general stat-stage tracking (which this module deliberately has none
+# of, see its own module docstring) -- rather than tracking the actual -2
+# SpA stage, a role that has used one of these earlier in the SAME race has
+# ALL its own outgoing damage halved from then on (a flat approximation, not
+# gated to Special moves only). Close Combat/Superpower (-1/-1) are
+# deliberately excluded -- too mild a drop for this approximation to fit.
+SELF_HALVING_MOVES = frozenset({"Draco Meteor", "Overheat", "Leaf Storm",
+                                "Psycho Boost", "Fleur Cannon"})
+
+# Abilities that block Intimidate outright (Clear Body/White Smoke/Full
+# Metal Body block ANY opponent-inflicted stat drop; Hyper Cutter blocks
+# Attack drops specifically; Inner Focus blocks Intimidate specifically).
+INTIMIDATE_BLOCKED = frozenset({"Clear Body", "White Smoke", "Full Metal Body",
+                                "Hyper Cutter", "Inner Focus"})
 
 
 def _priority_blocked(attacker, mv, defending_side):
@@ -620,7 +685,7 @@ def _priority_blocked(attacker, mv, defending_side):
 
 
 def _choose_move(attacker, moves, defender, typechart, weather=None,
-                 defending_side=None, auras=None):
+                 defending_side=None, auras=None, terrain=None):
     """The move `attacker` would actually use against `defender`, searched on
     the AVERAGE roll: prefer one that KOes outright; failing that, prefer one
     that sets up a KO within a FOLLOW-UP turn (below); failing THAT, prefer
@@ -637,11 +702,28 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     2-turn kill once ONE-TURN LOOKAHEAD below exists -- priority is not the
     thing that should decide between "barely" and "almost entirely" done).
     A move's priority is still fully honoured in the REAL turn-order
-    computation once chosen (nothing here changes that), and the two cases
-    where priority genuinely needs to drive the CHOICE -- surviving to act
-    at all, or a Sucker Punch pick that would otherwise fail outright --
-    are handled by a dedicated correction afterward
+    computation once chosen (nothing here changes that), and two of the
+    cases where priority genuinely needs to drive the CHOICE -- surviving
+    to act at all, or a Sucker Punch pick that would otherwise fail
+    outright -- are handled by a dedicated correction afterward
     (`_reconsider_for_survival`), not baked into this base ranking.
+
+    ONE NARROW EXCEPTION: when two or more candidates ALREADY guarantee an
+    outright KO this turn (`kos_now`), priority breaks the tie before raw
+    damage does -- "Kingambit picks Kowtow Cleave (more damage) over Sucker
+    Punch when Sucker Punch should guarantee the KO" against a much faster
+    Dragapult: both moves one-shot it, so there is no damage tradeoff left
+    to weigh, and going first (via Sucker Punch) is strictly better than
+    going second with a bigger number on a target that was dying either
+    way -- it can turn what would only ever be an `out_trade` (Dragapult
+    gets to act first and do something before it faints) into a real
+    `sweep`. This does NOT reintroduce the Aqua-Jet-over-Wave-Crash bug
+    above: that bucket is `kos_now=False` for both candidates (neither
+    one-shots), where this exception never applies -- `priority_if_kos_now`
+    is 0 for every such candidate, so the ranking there is exactly as
+    described above, priority-blind. Only among moves that already clear
+    the same "kills it this turn, for certain" bar does a free "and I go
+    first" become worth preferring.
 
     ONE-TURN LOOKAHEAD: "it's important to at least have a one turn
     lookahead -- if wave crash into aqua jet kills ... on the second turn."
@@ -671,7 +753,7 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
         if not mv.power and mv.name not in WEIGHT_BASED_POWER:
             continue
         got = _raw_hit(attacker, mv, defender, typechart, weather=weather, roll="avg",
-                       auras=auras)
+                       auras=auras, terrain=terrain)
         if _priority_blocked(attacker, mv, defending_side):
             got = NO_HIT
         candidates.append((mv, got))
@@ -682,7 +764,8 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
     for mv, got in candidates:
         kos_now = got.frac >= 1.0
         kos_in_two = kos_now or (got.frac + best_follow_up) >= 1.0
-        key = (kos_now, kos_in_two, got.frac)
+        priority_if_kos_now = mv.priority if kos_now else 0
+        key = (kos_now, kos_in_two, priority_if_kos_now, got.frac)
         if best_key is None or key > best_key:
             best_key, best_hit, best_move = key, got, mv
     return best_hit, best_move
@@ -702,6 +785,93 @@ def _answer_for(name, merged, moves_db, natures, typechart, target_names,
     moves = (move_overrides or {}).get(name)
     return best_answer(name, merged, moves_db, natures, typechart, target_names,
                        item=item, move_names=moves, excluded_items=excluded_items)
+
+
+def _resolve_unique_items(names, merged, moves_db, natures, typechart,
+                          target_names, item_overrides=None, move_overrides=None,
+                          excluded_items=DEFAULT_EXCLUDED_ITEMS):
+    """VGC's real Item Clause: no two of `names` may hold the same item.
+    OPT-IN -- callers only reach for this when asked to (`bring4_search`/
+    `core_deep_dive`'s own `enforce_item_clause` flag); it is never applied
+    silently.
+
+    Each name's best legal item is searched independently, in the given
+    order -- a name whose independently-best item was already claimed by an
+    earlier name in this same list is re-searched with every already-claimed
+    item ALSO excluded (`_answer_for`'s existing `excluded_items` mechanism),
+    falling back to its own next-best legal item. Build-order dependent by
+    design (per product decision): whichever name resolves first keeps its
+    top choice. A name already pinned via `item_overrides` is respected
+    verbatim, never re-resolved -- an explicit pin always wins.
+
+    `_answer_for`'s own fallback already handles "every legal item excluded"
+    gracefully (returns `item=None`, moveset still searched under no item)
+    -- no special-casing needed here for that, or for Mega Stones (each
+    holds a uniquely-named stone, so two different Megas' stones never
+    collide as strings in the first place).
+
+    Returns a NEW item_overrides dict (a superset of the input) with every
+    name in `names` pinned to its (possibly reassigned) item -- pass it
+    straight into a downstream `_answer_for`/`joint_pool_search` call so
+    items are computed exactly once, not searched twice.
+    """
+    resolved = dict(item_overrides or {})
+    taken = set()
+    for name in names:
+        if name not in resolved:
+            item, _mv, _w = _answer_for(
+                name, merged, moves_db, natures, typechart, target_names,
+                item_overrides=item_overrides, move_overrides=move_overrides,
+                excluded_items=excluded_items)
+            if item and item in taken:
+                item, _mv, _w = _answer_for(
+                    name, merged, moves_db, natures, typechart, target_names,
+                    item_overrides=item_overrides, move_overrides=move_overrides,
+                    excluded_items=excluded_items | taken)
+            resolved[name] = item
+        if resolved[name]:
+            taken.add(resolved[name])
+    return resolved
+
+
+def _fixed_sets_from_pair_rows(pair_rows, merged, moves_db, natures, typechart,
+                               target_names, excluded_items=DEFAULT_EXCLUDED_ITEMS):
+    """{name: item}, {name: [move, ...]} read back from `pair_rows` (a
+    `bring4_search`/`joint_pool_search` result) -- the ITEM each name was
+    ACTUALLY raced with (`bring4_search`'s own Item-Clause-resolved
+    `item_overrides` if `enforce_item_clause` was on, unmodified otherwise
+    -- either way, whatever the race really used), never re-derived
+    independently. "When unique-items are enforced, it is crucial these
+    are reflected in the sets, summary, and gameplan for each team" --
+    `bring4_search` itself already resolves Item Clause correctly for its
+    OWN ranking, but (unlike `multi_bring4_coverage`, which returns
+    `fixed_items`/`fixed_moves` directly) never exposed that resolution to
+    its caller, so a caller building a Sets/Teamsheets display from a
+    FRESH, independent `_answer_for` call could silently disagree with
+    what was actually raced once Item Clause reassigned something away
+    from its independently-best pick.
+
+    Every name in `pair_rows` appears in at least one row (each pair_rows
+    entry already carries `item1`/`item2`, `joint_pool_search`'s own
+    convention), so this needs no new racing for items. Moves aren't
+    carried on a pair row, so they're searched FOR that pinned item (one
+    `_answer_for` call per name, `item_overrides` pinning it exactly the
+    way an explicit `--item` override already does) -- matches what the
+    original race's own move search would have produced for that same
+    item, never a different one.
+    """
+    fixed_items = {}
+    for r in pair_rows:
+        n1, n2 = r["pair"]
+        fixed_items[n1] = r["item1"]
+        fixed_items[n2] = r["item2"]
+    fixed_moves = {}
+    for name, item in fixed_items.items():
+        _item, move_names, _weather = _answer_for(
+            name, merged, moves_db, natures, typechart, target_names,
+            item_overrides=fixed_items, excluded_items=excluded_items)
+        fixed_moves[name] = move_names or []
+    return fixed_items, fixed_moves
 
 
 def _scarf_speed(combatant):
@@ -749,6 +919,64 @@ def _field_weather(combatants):
         if c is not None and c.ability in WEATHER_SETTERS:
             weather = WEATHER_SETTERS[c.ability]
     return weather
+
+
+def _field_terrain(combatants):
+    """The ONE shared field terrain for a 2v2 board -- Regulation M-C's
+    Grassy Surge, mirrors `_field_weather` exactly (same "checked against
+    every combatant, last setter in `combatants`' own order wins" rule,
+    same no-fainted-filter: a terrain-setter that later faints doesn't
+    retroactively un-set the terrain it already put up). Terrain is NOT
+    exclusive with weather -- both can be active on the same board -- so
+    this is a fully separate lookup, not folded into `_field_weather`."""
+    terrain = None
+    for c in combatants.values():
+        if c is not None and c.ability in TERRAIN_SETTERS:
+            terrain = TERRAIN_SETTERS[c.ability]
+    return terrain
+
+
+_SIDE_OF = {"C": ("C", "P"), "P": ("C", "P"), "E1": ("E1", "E2"), "E2": ("E1", "E2")}
+_OPPOSING_OF = {"C": ("E1", "E2"), "P": ("E1", "E2"), "E1": ("C", "P"), "E2": ("C", "P")}
+
+
+def _intimidate_mult_by_role(combatants):
+    """{role: {"physical": mult}} or {role: {"special": mult}} for every
+    role whose OPPOSING side has a live Intimidate holder -- computed ONCE
+    from the INITIAL `combatants` (the real -1 Atk stage Intimidate applies
+    on switch-in PERSISTS even if the holder later faints mid-race, so this
+    is correct to compute once at race start, not re-checked every turn).
+
+    A -1 Atk stage is x(2/3) on the stat -- and, since the damage formula
+    multiplies by the attack stat directly, x(2/3) on damage output is
+    mathematically EXACT for this, not an approximation. `INTIMIDATE_
+    BLOCKED` abilities are unaffected; Defiant/Competitive invert it into a
+    real +2 stage (x2.0) SELF-boost on the matching damage category instead
+    of a drop -- also exact, not approximated. Contrary reverses the SAME
+    -1 magnitude into a +1 (x1.5), not a +2 -- it flips direction, not size
+    (mirrors `damage.apply_intimidate`'s own Contrary branch).
+
+    A role with no entry here means "unaffected" (multiplier 1.0), matching
+    every other optional per-role map in this module's convention.
+    """
+    out = {}
+    for role, c in combatants.items():
+        if c is None:
+            continue
+        if not any(combatants[r] is not None and combatants[r].ability == "Intimidate"
+                   for r in _OPPOSING_OF[role]):
+            continue
+        if c.ability in INTIMIDATE_BLOCKED:
+            continue
+        if c.ability == "Defiant":
+            out[role] = {"physical": 2.0}
+        elif c.ability == "Competitive":
+            out[role] = {"special": 2.0}
+        elif c.ability == "Contrary":
+            out[role] = {"physical": 1.5}
+        else:
+            out[role] = {"physical": 2 / 3}
+    return out
 
 
 _AURA_ABILITIES = frozenset(AURA_TYPES) | {"Aura Break"}
@@ -813,7 +1041,6 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
     bool}}. `incoming[t].frac`/`.hi` are the same number (their best roll);
     `.lo`/`.avg` are their worst/average roll on you, still worth showing.
     """
-    targets = set(target_names)
     need_screen = max_taken is not None or outspeed is not None
     # Each named target's own set is searched ONCE (against the whole pool,
     # the same "what does this threat generally run" question `speed_tiers`
@@ -832,8 +1059,6 @@ def threshold_search(pool, target_names, merged, moves_db, natures, typechart,
 
     rows = []
     for name in pool:
-        if name in targets:
-            continue
         item, move_names, weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
             item_overrides=item_overrides, move_overrides=move_overrides,
@@ -1004,7 +1229,7 @@ def chip_then_ko(pool, target_names, partner_name, partner_move_name, merged,
 
     rows = []
     for name in pool:
-        if name in target_names or name == partner_name:
+        if name == partner_name:
             continue
         item, move_names, weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
@@ -1043,7 +1268,8 @@ _JOINT_OUTCOME_RANK = {"sweep": 0, "out_trade": 1, "no_ko": 2, "loss": 3}
 
 
 def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
-                   weather=None, roll="avg", defending_side=None, auras=None):
+                   weather=None, roll="avg", defending_side=None, auras=None,
+                   terrain=None):
     """{role: Hit} for whatever `mv` actually damages: every role in
     `defenders` if it's a spread move landing on more than one of them (the
     doubles 0.75x penalty applied via `num_targets_hit`), else just
@@ -1059,6 +1285,9 @@ def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`), passed straight through to `_raw_hit`.
+
+    `terrain`: the board's active terrain (`_field_terrain`), passed straight
+    through to `_raw_hit`.
     """
     if mv is None:
         return {}
@@ -1069,10 +1298,11 @@ def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
     if is_spread_move(mv.target) and len(defenders) > 1:
         n = len(defenders)
         return {role: _raw_hit(attacker, mv, d, typechart, weather=weather,
-                               roll=roll, num_targets_hit=n, auras=auras)
+                               roll=roll, num_targets_hit=n, auras=auras,
+                               terrain=terrain)
                for role, d in defenders.items()}
     got = _raw_hit(attacker, mv, defenders[intended_role], typechart,
-                   weather=weather, roll=roll, auras=auras)
+                   weather=weather, roll=roll, auras=auras, terrain=terrain)
     return {intended_role: got}
 
 
@@ -1123,8 +1353,9 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     if partner is not None:
         combatants["P"] = partner
     weather = _field_weather(combatants)
+    terrain = _field_terrain(combatants)
     auras = _active_auras(combatants)
-    field = FieldState(weather=weather)
+    field = FieldState(weather=weather, terrain=terrain)
     hp = {k: 1.0 for k in combatants}
     defenders = {"E1": e1, "E2": e2}
     target_role = "E1" if e1_name == candidate_target else "E2"
@@ -1133,23 +1364,26 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
 
     plan = {}
     got, mv = _choose_move(attacker, atk_moves, combatants[target_role], typechart,
-                           weather=weather, defending_side=[e1, e2], auras=auras)
+                           weather=weather, defending_side=[e1, e2], auras=auras,
+                           terrain=terrain)
     plan["C"] = (_hit_or_spread(attacker, mv, target_role, defenders, typechart,
-                                weather=weather, auras=auras), mv)
+                                weather=weather, auras=auras, terrain=terrain), mv)
     for role, e, e_moves in (("E1", e1, e1_moves), ("E2", e2, e2_moves)):
         got, mv = _choose_move(e, e_moves, attacker, typechart, weather=weather,
-                               defending_side=our_side, auras=auras)
+                               defending_side=our_side, auras=auras, terrain=terrain)
         plan[role] = (_hit_or_spread(e, mv, "C", {"C": attacker}, typechart,
                                      weather=weather, defending_side=our_side,
-                                     auras=auras), mv)
+                                     auras=auras, terrain=terrain), mv)
     if partner is not None:
         p_target_role = "E1" if (partner_target or candidate_target) == e1_name else "E2"
         plan["P"] = (_hit_or_spread(partner, partner_move, p_target_role, defenders,
-                                    typechart, weather=weather, auras=auras), partner_move)
+                                    typechart, weather=weather, auras=auras,
+                                    terrain=terrain), partner_move)
 
     def speed_key(role):
         mv = plan[role][1]
         prio = mv.priority if mv is not None else 0
+        prio += grassy_glide_priority_bonus(combatants[role], mv, field.terrain)
         side = "p1" if role in ("C", "P") else "p2"
         spd = effective_speed(combatants[role], field, side)
         theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
@@ -1174,6 +1408,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         def pl_speed_key(role):
             mv = pl[role][1]
             prio = mv.priority if mv is not None else 0
+            prio += grassy_glide_priority_bonus(combatants[role], mv, field.terrain)
             side = "p1" if role in ("C", "P") else "p2"
             spd = effective_speed(combatants[role], field, side)
             theirs_first = 0 if role in ("E1", "E2") else 1
@@ -1218,10 +1453,11 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     def build_hits(role, e, new_mv):
         if role == "C":
             return _hit_or_spread(attacker, new_mv, target_role, defenders,
-                                  typechart, weather=weather, auras=auras)
+                                  typechart, weather=weather, auras=auras,
+                                  terrain=terrain)
         return _hit_or_spread(e, new_mv, "C", {"C": attacker}, typechart,
                               weather=weather, defending_side=our_side,
-                              auras=auras)
+                              auras=auras, terrain=terrain)
 
     move_source = {"C": atk_moves, "E1": e1_moves, "E2": e2_moves}
     doomed, sp_wasted = doomed_roles(plan)
@@ -1243,7 +1479,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         _got2, new_mv = _choose_move(e, faster, target_for, typechart,
                                      weather=weather,
                                      defending_side=defending_side_for,
-                                     auras=auras)
+                                     auras=auras, terrain=terrain)
         if new_mv is None:
             continue
         trial_plan = dict(plan)
@@ -1264,7 +1500,7 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
         _got2, new_mv = _choose_move(e, alternatives, target_for, typechart,
                                      weather=weather,
                                      defending_side=defending_side_for,
-                                     auras=auras)
+                                     auras=auras, terrain=terrain)
         if new_mv is None:
             continue
         plan[role] = (build_hits(role, e, new_mv), new_mv)
@@ -1371,7 +1607,7 @@ def pair_search(pool, target_names, merged, moves_db, natures, typechart,
 
     rows = []
     for name in pool:
-        if name in target_names or name == partner_name:
+        if name == partner_name:
             continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
@@ -1470,9 +1706,26 @@ def _tailwind_move_for(combatant):
 
 def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None, attacker_hp_frac=None,
-                   target_hp_fracs=None, auras=None):
+                   target_hp_fracs=None, auras=None, terrain=None,
+                   attacker_role=None, dmg_mult_by_role=None,
+                   half_damage_roles=frozenset()):
     """Best (hits: {role: Hit}, MoveInfo) for `attacker` against whichever of
     `live_targets` ({role: Combatant}) it ends up hitting.
+
+    `attacker_role`/`dmg_mult_by_role`/`half_damage_roles`: the attacker's
+    OWN role string, plus two low-cost stand-ins for general stat-stage
+    tracking (which this module deliberately has none of -- see the module
+    docstring) -- `dmg_mult_by_role` is `_intimidate_mult_by_role`'s static,
+    computed-once-per-race map (Intimidate's exact -1 Atk x(2/3), or its
+    Defiant/Competitive x2.0 inversion); `half_damage_roles` is `_joint_
+    race`'s own turn-to-turn set of roles that have already used a
+    `SELF_HALVING_MOVES` move earlier in this race. Both are applied to a
+    Hit's damage fields the moment it's computed, BEFORE ranking -- so a
+    halved/Intimidate-suppressed attacker is correctly deprioritized in its
+    own KO-lookahead too, not just in the number it reports afterward.
+    `attacker_role=None` (every caller outside `_resolve_turn`'s real
+    joint-race engine) means neither applies at all, matching every other
+    optional per-role map in this module.
 
     `attacker_hp_frac`/`target_hp_fracs` ({role: fraction}): the attacker's
     and each live target's REAL current HP as of the start of this turn --
@@ -1484,6 +1737,9 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`) -- passed straight through to `_raw_hit`.
+
+    `terrain`: the board's active terrain (`_field_terrain`) -- passed
+    straight through to `_raw_hit`.
 
     A spread move that's actually live (more than one target still standing)
     always hits EVERY entry in `live_targets` at once (doubles 0.75x penalty,
@@ -1510,14 +1766,19 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     own best available follow-up ON THAT SAME TARGET (any move against it,
     computed across every candidate here first) would clear 100%.
 
-    PRIORITY IS NOT A TIE-BREAK HERE, same reasoning as `_choose_move`: it
-    let a weak priority move beat a far stronger slow one whenever both
-    merely cleared the same "reaches a 2-turn kill" bar. Raw damage is the
-    tie-break instead; a chosen move's real priority is still fully
-    honoured in the turn-order computation once picked, and
-    `_reconsider_for_survival` is the dedicated place priority-driven
-    reconsideration actually belongs (surviving to act, or a Sucker Punch
-    pick that would otherwise fail).
+    PRIORITY IS NOT A GENERAL TIE-BREAK HERE, same reasoning and same one
+    narrow exception as `_choose_move`: it let a weak priority move beat a
+    far stronger slow one whenever both merely cleared the same "reaches a
+    2-turn kill" bar, so raw damage is the tie-break there; a chosen move's
+    real priority is still fully honoured in the turn-order computation
+    once picked, and `_reconsider_for_survival` is the dedicated place
+    priority-driven reconsideration otherwise belongs (surviving to act, or
+    a Sucker Punch pick that would otherwise fail). But among candidates
+    that ALREADY guarantee killing everything they hit THIS turn
+    (`kos_now_count` tied at its own max), priority breaks the tie before
+    raw damage does -- there is no damage tradeoff left to weigh between two
+    moves that both finish the job, and going first is strictly better than
+    going second on a target that dies either way.
 
     SPREAD MOVES RANK BY HOW MANY TARGETS THEY GUARANTEE KILLING RIGHT NOW,
     not an all-or-nothing "does it KO every target" flag: a Heat Wave that
@@ -1531,11 +1792,39 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     spread move; 0 or 1 for a single-target one) are compared before raw
     damage for exactly this reason -- an outright kill on even one target
     is worth more than any amount of un-lethal chip.
+
+    RECOIL IS A LATE TIE-BREAK TOO, right after priority and before raw
+    damage (`_self_cost` below): "no point in using the recoil move because
+    [a no-recoil move] would also kill ... it would take no recoil and
+    make it a win" -- among candidates already tied on kos_now_count/
+    kos_in_two_count/priority, the one that costs the ATTACKER less of its
+    own HP wins, so a higher-power recoil move never beats an equally
+    kill-securing recoil-free one purely because it does more (moot, once
+    both already guarantee the kill) overkill damage.
     """
     if not live_targets:
         return {}, None
     defending_side = list(live_targets.values())
     n_live = len(live_targets)
+
+    def _scaled(got, mv):
+        """Apply the Intimidate/Defiant/Competitive static multiplier and
+        the Draco-Meteor-family halving to a freshly-computed Hit, before
+        it's used for ranking. A no-op (returns `got` unchanged) whenever
+        `attacker_role` wasn't given, or nothing applies to this attacker."""
+        if attacker_role is None or got is NO_HIT:
+            return got
+        mult = 1.0
+        if dmg_mult_by_role:
+            cat = "physical" if mv.category == "Physical" else "special"
+            mult *= dmg_mult_by_role.get(attacker_role, {}).get(cat, 1.0)
+        if attacker_role in half_damage_roles:
+            mult *= 0.5
+        if mult == 1.0:
+            return got
+        return Hit(move_name=got.move_name, frac=got.frac * mult,
+                  lo=got.lo * mult, avg=got.avg * mult, hi=got.hi * mult,
+                  eff=got.eff, num_targets_hit=got.num_targets_hit)
 
     # Two passes: gather every candidate action's raw hits FIRST (tracking
     # the best single-hit damage this attacker can put on each target,
@@ -1551,12 +1840,12 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             continue
         blocked = _priority_blocked(attacker, mv, defending_side)
         if is_spread_move(mv.target) and n_live > 1:
-            hits = {role: (NO_HIT if blocked else
+            hits = {role: _scaled(NO_HIT if blocked else
                           _raw_hit(attacker, mv, d, typechart, weather=weather,
                                    roll="avg", num_targets_hit=n_live,
                                    attacker_hp_frac=attacker_hp_frac,
                                    defender_hp_frac=(target_hp_fracs or {}).get(role),
-                                   auras=auras))
+                                   auras=auras, terrain=terrain), mv)
                    for role, d in live_targets.items()}
             spread_candidates.append((mv, hits))
             for role, h in hits.items():
@@ -1565,10 +1854,11 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         candidates = ([hinted_target] if hinted_target in live_targets
                       else list(live_targets))
         for role in candidates:
-            got = NO_HIT if blocked else _raw_hit(
+            got = _scaled(NO_HIT if blocked else _raw_hit(
                 attacker, mv, live_targets[role], typechart, weather=weather,
                 roll="avg", attacker_hp_frac=attacker_hp_frac,
-                defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras)
+                defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras,
+                terrain=terrain), mv)
             single_candidates.append((mv, role, got))
             best_frac_by_role[role] = max(best_frac_by_role[role], got.frac)
 
@@ -1588,13 +1878,42 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         """
         return (target_hp_fracs or {}).get(role, 1.0)
 
+    def _self_cost(mv, hits):
+        """Recoil cost as a fraction of the ATTACKER's own max HP -- 0.0 for
+        a move with no recoil, or when Rock Head/Magic Guard negates it.
+        Summed across every target `hits` covers (one for a single-target
+        candidate, every live target for a spread one), each capped at what
+        that target ACTUALLY has left (`remaining(role)`) -- mirrors
+        `_apply_plan`'s own overkill-capping fix ("Floette should take max
+        half of its target HP"): ranking a move on an inflated overkill
+        figure would make it look more self-costly than it really is,
+        same bug either way.
+
+        Used ONLY as a late tie-break in the ranking below -- it never
+        overrides a real difference in kos_now_count/kos_in_two_count/
+        priority, it just stops a needlessly self-costly move from beating
+        an equally good free one on raw damage alone ("no point in using
+        the recoil move because Moonblast would also kill ... it would
+        take no recoil and make it a win" -- both guarantee the kill here,
+        so this tie-break, not raw damage, decides between them).
+        """
+        if not mv.recoil or attacker.ability in ("Rock Head", "Magic Guard"):
+            return 0.0
+        num, den = mv.recoil
+        dmg = sum(min(h.frac, remaining(role)) * live_targets[role].max_hp()
+                 for role, h in hits.items())
+        atk_max = attacker.max_hp()
+        return (dmg * num / den) / atk_max if atk_max else 0.0
+
     best_key, best_hits, best_move = None, {}, None
     for mv, role, got in single_candidates:
         bar = remaining(role)
         kos_now_count = 1 if got.frac >= bar else 0
         kos_in_two_count = 1 if (kos_now_count or
                                  (got.frac + best_frac_by_role[role]) >= bar) else 0
-        key = (kos_now_count, kos_in_two_count, got.frac)
+        priority_if_kos_now = mv.priority if kos_now_count else 0
+        key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
+              -_self_cost(mv, {role: got}), got.frac)
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
     for mv, hits in spread_candidates:
@@ -1603,13 +1922,16 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             1 for role, h in hits.items()
             if h.frac >= remaining(role)
             or (h.frac + best_frac_by_role[role]) >= remaining(role))
-        key = (kos_now_count, kos_in_two_count, sum(h.frac for h in hits.values()))
+        priority_if_kos_now = mv.priority if kos_now_count else 0
+        key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
+              -_self_cost(mv, hits), sum(h.frac for h in hits.values()))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move
 
 
-def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
+def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+                own_speed_mult=1.0):
     """Resolve `plan` ({role: (hits, MoveInfo)}) in priority-then-speed
     order and apply every hit (Focus Sash/Sturdy honoured, a hit aimed at a
     protected role dropped) -- the one place `_resolve_turn`'s real
@@ -1617,6 +1939,11 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     (`_reconsider_for_survival`) share the EXACT same rules, so "would this
     role survive to act" can never quietly diverge from what actually
     happens when the plan is applied for real.
+
+    `own_speed_mult`: the exact mirror of `enemy_speed_mult`, applied to
+    OUR OWN side ("C"/"P") instead of theirs -- see `_pair_vs_targets`'s
+    "OUR OWN TAILWIND AS A MATCHING ANSWER". Default 1.0 (no-op) leaves
+    every existing caller unaffected.
 
     Returns (hp, log, enemy_acted, wiped, doomed, sucker_punch_wasted) --
     `doomed`: roles whose hp was already <=0 by the time their own position
@@ -1637,14 +1964,25 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
     ("Kingambit has no reason to target Arcanine [with Sucker Punch]" --
     a whole turn spent on a move that was never going to land, when a
     normal attack sitting in the same moveset would have).
+
+    RECOIL / LIFE ORB / ROUGH SKIN-IRON BARBS: applied to the ATTACKER's own
+    `hp[role]` right after its hits this move land, mirroring `battle.py`'s
+    own post-hit "attacker-side consequences" block -- see the inline
+    comments below for the exact rules. All three can self-KO (real
+    mechanic), and are applied BEFORE the `wiped` check below so a
+    recoil/Rough-Skin KO correctly registers as a wipe.
     """
     def speed_key(role):
         mv = plan[role][1]
         prio = mv.priority if mv is not None else 0
+        if mv is not None:
+            prio += grassy_glide_priority_bonus(combatants[role], mv, field.terrain)
         side = "p1" if role in ("C", "P") else "p2"
         spd = effective_speed(combatants[role], field, side)
         if role in ("E1", "E2"):
             spd *= enemy_speed_mult
+        elif role in ("C", "P"):
+            spd *= own_speed_mult
         theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
         return (-prio, -spd, theirs_first)
 
@@ -1671,13 +2009,18 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
             if hits and not filtered:
                 sucker_punch_wasted.add(role)
             hits = filtered
+        attacker_c = combatants[role]
+        contact = bool((mv.flags or {}).get("contact"))
+        raw_dmg_dealt = 0.0  # for recoil, mirrors battle.py's total_damage_dealt
+        rough_skin_loss = 0.0
         for tgt_role, got in hits.items():
             if tgt_role in protected_roles:
                 continue  # Protect blocks this hit entirely
             if hp.get(tgt_role, 0.0) <= 0:
                 continue
             target_c = combatants[tgt_role]
-            new_hp = hp[tgt_role] - got.frac
+            pre_hit_hp = hp[tgt_role]
+            new_hp = pre_hit_hp - got.frac
             # Focus Sash / Sturdy: survive a would-be KO at 1 HP, but only
             # from FULL HP -- mirrors `battle.py`'s own rule exactly
             # (`target.current_hp == target.max_hp()`). Checked against
@@ -1695,6 +2038,47 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
                 new_hp = 1.0 / target_c.max_hp()
             hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))
+            # Recoil/Rough Skin must scale off the HP the target ACTUALLY
+            # lost, never off `got.frac` directly -- `got.frac` is the RAW
+            # calculated hit (`_raw_hit`'s own convention, always divided by
+            # the target's FULL max HP), which can exceed what the target
+            # even had left (an "overkill" hit). Real Pokemon recoil scales
+            # off the HP removed, not a theoretical overkill amount --
+            # "Floette should take max half of its target HP", not half of
+            # a hit calculated to do 20% more than the target even had.
+            # `pre_hit_hp - hp[tgt_role]` is exactly that removed amount,
+            # already correctly capped by both the overkill clamp above and
+            # any Focus Sash/Sturdy survival.
+            if got.frac > 0:
+                actual_hp_lost = pre_hit_hp - hp[tgt_role]
+                raw_dmg_dealt += actual_hp_lost * target_c.max_hp()
+                # Rough Skin / Iron Barbs: punishes the ATTACKER for making
+                # contact, even if this same hit faints the holder (real
+                # mechanic -- the ability reacts to the contact itself, not
+                # to the holder surviving it). Cheap-model only -- not
+                # threaded into `battle.py` (not what was reported).
+                if (contact and target_c.ability in ("Rough Skin", "Iron Barbs")
+                        and attacker_c.ability != "Magic Guard"):
+                    rough_skin_loss += 1 / 8
+        if raw_dmg_dealt > 0:
+            # Recoil (Flare Blitz/Wave Crash 33%, Head Smash 50%, ...) as a
+            # fraction of TOTAL damage dealt this move -- Rock Head/Magic
+            # Guard negate it. Mirrors `battle.py:980-989` exactly.
+            if mv.recoil and attacker_c.ability not in ("Rock Head", "Magic Guard"):
+                num, den = mv.recoil
+                recoil_raw = raw_dmg_dealt * num / den
+                hp[role] = max(0.0, hp[role] - recoil_raw / attacker_c.max_hp())
+            # Life Orb: flat 10% max HP recoil on any damaging move that
+            # connected -- Magic Guard blocks it, Sheer Force cancels it
+            # when the boosted move has a secondary effect (its signature
+            # interaction). Mirrors `battle.py:1001-1017`.
+            sheer_force_cancels_lo = (attacker_c.ability == "Sheer Force"
+                                      and bool(mv.secondary))
+            if (attacker_c.item == "Life Orb" and attacker_c.ability != "Magic Guard"
+                    and not sheer_force_cancels_lo):
+                hp[role] = max(0.0, hp[role] - 0.10)
+        if rough_skin_loss:
+            hp[role] = max(0.0, hp[role] - rough_skin_loss)
         if wiped is None:
             if hp["E1"] <= 0 and hp["E2"] <= 0:
                 wiped = "theirs"
@@ -1706,7 +2090,9 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field):
 def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                              moves_by_role, hp, typechart, weather, field,
                              live_targets_by_role, hint_by_role,
-                             enemy_speed_mult, protected_roles, auras=None):
+                             enemy_speed_mult, protected_roles, auras=None,
+                             dmg_mult_by_role=None, half_damage_roles=frozenset(),
+                             own_speed_mult=1.0):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk" -- a provisional `plan` chooses every
     actor's move independently, unaware of the others, so an actor can end
@@ -1763,13 +2149,16 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   weather=weather,
                                   hinted_target=(hint_by_role or {}).get(role),
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
-                                  auras=auras)
+                                  auras=auras, terrain=field.terrain,
+                                  attacker_role=role, dmg_mult_by_role=dmg_mult_by_role,
+                                  half_damage_roles=half_damage_roles)
         if mv is None:
             continue
         trial_plan = dict(new_plan)
         trial_plan[role] = (hits, mv)
         _hp2, _log2, _ea2, _w2, doomed2, _sp2 = _apply_plan(
-            trial_plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+            trial_plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+            own_speed_mult=own_speed_mult)
         if role not in doomed2:
             new_plan[role] = (hits, mv)
     for role in sucker_punch_wasted:
@@ -1785,16 +2174,60 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                                   weather=weather,
                                   hinted_target=(hint_by_role or {}).get(role),
                                   attacker_hp_frac=hp[role], target_hp_fracs=hp,
-                                  auras=auras)
+                                  auras=auras, terrain=field.terrain,
+                                  attacker_role=role, dmg_mult_by_role=dmg_mult_by_role,
+                                  half_damage_roles=half_damage_roles)
         if mv is None:
             continue
         new_plan[role] = (hits, mv)
     return new_plan
 
 
+_ALLY_OF = {"C": "P", "P": "C", "E1": "E2", "E2": "E1"}
+
+
+def _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras):
+    """`allAdjacent` moves (Earthquake, Surf, Discharge, Bulldoze, Explosion
+    -- `damage.hits_ally`) also hit the user's own live partner. `_choose_
+    action` itself still picks the best move purely against the OPPOSING
+    side (hitting your own ally is a real cost applied AFTER the choice is
+    made, never a reason its own ranking would pick a different move) -- so
+    this runs as a small post-process on `plan`, right before `_apply_plan`,
+    rather than inside `_choose_action`'s scoring. That also sidesteps the
+    one real hazard here: a spread-hit ranking that didn't know "enemy" from
+    "own ally" could credit a self-KO as a win. Called on the FINAL `plan`
+    (after `_reconsider_for_survival` too, if it ran), so it's always the
+    role's actually-chosen move being checked.
+
+    DOCUMENTED SIMPLIFICATION: when exactly one enemy is alive, the existing
+    enemy-hit in `hits` was already computed by `_choose_action` at
+    `num_targets_hit=1` (no 0.75x, since `is_spread_move(...) and n_live > 1`
+    didn't fire there). This does not retroactively recompute that hit once
+    adding the ally makes it a real 2-target spread -- only the ally's OWN
+    new hit gets the correct `num_targets_hit`. Both-enemies-alive (the
+    common case) was already correct and is untouched.
+    """
+    new_plan = dict(plan)
+    for role, (hits, mv) in plan.items():
+        if mv is None or not hits_ally(mv.target):
+            continue
+        ally_role = _ALLY_OF[role]
+        if hp.get(ally_role, 0.0) <= 0:
+            continue
+        n = max(2, len(hits) + 1)  # already-hit enemies + the ally
+        got = _raw_hit(combatants[role], mv, combatants[ally_role], typechart,
+                       weather=weather, roll="avg", num_targets_hit=n,
+                       defender_hp_frac=hp.get(ally_role), auras=auras,
+                       terrain=terrain)
+        new_plan[role] = ({**hits, ally_role: got}, mv)
+    return new_plan
+
+
 def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   enemy_speed_mult=1.0, protected_roles=frozenset(),
-                  recharging_roles=frozenset(), tailwind_setter_role=None):
+                  recharging_roles=frozenset(), tailwind_setter_role=None,
+                  terrain=None, dmg_mult_by_role=None,
+                  half_damage_roles=frozenset(), own_speed_mult=1.0):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
     enemy side chooses independently and greedily (`_choose_action` with no
     hint), same "no coordination" behaviour `_sequential_pair_outcome`
@@ -1835,14 +2268,21 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     protected role simply scores no KO and no damage for that hit, so a combo
     that targets the other, unprotected enemy naturally ranks higher.
 
-    `tailwind_setter_role`: one enemy role ("E1"/"E2") that casts Tailwind
-    THIS turn instead of attacking -- `_tailwind_move_for` substituted
-    directly, same "still a real action, lands no hit" pattern
-    `protected_roles` uses. `_joint_race`'s own turn loop is what actually
-    makes this mean anything speed-wise (only passing this on turn 1, and
-    only applying the real `enemy_speed_mult` from turn 2 onward) -- see
-    its own docstring for the full "test the setter actually choosing to
-    set it, not an instant free boost" reasoning.
+    `tailwind_setter_role`: one role -- "E1"/"E2" for the enemy-tailwind
+    check, or "C"/"P" for `_pair_vs_targets`'s own-tailwind mirror -- that
+    casts Tailwind THIS turn instead of attacking -- `_tailwind_move_for`
+    substituted directly, same "still a real action, lands no hit" pattern
+    `protected_roles` uses; checked in BOTH the `ours_live` and
+    `theirs_live` loops below (a role string can only ever match one side,
+    so this is a single check that naturally applies to whichever side the
+    caller names). `_joint_race`'s own turn loop is what actually makes
+    this mean anything speed-wise (only passing this on turn 1, and only
+    applying the real `enemy_speed_mult`/`own_speed_mult` from turn 2
+    onward) -- see its own docstring for the full "test the setter actually
+    choosing to set it, not an instant free boost" reasoning.
+
+    `own_speed_mult`: the exact mirror of `enemy_speed_mult`, for OUR OWN
+    side. Default 1.0 (no-op).
 
     `weather` is the ONE shared field value (`_field_weather`'s own return)
     -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
@@ -1850,6 +2290,11 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     rather than a bare one, to BOTH sides' turn order too (Swift Swim/
     Chlorophyll/Sand Rush/Slush Rush all key off the field, not off who
     happens to be attacking).
+
+    `terrain` is the same idea for the ONE shared field terrain
+    (`_field_terrain`'s own return) -- applied to both sides' damage (the
+    Grass boost/Earthquake reduction) and, via the same `FieldState`, to
+    turn order (Grassy Glide's priority bump for a grounded user).
 
     SURVIVAL-AWARE RECONSIDERATION: after the provisional plan is built, any
     role about to die before its own turn comes up gets one chance to
@@ -1860,23 +2305,38 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     cheap `_apply_plan` pass) when the provisional plan actually leaves
     someone doomed or Sucker-Punch-wasted, so an ordinary turn costs
     exactly what it always did.
+
+    An `allAdjacent` move (Earthquake and friends) also hits the user's own
+    live partner -- see `_with_ally_splash`, applied to `plan` right before
+    each `_apply_plan` call so it always reflects the FINAL chosen move.
+
+    `dmg_mult_by_role`/`half_damage_roles`: Intimidate/Defiant/Competitive's
+    static per-role multiplier and the Draco-Meteor-family's turn-to-turn
+    halving set -- both `_joint_race`'s own board-level state, threaded
+    straight through to every `_choose_action` call (both sides) so ranking
+    itself already reflects them (see `_choose_action`'s own docstring).
     """
     hp = dict(hp)
     ours_live = {r: combatants[r] for r in ("C", "P") if hp[r] > 0}
     theirs_live = {r: combatants[r] for r in ("E1", "E2") if hp[r] > 0}
-    field = FieldState(weather=weather)
+    field = FieldState(weather=weather, terrain=terrain)
     auras = _active_auras(combatants, hp)
 
     plan = {}
     for role, c in ours_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
+        elif role == tailwind_setter_role:
+            plan[role] = ({}, _tailwind_move_for(c))
         else:
             plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
                                         typechart, weather=weather,
                                         hinted_target=our_hints.get(role),
                                         attacker_hp_frac=hp[role],
-                                        target_hp_fracs=hp, auras=auras)
+                                        target_hp_fracs=hp, auras=auras,
+                                        terrain=terrain, attacker_role=role,
+                                        dmg_mult_by_role=dmg_mult_by_role,
+                                        half_damage_roles=half_damage_roles)
     for role, c in theirs_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
@@ -1888,10 +2348,15 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = _choose_action(c, moves_by_role[role], ours_live,
                                         typechart, weather=weather,
                                         attacker_hp_frac=hp[role],
-                                        target_hp_fracs=hp, auras=auras)
+                                        target_hp_fracs=hp, auras=auras,
+                                        terrain=terrain, attacker_role=role,
+                                        dmg_mult_by_role=dmg_mult_by_role,
+                                        half_damage_roles=half_damage_roles)
 
+    plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
     hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
-        plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+        plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+        own_speed_mult=own_speed_mult)
     final_doomed = doomed
     if (doomed - protected_roles) or (sp_wasted - protected_roles):
         live_targets_by_role = {r: theirs_live for r in ours_live}
@@ -1899,9 +2364,12 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
         plan = _reconsider_for_survival(
             plan, doomed, sp_wasted, combatants, moves_by_role, hp, typechart,
             weather, field, live_targets_by_role, our_hints, enemy_speed_mult,
-            protected_roles, auras)
+            protected_roles, auras, dmg_mult_by_role=dmg_mult_by_role,
+            half_damage_roles=half_damage_roles, own_speed_mult=own_speed_mult)
+        plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
         hp2, log, enemy_acted, wiped, final_doomed, _sp2 = _apply_plan(
-            plan, combatants, hp, protected_roles, enemy_speed_mult, field)
+            plan, combatants, hp, protected_roles, enemy_speed_mult, field,
+            own_speed_mult=own_speed_mult)
     recharging_next = {role for role, (_hits, mv) in plan.items()
                        if role not in final_doomed and mv is not None
                        and mv.flags and mv.flags.get("recharge")}
@@ -1910,7 +2378,9 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
 
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               enemy_speed_mult=1.0, protected_roles=frozenset(),
-              recharging_roles=frozenset(), tailwind_setter_role=None):
+              recharging_roles=frozenset(), tailwind_setter_role=None,
+              terrain=None, dmg_mult_by_role=None,
+              half_damage_roles=frozenset(), own_speed_mult=1.0):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -1943,7 +2413,9 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
             combatants, moves_by_role, hp, typechart, weather, hints,
             enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
             recharging_roles=recharging_roles,
-            tailwind_setter_role=tailwind_setter_role)
+            tailwind_setter_role=tailwind_setter_role, terrain=terrain,
+            dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
+            own_speed_mult=own_speed_mult)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
@@ -1958,7 +2430,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0, first_turn_moves_override=None,
-                first_turn_protected_role=None, first_turn_tailwind_role=None):
+                first_turn_protected_role=None, first_turn_tailwind_role=None,
+                terrain=None, own_speed_mult=1.0):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -1973,6 +2446,16 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     call is the Tailwind-robustness replay (`enemy_speed_mult=2.0`) -- a
     caller that wants both shows the outcome difference, not two logs to
     reconcile.
+
+    FAKE OUT / FIRST IMPRESSION (`FIRST_TURN_ONLY_MOVES`) are legal ONLY the
+    turn a role is genuinely fresh (see `still_fresh` below) -- this is the
+    one piece of real per-role state this loop enforces on `moves_by_role`
+    itself (not `_resolve_turn`'s recharge/reconsideration machinery), since
+    it has to be applied before a role's moveset is ever offered to
+    `_choose_action`. Previously unenforced here at all (`_sequential_pair_
+    outcome`, `pair_search`'s single-turn hypothesis, needs no such gate --
+    it only ever plays exactly one turn, so Fake Out is always legal there
+    by construction).
 
     `first_turn_moves_override`: optional `{role: [MoveInfo, ...]}` applied
     ONLY to the first turn, then dropped -- `switch_in_search` uses this to
@@ -1990,18 +2473,26 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     can still turn our sweep/out-trade into something worse. See
     `_resolve_turn`'s own docstring for the mechanics.
 
-    `first_turn_tailwind_role`: optional single enemy role that spends turn 1
-    CASTING Tailwind (a no-op action, same shape as `first_turn_protected_role`)
+    `first_turn_tailwind_role`: optional single role -- an enemy role
+    ("E1"/"E2") for the enemy-tailwind check, or one of OURS ("C"/"P") for
+    `_pair_vs_targets`'s own-tailwind mirror -- that spends turn 1 CASTING
+    Tailwind (a no-op action, same shape as `first_turn_protected_role`)
     instead of attacking -- modeling the real cost of actually setting it,
-    rather than assuming it is simply already up. `enemy_speed_mult` (the
-    caller-supplied Tailwind multiplier) is only applied from turn 2 onward;
-    turn 1 always races at normal speed, since the boost doesn't exist until
-    the setter's own action resolves. This module has no intra-turn re-sort
-    (`battle.py`'s real engine does re-sort so a same-turn Tailwind can still
-    help a not-yet-acted teammate that turn -- see its comment near the
-    Tailwind field-effect application), so this is a deliberate, documented
-    simplification: the boost is available strictly starting the turn after
-    it's cast.
+    rather than assuming it is simply already up. Whichever of
+    `enemy_speed_mult`/`own_speed_mult` belongs to THAT role's side (the
+    caller-supplied Tailwind multiplier) is only applied from turn 2
+    onward; turn 1 always races at normal speed, since the boost doesn't
+    exist until the setter's own action resolves. This module has no
+    intra-turn re-sort (`battle.py`'s real engine does re-sort so a
+    same-turn Tailwind can still help a not-yet-acted teammate that turn --
+    see its comment near the Tailwind field-effect application), so this is
+    a deliberate, documented simplification: the boost is available
+    strictly starting the turn after it's cast.
+
+    `own_speed_mult`: the exact mirror of `enemy_speed_mult`, for OUR OWN
+    side -- `_pair_vs_targets`'s own-tailwind check passes 2.0 here (and
+    `first_turn_tailwind_role="C"` or `"P"`) instead of `enemy_speed_mult`.
+    Default 1.0 (no-op) leaves every existing caller unaffected.
 
     RECHARGE (Hyper Beam, Giga Impact, ...): `_best_turn`'s own
     `recharging_next` return is carried forward as the NEXT call's
@@ -2009,31 +2500,74 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     threads through, since `_resolve_turn`'s own doomed/Sucker-Punch-wasted
     reconsideration is entirely resolved within a single turn and needs
     nothing carried.
+
+    INTIMIDATE / DEFIANT / COMPETITIVE: `_intimidate_mult_by_role`'s static
+    per-role multiplier, computed ONCE here from the INITIAL `combatants` --
+    correct to compute once, not re-checked every turn, since the real -1
+    Atk stage Intimidate applies on switch-in persists even after the
+    holder itself later faints mid-race.
+
+    DRACO METEOR FAMILY (`SELF_HALVING_MOVES`): `half_damage`, a role set
+    that starts empty and is threaded turn-to-turn exactly like
+    `recharging` above -- after each turn, any role whose move this turn
+    was in `SELF_HALVING_MOVES` (read straight off `turn_log`, no extra
+    `_best_turn`/`_resolve_turn` return value needed) is added for every
+    turn AFTER this one (first use still deals full damage, matching the
+    real self-effect's timing).
     """
     hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
     any_enemy_acted = False
     wiped_side, turns_used = None, 0
     full_log = []
     recharging = frozenset()
+    dmg_mult_by_role = _intimidate_mult_by_role(combatants)
+    half_damage = frozenset()
+    # Fake Out / First Impression are only legal the turn a Pokemon is sent
+    # out. Every role starts "fresh"; a role loses freshness the first turn
+    # it's actually OFFERED a real (non-empty) moveset -- not simply
+    # `turn_i == 0`, since `switch_in_search`'s `first_turn_moves_override`
+    # can hand a role an EMPTY list on turn 0 (it hasn't switched in with
+    # anything to choose yet), meaning ITS real first active turn -- and so
+    # its own Fake-Out-legal turn -- is turn_i == 1, not turn_i == 0.
+    still_fresh = set(moves_by_role.keys())
     for turn_i in range(max(1, turns)):
         if (hp["E1"] <= 0 and hp["E2"] <= 0) or (hp["C"] <= 0 and hp["P"] <= 0):
             break
         turn_moves = moves_by_role
         if turn_i == 0 and first_turn_moves_override:
             turn_moves = {**moves_by_role, **first_turn_moves_override}
+        turn_moves = {
+            role: ([m for m in mvs if m.name not in FIRST_TURN_ONLY_MOVES]
+                  if role not in still_fresh else mvs)
+            for role, mvs in turn_moves.items()
+        }
+        for role, mvs in turn_moves.items():
+            if mvs:
+                still_fresh.discard(role)
         protected = ({first_turn_protected_role}
                     if turn_i == 0 and first_turn_protected_role else frozenset())
         tailwind_role_this_turn = (first_turn_tailwind_role
                                    if turn_i == 0 and first_turn_tailwind_role else None)
-        mult_this_turn = (1.0 if (first_turn_tailwind_role and turn_i == 0)
-                          else enemy_speed_mult)
+        # Whichever SIDE is actually casting this turn races at normal
+        # speed (the boost doesn't exist until the cast resolves); the
+        # OTHER side's own multiplier (usually just 1.0, unused) is
+        # unaffected -- these are two independent scalars now, not one
+        # shared "the enemy" assumption.
+        enemy_mult_this_turn = (1.0 if (turn_i == 0 and tailwind_role_this_turn
+                                        in ("E1", "E2")) else enemy_speed_mult)
+        own_mult_this_turn = (1.0 if (turn_i == 0 and tailwind_role_this_turn
+                                      in ("C", "P")) else own_speed_mult)
         hp, turn_log, enemy_acted, wiped, recharging = _best_turn(
             combatants, turn_moves, hp, typechart, weather,
-            enemy_speed_mult=mult_this_turn, protected_roles=protected,
-            recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn)
+            enemy_speed_mult=enemy_mult_this_turn, protected_roles=protected,
+            recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn,
+            terrain=terrain, dmg_mult_by_role=dmg_mult_by_role,
+            half_damage_roles=half_damage, own_speed_mult=own_mult_this_turn)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
+        half_damage |= {role for role, _tgt, h in turn_log
+                        if h.move_name in SELF_HALVING_MOVES}
         if wiped is not None:
             wiped_side = wiped
             break
@@ -2049,7 +2583,7 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
 
 
 def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
-              auras=None):
+              auras=None, terrain=None):
     """The best `Hit` `attacker`'s own moveset can land on `target`
     SPECIFICALLY -- one cell of the 2x2 damage grid, not the move a
     target-choosing AI would actually pick (that's `_choose_action`).
@@ -2097,7 +2631,8 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
         else:
             n = 2 if (is_spread_move(mv.target) and other_live is not None) else 1
             got = _raw_hit(attacker, mv, target, typechart, weather=weather,
-                           roll="avg", num_targets_hit=n, auras=auras)
+                           roll="avg", num_targets_hit=n, auras=auras,
+                           terrain=terrain)
         candidates.append((mv, got))
     if not candidates:
         return NO_HIT
@@ -2112,7 +2647,8 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
     return best_hit
 
 
-def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather):
+def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather,
+                 terrain=None):
     """Every one of the 8 attacker-vs-specific-defender `Hit`s on this board
     -- "see if and how I out-trade (2x2 damage)" asks for the actual numbers,
     not just which line the race happened to choose. Returns {"ours": {("C",
@@ -2121,16 +2657,16 @@ def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather):
     """
     auras = _active_auras({"C": c1, "P": c2, "E1": e1c, "E2": e2c})
     ours = {
-        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras),
-        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras),
-        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras),
-        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras),
+        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain),
+        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain),
+        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain),
+        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain),
     }
     theirs = {
-        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras),
-        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras),
-        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras),
-        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras),
+        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain),
+        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain),
+        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain),
+        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain),
     }
     return {"ours": ours, "theirs": theirs}
 
@@ -2149,13 +2685,44 @@ def _ohko_risk(grid):
            for (atk, tgt), h in grid["theirs"].items() if h.hi >= 1.0]
 
 
+def _pruned_entry():
+    """A placeholder `detail[(e1,e2)]` entry for an enemy pair `_pair_vs_
+    targets` never actually raced -- see its `prune_below` parameter.
+    Always "loss": the WORST case, same direction every other minimax in
+    this module already biases toward (mega assignment, enemy Protect/
+    Tailwind choice) -- never makes a pruned pair look better than it can
+    possibly be, only (knowingly) worse than it might actually be. Built
+    fresh each call since `detail`'s own consumers (`_pair_vs_targets`
+    itself, want_grid's cleanup) pop keys off individual entries; a single
+    shared dict reused across every pruned key would let one caller's pop
+    silently affect all the others.
+    """
+    return {
+        "outcome": "loss", "outcome_without_tailwind": "loss",
+        "tailwind_is_real_threat": False, "tailwind_forced": False,
+        "turns_used": 0, "tailwind_outcome": "loss", "tailwind_safe": False,
+        "own_tailwind_is_real_threat": False, "own_tailwind_used": False,
+        "own_tailwind_outcome": None,
+        "protect_outcomes": {"E1": "loss", "E2": "loss"}, "protect_safe": False,
+        "log": [], "_pruned": True,
+        "our_hp": {"C": 0.0, "P": 0.0}, "clean_win_value": 0.0,
+        "our_damage_output": 0.0,
+    }
+
+
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
-                     turns, want_grid=False, merged=None):
+                     turns, want_grid=False, merged=None, prune_below=None,
+                     forced_base_names=frozenset()):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
     (partner fixed) and `joint_pool_search` (both slots searched) can never
     drift apart on what "beats" means.
+
+    `forced_base_names`: passed straight through to `_resolve_forms` for OUR
+    side only (the enemy's own mega choice stays unconstrained) -- a name in
+    here is locked to base form for this whole race, never offered as the
+    transformer. Default empty set changes nothing.
 
     ONLY ONE MEGA PER SIDE, the same minimax `pair_search` uses: every legal
     mega assignment on OUR side (`_resolve_forms`/`_mega_choices`) is tried
@@ -2172,7 +2739,9 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     `target_names`' C(n,2) pairings.
 
     `detail`: {(e1, e2): {outcome, turns_used, tailwind_outcome,
-    tailwind_safe, protect_outcomes, protect_safe, log}}. `log` is
+    tailwind_safe, own_tailwind_is_real_threat, own_tailwind_used,
+    own_tailwind_outcome, protect_outcomes, protect_safe, log,
+    our_damage_output}}. `log` is
     `_joint_race`'s own per-turn hit list -- "what the damage roll is", not
     just the win/loss classification -- for the NORMAL-speed race (the one
     that decided `outcome`); the Tailwind and Protect replays' logs aren't
@@ -2224,10 +2793,107 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     still uses everywhere. The pre-override result survives either way as
     `outcome_without_tailwind`; `tailwind_forced` says whether the swap
     happened.
+
+    OUR OWN TAILWIND AS A MATCHING ANSWER, the mirror image of the above:
+    "I think it's important to be able to withstand tailwind versus
+    opponents with Tailwind (or match with your own)". A hyper-offensive
+    setter+attacker pair (Whimsicott/Talonflame's priority Tailwind,
+    Aerodactyl/Dragonite's non-priority one, and so on) that opens with
+    Tailwind turn 1 and attacks turn 2+ once sped up is a real, biddable
+    plan of OURS, not something imposed on us the way the enemy's own
+    Tailwind is -- so unlike the pessimistic enemy check above, this one is
+    OPTIMISTIC: when either `n1` or `n2` has real usage-data access to
+    Tailwind, the race is replayed once per real setter of OURS with that
+    role casting Tailwind turn 1 (BEST-for-us kept, `min` by
+    `_JOINT_OUTCOME_RANK`, mirroring the enemy check's own `max`), and if
+    that beats whatever the enemy-tailwind-adjusted outcome above already
+    is, IT replaces `outcome`/`turns_used`/`log` as the final chosen result
+    -- "we would choose to counter their speed control with ours if it
+    actually turns the tables," never a reason a pair looks WORSE than its
+    already-decided baseline. `own_tailwind_is_real_threat` says whether
+    `n1`/`n2` carries a real setter at all; `own_tailwind_used` says
+    whether using it actually changed this specific matchup's outcome (a
+    LIMITED, per-matchup "does this tailwind-opener plan actually sweep a
+    hole in their team" check, not a full standalone search); `own_
+    tailwind_outcome` is the race's own outcome under that plan, `None`
+    when there's no real setter to check. `pairs_own_tailwind_used` (the
+    summary's own count, mirroring `pairs_tailwind_safe`) is how many of
+    `target_names`'s enemy pairs this specific answer actually mattered
+    for.
+
+    `prune_below`: optional fraction (e.g. `good_threshold`) -- once it is
+    MATHEMATICALLY CERTAIN this pair cannot reach that share of
+    `target_names`'s enemy pairs beaten (even if every remaining, not-yet-
+    raced enemy pair were a win), stop racing and fill the rest of `detail`
+    with `_pruned_entry()` (a "loss" placeholder) instead. This is a SOUND
+    bound, not a heuristic guess -- unlike `prescreen.py`'s own measured,
+    abandoned attempt at this (see its module docstring: a cheap proxy
+    score deleted the eventual winner 85% of the time), it can never
+    discard a pair that could actually still qualify, because it only ever
+    fires once qualifying is already provably impossible. It CAN understate
+    a pruned pair's true performance against the enemy pairs it never
+    raced (their real outcome might have been a win) -- always in the
+    worst-case direction, same bias every other minimax in this module
+    already carries, never the other way. `None` (the default) disables
+    this entirely; every enemy pair is always raced. Left off by
+    `bring4_search`'s own Stage 1 (needs each of a fixed 6's exact C(6,2)
+    pair performances, not an early "this one's definitely bad" verdict --
+    "a check for a promising bring-4" needs the real numbers); turned on by
+    `multi_bring4_coverage`'s own pool-wide Stage A, where the pool can be
+    large (up to 300) and most candidates are mediocre.
+
+    WIN QUALITY, not just win/loss: "losing 1 pokemon and taking a lot of
+    damage and KOing 2 enemies [is] far inferior to KOing the enemy without
+    taking damage" -- `sweep` and `out_trade` are both "beaten" for
+    `pairs_swept`/`pairs_traded`/ranking-by-raw-count purposes, but a messy
+    `out_trade` (one of ours fainted, the other badly chipped) and a clean
+    `sweep` (neither of ours ever took a hit) used to score identically.
+    Each `detail` entry also carries `our_hp` ({"C": frac, "P": frac}, read
+    from the CHOSEN race's own final `hp` -- the Tailwind race's if
+    `tailwind_forced`, the normal one otherwise) and `clean_win_value`
+    (`our_hp["C"] + our_hp["P"]`, 0.0-2.0): exactly 2.0 for every `sweep`
+    (a sweep is BY DEFINITION zero damage taken), lower for a chippy
+    `out_trade`, at or near 0 for one that cost a whole Pokemon. Always 0.0
+    for `loss`/`no_ko` -- whatever HP happened to survive a real loss isn't
+    a quality signal worth ranking on, the outcome bucket itself already
+    says "bad". `pairs_clean_win_total` (the summary's own sum of this
+    across every enemy pair) is what `_pair_sort_key` uses to tell two
+    equally-"beaten" pairs apart -- see its own docstring for where in the
+    ranking this sits.
+
+    RAW DAMAGE OUTPUT, a separate axis from win/loss entirely: "Spread
+    damage is highly preferable in this format ... I want to mathematically
+    output the most damage possible (ideally neutral or super effective)
+    while surviving for long enough to keep dishing it out." Each `detail`
+    entry's `our_damage_output` sums every hit OUR side landed in the
+    CHOSEN race (`chosen_log`, whichever hypothesis above actually won),
+    weighted by `h.num_targets_hit` (a spread hit already counts for both
+    targets it lands on) -- unlike `spread_power.py`'s own per-species
+    benchmark score, `h.frac` here is computed against the REAL enemy, so a
+    resisted hit already contributes less and a super-effective one more,
+    with no separate type-effectiveness gate needed. Survival is free: a
+    fainted attacker simply stops appearing in later turns of the log, so
+    "keep dishing it out" is already priced in by construction, not a
+    separate multiplier. `pairs_damage_output_total` (the summary's own sum
+    across every enemy pair) is NOT part of `_pair_sort_key`'s own ranking
+    -- it's a separate, opt-in lens `--tailwind-focus` (`counter_table.py`)
+    re-sorts its own final results by, on top of (not instead of) the
+    existing win/loss-based search.
     """
     m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
+    all_enemy_pairs = list(itertools.combinations(target_names, 2))
+    total_pairs = len(all_enemy_pairs)
     detail = {}
-    for e1_name, e2_name in itertools.combinations(target_names, 2):
+    for pair_idx, (e1_name, e2_name) in enumerate(all_enemy_pairs):
+        if prune_below is not None and detail:
+            beaten_so_far = sum(1 for d in detail.values()
+                                if d["outcome"] in ("sweep", "out_trade"))
+            remaining = total_pairs - len(detail)
+            best_possible = (beaten_so_far + remaining) / total_pairs
+            if best_possible < prune_below:
+                for e1_r, e2_r in all_enemy_pairs[pair_idx:]:
+                    detail[(e1_r, e2_r)] = _pruned_entry()
+                break
         e1m, e2m = enemy_built[e1_name]["moves"], enemy_built[e2_name]["moves"]
         def _has_tailwind(name):
             return merged is not None and any(
@@ -2236,48 +2902,114 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         tailwind_setter_roles = [role for role, name in (("E1", e1_name), ("E2", e2_name))
                                  if _has_tailwind(name)]
         real_tailwind_threat = bool(tailwind_setter_roles)
+        own_tailwind_setter_roles = [role for role, name in (("C", n1), ("P", n2))
+                                     if _has_tailwind(name)]
+        own_real_tailwind_threat = bool(own_tailwind_setter_roles)
 
         best = None
-        for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built):
+        for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built,
+                                                forced_base_names=forced_base_names):
             worst = None
             for _enemy_mt, (e1c, e2c) in _resolve_forms((e1_name, e2_name), enemy_built):
                 combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
                 moves_by_role = {"C": m1, "P": m2, "E1": e1m, "E2": e2m}
                 weather = _field_weather(combatants)
-                outcome, turns_used, _hp, log = _joint_race(
-                    combatants, moves_by_role, typechart, weather, turns)
+                terrain = _field_terrain(combatants)
+                outcome, turns_used, hp, log = _joint_race(
+                    combatants, moves_by_role, typechart, weather, turns,
+                    terrain=terrain)
                 if tailwind_setter_roles:
-                    tw_outcome, tw_turns_used, _tw_hp, tw_log = max(
+                    tw_outcome, tw_turns_used, tw_hp, tw_log = max(
                         (_joint_race(combatants, moves_by_role, typechart, weather,
-                                    turns, first_turn_tailwind_role=role)
+                                    turns, first_turn_tailwind_role=role,
+                                    terrain=terrain)
                          for role in tailwind_setter_roles),
                         key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
                 else:
-                    tw_outcome, tw_turns_used, _tw_hp, tw_log = _joint_race(
+                    tw_outcome, tw_turns_used, tw_hp, tw_log = _joint_race(
                         combatants, moves_by_role, typechart, weather, turns,
-                        enemy_speed_mult=2.0)
+                        enemy_speed_mult=2.0, terrain=terrain)
                 pr_e1_outcome, _pr1_t, _pr1_hp, _pr1_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="E1")
+                    first_turn_protected_role="E1", terrain=terrain)
                 pr_e2_outcome, _pr2_t, _pr2_hp, _pr2_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="E2")
+                    first_turn_protected_role="E2", terrain=terrain)
                 protect_outcomes = {"E1": pr_e1_outcome, "E2": pr_e2_outcome}
                 tailwind_forced = (real_tailwind_threat and
                                    _JOINT_OUTCOME_RANK[tw_outcome] >
                                    _JOINT_OUTCOME_RANK[outcome])
+                chosen_outcome = tw_outcome if tailwind_forced else outcome
+                chosen_hp = tw_hp if tailwind_forced else hp
+                chosen_turns_used = tw_turns_used if tailwind_forced else turns_used
+                chosen_log = tw_log if tailwind_forced else log
+                # OUR OWN TAILWIND AS A MATCHING ANSWER (see docstring):
+                # a real setter of OURS is a choice we'd only make if it
+                # actually helps, so -- mirroring `tailwind_forced`'s
+                # pessimistic swap but in the OPTIMISTIC direction -- try
+                # it and keep it only when it beats whatever the enemy-
+                # tailwind-adjusted baseline above already is.
+                if own_tailwind_setter_roles:
+                    own_tw_outcome, own_tw_turns_used, own_tw_hp, own_tw_log = min(
+                        (_joint_race(combatants, moves_by_role, typechart, weather,
+                                    turns, first_turn_tailwind_role=role,
+                                    own_speed_mult=2.0, terrain=terrain)
+                         for role in own_tailwind_setter_roles),
+                        key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                else:
+                    own_tw_outcome, own_tw_turns_used, own_tw_hp, own_tw_log = (
+                        None, 0, None, [])
+                own_tailwind_used = (own_real_tailwind_threat and
+                                     _JOINT_OUTCOME_RANK[own_tw_outcome] <
+                                     _JOINT_OUTCOME_RANK[chosen_outcome])
+                if own_tailwind_used:
+                    chosen_outcome, chosen_hp = own_tw_outcome, own_tw_hp
+                    chosen_turns_used, chosen_log = own_tw_turns_used, own_tw_log
+                # Retained HP is only a meaningful QUALITY signal for an
+                # actual win -- for loss/no_ko the outcome bucket alone
+                # already says "bad", and `hp` can go slightly negative on
+                # an overkill hit (damage isn't clamped at 0 when applied,
+                # only the "fainted" check reads it as <=0), so a real loss
+                # must not leak a garbage-but-technically-positive value in.
+                if chosen_outcome in ("sweep", "out_trade"):
+                    our_hp = {"C": max(0.0, chosen_hp["C"]),
+                             "P": max(0.0, chosen_hp["P"])}
+                else:
+                    our_hp = {"C": 0.0, "P": 0.0}
+                # REAL DAMAGE OUTPUT, not the abstract per-species benchmark
+                # `spread_power.py` scores with -- every hit OUR side landed
+                # in the CHOSEN race (whichever hypothesis won), weighted by
+                # `num_targets_hit` (a spread hit already counts for both
+                # targets) and already reflecting the REAL type matchup
+                # (`h.frac` is computed against the actual defender, so a
+                # resisted hit contributes less, a super-effective one
+                # more -- "mathematically output the most damage possible
+                # (ideally neutral or super effective) while surviving long
+                # enough to keep dishing it out": survival is free here too,
+                # since a fainted attacker simply stops appearing in later
+                # turns of `chosen_log`.
+                our_damage_output = sum(
+                    h.frac * h.num_targets_hit
+                    for turn_hits in chosen_log for role, _tgt, h in turn_hits
+                    if role in ("C", "P"))
                 entry = {
-                    "outcome": tw_outcome if tailwind_forced else outcome,
+                    "outcome": chosen_outcome,
                     "outcome_without_tailwind": outcome,
                     "tailwind_is_real_threat": real_tailwind_threat,
                     "tailwind_forced": tailwind_forced,
-                    "turns_used": tw_turns_used if tailwind_forced else turns_used,
+                    "turns_used": chosen_turns_used,
                     "tailwind_outcome": tw_outcome,
                     "tailwind_safe": tw_outcome in ("sweep", "out_trade"),
+                    "own_tailwind_is_real_threat": own_real_tailwind_threat,
+                    "own_tailwind_used": own_tailwind_used,
+                    "own_tailwind_outcome": own_tw_outcome,
                     "protect_outcomes": protect_outcomes,
                     "protect_safe": all(o in ("sweep", "out_trade")
                                         for o in protect_outcomes.values()),
-                    "log": tw_log if tailwind_forced else log,
+                    "log": chosen_log,
+                    "our_hp": our_hp,
+                    "clean_win_value": our_hp["C"] + our_hp["P"],
+                    "our_damage_output": our_damage_output,
                     "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
                 }
                 if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
@@ -2288,10 +3020,12 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 best = worst
 
         if want_grid:
-            weather = _field_weather({"C": best["_c1"], "P": best["_c2"],
-                                      "E1": best["_e1c"], "E2": best["_e2c"]})
+            grid_combatants = {"C": best["_c1"], "P": best["_c2"],
+                               "E1": best["_e1c"], "E2": best["_e2c"]}
+            weather = _field_weather(grid_combatants)
+            terrain = _field_terrain(grid_combatants)
             grid = _damage_grid(best["_c1"], best["_c2"], best["_e1c"], best["_e2c"],
-                               m1, m2, e1m, e2m, typechart, weather)
+                               m1, m2, e1m, e2m, typechart, weather, terrain=terrain)
             best["grid"] = grid
             best["ohko_risk"] = _ohko_risk(grid)
         for k in ("_c1", "_c2", "_e1c", "_e2c"):
@@ -2303,7 +3037,11 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         "pairs_lost": sum(1 for d in detail.values() if d["outcome"] == "loss"),
         "pairs_no_ko": sum(1 for d in detail.values() if d["outcome"] == "no_ko"),
         "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
+        "pairs_own_tailwind_used": sum(1 for d in detail.values()
+                                       if d["own_tailwind_used"]),
         "pairs_protect_safe": sum(1 for d in detail.values() if d["protect_safe"]),
+        "pairs_clean_win_total": sum(d["clean_win_value"] for d in detail.values()),
+        "pairs_damage_output_total": sum(d["our_damage_output"] for d in detail.values()),
         "pairs_total": len(detail),
     }
     return detail, summary
@@ -2370,7 +3108,7 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 
     rows = []
     for name in pool:
-        if name in target_names or name == partner_name:
+        if name == partner_name:
             continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
@@ -2398,7 +3136,8 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 
 def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       typechart, turns=2, item_overrides=None,
-                      move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
+                      move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                      prune_below=None, extra_forced_base=frozenset()):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
     genuinely searched (not one fixed), against every pair drawn from
@@ -2415,16 +3154,33 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     ~270-Pokemon default is minutes, not seconds, unlike every other search
     in this module. Narrow with `--pool-size` for anything but a quick check.
 
+    `prune_below`: passed straight through to `_pair_vs_targets` -- see its
+    own docstring. `None` (the default) races every enemy pair for every
+    our-pair, exactly as before this existed.
+
+    `extra_forced_base`: for each name in it, EVERY pair containing that name
+    is raced a SECOND time with `forced_base_names={that name}` (locking it
+    to base form), and the extra row appended with `"forced_base": <name>`
+    (every other row gets `"forced_base": None`) -- `bring4_search` uses this
+    to get a per-name "what if this stone-holder never transforms" pair
+    table, for the bring-4s that carry it alongside the core's OTHER allowed
+    stone-holder (VGC's real "only one Mega Evolution per team per game"
+    rule needs one of the two consistently picked, across ALL of that
+    bring's own pairs, not just within whichever pair happens to contain
+    both). Default empty set costs nothing extra and changes no returned row
+    -- every existing caller is unaffected.
+
     Returns rows: {pair: (name1, name2), item1, item2, pairs_swept,
     pairs_traded, pairs_lost, pairs_no_ko, pairs_tailwind_safe,
-    pairs_protect_safe, pairs_total, detail} -- `detail` is
+    pairs_protect_safe, pairs_total, detail, forced_base} -- `detail` is
     `_pair_vs_targets`'s own shape (damage log included), ranked the same
-    way `joint_pair_search` ranks.
+    way `joint_pair_search` ranks. `forced_base` is `None` for every row
+    except the `extra_forced_base` extras described above -- a caller that
+    doesn't pass `extra_forced_base` only ever sees `None` here, unchanged
+    from before this field existed.
     """
     built = {}
     for name in pool:
-        if name in target_names:
-            continue
         item, move_names, _weather = _answer_for(
             name, merged, moves_db, natures, typechart, target_names,
             item_overrides=item_overrides, move_overrides=move_overrides,
@@ -2442,9 +3198,24 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     for n1, n2 in itertools.combinations(built, 2):
         detail, summary = _pair_vs_targets(n1, n2, built, target_names,
                                            enemy_built, typechart, turns,
-                                           merged=merged)
+                                           merged=merged, prune_below=prune_below)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
-                    "item2": built[n2]["item"], "detail": detail, **summary})
+                    "item2": built[n2]["item"], "detail": detail,
+                    "forced_base": None, **summary})
+    for forced_name in extra_forced_base:
+        if forced_name not in built:
+            continue
+        for other in built:
+            if other == forced_name:
+                continue
+            n1, n2 = (forced_name, other) if forced_name < other else (other, forced_name)
+            detail, summary = _pair_vs_targets(
+                n1, n2, built, target_names, enemy_built, typechart, turns,
+                merged=merged, prune_below=prune_below,
+                forced_base_names=frozenset({forced_name}))
+            rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
+                        "item2": built[n2]["item"], "detail": detail,
+                        "forced_base": forced_name, **summary})
     rows.sort(key=_pair_sort_key)
     return rows
 
@@ -2474,32 +3245,62 @@ def _pair_sort_key(row):
     `protect_outcomes`/`protect_safe` exists to catch (the real doubles
     50/50 the user described), so it leads the ranking rather than being a
     tie-break buried behind it. Raw beaten count (swept+traded) is the
-    second criterion, tailwind-safe count third.
+    second criterion -- winning more matchups always outranks winning fewer
+    ones more cleanly, the same "uncovered enemy pairs dominate" priority
+    `_bring4_candidates` gives an unconditional loss over a bring-4's
+    average quality.
+
+    THIRD: `pairs_clean_win_total` (`_pair_vs_targets`'s own "WIN QUALITY"
+    field) -- "losing 1 pokemon and taking a lot of damage and KOing 2
+    enemies [is] far inferior to KOing the enemy without taking damage".
+    Two pairs that win the exact same NUMBER of matchups are told apart by
+    how cleanly they won them (2.0 per enemy pair for a true sweep, less
+    for a chippy out-trade, near 0 for one that cost a whole Pokemon) --
+    strictly after raw count (a pair with an unconditional loss to some
+    enemy composition is still worse than one that wins everywhere, however
+    messily), strictly before tailwind-safe count (a real Tailwind-boosted
+    loss is a more concrete, binary risk than an average-case quality
+    difference). Tailwind-safe count is the fourth and final criterion.
     """
     return (-row["pairs_protect_safe"], -(row["pairs_swept"] + row["pairs_traded"]),
-           -row["pairs_tailwind_safe"])
+           -row["pairs_clean_win_total"], -row["pairs_tailwind_safe"])
 
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   turns=2, good_threshold=1.0, item_overrides=None,
-                  move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS):
-    """For an ALREADY-DECIDED team of 6 (from team preview) against one
-    specific enemy roster, which 4 should you actually bring?
+                  move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                  enforce_item_clause=False):
+    """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
+    against one specific enemy roster, which 4 should you actually bring?
 
         "given that I will bring 4 vs a specific enemy, that is 6 pairs I
          will bring. I want the 6 possible pairs of my brings to perform
          very well, or at least to have several perform very well, such
          that I always have options no matter what position I am in."
 
-    STAGE 1 -- every one of the C(6,2)=15 pairs drawn from `our6`, each
-    against every enemy pair drawn from `target_names`: literally
+    Sizes other than 6 aren't a special case: a team of exactly 4 has only
+    ONE possible bring-4 (itself), so Stage 2 below degenerates to a single
+    row summarising its own C(4,2)=6 internal pairs -- "in any case, the
+    output should summarise the pair results for the 6 brought pairs in
+    the bring-4" holds whether `our6` was already narrowed to 4 or is a
+    full 6 Stage 2 still has to choose from. A team of 5 sits in between
+    (C(5,4)=5 candidate bring-4s). A team of exactly 3 is the same
+    degenerate case one size further down -- there's nothing to bring BUT
+    the whole 3 ("output the best 3-Pokemon cores... 3 total pairs"), so
+    Stage 2 yields one row summarising its own C(3,2)=3 internal pairs. Same
+    "no wasted members" convention `multi_bring4_exhaustive`/
+    `multi_bring4_beam` already use.
+
+    STAGE 1 -- every one of `our6`'s C(len(our6),2) pairs, each against
+    every enemy pair drawn from `target_names`: literally
     `joint_pool_search(our6, target_names, ...)`, no new racing. This
     alone answers "searching the top pairs to see how many are in."
 
-    STAGE 2 -- every one of the C(6,4)=15 possible BRING-4 subsets of
-    `our6`: look up its own 6 internal pairs from Stage 1 (pure lookup,
-    still no new racing). Ranked PRIMARILY by how many of `target_names`'s
-    enemy pairs NONE of those 6 internal pairs can beat
+    STAGE 2 -- every one of `our6`'s C(len(our6),min(4,len(our6))) possible
+    BRING subsets: look up its own internal pairs from Stage 1 (pure lookup,
+    still no new racing, EXCEPT for a bring that carries BOTH of a 2-Mega
+    core's stone-holders -- see below). Ranked PRIMARILY by how many of
+    `target_names`'s enemy pairs NONE of those internal pairs can beat
     (`uncovered_enemy_pairs` -- "having a pair that every pair of yours
     loses against is terrible, and this is an important factor": two
     bring-4s can have the identical raw beaten fraction while one of them
@@ -2510,45 +3311,79 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     ranking `joint_pool_search` already uses) -- "searching the given top
     teams and searching for how bad their worst pair performs," maximin:
     the bring-4 whose worst case is LEAST bad wins. THEN by how many of its
-    6 pairs are "good" (beat at least `good_threshold` of `target_names`'s
+    pairs are "good" (beat at least `good_threshold` of `target_names`'s
     enemy pairs, default 100% -- "always have options").
 
+    BRING-4-CONSISTENT MEGA CHOICE: when `our6` carries exactly 2 Mega-stone
+    holders (the existing `--max-megas` composition cap, unaffected by any
+    of this), VGC's real "only one Mega Evolution per team per game" rule
+    means a SPECIFIC bring-4 subset that happens to carry BOTH of them can't
+    freely let each transform independently across its own 6 pairs (today's
+    per-pair minimax already correctly restricts "at most one of THESE TWO"
+    within any single pair, but that's not the same as "the SAME one, for
+    this bring's whole 6 pairs"). For exactly those bring-4 subsets (0 or 1
+    of the core's own stone-holders needs no such consistency -- there's
+    nothing to be inconsistent WITH, and forcing one anyway would make that
+    member look artificially worse than reality), `_bring4_candidates`
+    builds the row under BOTH "which one gets to be this bring's mega"
+    hypotheses and keeps whichever ranks better -- see its own docstring.
+
+    `enforce_item_clause`: off by default (real search cost concern, not a
+    correctness one) -- when `True`, pre-resolves `our6`'s items with VGC's
+    real Item Clause enforced (`_resolve_unique_items`) before any racing,
+    so no two of `our6` end up holding the same item. Useful for verifying
+    an already-decided team; leave off for anything performance-sensitive.
+
     Returns (pair_rows, bring4_rows):
-      pair_rows -- `joint_pool_search`'s own 15-row output, unchanged.
-      bring4_rows -- [{bring4: (4 names), pairs: [(n1,n2), ...6...],
-                       pair_rows: [<pair_rows entry>, ...6...],
+      pair_rows -- `joint_pool_search`'s own row-per-pair output (its
+        `forced_base` bookkeeping field stripped back out -- this stays
+        exactly the C(len(our6),2) unique pairs it always was).
+      bring4_rows -- [{bring4: (names), pairs: [(n1,n2), ...],
+                       pair_rows: [<pair_rows entry>, ...],
                        worst_pair: (n1,n2), worst_pair_row: <pair_rows entry>,
-                       pairs_good: int, pairs_total: 6,
+                       pairs_good: int, pairs_total: int,
                        uncovered_enemy_pairs: [(e1,e2), ...]}], best-worst-
-      case first.
+      case first -- a single entry when `our6` is already at the bring size
+      (3 or 4).
     """
     our6 = list(dict.fromkeys(our6))
-    if len(our6) != 6:
-        raise ValueError(f"bring4_search needs exactly 6 distinct Pokemon, "
-                         f"got {len(our6)}: {our6}")
+    if not (3 <= len(our6) <= 6):
+        raise ValueError(f"bring4_search needs 3, 4, 5, or 6 distinct "
+                         f"Pokemon, got {len(our6)}: {our6}")
     overlap = _mega_base_overlap(our6)
     if overlap:
         raise ValueError(f"can't bring both a Mega and its own base form: "
                          f"{', '.join(sorted(overlap))}")
-    shared = set(our6) & set(target_names)
-    if shared:
-        # joint_pool_search silently excludes any pool member also named as
-        # an enemy (the right call for multi_bring4_coverage's own "this
-        # candidate is someone else's named enemy" case) -- but `our6` here
-        # is a FIXED, complete 6, every member of which Stage 2 needs a
-        # pair for. Left unchecked this doesn't fail here; it fails deep
-        # inside `_bring4_candidates` with a bare KeyError once Stage 2
-        # tries to look up a pair that was silently never computed.
-        raise ValueError(f"our6 and target_names share a Pokemon, which "
-                         f"can't be both ours and the enemy's: "
-                         f"{', '.join(sorted(shared))}")
-    pair_rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
-                                  typechart, turns=turns,
-                                  item_overrides=item_overrides,
-                                  move_overrides=move_overrides,
-                                  excluded_items=excluded_items)
+    if enforce_item_clause:
+        item_overrides = _resolve_unique_items(
+            our6, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
+    megas = [n for n in our6 if n.startswith("Mega ")]
+    extra_forced_base = frozenset(megas) if len(megas) == 2 else frozenset()
+    rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
+                             typechart, turns=turns,
+                             item_overrides=item_overrides,
+                             move_overrides=move_overrides,
+                             excluded_items=excluded_items,
+                             extra_forced_base=extra_forced_base)
+    pair_lookup_forced_base = None
+    if extra_forced_base:
+        # Built BEFORE popping "forced_base" below -- that pop mutates the
+        # same dict objects `rows` still references, so this must read the
+        # field first.
+        pair_lookup_forced_base = {
+            name: {frozenset(r["pair"]): r for r in rows
+                  if r["forced_base"] == name}
+            for name in megas}
+    pair_rows = [r for r in rows if r["forced_base"] is None]
+    for r in pair_rows:
+        r.pop("forced_base", None)
     pair_by_key = {frozenset(r["pair"]): r for r in pair_rows}
-    bring4_rows = _bring4_candidates(our6, pair_by_key, target_names, good_threshold)
+    bring4_rows = _bring4_candidates(
+        our6, pair_by_key, target_names, good_threshold,
+        megas=megas if extra_forced_base else None,
+        pair_lookup_forced_base=pair_lookup_forced_base)
     return pair_rows, bring4_rows
 
 
@@ -2569,45 +3404,360 @@ def _uncovered_enemy_pairs(pairs, target_names):
                       for r in pairs)]
 
 
-def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0):
-    """Every one of the C(len(six),4) possible bring-4 subsets of `six`
-    (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this also
-    runs for a 4- or 5-member PARTIAL team-of-6 during `multi_bring4_beam`'s
-    growth, where it degenerates to 1 or 5 subsets respectively -- the
-    combinatorics don't care), using an ALREADY-COMPUTED `pair_lookup`
-    ({frozenset(pair): row}) rather than racing anything. Shared by
-    `bring4_search`'s own Stage 2 and the multi-enemy search, which builds
-    the same shape of lookup per enemy from one shared pool-wide pair table.
-    `target_names` is the exact enemy list `pair_lookup`'s own rows were
-    raced against -- needed here only to enumerate its enemy pairs for
-    `_uncovered_enemy_pairs`.
+def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
+                       megas=None, pair_lookup_forced_base=None):
+    """Every one of the C(len(six),min(4,len(six))) possible bring subsets of
+    `six` (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this
+    also runs for a 3-, 4-, or 5-member PARTIAL team during
+    `multi_bring4_beam`'s growth or a `--core-sizes 3` core, where it
+    degenerates to 1, 1, or 5 subsets respectively -- the combinatorics
+    don't care), using an ALREADY-COMPUTED `pair_lookup` ({frozenset(pair):
+    row}) rather than racing anything. Shared by `bring4_search`'s own
+    Stage 2 and the multi-enemy search, which builds the same shape of
+    lookup per enemy from one shared pool-wide pair table. `target_names` is
+    the exact enemy list `pair_lookup`'s own rows were raced against --
+    needed here only to enumerate its enemy pairs for `_uncovered_enemy_pairs`.
 
     RANKED PRIMARILY BY UNCOVERED ENEMY PAIRS -- see `_uncovered_enemy_pairs`
-    -- THEN by the WORST of the 6 internal pairs' own rank (`_pair_sort_key`,
-    maximin: the bring-4 whose worst case is LEAST bad wins), THEN by how
-    many of the 6 clear the good-pair bar.
+    -- THEN by the WORST of the bring's own internal pairs' own rank
+    (`_pair_sort_key`, maximin: the bring whose worst case is LEAST bad
+    wins), THEN by how many of them clear the good-pair bar.
+
+    `megas`/`pair_lookup_forced_base`: BRING-4-CONSISTENT MEGA CHOICE, opt-in
+    (both `None` by default -- ordinary lookup, exactly as before this
+    existed). `megas`: the core's own (at most 2) Mega-stone-holder names.
+    `pair_lookup_forced_base`: {name: {frozenset(pair): row}} for each name
+    in `megas` -- the SAME pairs as `pair_lookup`, but raced with that name
+    locked to base form (`joint_pool_search`'s `extra_forced_base` rows).
+    For a bring subset containing BOTH `megas`, the row is built TWICE --
+    once with megas[1] locked to base (so megas[0] is free, "the team's
+    mega" for this bring) and once the mirror image -- and the
+    better-ranked of the two, by the exact same key used to rank every
+    other bring, is kept. A bring with 0 or 1 of `megas` needs no such
+    consistency (nothing to be inconsistent WITH) and uses the ordinary
+    unconstrained `pair_lookup`, unchanged.
 
     Returns bring4_rows in `bring4_search`'s own shape, best-worst-case
-    first -- `[0]` is always "the best bring-4 available from `six`."
+    first -- `[0]` is always "the best bring available from `six`." Each
+    row also carries `mega_used`: the single Mega-stone holder this
+    specific bring treats as transformed (`None` if it carries none) --
+    "note which one is used" when a bring's own 2 stone holders were
+    resolved via the consistency check above.
     """
-    bring4_rows = []
-    for bring4 in itertools.combinations(six, 4):
-        pairs = [pair_lookup[frozenset(p)] for p in itertools.combinations(bring4, 2)]
+    bring_size = min(4, len(six))
+
+    def _row_for(bring4, lookup, forced_base_name=None):
+        pairs = [lookup(p) for p in itertools.combinations(bring4, 2)]
         worst = max(pairs, key=_pair_sort_key)
         pairs_good = sum(1 for r in pairs if _pair_beaten_frac(r) >= good_threshold)
         uncovered = _uncovered_enemy_pairs(pairs, target_names)
-        bring4_rows.append({
+        mega_members = [n for n in bring4
+                        if n.startswith("Mega ") and n != forced_base_name]
+        return {
             "bring4": bring4, "pairs": [r["pair"] for r in pairs],
             "pair_rows": pairs, "worst_pair": worst["pair"], "worst_pair_row": worst,
-            "pairs_good": pairs_good, "pairs_total": 6,
+            "pairs_good": pairs_good, "pairs_total": len(pairs),
             "uncovered_enemy_pairs": uncovered,
-        })
-    bring4_rows.sort(key=lambda b: (len(b["uncovered_enemy_pairs"]),
-                                    _pair_sort_key(b["worst_pair_row"]), -b["pairs_good"]))
+            # The single Mega-stone holder THIS bring actually treats as
+            # transformed -- `None` if the bring carries no stone holder at
+            # all, or (only possible when a caller skips the
+            # bring-4-consistent-mega machinery below entirely) BOTH of a
+            # core's 2 stone holders are still simultaneously assumed mega,
+            # an already-flagged-elsewhere inconsistent state this never
+            # claims to resolve on its own.
+            "mega_used": mega_members[0] if len(mega_members) == 1 else None,
+        }
+
+    def _rank_key(b):
+        return (len(b["uncovered_enemy_pairs"]), _pair_sort_key(b["worst_pair_row"]),
+                -b["pairs_good"])
+
+    bring4_rows = []
+    for bring4 in itertools.combinations(six, bring_size):
+        if megas and len(set(bring4) & set(megas)) == 2:
+            m1, m2 = megas
+            row_m1_is_mega = _row_for(
+                bring4, lambda p, forced=m2: pair_lookup_forced_base[forced].get(
+                    frozenset(p), pair_lookup[frozenset(p)]),
+                forced_base_name=m2)
+            row_m2_is_mega = _row_for(
+                bring4, lambda p, forced=m1: pair_lookup_forced_base[forced].get(
+                    frozenset(p), pair_lookup[frozenset(p)]),
+                forced_base_name=m1)
+            bring4_rows.append(min(row_m1_is_mega, row_m2_is_mega, key=_rank_key))
+        else:
+            bring4_rows.append(_row_for(bring4, lambda p: pair_lookup[frozenset(p)]))
+    bring4_rows.sort(key=_rank_key)
     return bring4_rows
 
 
-def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
+def bring4_pair_depth(bring4_row):
+    """Summarise a bring-4's own 6 internal pairs (`bring4_row["pair_rows"]`,
+    already computed -- no new racing) beyond the single worst pair
+    `_bring4_candidates` already ranks on: "I would like ... the basic
+    details of the 6 pairs for each bring4 (total, 3rd best, 4th best, and
+    worst wins, wins under Tailwind ..., under protect safe)" -- a bring-4
+    can look fine on JUST its worst pair while its middle-of-the-pack pairs
+    (3rd/4th best of 6) are actually mediocre, which the existing ranking
+    never surfaces.
+
+    Pairs are ordered by `_pair_sort_key` (ascending = best first, the same
+    ranking `joint_pool_search`'s own rows already sort by) -- "3rd best"/
+    "4th best" read off that order, not off raw beaten count alone, so they
+    agree with the SAME notion of "better" the rest of this module uses
+    (protect-safe wins first, then beaten count, then tailwind-safe count).
+
+    Returns {"beaten_total": int, "beaten_3rd": int|None, "beaten_4th":
+    int|None, "beaten_worst": int|None, "pairs_total": int (the shared
+    per-pair enemy-pairs-total, e.g. 1 for a single named enemy pair),
+    "tailwind_safe_total": int, "protect_safe_total": int,
+    "clean_win_total": float} -- the four "beaten_*" fields and the three
+    "*_total" fields are all summed/read across the SAME `n_pairs` =
+    `len(bring4_row["pair_rows"])` pairs (6 for a bring of 4, the common
+    case, but only 3 for a 3-Pokemon core -- "I would like to output the
+    best 3-pokemon cores against each team", which has just one possible
+    bring, itself), so e.g. `beaten_total` compares directly against
+    `n_pairs * pairs_total`, and `clean_win_total` against `n_pairs *
+    pairs_total * 2.0` (see `_pair_vs_targets`'s own "WIN QUALITY"
+    docstring paragraph for what 2.0 per pair means: a true sweep, zero
+    damage taken). `beaten_3rd`/`beaten_4th` are `None` only if
+    `bring4_row` has fewer than 3/4 pairs (true for a 3-Pokemon core's own
+    3 pairs, not just a hand-built partial row -- this stays honest rather
+    than raising an IndexError).
+
+    ALSO returns the BEST/3RD-BEST breakdown (same `_pair_sort_key` order,
+    same `None`-if-too-few-pairs rule as `beaten_3rd`/`beaten_4th`) for two
+    more per-pair fields, plus a whole-bring SUM to match: "best and third
+    best pair under tailwind and under enemy protect" --
+    "tailwind_safe_best"/"tailwind_safe_3rd", "protect_safe_best"/
+    "protect_safe_3rd". And "best and third best number of pairs beaten
+    without having either of own pair faint" -- a discrete, stricter cousin
+    of `clean_win_total`'s continuous HP-retained score (0.0-2.0 per enemy
+    pair): `no_faint_total`/`no_faint_best`/`no_faint_3rd`, from
+    `_pairs_beaten_without_fainting` below, which reads each matchup's
+    `detail[...]["our_hp"]` directly -- a real win (`sweep`/`out_trade`)
+    where NEITHER of the pair's own two Pokemon actually fainted.
+    """
+    pairs = sorted(bring4_row["pair_rows"], key=_pair_sort_key)
+    pairs_total = pairs[0]["pairs_total"] if pairs else 0
+    beaten = [r["pairs_swept"] + r["pairs_traded"] for r in pairs]
+    tw = [r["pairs_tailwind_safe"] for r in pairs]
+    pr = [r["pairs_protect_safe"] for r in pairs]
+    no_faint = [_pairs_beaten_without_fainting(r) for r in pairs]
+    return {
+        "beaten_total": sum(beaten),
+        "beaten_3rd": beaten[2] if len(beaten) > 2 else None,
+        "beaten_4th": beaten[3] if len(beaten) > 3 else None,
+        "beaten_worst": beaten[-1] if beaten else None,
+        "pairs_total": pairs_total,
+        "tailwind_safe_total": sum(tw),
+        "tailwind_safe_best": tw[0] if tw else None,
+        "tailwind_safe_3rd": tw[2] if len(tw) > 2 else None,
+        "protect_safe_total": sum(pr),
+        "protect_safe_best": pr[0] if pr else None,
+        "protect_safe_3rd": pr[2] if len(pr) > 2 else None,
+        "clean_win_total": sum(r["pairs_clean_win_total"] for r in pairs),
+        "no_faint_total": sum(no_faint),
+        "no_faint_best": no_faint[0] if no_faint else None,
+        "no_faint_3rd": no_faint[2] if len(no_faint) > 2 else None,
+    }
+
+
+def recommended_lead(bring4_row):
+    """Which of `bring4_row`'s own C(4,2)=6 internal pairs to send out
+    FIRST ("lead") against this specific enemy roster, and which 2 members
+    stay back ("backup") -- "Is there a way to assess the best lead vs a
+    given enemy team? Just the best pair + their backup."
+
+    No new racing: `bring4_row["pair_rows"]` is already fully raced against
+    every enemy pair drawn from this specific roster (the same table
+    `_bring4_candidates` picked its own "worst pair" from) -- the BEST-
+    ranked of those 6 pairs by `_pair_sort_key` (protect-safe wins, then
+    beaten count, then win quality, then tailwind-safe count -- the exact
+    same ranking that decides everything else in this module) is simply
+    "send out your best-performing matchup first," and the other 2 members
+    of the bring are what's left to bring in as the situation develops.
+
+    A 3-Pokemon core's own bring (only 3 pairs, C(3,2)=3) still works the
+    same way -- there's just one fewer "backup" member (only 1, not 2).
+
+    Returns {"lead": (n1, n2), "backup": (n3, n4, ...)}.
+    """
+    best_pair = min(bring4_row["pair_rows"], key=_pair_sort_key)
+    lead = best_pair["pair"]
+    backup = tuple(n for n in bring4_row["bring4"] if n not in lead)
+    return {"lead": lead, "backup": backup}
+
+
+def _pairs_beaten_without_fainting(row):
+    """How many of `row`'s own enemy pairs it beats (`sweep`/`out_trade`)
+    WITHOUT either of its own two Pokemon fainting -- a discrete, stricter
+    cousin of `pairs_clean_win_total`'s continuous HP-retained score.
+    `d["our_hp"]` is `{"C": 0.0, "P": 0.0}` for every non-win outcome
+    already (`_pair_vs_targets`'s own "a real loss must not leak a
+    garbage-but-technically-positive value in" rule), so checking the
+    outcome first isn't strictly required for correctness, but keeps the
+    intent explicit at the call site.
+    """
+    return sum(1 for d in row["detail"].values()
+              if d["outcome"] in ("sweep", "out_trade")
+              and d["our_hp"]["C"] > 0 and d["our_hp"]["P"] > 0)
+
+
+def enemy_has_real_tailwind(target_names, merged):
+    """True if any named enemy actually runs Tailwind in real usage data
+    (`merged[name]["moves_usage"]`) -- the same check `_pair_vs_targets`'s
+    own `_has_tailwind` makes per race, factored out here so a CALLER (the
+    CLI's CSV/xlsx export) can flag "this roster has a real Tailwind
+    threat" once for a whole bring-4 table, instead of re-deriving it from
+    `tailwind_is_real_threat`/`tailwind_forced` on every individual pair
+    row -- "wins under Tailwind, ESPECIALLY IF they have a tailwind user
+    in the 2v2" is exactly this: a flag that tells the reader whether the
+    tailwind-safe column is worth a second look at all, not just its raw
+    number."""
+    return any(
+        any(mv == "Tailwind" for mv, _pct in merged.get(name, {}).get("moves_usage", []))
+        for name in target_names)
+
+
+def own_pair_has_real_tailwind(n1, n2, merged):
+    """True if either of OUR own pair (`n1`, `n2`) actually runs Tailwind in
+    real usage data -- the mirror image of `enemy_has_real_tailwind`, same
+    factoring-out reason: a CALLER can flag "this pair has a real Tailwind
+    answer of its own" once, without re-deriving it from every individual
+    `detail` entry's own `own_tailwind_is_real_threat`."""
+    return any(
+        any(mv == "Tailwind" for mv, _pct in merged.get(name, {}).get("moves_usage", []))
+        for name in (n1, n2))
+
+
+def tailwind_focus_pool(pool, merged):
+    """`pool` (whatever --pool-size/--team already narrowed it to) PLUS any
+    real Tailwind setter (usage-data check, same as `own_pair_has_real_
+    tailwind`) NOT already in it -- "checks for teams by running tailwind
+    setter (who ideally can do good damage too) + attacker."
+
+    STRICTLY ADDITIVE, not a restriction: a generic-Score-based --pool-size
+    cut can easily miss a bulky support Tailwind setter (low raw stats),
+    so this guarantees the archetype's own essential opener role is always
+    a real candidate -- but it never REMOVES a name `pool` already had. An
+    ordinary single-target attacker (Kingambit, Rampardos, ...) that
+    --pool-size already included for the "attacker"/"back two mop up"
+    roles stays exactly as available as before; only setters `pool` was
+    MISSING get added on top.
+
+    Deliberately NOT also union'd with real spread attackers
+    (`spread_power.spread_moves`'s own eligibility, checked empirically):
+    a 70+ BP spread move is common enough in this dataset (roughly 190 of
+    ~270 species) that adding every eligible name back in from the WHOLE
+    dataset would swallow most of whatever --pool-size just narrowed to,
+    the exact opposite of "lightweight" -- "bearing in mind that just
+    outputting a lot of spread damage is very good" is instead handled
+    entirely on the RANKING side (`core_damage_output`, which already
+    weights a landed spread hit for both targets), not by widening who
+    gets searched at all.
+    """
+    def _has_tailwind(name):
+        return any(mv == "Tailwind"
+                  for mv, _pct in merged.get(name, {}).get("moves_usage", []))
+    have = set(pool)
+    extra = [n for n in merged if n not in have and _has_tailwind(n)]
+    return list(pool) + extra
+
+
+def bring4_damage_output(bring4_row):
+    """Total real damage output (`pairs_damage_output_total`, see
+    `_pair_vs_targets`) across ONE bring-4's own 6 internal pairs (already
+    on every `pair_rows` entry via `**summary`) -- the building block
+    `core_damage_output` sums across every named enemy's own best bring,
+    and what a `--bring4`/single-enemy xlsx export reads directly."""
+    return sum(pr["pairs_damage_output_total"] for pr in bring4_row["pair_rows"])
+
+
+def core_damage_output(core_row):
+    """Total real damage output across EVERY enemy roster's own best
+    bring-4 for this `_core_row`-shaped `core_row` -- summed, not
+    averaged, so a core that's strong against MORE named enemies scores
+    higher, matching the rest of this module's own "more coverage is
+    better" convention.
+
+    `--tailwind-focus` (`counter_table.py`) re-sorts its final `multi_rows`
+    by this, ON TOP OF (not instead of) the underlying win/loss-based
+    search that decided which cores were even considered -- "I want to
+    mathematically output the most damage possible ... while surviving for
+    long enough to keep dishing it out" becomes the PRESENTATION order,
+    without discarding the legality/robustness filtering
+    (`good_threshold`/`min_enemies`/protect-safety) the search already did
+    to decide what counts as a real candidate at all.
+    """
+    return sum(bring4_damage_output(pe["best_bring4_row"])
+              for pe in core_row["per_enemy"])
+
+
+def _core_item_clause_pair_by_key(core, target_name_lists, item_clause_context):
+    """Re-race JUST `core`'s own C(size,2) pairs, once, with VGC's real Item
+    Clause enforced across `core`'s own members -- used by `_core_row` only
+    for a core whose pool-wide `fixed_items` picks collide (2+ members
+    independently want the SAME item), which the pool-wide Stage A search
+    (one fixed item per POOL member, searched once against every enemy,
+    with no notion of "who else is on this specific 4-6 member team") can
+    never catch by construction: "When unique-items are enforced, it is
+    crucial these are reflected in the sets, summary, and gameplan for each
+    team" -- three Pokemon can each independently want Focus Sash, and the
+    pool-wide table would show ALL THREE holding it if they ever get
+    grouped into the same core together, which is illegal.
+
+    Resolved ONCE (`_resolve_unique_items`, the exact same build-order-
+    dependent resolution `bring4_search`/`core_deep_dive` already use for
+    a single fixed team) against the UNION of every named enemy, then
+    raced against EACH enemy roster in turn -- same "a real team's set is
+    fixed for the whole event" rule the pool-wide computation already
+    follows, just re-derived at CORE (not pool) scope.
+
+    Returns `(pair_by_key_per_enemy, resolved_items)`:
+    `pair_by_key_per_enemy` is {tuple(target_names): {frozenset(pair): row}},
+    one table per enemy roster -- `_core_row` swaps this in wholesale for a
+    conflicting core (every pair `_bring4_candidates` looks up for a bring
+    drawn from `core` is, by construction, a pair entirely within `core`).
+    `resolved_items` is `core`'s own {name: item} -- Item-Clause-legal
+    across `core`'s members, unlike `item_clause_context["fixed_items"]`
+    (pool-wide, and exactly what collided) -- `_core_row` carries it back up
+    so a caller displaying this core's set (a teamsheet, an xlsx Sets/
+    Summary/Gameplans sheet) can show the SAME set the numbers next to it
+    were actually computed from, not the illegal pool-wide one.
+
+    KNOWN LIMITATION, stated plainly: does not compose with `_bring4_
+    candidates`'s own "bring-4-consistent mega choice" hypothesis testing
+    -- a core that ALSO carries 2 Mega-stone holders skips that
+    consistency check when an item conflict triggers this path (see
+    `_core_row`). Narrow (needs both conditions on the SAME core at once)
+    and a known, accepted gap rather than a silent one.
+    """
+    fixed_items = item_clause_context["fixed_items"]
+    fixed_moves = item_clause_context["fixed_moves"]
+    merged = item_clause_context["merged"]
+    moves_db = item_clause_context["moves_db"]
+    natures = item_clause_context["natures"]
+    typechart = item_clause_context["typechart"]
+    turns = item_clause_context["turns"]
+    excluded_items = item_clause_context["excluded_items"]
+    all_enemies = sorted({n for t in target_name_lists for n in t})
+    resolved_items = _resolve_unique_items(
+        list(core), merged, moves_db, natures, typechart, all_enemies,
+        move_overrides=fixed_moves, excluded_items=excluded_items)
+    out = {}
+    for target_names in target_name_lists:
+        rows = joint_pool_search(list(core), target_names, merged, moves_db,
+                                 natures, typechart, turns=turns,
+                                 item_overrides=resolved_items,
+                                 move_overrides=fixed_moves,
+                                 excluded_items=excluded_items)
+        out[tuple(target_names)] = {frozenset(r["pair"]): r for r in rows}
+    return out, resolved_items
+
+
+def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
+              pair_by_key_forced_base_list=None, item_clause_context=None):
     """For a candidate CORE (4, 5, or 6 Pokemon -- see `multi_bring4_
     exhaustive`'s own note on why fewer than 6 is a real, often BETTER
     answer, not a fallback) against SEVERAL enemy rosters: the BEST bring-4
@@ -2635,13 +3785,60 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
     `multi_bring4_exhaustive`/`multi_bring4_beam` both drop any row where
     this is non-empty, since the identical-scoring smaller core is already
     enumerated on its own.
+
+    `pair_by_key_forced_base_list` (one `{name: {frozenset(pair): row}}` per
+    enemy, from `multi_bring4_coverage`): when `core` carries exactly 2
+    Mega-stone holders, passed down to `_bring4_candidates` as its own
+    `megas`/`pair_lookup_forced_base` so a bring subset containing BOTH is
+    scored under a single self-consistent "which one is this bring's
+    actual mega" hypothesis, not each pair assuming its own member
+    transforms independently ("you cannot vary your mega choice if both are
+    brought" to one battle). `None` (the default) reproduces the old,
+    inconsistent behaviour -- every caller that can supply it now does.
+
+    `item_clause_context` (from `multi_bring4_coverage`'s returned dict,
+    plus `turns`/`excluded_items` -- see `multi_bring4_exhaustive`/
+    `multi_bring4_beam`'s own `enforce_item_clause`): when `core`'s own
+    members' pool-wide `fixed_items` picks collide (2+ of THIS core's
+    members independently want the same item -- undetectable at Stage A,
+    which only ever searches one pool member's set at a time against the
+    enemy union, never against its actual teammates), `pair_by_key_list` is
+    swapped out wholesale for a core-scoped re-race
+    (`_core_item_clause_pair_by_key`) that enforces VGC's real Item Clause
+    across `core`'s own members. `None` (the default) skips the conflict
+    check entirely, reproducing the old behaviour -- cheap (an O(core_size)
+    scan) in the common, non-conflicting case, since the check itself is
+    just comparing `len` of a list against `len` of a `set`. See
+    `_core_item_clause_pair_by_key`'s own docstring for the accepted gap
+    against `pair_by_key_forced_base_list` when both trigger on the same
+    core at once. When a conflict was resolved, the returned dict's
+    `item_clause_resolved_items` carries `core`'s own Item-Clause-legal
+    {name: item} (`None` when no conflict was found, or when
+    `item_clause_context` itself was `None`) -- a caller displaying this
+    core's set should prefer this over the pool-wide `fixed_items` whenever
+    it is not `None`, so what's shown always matches what was raced.
     """
     core = tuple(sorted(core))
+    megas = tuple(n for n in core if n.startswith("Mega "))
+    core_resolved_items = None
+    if item_clause_context is not None:
+        fixed_items = item_clause_context["fixed_items"]
+        held = [fixed_items[n] for n in core if fixed_items.get(n)]
+        if len(held) != len(set(held)):
+            conflict_pair_by_key, core_resolved_items = _core_item_clause_pair_by_key(
+                core, target_name_lists, item_clause_context)
+            pair_by_key_list = [conflict_pair_by_key[tuple(target_names)]
+                                for target_names in target_name_lists]
     per_enemy = []
     worst_key, worst_idx = None, None
     used = set()
     for i, (pair_lookup, target_names) in enumerate(zip(pair_by_key_list, target_name_lists)):
-        candidates = _bring4_candidates(core, pair_lookup, target_names, good_threshold)
+        forced_base = (pair_by_key_forced_base_list[i]
+                      if pair_by_key_forced_base_list is not None else None)
+        candidates = _bring4_candidates(
+            core, pair_lookup, target_names, good_threshold,
+            megas=megas if len(megas) == 2 and forced_base else None,
+            pair_lookup_forced_base=forced_base)
         best = candidates[0]
         key = (len(best["uncovered_enemy_pairs"]),) + _pair_sort_key(best["worst_pair_row"])
         per_enemy.append({"target_names": list(target_names),
@@ -2651,13 +3848,51 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0):
             worst_key, worst_idx = key, i
     return {"core": core, "core_size": len(core), "per_enemy": per_enemy,
            "worst_enemy_idx": worst_idx, "worst_enemy_score_key": worst_key,
-           "unused": tuple(sorted(set(core) - used))}
+           "unused": tuple(sorted(set(core) - used)),
+           "item_clause_resolved_items": core_resolved_items}
+
+
+# `multi_bring4_coverage`'s per-enemy `joint_pool_search` calls are fully
+# independent (same `pool`/`fixed_items`/`fixed_moves` read, nothing written
+# back and forth) -- a `--jobs` process pool, same shape as
+# `roster_rating.rate_many`'s own worker_init/_WORKER_WORLD pair. Each worker
+# builds its OWN copy of the dataset once (~14s) and reuses it for every
+# enemy roster handed to it, rather than paying that cost per task or
+# pickling the (large) merged/moves/natures/typechart objects through
+# ProcessPoolExecutor on every submit.
+_WORKER_WORLD = None
+
+
+def _multi_bring4_worker_init():
+    """Build this worker's dataset once, not once per enemy roster."""
+    global _WORKER_WORLD
+    from species_data import build_merged_dataset
+    merged, _usage, moves, natures, typechart = build_merged_dataset()
+    _WORKER_WORLD = {"merged": merged, "moves": moves, "natures": natures,
+                     "typechart": typechart}
+
+
+def _multi_bring4_coverage_job(job):
+    """One enemy roster's pool-wide pair search, for `multi_bring4_coverage`'s
+    `jobs` > 1 path. Top-level and plain-typed: the pool may use spawn, so
+    both ends of this call cross a pickle boundary."""
+    (pool, target_names, turns, fixed_items, fixed_moves, excluded_items,
+     good_threshold, pool_megas) = job
+    global _WORKER_WORLD
+    if _WORKER_WORLD is None:
+        _multi_bring4_worker_init()
+    w = _WORKER_WORLD
+    return joint_pool_search(pool, target_names, w["merged"], w["moves"],
+                             w["natures"], w["typechart"], turns=turns,
+                             item_overrides=fixed_items, move_overrides=fixed_moves,
+                             excluded_items=excluded_items, prune_below=good_threshold,
+                             extra_forced_base=pool_megas)
 
 
 def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                           typechart, turns=2, good_threshold=1.0,
                           min_enemies=2, item_overrides=None, move_overrides=None,
-                          excluded_items=DEFAULT_EXCLUDED_ITEMS):
+                          excluded_items=DEFAULT_EXCLUDED_ITEMS, jobs=1):
     """Stage A, shared by `multi_bring4_exhaustive` and `multi_bring4_beam`:
     run the existing pool-wide pair search once per enemy roster.
 
@@ -2671,7 +3906,21 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     once per entry in `target_name_lists`. Then narrows `pool` down to a
     CANDIDATE POOL: only members that appear in a "good" pair (beats
     `good_threshold` or more of that one enemy's own pairs) for at least
-    `min_enemies` of the named enemy rosters.
+    `min_enemies` of the named enemy rosters -- clamped to
+    `len(target_name_lists)` if given larger, since a member can never be
+    "good against N enemies" when fewer than N were even named (the
+    default of 2 would otherwise silently empty `candidate_pool` for
+    every single-roster search).
+
+    Each per-enemy `joint_pool_search` call below passes `prune_below=
+    good_threshold` -- once a pair's remaining, not-yet-raced enemy pairs
+    could not possibly push it up to `good_threshold` even if every one of
+    them were a win, racing that pair against the rest of THIS roster stops
+    (see `_pair_vs_targets`'s docstring for why this bound is sound: it
+    never turns a pair that could still qualify into one that doesn't).
+    This is what keeps a 300-candidate pool's Stage A affordable -- a pair
+    that's already hopeless against one enemy roster doesn't get raced
+    against the rest of that roster's pairs too.
 
         "A good bring of 4 should probably have at least 3-4 good pairs
          out of 6, and there shouldn't actually be many added pairs to
@@ -2722,10 +3971,37 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     `move_overrides` pin for a name still wins over this computed default,
     same "an explicit pin always wins" rule every other override in this
     module already follows.
+
+    `jobs`: run N enemy rosters' `joint_pool_search` calls in parallel
+    worker processes instead of one after another (1, the default: serial,
+    no process pool spun up at all). The per-enemy searches below are
+    independent -- same `pool`/`fixed_items`/`fixed_moves` read by every
+    one of them, nothing written back and forth -- so this is a plain
+    process-pool map, same shape as `roster_rating.rate_many`. Falls back to
+    serial when there is only one enemy roster to search (nothing to gain
+    from a pool for one task) regardless of what `jobs` asks for.
+
+    BRING-4-CONSISTENT MEGA CHOICE, same rule `bring4_search` already
+    enforces for its own fixed 6: "you cannot vary your mega choice if both
+    [mega-stone holders] are brought" to one specific battle. Every mega in
+    `pool` (after the drop above) is raced a SECOND time per enemy, locked
+    to base form (`joint_pool_search`'s `extra_forced_base`), so `_core_row`
+    can later self-consistently pick "which ONE of a core's (at most 2)
+    stone-holders is this bring's actual mega" instead of letting each of a
+    bring's internal pairs assume its own member transforms independently
+    -- exactly the gap that let a bring like "Arcanine-Hisui / Lycanroc-Dusk
+    / Mega Floette / Mega Scizor" get scored as if BOTH megas were
+    simultaneously live, which is illegal (VGC's real "only one Mega
+    Evolution per team per game" rule). Eager, not lazy: every mega in the
+    pool gets this treatment up front here, not only the ones that end up
+    paired together in some candidate core -- doubles the racing cost for
+    any pair involving a mega (across every enemy), a deliberate trade of
+    search cost for correctness, same one `bring4_search` already pays for
+    its own (at most 2) stone-holders.
     """
     target_name_lists = [list(t) for t in target_name_lists]
+    min_enemies = min(min_enemies, len(target_name_lists))
     any_enemy = {n for t in target_name_lists for n in t}
-    pool = [n for n in pool if n not in any_enemy]
     all_enemies = sorted(any_enemy)
     fixed_items, fixed_moves = {}, {}
     for name in pool:
@@ -2743,14 +4019,49 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     # per-battle-adjusted-set problem this whole block exists to prevent,
     # just for the one name that happened to have no global answer.
     pool = [n for n in pool if n in fixed_moves]
-    per_enemy, pair_by_key = [], []
+    pool_megas = frozenset(n for n in pool if n.startswith("Mega "))
+    if jobs > 1 and len(target_name_lists) > 1:
+        import concurrent.futures as cf
+        jobs_list = [(pool, target_names, turns, fixed_items, fixed_moves,
+                     excluded_items, good_threshold, pool_megas)
+                    for target_names in target_name_lists]
+        with cf.ProcessPoolExecutor(
+                max_workers=min(jobs, len(jobs_list)),
+                initializer=_multi_bring4_worker_init) as ex:
+            # map, not as_completed: raw_per_enemy must stay in
+            # target_name_lists order -- every downstream reader
+            # (candidate_pool below, multi_bring4_exhaustive/beam, the xlsx
+            # writer) zips it against target_name_lists positionally.
+            raw_per_enemy = list(ex.map(_multi_bring4_coverage_job, jobs_list))
+    else:
+        raw_per_enemy = [joint_pool_search(pool, target_names, merged, moves_db,
+                                           natures, typechart, turns=turns,
+                                           item_overrides=fixed_items,
+                                           move_overrides=fixed_moves,
+                                           excluded_items=excluded_items,
+                                           prune_below=good_threshold,
+                                           extra_forced_base=pool_megas)
+                        for target_names in target_name_lists]
+    # Split each enemy's raw rows into the ordinary per-pair table
+    # (`per_enemy`/`pair_by_key`, exactly the shape this returned before the
+    # forced-base mega rows existed -- every existing reader, e.g.
+    # `_print_pair_summary`, still sees one row per pair) and a SEPARATE
+    # per-mega forced-base lookup (`pair_by_key_forced_base`) `_core_row`
+    # reads from when a candidate core carries 2 stone-holders together.
+    per_enemy, pair_by_key, pair_by_key_forced_base = [], [], []
     appears_good_in = {}
-    for target_names in target_name_lists:
-        rows = joint_pool_search(pool, target_names, merged, moves_db, natures,
-                                 typechart, turns=turns,
-                                 item_overrides=fixed_items,
-                                 move_overrides=fixed_moves,
-                                 excluded_items=excluded_items)
+    for raw_rows in raw_per_enemy:
+        # Built BEFORE popping "forced_base" below -- that pop mutates the
+        # same dict objects `raw_rows` still references (mirrors
+        # `bring4_search`'s own identical warning), so this must read the
+        # field first.
+        pair_by_key_forced_base.append({
+            name: {frozenset(r["pair"]): r for r in raw_rows
+                  if r["forced_base"] == name}
+            for name in pool_megas})
+        rows = [r for r in raw_rows if r["forced_base"] is None]
+        for r in rows:
+            r.pop("forced_base", None)
         per_enemy.append(rows)
         pair_by_key.append({frozenset(r["pair"]): r for r in rows})
         good_names = set()
@@ -2761,8 +4072,11 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
             appears_good_in[n] = appears_good_in.get(n, 0) + 1
     candidate_pool = sorted(n for n, c in appears_good_in.items() if c >= min_enemies)
     return {"per_enemy": per_enemy, "pair_by_key": pair_by_key,
+           "pair_by_key_forced_base": pair_by_key_forced_base,
            "target_name_lists": target_name_lists, "candidate_pool": candidate_pool,
-           "merged": merged, "fixed_items": fixed_items, "fixed_moves": fixed_moves}
+           "merged": merged, "fixed_items": fixed_items, "fixed_moves": fixed_moves,
+           "moves_db": moves_db, "natures": natures, "typechart": typechart,
+           "turns": turns, "excluded_items": excluded_items}
 
 
 def _effective_type_limits(max_weak=None, type_limits=None):
@@ -2782,7 +4096,8 @@ def _effective_type_limits(max_weak=None, type_limits=None):
     return limits
 
 
-def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2):
+def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
+                              max_weak_types=None):
     """True if `core` (any size) may be proposed as a multi-bring4
     candidate at all: "you cannot have both a mega and its non-mega form"
     (always enforced, `_mega_base_overlap`), "a full team can only have two
@@ -2794,10 +4109,12 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2):
     TEAM COMPOSITION cap, not a per-battle one), plus, when
     `effective_limits` is non-empty, the Advanced weakness limits
     `team_search.hard_violations` already implements -- reused directly,
-    never reimplemented. `max_megas` is checked MONOTONICALLY safe to prune
-    on during partial-core growth too (`multi_bring4_beam`'s own use of this
-    function): a partial core already over the cap can never fix that by
-    adding more members.
+    never reimplemented -- plus, when `max_weak_types` is given, the
+    `weak_type_breadth` cap ("no more than N types may have 2+ weak
+    members"). `max_megas` and `max_weak_types` are both checked
+    MONOTONICALLY safe to prune on during partial-core growth too
+    (`multi_bring4_beam`'s own use of this function): a partial core
+    already over either cap can never fix that by adding more members.
     """
     if _mega_base_overlap(core):
         return False
@@ -2807,6 +4124,8 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2):
         from team_search import hard_violations
         if hard_violations(list(core), merged, type_limits=effective_limits):
             return False
+    if max_weak_types is not None and weak_type_breadth(core, merged) > max_weak_types:
+        return False
     return True
 
 
@@ -2840,10 +4159,26 @@ _EXHAUSTIVE_POOL_CEILING = 30
 _CORE_SIZES = (4, 5, 6)
 
 
+def _item_clause_context_from_coverage(coverage):
+    """Build `_core_row`'s `item_clause_context` from `multi_bring4_coverage`'s
+    own returned dict -- the one place `multi_bring4_exhaustive`/
+    `multi_bring4_beam` assemble it, so both stay in sync if that shape ever
+    changes."""
+    return {"fixed_items": coverage["fixed_items"],
+           "fixed_moves": coverage["fixed_moves"],
+           "merged": coverage["merged"], "moves_db": coverage["moves_db"],
+           "natures": coverage["natures"], "typechart": coverage["typechart"],
+           "turns": coverage["turns"], "excluded_items": coverage["excluded_items"]}
+
+
 def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_candidates=_EXHAUSTIVE_POOL_CEILING,
-                            max_weak=None, type_limits=None, max_megas=2):
-    """Every possible CORE (4, 5, or 6 Pokemon, not just exactly 6) drawn
+                            max_weak=None, type_limits=None, max_megas=2,
+                            max_weak_types=None, core_sizes=_CORE_SIZES,
+                            enforce_item_clause=False):
+    """Every possible CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
+    can widen this down to 3, "I would like to output the best 3-pokemon
+    cores against each team" -- not just exactly 6) drawn
     from `coverage["candidate_pool"]` (`multi_bring4_coverage`), scored and
     ranked by `_core_row`'s worst-case-across-enemies metric -- exhaustive,
     so (within that candidate pool) provably optimal, not a heuristic
@@ -2858,22 +4193,33 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     dropped: the identical-scoring core without that member is already
     enumerated on its own, so keeping the padded version would only ever
     duplicate a real answer with dead weight attached. Also drops any core
-    with both a Mega and its own base form, and (when `max_weak`/
-    `type_limits` are given) any that breaks those Advanced weakness
-    limits (`team_search.hard_violations`, reused).
+    with both a Mega and its own base form, one that breaks
+    `max_weak`/`type_limits` (`team_search.hard_violations`, reused), and
+    (when `max_weak_types` is given) one where more than `max_weak_types`
+    DIFFERENT types have 2+ weak members (`weak_type_breadth`) -- "no more
+    than 3 types that have 2 members weak to it", a breadth cap distinct
+    from `max_weak`'s own per-type ceiling.
 
     Raises if the candidate pool is bigger than `max_candidates` -- narrow
     with a higher `--min-enemies`/`--good-threshold`, or use
     `multi_bring4_beam` instead.
 
+    `enforce_item_clause`: when True, every candidate core is checked for
+    an Item Clause conflict among its own members (`_core_row`'s own
+    `item_clause_context` path) and re-raced core-scoped when one is found
+    -- "When unique-items are enforced, it is crucial these are reflected
+    in the sets, summary, and gameplan for each team." False (the default)
+    reproduces the old, pool-wide-only behaviour.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first.
     """
     pool = coverage["candidate_pool"]
     n = len(pool)
-    if n < 4:
+    min_size = min(core_sizes)
+    if n < min_size:
         raise ValueError(f"only {n} candidate(s) appear in a good pair for "
-                         f"enough enemies to form even a 4-member core -- "
-                         f"widen the pool, or lower "
+                         f"enough enemies to form even a {min_size}-member "
+                         f"core -- widen the pool, or lower "
                          f"--good-threshold/--min-enemies")
     if n > max_candidates:
         raise ValueError(f"{n} candidates is too many for an exhaustive "
@@ -2882,16 +4228,21 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                          f"--beam instead")
     effective_limits = _effective_type_limits(max_weak, type_limits)
     merged = coverage["merged"]
+    item_clause_context = (_item_clause_context_from_coverage(coverage)
+                           if enforce_item_clause else None)
     rows = []
-    for size in _CORE_SIZES:
+    for size in core_sizes:
         if size > n:
             continue
         for core in itertools.combinations(pool, size):
             if not _core_passes_hard_filters(core, merged, effective_limits,
-                                             max_megas=max_megas):
+                                             max_megas=max_megas,
+                                             max_weak_types=max_weak_types):
                 continue
             row = _core_row(core, coverage["pair_by_key"],
-                            coverage["target_name_lists"], good_threshold)
+                            coverage["target_name_lists"], good_threshold,
+                            pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
+                            item_clause_context=item_clause_context)
             if row["unused"]:
                 continue
             rows.append(row)
@@ -2900,8 +4251,11 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
 
 
 def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
-                      max_weak=None, type_limits=None, max_megas=2):
-    """Beam-search a CORE (4, 5, or 6 Pokemon) over the WHOLE pool
+                      max_weak=None, type_limits=None, max_megas=2,
+                      max_weak_types=None, core_sizes=_CORE_SIZES,
+                      enforce_item_clause=False):
+    """Beam-search a CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
+    can widen this down to 3) over the WHOLE pool
     `multi_bring4_coverage` already has pair data for (the raw pool, NOT
     narrowed to `candidate_pool`) -- for when that candidate pool is too
     large for `multi_bring4_exhaustive`, or a broader search is wanted
@@ -2923,18 +4277,32 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     them" applies here too. A core with an unused member is dropped, same
     as `multi_bring4_exhaustive`.
 
+    `enforce_item_clause`: same as `multi_bring4_exhaustive`'s own -- a
+    candidate core's Item Clause conflicts are checked (and, if found,
+    re-raced core-scoped) both while SCORING growth candidates (`score()`
+    below) and at the final `found`-capture step, so the beam's own
+    ranking during growth already reflects a conflicting core's real,
+    Item-Clause-legal performance rather than its illegal pool-wide one.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first, for
     whichever cores the beam actually reached (not exhaustive, so not
     guaranteed globally optimal).
     """
     pair_by_key_list = coverage["pair_by_key"]
+    pair_by_key_forced_base_list = coverage["pair_by_key_forced_base"]
     target_name_lists = coverage["target_name_lists"]
     merged = coverage["merged"]
+    item_clause_context = (_item_clause_context_from_coverage(coverage)
+                           if enforce_item_clause else None)
     effective_limits = _effective_type_limits(max_weak, type_limits)
     # Only `max_weak` is monotonic (safe to prune ON during growth, before a
     # candidate reaches a real core size) -- `max_net` can only be checked
     # once a candidate is a genuine 4-6 core, at the `found`-capture step
     # below, using the FULL `effective_limits`. See `_monotonic_limits`.
+    # `max_weak_types` (a count of TYPES, not a per-type cap) is ALSO
+    # monotonic the same way `max_weak`/`max_megas` are -- see
+    # `weak_type_breadth`'s own docstring -- so it's passed to every
+    # `_core_passes_hard_filters` call below, growth-time and final alike.
     growth_limits = _monotonic_limits(effective_limits)
     pool = sorted({n for pbk in pair_by_key_list for fs in pbk for n in fs})
 
@@ -2952,11 +4320,15 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                        if frozenset(p) in pbk)
             return (-total,)
         return _core_row(team, pair_by_key_list, target_name_lists,
-                         good_threshold)["worst_enemy_score_key"]
+                         good_threshold,
+                         pair_by_key_forced_base_list=pair_by_key_forced_base_list,
+                         item_clause_context=item_clause_context
+                         )["worst_enemy_score_key"]
 
     seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
              if _core_passes_hard_filters(p, merged, growth_limits,
-                                          max_megas=max_megas)]
+                                          max_megas=max_megas,
+                                          max_weak_types=max_weak_types)]
     seeds.sort(key=lambda x: x[0])
     beam = [t for _, t in seeds[:beam_width]]
 
@@ -2971,22 +4343,27 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                 if key in cand:
                     continue
                 if not _core_passes_hard_filters(key, merged, growth_limits,
-                                                 max_megas=max_megas):
+                                                 max_megas=max_megas,
+                                                 max_weak_types=max_weak_types):
                     continue
                 cand[key] = score(list(key))
         ranked = sorted(cand.items(), key=lambda kv: kv[1])[:beam_width]
         beam = [list(k) for k, _ in ranked]
         if not beam:
             break
-        if len(beam[0]) in _CORE_SIZES:
+        if len(beam[0]) in core_sizes:
             for team in beam:
                 key = tuple(sorted(team))
                 if key in found:
                     continue
                 if not _core_passes_hard_filters(key, merged, effective_limits,
-                                                 max_megas=max_megas):
+                                                 max_megas=max_megas,
+                                                 max_weak_types=max_weak_types):
                     continue  # catches a max_net violation growth couldn't see
-                row = _core_row(team, pair_by_key_list, target_name_lists, good_threshold)
+                row = _core_row(team, pair_by_key_list, target_name_lists,
+                                good_threshold,
+                                pair_by_key_forced_base_list=pair_by_key_forced_base_list,
+                                item_clause_context=item_clause_context)
                 if not row["unused"]:
                     found[key] = row
 
@@ -3041,7 +4418,8 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
 
 
 _ROW_TOTAL_FIELDS = ("pairs_swept", "pairs_traded", "pairs_lost", "pairs_no_ko",
-                     "pairs_tailwind_safe", "pairs_protect_safe", "pairs_total")
+                     "pairs_tailwind_safe", "pairs_protect_safe",
+                     "pairs_clean_win_total", "pairs_total")
 
 
 def _sum_rows(rows):
@@ -3052,9 +4430,33 @@ def _sum_rows(rows):
     return {f: sum(r[f] for r in rows) for f in _ROW_TOTAL_FIELDS}
 
 
+def _core_deep_dive_race(core, target_name_lists, our_built, enemy_built_by_team,
+                         typechart, turns, merged, sets, forced_base_names):
+    """`core_deep_dive`'s own racing body, factored out so it can be run
+    TWICE (once per mega hypothesis) when the core carries 2 stone-holders
+    -- see `core_deep_dive`'s own docstring."""
+    per_pair = {}
+    all_summaries = []
+    for n1, n2 in itertools.combinations(core, 2):
+        per_enemy = []
+        for target_names, enemy_built in zip(target_name_lists, enemy_built_by_team):
+            detail, summary = _pair_vs_targets(
+                n1, n2, our_built, target_names, enemy_built, typechart,
+                turns, merged=merged, forced_base_names=forced_base_names)
+            per_enemy.append({"target_names": target_names, "detail": detail,
+                             "summary": summary})
+        pair_total = _sum_rows([pe["summary"] for pe in per_enemy])
+        per_pair[(n1, n2)] = {"per_enemy": per_enemy, "total": pair_total}
+        all_summaries.append(pair_total)
+    overall = _sum_rows(all_summaries)
+    return {"core": tuple(core), "sets": sets, "per_pair": per_pair,
+           "overall": overall}
+
+
 def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart,
                    turns=2, item_overrides=None, move_overrides=None,
-                   excluded_items=DEFAULT_EXCLUDED_ITEMS):
+                   excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                   enforce_item_clause=False):
     """The full report for an ALREADY-CHOSEN core (the `--multi-bring4`
     result the user actually wants to inspect, not a fresh search): every
     one of its C(size,2) pairs, raced against every enemy pair drawn from
@@ -3078,17 +4480,41 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     across `target_name_lists`, then reused for every enemy team's races
     below (never a different item/moveset per enemy).
 
+    `enforce_item_clause`: off by default -- when `True`, resolves `core`'s
+    items with VGC's real Item Clause enforced (`_resolve_unique_items`)
+    before any racing, so `sets` never shows two members holding the same
+    item. See `bring4_search`'s own docstring for why this is opt-in.
+
+    BRING-4-CONSISTENT MEGA CHOICE: when `core` carries exactly 2 Mega-stone
+    holders, this function (unlike `bring4_search`) doesn't do bring-4
+    subsetting -- it reports every one of the core's own C(size,2) pairs
+    directly, so there is no "which subset" question, only "which of the
+    (at most 2) team-wide hypotheses is better for this core as a whole."
+    The whole racing pass runs TWICE, once per hypothesis (`_pair_
+    sort_key`'s existing "lower is better" ranking on each `overall` decides
+    the winner), and only that winning hypothesis is returned. A core with
+    0 or 1 stone-holders needs no such choice and races once, unconstrained,
+    exactly as before this existed.
+
     Returns {"core": tuple(core), "sets": {name: {"item", "moves"}},
     "per_pair": {(n1, n2): {"per_enemy": [{"target_names", "detail",
     "summary"}, ... one entry per `target_name_lists` member ...],
     "total": <summed pairs_swept/traded/lost/no_ko/tailwind_safe/
     protect_safe/total across every enemy team, for this ONE pair>}, ...
     one entry per pair in `core`...}, "overall": <the same summed shape,
-    across EVERY pair and EVERY enemy team>}.
+    across EVERY pair and EVERY enemy team>, "mega_used": the single
+    Mega-stone holder this dive's winning hypothesis treats as transformed
+    (`None` if `core` carries none) -- "note which one is used" once a
+    core's own 2 stone holders needed the consistency choice above}.
     """
     core = list(dict.fromkeys(core))
     target_name_lists = [list(t) for t in target_name_lists]
     all_enemies = sorted({n for t in target_name_lists for n in t})
+    if enforce_item_clause:
+        item_overrides = _resolve_unique_items(
+            core, merged, moves_db, natures, typechart, all_enemies,
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
     sets = {}
     for name in core:
         item, move_names, _weather = _answer_for(
@@ -3106,22 +4532,23 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     enemy_built_by_team = [_build_forms(t, merged, natures, moves_db)
                            for t in target_name_lists]
 
-    per_pair = {}
-    all_summaries = []
-    for n1, n2 in itertools.combinations(core, 2):
-        per_enemy = []
-        for target_names, enemy_built in zip(target_name_lists, enemy_built_by_team):
-            detail, summary = _pair_vs_targets(
-                n1, n2, our_built, target_names, enemy_built, typechart,
-                turns, merged=merged)
-            per_enemy.append({"target_names": target_names, "detail": detail,
-                             "summary": summary})
-        pair_total = _sum_rows([pe["summary"] for pe in per_enemy])
-        per_pair[(n1, n2)] = {"per_enemy": per_enemy, "total": pair_total}
-        all_summaries.append(pair_total)
-    overall = _sum_rows(all_summaries)
-    return {"core": tuple(core), "sets": sets, "per_pair": per_pair,
-           "overall": overall}
+    megas = [n for n in core if n.startswith("Mega ")]
+    if len(megas) == 2:
+        dive_a = _core_deep_dive_race(
+            core, target_name_lists, our_built, enemy_built_by_team, typechart,
+            turns, merged, sets, forced_base_names=frozenset({megas[1]}))
+        dive_a["mega_used"] = megas[0]
+        dive_b = _core_deep_dive_race(
+            core, target_name_lists, our_built, enemy_built_by_team, typechart,
+            turns, merged, sets, forced_base_names=frozenset({megas[0]}))
+        dive_b["mega_used"] = megas[1]
+        return dive_a if (_pair_sort_key(dive_a["overall"])
+                          <= _pair_sort_key(dive_b["overall"])) else dive_b
+    result = _core_deep_dive_race(core, target_name_lists, our_built,
+                                  enemy_built_by_team, typechart, turns, merged,
+                                  sets, forced_base_names=frozenset())
+    result["mega_used"] = megas[0] if len(megas) == 1 else None
+    return result
 
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
@@ -3219,14 +4646,16 @@ def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
                     # Drought/Snow Warning candidate) applies on entry
                     # regardless of whether it gets to ACT this turn --
                     # `_field_weather` already covers this, since
-                    # `combatants` has it in its normal slot.
+                    # `combatants` has it in its normal slot. Same for a
+                    # Grassy Surge candidate and `_field_terrain`.
                     race_weather = _field_weather(combatants)
+                    race_terrain = _field_terrain(combatants)
                     outcome, turns_used, _hp, log = _joint_race(
                         combatants, moves_by_role, typechart, race_weather, turns,
-                        first_turn_moves_override=override)
+                        first_turn_moves_override=override, terrain=race_terrain)
                     entry = {"outcome": outcome, "turns_used": turns_used, "log": log,
                              "_combatants": combatants, "_moves_by_role": moves_by_role,
-                             "_weather": race_weather}
+                             "_weather": race_weather, "_terrain": race_terrain}
                     if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
                             > _JOINT_OUTCOME_RANK[worst["outcome"]]):
                         worst = entry
@@ -3239,7 +4668,7 @@ def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
             tw_outcome, _tw_t, _tw_hp, _tw_log = _joint_race(
                 best["_combatants"], best["_moves_by_role"], typechart,
                 best["_weather"], turns, enemy_speed_mult=2.0,
-                first_turn_moves_override=override)
+                first_turn_moves_override=override, terrain=best["_terrain"])
             log = best["log"]
             switch_in_taken = (sum(h.avg for role, _tgt, h in log[0]
                                    if role in ("E1", "E2")

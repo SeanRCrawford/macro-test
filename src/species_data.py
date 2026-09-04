@@ -128,7 +128,7 @@ def load_mbsmogon():
     # the other under the base species name (if that name has no row already),
     # so it can be used for the pre-transform form.
     def _has_stone(rec):
-        return any((i.lower().endswith(("ite", "ite x", "ite y", "itex", "itey")) and pct >= 50.0)
+        return any(is_mega_stone_name(i) and pct >= 50.0
                    for i, pct in rec["items_usage"])
 
     for pname, extras in duplicates.items():
@@ -140,7 +140,7 @@ def load_mbsmogon():
         if pname.startswith("Mega ") and other_rows:
             base = pname[5:]
             parts = base.split()
-            if len(parts) >= 2 and parts[-1] in ("X", "Y"):
+            if len(parts) >= 2 and parts[-1] in ("X", "Y", "Z"):
                 base = " ".join(parts[:-1])
             if base not in records:
                 rec = dict(other_rows[0])
@@ -282,6 +282,108 @@ def parse_showdown_export(text: str) -> list[dict]:
     return mons
 
 
+EV_ORDER = ("hp", "atk", "def", "spa", "spd", "spe")
+EV_LABEL = {"hp": "HP", "atk": "Atk", "def": "Def", "spa": "SpA", "spd": "SpD", "spe": "Spe"}
+
+
+def resolve_export_fields(name: str, spec: dict, merged: dict) -> dict:
+    """One roster member's full paste-ready fields -- {"species", "item",
+    "ability", "nature", "evs", "moves"} -- filling anything `spec` (the
+    usual {name: {"item", "ability", "nature", "evs", "moves"}} overrides
+    dict, any key absent) doesn't say the same way
+    `combatants._build_combatant` fills it when a set is silent, so this
+    always matches what the tool actually simulated for that member. The
+    one place this resolution logic lives -- `team_to_showdown_export`
+    below and any xlsx/CSV column that wants to show a searched member's
+    item/ability/nature/EVs/moves reuse it rather than re-deriving.
+
+    A stone-holding Mega ("Mega Charizard Y") resolves "species"/"item" to
+    its BASE species holding the stone (`find_mega_stone`), which is what
+    Showdown/pokepast.es expects and what `custom_team_from_export` maps
+    back to the same "Mega X" name -- with the BASE forme's ability (a
+    paste has no way to express a mega-exclusive ability; see
+    `combatants._build_combatant`'s own comment on this). A Mega row with
+    no recorded stone (e.g. Mega Floette) has nothing to invert -- "species"
+    stays that literal name.
+    """
+    from combatants import FORCED_BASE_ABILITY, _default_ability
+
+    spec = spec or {}
+    stone = find_mega_stone(name, merged)
+    item = spec.get("item") or (stone if stone else
+                                _default_item(merged.get(name, {})))
+    if stone and item == stone:
+        species = base_form_name(name) or name
+        ability_rec = merged.get(species) or {}
+        ability_key = species
+    else:
+        species = name
+        ability_rec = merged.get(name) or {}
+        ability_key = name
+    ability = spec.get("ability") or FORCED_BASE_ABILITY.get(
+        ability_key, _default_ability(ability_rec.get("abilities_usage") or []))
+    rec = merged.get(name) or {}
+    nature = spec.get("nature") or rec.get("nature") or ""
+    evs = spec.get("evs") or rec.get("evs") or {}
+    moves = spec.get("moves") or [m for m, _pct in (rec.get("moves_usage") or [])[:4]]
+    return {"species": species, "item": item, "ability": ability,
+           "nature": nature, "evs": evs, "moves": moves}
+
+
+def team_to_showdown_export(names: list, sets: dict, merged: dict) -> str:
+    """The inverse of `custom_team_from_export`: a roster (this codebase's
+    names -- "Mega X" included) plus its `sets` overrides as pastable
+    Showdown export text -- "I need a way to export any of the teamsheets
+    ... maybe with a base64 encoded pokepaste in an excel cell". Round-trips
+    through `custom_team_from_export` (see tests) -- every field comes from
+    `resolve_export_fields`, so the paste always matches what this tool
+    actually simulated for that member (Mega-as-base+stone included).
+
+    EVs are this codebase's own house-rule points (flat +1/point, not
+    Showdown's real quartered EVs -- see stats.py) written under the
+    familiar `EVs:` label anyway, since that's the same number
+    `parse_showdown_export` reads back into `sets[name]["evs"]` -- the paste
+    is for THIS tool's own round-trip, not a claim that it's tournament-legal
+    on Showdown itself.
+    """
+    blocks = []
+    for name in names:
+        f = resolve_export_fields(name, sets.get(name), merged)
+        lines = [f"{f['species']} @ {f['item']}" if f["item"] else f["species"]]
+        if f["ability"]:
+            lines.append(f"Ability: {f['ability']}")
+        ev_parts = [f"{f['evs'][k]} {EV_LABEL[k]}" for k in EV_ORDER if f["evs"].get(k)]
+        if ev_parts:
+            lines.append("EVs: " + " / ".join(ev_parts))
+        if f["nature"]:
+            lines.append(f"{f['nature']} Nature")
+        for mv in f["moves"]:
+            lines.append(f"- {mv}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _default_item(rec: dict) -> str:
+    """First (highest-usage) recorded item for a merged-dataset record, or
+    "" if it has none on file -- the same fallback `combatants._build_combatant`
+    applies when no item override is given."""
+    items = rec.get("items_usage") or []
+    return items[0][0] if items else ""
+
+
+SPECIES_ALIASES = {
+    # Showdown's own dex names this forme "Floette-Eternal" (no item/stone
+    # involved -- it's its own species entry, unlike an ordinary Mega).
+    # This roster's usage data (mbsmogon.xlsx) instead calls the same
+    # Pokemon "Mega Floette" (see resolve_export_fields's comment: a Mega
+    # row with no recorded stone has nothing for the stone-holding-base
+    # lookup below to invert through), so a paste naming it "Floette-Eternal"
+    # needs a direct alias rather than going through that stone lookup.
+    "Floette-Eternal": "Mega Floette",
+    "Floette Eternal": "Mega Floette",
+}
+
+
 def custom_team_from_export(text: str, merged: dict) -> tuple[list, dict]:
     """Turn parsed Showdown-export mons into (roster_names, sets) in this
     codebase's convention: a base species holding its Mega Stone becomes the
@@ -292,9 +394,11 @@ def custom_team_from_export(text: str, merged: dict) -> tuple[list, dict]:
     names, sets = [], {}
     for mon in mons:
         species, item = mon["species"], mon["item"]
+        species = SPECIES_ALIASES.get(species, species)
         name = species
         if item:
-            for cand in (f"Mega {species}", f"Mega {species} X", f"Mega {species} Y"):
+            for cand in (f"Mega {species}", f"Mega {species} X", f"Mega {species} Y",
+                        f"Mega {species} Z"):
                 if cand in merged and find_mega_stone(cand, merged) == item:
                     name = cand
                     break
@@ -430,6 +534,21 @@ def build_merged_dataset():
     return merged, unresolved, moves, natures, typechart
 
 
+def is_mega_stone_name(item_name: str) -> bool:
+    """True if `item_name` LOOKS like a Mega Stone by its own naming
+    convention (ends in "ite"/"ite x"/"ite y"/"itex"/"itey", or the "Z"
+    alternate-forme suffix Regulation M-C introduced -- e.g. "Absolite Z",
+    "Garchompite Z", "Lucarionite Z" -- since the base name is already
+    claimed by that species' regular Mega). The one shared check, used by
+    `find_mega_stone`, `load_mbsmogon`'s duplicate-row resolution, and
+    `damage.py`'s Knock Off stone-exemption -- previously duplicated three
+    times, which is how the "Z" suffix went unrecognized in two of them.
+    """
+    low = item_name.lower()
+    return low.endswith(("ite", "ite x", "ite y", "itex", "itey",
+                         "ite z", "itez"))
+
+
 def find_mega_stone(name: str, merged: dict) -> str | None:
     """Return this Pokemon's Mega Stone if its usage data actually shows one.
 
@@ -444,9 +563,7 @@ def find_mega_stone(name: str, merged: dict) -> str | None:
     if not rec:
         return None
     for item, pct in rec.get("items_usage", []):
-        low = item.lower()
-        if (low.endswith("ite") or low.endswith("ite x") or low.endswith("ite y")
-                or low.endswith("itex") or low.endswith("itey")) and pct >= 50.0:
+        if is_mega_stone_name(item) and pct >= 50.0:
             return item
     return None
 
@@ -508,13 +625,15 @@ def build_generation_map(names, pokedex) -> dict:
 
 
 def base_form_name(name: str) -> str | None:
-    """'Mega Charizard Y' -> 'Charizard', 'Mega Skarmory' -> 'Skarmory'.
+    """'Mega Charizard Y' -> 'Charizard', 'Mega Skarmory' -> 'Skarmory',
+    'Mega Garchomp Z' -> 'Garchomp' (the "Z" alternate-forme suffix, e.g.
+    Regulation M-C's Mega Absol Z/Garchomp Z/Lucario Z, same pattern as X/Y).
     Returns None if `name` isn't a Mega pick."""
     if not name.startswith("Mega "):
         return None
     rest = name[5:]
     parts = rest.split()
-    if len(parts) >= 2 and parts[-1] in ("X", "Y"):
+    if len(parts) >= 2 and parts[-1] in ("X", "Y", "Z"):
         return " ".join(parts[:-1])
     return rest
 

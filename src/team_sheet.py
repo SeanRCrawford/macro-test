@@ -30,8 +30,47 @@ re-run run_search to see the effect. "analysis" is a snapshot computed at
 save time -- if you hand-edit "sets" afterwards it can go stale; re-run the
 analysis (Team Builder tab) to refresh it.
 """
+import base64
 import json
 from pathlib import Path
+
+# A single-cell, copy-pasteable stand-in for a whole team.json's {"pool",
+# "sets"} -- "export any of the teamsheets generated in the CLI's .xlsx to
+# the streamlit app ... maybe with a base64 encoded pokepaste in an excel
+# cell". Plain JSON in an Excel cell is fragile (quotes/newlines get mangled
+# by copy-paste and by Excel's own CSV-flavoured clipboard format); base64
+# survives that round-trip intact. The prefix makes a token unambiguous to
+# detect (as opposed to a stray base64-looking string) and versions the
+# format, so a future change to what's encoded is detectable instead of
+# silently misparsed.
+TEAMSHEET_TOKEN_PREFIX = "TSHEET1:"
+
+
+def encode_teamsheet(pool, sets=None):
+    """(pool, sets) -> a single-line `TEAMSHEET_TOKEN_PREFIX`-prefixed token,
+    safe to drop in one Excel/CSV cell or paste as one line anywhere."""
+    payload = {"pool": list(pool), "sets": sets or {}}
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return TEAMSHEET_TOKEN_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def decode_teamsheet(text):
+    """The inverse of `encode_teamsheet`: token text -> (pool, sets). Raises
+    ValueError if `text` isn't a recognised token (wrong/missing prefix,
+    invalid base64, or the decoded JSON isn't the expected shape) -- a
+    caller decides what to fall back to (raw pokepaste text, plain JSON)."""
+    text = text.strip()
+    if not text.startswith(TEAMSHEET_TOKEN_PREFIX):
+        raise ValueError("not a teamsheet token (missing prefix)")
+    b64 = text[len(TEAMSHEET_TOKEN_PREFIX):]
+    try:
+        raw = base64.urlsafe_b64decode(b64.encode("ascii"))
+        data = json.loads(raw)
+    except Exception as e:
+        raise ValueError(f"malformed teamsheet token: {e}") from e
+    if not isinstance(data, dict) or "pool" not in data:
+        raise ValueError("decoded teamsheet token has no 'pool'")
+    return list(data["pool"]), dict(data.get("sets") or {})
 
 
 def save_team(path, pool, sets=None, analysis=None):

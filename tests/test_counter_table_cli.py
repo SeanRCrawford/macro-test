@@ -93,6 +93,73 @@ class TestParseTypeLimits(unittest.TestCase):
         self.assertIn("integer", str(caught.exception))
 
 
+class TestStrictWeakTypesShorthand(unittest.TestCase):
+    """"a new type weakness limiter where I name specific types that may
+    have no more than 1 weakness, I can define types but default if I use
+    the argument is 'fire, water, fairy, steel, dark, ghost, ground', if I
+    don't use the argument then none are applied" -- a convenience
+    shorthand over the existing --type-limit mechanism, not a new
+    enforcement path (`_merge_strict_weak_types` folds it into the exact
+    same {type: {"max_weak": N}} shape `_parse_type_limits` already
+    produces)."""
+
+    def test_omitted_flag_resolves_to_no_types(self):
+        self.assertEqual(ct._resolve_strict_weak_types(None), [])
+
+    def test_bare_flag_resolves_to_the_default_list(self):
+        self.assertEqual(
+            ct._resolve_strict_weak_types("__DEFAULT__"),
+            ["Fire", "Water", "Fairy", "Steel", "Dark", "Ghost", "Ground"])
+
+    def test_an_explicit_list_is_used_verbatim(self):
+        self.assertEqual(ct._resolve_strict_weak_types("Fire,Ice"),
+                         ["Fire", "Ice"])
+
+    def test_an_unknown_type_is_rejected(self):
+        with self.assertRaises(SystemExit) as caught:
+            ct._resolve_strict_weak_types("Bogus")
+        self.assertIn("unknown type", str(caught.exception))
+
+    def test_no_types_leaves_type_limits_unchanged(self):
+        self.assertIsNone(ct._merge_strict_weak_types(None, []))
+        self.assertEqual(ct._merge_strict_weak_types({"Ice": {"max_net": 0}}, []),
+                         {"Ice": {"max_net": 0}})
+
+    def test_each_named_type_gets_max_weak_one(self):
+        self.assertEqual(ct._merge_strict_weak_types(None, ["Fire", "Water"]),
+                         {"Fire": {"max_weak": 1}, "Water": {"max_weak": 1}})
+
+    def test_an_explicit_type_limit_for_the_same_type_wins(self):
+        """More specific/intentional always beats the shorthand -- Fire's
+        own explicit --type-limit entry replaces the shorthand's bare
+        max_weak=1 outright, while Water (only named by the shorthand)
+        still gets it."""
+        merged = ct._merge_strict_weak_types(
+            {"Fire": {"max_weak": 2, "max_net": -1}}, ["Fire", "Water"])
+        self.assertEqual(merged, {"Fire": {"max_weak": 2, "max_net": -1},
+                                  "Water": {"max_weak": 1}})
+
+    def test_only_applies_to_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--strict-weak-types"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--strict-weak-types", msg)
+
+    def test_end_to_end_no_printed_core_has_two_weak_to_a_named_type(self):
+        """A real --multi-bring4 run with an explicit --strict-weak-types
+        list: every printed core's own weaknesses-by-type line must never
+        show 2+ for Fire (the only named type here)."""
+        msg, out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+             "--good-threshold", "0", "--min-enemies", "1",
+             "--strict-weak-types", "Fire", "--top", "30"])
+        self.assertIsNone(msg, out)
+        import re
+        fire_counts = re.findall(r"weaknesses by type: [^\n]*Fire (\d+)", out)
+        self.assertTrue(fire_counts, "expected at least one printed core")
+        self.assertTrue(all(int(c) <= 1 for c in fire_counts), fire_counts)
+
+
 class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
     """--max-weak/--type-limit only mean something under --multi-bring4 --
     same "reject loudly rather than silently ignore" convention every other
@@ -133,6 +200,150 @@ class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("--multi-bring4", msg)
 
+    def test_max_weak_types_without_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--max-weak-types", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--multi-bring4", msg)
+
+    def test_teamsheet_json_without_bring4_or_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--teamsheet-json", "-"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--teamsheet-json", msg)
+
+    def test_unique_items_without_bring4_or_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--unique-items"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--unique-items", msg)
+
+
+class TestCliAcceptsMirrorMatches(unittest.TestCase):
+    """"you should be allowed to bring the same pokemon as the enemy" --
+    the CLI used to hard-reject --deep/--bring4/--joint --partner whenever
+    --our/--partner shared a name with --vs, on top of counter_finder.py's
+    own (now-also-removed) ValueError. All three are legal VGC mirrors now;
+    only the pre-existing "unknown Pokemon" checks remain."""
+
+    def test_deep_accepts_a_shared_name(self):
+        msg, out = run_main(
+            ["--vs", "Kingambit,Sableye", "--our", "Kingambit,Garchomp",
+             "--deep"])
+        self.assertIsNone(msg, out)
+
+    def test_bring4_accepts_a_shared_name(self):
+        msg, out = run_main(
+            ["--vs", "Kingambit,Sableye", "--our",
+             "Kingambit,Garchomp,Incineroar,Gallade", "--bring4",
+             "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+
+    def test_joint_partner_accepts_a_shared_name(self):
+        msg, out = run_main(
+            ["--vs", "Kingambit,Sableye", "--joint", "--partner",
+             "Kingambit"])
+        self.assertIsNone(msg, out)
+
+
+class TestUniqueItemsFlag(unittest.TestCase):
+    """"make the item uniqueness an option, but by default items will
+    remain non-unique to reduce search time" -- `--unique-items` threads
+    into `enforce_item_clause` on `bring4_search`/`core_deep_dive`. Off by
+    default: a known real collision (Ninetales-Alola and Rampardos both
+    independently pick Life Orb against this fixture -- see
+    TestResolveUniqueItems in test_counter_finder.py) shows up in the
+    printed deep-dive "set: ..." line unless the flag is passed."""
+
+    # Exactly 4 names (not the padded-to-6 list this used to be) -- with
+    # only one possible bring-4 to rank, both colliding members are
+    # GUARANTEED to show up in the deep dive regardless of how any other
+    # mechanic changes shift bring-4 ranking; a padded-to-6 list left this
+    # fixture fragile to exactly that (a bring-4 search entirely avoiding
+    # Ninetales-Alola/Rampardos once other mechanics made a different
+    # 4-of-6 rank #1, silently no longer exercising the collision at all).
+    OUR6 = "Mega Gengar,Mega Alakazam,Ninetales-Alola,Rampardos"
+
+    def _set_line(self, out):
+        idx = out.find("set: ")
+        self.assertGreaterEqual(idx, 0, out)
+        return out[idx:out.find("\n", idx)]
+
+    def test_off_by_default_the_known_collision_still_shows(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Sableye,Ariados",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertIn("Ninetales-Alola @ Life Orb", line)
+        self.assertIn("Rampardos @ Life Orb", line)
+
+    def test_resolves_the_collision_in_bring4_deep_dive(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Sableye,Ariados",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--unique-items"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertIn("Ninetales-Alola @ Life Orb", line)
+        self.assertNotIn("Rampardos @ Life Orb", line)
+
+    def test_resolves_the_collision_in_multi_bring4_deep_dive_core(self):
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+                "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+                "--good-threshold", "0", "--min-enemies", "1",
+                "--deep-dive-core", "1", "--unique-items"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        # Whichever core was actually chosen, no two of its members may
+        # share an item under --unique-items.
+        items = [part.split(" @ ")[1] for part in
+                line[len("set: "):].split(", ")]
+        self.assertEqual(len(items), len(set(items)), line)
+
+
+class TestCoreSizesFlag(unittest.TestCase):
+    """"I would like to output the best 3-pokemon cores against each team"
+    -- `--core-sizes` (comma-separated, default "4,5,6", each 3-6) threads
+    into `multi_bring4_exhaustive`/`multi_bring4_beam`'s own `core_sizes`
+    parameter. `--bring4 --our` also accepts exactly 3 names now."""
+
+    def test_only_applies_to_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--core-sizes", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--core-sizes", msg)
+
+    def test_rejects_a_non_integer(self):
+        msg, _out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--core-sizes", "x"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--core-sizes", msg)
+
+    def test_rejects_a_size_outside_three_to_six(self):
+        msg, _out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--core-sizes", "2"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--core-sizes", msg)
+
+    def test_core_sizes_three_only_prints_three_pokemon_cores(self):
+        msg, out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+             "--good-threshold", "0", "--min-enemies", "1",
+             "--core-sizes", "3", "--top", "5"])
+        self.assertIsNone(msg, out)
+        # Every printed core's leading "(N)" rank marker must read "(3)".
+        import re
+        core_sizes_seen = set(re.findall(r"^\s+\d+ \((\d)\)", out, re.MULTILINE))
+        self.assertEqual(core_sizes_seen, {"3"})
+
+    def test_bring4_our_accepts_exactly_three_names(self):
+        msg, out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade", "--bring4",
+             "--vs", "Sableye,Ariados", "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("all 3 pairs drawn from your 3", out)
+
 
 class TestHelpDocumentsTheNewFlags(unittest.TestCase):
     """A flag missing from `--help` is one nobody can discover; a flag in
@@ -164,6 +375,21 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
     def test_xlsx_is_parsed(self):
         self.assertIn("--xlsx", self.help_text)
 
+    def test_core_sizes_is_parsed(self):
+        self.assertIn("--core-sizes", self.help_text)
+
+    def test_strict_weak_types_is_parsed(self):
+        self.assertIn("--strict-weak-types", self.help_text)
+
+    def test_unique_items_is_parsed(self):
+        self.assertIn("--unique-items", self.help_text)
+
+    def test_max_weak_types_is_parsed(self):
+        self.assertIn("--max-weak-types", self.help_text)
+
+    def test_teamsheet_json_is_parsed(self):
+        self.assertIn("--teamsheet-json", self.help_text)
+
     def test_every_flag_the_module_docstring_shows_is_parsed(self):
         import re
         docstring = ct.__doc__
@@ -180,7 +406,11 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.argv = ["--pool-size", "16", "--multi-bring4",
+        # pool-size 16 stopped reliably finding a core once Regulation M-C's
+        # very-high-Score additions started crowding the top of the
+        # candidate pool -- widened per the tool's own suggested remedy
+        # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
                    "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
                    "--top", "3"]
@@ -266,7 +496,11 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.argv = ["--pool-size", "16", "--multi-bring4",
+        # pool-size 16 stopped reliably finding a core once Regulation M-C's
+        # very-high-Score additions started crowding the top of the
+        # candidate pool -- widened per the tool's own suggested remedy
+        # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
                    "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
                    "--top", "3"]
@@ -308,7 +542,19 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
             self.assertIn("Cores", wb.sheetnames)
             ws = wb["Cores"]
             self.assertGreater(ws.max_row, 1, "header plus at least one core row")
-            self.assertEqual(ws.cell(row=1, column=1).value, "Core")
+            # A leading "#" rank column -- "the team number [must] be
+            # indexed in the xlsx export" -- with "Core" as the next column.
+            self.assertEqual(ws.cell(row=1, column=1).value, "#")
+            self.assertEqual(ws.cell(row=1, column=2).value, "Core")
+            self.assertEqual(ws.cell(row=2, column=1).value, 1)
+            # "Sets"/"Teamsheets" sheets carry every row's own item+moveset
+            # and a pastable pokepaste/token, not just the deep-dived one.
+            self.assertIn("Sets", wb.sheetnames)
+            self.assertIn("Teamsheets", wb.sheetnames)
+            ts = wb["Teamsheets"]
+            self.assertGreater(ts.max_row, 1)
+            token_col = [c.value for c in ts[1]].index("Teamsheet (base64)") + 1
+            self.assertTrue(ts.cell(row=2, column=token_col).value.startswith("TSHEET1:"))
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -324,15 +570,575 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
             self.assertIsNone(msg)
             from openpyxl import load_workbook
             wb = load_workbook(path)
-            for name in ("Cores", "Deep Dive Sets", "Deep Dive Summary",
-                        "Deep Dive Gameplans"):
+            # Ranked "Dive N ..." sheets (N = the rank actually dived) --
+            # several dives from one run each get their own trio instead of
+            # colliding on one fixed sheet name.
+            for name in ("Cores", "Dive 1 Sets", "Dive 1 Summary",
+                        "Dive 1 Gameplans"):
                 self.assertIn(name, wb.sheetnames)
-            gp = wb["Deep Dive Gameplans"]
+            gp = wb["Dive 1 Gameplans"]
             self.assertGreater(gp.max_row, 1)
             self.assertEqual(gp.cell(row=1, column=1).value, "Pair")
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+    def test_deep_dive_core_accepts_a_comma_separated_list(self):
+        """"I can deep mode run for promising teams 5, 85, and 16" --
+        several ranks in one run, each printed and each getting its own
+        xlsx sheet trio."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                self.argv + ["--deep-dive-core", "1,2", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            self.assertEqual(out.count("Deep dive:"), 2)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            for name in ("Dive 1 Sets", "Dive 1 Summary", "Dive 1 Gameplans",
+                        "Dive 2 Sets", "Dive 2 Summary", "Dive 2 Gameplans"):
+                self.assertIn(name, wb.sheetnames)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestDiveSheetsFormatting(unittest.TestCase):
+    """"in the deep dive exports in the xlsx: for gameplans, it would be
+    good to have an empty line between each match for legibility. In
+    summary it would be good to have a column to see what each pair loses
+    to." -- both purely in `_write_dive_sheets`, no new search machinery."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--top", "3"]
+
+    def test_gameplans_has_a_blank_row_between_matches(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, _out = run_main(
+                self.argv + ["--deep-dive-core", "1", "--xlsx", path])
+            self.assertIsNone(msg, _out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            gp = wb["Dive 1 Gameplans"]
+            rows = [[c.value for c in row] for row in gp.iter_rows(min_row=2)]
+            blank_rows = [r for r in rows if all(v is None for v in r)]
+            self.assertGreater(len(blank_rows), 0,
+                               "at least one blank separator row between matches")
+            # Every blank row is followed (or preceded) by real data -- not
+            # a trailing artifact of the sheet.
+            self.assertTrue(any(v is not None for v in rows[-1]) or len(rows) > 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_summary_has_a_loses_to_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, _out = run_main(
+                self.argv + ["--deep-dive-core", "1", "--xlsx", path])
+            self.assertIsNone(msg, _out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            summ = wb["Dive 1 Summary"]
+            header = [c.value for c in summ[1]]
+            self.assertIn("Loses To", header)
+            loses_col = header.index("Loses To") + 1
+            lost_col = header.index("Lost") + 1
+            # Every row's "Loses To" cell agrees with its own "Lost" count --
+            # same outcome == "loss" predicate behind both columns.
+            for row in range(2, summ.max_row + 1):
+                lost_count = summ.cell(row=row, column=lost_col).value
+                loses_to = summ.cell(row=row, column=loses_col).value or ""
+                names = [n for n in loses_to.split("; ") if n]
+                self.assertEqual(len(names), lost_count,
+                                 f"row {row}: {loses_to!r} vs Lost={lost_count}")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestDeepDiveCoreForBring4(unittest.TestCase):
+    """--deep-dive-core now also works with --bring4 (a fixed 6, one enemy
+    roster), not just --multi-bring4 -- "I want to be able to choose a
+    specific team to deep dive into" applies just as much to a bring-4 as
+    to a multi-bring4 core: `core_deep_dive` accepts any core, so this is
+    just wiring the Nth-ranked `bring4_rows` entry into it, the same way
+    `--multi-bring4` already wires its own Nth-ranked core."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+                   "Mega Alakazam,Sharpedo",
+                   "--bring4", "--vs", "Sableye,Ariados"]
+
+    def test_deep_dive_core_prints_the_aggregate_and_gameplans(self):
+        msg, out = run_main(self.argv + ["--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Deep dive:", out)
+        self.assertIn("OVERALL, every pair vs every enemy", out)
+        self.assertIn("tw-safe", out)
+        self.assertIn("pr-safe", out)
+        self.assertRegex(out, r"T\d .+ -> .+: .+ \d+-\d+-\d+%")
+
+    def test_deep_dive_core_out_of_range_is_rejected(self):
+        msg, _out = run_main(self.argv + ["--deep-dive-core", "999"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--deep-dive-core", msg)
+
+    def test_deep_dive_core_is_not_computed_by_default(self):
+        _msg, out = run_main(self.argv)
+        self.assertNotIn("Deep dive:", out)
+
+    def test_deep_dive_core_without_bring4_or_multi_bring4_is_still_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--deep-dive-core", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--deep-dive-core", msg)
+
+
+class TestBring4SixPairExportColumns(unittest.TestCase):
+    """"I would like the csv/xlsx export from the CLI to show the basic
+    details of the 6 pairs for each bring4 (total, 3rd best, 4th best, and
+    worst wins, wins under Tailwind ..., under protect safe)" --
+    `bring4_pair_depth`/`enemy_has_real_tailwind`, threaded into --bring4's
+    own CSV export."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+                   "Mega Alakazam,Sharpedo",
+                   "--bring4", "--vs", "Sableye,Ariados"]
+
+    def test_csv_export_has_the_six_pair_depth_columns(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertTrue(rows)
+            header = rows[0].keys()
+            for col in ("pairs beaten total", "pairs beaten 3rd best",
+                       "pairs beaten 4th best", "pairs beaten worst",
+                       "enemy has real tailwind",
+                       "pairs tailwind safe total",
+                       "pairs protect safe total"):
+                self.assertIn(col, header)
+            # Sableye+Ariados carries no real Tailwind user.
+            self.assertEqual(rows[0]["enemy has real tailwind"], "False")
+        finally:
+            os.unlink(path)
+
+    def test_enemy_with_a_real_tailwind_setter_is_flagged_true(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+                   "Mega Alakazam,Sharpedo",
+                   "--bring4", "--vs", "Sableye,Talonflame", "--csv", path]
+            msg, _out = run_main(argv)
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual(rows[0]["enemy has real tailwind"], "True")
+        finally:
+            os.unlink(path)
+
+    def test_csv_export_has_a_teamsheet_base64_column_that_decodes(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertIn("teamsheet base64", rows[0])
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(rows[0]["teamsheet base64"])
+            self.assertTrue(pool)
+        finally:
+            os.unlink(path)
+
+
+class TestMultiBring4SixPairExportColumns(unittest.TestCase):
+    """The same six-pair depth columns, for --multi-bring4's CSV AND xlsx
+    export (one core row can carry several enemies' worth of them)."""
+
+    @classmethod
+    def setUpClass(cls):
+        # pool-size 16 stopped reliably finding a core once Regulation M-C's
+        # very-high-Score additions (Mega Garchomp Z in particular) started
+        # crowding the top of the candidate pool -- widened per the tool's
+        # own suggested remedy ("widen the pool") rather than tuning Score
+        # estimates to dodge a small, exhaustive-search fixture; this test
+        # only cares that the export columns exist, not which core is found.
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--top", "3"]
+
+    def test_csv_export_has_per_enemy_six_pair_depth_columns(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            for col in ("enemy 1 pairs beaten total",
+                       "enemy 1 pairs beaten 3rd best",
+                       "enemy 1 pairs beaten 4th best",
+                       "enemy 1 pairs beaten worst",
+                       "enemy 1 has real tailwind",
+                       "enemy 1 pairs tailwind safe total",
+                       "enemy 1 pairs protect safe total"):
+                self.assertIn(col, header)
+        finally:
+            os.unlink(path)
+
+    def test_csv_export_has_a_per_enemy_teamsheet_base64_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertIn("enemy 1 teamsheet base64", rows[0])
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(rows[0]["enemy 1 teamsheet base64"])
+            self.assertTrue(pool)
+        finally:
+            os.unlink(path)
+
+    def test_xlsx_export_has_per_enemy_six_pair_depth_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb["Cores"]
+            header = [ws.cell(row=1, column=c).value
+                     for c in range(1, ws.max_column + 1)]
+            self.assertEqual(header[0], "#")
+            for col in ("Enemy 1 pairs beaten total",
+                       "Enemy 1 pairs beaten 3rd best",
+                       "Enemy 1 pairs beaten 4th best",
+                       "Enemy 1 pairs beaten worst",
+                       "Enemy 1 has real Tailwind",
+                       "Enemy 1 pairs Tailwind-safe total",
+                       "Enemy 1 pairs protect-safe total"):
+                self.assertIn(col, header)
+            # Whimsicott is a real Tailwind setter in this fixture's roster.
+            tw_col = header.index("Enemy 1 has real Tailwind") + 1
+            self.assertEqual(ws.cell(row=2, column=tw_col).value, True)
+            self.assertEqual(ws.cell(row=2, column=1).value, 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_xlsx_export_has_sets_and_teamsheets_sheets(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertIn("Sets", wb.sheetnames)
+            self.assertIn("Teamsheets", wb.sheetnames)
+            sets_ws = wb["Sets"]
+            self.assertGreater(sets_ws.max_row, 1)
+            self.assertEqual(
+                [c.value for c in sets_ws[1]],
+                ["#", "Team", "Pokemon", "Item", "Ability", "Nature", "EVs",
+                 "Moves", "Move usage %"])
+            ts = wb["Teamsheets"]
+            token_col = [c.value for c in ts[1]].index("Teamsheet (base64)") + 1
+            token = ts.cell(row=2, column=token_col).value
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(token)
+            self.assertTrue(pool)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestMaxWeakTypesEndToEnd(unittest.TestCase):
+    """"I would like to be able to select a cap for the number of types
+    that have 2 weaknesses, such as no more than 3 types that have 2
+    members weak to it. Display this measure in the export.\""""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "16", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--good-threshold", "30", "--max-weak", "6", "--top", "3"]
+
+    def test_types_with_2plus_weak_members_line_is_printed(self):
+        msg, out = run_main(self.argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("types with 2+ weak members:", out)
+
+    def test_a_tight_cap_actually_changes_the_printed_result(self):
+        _msg1, out_uncapped = run_main(self.argv)
+        _msg2, out_capped = run_main(self.argv + ["--max-weak-types", "1"])
+        self.assertNotEqual(out_uncapped, out_capped)
+
+    def test_csv_export_has_the_types_with_2plus_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("types with 2+ weak members", header)
+        finally:
+            os.unlink(path)
+
+    def test_xlsx_export_has_the_types_with_2plus_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb["Cores"]
+            header = [ws.cell(row=1, column=c).value
+                     for c in range(1, ws.max_column + 1)]
+            self.assertIn("Types with 2+ weak members", header)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestTeamsheetJsonExport(unittest.TestCase):
+    """"I am primarily using the CLI for counter_table.py and then checking
+    results in the streamlit app, so the export in the CLI needs to be
+    able to export to the streamlit app, whether through a paste or
+    otherwise" -- `--teamsheet-json PATH` (or `-` for stdout) writes
+    exactly the JSON shape the app's Team Builder tab reads/writes."""
+
+    def test_bring4_stdout_prints_a_teamsheet_builder_can_load(self):
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola",
+               "--bring4", "--vs", "Sableye,Ariados", "--teamsheet-json", "-"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("Teamsheet JSON", out)
+        self.assertIn("paste into the Streamlit app", out)
+        start = out.index("{")
+        end = out.rindex("}") + 1
+        import json
+        payload = json.loads(out[start:end])
+        self.assertEqual(set(payload["pool"]),
+                         {"Kingambit", "Dragapult", "Whimsicott",
+                          "Ninetales-Alola"})
+        for name in payload["pool"]:
+            self.assertIn("item", payload["sets"][name])
+            self.assertIn("moves", payload["sets"][name])
+
+    def test_bring4_defaults_to_the_top_result_without_deep_dive_core(self):
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+               "Mega Alakazam,Sharpedo",
+               "--bring4", "--vs", "Sableye,Ariados"]
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".json", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(argv + ["--teamsheet-json", path])
+            self.assertIsNone(msg)
+            import json
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            self.assertEqual(len(payload["pool"]), 4)
+        finally:
+            os.unlink(path)
+
+    def test_multi_bring4_writes_a_loadable_file(self):
+        argv = ["--pool-size", "16", "--multi-bring4",
+               "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+               "--good-threshold", "30"]
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".json", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, out = run_main(argv + ["--teamsheet-json", path])
+            self.assertIsNone(msg, out)
+            import json
+            with open(path, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            self.assertTrue(payload["pool"])
+            self.assertEqual(set(payload["pool"]), set(payload["sets"]))
+        finally:
+            os.unlink(path)
+
+    def test_reuses_the_deep_dive_core_pick_rather_than_recomputing(self):
+        """Passing --deep-dive-core alongside --teamsheet-json must export
+        THAT SAME core, not silently fall back to the top result."""
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola,"
+               "Mega Alakazam,Sharpedo",
+               "--bring4", "--vs", "Sableye,Ariados",
+               "--deep-dive-core", "2", "--teamsheet-json", "-"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        deep_dive_start = out.index("Deep dive:")
+        teamsheet_start = out.index("Teamsheet JSON")
+        core_line = out[deep_dive_start:teamsheet_start].splitlines()[0]
+        core_names = set(n.strip() for n in
+                         core_line.replace("Deep dive:", "").split("/"))
+        import json
+        start = out.index("{", teamsheet_start)
+        end = out.rindex("}") + 1
+        payload = json.loads(out[start:end])
+        self.assertEqual(set(payload["pool"]), core_names)
+
+    def test_multi_bring4_with_no_core_found_errors_cleanly(self):
+        argv = ["--pool-size", "16", "--multi-bring4",
+               "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+               "--max-weak", "0", "--max-megas", "0",
+               "--teamsheet-json", "-"]
+        msg, _out = run_main(argv)
+        self.assertIsNotNone(msg)
+        self.assertIn("--teamsheet-json", msg)
+
+
+class TestCleanWinScoring(unittest.TestCase):
+    """"I would consider losing 1 pokemon and taking a lot of damage and
+    KOing 2 enemies as far inferior to KOing the enemy without taking
+    damage, given the range of possible outcomes. There should be a way to
+    score this to reflect this dynamic." `pairs_clean_win_total` (CLI
+    print, CSV, --bring4/--multi-bring4 CSV+xlsx, --deep-dive-core) is
+    that score."""
+
+    def test_joint_print_shows_the_clean_column(self):
+        msg, out = run_main(["--joint", "--vs", "Sableye,Ariados",
+                             "--pool-size", "10", "--top", "3"])
+        self.assertIsNone(msg, out)
+        self.assertIn("clean", out)
+
+    def test_joint_csv_export_has_the_clean_win_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(["--joint", "--vs", "Sableye,Ariados",
+                                  "--pool-size", "10", "--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("pairs clean win total", header)
+        finally:
+            os.unlink(path)
+
+    def test_bring4_csv_has_the_6_pairs_clean_win_column(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            argv = ["--our",
+                   "Kingambit,Dragapult,Whimsicott,Ninetales-Alola",
+                   "--bring4", "--vs", "Sableye,Ariados", "--csv", path]
+            msg, _out = run_main(argv)
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("pairs clean win total", header)
+        finally:
+            os.unlink(path)
+
+    def test_multi_bring4_csv_and_xlsx_have_the_clean_win_column(self):
+        import csv
+        import tempfile
+        argv = ["--pool-size", "16", "--multi-bring4",
+               "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+               "--good-threshold", "30", "--max-weak", "6"]
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            csv_path = f.name
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            xlsx_path = f.name
+        os.unlink(xlsx_path)
+        try:
+            msg, _out = run_main(argv + ["--csv", csv_path])
+            self.assertIsNone(msg)
+            with open(csv_path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("enemy 1 pairs clean win total", header)
+
+            msg, out = run_main(argv + ["--xlsx", xlsx_path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(xlsx_path)
+            ws = wb["Cores"]
+            xlsx_header = [ws.cell(row=1, column=c).value
+                          for c in range(1, ws.max_column + 1)]
+            self.assertIn("Enemy 1 pairs clean win total", xlsx_header)
+        finally:
+            os.unlink(csv_path)
+            if os.path.exists(xlsx_path):
+                os.unlink(xlsx_path)
+
+    def test_deep_dive_core_prints_the_clean_win_figure(self):
+        argv = ["--our",
+               "Kingambit,Dragapult,Whimsicott,Ninetales-Alola",
+               "--bring4", "--vs", "Sableye,Ariados",
+               "--deep-dive-core", "1"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("clean win", out)
 
 
 class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
@@ -373,7 +1179,7 @@ class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
             "name": "Gallade", "item": "Life Orb",
             "pairs_swept": 1, "pairs_traded": 0, "pairs_lost": 1,
             "pairs_no_ko": 0, "pairs_tailwind_safe": 1, "pairs_protect_safe": 1,
-            "pairs_total": 2,
+            "pairs_clean_win_total": 2.0, "pairs_total": 2,
             "detail": {
                 ("Kingambit", "Basculegion"): {
                     "outcome": "sweep", "turns_used": 1,
@@ -415,7 +1221,7 @@ class TestDetailPreviewsShowTheWorstMatchupsFirst(unittest.TestCase):
         }
         summary = {"pairs_total": 2, "pairs_swept": 1, "pairs_traded": 0,
                   "pairs_lost": 1, "pairs_no_ko": 0, "pairs_tailwind_safe": 1,
-                  "pairs_protect_safe": 1}
+                  "pairs_protect_safe": 1, "pairs_clean_win_total": 2.0}
         buf = io.StringIO()
         with redirect_stdout(buf):
             ct._print_deep("Gallade", "Ninetales-Alola", "Life Orb", None,
@@ -474,6 +1280,600 @@ class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
              "--vs-team", "Big 6"])
         self.assertIsNotNone(msg)
         self.assertIn("needs at least 2 Pokemon", msg)
+
+
+class TestVsAllTeamsFlag(unittest.TestCase):
+    """--vs-all-teams: run --multi-bring4 against EVERY saved team
+    (species_data.load_teams's merged teams.csv + data/teams/ +
+    data/my_teams/ dict, already loaded as W["teams"]) instead of naming
+    each one with a repeated --vs-team."""
+
+    def test_resolves_to_every_saved_team(self):
+        from _harness import load_world
+        W = load_world()
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-all-teams", "--pool-size", "10",
+             "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn(f"vs {len(W['teams'])} enemy teams", out)
+        self.assertEqual(out.count("-- top pairs:"), len(W["teams"]),
+                         "one 'Enemy N (...) -- top pairs:' header per saved team")
+
+    def test_mutually_exclusive_with_vs_team(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-all-teams", "--vs-team", "Rain"])
+        self.assertIsNotNone(msg)
+        self.assertIn("can't be combined with --vs-team", msg)
+
+    def test_requires_multi_bring4(self):
+        msg, _out = run_main(
+            ["--bring4", "--our", "Garchomp,Hydreigon,Kingambit,Whimsicott",
+             "--vs-all-teams"])
+        self.assertIsNotNone(msg)
+        self.assertIn("requires --multi-bring4", msg)
+
+
+class TestTurnsAppliesToMultiBring4(unittest.TestCase):
+    """`multi_bring4_coverage` already accepted and threaded a `turns`
+    parameter (default 2) -- the CLI's own validation was the only thing
+    blocking --turns from --multi-bring4."""
+
+    def test_no_longer_rejected(self):
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "8", "--top", "1", "--turns", "4"])
+        self.assertIsNone(msg, out)
+
+    def test_still_rejected_outside_joint_deep_bring4_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--turns", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--turns only applies to", msg)
+
+
+class TestJobsAppliesToMultiBring4(unittest.TestCase):
+    """"Is there a way to optionally devote more resources to
+    counter_table.py for parallel calculations, such as with the --jobs
+    argument in [generate_]overnight?" -- --jobs mirrors search_teams.py's
+    own flag: N enemy rosters' pool-wide pair searches run in parallel
+    worker processes instead of one after another. Only meaningful for
+    --multi-bring4, since that's the only mode with more than one such
+    independent search to split across workers."""
+
+    def test_still_rejected_outside_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--jobs", "2"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--jobs only applies to --multi-bring4", msg)
+
+    def test_jobs_1_explicit_on_multi_bring4_still_works(self):
+        """--jobs defaults to 1 -- passing it explicitly on --multi-bring4
+        must behave exactly like the default (serial, no process pool)."""
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "8", "--top", "1", "--no-prompt", "--jobs", "1"])
+        self.assertIsNone(msg, out)
+
+    def test_a_multi_bring4_run_with_jobs_2_produces_the_same_result_as_serial(self):
+        """Parallelism is purely a speed knob -- everything but the extra
+        "workers" progress line (only --jobs > 1 prints that) must match."""
+        args = ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                "--vs-team", "Garchomp,Incineroar", "--pool-size", "8",
+                "--top", "3", "--no-prompt"]
+        msg_serial, out_serial = run_main(args)
+        msg_parallel, out_parallel = run_main(args + ["--jobs", "2"])
+        self.assertIsNone(msg_serial, out_serial)
+        self.assertIsNone(msg_parallel, out_parallel)
+        strip_workers = lambda s: "\n".join(   # noqa: E731
+            l for l in s.splitlines() if not l.startswith("workers  :")
+            and not l.startswith("WARNING  :"))
+        self.assertEqual(strip_workers(out_serial), strip_workers(out_parallel))
+
+    def test_jobs_2_prints_a_workers_line(self):
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--vs-team", "Garchomp,Incineroar", "--pool-size", "8",
+             "--top", "1", "--no-prompt", "--jobs", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("workers  : 2 of", out)
+
+    def test_jobs_2_with_only_one_vs_team_prints_no_workers_line(self):
+        """Nothing to split across workers with a single enemy roster --
+        the CLI's own "> 1 enemy" guard (mirrors multi_bring4_coverage's
+        own len(target_name_lists) > 1 fallback) keeps the workers line
+        from claiming parallelism that never actually ran."""
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "8", "--top", "1", "--no-prompt", "--jobs", "2"])
+        self.assertIsNone(msg, out)
+        self.assertNotIn("workers  :", out)
+
+
+class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
+    """"I need a way, both in the counter_table.py and the streamlit app, to
+    run a bring4 (4-6) vs only ONE named TEAM (--vs-team)" -- --bring4 now
+    accepts a single --vs-team (a saved team.csv row/pokepaste, resolved
+    the same way --multi-bring4's own --vs-team already is) as an
+    alternative to spelling the roster out with --vs."""
+
+    OUR = ("Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+          "Mega Alakazam")
+
+    def test_a_saved_team_name_resolves_to_its_full_roster(self):
+        from _harness import load_world
+        W = load_world()
+        self.assertIn("Rain", W["teams"])
+        msg, out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs-team", "Rain",
+             "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+        for name in W["teams"]["Rain"]:
+            self.assertIn(name, out)
+
+    def test_a_raw_comma_list_still_works_as_a_single_vs_team(self):
+        msg, out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs-team",
+             "Archaludon,Grimmsnarl,Mega Metagross,Pelipper", "--no-prompt",
+             "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Archaludon", out)
+        self.assertIn("Grimmsnarl", out)
+
+    def test_vs_and_vs_team_together_is_rejected(self):
+        msg, _out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs", "Kingambit,Basculegion",
+             "--vs-team", "Rain"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--vs-team", msg)
+
+    def test_neither_vs_nor_vs_team_is_rejected(self):
+        msg, _out = run_main(["--our", self.OUR, "--bring4"])
+        self.assertIsNotNone(msg)
+
+    def test_more_than_one_vs_team_is_rejected(self):
+        msg, _out = run_main(
+            ["--our", self.OUR, "--bring4", "--vs-team", "Rain", "--vs-team",
+             "Big 6"])
+        self.assertIsNotNone(msg)
+        self.assertIn("at most one --vs-team", msg)
+
+    def test_xlsx_export_works_with_bring4(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, _out = run_main(
+                ["--our", self.OUR, "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertIn("Bring-4s", wb.sheetnames)
+            self.assertIn("Sets", wb.sheetnames)
+            self.assertIn("Teamsheets", wb.sheetnames)
+            ws = wb["Bring-4s"]
+            self.assertEqual(ws.cell(row=1, column=1).value, "#")
+            self.assertEqual(ws.cell(row=2, column=1).value, 1)
+            ts = wb["Teamsheets"]
+            token_col = [c.value for c in ts[1]].index("Teamsheet (base64)") + 1
+            token = ts.cell(row=2, column=token_col).value
+            self.assertTrue(token.startswith("TSHEET1:"))
+            from team_sheet import decode_teamsheet
+            pool, _sets = decode_teamsheet(token)
+            self.assertTrue(pool)  # decodes to a real, non-empty roster
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestXlsxNewSummaryColumns(unittest.TestCase):
+    """"I would like the best and third best pair under tailwind and under
+    enemy protect. I would also like to see best and third best number of
+    pairs beaten without having either of own pair faint. I also want new
+    columns that have Avg Wins/90, Avg Wins under tailwind/90, Avg wins
+    under protect/90, Clean wins /90, and the average score ... of the
+    team" -- both `--bring4`'s "Bring-4s" sheet and `--multi-bring4`'s
+    "Cores" sheet must carry every one of these."""
+
+    NEW_COLUMNS = ("Average Score", "Avg Wins/90", "Avg Wins under Tailwind/90",
+                  "Avg Wins under Protect/90", "Clean wins/90")
+    NEW_PER_ENEMY_SUFFIXES = ("pairs Tailwind-safe best", "pairs Tailwind-safe 3rd best",
+                              "pairs protect-safe best", "pairs protect-safe 3rd best",
+                              "pairs beaten without fainting best",
+                              "pairs beaten without fainting 3rd best")
+
+    def test_bring4_xlsx_has_every_new_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            for col in self.NEW_COLUMNS:
+                self.assertIn(col, header)
+            for suffix in self.NEW_PER_ENEMY_SUFFIXES:
+                self.assertIn(suffix, header)
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            for col in self.NEW_COLUMNS:
+                self.assertIsNotNone(row2[col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_xlsx_has_every_new_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            for col in self.NEW_COLUMNS:
+                self.assertIn(col, header)
+            for suffix in self.NEW_PER_ENEMY_SUFFIXES:
+                self.assertTrue(any(h and h.endswith(suffix) for h in header),
+                                f"no per-enemy column ending in {suffix!r}")
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            for col in self.NEW_COLUMNS:
+                self.assertIsNotNone(row2[col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_avg_wins_per_90_matches_a_from_scratch_recomputation(self):
+        """Cross-check the xlsx cell against `bring4_pair_depth`/`_per_90`
+        computed directly from the same search results, not just "is it a
+        number" -- catches a wrong column, a wrong `_per_90` scale, or an
+        averaging-across-the-wrong-things bug."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "1"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            from counter_finder import bring4_search, bring4_pair_depth
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            from _harness import load_world
+            W = load_world()
+            merged, moves = W["merged"], W["moves"]
+            natures, typechart = W["natures"], W["typechart"]
+            our6 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
+                   "Whimsicott", "Mega Alakazam"]
+            targets = list(W["teams"]["Rain"])
+            _pair_rows, bring4_rows = bring4_search(
+                our6, targets, merged, moves, natures, typechart, good_threshold=0.0)
+            depth = bring4_pair_depth(bring4_rows[0])
+            n_pairs, pt = len(bring4_rows[0]["pair_rows"]), depth["pairs_total"]
+            expected = round(depth["beaten_total"] / (n_pairs * pt) * 90, 1)
+            self.assertAlmostEqual(row2["Avg Wins/90"], expected, places=1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestXlsxMegaUsedAndSixPairsColumns(unittest.TestCase):
+    """"In the xlsx where use of a single mega is enforced when both are
+    brought, note which one is used in the cores sheet and the Summary/
+    Gameplans sheet. Also keep a note of the 6 pairs for each enemy team
+    and their overall performance along with the full summary." -- the
+    "Bring-4s"/"Cores" sheets get a "Mega used" column plus a per-bring "6
+    pairs" note; the "Dive N Summary"/"Dive N Gameplans" sheets get a
+    "Mega Used" column."""
+
+    def test_bring4_xlsx_has_mega_used_and_six_pairs_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            self.assertIn("Mega used", header)
+            self.assertIn("6 pairs", header)
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            self.assertTrue(row2["6 pairs"])
+            self.assertIn("+", row2["6 pairs"])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_xlsx_has_per_enemy_mega_used_and_six_pairs_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            self.assertTrue(any(h and h.endswith("mega used") for h in header))
+            self.assertTrue(any(h and h.endswith("6 pairs") for h in header))
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            pairs_col = next(h for h in header if h.endswith("6 pairs"))
+            self.assertTrue(row2[pairs_col])
+            self.assertIn("+", row2[pairs_col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_dive_summary_and_gameplans_sheets_have_mega_used_column(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "1",
+                 "--deep-dive-core", "1"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            summary_header = [c.value for c in wb["Dive 1 Summary"][1]]
+            gameplans_header = [c.value for c in wb["Dive 1 Gameplans"][1]]
+            self.assertIn("Mega Used", summary_header)
+            self.assertIn("Mega Used", gameplans_header)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestXlsxSum3rdBestAndLeadBackupColumns(unittest.TestCase):
+    """"I would also like to see sum-of 3rd best pair for each of the
+    relevant metrics across every enemy team in the summary .xlsx" -- the
+    "Cores" sheet gets 4 core-level "Sum 3rd Best ..." columns. "Is there a
+    way to assess the best lead vs a given enemy team? Just the best pair +
+    their backup" -- the "Bring-4s"/"Cores" sheets get "Lead"/"Backup"
+    columns, and --bring4's own Stage-1 pair table gets an "own-tw" column."""
+
+    SUM_3RD_COLUMNS = ("Sum 3rd Best Pairs Beaten", "Sum 3rd Best Tailwind-Safe",
+                      "Sum 3rd Best Protect-Safe", "Sum 3rd Best No-Faint")
+
+    def test_multi_bring4_xlsx_has_sum_3rd_best_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            for col in self.SUM_3RD_COLUMNS:
+                self.assertIn(col, header)
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            for col in self.SUM_3RD_COLUMNS:
+                self.assertIsInstance(row2[col], int)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_sum_3rd_beaten_matches_a_from_scratch_recomputation(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "1", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            from counter_finder import (bring4_pair_depth, multi_bring4_coverage,
+                                        multi_bring4_exhaustive)
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Cores"][1]]
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            from _harness import load_world
+            W = load_world()
+            merged, moves = W["merged"], W["moves"]
+            natures, typechart = W["natures"], W["typechart"]
+            pool = [n for n in W["merged"] if n not in ("Kingambit", "Basculegion",
+                                                         "Garchomp", "Incineroar")]
+            # Same --pool-size 20 narrowing `main()` itself applies -- reuse
+            # the SAME candidate names the CLI run actually used (its own
+            # "Core" cell), not a fresh, potentially-different top-20 cut.
+            core = row2["Core"].split(" / ")
+            targets = [["Kingambit", "Basculegion"], ["Garchomp", "Incineroar"]]
+            coverage = multi_bring4_coverage(
+                core, targets, merged, moves, natures, typechart,
+                good_threshold=0.0, min_enemies=1)
+            rows = multi_bring4_exhaustive(coverage, good_threshold=0.0,
+                                           core_sizes=(len(core),))
+            self.assertEqual(len(rows), 1)
+            expected = sum(
+                (bring4_pair_depth(pe["best_bring4_row"])["beaten_3rd"] or 0)
+                for pe in rows[0]["per_enemy"])
+            self.assertEqual(row2["Sum 3rd Best Pairs Beaten"], expected)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bring4_xlsx_has_lead_and_backup_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            self.assertIn("Lead", header)
+            self.assertIn("Backup", header)
+            row2 = {h: c.value for h, c in zip(header, wb["Bring-4s"][2])}
+            self.assertIn("+", row2["Lead"])
+            bring4_names = set(row2["Bring-4"].split(" / "))
+            lead_names = set(row2["Lead"].split(" + "))
+            backup_names = set(row2["Backup"].split(" + "))
+            self.assertTrue(lead_names.issubset(bring4_names))
+            self.assertTrue(backup_names.issubset(bring4_names))
+            self.assertEqual(lead_names | backup_names, bring4_names)
+            self.assertEqual(lead_names & backup_names, set())
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_multi_bring4_xlsx_has_per_enemy_lead_and_backup_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            self.assertTrue(any(h and h.endswith("lead") for h in header))
+            self.assertTrue(any(h and h.endswith("backup") for h in header))
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            lead_col = next(h for h in header if h.endswith("lead"))
+            self.assertIn("+", row2[lead_col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bring4_stage1_table_shows_an_own_tw_column(self):
+        msg, out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                      "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+             "--no-prompt", "--top", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("own-tw", out)
+
+
+class TestTailwindFocusFlag(unittest.TestCase):
+    """"Is it possible to create a lighter weight counter_table.py that
+    just checks for teams by running tailwind setter ... + attacker ...
+    Bearing in mind that just outputting a lot of spread damage is very
+    good." -- `--tailwind-focus` (--multi-bring4 only): adds any real
+    Tailwind setter --pool-size's own cut left out (never removing an
+    existing candidate), then re-sorts the final cores by total real
+    damage output instead of the usual win/loss-first order."""
+
+    def test_only_applies_to_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--tailwind-focus"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--tailwind-focus", msg)
+
+    def test_flag_is_parsed(self):
+        _msg, out = run_main(["--help"])
+        self.assertIn("--tailwind-focus", out)
+
+    def test_real_run_adds_setters_and_reorders_by_damage_output(self):
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+             "--good-threshold", "0", "--min-enemies", "1", "--top", "2",
+             "--no-prompt", "--tailwind-focus"])
+        self.assertIsNone(msg, out)
+        self.assertIn("tailwind-focus:", out)
+        self.assertIn("tailwind-focus damage-output order", out)
+        # "Multi-bring4 search: N Pokemon vs ..." -- N must be >= the
+        # --pool-size cut (20), never smaller: additive, not restrictive.
+        pool_line = next(l for l in out.splitlines()
+                         if l.startswith("Multi-bring4 search:"))
+        pool_size = int(pool_line.split()[2])
+        self.assertGreaterEqual(pool_size, 20)
+
+    def test_xlsx_has_total_damage_output_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1", "--top", "2",
+                 "--no-prompt", "--tailwind-focus", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            self.assertIn("Total Damage Output", header)
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            self.assertIsInstance(row2["Total Damage Output"], (int, float))
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_bring4_xlsx_also_carries_the_column_regardless_of_flag(self):
+        """The "Total Damage Output" column on --bring4's own "Bring-4s"
+        sheet isn't gated by --tailwind-focus (that flag only applies to
+        --multi-bring4) -- it's always there, same as the other metrics
+        added alongside it this session."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                 "--no-prompt", "--xlsx", path, "--top", "2"])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Bring-4s"][1]]
+            self.assertIn("Total Damage Output", header)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):

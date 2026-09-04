@@ -136,6 +136,17 @@ def optimised_items(names, world, enemy_names=()):
 # (which is a valid item, other choice items are not)"*.
 BANNED_ITEMS = frozenset({"Assault Vest", "Choice Band", "Choice Specs"})
 
+# Regulation M-C additions to the searchable pool: Rillaboom, Baxcalibur,
+# and the three Mega-Z formes (Mega Absol Z, Mega Garchomp Z, Mega Lucario
+# Z -- resolved via the existing "Mega X Y" 3-token branch in
+# `species_data.resolve_species`, now also matching a trailing "Z" the same
+# way it already matches "X"/"Y"). No banned item above needed to change for
+# them -- their recorded sets (`data/mbsmogon.xlsx`) don't carry any of
+# Assault Vest/Choice Band/Choice Specs. There is no other regulation-tag
+# schema in this codebase (see `lead_scan.py`'s own "Regulation MB" item-
+# legality comments for the only other enforcement point) -- this is a plain
+# documentation note, not something any code reads.
+
 
 def build_position(our4, enemy4, world, our_sets=None, enemy_sets=None,
                    optimise=True, enemy_mega=None):

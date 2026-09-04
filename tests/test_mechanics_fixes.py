@@ -631,5 +631,277 @@ class TestSuckerPunchFailsIfTheTargetAlreadyMoved(unittest.TestCase):
         self.assertNotIn("for o in ordered", block)
 
 
+class TestContraryReversesStatChanges(unittest.TestCase):
+    """"Mega Staraptor's contrary means that Close Combat raises its defence
+    and special defence rather than lower it." `apply_boosts` had no
+    Contrary handling at all -- a self-inflicted drop (Close Combat's own
+    -1 Def/-1 SpD) went through completely unreversed. `apply_intimidate`
+    is a SEPARATE, hand-rolled implementation for the switch-in case and
+    needed the same fix independently; auditing it surfaced a second,
+    unrelated bug in the same function -- Defiant's own Intimidate response
+    was a plain +1 Attack instead of the real +2 ("sharply raised") its
+    sibling in `apply_boosts` already got right."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _staraptor(self, ability="Contrary"):
+        from combatants import make_combatant
+        return make_combatant("Mega Staraptor", self.W["merged"], self.W["natures"],
+                              ability=ability)
+
+    def test_mega_staraptor_really_can_carry_contrary(self):
+        abilities = dict(self.W["merged"]["Mega Staraptor"]["abilities_usage"])
+        self.assertIn("Contrary", abilities)
+
+    def test_self_inflicted_drop_becomes_a_raise(self):
+        from damage import apply_boosts
+        c = self._staraptor()
+        changed = apply_boosts(c, {"def": -1, "spd": -1}, from_foe=False)
+        self.assertEqual(changed, {"def": 1, "spd": 1})
+        self.assertEqual(c.stages["def"], 1)
+        self.assertEqual(c.stages["spd"], 1)
+
+    def test_a_non_contrary_holder_is_unaffected(self):
+        from combatants import make_combatant
+        from damage import apply_boosts
+        c = make_combatant("Mega Staraptor", self.W["merged"], self.W["natures"],
+                           ability="Reckless")
+        changed = apply_boosts(c, {"def": -1, "spd": -1}, from_foe=False)
+        self.assertEqual(changed, {"def": -1, "spd": -1})
+        self.assertEqual(c.stages["def"], -1)
+
+    def test_a_foe_inflicted_drop_also_reverses_not_just_self_effects(self):
+        """Contrary reacts to EVERY stat change, not only self-inflicted
+        ones -- a foe's Snarl (-1 SpA secondary) raises a Contrary target's
+        Sp. Atk instead."""
+        from damage import apply_boosts
+        c = self._staraptor()
+        changed = apply_boosts(c, {"spa": -1}, from_foe=True)
+        self.assertEqual(changed, {"spa": 1})
+
+    def test_close_combat_raises_defence_and_special_defence_in_a_real_turn(self):
+        """End to end, through a played battle turn -- not just the helper
+        in isolation."""
+        b = battle(["Mega Staraptor", "Kingambit"], ["Milotic", "Sinistcha"])
+        staraptor = b.p1.active[0]
+        milotic = b.p2.active[0]
+        staraptor.ability = "Contrary"
+        cc = b.make_move("closecombat")
+        protect = b.make_move("protect")
+        tackle = b.make_move("tackle")
+        b.run_turn(
+            [Action(staraptor, "p1", "move", cc, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", tackle, [staraptor]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        self.assertEqual(staraptor.stages["def"], 1)
+        self.assertEqual(staraptor.stages["spd"], 1)
+        log = b.log.dump().lower()
+        self.assertIn("defense rose, sp. def rose", log)
+
+    def test_intimidate_raises_attack_for_a_contrary_target_instead(self):
+        from damage import apply_intimidate
+        c = self._staraptor()
+        msg = apply_intimidate(c)
+        self.assertEqual(c.stages["atk"], 1)
+        self.assertIn("Contrary", msg)
+        self.assertIn("raised", msg)
+
+    def test_defiant_intimidate_response_is_plus_two_not_plus_one(self):
+        """A second bug this audit surfaced: `apply_intimidate`'s own
+        Defiant branch was a plain +1, inconsistent with `apply_boosts`'s
+        (correct) +2 for the exact same real-game interaction."""
+        from combatants import make_combatant
+        from damage import apply_intimidate
+        c = make_combatant("Kingambit", self.W["merged"], self.W["natures"])
+        self.assertEqual(c.ability, "Defiant")
+        msg = apply_intimidate(c)
+        self.assertEqual(c.stages["atk"], 2)
+        self.assertIn("sharply", msg.lower())
+
+
+class TestPriorityBlockedBySideAndAIAvoidance(unittest.TestCase):
+    """"priority blocking abilities (such as Tsareena, Farigiraf) lead to
+    the enemy trying to click priority moves anyway. They should not
+    attempt to use priority moves if these abilities are present."
+    `battle.py`'s own `_blocked_by_guard` already correctly zeroed out a
+    blocked priority hit at RESOLUTION time -- the gap was that neither
+    `solver.py`'s greedy opponent AI nor `fast_eval.py`'s fast screening
+    playouts knew about the block at DECISION time (`quick_damage_estimate`
+    has no ability awareness at all), so they kept valuing and picking a
+    doomed priority move over a real alternative. `priority_blocked_by_side`
+    (`battle.py`) is the new shared, AI-facing check; this covers it
+    directly plus both AI paths that now use it."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_priority_blocked_by_side_true_for_a_priority_move_vs_armor_tail(self):
+        from battle import priority_blocked_by_side
+        from combatants import make_combatant
+        from counter_finder import _lookup_move
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        farigiraf = make_combatant("Farigiraf", merged, natures)
+        self.assertEqual(farigiraf.ability, "Armor Tail")
+        fake_out = _lookup_move("Fake Out", moves)
+        self.assertTrue(priority_blocked_by_side("Sheer Force", fake_out, [farigiraf]))
+
+    def test_priority_blocked_by_side_false_for_a_non_priority_move(self):
+        from battle import priority_blocked_by_side
+        from combatants import make_combatant
+        from counter_finder import _lookup_move
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        farigiraf = make_combatant("Farigiraf", merged, natures)
+        tackle = _lookup_move("Tackle", moves)
+        self.assertFalse(priority_blocked_by_side("Sheer Force", tackle, [farigiraf]))
+
+    def test_priority_blocked_by_side_ignored_by_mold_breaker(self):
+        from battle import priority_blocked_by_side
+        from combatants import make_combatant
+        from counter_finder import _lookup_move
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        farigiraf = make_combatant("Farigiraf", merged, natures)
+        fake_out = _lookup_move("Fake Out", moves)
+        self.assertFalse(priority_blocked_by_side("Mold Breaker", fake_out, [farigiraf]))
+
+    def test_priority_blocked_by_side_false_when_the_holder_has_fainted(self):
+        from battle import priority_blocked_by_side
+        from combatants import make_combatant
+        from counter_finder import _lookup_move
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        farigiraf = make_combatant("Farigiraf", merged, natures)
+        farigiraf.fainted = True
+        fake_out = _lookup_move("Fake Out", moves)
+        self.assertFalse(priority_blocked_by_side("Sheer Force", fake_out, [farigiraf]))
+
+    def test_fast_evals_greedy_ai_avoids_a_blocked_priority_move(self):
+        """The exact regression this session's report was about, through
+        `fast_eval._pick_greedy_action` (the fast screening playout AI)."""
+        from fast_eval import _pick_greedy_action
+        from solver import build_moveset
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Incineroar", "Kingambit"], ["Farigiraf", "Milotic"])
+        incin = b.p1.active[0]
+        farigiraf = b.p2.active[0]
+        moveset = build_moveset(merged["Incineroar"], moves)
+        self.assertIn("Fake Out", [m[0].name for m in moveset])
+        action = _pick_greedy_action(b, incin, "p1",
+                                     [farigiraf, b.p2.active[1]], moveset,
+                                     allies=b.p1.active)
+        self.assertIsNotNone(action)
+        self.assertIsNotNone(action.move)
+        self.assertNotEqual(action.move.name, "Fake Out")
+
+    def test_solvers_candidate_actions_still_offers_fake_out_as_a_legal_candidate(self):
+        """`candidate_actions` never REMOVES a blocked priority move from the
+        candidate list (matching `counter_finder._priority_blocked`'s own
+        "still legal to attempt, just correctly valued at 0" design) -- the
+        real avoidance happens at VALUATION, covered end to end by the two
+        tests below (`_pick_greedy_action`/`greedy_opponent_joint_action`).
+        This just guards that the new block-check inside `candidate_actions`
+        (added so its target-selection scoring doesn't crash or silently
+        misbehave against a fully-blocked side, where EVERY foe ties at
+        zero) doesn't also make Fake Out disappear outright, or error."""
+        from solver import candidate_actions, build_moveset
+        merged, natures, moves, typechart = (
+            self.W["merged"], self.W["natures"], self.W["moves"], self.W["typechart"])
+        from engine import FieldState
+        b = battle(["Incineroar", "Kingambit"], ["Farigiraf", "Milotic"])
+        incin = b.p1.active[0]
+        farigiraf, milotic = b.p2.active[0], b.p2.active[1]
+        moveset = build_moveset(merged["Incineroar"], moves)
+        actions = candidate_actions(incin, "p1", b.p1.active, [farigiraf, milotic],
+                                    moveset, typechart, FieldState(), 1)
+        fake_out_actions = [a for a in actions if a.move and a.move.name == "Fake Out"]
+        self.assertTrue(fake_out_actions, "Fake Out must still be offered as SOME candidate")
+
+    def test_greedy_opponent_action_value_prefers_a_real_hit_over_a_blocked_priority_move(self):
+        """End to end through `solver.greedy_opponent_joint_action` -- the
+        function `battle.py`-based simulations actually call for the
+        opponent's turn."""
+        from solver import greedy_opponent_joint_action, build_moveset
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Incineroar", "Kingambit"], ["Farigiraf", "Milotic"])
+        movesets = {c.name: build_moveset(merged[c.name], moves)
+                   for c in b.p1.active + b.p2.active}
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        incin_action = next(a for a in joint if a.combatant is b.p1.active[0])
+        self.assertIsNotNone(incin_action.move)
+        self.assertNotEqual(incin_action.move.name, "Fake Out")
+
+
+class TestCrashDamageMovesExcludedFromAutoSearch(unittest.TestCase):
+    """"There are certain moves which should be banned, like High Jump
+    Kick, given it causes massive damage if it misses (including vs enemy
+    protect)." High Jump Kick/Jump Kick/Axe Kick/Supercell Slam "crash"
+    (lose ~50% of the user's own max HP) on a miss, AND on a Protect block
+    specifically -- unlike an ordinary move, which just deals no damage.
+    Neither this engine's cheap model nor its real battle simulation models
+    misses or the crash itself (`MoveInfo.has_crash`'s own field comment:
+    "not modeled"), so a search that cannot see that risk must never
+    recommend planning around one of these moves -- excluded from the
+    AUTOMATIC, usage-derived candidate pool in both `optimize_sets.
+    candidate_moves` (the cheap model) and `solver.build_moveset` (the real
+    engine), while an explicit hand-built/pasted set (`only_moves`) still
+    permits it -- that path represents a REAL team being evaluated, not a
+    choice this search invented on its own.
+
+    Tsareena (14.3% usage on High Jump Kick, per the real dataset) is the
+    concrete example from the session report."""
+
+    def setUp(self):
+        self.W = world()
+        self.assertIn("Tsareena", self.W["merged"],
+                      "fixture needs a real, in-dataset High Jump Kick user")
+        hjk_usage = dict(self.W["merged"]["Tsareena"]["moves_usage"])
+        self.assertIn("High Jump Kick", hjk_usage,
+                      "fixture Pokemon must actually carry the move in real usage data")
+
+    def test_high_jump_kick_dropped_from_optimize_sets_candidate_moves(self):
+        from optimize_sets import candidate_moves
+        merged, moves = self.W["merged"], self.W["moves"]
+        names = [m.name for m, _pct in candidate_moves("Tsareena", merged, moves)]
+        self.assertNotIn("High Jump Kick", names)
+        # Nothing else about the candidate list should be touched.
+        self.assertIn("Triple Axel", names)
+        self.assertIn("Power Whip", names)
+
+    def test_high_jump_kick_dropped_from_solvers_auto_build_moveset(self):
+        from solver import build_moveset
+        merged, moves = self.W["merged"], self.W["moves"]
+        names = [m.name for m, _pct in build_moveset(merged["Tsareena"], moves, top_k=10)]
+        self.assertNotIn("High Jump Kick", names)
+        self.assertIn("Triple Axel", names)
+
+    def test_an_explicit_hand_built_set_may_still_include_it(self):
+        """The auto-search must never offer it, but a caller representing a
+        REAL, already-decided team (a pasted set, a teamsheet) is not
+        second-guessed -- `only_moves` stays fully permissive."""
+        from solver import build_moveset
+        merged, moves = self.W["merged"], self.W["moves"]
+        names = [m.name for m, _pct in build_moveset(
+            merged["Tsareena"], moves,
+            only_moves=["High Jump Kick", "Protect", "Trop Kick", "Power Whip"])]
+        self.assertEqual(names, ["High Jump Kick", "Protect", "Trop Kick", "Power Whip"])
+
+    def test_other_crash_damage_moves_are_also_excluded(self):
+        """Jump Kick / Axe Kick / Supercell Slam carry the exact same
+        `hasCrashDamage` mechanic as High Jump Kick -- this must be a
+        property-based exclusion (`MoveInfo.has_crash`), not a hardcoded
+        High-Jump-Kick-only special case."""
+        moves = self.W["moves"]
+        for name in ("Jump Kick", "Axe Kick", "Supercell Slam", "High Jump Kick"):
+            key = name.lower().replace(" ", "")
+            self.assertIn(key, moves, f"{name} missing from this dataset's move list")
+            self.assertTrue(moves[key].get("hasCrashDamage"),
+                            f"{name} must carry hasCrashDamage for this fixture to mean anything")
+        from damage import move_from_showdown
+        for name in ("Jump Kick", "Axe Kick", "Supercell Slam"):
+            key = name.lower().replace(" ", "")
+            mi = move_from_showdown(moves[key])
+            self.assertTrue(mi.has_crash)
+
+
 if __name__ == "__main__":
     unittest.main()
