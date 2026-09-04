@@ -3507,6 +3507,11 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
               f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
               f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
               f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} clean win")
+    only_losses = st.checkbox(
+        "Only show enemy pairs each pair loses to", key=f"{key_prefix}_onlyloss",
+        help="\"I also want an option to just see the specific enemy pairs "
+             "my given pair loses against\" -- filters every matchup list "
+             "below to just the unconditional losses.")
     if len(core) > 4 and len(target_name_lists) == 1:
         bring4_rows = bring4_from_deep_dive(core, dive, target_name_lists[0])
         st.markdown("**Best bring-4 (from this deep dive)**")
@@ -3518,11 +3523,19 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     hide_index=True)
         st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"]),
                     width='stretch', hide_index=True)
-    only_losses = st.checkbox(
-        "Only show enemy pairs each pair loses to", key=f"{key_prefix}_onlyloss",
-        help="\"I also want an option to just see the specific enemy pairs "
-             "my given pair loses against\" -- filters every matchup list "
-             "below to just the unconditional losses.")
+        st.markdown("**Deep dive: just the winning bring-4's own pairs**")
+        st.caption("\"When all pairs are deep dived and the best bring4 is "
+                  "found, then have a section which only shows the deep "
+                  "dive for those four\" -- the SAME 6 pairs as the table "
+                  "above, with the full matchup-by-matchup breakdown, "
+                  "without scrolling past the other 9 of the core's "
+                  "C(6,2)=15 pairs to find them.")
+        for row in bring4_rows[0]["pair_rows"]:
+            n1, n2 = row["pair"]
+            with st.expander(f"{n1} + {n2} -- {row['pairs_swept'] + row['pairs_traded']}/"
+                             f"{row['pairs_total']} beaten"):
+                _render_pair_matchup_detail(n1, n2, row["detail"], only_losses)
+        st.markdown("**Every pair in the core**")
     for (n1, n2), pair in dive["per_pair"].items():
         pt = pair["total"]
         with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"

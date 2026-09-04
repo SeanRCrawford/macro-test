@@ -951,8 +951,8 @@ def move_plans(actor, moveset, foes, allies, typechart, field, battle):
         if actor.item == "Choice Specs" and not physical:
             atk *= 1.5
         lo, _hi, _avg, _eff = damage_roll(
-            50, move.power, atk, defensive_stat(defender, dk, move), actor,
-            defender, move, typechart, weather=field.weather,
+            50, move.power, atk, defensive_stat(defender, dk, move, weather=field.weather),
+            actor, defender, move, typechart, weather=field.weather,
             num_targets_hit=n_targets)
         return (lo / (defender.max_hp() or 1)) * mega_bulk_factor(defender)
 

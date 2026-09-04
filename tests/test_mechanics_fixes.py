@@ -1025,5 +1025,169 @@ class TestCrashDamageMovesExcludedFromAutoSearch(unittest.TestCase):
             self.assertTrue(mi.has_crash)
 
 
+class TestSandSnowDefensiveBoostAppliedOnce(unittest.TestCase):
+    """"0 SpA Mega Raichu Y Focus Blast vs. Tyranitar in Sand ... guaranteed
+    OHKO" -- `damage_roll` carried its OWN internal copy of sand's Rock-type
+    Sp. Def / snow's Ice-type Def 1.5x boost, exactly duplicating what
+    `defensive_stat` (`weather_defence_boost`) already does to `def_stat`
+    before the call. Every real call site pre-resolves `def_stat` through
+    `defensive_stat(..., weather=...)` and ALSO passes its own `weather=...`
+    into `damage_roll` (needed for rain/sun's offensive boost and Weather
+    Ball, which genuinely belong inside `damage_roll`) -- so the SAME 1.5x
+    was silently applied TWICE, understating Tyranitar's real sand-boosted
+    bulk (and any Ice-type's snow-boosted bulk) across the entire cheap
+    model, the real engine, and the solver alike."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _raichu_vs_tyranitar_hardy_zero_ev(self):
+        """0 EV / neutral-for-the-relevant-stat nature on both sides, so the
+        raw numbers are directly comparable to a hand-computed reference
+        calc: 180 SpA (Raichu), 120 base SpD / 180 sand-boosted (Tyranitar),
+        Focus Blast 120 BP, 4x effective (Fighting vs Rock/Dark)."""
+        from combatants import make_combatant
+        zero = {"hp": 0, "atk": 0, "def": 0, "spa": 0, "spd": 0, "spe": 0}
+        from counter_finder import _mega_project
+        raichu = _mega_project(make_combatant(
+            "Mega Raichu Y", self.W["merged"], self.W["natures"],
+            nature="Hardy", evs=zero))
+        raichu.current_hp = raichu.max_hp()
+        ttar = _mega_project(make_combatant(
+            "Tyranitar", self.W["merged"], self.W["natures"],
+            nature="Hardy", evs=zero))
+        ttar.current_hp = ttar.max_hp()
+        return raichu, ttar
+
+    def test_defensive_stat_already_carries_the_full_150pc_boost(self):
+        """Precondition: this is what every correct caller feeds `damage_
+        roll` as `def_stat` -- confirms the fixture setup itself, not the
+        bug under test (see `test_sand_boosts_a_rock_types_special_defence`
+        in test_spread_power.py for the same check against a different
+        fixture)."""
+        from damage import defensive_stat, move_from_showdown
+        raichu, ttar = self._raichu_vs_tyranitar_hardy_zero_ev()
+        fb = move_from_showdown(self.W["moves"]["focusblast"])
+        self.assertEqual(raichu.stats["spa"], 180)
+        self.assertEqual(ttar.stats["spd"], 120)
+        self.assertAlmostEqual(defensive_stat(ttar, "spd", fb, weather="sand"), 180.0)
+
+    def test_damage_roll_does_not_double_the_boost_when_def_stat_is_prebosted(self):
+        """The regression itself, directly against `damage_roll`: passing
+        the ALREADY sand-boosted `def_stat` (the correct, universal calling
+        convention) plus `weather="sand"` (needed for Weather Ball/rain/sun,
+        unrelated to this bug) must NOT additionally halve-ish the result --
+        this is the exact case that used to silently apply 1.5x twice."""
+        from damage import damage_roll, defensive_stat, move_from_showdown, effective_stat
+        raichu, ttar = self._raichu_vs_tyranitar_hardy_zero_ev()
+        fb = move_from_showdown(self.W["moves"]["focusblast"])
+        atk = effective_stat(raichu.stats["spa"], 0)
+        dfn_boosted = defensive_stat(ttar, "spd", fb, weather="sand")
+        lo, hi, avg, eff = damage_roll(50, fb.power, atk, dfn_boosted, raichu, ttar,
+                                       fb, self.W["typechart"], weather="sand")
+        self.assertEqual(eff, 4.0)
+        # Correct (single-application) reference: base=54.8, *4 eff, *0.85/1.00
+        # roll -- 186.32-219.2. The bug produced roughly 2/3 of this
+        # (124.2-146.1), understating a guaranteed OHKO as an 82-97% hit.
+        self.assertAlmostEqual(lo, 186.32, places=1)
+        self.assertAlmostEqual(hi, 219.2, places=1)
+        self.assertGreater(lo, ttar.max_hp(), "must be a guaranteed OHKO -- the bug's whole point")
+
+    def test_raw_hit_in_the_cheap_model_is_a_guaranteed_ohko(self):
+        """End to end through `counter_finder._raw_hit`, the actual
+        production hot path every search tool in this repo sits on --
+        confirms the fix reaches real usage, not just `damage_roll` in
+        isolation."""
+        from counter_finder import _raw_hit
+        from damage import move_from_showdown
+        raichu, ttar = self._raichu_vs_tyranitar_hardy_zero_ev()
+        fb = move_from_showdown(self.W["moves"]["focusblast"])
+        hit = _raw_hit(raichu, fb, ttar, self.W["typechart"], weather="sand")
+        self.assertGreaterEqual(hit.lo, 1.0, "must be a guaranteed OHKO on the low roll too")
+
+    def test_quick_damage_estimate_in_the_solver_is_not_halved(self):
+        """`solver.quick_damage_estimate` (the real engine's own action
+        pricing) had the identical double-apply shape -- pre-resolves
+        `def_stat` via `defensive_stat(..., weather=...)`, then also passes
+        `weather=...` into `damage_roll`."""
+        from combatants import make_combatant
+        from engine import FieldState
+        from solver import quick_damage_estimate
+        from damage import move_from_showdown
+        raichu, ttar = self._raichu_vs_tyranitar_hardy_zero_ev()
+        fb = move_from_showdown(self.W["moves"]["focusblast"])
+        field = FieldState(weather="sand")
+        avg = quick_damage_estimate(raichu, ttar, fb, self.W["typechart"], field)
+        self.assertGreater(avg, ttar.max_hp(),
+                           "must be a guaranteed OHKO on the average roll")
+
+    def test_a_real_played_turn_in_battle_py_is_not_halved(self):
+        """End to end through `Battle.run_turn` -- Tyranitar's own Sand
+        Stream sets the weather on send-out, so this exercises the exact
+        real-game sequence the report was made against, not a hand-built
+        weather flag. "Mega Raichu Y" is directly buildable as its own
+        species entry in this dataset's roster (confirmed via `make_team`),
+        so no fallback species is needed."""
+        from damage import damage_roll, defensive_stat, move_from_showdown, effective_stat
+        b = battle(["Mega Raichu Y", "Whimsicott"], ["Tyranitar", "Garchomp"])
+        self.assertEqual(b.field.weather, "sand",
+                         "fixture assumes Tyranitar's Sand Stream is live")
+        raichu = b.p1.active[0]
+        ttar = b.p2.active[0]
+        fb = move_from_showdown(self.W["moves"]["focusblast"])
+        atk = effective_stat(raichu.stats["spa"], 0)
+        dfn_boosted = defensive_stat(ttar, "spd", fb, weather="sand")
+        _lo, _hi, avg_correct, _eff = damage_roll(
+            50, fb.power, atk, dfn_boosted, raichu, ttar, fb,
+            self.W["typechart"], weather="sand")
+        # The bug's signature: it silently applied the 1.5x sand boost
+        # twice, so the buggy average would land at exactly 2/3 of the
+        # correct one -- the midpoint between the two is a clean threshold
+        # a real played turn's damage must clear.
+        avg_buggy = avg_correct * 2 / 3
+        before_hp = ttar.current_hp
+        # Only Tyranitar's PARTNER protects -- Tyranitar itself must not,
+        # or the hit never lands and the assertion would pass for the
+        # wrong reason.
+        b.run_turn(
+            [Action(raichu, "p1", "move", b.make_move("focusblast"), [ttar]),
+             Action(b.p1.active[1], "p1", "protect", b.make_move("protect"),
+                    [b.p1.active[1]])],
+            [Action(ttar, "p2", "move", b.make_move("tailwind"), [ttar]),
+             Action(b.p2.active[1], "p2", "protect", b.make_move("protect"),
+                    [b.p2.active[1]])])
+        dealt = before_hp - ttar.current_hp
+        self.assertGreater(dealt, (avg_correct + avg_buggy) / 2,
+                           "real played damage must land near the correct "
+                           "(single-application) figure, not the halved-ish "
+                           "buggy one")
+
+    def test_snow_boosts_an_ice_type_the_same_single_way(self):
+        """The mirror mechanic (`WEATHER_DEFENCE`'s other entry) -- same bug
+        shape, same fix, checked against a real Ice-type/Physical move
+        pairing so the fix isn't accidentally sand-specific."""
+        from combatants import make_combatant
+        from damage import damage_roll, defensive_stat, move_from_showdown, effective_stat
+        zero = {"hp": 0, "atk": 0, "def": 0, "spa": 0, "spd": 0, "spe": 0}
+        attacker = make_combatant("Garchomp", self.W["merged"], self.W["natures"],
+                                  nature="Hardy", evs=zero)
+        ice = make_combatant("Ninetales-Alola", self.W["merged"], self.W["natures"],
+                             nature="Hardy", evs=zero)
+        eq = move_from_showdown(self.W["moves"]["earthquake"])
+        atk = effective_stat(attacker.stats["atk"], 0)
+        dfn_boosted = defensive_stat(ice, "def", eq, weather="snow")
+        dfn_bare = defensive_stat(ice, "def", eq)
+        self.assertAlmostEqual(dfn_boosted / dfn_bare, 1.5)
+        lo, hi, avg, _eff = damage_roll(50, eq.power, atk, dfn_boosted, attacker, ice,
+                                        eq, self.W["typechart"], weather="snow")
+        lo2, hi2, avg2, _eff2 = damage_roll(50, eq.power, atk, dfn_boosted, attacker, ice,
+                                            eq, self.W["typechart"], weather=None)
+        # Passing weather="snow" alongside an ALREADY-boosted def_stat must
+        # make no further difference for a Physical move against an
+        # Ice-type -- confirms the removed block covered snow/Physical too,
+        # not just sand/Special.
+        self.assertAlmostEqual(avg, avg2, places=5)
+
+
 if __name__ == "__main__":
     unittest.main()
