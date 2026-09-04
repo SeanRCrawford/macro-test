@@ -275,7 +275,7 @@ class TestCleanWinScoringIsVisible(unittest.TestCase):
         at = app()
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
-                     and b.key.endswith("_go")]
+                     and b.key.endswith("_go") and "all6" not in b.key]
         at = dd_buttons[0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any("clean win" in m.value for m in at.markdown))
@@ -297,7 +297,7 @@ class TestDeepDiveASpecificTeam(unittest.TestCase):
         at = app()
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
-                     and b.key.endswith("_go")]
+                     and b.key.endswith("_go") and "all6" not in b.key]
         self.assertEqual(len(dd_buttons), 1)
         at = dd_buttons[0].click().run()
         self.assertFalse(at.exception, list(at.exception))
@@ -308,7 +308,7 @@ class TestDeepDiveASpecificTeam(unittest.TestCase):
         at = app()
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
-                     and b.key.endswith("_go")]
+                     and b.key.endswith("_go") and "all6" not in b.key]
         at = dd_buttons[0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         dl = [d for d in at.download_button if d.key and d.key.endswith("_dl")]
@@ -321,7 +321,7 @@ class TestDeepDiveASpecificTeam(unittest.TestCase):
         at = app()
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
-                     and b.key.endswith("_go")]
+                     and b.key.endswith("_go") and "all6" not in b.key]
         at = dd_buttons[0].click().run()
         use_buttons = [b for b in at.button if b.key and b.key.endswith("_use")]
         at = use_buttons[0].click().run()
@@ -399,6 +399,111 @@ class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):
         at = ta.set_value(self.RAIN_PASTE).run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any("Archaludon" in s.value for s in at.success))
+
+
+class TestPerBring4DeepDiveRespectsPinnedMoveset(unittest.TestCase):
+    """"The Counter Table in the streamlit app doesn't use the actual
+    moveset of the loaded team in bring 4." Root cause: `_render_core_
+    deep_dive` never received `item_overrides`/`move_overrides` at all,
+    even though the SAME branch's `bring4_search` call already respected
+    them (see `TestBring4TabMirrorsTheCliExactly` above) -- so Stage 1/2
+    rankings and the deep-dive display could silently disagree on which
+    set each Pokemon holds. Fixed by threading the same overrides through
+    to the deep dive's own `core_deep_dive` call."""
+
+    TEAM = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    SETS = {
+        "Garchomp": {"item": "Rocky Helmet",
+                    "moves": ["Earthquake", "Protect", "Dragon Claw",
+                             "Stealth Rock"]},
+        "Incineroar": {"item": "Sitrus Berry",
+                      "moves": ["Fake Out", "Flare Blitz", "Knock Off",
+                               "Protect"]},
+    }
+
+    def test_the_per_bring4_deep_dive_shows_the_pinned_set(self):
+        at = app(team=self.TEAM, sets=self.SETS)
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        caption = next(c.value for c in at.caption if c.value.startswith("Set:"))
+        self.assertIn("Rocky Helmet", caption)
+        self.assertIn("Sitrus Berry", caption)
+
+
+class TestFullDeepDiveAllOfOur6VsOneEnemy(unittest.TestCase):
+    """"I would also like to run full deep dive with all configurations vs
+    a given enemy team with my loaded team" -- every C(6,2) pair `our6`
+    can form, raced against the currently-selected enemy roster, without
+    needing to search/pick a bring-4 first (a superset of every possible
+    bring-4's own internal pairs)."""
+
+    def test_the_button_is_offered_without_a_stage_1_2_search_first(self):
+        at = app()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(b.key == "ctb4_dd_all6_one_go" for b in at.button))
+
+    def test_clicking_it_dives_all_15_pairs(self):
+        at = app()  # default TEAM has 6 members -> C(6,2) = 15 pairs
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Overall" in m.value for m in at.markdown))
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        self.assertEqual(len(dive["per_pair"]), 15)
+
+    def test_it_respects_a_loaded_teams_pinned_set(self):
+        team = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
+                "Farigiraf", "Whimsicott"]
+        sets = {"Garchomp": {"item": "Rocky Helmet",
+                             "moves": ["Earthquake", "Protect",
+                                      "Dragon Claw", "Stealth Rock"]}}
+        at = app(team=team, sets=sets)
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        caption = next(c.value for c in at.caption if c.value.startswith("Set:"))
+        self.assertIn("Rocky Helmet", caption)
+
+
+class TestFullDeepDiveAllOfOur6VsAllEnemyTeams(unittest.TestCase):
+    """"and also full deep dive versus all enemy teams with my loaded
+    team" -- a separate, more expensive dive across EVERY saved enemy
+    roster at once, persisted in session_state (like every other deep
+    dive already is) so it survives a rerun triggered by an unrelated
+    widget."""
+
+    def test_the_button_is_offered(self):
+        at = app()
+        self.assertTrue(any(b.key == "ctb4_dd_all6_allteams_go"
+                            for b in at.button))
+
+    def test_clicking_it_dives_vs_every_saved_team(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Overall, vs all" in m.value for m in at.markdown))
+
+    def test_results_survive_a_rerun_that_does_not_reclick_the_button(self):
+        """Regression: `all_shown_vs` (used to label each enemy team in
+        the per-pair-per-enemy breakdown) used to be a local variable
+        defined ONLY inside the button's own `if st.button(...):` block,
+        but read again OUTSIDE that block, in the always-rendered display
+        code further down -- any rerun that did NOT re-click the button
+        (e.g. any other widget interaction elsewhere on the page) raised
+        a NameError. Calling `.run()` again without touching the button
+        reproduces exactly that "later rerun" case."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        at = at.run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Overall, vs all" in m.value for m in at.markdown))
 
 
 if __name__ == "__main__":
