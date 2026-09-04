@@ -1793,14 +1793,31 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     damage for exactly this reason -- an outright kill on even one target
     is worth more than any amount of un-lethal chip.
 
-    RECOIL IS A LATE TIE-BREAK TOO, right after priority and before raw
-    damage (`_self_cost` below): "no point in using the recoil move because
-    [a no-recoil move] would also kill ... it would take no recoil and
-    make it a win" -- among candidates already tied on kos_now_count/
-    kos_in_two_count/priority, the one that costs the ATTACKER less of its
-    own HP wins, so a higher-power recoil move never beats an equally
-    kill-securing recoil-free one purely because it does more (moot, once
-    both already guarantee the kill) overkill damage.
+    RECHARGE IS AN EVEN LATER-BREAKING TIE-BREAK, checked right before
+    recoil: "Hyper Voice would have KOd and also done spread damage
+    without the recharge downside of Hyper Beam" -- a move that forces a
+    whole lost turn next (`move.flags.get("recharge")`, e.g. Hyper Beam/
+    Giga Impact) is a FAR bigger tempo cost than any amount of recoil
+    percentage (a recoil move still gets to act again immediately; a
+    recharge move hands the opponent a completely free turn), so among
+    candidates already tied on kos_now_count/kos_in_two_count/priority, a
+    non-recharging move always beats a recharging one -- raw power alone
+    (Hyper Beam's usual edge over a same-tier non-recharge move) never
+    gets to decide between two options that already secure the identical
+    kill. Only relevant when BOTH the recharge move and a real alternative
+    clear the same kos bar; a recharge move that's the ONLY thing that
+    KOs, or that KOs MORE targets/at higher priority than any alternative,
+    is still picked exactly as before -- this never costs a kill, only
+    breaks a tie that raw damage used to decide wrongly.
+
+    RECOIL IS A LATE TIE-BREAK TOO, right after priority/recharge and
+    before raw damage (`_self_cost` below): "no point in using the recoil
+    move because [a no-recoil move] would also kill ... it would take no
+    recoil and make it a win" -- among candidates still tied after that,
+    the one that costs the ATTACKER less of its own HP wins, so a
+    higher-power recoil move never beats an equally kill-securing
+    recoil-free one purely because it does more (moot, once both already
+    guarantee the kill) overkill damage.
     """
     if not live_targets:
         return {}, None
@@ -1878,6 +1895,14 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         """
         return (target_hp_fracs or {}).get(role, 1.0)
 
+    def _requires_recharge(mv):
+        """True for Hyper Beam/Giga Impact-style moves -- see the RECHARGE
+        tie-break in this function's own docstring. Used the same way
+        `_self_cost` is: a plain boolean cost checked once, before recoil,
+        between two candidates already tied on kos_now_count/kos_in_two_
+        count/priority."""
+        return bool(mv.flags and mv.flags.get("recharge"))
+
     def _self_cost(mv, hits):
         """Recoil cost as a fraction of the ATTACKER's own max HP -- 0.0 for
         a move with no recoil, or when Rock Head/Magic Guard negates it.
@@ -1913,7 +1938,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                                  (got.frac + best_frac_by_role[role]) >= bar) else 0
         priority_if_kos_now = mv.priority if kos_now_count else 0
         key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
-              -_self_cost(mv, {role: got}), got.frac)
+              -_requires_recharge(mv), -_self_cost(mv, {role: got}), got.frac)
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
     for mv, hits in spread_candidates:
@@ -1924,7 +1949,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             or (h.frac + best_frac_by_role[role]) >= remaining(role))
         priority_if_kos_now = mv.priority if kos_now_count else 0
         key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
-              -_self_cost(mv, hits), sum(h.frac for h in hits.values()))
+              -_requires_recharge(mv), -_self_cost(mv, hits),
+              sum(h.frac for h in hits.values()))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move

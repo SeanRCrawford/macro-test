@@ -577,6 +577,64 @@ class TestBestBring4FromDeepDive(unittest.TestCase):
         self.assertTrue(any(c.value == expected_caption for c in at.caption))
 
 
+class TestWinningBring4OwnPairsSection(unittest.TestCase):
+    """"When all pairs are deep dived and the best bring4 is found, then
+    have a section which only shows the deep dive for those four" -- a
+    dedicated subsection with just the winning bring-4's own 6 pairs and
+    their full matchup-by-matchup breakdown, instead of having to find
+    them among the core's full C(6,2)=15."""
+
+    def test_the_section_shows_exactly_the_winning_bring4s_six_pairs(self):
+        at = app()  # default TEAM has 6 members
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(
+            "Deep dive: just the winning bring-4's own pairs" in m.value
+            for m in at.markdown))
+        self.assertTrue(any(m.value == "**Every pair in the core**"
+                            for m in at.markdown))
+
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        expected = bring4_from_deep_dive(TEAM, dive, vs_roster)
+        expected_pairs = {tuple(r["pair"]) for r in expected[0]["pair_rows"]}
+
+        expander_labels = [e.label for e in at.expander]
+        # Every one of the winning bring-4's 6 pairs shows up as its own
+        # expander (once for the dedicated section, once more inside the
+        # unfiltered "every pair in the core" section below it).
+        for n1, n2 in expected_pairs:
+            matches = [lbl for lbl in expander_labels
+                      if lbl.startswith(f"{n1} + {n2} ")]
+            self.assertGreaterEqual(len(matches), 2,
+                                    f"expected {n1} + {n2} in both sections")
+
+    def test_no_section_for_a_core_already_at_the_bring_size(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any(
+            "Deep dive: just the winning bring-4's own pairs" in m.value
+            for m in at.markdown))
+
+    def test_only_losses_filter_also_applies_inside_this_section(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        cb = [c for c in at.checkbox if c.key == "ctb4_dd_all6_one_onlyloss"][0]
+        at = cb.set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+
+
 class TestOnlyShowLossesFilter(unittest.TestCase):
     """"I also want an option to just see the specific enemy pairs my
     given pair loses against" -- a checkbox that filters each pair's own

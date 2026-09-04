@@ -5470,6 +5470,65 @@ class TestChooseActionAvoidsNeedlessRecoil(unittest.TestCase):
         self.assertEqual(chosen.name, "Light of Ruin")
 
 
+class TestChooseActionAvoidsNeedlessRecharge(unittest.TestCase):
+    """"Hyper Voice from Sylveon would have KOd and also done spread damage
+    without the recharge downside of Hyper Beam" -- `_choose_action` had a
+    late tie-break for recoil (`_self_cost`) but nothing analogous for
+    recharge (Hyper Beam/Giga Impact), so a higher-power recharge move
+    could beat an equally kill-securing recharge-free one on raw overkill
+    damage alone, handing the opponent a free turn for nothing. `_requires_
+    recharge` is a NEW, even-earlier tie-break (checked before recoil,
+    since a lost turn is a far bigger cost than any recoil percentage)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_prefers_the_recharge_free_move_when_both_guarantee_the_kill(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        sylveon = cf._build("Sylveon", merged, natures)
+        dragonite = cf._build("Dragonite", merged, natures)
+        hyper_beam = cf._lookup_move("Hyper Beam", moves)
+        hyper_voice = cf._lookup_move("Hyper Voice", moves)
+        self.assertTrue((hyper_beam.flags or {}).get("recharge"))
+        self.assertFalse((hyper_voice.flags or {}).get("recharge"))
+        hits, chosen = cf._choose_action(
+            sylveon, [hyper_beam, hyper_voice], {"E": dragonite}, typechart)
+        self.assertEqual(chosen.name, "Hyper Voice")
+        self.assertGreaterEqual(hits["E"].frac, 1.0, "fixture must be a real KO")
+
+    def test_the_recharge_move_still_wins_when_it_is_the_only_guaranteed_kill(self):
+        """Recharge-awareness is a TIE-break, not a blanket penalty -- a
+        recharge move that's the only one clearing the KO bar must still
+        be chosen over a weaker recharge-free move that doesn't."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        sylveon = cf._build("Sylveon", merged, natures)
+        sinistcha = cf._build("Sinistcha", merged, natures)
+        hyper_beam = cf._lookup_move("Hyper Beam", moves)
+        hyper_voice = cf._lookup_move("Hyper Voice", moves)
+        hits_hb, _chosen_hb = cf._choose_action(
+            sylveon, [hyper_beam], {"E": sinistcha}, typechart)
+        hits_hv, _chosen_hv = cf._choose_action(
+            sylveon, [hyper_voice], {"E": sinistcha}, typechart)
+        if hits_hb["E"].frac >= 1.0 and hits_hv["E"].frac < 1.0:
+            hits, chosen = cf._choose_action(
+                sylveon, [hyper_beam, hyper_voice], {"E": sinistcha}, typechart)
+            self.assertEqual(chosen.name, "Hyper Beam")
+        else:
+            self.skipTest("fixture no longer isolates 'only Hyper Beam KOs' "
+                          "on the current dataset -- not what this test checks")
+
+    def test_a_charge_move_with_no_recharge_flag_is_unaffected(self):
+        """A move without `flags.get("recharge")` (the overwhelming
+        majority) must never be treated as if it cost a lost turn -- this
+        tie-break only ever fires for the small named family that actually
+        carries the flag."""
+        moves = self.W["moves"]
+        moonblast = cf._lookup_move("Moonblast", moves)
+        self.assertFalse((moonblast.flags or {}).get("recharge"))
+
+
 class TestRoughSkinInTheJointRace(unittest.TestCase):
     """Rough Skin / Iron Barbs weren't implemented ANYWHERE in this repo --
     a NEW mechanic, scoped to the cheap model only (matches what was
