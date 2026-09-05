@@ -2222,12 +2222,17 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
     Punch]" -- Iron Head/Kowtow Cleave/Low Kick sitting in the same
     moveset would have landed for real).
 
-    ONE PASS, not a fixed point, and only the SINGLE best-ranked
-    alternative per role is tried in either case: reassigning one role can
-    in principle change another's own doomed/wasted status -- but with
-    only 4 actors on a real board this already covers the cases that
-    motivated it, and the module stays a cheap arithmetic screen, not an
-    exhaustive search of every ordering.
+ONE PASS PER CALL, and only the SINGLE best-ranked alternative per role is
+    tried in either case -- but reassigning one role CAN, as a side effect,
+    change another's own doomed/wasted status (a doomed role that switches to
+    a faster, tied-priority move to survive can, by winning that same speed
+    tie, retroactively defeat an ally's Sucker Punch), so `_resolve_turn`'s
+    own caller loops this function across passes -- each pass fed the FRESH
+    `doomed`/`sucker_punch_wasted` a real `_apply_plan` re-check finds -- until
+    nothing new turns up. This function itself stays a single, cheap pass;
+    see `_resolve_turn`'s own docstring for why looping IT is what actually
+    closes that gap, rather than making this function itself hunt for a
+    fixed point.
     """
     new_plan = dict(plan)
     for role in doomed:
@@ -2466,7 +2471,28 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
         plan, combatants, hp, protected_roles, enemy_speed_mult, field,
         own_speed_mult=own_speed_mult)
     final_doomed = doomed
-    if (doomed - protected_roles) or (sp_wasted - protected_roles):
+    # Reconsidering ONE role can, as a side effect, newly doom or Sucker-
+    # Punch-waste ANOTHER: "Metagross survives by switching to Bullet Punch
+    # (priority +1, and Metagross is faster) to dodge Kingambit's own Sucker
+    # Punch" also means Metagross now resolves BEFORE Kingambit -- which is
+    # exactly the condition that fails Kingambit's Sucker Punch (`_apply_
+    # plan`'s own rule: it only connects if the target is STILL PENDING).
+    # A single reconsideration pass fixed Metagross but left Kingambit
+    # permanently swinging a dead move at it turn after turn, never
+    # switching to an unconditional one instead. So this loops -- each pass
+    # feeds the FRESH `doomed`/`sp_wasted` a real `_apply_plan` call finds
+    # (not last pass's, which is now stale) back into `_reconsider_for_
+    # survival` -- until a pass turns up nothing that hasn't already been
+    # tried, capped at `len(plan)` iterations (never more actors than that,
+    # so a real fixed point always arrives well before the cap -- this only
+    # guards against two roles pathologically flip-flopping forever).
+    seen = set()
+    for _ in range(len(plan)):
+        newly_stuck = ((doomed - protected_roles - seen)
+                       | (sp_wasted - protected_roles - seen))
+        if not newly_stuck:
+            break
+        seen |= newly_stuck
         live_targets_by_role = {r: theirs_live for r in ours_live}
         live_targets_by_role.update({r: ours_live for r in theirs_live})
         plan = _reconsider_for_survival(
@@ -2476,13 +2502,56 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             half_damage_roles=half_damage_roles, own_speed_mult=own_speed_mult,
             def_mult_by_role=def_mult_by_role)
         plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
-        hp2, log, enemy_acted, wiped, final_doomed, _sp2 = _apply_plan(
+        hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
             plan, combatants, hp, protected_roles, enemy_speed_mult, field,
             own_speed_mult=own_speed_mult)
+        final_doomed = doomed
     recharging_next = {role for role, (_hits, mv) in plan.items()
                        if role not in final_doomed and mv is not None
                        and mv.flags and mv.flags.get("recharge")}
     return hp2, log, enemy_acted, wiped, recharging_next
+
+
+def _advance_turn_state(turn_log, dmg_mult_by_role, def_mult_by_role,
+                        half_damage_roles, combatants):
+    """The SELF_HALVING_MOVES/CONTRARY_SELF_DROP_MOVES bookkeeping that turns
+    one turn's `turn_log` into the `(dmg_mult_by_role, def_mult_by_role,
+    half_damage_roles)` that apply to the turn AFTER it -- `_joint_race`'s own
+    turn loop needs this every real turn, and `_best_turn`'s own one-turn
+    lookahead (see its docstring) needs the exact same rule to preview a
+    hypothetical next turn, so it lives here once rather than in both places.
+
+    Returns FRESH dicts/sets (never mutates its inputs) -- `_best_turn` calls
+    this once per candidate hint combo to build that combo's own hypothetical
+    next-turn state, and those previews must not leak into each other (unlike
+    `_joint_race`'s own single running copy, several combos are evaluated
+    from the SAME starting state here, so a shared mutable dict would let one
+    combo's hypothetical Contrary boost bleed into another's).
+    """
+    new_half_damage = half_damage_roles | {role for role, _tgt, h in turn_log
+                                           if h.move_name in SELF_HALVING_MOVES}
+    new_dmg_mult = dict(dmg_mult_by_role or {})
+    new_def_mult = dict(def_mult_by_role or {})
+    for role, _tgt, h in turn_log:
+        stat_changes = CONTRARY_SELF_DROP_MOVES.get(h.move_name)
+        if (not stat_changes or combatants[role] is None
+                or combatants[role].ability != "Contrary"):
+            continue
+        off = dict(new_dmg_mult.get(role, {}))
+        deff = dict(new_def_mult.get(role, {}))
+        for stat, raw_delta in stat_changes.items():
+            mult = _STAGE_MULT[-raw_delta]  # Contrary flips the move's own drop
+            if stat == "atk":
+                off["physical"] = off.get("physical", 1.0) * mult
+            elif stat == "spa":
+                off["special"] = off.get("special", 1.0) * mult
+            elif stat == "def":
+                deff["physical"] = deff.get("physical", 1.0) / mult
+            elif stat == "spd":
+                deff["special"] = deff.get("special", 1.0) / mult
+        new_dmg_mult[role] = off
+        new_def_mult[role] = deff
+    return new_dmg_mult, new_def_mult, new_half_damage
 
 
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,
@@ -2490,7 +2559,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               recharging_roles=frozenset(), tailwind_setter_role=None,
               terrain=None, dmg_mult_by_role=None,
               half_damage_roles=frozenset(), own_speed_mult=1.0,
-              def_mult_by_role=None):
+              def_mult_by_role=None, lookahead=1):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -2504,9 +2573,57 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     protected, recharging, or tailwind-casting role naturally falls out of
     OUR side's ranking here with no change to the ranking itself.
 
-    Ranked by (enemies KO'd this turn, -ours KO'd this turn, net fractional
-    damage this turn) -- "best FOR US", matching every other joint search in
-    this module ranking on the attacker's own outcome, not the enemy's.
+    Ranked by (enemies KO'd, -ours KO'd, net fractional damage) -- "best FOR
+    US", matching every other joint search in this module ranking on the
+    attacker's own outcome, not the enemy's. `lookahead` (default 1) makes
+    this a TWO-turn-deep ranking, not just this turn's raw numbers:
+
+    "Metagross has at best a 2HKO vs Kingambit on T2 but Hydreigon has a
+    OHKO, so if Kingambit sucker punches Hydreigon and then Metagross it
+    cannot lose" -- concretely diagnosed bug: with a Focus-Sash Hydreigon
+    surviving a hit at 1 HP and a healthy-ish Metagross still standing,
+    ranking on THIS TURN's raw numbers alone can prefer double-teaming
+    Metagross for an outright kill NOW (`enemies_ko=1` this turn) over
+    softening Hydreigon toward its guaranteed finish next turn (`enemies_ko=0`
+    this turn, since Focus Sash blocks an immediate kill) -- even when the
+    second line is the one that actually WINS the race, because a full-HP
+    Hydreigon left alive gets a free turn to sweep both of ours with its own
+    spread move before Kingambit ever gets back to it. A one-turn-only key
+    cannot see that; it only ever asks "how good does this combo look right
+    now."
+
+    For each hint combo, once its own `_resolve_turn` result (`new_hp`, this
+    combo's `log`) is in hand: if the race isn't already decided this turn
+    (`wiped is None`) and both sides still have someone standing, AND
+    `lookahead > 0`, a SECOND `_best_turn` call previews the very next turn
+    from `new_hp` -- `_advance_turn_state` rolls this combo's own `log`
+    forward into that preview's `dmg_mult_by_role`/`def_mult_by_role`/
+    `half_damage_roles` (so a Contrary boost or a Draco-Meteor-family
+    self-halving picked up THIS turn is still in effect for the preview),
+    `recharging_next` becomes the preview's `recharging_roles`, and
+    `lookahead - 1` (0 here -- a single extra ply, "two turns" total) stops
+    the recursion from going any deeper. `enemies_ko`/`ours_ko`/net damage
+    are then computed against the PREVIEW's final hp instead of this turn's
+    `new_hp` -- comparing what the ORIGINAL `hp` looked like against where
+    each combo's own best two-turn line ends up, not just where it stands
+    one turn in. This is exactly what lets Kingambit correctly rank "leave
+    Metagross alive one more turn, finish Hydreigon next" above "kill
+    Metagross now, let Hydreigon go another round" -- the SAME hint search
+    that already existed, just looking one ply further before it grades any
+    combo.
+
+    A combo that already wins or already loses outright THIS turn skips the
+    preview entirely (there's nothing deeper to learn -- an immediate sweep
+    or an immediate full wipe already fully decides it), and so does a turn
+    with only ONE possible combo to begin with (a race's own endgame is
+    mostly this -- one attacker of ours left, one target of theirs left --
+    and previewing a choice that isn't actually a choice never changes what
+    gets picked). Either way the actual ACTION TAKEN this turn is still
+    exactly this combo's own `new_hp`/`log`/`enemy_acted`/`wiped`/
+    `recharging_next` -- the preview only ever informs which combo ranks
+    best, it is never itself played out. `lookahead=0` (used by the
+    preview's own recursive call, so it goes exactly one ply deep and no
+    further) restores the original one-turn-only ranking.
 
     Returns (`new_hp`, `log`, `enemy_acted`, `wiped`, `recharging_next`) --
     the winning hint combo's own `_resolve_turn` results, `recharging_next`
@@ -2516,6 +2633,15 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     ours_live = [r for r in ("C", "P") if hp[r] > 0]
     theirs_live_roles = [r for r in ("E1", "E2") if hp[r] > 0]
     hint_options = theirs_live_roles or [None]
+    # If there's only ONE possible hint combo this turn (down to a single
+    # attacker of ours against a single remaining target, or nobody of ours
+    # left to hint at all -- both common in a race's own endgame), the
+    # lookahead preview can never change which combo gets picked -- it's the
+    # only one there is -- so skip computing it at all. This is a pure
+    # performance guard (the ranking KEY would be moot either way), not a
+    # correctness change: it only skips the preview in exactly the cases
+    # where no comparison ever happens.
+    total_combos = len(hint_options) ** max(1, len(ours_live))
     best = None
     for combo in itertools.product(hint_options, repeat=max(1, len(ours_live))):
         hints = dict(zip(ours_live, combo))
@@ -2526,10 +2652,25 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
             tailwind_setter_role=tailwind_setter_role, terrain=terrain,
             dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
             own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role)
-        enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
-        ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
-        dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
-        dmg_taken = sum(hp[r] - new_hp[r] for r in ("C", "P"))
+        final_hp = new_hp
+        both_sides_still_live = (wiped is None
+                                 and any(new_hp[r] > 0 for r in ("C", "P"))
+                                 and any(new_hp[r] > 0 for r in ("E1", "E2")))
+        if lookahead > 0 and both_sides_still_live and total_combos > 1:
+            next_dmg_mult, next_def_mult, next_half_damage = _advance_turn_state(
+                log, dmg_mult_by_role, def_mult_by_role, half_damage_roles, combatants)
+            next_moves = {role: [m for m in mvs if m.name not in FIRST_TURN_ONLY_MOVES]
+                         for role, mvs in moves_by_role.items()}
+            final_hp, _log2, _acted2, _wiped2, _recharge2 = _best_turn(
+                combatants, next_moves, new_hp, typechart, weather,
+                enemy_speed_mult=enemy_speed_mult, recharging_roles=recharging_next,
+                terrain=terrain, dmg_mult_by_role=next_dmg_mult,
+                half_damage_roles=next_half_damage, own_speed_mult=own_speed_mult,
+                def_mult_by_role=next_def_mult, lookahead=lookahead - 1)
+        enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and final_hp[r] <= 0)
+        ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and final_hp[r] <= 0)
+        dmg_dealt = sum(hp[r] - final_hp[r] for r in ("E1", "E2"))
+        dmg_taken = sum(hp[r] - final_hp[r] for r in ("C", "P"))
         key = (enemies_ko, -ours_ko, dmg_dealt - dmg_taken)
         if best is None or key > best[0]:
             best = (key, new_hp, log, enemy_acted, wiped, recharging_next)
@@ -2692,25 +2833,8 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
-        half_damage |= {role for role, _tgt, h in turn_log
-                        if h.move_name in SELF_HALVING_MOVES}
-        for role, _tgt, h in turn_log:
-            stat_changes = CONTRARY_SELF_DROP_MOVES.get(h.move_name)
-            if (not stat_changes or combatants[role] is None
-                    or combatants[role].ability != "Contrary"):
-                continue
-            off = dmg_mult_by_role.setdefault(role, {})
-            deff = def_mult_by_role.setdefault(role, {})
-            for stat, raw_delta in stat_changes.items():
-                mult = _STAGE_MULT[-raw_delta]  # Contrary flips the move's own drop
-                if stat == "atk":
-                    off["physical"] = off.get("physical", 1.0) * mult
-                elif stat == "spa":
-                    off["special"] = off.get("special", 1.0) * mult
-                elif stat == "def":
-                    deff["physical"] = deff.get("physical", 1.0) / mult
-                elif stat == "spd":
-                    deff["special"] = deff.get("special", 1.0) / mult
+        dmg_mult_by_role, def_mult_by_role, half_damage = _advance_turn_state(
+            turn_log, dmg_mult_by_role, def_mult_by_role, half_damage, combatants)
         if wiped is not None:
             wiped_side = wiped
             break
