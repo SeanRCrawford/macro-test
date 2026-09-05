@@ -214,7 +214,8 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
                             deep_dive, enemy_has_real_tailwind, joint_pair_search,
                             joint_pool_search, member_weakness_summary,
                             multi_bring4_beam, multi_bring4_coverage,
-                            multi_bring4_exhaustive, own_pair_has_real_tailwind,
+                            multi_bring4_exhaustive, net_weakness_by_type,
+                            own_pair_has_real_tailwind,
                             pair_search, recommended_lead, speed_tiers,
                             switch_in_search, tailwind_focus_pool, threshold_search)
 
@@ -1340,6 +1341,46 @@ def _avg_score(names, merged):
     return sum(scores) / len(scores) if scores else None
 
 
+def _auto_deep_dive_filter_reasons(names, has_uncovered, merged, min_avg_score):
+    """--auto-deep-dive's own gate: "there should be no uncovered enemy
+    pairs, no types with 2 NET weaknesses, no more than 3 types with 2 or
+    more weaknesses AND 1 or more net weakness, and also an average score
+    threshold". Returns a list of human-readable failure reasons (empty
+    list = passes every condition) rather than a bare bool, so a
+    top-ranked result that got skipped can say WHY, matching this file's
+    own "no answer to: ..." transparency for uncovered pairs elsewhere.
+
+    `names`: the core (or bring-4) to check weaknesses/Score against --
+    `_avg_score`/`member_weakness_summary`'s own convention (see their call
+    sites in `_write_multi_bring4_xlsx`) is the CORE, not any one enemy's
+    chosen bring-4 -- a hard team-generation-level gate, not a per-matchup
+    one.
+    `has_uncovered`: whether this candidate has an unconditional loss
+    against ANY named enemy pair, for ANY enemy roster it was evaluated
+    against -- computed by the caller (multi-bring4's `per_enemy` nests
+    this per enemy roster; a single-roster caller has it flat), since the
+    shape of "uncovered" differs between callers and this function only
+    needs the final yes/no.
+    """
+    reasons = []
+    if has_uncovered:
+        reasons.append("has an uncovered enemy pair")
+    weak = member_weakness_summary(names, merged)["per_type"]
+    net = net_weakness_by_type(names, merged)
+    two_plus_net = sorted(t for t, n in net.items() if n >= 2)
+    if two_plus_net:
+        reasons.append(f"{', '.join(two_plus_net)} at 2+ net weakness")
+    breadth = sum(1 for t in weak if weak[t] >= 2 and net[t] >= 1)
+    if breadth > 3:
+        reasons.append(f"{breadth} types with 2+ weak members and 1+ net "
+                       f"weakness (max 3)")
+    avg = _avg_score(names, merged)
+    if avg is None or avg < min_avg_score:
+        reasons.append(f"average Score {'n/a' if avg is None else f'{avg:.1f}'} "
+                       f"< {min_avg_score}")
+    return reasons
+
+
 def _pairs_note(pair_rows):
     """A compact "name+name beaten/total" note for EVERY one of a bring-4's
     own internal pairs (6 for a 4-Pokemon bring, fewer for a 3-Pokemon
@@ -2022,6 +2063,22 @@ def main():
                          "--deep-dive-core \"5,85,16\" -- the xlsx's '#' "
                          "column (with --xlsx) is the same ranking this "
                          "reads")
+    ap.add_argument("--auto-deep-dive", type=int, default=0, metavar="N",
+                    help="--multi-bring4 only: instead of --deep-dive-core/"
+                         "the interactive prompt, scan the top N ranked "
+                         "cores and deep dive every one of them that has NO "
+                         "uncovered enemy pair (against any named enemy "
+                         "team), no type at 2+ NET weakness, at most 3 "
+                         "types with 2+ weak members AND 1+ net weakness, "
+                         "and an average roster.csv Score at or above "
+                         "--auto-deep-dive-min-score. Any of the top N that "
+                         "fails a condition is reported and skipped, not "
+                         "silently dropped. Mutually exclusive with "
+                         "--deep-dive-core.")
+    ap.add_argument("--auto-deep-dive-min-score", type=float, default=475.0,
+                    metavar="SCORE",
+                    help="Average roster.csv Score threshold for "
+                         "--auto-deep-dive (default 475).")
     ap.add_argument("--no-prompt", action="store_true",
                     help="--multi-bring4/--bring4 only: skip the interactive "
                          "'deep dive which cores?' prompt this tool asks "
@@ -2081,6 +2138,10 @@ def main():
         raise SystemExit("--vs-team requires --multi-bring4 or --bring4")
     if args.deep_dive_core and not (args.multi_bring4 or args.bring4):
         raise SystemExit("--deep-dive-core requires --multi-bring4 or --bring4")
+    if args.auto_deep_dive and not args.multi_bring4:
+        raise SystemExit("--auto-deep-dive requires --multi-bring4")
+    if args.auto_deep_dive and args.deep_dive_core:
+        raise SystemExit("--auto-deep-dive and --deep-dive-core are mutually exclusive")
     if args.no_prompt and not (args.multi_bring4 or args.bring4):
         raise SystemExit("--no-prompt requires --multi-bring4 or --bring4")
     if args.xlsx and not (args.multi_bring4 or args.bring4):
@@ -2397,9 +2458,31 @@ def main():
                             fixed_items=coverage["fixed_items"],
                             fixed_moves=coverage["fixed_moves"],
                             core_sizes=core_sizes)
-        ranks = _parse_deep_dive_core(args.deep_dive_core)
-        if not ranks:
-            ranks = _prompt_deep_dive_ranks(len(multi_rows), args.no_prompt)
+        if args.auto_deep_dive:
+            scan = min(args.auto_deep_dive, len(multi_rows))
+            ranks = []
+            for i in range(scan):
+                row = multi_rows[i]
+                has_uncovered = any(pe["best_bring4_row"]["uncovered_enemy_pairs"]
+                                    for pe in row["per_enemy"])
+                reasons = _auto_deep_dive_filter_reasons(
+                    row["core"], has_uncovered, merged,
+                    args.auto_deep_dive_min_score)
+                if reasons:
+                    print(f"--auto-deep-dive: skipping rank {i + 1} "
+                         f"({' / '.join(row['core'])}) -- {'; '.join(reasons)}")
+                else:
+                    ranks.append(i + 1)
+            if ranks:
+                print(f"--auto-deep-dive: deep diving rank(s) "
+                     f"{', '.join(str(r) for r in ranks)} of the top {scan}\n")
+            else:
+                print(f"--auto-deep-dive: none of the top {scan} passed "
+                     f"every condition\n")
+        else:
+            ranks = _parse_deep_dive_core(args.deep_dive_core)
+            if not ranks:
+                ranks = _prompt_deep_dive_ranks(len(multi_rows), args.no_prompt)
         core_dives = []
         for rank in ranks:
             if rank > len(multi_rows):

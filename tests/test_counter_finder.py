@@ -4123,6 +4123,49 @@ class TestMemberWeaknessSummaryByType(unittest.TestCase):
         self.assertEqual(set(weak["per_type"]), set(TYPES))
 
 
+class TestNetWeaknessByType(unittest.TestCase):
+    """`net_weakness_by_type` -- "three Fire-weak members matter much less
+    if four others resist it" -- (weak count) - (resist count) per type,
+    via the SAME `team_search._weak_resist` split `weakness_violations`'s
+    own `max_net` scoring already reads. A raw per-type map for a caller
+    (`counter_table.py`'s --auto-deep-dive gate) to apply its own hard
+    threshold to directly, not `weakness_violations`'s bounded soft
+    penalty."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_matches_weak_resist_directly(self):
+        from team_search import _weak_resist
+        merged = self.W["merged"]
+        core = ["Torkoal", "Kingambit", "Garchomp", "Corviknight", "Sylveon"]
+        net = cf.net_weakness_by_type(core, merged)
+        for t in ("Fire", "Water", "Ground", "Fairy"):
+            weak, resist = _weak_resist(core, merged, t)
+            self.assertEqual(net[t], len(weak) - len(resist), t)
+
+    def test_all_18_types_are_present(self):
+        from species_data import TYPES
+        merged = self.W["merged"]
+        net = cf.net_weakness_by_type(["Torkoal"], merged)
+        self.assertEqual(set(net), set(TYPES))
+
+    def test_a_resistor_lowers_the_net_below_the_raw_weak_count(self):
+        """Torkoal alone is weak to Water (net +1); adding a Water-RESISTING
+        teammate must bring the net down to 0, even though the raw
+        per-type WEAK count (member_weakness_summary's own reading) stays
+        at 1 -- net and raw weak count are genuinely different questions."""
+        merged = self.W["merged"]
+        solo_net = cf.net_weakness_by_type(["Torkoal"], merged)
+        self.assertEqual(solo_net["Water"], 1)
+        # Milotic (pure Water) resists Water.
+        duo_net = cf.net_weakness_by_type(["Torkoal", "Milotic"], merged)
+        self.assertEqual(duo_net["Water"], 0)
+        duo_weak = cf.member_weakness_summary(["Torkoal", "Milotic"], merged)
+        self.assertEqual(duo_weak["per_type"]["Water"], 1,
+                         "raw weak count must be unaffected by a resistor")
+
+
 class TestCoreRowAndBring4Candidates(unittest.TestCase):
     """The shared, no-new-racing combinatorics both `bring4_search` and the
     multi-enemy search are built on."""
@@ -5846,6 +5889,168 @@ class TestIntimidateInTheJointRace(unittest.TestCase):
                      "E1": cf._build("Kingambit", merged, natures),
                      "E2": cf._build("Sinistcha", merged, natures)}
         self.assertEqual(cf._intimidate_mult_by_role(combatants), {})
+
+
+class TestContraryDefenseBoostInTheJointRace(unittest.TestCase):
+    """"Mega Staraptor's Contrary meaning Close Combat boosts its def and
+    spdef" -- Close Combat's own -1 Def/-1 SpD (and Superpower's -1 Atk/-1
+    Def), verified via `mbsmogon.xlsx`'s own usage data to be a REAL, if
+    uncommon, ability choice for this roster's Mega Staraptor (13.2%,
+    resolved correctly by `_build`/`_mega_project` already -- this class
+    tests the NEW mechanic, not ability resolution). A Contrary holder
+    inverts that drop into a real +1/+1 stage GAIN, x1.5 bulkier on both
+    the physical and special sides -- exact math, mirroring `_intimidate_
+    mult_by_role`'s own -1/+1 stage table, not the flat SELF_HALVING_MOVES
+    approximation."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_mega_staraptor_actually_resolves_to_contrary(self):
+        """Precondition, not the bug under test -- confirms the fixture."""
+        star = cf._build("Mega Staraptor", self.W["merged"], self.W["natures"])
+        self.assertEqual(star.ability, "Contrary")
+
+    def test_close_combat_is_in_the_family(self):
+        self.assertEqual(cf.CONTRARY_SELF_DROP_MOVES["Close Combat"],
+                         {"def": -1, "spd": -1})
+
+    def test_choose_action_reads_a_boosted_def_mult_as_real_extra_bulk(self):
+        """Direct unit test of `_choose_action`'s own application point
+        (mirrors `TestIntimidateInTheJointRace.test_ordinary_ability_takes_
+        exactly_two_thirds`): a x(2/3) `def_mult_by_role` entry for the
+        DEFENDING role must cut the computed Hit by exactly that factor,
+        matching a real +1 Def stage's exact multiplier."""
+        merged, natures, typechart = (
+            self.W["merged"], self.W["natures"], self.W["typechart"])
+        chomp = cf._build("Garchomp", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        eq = cf._lookup_move("Earthquake", self.W["moves"])
+        hits_no, _mv = cf._choose_action(chomp, [eq], {"E1": target}, typechart,
+                                         attacker_role="C")
+        hits_boosted, _mv = cf._choose_action(
+            chomp, [eq], {"E1": target}, typechart, attacker_role="C",
+            def_mult_by_role={"E1": {"physical": 2 / 3}})
+        self.assertAlmostEqual(hits_boosted["E1"].frac / hits_no["E1"].frac,
+                               2 / 3, places=6)
+
+    def test_first_use_deals_the_normal_amount(self):
+        """The boost applies to damage taken AFTER Close Combat resolves,
+        not retroactively to the turn it was used -- same "first use is
+        still the normal number" timing `SELF_HALVING_MOVES` already uses."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        star = cf._build("Mega Staraptor", merged, natures)
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": star, "P": partner, "E1": e1, "E2": e2}
+        cc = cf._lookup_move("Close Combat", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [cc], "P": [protect], "E1": [protect], "E2": [protect]}
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 1)
+        role, tgt, full_hit = next((r, t, h) for r, t, h in log[0] if r == "C")
+        no_boost = cf._raw_hit(star, cc, combatants[tgt], typechart, roll="avg")
+        self.assertAlmostEqual(full_hit.frac, no_boost.frac, places=3)
+
+    def test_a_contrary_user_takes_less_damage_the_turn_after_close_combat(self):
+        """End to end through `_joint_race`: Mega Staraptor uses Close Combat
+        turn 1 (real damage, unaffected -- see above), then eats a Rock
+        Slide from Garchomp turn 2 -- that hit on Mega Staraptor must be
+        exactly x(2/3) of what the SAME Rock Slide did on it turn 1, since
+        Def is now genuinely +1 (x1.5 bulkier) instead of the -1 drop a
+        non-Contrary user would have taken. Rock Slide (2x on Flying,
+        neutral on Milotic's own Water typing) is used instead of
+        Earthquake specifically so Garchomp's own greedy targeting reliably
+        keeps aiming at Mega Staraptor both turns, not its partner -- a
+        Ground move would do ZERO to the Flying-type Mega Staraptor and
+        so never even be aimed at it.
+
+        Mega Staraptor's own Close Combat needs a target too -- Weavile
+        (Dark/Ice, 4x weak to Fighting) is used as E2 specifically so Close
+        Combat clearly prefers it over Garchomp's own neutral 1x, leaving
+        Garchomp fully unharmed and free to land Rock Slide on Mega
+        Staraptor both turns (Garchomp is otherwise fast enough, and Close
+        Combat hits hard enough, that Garchomp would be finished off
+        mid-turn-2 before ever getting to act, if it were CC's target
+        instead)."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        star = cf._build("Mega Staraptor", merged, natures)
+        partner = cf._build("Milotic", merged, natures)
+        chomp = cf._build("Garchomp", merged, natures)
+        e2 = cf._build("Weavile", merged, natures)
+        combatants = {"C": star, "P": partner, "E1": chomp, "E2": e2}
+        cc = cf._lookup_move("Close Combat", moves)
+        rock_slide = cf._lookup_move("Rock Slide", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [cc], "P": [protect], "E1": [rock_slide], "E2": [protect]}
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 2)
+        turn1_hit = next(((t, h) for role, t, h in log[0] if role == "E1"), None)
+        turn2_hit = next(((t, h) for role, t, h in log[1] if role == "E1"), None)
+        self.assertIsNotNone(turn1_hit, "Garchomp should get a turn-1 hit in")
+        self.assertEqual(turn1_hit[0], "C", "Rock Slide should target Mega Staraptor")
+        self.assertIsNotNone(turn2_hit, "Mega Staraptor should survive to turn 2")
+        self.assertEqual(turn2_hit[0], "C")
+        self.assertAlmostEqual(turn2_hit[1].frac / turn1_hit[1].frac, 2 / 3, places=2)
+
+    def test_a_non_contrary_close_combat_user_gets_no_boost(self):
+        """Scoped to Contrary specifically -- an ordinary user's own -1/-1
+        drop stays deliberately unmodeled, exactly as `SELF_HALVING_MOVES`'s
+        own `test_close_combat_does_not_trigger_the_halving` already
+        establishes for the offensive side. Gallade is Psychic/Fighting --
+        Rock Slide is neutral on it, same as on Milotic, so either target
+        is fine here; the assertion only needs the SAME target to repeat
+        turn to turn."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        gallade = cf._build("Gallade", merged, natures)
+        self.assertNotEqual(gallade.ability, "Contrary")
+        partner = cf._build("Milotic", merged, natures)
+        chomp = cf._build("Garchomp", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": gallade, "P": partner, "E1": chomp, "E2": e2}
+        cc = cf._lookup_move("Close Combat", moves)
+        rock_slide = cf._lookup_move("Rock Slide", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [cc], "P": [protect], "E1": [rock_slide], "E2": [protect]}
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 2)
+        turn1_hit = next(((t, h) for role, t, h in log[0] if role == "E1"), None)
+        turn2_hit = next(((t, h) for role, t, h in log[1] if role == "E1"), None)
+        self.assertIsNotNone(turn1_hit)
+        if turn2_hit is not None and turn2_hit[0] == turn1_hit[0]:
+            self.assertAlmostEqual(turn2_hit[1].frac, turn1_hit[1].frac, places=2)
+
+    def test_superpower_boosts_atk_and_def_for_a_contrary_holder(self):
+        """The other family member: Superpower's own -1 Atk/-1 Def becomes
+        a real +1/+1 for Contrary -- Atk feeds `dmg_mult_by_role` (this
+        role's own future OUTGOING damage), exactly like Defiant/Competitive
+        already do for Intimidate."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        star = cf._build("Mega Staraptor", merged, natures)
+        partner = cf._build("Milotic", merged, natures)
+        # Ghost-types (e.g. Sinistcha) are FLAT IMMUNE to Fighting -- would
+        # read as a spurious 0.0 turn-1 hit and break the ratio math below,
+        # not a real edge case of the mechanic under test. Milotic (Water)
+        # takes normal Fighting damage instead.
+        e1 = cf._build("Milotic", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        combatants = {"C": star, "P": partner, "E1": e1, "E2": e2}
+        sp = cf._lookup_move("Superpower", moves)
+        protect = cf._lookup_move("Protect", moves)
+        moves_by_role = {"C": [sp], "P": [protect], "E1": [protect], "E2": [protect]}
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 2)
+        turn1 = next(((t, h) for role, t, h in log[0] if role == "C"), None)
+        turn2 = next(((t, h) for role, t, h in log[1] if role == "C"), None)
+        self.assertIsNotNone(turn1)
+        self.assertIsNotNone(turn2, "Milotic should survive one hit")
+        self.assertEqual(turn2[0], turn1[0], "same target both turns")
+        self.assertAlmostEqual(turn2[1].frac / turn1[1].frac, 1.5, places=2)
 
 
 class TestBring4FromDeepDive(unittest.TestCase):
