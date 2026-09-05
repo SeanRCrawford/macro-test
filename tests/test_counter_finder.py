@@ -4123,6 +4123,49 @@ class TestMemberWeaknessSummaryByType(unittest.TestCase):
         self.assertEqual(set(weak["per_type"]), set(TYPES))
 
 
+class TestNetWeaknessByType(unittest.TestCase):
+    """`net_weakness_by_type` -- "three Fire-weak members matter much less
+    if four others resist it" -- (weak count) - (resist count) per type,
+    via the SAME `team_search._weak_resist` split `weakness_violations`'s
+    own `max_net` scoring already reads. A raw per-type map for a caller
+    (`counter_table.py`'s --auto-deep-dive gate) to apply its own hard
+    threshold to directly, not `weakness_violations`'s bounded soft
+    penalty."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_matches_weak_resist_directly(self):
+        from team_search import _weak_resist
+        merged = self.W["merged"]
+        core = ["Torkoal", "Kingambit", "Garchomp", "Corviknight", "Sylveon"]
+        net = cf.net_weakness_by_type(core, merged)
+        for t in ("Fire", "Water", "Ground", "Fairy"):
+            weak, resist = _weak_resist(core, merged, t)
+            self.assertEqual(net[t], len(weak) - len(resist), t)
+
+    def test_all_18_types_are_present(self):
+        from species_data import TYPES
+        merged = self.W["merged"]
+        net = cf.net_weakness_by_type(["Torkoal"], merged)
+        self.assertEqual(set(net), set(TYPES))
+
+    def test_a_resistor_lowers_the_net_below_the_raw_weak_count(self):
+        """Torkoal alone is weak to Water (net +1); adding a Water-RESISTING
+        teammate must bring the net down to 0, even though the raw
+        per-type WEAK count (member_weakness_summary's own reading) stays
+        at 1 -- net and raw weak count are genuinely different questions."""
+        merged = self.W["merged"]
+        solo_net = cf.net_weakness_by_type(["Torkoal"], merged)
+        self.assertEqual(solo_net["Water"], 1)
+        # Milotic (pure Water) resists Water.
+        duo_net = cf.net_weakness_by_type(["Torkoal", "Milotic"], merged)
+        self.assertEqual(duo_net["Water"], 0)
+        duo_weak = cf.member_weakness_summary(["Torkoal", "Milotic"], merged)
+        self.assertEqual(duo_weak["per_type"]["Water"], 1,
+                         "raw weak count must be unaffected by a resistor")
+
+
 class TestCoreRowAndBring4Candidates(unittest.TestCase):
     """The shared, no-new-racing combinatorics both `bring4_search` and the
     multi-enemy search are built on."""

@@ -360,6 +360,25 @@ def weak_type_breadth(core, merged, threshold=2):
     return sum(1 for c in per_type.values() if c >= threshold)
 
 
+def net_weakness_by_type(core, merged):
+    """{type: net} for every type -- net = (members weak to it) - (members
+    resistant/immune to it), via `team_search._weak_resist` (the SAME split
+    `weakness_violations`'s own `max_net` scores by -- "three Fire-weak
+    members matter much less if four others resist it"). A raw per-type
+    map, not a scored/bounded penalty: `weakness_violations` is for
+    `score_team`'s soft synergy term; this is for a caller applying its
+    OWN hard threshold directly (e.g. `counter_table.py`'s --auto-deep-dive
+    gate: "no types with 2 NET weaknesses").
+    """
+    from species_data import TYPES
+    from team_search import _weak_resist
+    out = {}
+    for t in TYPES:
+        weak, resist = _weak_resist(list(core), merged, t)
+        out[t] = len(weak) - len(resist)
+    return out
+
+
 def _build_forms(names, merged, natures, moves_db, items=None):
     """{name: {"mega": Combatant, "base": Combatant, "moves": [MoveInfo,...]}}
     for every name in `names`, built ONCE regardless of how many pairs drawn

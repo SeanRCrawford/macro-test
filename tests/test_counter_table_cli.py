@@ -390,6 +390,12 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
     def test_teamsheet_json_is_parsed(self):
         self.assertIn("--teamsheet-json", self.help_text)
 
+    def test_auto_deep_dive_is_parsed(self):
+        self.assertIn("--auto-deep-dive", self.help_text)
+
+    def test_auto_deep_dive_min_score_is_parsed(self):
+        self.assertIn("--auto-deep-dive-min-score", self.help_text)
+
     def test_every_flag_the_module_docstring_shows_is_parsed(self):
         import re
         docstring = ct.__doc__
@@ -604,6 +610,122 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+
+class TestAutoDeepDiveFilterReasons(unittest.TestCase):
+    """`_auto_deep_dive_filter_reasons` -- "there should be no uncovered
+    enemy pairs, no types with 2 NET weaknesses, no more than 3 types with
+    2 or more weaknesses AND 1 or more net weakness, and also an average
+    score threshold, default 475" -- --auto-deep-dive's gate, tested
+    directly against real roster data rather than only through a full CLI
+    run."""
+
+    @classmethod
+    def setUpClass(cls):
+        from _harness import load_world
+        cls.merged = load_world()["merged"]
+
+    def test_an_uncovered_pair_fails_regardless_of_everything_else(self):
+        reasons = ct._auto_deep_dive_filter_reasons(
+            ["Kingambit"], True, self.merged, 0)
+        self.assertTrue(any("uncovered" in r for r in reasons))
+
+    def test_no_uncovered_pair_and_a_zero_score_bar_can_still_fail_on_weakness(self):
+        """Torkoal AND Arcanine are both weak to Water (established by
+        `TestMemberWeaknessSummaryByType`) and neither resists it -- Water
+        nets +2, reliably tripping the net-weakness condition even with
+        every other bar set to let everything through."""
+        reasons = ct._auto_deep_dive_filter_reasons(
+            ["Torkoal", "Arcanine"], False, self.merged, 0)
+        self.assertTrue(any("Water" in r for r in reasons), reasons)
+
+    def test_an_unreachable_score_bar_always_fails(self):
+        reasons = ct._auto_deep_dive_filter_reasons(
+            ["Kingambit", "Garchomp"], False, self.merged, 10_000)
+        self.assertTrue(any("Score" in r for r in reasons))
+
+    def test_a_trivially_low_score_bar_never_fails_on_score(self):
+        reasons = ct._auto_deep_dive_filter_reasons(
+            ["Kingambit", "Garchomp"], False, self.merged, -10_000)
+        self.assertFalse(any("Score" in r for r in reasons))
+
+    def test_passes_every_condition_returns_an_empty_list(self):
+        """A well-rounded 6 (no uncovered pair asserted directly, a low
+        score bar, and enough type diversity to keep every weakness
+        condition clear) must return no failure reasons at all."""
+        core = ["Kingambit", "Garchomp", "Corviknight", "Sylveon",
+               "Milotic", "Farigiraf"]
+        reasons = ct._auto_deep_dive_filter_reasons(core, False, self.merged, 0)
+        self.assertEqual(reasons, [], core)
+
+
+class TestAutoDeepDiveModeRestrictions(unittest.TestCase):
+
+    def test_requires_multi_bring4(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--auto-deep-dive", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--auto-deep-dive", msg)
+        self.assertIn("--multi-bring4", msg)
+
+    def test_mutually_exclusive_with_deep_dive_core(self):
+        msg, _out = run_main(
+            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+             "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+             "--auto-deep-dive", "3", "--deep-dive-core", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--auto-deep-dive", msg)
+        self.assertIn("--deep-dive-core", msg)
+
+
+class TestAutoDeepDiveEndToEnd(unittest.TestCase):
+    """A real --multi-bring4 run: every one of the top N ranked cores must
+    end up either deep-dived ("Deep dive: ...") or explicitly skipped with
+    a reason ("--auto-deep-dive: skipping rank N ... -- ...") -- never
+    silently dropped."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "30", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--top", "3"]
+
+    def test_an_unreachable_score_bar_skips_every_one_of_the_top_n(self):
+        msg, out = run_main(
+            self.argv + ["--auto-deep-dive", "3",
+                        "--auto-deep-dive-min-score", "999999"])
+        self.assertIsNone(msg, out)
+        self.assertNotIn("Deep dive:", out)
+        self.assertEqual(out.count("--auto-deep-dive: skipping rank"), 3)
+        self.assertIn("none of the top 3 passed", out)
+
+    def test_every_scanned_rank_is_accounted_for(self):
+        """With every OTHER bar left at its default (0 uncovered pairs, the
+        weakness caps, and the default 475 Score bar), each of the top 3
+        ranks is either deep-dived or explicitly skipped -- the two counts
+        must sum to exactly 3, never fewer (a silently-dropped rank)."""
+        msg, out = run_main(self.argv + ["--auto-deep-dive", "3"])
+        self.assertIsNone(msg, out)
+        skipped = out.count("--auto-deep-dive: skipping rank")
+        dived = out.count("Deep dive:")
+        self.assertEqual(skipped + dived, 3, out)
+
+    def test_a_qualifying_rank_actually_runs_a_real_deep_dive(self):
+        """This fixture's own top 3 (all Dragon/Ground-heavy) happen to
+        fail on weakness breadth regardless of the score bar -- rather
+        than depend on which cores a specific pool/enemy pairing turns up,
+        force `_auto_deep_dive_filter_reasons` to pass every rank (a
+        controlled fixture for the WIRING, not the filter's own logic --
+        that's `TestAutoDeepDiveFilterReasons`'s job) and confirm the
+        qualifying branch actually runs `core_deep_dive` and prints its
+        gameplan, not just the all-skipped path above."""
+        from unittest.mock import patch
+        with patch.object(ct, "_auto_deep_dive_filter_reasons", return_value=[]):
+            msg, out = run_main(self.argv + ["--auto-deep-dive", "3"])
+        self.assertIsNone(msg, out)
+        self.assertNotIn("skipping rank", out)
+        self.assertEqual(out.count("Deep dive:"), 3)
+        self.assertRegex(out, r"T\d .+ -> .+: .+ \d+-\d+-\d+%")
 
 
 class TestDiveSheetsFormatting(unittest.TestCase):
