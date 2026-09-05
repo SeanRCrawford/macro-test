@@ -4619,13 +4619,28 @@ class TestSwitchInSearch(unittest.TestCase):
             self.merged, self.moves, self.natures, self.typechart, turns=turns)
 
     def test_a_real_fix_is_found_and_labelled_correctly(self):
+        """Ninetales-Alola ranked first here before the mutual-KO fix
+        (TestMutualKnockoutIsNotMisclassifiedAsAWin): one of its own
+        minimax mega-choice branches used to be misclassified as
+        "out_trade" (a genuine mutual KO -- our own finishing blow's
+        recoil/Rough-Skin also dropped us to 0 the same turn), which
+        changed which mega assignment that candidate's own minimax
+        selected as "best", and so its resulting `switch_in_taken`. Mega
+        Scizor's own switch_in_taken is genuinely lower once that's
+        corrected -- re-verified directly (not just re-derived from the
+        old expectation) by comparing both candidates' numbers after the
+        fix, matching this class's own "verified by hand" standard."""
         rows, tried = self._search(("Mega Charizard Y", "Mega Floette"))
         self.assertGreater(tried, 0)
         self.assertTrue(rows)
         best = rows[0]
-        self.assertEqual(best["leaving"], "Ninetales-Alola")
+        self.assertEqual(best["leaving"], "Mega Scizor")
         self.assertIn(best["arriving"], self.BENCH)
         self.assertIn(best["outcome"], ("sweep", "out_trade"))
+        ninetales_row = next(r for r in rows if r["leaving"] == "Ninetales-Alola")
+        self.assertLess(best["switch_in_taken"], ninetales_row["switch_in_taken"],
+                        "fixture assumes Mega Scizor's own fix now takes "
+                        "genuinely less switch-in damage")
 
     def test_a_genuine_loss_reports_no_fix_rather_than_a_bad_one(self):
         """Basculegion + Mega Charizard Y is too much pressure for a single
@@ -5388,6 +5403,92 @@ class TestRecoilInTheJointRace(unittest.TestCase):
         self.assertEqual(new_hp["C"], 1.0)
 
 
+class TestSpreadHitRecomputedIfATargetAlreadyFaintedThisTurn(unittest.TestCase):
+    """"if Staraptor fainted then Heat Wave would have been single target
+    damage rather than spread" -- `hits`/`num_targets_hit` are fixed at
+    PLAN-BUILD time (before the turn's own speed order plays out), so a
+    spread move computed against 2 live targets can find, by the time it
+    actually resolves in `_apply_plan`, that a FASTER attacker already
+    fainted one of them this same turn -- real doubles decides the 0.75x
+    multi-target penalty at the moment of use, not at team-preview, so a
+    stale spread-reduced hit on the one target still standing is wrong."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _fixture(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        attacker = cf._build("Kingambit", merged, natures)
+        spreader = cf._build("Mega Staraptor", merged, natures)
+        e1 = cf._build("Milotic", merged, natures)
+        e2 = cf._build("Milotic", merged, natures)
+        return attacker, spreader, e1, e2
+
+    def test_the_survivors_hit_is_rescaled_up_when_the_other_target_already_fainted(self):
+        from damage import MoveInfo
+        from engine import FieldState
+        attacker, spreader, e1, e2 = self._fixture()
+        combatants = {"C": attacker, "P": spreader, "E1": e1, "E2": e2}
+        # Priority 1 guarantees C resolves before P regardless of raw speed.
+        fast_ohko = MoveInfo("Fast Attack", 100, "Normal", "Physical", "normal",
+                             priority=1)
+        heat_wave = MoveInfo("Heat Wave", 95, "Fire", "Special",
+                             "allAdjacentFoes", priority=0)
+        ohko = cf.Hit(move_name="Fast Attack", frac=1.0, lo=1.0, avg=1.0,
+                     hi=1.0, eff=1.0, num_targets_hit=1)
+        # The SAME spread hit fraction on both -- exactly what `_choose_
+        # action` would have computed for Heat Wave when BOTH enemies were
+        # still alive (E1's own copy is never actually used once E1 is
+        # dead by the time P's turn comes up, but it has to be present in
+        # `hits` for `_apply_plan` to know Heat Wave was aimed at 2 targets
+        # in the first place).
+        spread_hit = cf.Hit(move_name="Heat Wave", frac=0.3, lo=0.3, avg=0.3,
+                           hi=0.3, eff=1.0, num_targets_hit=2)
+        plan = {"C": ({"E1": ohko}, fast_ohko),
+               "P": ({"E1": spread_hit, "E2": spread_hit}, heat_wave),
+               "E1": ({}, None), "E2": ({}, None)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        new_hp, log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["E1"], 0.0, "E1 must be OHKO'd by C first")
+        self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3 / 0.75, places=6,
+                               msg="E2 should take the UNDONE-0.75x hit, "
+                                   "since E1 was already dead when Heat "
+                                   "Wave resolved")
+        logged = next(h for role, tgt, h in log if role == "P" and tgt == "E2")
+        self.assertAlmostEqual(logged.frac, 0.3 / 0.75, places=6,
+                               msg="the LOGGED gameplan hit must match what "
+                                   "was actually applied, not the stale "
+                                   "spread frac")
+        self.assertEqual(logged.num_targets_hit, 1)
+
+    def test_both_still_alive_keeps_the_spread_penalty(self):
+        """Precondition/contrast: if C's move ISN'T lethal (E1 survives),
+        Heat Wave's own spread hit on both must stay exactly as computed
+        -- confirms the rescale only fires when a target is genuinely gone,
+        not on every multi-target hit."""
+        from damage import MoveInfo
+        from engine import FieldState
+        attacker, spreader, e1, e2 = self._fixture()
+        combatants = {"C": attacker, "P": spreader, "E1": e1, "E2": e2}
+        weak_hit = cf.Hit(move_name="Fast Attack", frac=0.1, lo=0.1, avg=0.1,
+                         hi=0.1, eff=1.0, num_targets_hit=1)
+        fast_move = MoveInfo("Fast Attack", 40, "Normal", "Physical", "normal",
+                             priority=1)
+        heat_wave = MoveInfo("Heat Wave", 95, "Fire", "Special",
+                             "allAdjacentFoes", priority=0)
+        spread_hit = cf.Hit(move_name="Heat Wave", frac=0.3, lo=0.3, avg=0.3,
+                           hi=0.3, eff=1.0, num_targets_hit=2)
+        plan = {"C": ({"E1": weak_hit}, fast_move),
+               "P": ({"E1": spread_hit, "E2": spread_hit}, heat_wave),
+               "E1": ({}, None), "E2": ({}, None)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertGreater(new_hp["E1"], 0.0, "fixture must NOT OHKO E1")
+        self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3, places=6)
+
+
 class TestRecoilCappedAtTargetsActualHp(unittest.TestCase):
     """"Floette should take max half of its target HP" -- recoil must scale
     off the HP the TARGET actually lost, not `got.frac` directly (which is
@@ -5570,6 +5671,80 @@ class TestChooseActionAvoidsNeedlessRecharge(unittest.TestCase):
         moves = self.W["moves"]
         moonblast = cf._lookup_move("Moonblast", moves)
         self.assertFalse((moonblast.flags or {}).get("recharge"))
+
+
+class TestMutualKnockoutIsNotMisclassifiedAsAWin(unittest.TestCase):
+    """"I believe this should qualify as a win for Staraptor, but is
+    treated as an out_trade for my side" -- turned out to be a genuine
+    MUTUAL KO: Mega Staraptor's own finishing Brave Bird carries 33%
+    recoil, which (on top of the incoming damage it had already taken)
+    drops IT to 0 the exact same turn its hit drops the enemy's last
+    Pokemon to 0. `wiped_side` locks to "theirs" the moment the ENEMY's hp
+    hits 0 (a step before the attacker's own recoil is even computed), so
+    `wiped_side == "theirs"` alone used to grant "sweep"/"out_trade"
+    regardless of whether `ours_alive` was ALSO now False -- crediting a
+    race nobody actually survived to claim as an unambiguous win."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_recoil_finishing_blow_that_also_kos_the_attacker_is_a_loss(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        dragonite = cf._build("Dragonite", merged, natures)
+        sylveon = cf._build("Sylveon", merged, natures)
+        scizor = cf._build("Mega Scizor", merged, natures)
+        star = cf._build("Mega Staraptor", merged, natures)
+        es = cf._lookup_move("Extreme Speed", moves)
+        qa = cf._lookup_move("Quick Attack", moves)
+        bp = cf._lookup_move("Bullet Punch", moves)
+        cc = cf._lookup_move("Close Combat", moves)
+        dc = cf._lookup_move("Dragon Claw", moves)
+        bb = cf._lookup_move("Brave Bird", moves)
+        self.assertEqual(bb.recoil, [33, 100], "fixture needs Brave Bird's own recoil")
+        combatants = {"E1": dragonite, "E2": scizor, "C": sylveon, "P": star}
+        moves_by_role = {"E1": [es, dc], "E2": [bp], "C": [qa], "P": [cc, bb]}
+        outcome, _turns_used, hp, _log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 3)
+        # Precondition: this fixture really is a full mutual wipe, not just
+        # a one-sided finish -- otherwise this test would pass for the
+        # wrong reason.
+        self.assertEqual(hp, {"C": 0.0, "P": 0.0, "E1": 0.0, "E2": 0.0})
+        self.assertEqual(outcome, "loss")
+
+    def test_the_same_finish_without_a_recoil_move_still_reads_as_a_win(self):
+        """Contrast/guard against over-correcting: swap Brave Bird for a
+        no-recoil move of identical raw power (Fly, PHYSICAL, same 120 BP,
+        Flying-type, no recoil) that still finishes Dragonite the same
+        turn -- Mega Staraptor must survive and this must still read as a
+        genuine out_trade/sweep win, confirming the fix only changes the
+        TRUE mutual-KO case, not the ordinary "we finish them and live"
+        case."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        dragonite = cf._build("Dragonite", merged, natures)
+        sylveon = cf._build("Sylveon", merged, natures)
+        scizor = cf._build("Mega Scizor", merged, natures)
+        star = cf._build("Mega Staraptor", merged, natures)
+        es = cf._lookup_move("Extreme Speed", moves)
+        qa = cf._lookup_move("Quick Attack", moves)
+        bp = cf._lookup_move("Bullet Punch", moves)
+        cc = cf._lookup_move("Close Combat", moves)
+        dc = cf._lookup_move("Dragon Claw", moves)
+        no_recoil_finisher = cf._lookup_move("Brave Bird", moves)
+        no_recoil_finisher = cf.MoveInfo(
+            no_recoil_finisher.name, no_recoil_finisher.power,
+            no_recoil_finisher.move_type, no_recoil_finisher.category,
+            no_recoil_finisher.target, priority=no_recoil_finisher.priority,
+            flags=no_recoil_finisher.flags)  # recoil=None (the default)
+        self.assertIsNone(no_recoil_finisher.recoil)
+        combatants = {"E1": dragonite, "E2": scizor, "C": sylveon, "P": star}
+        moves_by_role = {"E1": [es, dc], "E2": [bp], "C": [qa],
+                         "P": [cc, no_recoil_finisher]}
+        outcome, _turns_used, hp, _log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 3)
+        self.assertGreater(hp["P"], 0.0, "Staraptor must survive without recoil")
+        self.assertIn(outcome, ("sweep", "out_trade"))
 
 
 class TestRoughSkinInTheJointRace(unittest.TestCase):

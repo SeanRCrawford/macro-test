@@ -300,6 +300,96 @@ class TestUniqueItemsFlag(unittest.TestCase):
         self.assertEqual(len(items), len(set(items)), line)
 
 
+class TestUniqueItemsScopedToTopRowsOnly(unittest.TestCase):
+    """"it outputs the best pairs vs each team, then hangs for hours ...
+    unique-items may be drastically slowing it down ... I only want to run
+    deep dives and unique_items for the top n teams" -- `--multi-bring4`'s
+    own sweep (`multi_bring4_exhaustive`/`multi_bring4_beam`) no longer
+    receives `enforce_item_clause` at all; `_apply_item_clause_to_top_rows`
+    applies the SAME correction afterward, scoped to just the top `--top`
+    rows -- fast regardless of how huge the full sweep was, since
+    `_core_row` itself only pays the expensive re-race on an actual
+    collision.
+
+    Same fixture as `TestMultiBring4CoverageItemClause` in
+    test_counter_finder.py: Ninetales-Alola and Rampardos both
+    independently want Life Orb."""
+
+    # Exactly 4 names, matching `TestMultiBring4CoverageItemClause`'s own
+    # `FOUR`/`_four_coverage()` pattern in test_counter_finder.py: with a
+    # size-4 core and `core_sizes=(4,)`, the WHOLE core is necessarily the
+    # bring-4 against a single enemy roster, so `_core_row`'s own `unused`
+    # never drops it -- decoupled from which 4-of-6 subset a larger pool's
+    # own bring-4 search would otherwise have picked.
+    FOUR = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Rampardos"]
+    TARGETS = ["Sableye", "Ariados"]
+
+    def setUp(self):
+        from _harness import load_world
+        self.W = load_world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = ct.multi_bring4_coverage(
+            self.FOUR, [self.TARGETS], merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+        self.rows = ct.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.0, core_sizes=(4,))
+
+    def test_the_sweep_itself_never_resolves_the_collision(self):
+        """Precondition: the plain sweep (no enforce_item_clause passed at
+        all, matching the new CLI wiring) leaves every row unresolved --
+        confirms `_apply_item_clause_to_top_rows` is doing the actual work
+        below, not the sweep itself."""
+        self.assertEqual(len(self.rows), 1)
+        self.assertIsNone(self.rows[0]["item_clause_resolved_items"])
+
+    def test_top_n_rows_get_resolved(self):
+        corrected = ct._apply_item_clause_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0)
+        resolved = corrected[0]["item_clause_resolved_items"]
+        self.assertIsNotNone(resolved)
+        self.assertNotEqual(resolved["Ninetales-Alola"], resolved["Rampardos"])
+
+    def test_top_n_zero_leaves_everything_unresolved(self):
+        corrected = ct._apply_item_clause_to_top_rows(
+            self.rows, 0, self.coverage, good_threshold=0.0)
+        self.assertEqual(corrected, self.rows)
+
+    def test_wired_into_the_cli_with_the_right_top_n(self):
+        """A real --multi-bring4 --unique-items run must call
+        `_apply_item_clause_to_top_rows` with `args.top` -- not run the
+        sweep itself with `enforce_item_clause`, and not skip the
+        correction. Checked by mocking the function itself, since a random
+        --pool-size sample from the whole roster isn't guaranteed to
+        surface a real collision in whichever core happens to rank #1 (the
+        actual collision-resolution behaviour is covered directly by
+        `test_top_n_rows_get_resolved` above and by test_counter_finder.py's
+        `TestMultiBring4CoverageItemClause`)."""
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--unique-items", "--top", "3", "--no-prompt"]
+        with patch.object(ct, "_apply_item_clause_to_top_rows",
+                         wraps=ct._apply_item_clause_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.args[1], 3)
+
+    def test_not_called_at_all_without_unique_items(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt"]
+        with patch.object(ct, "_apply_item_clause_to_top_rows",
+                         wraps=ct._apply_item_clause_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_not_called()
+
+
 class TestCoreSizesFlag(unittest.TestCase):
     """"I would like to output the best 3-pokemon cores against each team"
     -- `--core-sizes` (comma-separated, default "4,5,6", each 3-6) threads

@@ -918,5 +918,100 @@ class TestMegaEvolutionVisibility(unittest.TestCase):
         self.assertTrue(any(c.value == expected for c in at.caption))
 
 
+class TestBring4MegaVisibilityOutsideDeepDive(unittest.TestCase):
+    """"It should also show the chosen mega vs a given six" --
+    `TestMegaEvolutionVisibility` above only covers the opt-in deep dive;
+    the BASIC (no click needed) Stage 2 table and per-enemy bring-4 lines
+    (`_render_multi_bring4_core`, the "team by team" breakdown) never
+    showed `mega_used` at all, even though `_bring4_candidates` already
+    computes it for every row."""
+
+    TWO_MEGAS = ["Mega Metagross", "Mega Swampert", "Incineroar",
+                "Farigiraf", "Gallade", "Hydreigon"]
+    ONE_MEGA = ["Mega Metagross", "Incineroar", "Farigiraf", "Gallade",
+               "Hydreigon", "Whimsicott"]
+    NO_MEGA = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
+              "Whimsicott", "Kingambit"]
+
+    def test_stage2_table_carries_a_mega_column(self):
+        at = app(team=self.ONE_MEGA)
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+        dfs = [d.value for d in at.dataframe if "Mega" in d.value.columns]
+        self.assertTrue(dfs, "expected a 'Mega' column somewhere")
+        stage2 = next(df for df in dfs if "Bring-4" in df.columns)
+        for i, row in enumerate(bring4_rows):
+            expected = row.get("mega_used") or "-"
+            self.assertEqual(stage2.iloc[i]["Mega"], expected)
+
+    def test_stage2_table_shows_dash_for_no_mega(self):
+        at = app(team=self.NO_MEGA)
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Mega" in d.value.columns]
+        stage2 = next(df for df in dfs if "Bring-4" in df.columns)
+        self.assertTrue(all(v == "-" for v in stage2["Mega"]))
+
+    @staticmethod
+    def _expected_bring4_mega_caption(bring4_row):
+        """Mirrors `app._bring4_mega_caption`'s own formula -- app.py can't
+        be imported directly (its Streamlit calls run at module level), so
+        this is re-derived here from `mega_used`/`bring4`, the same way
+        `TestMegaEvolutionVisibility`'s existing tests hand-build their own
+        expected strings rather than calling the app function."""
+        megas_in_bring = [n for n in bring4_row["bring4"] if n.startswith("Mega ")]
+        if not megas_in_bring:
+            return None
+        used = bring4_row.get("mega_used")
+        if len(megas_in_bring) == 1:
+            return f"Mega Evolution: {megas_in_bring[0]} evolves."
+        other = ", ".join(n for n in megas_in_bring if n != used)
+        return (f"Mega Evolution: {used} evolves -- {other} stays in base "
+               f"form (VGC: only one Mega per side).")
+
+    def test_pool_search_result_shows_the_mega_caption(self):
+        """`_render_multi_bring4_core`'s own per-enemy line -- exercised via
+        the Bring-4 pool-search path, same button sequence as
+        `test_pool_search_cores_also_offer_a_deep_dive`."""
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value("\U0001f50d Search a pool for the best team").run()
+        [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(16).run()
+        [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+        [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state["ct_b4_pool_rows"]
+        self.assertTrue(rows)
+        top = rows[0]
+        mega_captions = [c.value for c in at.caption
+                        if c.value.startswith("Mega Evolution")]
+        for pe in top["per_enemy"]:
+            expected = self._expected_bring4_mega_caption(pe["best_bring4_row"])
+            if expected:
+                self.assertIn(expected, mega_captions)
+
+    def test_team_by_team_shows_its_own_per_team_caption(self):
+        at = app(team=self.TWO_MEGAS)
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        our6 = self.TWO_MEGAS
+        all_dive = at.session_state["ctb4_dd_all6_allteams_dive"]
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive
+        teams = load_world()["teams"]
+        mega_captions = [c.value for c in at.caption
+                        if c.value.startswith("Mega Evolution")]
+        for team_name in teams:
+            best = bring4_from_deep_dive(
+                our6, all_dive, list(teams[team_name]))[0]
+            expected = self._expected_bring4_mega_caption(best)
+            if expected:
+                self.assertIn(expected, mega_captions)
+
+
 if __name__ == "__main__":
     unittest.main()

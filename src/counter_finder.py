@@ -2096,6 +2096,26 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
                 continue  # Protect blocks this hit entirely
             if hp.get(tgt_role, 0.0) <= 0:
                 continue
+            if got.num_targets_hit > 1 and not any(
+                    other != tgt_role and hp.get(other, 0.0) > 0
+                    for other in hits):
+                # `hits`/`num_targets_hit` were fixed at PLAN-BUILD time,
+                # before this turn's own speed order actually played out --
+                # a move that WAS a real 2 (or 3, with an ally-splash EQ-
+                # family hit) target spread when the plan was built can
+                # turn out effectively single-target by the time it
+                # resolves, if every OTHER originally-intended target
+                # already fainted earlier this SAME turn to a faster
+                # attacker. Real doubles decides the 0.75x multi-target
+                # penalty at the moment of use, not at team-preview, so
+                # undo it here rather than deal a stale, needlessly
+                # weakened hit to the one target still standing -- the
+                # penalty is a flat 0.75x regardless of whether the
+                # original count was 2 or 3, so the undo divisor is always
+                # exactly that, unconditionally.
+                got = Hit(move_name=got.move_name, frac=got.frac / 0.75,
+                         lo=got.lo / 0.75, avg=got.avg / 0.75,
+                         hi=got.hi / 0.75, eff=got.eff, num_targets_hit=1)
             target_c = combatants[tgt_role]
             pre_hit_hp = hp[tgt_role]
             new_hp = pre_hit_hp - got.frac
@@ -2696,7 +2716,20 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             break
     theirs_alive = hp["E1"] > 0 or hp["E2"] > 0
     ours_alive = hp["C"] > 0 or hp["P"] > 0
-    if wiped_side == "theirs" or (not theirs_alive and ours_alive):
+    # "I believe this should qualify as a win for Staraptor, but is
+    # treated as an out_trade for my side" -- turned out to be a genuine
+    # MUTUAL KO instead: `wiped` locks to whichever side's own hp hit 0
+    # FIRST (`_apply_plan`'s own per-role loop, checked right after each
+    # actor's hits AND its own recoil/Life-Orb/Rough-Skin self-damage) --
+    # so a finishing blow whose OWN recoil (e.g. Brave Bird's 33%) also
+    # drops the attacker to 0 the very same turn still locks `wiped_side`
+    # to "theirs" (the target died from the hit itself, a step before the
+    # attacker's own recoil is even computed), even though `ours_alive` is
+    # ALSO now False. `wiped_side == "theirs"` alone used to grant "sweep"/
+    # "out_trade" regardless -- requiring `ours_alive` too means a true
+    # mutual wipe falls through to "loss" below instead of being credited
+    # as an unambiguous win nobody actually survived to claim.
+    if (wiped_side == "theirs" or not theirs_alive) and ours_alive:
         outcome = "sweep" if not any_enemy_acted else "out_trade"
     elif wiped_side == "ours" or not ours_alive:
         outcome = "loss"
