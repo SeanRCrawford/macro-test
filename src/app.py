@@ -3365,9 +3365,13 @@ def _pair_rows_df(pair_rows, include_total=False):
 
 def _bring4_rows_df(bring4_rows, total):
     """Stage 2's own dataframe shape (Bring-4/Uncovered enemy pairs/Good
-    pairs/Worst pair/Worst pair beaten) -- factored out so `bring4_search`'s
-    cheap Stage 2 and `bring4_from_deep_dive`'s accurate, already-raced
-    version render identically instead of drifting apart."""
+    pairs/Worst pair/Worst pair beaten/Mega) -- factored out so `bring4_
+    search`'s cheap Stage 2 and `bring4_from_deep_dive`'s accurate,
+    already-raced version render identically instead of drifting apart.
+    "It should also show the chosen mega vs a given six" -- `mega_used`
+    (`_bring4_candidates`'s own field, already computed for every row) as
+    its own column, `"-"` for a bring carrying no Mega-stone holder at
+    all."""
     n_pairs = len(bring4_rows[0]["pair_rows"]) if bring4_rows else 6
     return pd.DataFrame([
         {"Bring-4": " / ".join(b["bring4"]),
@@ -3375,8 +3379,28 @@ def _bring4_rows_df(bring4_rows, total):
          "Good pairs": f"{b['pairs_good']}/{n_pairs}",
          "Worst pair": " + ".join(b["worst_pair"]),
          "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
-                               f"/{total}")}
+                               f"/{total}"),
+         "Mega": b.get("mega_used") or "-"}
         for b in bring4_rows])
+
+
+def _bring4_mega_caption(bring4_row):
+    """"It should also show the chosen mega vs a given six" -- the BASIC
+    (non-deep-dive) per-enemy bring-4 line (`_render_multi_bring4_core`,
+    the "team by team" breakdown) never surfaced `mega_used`
+    (`_bring4_candidates`'s own field, already computed) the way
+    `_mega_evolution_caption` already does for a full deep dive's whole
+    CORE. `None` when the bring carries no Mega-stone holder at all --
+    nothing to say."""
+    megas_in_bring = [n for n in bring4_row["bring4"] if n.startswith("Mega ")]
+    if not megas_in_bring:
+        return None
+    used = bring4_row.get("mega_used")
+    if len(megas_in_bring) == 1:
+        return f"Mega Evolution: {megas_in_bring[0]} evolves."
+    other = ", ".join(n for n in megas_in_bring if n != used)
+    return (f"Mega Evolution: {used} evolves -- {other} stays in base form "
+           f"(VGC: only one Mega per side).")
 
 
 def _mega_evolution_caption(core, dive):
@@ -3606,6 +3630,9 @@ def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
         if uncovered:
             st.caption("No answer to: " + ", ".join(
                 f"{a}+{b}" for a, b in uncovered))
+        mega_caption = _bring4_mega_caption(pe["best_bring4_row"])
+        if mega_caption:
+            st.caption(mega_caption)
         with st.expander(f"Show the 6 pairs (vs {name})"):
             st.dataframe(_pair_rows_df(pe["best_bring4_row"]["pair_rows"],
                                        include_total=True),
@@ -3796,15 +3823,8 @@ with tab_counter:
                     st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
                     st.markdown(f"**Stage 2** -- all {len(bring4_rows)} possible bring-4s, "
                                f"ranked best worst-case first:")
-                    n_pairs = len(bring4_rows[0]["pair_rows"]) if bring4_rows else 6
-                    st.dataframe(pd.DataFrame([
-                        {"Bring-4": " / ".join(b["bring4"]),
-                         "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
-                         "Good pairs": f"{b['pairs_good']}/{n_pairs}",
-                         "Worst pair": " + ".join(b["worst_pair"]),
-                         "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
-                                               f"/{total}")}
-                        for b in bring4_rows]), width='stretch', hide_index=True)
+                    st.dataframe(_bring4_rows_df(bring4_rows, total),
+                                width='stretch', hide_index=True)
 
                     st.markdown("**Your best bring-4, by its own 6 internal pairs:**")
                     st.caption(" / ".join(bring4_rows[0]["bring4"]))
@@ -3908,6 +3928,9 @@ with tab_counter:
                             st.caption("No answer to: " + ", ".join(
                                 f"{a}+{b}" for a, b
                                 in best["uncovered_enemy_pairs"]))
+                        mega_caption = _bring4_mega_caption(best)
+                        if mega_caption:
+                            st.caption(mega_caption)
                         with st.expander(
                                 f"Show the pairs and matchups "
                                 f"(vs {team_name})"):

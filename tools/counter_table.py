@@ -208,7 +208,8 @@ import argparse  # noqa: E402
 import _harness  # noqa: E402,F401
 
 from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
-                            _fixed_sets_from_pair_rows, _pair_sort_key,
+                            _core_row, _fixed_sets_from_pair_rows,
+                            _item_clause_context_from_coverage, _pair_sort_key,
                             bring4_damage_output, bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, core_damage_output,
                             deep_dive, enemy_has_real_tailwind, joint_pair_search,
@@ -1381,6 +1382,44 @@ def _auto_deep_dive_filter_reasons(names, has_uncovered, merged, min_avg_score):
     return reasons
 
 
+def _apply_item_clause_to_top_rows(rows, top_n, coverage, good_threshold):
+    """"it outputs the best pairs vs each team, then hangs for hours ...
+    unique-items may be drastically slowing it down ... I only want to run
+    deep dives and unique_items for the top n teams" -- passing
+    `enforce_item_clause=True` straight into `multi_bring4_exhaustive`/
+    `multi_bring4_beam` checks (and, for a real collision, fully re-races)
+    EVERY candidate core the sweep considers, not just the ones anyone will
+    ever see; a large candidate pool with even a modest fraction of
+    colliding cores pays that re-race cost over and over for cores that
+    never make the printed/exported list. Deep dives were already scoped
+    to just the ranks actually dived (`--deep-dive-core`/`--auto-deep-
+    dive`) -- this gives `--unique-items` the same treatment for
+    `--multi-bring4`'s own top `top_n` (the `--top` console/xlsx count).
+
+    Re-invokes `_core_row` for just `rows[:top_n]`, this time with a real
+    `item_clause_context` -- `_core_row` itself only pays the expensive
+    re-race when an ACTUAL collision is found (a cheap O(core_size) check
+    first), so this stays fast for `top_n` small regardless of how huge
+    the full sweep was. Keeps `rows`' existing order (whatever ranking --
+    the search's own, or a `--tailwind-focus` re-sort -- already put it
+    in) rather than re-sorting the corrected slice by its own `worst_
+    enemy_score_key`: a forced item swap can shift a core's numbers
+    slightly, but re-sorting here would fight a `--tailwind-focus` order
+    applied by the caller just before this runs. `rows` beyond `top_n`
+    keep exactly the item-clause-UNAWARE numbers the sweep found (falls
+    back to the pool-wide `fixed_items` at display time, same as
+    `--unique-items` being off).
+    """
+    context = _item_clause_context_from_coverage(coverage)
+    corrected = [
+        _core_row(r["core"], coverage["pair_by_key"], coverage["target_name_lists"],
+                 good_threshold,
+                 pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
+                 item_clause_context=context)
+        for r in rows[:top_n]]
+    return corrected + rows[top_n:]
+
+
 def _pairs_note(pair_rows):
     """A compact "name+name beaten/total" note for EVERY one of a bring-4's
     own internal pairs (6 for a 4-Pokemon bring, fewer for a 3-Pokemon
@@ -1920,12 +1959,18 @@ def main():
                          "hold the same item) when resolving items. Off by "
                          "default -- items are searched per-member in "
                          "isolation, same as always, to keep search fast. "
-                         "Under --multi-bring4 this also makes the "
-                         "exhaustive/beam sweep itself re-race any core "
-                         "whose pool-wide items collide, so the ranking "
-                         "and every xlsx/CSV sheet reflect the real, "
-                         "Item-Clause-legal set for that core, not just "
-                         "--deep-dive-core's own follow-up")
+                         "Under --multi-bring4 this is applied to the TOP "
+                         "--top rows only (after ranking, before they're "
+                         "printed/xlsx'd/deep-dived), not to the whole "
+                         "exhaustive/beam sweep -- re-racing every "
+                         "colliding core the sweep considers, not just the "
+                         "ones anyone will see, is what made a real run "
+                         "with a large candidate pool hang for hours. Rows "
+                         "beyond --top keep the fast, pool-wide (not "
+                         "necessarily Item-Clause-legal) item picks; "
+                         "--deep-dive-core/--auto-deep-dive's own follow-up "
+                         "dives are unaffected -- already scoped to one "
+                         "core at a time")
     ap.add_argument("--tailwind-focus", action="store_true",
                     help="--multi-bring4 only: a LIGHTWEIGHT lens for the "
                          "hyper-offense 'Tailwind opener into spread "
@@ -2410,13 +2455,22 @@ def main():
         # fallback, so a --multi-bring4 run never depends on Stage B
         # succeeding to show anything at all.
         _print_pair_summary(coverage, top=args.top)
+        # `enforce_item_clause` is deliberately NEVER passed to the sweep
+        # below -- "it outputs the best pairs vs each team, then hangs for
+        # hours ... unique-items may be drastically slowing it down". True
+        # per-core Item Clause enforcement during multi_bring4_exhaustive/
+        # multi_bring4_beam pays a full core-scoped re-race for EVERY
+        # candidate core with a real collision, not just the ones anyone
+        # will ever see -- with a large candidate pool that can be the
+        # majority of the sweep's own cost. `_apply_item_clause_to_top_rows`
+        # below applies the same correction, scoped to just the top
+        # `--top` rows that actually get printed/exported/deep-dived.
         if args.beam:
             multi_rows = multi_bring4_beam(
                 coverage, good_threshold=good_threshold,
                 beam_width=args.beam_width, max_weak=args.max_weak,
                 type_limits=type_limits, max_megas=args.max_megas,
-                max_weak_types=args.max_weak_types, core_sizes=core_sizes,
-                enforce_item_clause=args.unique_items)
+                max_weak_types=args.max_weak_types, core_sizes=core_sizes)
             mode_label = f"beam, width {args.beam_width}"
         else:
             try:
@@ -2424,8 +2478,7 @@ def main():
                     coverage, good_threshold=good_threshold,
                     max_candidates=args.max_candidates, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types, core_sizes=core_sizes,
-                    enforce_item_clause=args.unique_items)
+                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
                 mode_label = "exhaustive"
             except ValueError as e:
                 # "It should be very quick to compute the sets of 4 brings
@@ -2442,8 +2495,7 @@ def main():
                     coverage, good_threshold=good_threshold,
                     beam_width=args.beam_width, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types, core_sizes=core_sizes,
-                    enforce_item_clause=args.unique_items)
+                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
                 mode_label = f"beam, width {args.beam_width} (auto-fallback)"
         if args.tailwind_focus:
             # Re-sort what the search already found, ON TOP OF (not instead
@@ -2451,6 +2503,9 @@ def main():
             # counter_finder.core_damage_output's own docstring.
             multi_rows.sort(key=core_damage_output, reverse=True)
             mode_label += ", tailwind-focus damage-output order"
+        if args.unique_items and multi_rows:
+            multi_rows = _apply_item_clause_to_top_rows(
+                multi_rows, args.top, coverage, good_threshold)
         _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
                             good_threshold, len(coverage["candidate_pool"]),
                             len(pool), merged, moves, natures, typechart,

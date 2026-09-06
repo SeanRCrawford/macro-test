@@ -1330,11 +1330,24 @@ class TestOwnTailwindAsAMatchingAnswer(unittest.TestCase):
     + Kingambit (Kowtow Cleave, Sucker Punch) against Sableye (its own real
     usage moveset: Rain Dance/Light Screen/Reflect/Encore -- no offense at
     all) + Arcanine-Hisui (Flare Blitz/Protect/Rock Slide/Extreme Speed).
-    At normal speed Kingambit is outsped and worn down without ever
-    finishing Arcanine-Hisui off -- a real LOSS. If Talonflame instead
-    spends turn 1 casting Tailwind, both of ours outspeed from turn 2 on,
-    turning the same matchup into a stalemate (no_ko) instead -- not a full
-    win, but a real, concrete improvement `own_tailwind_used` should catch.
+
+    Originally (before `_best_turn`'s own 2-turn lookahead --
+    `TestBestTurnTwoTurnLookahead`) Kingambit was outsped and worn down
+    without ever finishing Arcanine-Hisui off -- a real LOSS -- and casting
+    Tailwind turned it into a stalemate instead, which is what this fixture
+    was built to demonstrate. The lookahead now correctly recognises turn 1
+    that Arcanine-Hisui (the only one of the two enemies that can actually
+    attack) must be focused down FIRST regardless of speed -- Brave Bird
+    plus Kowtow Cleave together already clear it before its own move ever
+    lands -- so the NORMAL-speed race alone no longer loses this matchup at
+    all; it is a stalemate (no_ko) with or without Tailwind. This is a
+    genuinely better baseline, not a bug (re-verified directly: with the
+    lookahead OFF, this exact fixture still reproduces the original LOSS,
+    confirming the change is the lookahead's own smarter targeting, not a
+    regression elsewhere) -- so `own_tailwind_used` correctly comes back
+    False here now: Tailwind is never adopted when it would not actually
+    improve on an already-fine baseline (see `test_never_makes_a_pair_look_
+    worse_than_its_baseline`, which stays a real invariant either way).
     """
 
     def setUp(self):
@@ -1375,25 +1388,25 @@ class TestOwnTailwindAsAMatchingAnswer(unittest.TestCase):
             self.assertFalse(any(mv == "Tailwind" for mv, _pct in
                                  merged[n]["moves_usage"]), n)
 
-    def test_the_normal_race_alone_is_a_loss(self):
+    def test_the_normal_race_alone_is_a_stalemate_not_a_loss(self):
+        """See this class's own docstring: the 2-turn lookahead's smarter
+        turn-1 targeting (focus the one enemy that can actually attack)
+        fixes this exact matchup even at normal speed now."""
         d, _summary = self._race(merged=None)
-        self.assertEqual(d["outcome"], "loss")
+        self.assertEqual(d["outcome"], "no_ko")
         self.assertFalse(d["own_tailwind_is_real_threat"])
         self.assertFalse(d["own_tailwind_used"])
         self.assertIsNone(d["own_tailwind_outcome"])
 
-    def test_our_own_real_tailwind_answer_improves_the_outcome(self):
+    def test_our_own_tailwind_is_not_forced_when_the_baseline_is_already_fine(self):
         d, summary = self._race(merged=self.W["merged"])
-        self.assertTrue(d["own_tailwind_is_real_threat"])
-        self.assertTrue(d["own_tailwind_used"])
-        self.assertEqual(d["own_tailwind_outcome"], "no_ko")
-        self.assertEqual(d["outcome"], "no_ko",
-                         "a real Tailwind answer of OURS that turns a loss "
-                         "into a stalemate must be the assumed outcome")
-        self.assertEqual(d["outcome_without_tailwind"], "loss",
-                         "the original no-Tailwind result must still be "
-                         "recoverable, not overwritten")
-        self.assertEqual(summary["pairs_own_tailwind_used"], 1)
+        self.assertFalse(d["own_tailwind_used"],
+                         "Tailwind is a choice we'd only make if it HELPS -- "
+                         "the baseline is already a no_ko stalemate here, so "
+                         "there is nothing left for it to fix")
+        self.assertEqual(d["outcome"], "no_ko")
+        self.assertEqual(d["outcome_without_tailwind"], "no_ko")
+        self.assertEqual(summary["pairs_own_tailwind_used"], 0)
         self.assertEqual(summary["pairs_lost"], 0)
         self.assertEqual(summary["pairs_no_ko"], 1)
 
@@ -4619,13 +4632,28 @@ class TestSwitchInSearch(unittest.TestCase):
             self.merged, self.moves, self.natures, self.typechart, turns=turns)
 
     def test_a_real_fix_is_found_and_labelled_correctly(self):
+        """Ninetales-Alola ranked first here before the mutual-KO fix
+        (TestMutualKnockoutIsNotMisclassifiedAsAWin): one of its own
+        minimax mega-choice branches used to be misclassified as
+        "out_trade" (a genuine mutual KO -- our own finishing blow's
+        recoil/Rough-Skin also dropped us to 0 the same turn), which
+        changed which mega assignment that candidate's own minimax
+        selected as "best", and so its resulting `switch_in_taken`. Mega
+        Scizor's own switch_in_taken is genuinely lower once that's
+        corrected -- re-verified directly (not just re-derived from the
+        old expectation) by comparing both candidates' numbers after the
+        fix, matching this class's own "verified by hand" standard."""
         rows, tried = self._search(("Mega Charizard Y", "Mega Floette"))
         self.assertGreater(tried, 0)
         self.assertTrue(rows)
         best = rows[0]
-        self.assertEqual(best["leaving"], "Ninetales-Alola")
+        self.assertEqual(best["leaving"], "Mega Scizor")
         self.assertIn(best["arriving"], self.BENCH)
         self.assertIn(best["outcome"], ("sweep", "out_trade"))
+        ninetales_row = next(r for r in rows if r["leaving"] == "Ninetales-Alola")
+        self.assertLess(best["switch_in_taken"], ninetales_row["switch_in_taken"],
+                        "fixture assumes Mega Scizor's own fix now takes "
+                        "genuinely less switch-in damage")
 
     def test_a_genuine_loss_reports_no_fix_rather_than_a_bad_one(self):
         """Basculegion + Mega Charizard Y is too much pressure for a single
@@ -5388,6 +5416,92 @@ class TestRecoilInTheJointRace(unittest.TestCase):
         self.assertEqual(new_hp["C"], 1.0)
 
 
+class TestSpreadHitRecomputedIfATargetAlreadyFaintedThisTurn(unittest.TestCase):
+    """"if Staraptor fainted then Heat Wave would have been single target
+    damage rather than spread" -- `hits`/`num_targets_hit` are fixed at
+    PLAN-BUILD time (before the turn's own speed order plays out), so a
+    spread move computed against 2 live targets can find, by the time it
+    actually resolves in `_apply_plan`, that a FASTER attacker already
+    fainted one of them this same turn -- real doubles decides the 0.75x
+    multi-target penalty at the moment of use, not at team-preview, so a
+    stale spread-reduced hit on the one target still standing is wrong."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _fixture(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        attacker = cf._build("Kingambit", merged, natures)
+        spreader = cf._build("Mega Staraptor", merged, natures)
+        e1 = cf._build("Milotic", merged, natures)
+        e2 = cf._build("Milotic", merged, natures)
+        return attacker, spreader, e1, e2
+
+    def test_the_survivors_hit_is_rescaled_up_when_the_other_target_already_fainted(self):
+        from damage import MoveInfo
+        from engine import FieldState
+        attacker, spreader, e1, e2 = self._fixture()
+        combatants = {"C": attacker, "P": spreader, "E1": e1, "E2": e2}
+        # Priority 1 guarantees C resolves before P regardless of raw speed.
+        fast_ohko = MoveInfo("Fast Attack", 100, "Normal", "Physical", "normal",
+                             priority=1)
+        heat_wave = MoveInfo("Heat Wave", 95, "Fire", "Special",
+                             "allAdjacentFoes", priority=0)
+        ohko = cf.Hit(move_name="Fast Attack", frac=1.0, lo=1.0, avg=1.0,
+                     hi=1.0, eff=1.0, num_targets_hit=1)
+        # The SAME spread hit fraction on both -- exactly what `_choose_
+        # action` would have computed for Heat Wave when BOTH enemies were
+        # still alive (E1's own copy is never actually used once E1 is
+        # dead by the time P's turn comes up, but it has to be present in
+        # `hits` for `_apply_plan` to know Heat Wave was aimed at 2 targets
+        # in the first place).
+        spread_hit = cf.Hit(move_name="Heat Wave", frac=0.3, lo=0.3, avg=0.3,
+                           hi=0.3, eff=1.0, num_targets_hit=2)
+        plan = {"C": ({"E1": ohko}, fast_ohko),
+               "P": ({"E1": spread_hit, "E2": spread_hit}, heat_wave),
+               "E1": ({}, None), "E2": ({}, None)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        new_hp, log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["E1"], 0.0, "E1 must be OHKO'd by C first")
+        self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3 / 0.75, places=6,
+                               msg="E2 should take the UNDONE-0.75x hit, "
+                                   "since E1 was already dead when Heat "
+                                   "Wave resolved")
+        logged = next(h for role, tgt, h in log if role == "P" and tgt == "E2")
+        self.assertAlmostEqual(logged.frac, 0.3 / 0.75, places=6,
+                               msg="the LOGGED gameplan hit must match what "
+                                   "was actually applied, not the stale "
+                                   "spread frac")
+        self.assertEqual(logged.num_targets_hit, 1)
+
+    def test_both_still_alive_keeps_the_spread_penalty(self):
+        """Precondition/contrast: if C's move ISN'T lethal (E1 survives),
+        Heat Wave's own spread hit on both must stay exactly as computed
+        -- confirms the rescale only fires when a target is genuinely gone,
+        not on every multi-target hit."""
+        from damage import MoveInfo
+        from engine import FieldState
+        attacker, spreader, e1, e2 = self._fixture()
+        combatants = {"C": attacker, "P": spreader, "E1": e1, "E2": e2}
+        weak_hit = cf.Hit(move_name="Fast Attack", frac=0.1, lo=0.1, avg=0.1,
+                         hi=0.1, eff=1.0, num_targets_hit=1)
+        fast_move = MoveInfo("Fast Attack", 40, "Normal", "Physical", "normal",
+                             priority=1)
+        heat_wave = MoveInfo("Heat Wave", 95, "Fire", "Special",
+                             "allAdjacentFoes", priority=0)
+        spread_hit = cf.Hit(move_name="Heat Wave", frac=0.3, lo=0.3, avg=0.3,
+                           hi=0.3, eff=1.0, num_targets_hit=2)
+        plan = {"C": ({"E1": weak_hit}, fast_move),
+               "P": ({"E1": spread_hit, "E2": spread_hit}, heat_wave),
+               "E1": ({}, None), "E2": ({}, None)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertGreater(new_hp["E1"], 0.0, "fixture must NOT OHKO E1")
+        self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3, places=6)
+
+
 class TestRecoilCappedAtTargetsActualHp(unittest.TestCase):
     """"Floette should take max half of its target HP" -- recoil must scale
     off the HP the TARGET actually lost, not `got.frac` directly (which is
@@ -5572,6 +5686,80 @@ class TestChooseActionAvoidsNeedlessRecharge(unittest.TestCase):
         self.assertFalse((moonblast.flags or {}).get("recharge"))
 
 
+class TestMutualKnockoutIsNotMisclassifiedAsAWin(unittest.TestCase):
+    """"I believe this should qualify as a win for Staraptor, but is
+    treated as an out_trade for my side" -- turned out to be a genuine
+    MUTUAL KO: Mega Staraptor's own finishing Brave Bird carries 33%
+    recoil, which (on top of the incoming damage it had already taken)
+    drops IT to 0 the exact same turn its hit drops the enemy's last
+    Pokemon to 0. `wiped_side` locks to "theirs" the moment the ENEMY's hp
+    hits 0 (a step before the attacker's own recoil is even computed), so
+    `wiped_side == "theirs"` alone used to grant "sweep"/"out_trade"
+    regardless of whether `ours_alive` was ALSO now False -- crediting a
+    race nobody actually survived to claim as an unambiguous win."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_recoil_finishing_blow_that_also_kos_the_attacker_is_a_loss(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        dragonite = cf._build("Dragonite", merged, natures)
+        sylveon = cf._build("Sylveon", merged, natures)
+        scizor = cf._build("Mega Scizor", merged, natures)
+        star = cf._build("Mega Staraptor", merged, natures)
+        es = cf._lookup_move("Extreme Speed", moves)
+        qa = cf._lookup_move("Quick Attack", moves)
+        bp = cf._lookup_move("Bullet Punch", moves)
+        cc = cf._lookup_move("Close Combat", moves)
+        dc = cf._lookup_move("Dragon Claw", moves)
+        bb = cf._lookup_move("Brave Bird", moves)
+        self.assertEqual(bb.recoil, [33, 100], "fixture needs Brave Bird's own recoil")
+        combatants = {"E1": dragonite, "E2": scizor, "C": sylveon, "P": star}
+        moves_by_role = {"E1": [es, dc], "E2": [bp], "C": [qa], "P": [cc, bb]}
+        outcome, _turns_used, hp, _log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 3)
+        # Precondition: this fixture really is a full mutual wipe, not just
+        # a one-sided finish -- otherwise this test would pass for the
+        # wrong reason.
+        self.assertEqual(hp, {"C": 0.0, "P": 0.0, "E1": 0.0, "E2": 0.0})
+        self.assertEqual(outcome, "loss")
+
+    def test_the_same_finish_without_a_recoil_move_still_reads_as_a_win(self):
+        """Contrast/guard against over-correcting: swap Brave Bird for a
+        no-recoil move of identical raw power (Fly, PHYSICAL, same 120 BP,
+        Flying-type, no recoil) that still finishes Dragonite the same
+        turn -- Mega Staraptor must survive and this must still read as a
+        genuine out_trade/sweep win, confirming the fix only changes the
+        TRUE mutual-KO case, not the ordinary "we finish them and live"
+        case."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        dragonite = cf._build("Dragonite", merged, natures)
+        sylveon = cf._build("Sylveon", merged, natures)
+        scizor = cf._build("Mega Scizor", merged, natures)
+        star = cf._build("Mega Staraptor", merged, natures)
+        es = cf._lookup_move("Extreme Speed", moves)
+        qa = cf._lookup_move("Quick Attack", moves)
+        bp = cf._lookup_move("Bullet Punch", moves)
+        cc = cf._lookup_move("Close Combat", moves)
+        dc = cf._lookup_move("Dragon Claw", moves)
+        no_recoil_finisher = cf._lookup_move("Brave Bird", moves)
+        no_recoil_finisher = cf.MoveInfo(
+            no_recoil_finisher.name, no_recoil_finisher.power,
+            no_recoil_finisher.move_type, no_recoil_finisher.category,
+            no_recoil_finisher.target, priority=no_recoil_finisher.priority,
+            flags=no_recoil_finisher.flags)  # recoil=None (the default)
+        self.assertIsNone(no_recoil_finisher.recoil)
+        combatants = {"E1": dragonite, "E2": scizor, "C": sylveon, "P": star}
+        moves_by_role = {"E1": [es, dc], "E2": [bp], "C": [qa],
+                         "P": [cc, no_recoil_finisher]}
+        outcome, _turns_used, hp, _log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 3)
+        self.assertGreater(hp["P"], 0.0, "Staraptor must survive without recoil")
+        self.assertIn(outcome, ("sweep", "out_trade"))
+
+
 class TestRoughSkinInTheJointRace(unittest.TestCase):
     """Rough Skin / Iron Barbs weren't implemented ANYWHERE in this repo --
     a NEW mechanic, scoped to the cheap model only (matches what was
@@ -5754,12 +5942,20 @@ class TestDracoMeteorFamilyHalving(unittest.TestCase):
         self.assertAlmostEqual(full_hit.frac, no_halving.frac, places=3)
 
     def test_a_second_use_in_the_same_race_is_halved(self):
+        """`e1`/`e2` are the SAME species deliberately -- `_best_turn`'s own
+        2-turn lookahead (`TestBestTurnTwoTurnLookahead`) now genuinely
+        prefers whichever enemy takes more damage from Dragon-type Draco
+        Meteor, so two DIFFERENT species (the original fixture used
+        Kingambit + Sinistcha) can get hit on different turns, and their
+        different defensive stats -- not just the halving -- would then
+        move the ratio this test checks. Identical targets removes that
+        confound; the halving is the only thing left that can change it."""
         merged, moves, natures, typechart = (
             self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
         hydreigon = cf._build("Hydreigon", merged, natures)
         partner = cf._build("Milotic", merged, natures)
         e1 = cf._build("Kingambit", merged, natures)
-        e2 = cf._build("Sinistcha", merged, natures)
+        e2 = cf._build("Kingambit", merged, natures)
         combatants = {"C": hydreigon, "P": partner, "E1": e1, "E2": e2}
         draco = cf._lookup_move("Draco Meteor", moves)
         protect = cf._lookup_move("Protect", moves)
@@ -6139,3 +6335,235 @@ class TestBring4FromDeepDive(unittest.TestCase):
             move_overrides={n: s["moves"] for n, s in multi_dive["sets"].items()})
         rows_solo = cf.bring4_from_deep_dive(self.CORE, solo_dive, self.TARGETS)
         self.assertEqual(rows_a[0]["bring4"], rows_solo[0]["bring4"])
+
+
+class TestBestTurnTwoTurnLookahead(unittest.TestCase):
+    """"Metagross has at best a 2HKO vs Kingambit on T2 but Hydreigon has a
+    OHKO, so if Kingambit sucker punches Hydreigon and then Metagross it
+    cannot lose" -- `_best_turn` used to rank OUR target-hint combos purely
+    on THIS turn's own KO count, with no view of what happens next turn.
+    Diagnosed, reproducible bug: a Focus-Sash Hydreigon survives a hit at 1
+    HP (not a guaranteed kill THIS turn, `enemies_ko=0`), while double-
+    teaming a healthy-ish Metagross for an outright kill scores `enemies_ko=
+    1` -- so the OLD one-turn-only ranking always preferred finishing
+    Metagross now, leaving a full-HP Hydreigon free to sweep both of ours
+    with its own spread move before Kingambit ever got back to it. The fix:
+    `_best_turn` now previews ONE further turn (`lookahead=1`, the default)
+    from each candidate combo's own result before ranking, so a combo that
+    scores 0 kills this turn but sets up a clean finish next turn can
+    correctly outrank one that grabs an immediate kill at the cost of
+    leaving the bigger threat standing.
+
+    Real, directly-verified fixture (not synthetic): Kingambit + Mega
+    Staraptor vs Metagross (Assault Vest, so it survives the opening
+    double-team and its own priority-move reconsideration -- see
+    `TestReconsiderationFixedPoint` -- keeps mattering across several
+    turns) + Hydreigon (Focus Sash). Confirmed directly: patching `_best_
+    turn` to force `lookahead=0` reproduces an outright LOSS on this exact
+    fixture; the default (`lookahead=1`) turns it into a win.
+    """
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        self.typechart = typechart
+        self.kingambit = cf._build("Kingambit", merged, natures)
+        self.staraptor = cf._build("Mega Staraptor", merged, natures)
+        self.metagross = cf._build("Metagross", merged, natures, item="Assault Vest")
+        self.hydreigon = cf._build("Hydreigon", merged, natures, item="Focus Sash")
+        self.combatants = {"C": self.kingambit, "P": self.staraptor,
+                           "E1": self.metagross, "E2": self.hydreigon}
+        self.moves_by_role = {
+            "C": cf._move_infos("Kingambit", merged, moves,
+                                ["Sucker Punch", "Kowtow Cleave", "Iron Head", "Low Kick"]),
+            "P": cf._move_infos("Mega Staraptor", merged, moves,
+                                ["Close Combat", "Brave Bird", "Roost", "Dual Wingbeat"]),
+            "E1": cf._move_infos("Metagross", merged, moves,
+                                 ["Psychic Fangs", "Bullet Punch", "Meteor Mash", "Iron Head"]),
+            "E2": cf._move_infos("Hydreigon", merged, moves,
+                                 ["Dark Pulse", "Draco Meteor", "Earth Power", "Heat Wave"]),
+        }
+        self.weather = cf._field_weather(self.combatants)
+
+    def test_the_two_turn_lookahead_wins_where_one_turn_ranking_loses(self):
+        outcome, _turns_used, hp, _log = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, self.weather, 6)
+        self.assertIn(outcome, ("sweep", "out_trade"))
+        self.assertGreater(hp["C"], 0.0, "Kingambit must survive")
+
+    def test_with_lookahead_forced_off_the_old_losing_line_is_reproduced(self):
+        """Confirms the fix is really what changes the outcome here, not
+        some other coincidental behaviour -- patches `_best_turn` to force
+        `lookahead=0` (the pre-fix ranking) and checks this exact fixture
+        reverts to the original diagnosed LOSS."""
+        orig = cf._best_turn
+        def forced_off(*a, **kw):
+            kw["lookahead"] = 0
+            return orig(*a, **kw)
+        cf._best_turn = forced_off
+        try:
+            outcome, _turns_used, _hp, _log = cf._joint_race(
+                self.combatants, self.moves_by_role, self.typechart, self.weather, 6)
+        finally:
+            cf._best_turn = orig
+        self.assertEqual(outcome, "loss")
+
+    def test_turn_one_splits_fire_instead_of_double_teaming_metagross(self):
+        """The concrete decision the lookahead fixes: Staraptor should hit
+        the Focus-Sash Hydreigon (softening it toward next turn's guaranteed
+        finish) while Kingambit hits Metagross, rather than both piling onto
+        Metagross alone."""
+        _outcome, _turns_used, _hp, log = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, self.weather, 6)
+        turn1_targets = {role: tgt for role, tgt, _h in log[0] if role in ("C", "P")}
+        self.assertEqual(turn1_targets.get("P"), "E2",
+                         "Staraptor should soften Hydreigon, the bigger "
+                         "ongoing threat, not double-team Metagross")
+        self.assertEqual(turn1_targets.get("C"), "E1")
+
+
+class TestReconsiderationFixedPoint(unittest.TestCase):
+    """`_reconsider_for_survival` reassigning ONE role can, as a side
+    effect, newly doom or Sucker-Punch-waste ANOTHER -- a single pass used
+    to leave that second role permanently stuck. Concretely: Metagross
+    (Assault Vest, so it survives to matter across several turns) reconsiders
+    from Meteor Mash to the faster, tied-priority Bullet Punch specifically
+    to dodge Kingambit's own Sucker Punch -- but doing so means Metagross
+    now resolves BEFORE Kingambit, which is exactly the condition that fails
+    Sucker Punch (`_apply_plan`'s own rule: it only connects if the target is
+    still PENDING). Without looping the reconsideration, Kingambit keeps
+    swinging a permanently-dead Sucker Punch at Metagross turn after turn
+    instead of ever switching to an unconditional move, letting a nearly-
+    dead Metagross whittle it down for free.
+    """
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        self.typechart = typechart
+        self.kingambit = cf._build("Kingambit", merged, natures)
+        self.metagross = cf._build("Metagross", merged, natures, item="Assault Vest")
+        self.kingambit_moves = cf._move_infos(
+            "Kingambit", merged, moves,
+            ["Sucker Punch", "Kowtow Cleave", "Iron Head", "Low Kick"])
+        self.metagross_moves = cf._move_infos(
+            "Metagross", merged, moves,
+            ["Psychic Fangs", "Bullet Punch", "Meteor Mash", "Iron Head"])
+
+    def test_kingambit_switches_off_a_permanently_wasted_sucker_punch(self):
+        """A Metagross worn down to ~6.8% HP (matching the real race's own
+        state at this point) must still get finished by Kingambit even
+        though Kingambit's own Sucker Punch keeps failing against it."""
+        combatants = {"C": self.kingambit, "P": None,
+                      "E1": self.metagross, "E2": None}
+        moves_by_role = {"C": self.kingambit_moves, "P": [],
+                         "E1": self.metagross_moves, "E2": []}
+        hp = {"C": 0.196, "P": 0.0, "E1": 0.0675, "E2": 0.0}
+        weather = cf._field_weather(combatants)
+        new_hp, log, _enemy_acted, _wiped, _recharging = cf._best_turn(
+            combatants, moves_by_role, hp, self.typechart, weather)
+        self.assertLessEqual(new_hp["E1"], 0.0,
+                             "Kingambit must finish Metagross off by "
+                             "switching away from a Sucker Punch that can "
+                             "never land on it")
+        c_hits = [h for role, _tgt, h in log if role == "C"]
+        self.assertTrue(c_hits, "Kingambit must not go silent")
+        self.assertNotEqual(c_hits[0].move_name, "Sucker Punch")
+
+    def test_without_the_loop_kingambit_would_stay_silent(self):
+        """Confirms the loop is what fixes it: a single-pass `_resolve_turn`
+        (reconsideration attempted once, its own OWN discovery of the fresh
+        sp_wasted thrown away) leaves Kingambit unable to act."""
+        combatants = {"C": self.kingambit, "P": None,
+                      "E1": self.metagross, "E2": None}
+        moves_by_role = {"C": self.kingambit_moves, "P": [],
+                         "E1": self.metagross_moves, "E2": []}
+        hp = {"C": 0.196, "P": 0.0, "E1": 0.0675, "E2": 0.0}
+        weather = cf._field_weather(combatants)
+        field = cf.FieldState(weather=weather, terrain=None)
+        plan = {
+            "C": cf._choose_action(self.kingambit, self.kingambit_moves,
+                                   {"E1": self.metagross}, self.typechart,
+                                   weather=weather, hinted_target="E1",
+                                   attacker_hp_frac=hp["C"], target_hp_fracs=hp,
+                                   attacker_role="C"),
+            "E1": cf._choose_action(self.metagross, self.metagross_moves,
+                                    {"C": self.kingambit}, self.typechart,
+                                    weather=weather, attacker_hp_frac=hp["E1"],
+                                    target_hp_fracs=hp, attacker_role="E1"),
+        }
+        _hp2, _log, _ea, _w, doomed, sp_wasted = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, field)
+        self.assertIn("E1", doomed, "fixture assumes Metagross's naive "
+                     "Meteor Mash pick is doomed under Kingambit's Sucker "
+                     "Punch")
+        live_targets_by_role = {"C": {"E1": self.metagross},
+                                "E1": {"C": self.kingambit}}
+        one_pass_plan = cf._reconsider_for_survival(
+            plan, doomed, sp_wasted, combatants, moves_by_role, hp,
+            self.typechart, weather, field, live_targets_by_role,
+            {"C": "E1"}, 1.0, frozenset())
+        _hp3, log3, _ea3, _w3, _doomed3, sp_wasted3 = cf._apply_plan(
+            one_pass_plan, combatants, hp, frozenset(), 1.0, field)
+        self.assertIn("C", sp_wasted3, "fixture assumes ONE reconsideration "
+                     "pass leaves Kingambit's Sucker Punch newly wasted, "
+                     "which a single-pass caller would never see")
+        c_hits = [h for role, _tgt, h in log3 if role == "C"]
+        self.assertFalse(c_hits, "without the loop, Kingambit's plan is "
+                         "never revisited even though it's now known to fail")
+
+
+class TestAdvanceTurnState(unittest.TestCase):
+    """`_advance_turn_state` -- the shared SELF_HALVING_MOVES/CONTRARY_SELF_
+    DROP_MOVES bookkeeping `_joint_race`'s own turn loop and `_best_turn`'s
+    one-turn lookahead both need, factored out so they can't drift apart."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_returns_fresh_dicts_never_mutates_inputs(self):
+        """`_best_turn` evaluates several candidate combos from the SAME
+        starting state -- a shared mutable dict would let one combo's own
+        hypothetical Contrary boost leak into another's."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        staraptor = cf._build("Mega Staraptor", merged, natures)
+        combatants = {"C": staraptor, "P": None, "E1": None, "E2": None}
+        close_combat = cf._lookup_move("Close Combat", self.W["moves"])
+        turn_log = [("C", "E1", cf.Hit(move_name="Close Combat", frac=0.5,
+                                      lo=0.4, avg=0.5, hi=0.6, eff=1.0,
+                                      num_targets_hit=1))]
+        dmg_mult_before = {}
+        def_mult_before = {}
+        half_damage_before = frozenset()
+        new_dmg, new_def, new_half = cf._advance_turn_state(
+            turn_log, dmg_mult_before, def_mult_before, half_damage_before,
+            combatants)
+        self.assertEqual(dmg_mult_before, {})
+        self.assertEqual(def_mult_before, {})
+        self.assertEqual(half_damage_before, frozenset())
+        self.assertIn("C", new_def)
+
+    def test_self_halving_move_adds_the_role(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        hydreigon = cf._build("Hydreigon", merged, natures)
+        combatants = {"C": hydreigon, "P": None, "E1": None, "E2": None}
+        turn_log = [("C", "E1", cf.Hit(move_name="Draco Meteor", frac=0.5,
+                                      lo=0.4, avg=0.5, hi=0.6, eff=1.0,
+                                      num_targets_hit=1))]
+        _dmg, _deff, new_half = cf._advance_turn_state(
+            turn_log, {}, {}, frozenset(), combatants)
+        self.assertIn("C", new_half)
+
+    def test_non_contrary_user_gets_no_boost(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        gallade = cf._build("Gallade", merged, natures)
+        combatants = {"C": gallade, "P": None, "E1": None, "E2": None}
+        turn_log = [("C", "E1", cf.Hit(move_name="Close Combat", frac=0.5,
+                                      lo=0.4, avg=0.5, hi=0.6, eff=1.0,
+                                      num_targets_hit=1))]
+        new_dmg, new_def, _half = cf._advance_turn_state(
+            turn_log, {}, {}, frozenset(), combatants)
+        self.assertNotIn("C", new_def)
+        self.assertNotIn("C", new_dmg)
