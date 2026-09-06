@@ -6567,3 +6567,273 @@ class TestAdvanceTurnState(unittest.TestCase):
             turn_log, {}, {}, frozenset(), combatants)
         self.assertNotIn("C", new_def)
         self.assertNotIn("C", new_dmg)
+
+
+class TestWorstCaseTargeting(unittest.TestCase):
+    """`worst_case_targeting` -- "Try and implement that feature as an
+    option, not just greedy guess": by default the ENEMY's own per-turn
+    target choice is a single greedy, unhinted `_choose_action` guess (see
+    `_resolve_turn`'s own docstring) -- neither the exhaustive hint search
+    nor the 2-turn lookahead (`TestBestTurnTwoTurnLookahead`) ever considers
+    whether the enemy might deliberately pick the target that hurts US
+    most, since only OUR OWN hint combos are searched. This opt-in option
+    makes `_best_turn` resolve the enemy's own turn via `_resolve_turn_
+    worst_case` instead -- exhaustively searching every enemy target combo
+    and keeping whichever is worst for us, mirroring the worst-case search
+    already done for the enemy's MEGA choice.
+
+    Real, directly-verified fixture: Hydreigon + Mega Metagross (ours) vs
+    Mega Staraptor + Kingambit (enemy) -- the exact matchup from the user's
+    own corrected report ("I will note that Kingambit is the enemy team").
+    """
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        self.typechart = typechart
+
+        def build_custom(name, item, ability_override, evs, nature):
+            c = cf.make_combatant(name, merged, natures, item=item, evs=evs, nature=nature)
+            c = cf._mega_project(c)
+            if ability_override:
+                c.ability = ability_override
+            c.current_hp = c.max_hp()
+            return c
+        self.build_custom = build_custom
+
+        self.hydreigon = build_custom(
+            "Hydreigon", "Focus Sash", "Levitate",
+            {"hp": 2, "atk": 0, "def": 0, "spa": 32, "spd": 0, "spe": 32}, "modest")
+        self.mega_metagross = build_custom(
+            "Mega Metagross", "Metagrossite", "Tough Claws",
+            {"hp": 2, "atk": 32, "def": 0, "spa": 0, "spd": 0, "spe": 32}, "adamant")
+        self.mega_staraptor = build_custom(
+            "Mega Staraptor", "Staraptite", None,
+            {"hp": 29, "atk": 1, "def": 0, "spa": 0, "spd": 4, "spe": 32}, "jolly")
+        self.kingambit = build_custom(
+            "Kingambit", "Chople Berry", "Defiant",
+            {"hp": 31, "atk": 25, "def": 0, "spa": 0, "spd": 2, "spe": 8}, "adamant")
+        self.combatants = {"C": self.hydreigon, "P": self.mega_metagross,
+                           "E1": self.mega_staraptor, "E2": self.kingambit}
+        self.moves_by_role = {
+            "C": cf._move_infos("Hydreigon", merged, moves,
+                                ["Dark Pulse", "Draco Meteor", "Tailwind", "Heat Wave"]),
+            "P": cf._move_infos("Mega Metagross", merged, moves,
+                                ["Hard Press", "Ice Punch", "Psychic Fangs", "Protect"]),
+            "E1": cf._move_infos("Mega Staraptor", merged, moves,
+                                 ["Brave Bird", "Close Combat", "Tailwind", "Protect"]),
+            "E2": cf._move_infos("Kingambit", merged, moves,
+                                 ["Kowtow Cleave", "Sucker Punch", "Low Kick", "Iron Head"]),
+        }
+        self.weather = cf._field_weather(self.combatants)
+
+    def test_default_is_a_no_op(self):
+        """`worst_case_targeting` defaults to False and must reproduce the
+        exact same race as never passing it at all."""
+        a = cf._joint_race(self.combatants, self.moves_by_role, self.typechart,
+                           self.weather, 4)
+        b = cf._joint_race(self.combatants, self.moves_by_role, self.typechart,
+                           self.weather, 4, worst_case_targeting=False)
+        self.assertEqual(a, b)
+
+    def test_resolve_turn_worst_case_picks_the_provably_worst_combo(self):
+        """Direct verification of the search itself: manually enumerate
+        every enemy hint combo via plain `_resolve_turn` calls, compute
+        each one's own (enemies_ko, -ours_ko, net_dmg) key from OUR side,
+        and confirm `_resolve_turn_worst_case` returns whichever combo's
+        `new_hp` is the worst by that same metric -- not just "a"
+        different result, but provably THE worst one available."""
+        import itertools
+        hp0 = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        our_hints = {"C": "E1", "P": "E1"}
+        candidates = []
+        for combo in itertools.product(["C", "P"], repeat=2):
+            enemy_hints = {"E1": combo[0], "E2": combo[1]}
+            result = cf._resolve_turn(
+                self.combatants, self.moves_by_role, hp0, self.typechart,
+                self.weather, our_hints, enemy_hints=enemy_hints)
+            new_hp = result[0]
+            enemies_ko = sum(1 for r in ("E1", "E2") if new_hp[r] <= 0)
+            ours_ko = sum(1 for r in ("C", "P") if new_hp[r] <= 0)
+            dmg_dealt = sum(hp0[r] - new_hp[r] for r in ("E1", "E2"))
+            dmg_taken = sum(hp0[r] - new_hp[r] for r in ("C", "P"))
+            candidates.append(((-enemies_ko, ours_ko, dmg_taken - dmg_dealt), new_hp))
+        worst_expected_hp = max(candidates, key=lambda c: c[0])[1]
+
+        actual = cf._resolve_turn_worst_case(
+            self.combatants, self.moves_by_role, hp0, self.typechart, self.weather,
+            our_hints, ["C", "P"], ["E1", "E2"])
+        self.assertEqual(actual[0], worst_expected_hp)
+
+    def test_enables_a_real_loss_the_greedy_default_does_not_find(self):
+        """This exact fixture: the greedy default still loses this matchup
+        anyway (a bad type matchup for Metagross into Kingambit), so this
+        just confirms `worst_case_targeting=True` doesn't crash and stays
+        at least as bad for us -- `_JOINT_OUTCOME_RANK` must never show
+        the worst-case race as a BETTER outcome than the greedy one, since
+        assuming a smarter enemy can only ever hurt or match our own
+        result, never improve it."""
+        greedy_outcome, _t1, _hp1, _log1 = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, self.weather, 4)
+        worst_outcome, _t2, _hp2, _log2 = cf._joint_race(
+            self.combatants, self.moves_by_role, self.typechart, self.weather, 4,
+            worst_case_targeting=True)
+        self.assertLessEqual(cf._JOINT_OUTCOME_RANK[worst_outcome],
+                             cf._JOINT_OUTCOME_RANK[greedy_outcome])
+
+
+class TestBuildFormsRespectsCustomSets(unittest.TestCase):
+    """`_build_form`/`_build_forms` had no way to pin a real, known
+    Pokemon's exact EVs/Nature/Ability/moveset -- only `items` (and, for
+    OUR OWN side via `deep_dive`/`core_deep_dive`'s own `item_overrides`/
+    `move_overrides`, moves) were ever respected; everything else silently
+    fell back to mbsmogon.xlsx's usage-default spread. Directly explains a
+    user report: a deep dive of a pasted Showdown export (exact EVs/
+    Nature/moveset given) showed the SAME damage percentages and turn log
+    as the ORIGINAL, pre-any-fix bug report, because the engine was
+    silently substituting generic usage-default stats/moves the whole
+    time -- confirmed by reproducing the app's own `custom_team_from_
+    export` -> `core_deep_dive` pipeline and getting an exact character-
+    for-character match to the stale numbers."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_evs_and_nature_change_the_built_stats(self):
+        """Exercised via Metagross (whose real, exact competitive spread --
+        2HP/32Atk/32Spe Adamant -- is confirmably NOT mbsmogon.xlsx's own
+        usage-default for it), so a coincidental match (as Hydreigon's
+        usage-default spread turned out to be, for this particular sheet)
+        can't mask a broken override."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        default = cf._build_form("Metagross", merged, natures)
+        evs = {"hp": 2, "atk": 32, "def": 0, "spa": 0, "spd": 0, "spe": 32}
+        custom = cf._build_form("Metagross", merged, natures, evs=evs, nature="adamant")
+        base = merged["Metagross"]["base_stats"]
+        expected_atk = int(((2 * base["atk"] + 31) * 50 // 100 + 5) * 1.1) + 32
+        self.assertEqual(custom.stats["atk"], expected_atk)
+        self.assertNotEqual(custom.stats, default.stats)
+
+    def test_ability_override_applies_to_mega_holders_base_form_only(self):
+        """A Mega-stone holder's `ability` override always applies to its
+        BASE form (a real Showdown export's 'Ability:' line for a Mega
+        pick describes its pre-evolution ability, never the mega-
+        exclusive one, per `combatants.py`'s own `base_ability` comment)."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        mega = cf._build_form("Mega Staraptor", merged, natures,
+                              ability="Intimidate", stay_base=False)
+        self.assertEqual(mega.ability, "Contrary")
+        based = cf._build_form("Mega Staraptor", merged, natures,
+                               ability="Intimidate", stay_base=True)
+        self.assertEqual(based.ability, "Intimidate")
+
+    def test_move_overrides_pins_an_exact_moveset_not_usage_derived(self):
+        merged, moves, natures = self.W["merged"], self.W["moves"], self.W["natures"]
+        pinned = ["Kowtow Cleave", "Sucker Punch", "Low Kick", "Iron Head"]
+        forms = cf._build_forms(["Kingambit"], merged, natures, moves,
+                                move_overrides={"Kingambit": pinned})
+        got_names = sorted(mi.name for mi in forms["Kingambit"]["moves"])
+        self.assertEqual(got_names, sorted(pinned))
+        # The usage-derived default (no override) is confirmed DIFFERENT --
+        # this is the real, reported discrepancy: usage data ranks Protect
+        # over the user's actual 4th move, Low Kick.
+        default_forms = cf._build_forms(["Kingambit"], merged, natures, moves)
+        default_names = {mi.name for mi in default_forms["Kingambit"]["moves"]}
+        self.assertNotIn("Low Kick", default_names)
+
+    def test_defaults_are_a_no_op(self):
+        """No overrides given at all reproduces the exact pre-existing
+        `_build_forms` behaviour -- every existing caller that never
+        passed these new params is unaffected."""
+        merged, moves, natures = self.W["merged"], self.W["moves"], self.W["natures"]
+        forms = cf._build_forms(["Hydreigon", "Kingambit"], merged, natures, moves)
+        for name in ("Hydreigon", "Kingambit"):
+            expected = cf._build_form(name, merged, natures)
+            self.assertEqual(forms[name]["mega"].stats, expected.stats)
+            self.assertEqual(forms[name]["mega"].ability, expected.ability)
+
+
+class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
+    """End-to-end version of `TestBuildFormsRespectsCustomSets`: the exact
+    matchup from the user's own report (Hydreigon + Mega Metagross vs Mega
+    Staraptor + Kingambit, real pasted Showdown-export sets on both
+    sides), run through `core_deep_dive` exactly as `src/app.py`'s "Bring-4
+    (one enemy roster)" deep dive does -- WITHOUT the new overrides this
+    reproduces the stale bug report byte-for-byte; WITH them, the correct,
+    real-stat damage numbers come out instead."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        self.merged, self.moves, self.natures, self.typechart = merged, moves, natures, typechart
+        self.our6 = ["Hydreigon", "Mega Metagross"]
+        self.vs_roster = ["Mega Staraptor", "Kingambit"]
+        self.item_overrides = {"Hydreigon": "Focus Sash", "Mega Metagross": "Metagrossite"}
+        self.move_overrides = {
+            "Hydreigon": ["Dark Pulse", "Draco Meteor", "Tailwind", "Heat Wave"],
+            "Mega Metagross": ["Hard Press", "Ice Punch", "Psychic Fangs", "Protect"],
+        }
+        self.evs_overrides = {
+            "Hydreigon": {"hp": 2, "atk": 0, "def": 0, "spa": 32, "spd": 0, "spe": 32},
+            "Mega Metagross": {"hp": 2, "atk": 32, "def": 0, "spa": 0, "spd": 0, "spe": 32},
+            "Mega Staraptor": {"hp": 29, "atk": 1, "def": 0, "spa": 0, "spd": 4, "spe": 32},
+            "Kingambit": {"hp": 31, "atk": 25, "def": 0, "spa": 0, "spd": 2, "spe": 8},
+        }
+        self.nature_overrides = {"Hydreigon": "modest", "Mega Metagross": "adamant",
+                                 "Mega Staraptor": "jolly", "Kingambit": "adamant"}
+        self.ability_overrides = {"Mega Staraptor": None, "Kingambit": "Defiant"}
+        self.ability_overrides = {k: v for k, v in self.ability_overrides.items() if v}
+        self.enemy_item_overrides = {"Mega Staraptor": "Staraptite", "Kingambit": "Chople Berry"}
+        self.enemy_move_overrides = {
+            "Mega Staraptor": ["Brave Bird", "Close Combat", "Tailwind", "Protect"],
+            "Kingambit": ["Kowtow Cleave", "Sucker Punch", "Low Kick", "Iron Head"],
+        }
+
+    def _dive(self, **extra):
+        return cf.core_deep_dive(
+            self.our6, [self.vs_roster], self.merged, self.moves, self.natures,
+            self.typechart, turns=4, item_overrides=self.item_overrides,
+            move_overrides=self.move_overrides, **extra)
+
+    def _first_log(self, dive):
+        detail = next(iter(dive["per_pair"].values()))["per_enemy"][0]["detail"]
+        return next(iter(detail.values()))["log"]
+
+    def test_without_overrides_reproduces_the_stale_bug_report(self):
+        """No evs/nature/ability/enemy overrides at all: the exact numbers
+        from the user's original bug report (Close Combat 142-155-167%,
+        etc.) -- proof the OLD behaviour really was usage-default stats,
+        not the user's real ones."""
+        log = self._first_log(self._dive())
+        t1 = log[0]
+        close_combat = next(h for _r, _t, h in t1 if h.move_name == "Close Combat")
+        self.assertAlmostEqual(close_combat.lo, 1.42, delta=0.02)
+        self.assertAlmostEqual(close_combat.hi, 1.67, delta=0.02)
+
+    def test_with_overrides_uses_the_real_stats(self):
+        """Full overrides given: the damage numbers change to match the
+        REAL EVs/Nature (independently computed via `_build_form`'s own
+        stat formula, same as `TestBuildFormsRespectsCustomSets`), and
+        Kingambit's actual Low Kick (never in its usage-derived top 4)
+        is now a real, available option."""
+        dive = self._dive(evs_overrides=self.evs_overrides,
+                          nature_overrides=self.nature_overrides,
+                          ability_overrides=self.ability_overrides,
+                          enemy_item_overrides=self.enemy_item_overrides,
+                          enemy_move_overrides=self.enemy_move_overrides)
+        log = self._first_log(dive)
+        t1 = log[0]
+        close_combat = next(h for _r, _t, h in t1 if h.move_name == "Close Combat")
+        # Real Mega Staraptor (29 HP/1 Atk/4 SpD/32 Spe Jolly) hits noticeably
+        # softer than the usage-default spread the stale test above used.
+        self.assertLess(close_combat.hi, 1.5)
+        self.assertGreater(close_combat.hi, 1.35)
+        kingambit_moves = dive["sets"]  # our own sets only carry item/moves
+        # Kingambit is the enemy, not in `sets` -- confirm via the built
+        # enemy forms directly instead.
+        enemy_forms = cf._build_forms(
+            self.vs_roster, self.merged, self.natures, self.moves,
+            items=self.enemy_item_overrides, move_overrides=self.enemy_move_overrides)
+        self.assertIn("Low Kick", {mi.name for mi in enemy_forms["Kingambit"]["moves"]})

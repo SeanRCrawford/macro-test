@@ -3495,7 +3495,9 @@ def _render_teamsheet_export(core, sets, key_prefix):
 
 def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                            excluded_items, key_prefix, item_overrides=None,
-                           move_overrides=None):
+                           move_overrides=None, evs_overrides=None,
+                           nature_overrides=None, ability_overrides=None,
+                           enemy_item_overrides=None, enemy_move_overrides=None):
     """"I want to be able to choose a specific team to deep dive into" --
     an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
     (any bring-4, or a multi-bring4 core), the app-side counterpart to the
@@ -3513,6 +3515,14 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     Counter Table doesn't use the actual moveset of the loaded team").
     `None` (the default) reproduces the old behaviour, correct for a
     freshly pool-searched core that has no pre-decided set to respect.
+
+    `evs_overrides`/`nature_overrides`/`ability_overrides`: same idea, for
+    a real, known set's EVs/Nature/Ability -- covers ANY name here, `core`'s
+    own members or a named enemy roster in `target_name_lists` alike (a
+    pasted or saved custom team's `sets` dict already carries all three,
+    same as item/moves; only item/moves were ever actually threaded through
+    before this existed, so a custom competitive spread silently raced
+    with mbsmogon.xlsx's usage-default stats instead of the real ones).
 
     Also renders the teamsheet export (`_render_teamsheet_export`) for
     `core` using the deep dive's own `sets` -- one call answers both "show
@@ -3535,13 +3545,27 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     from that (lead / back)".
     """
     from counter_finder import core_deep_dive, bring4_from_deep_dive, recommended_lead
+    worst_case_targeting = st.checkbox(
+        "Worst-case enemy targeting", key=f"{key_prefix}_worst_case",
+        help="By default the enemy's own per-turn target choice is a "
+             "single greedy guess. Check this to also exhaustively search "
+             "the enemy's OWN targeting each turn and assume whichever "
+             "combo is worst for us -- mirrors the worst-case search "
+             "already done for the enemy's Mega-evolve choice. Real cost: "
+             "roughly squares the per-turn search on top of the engine's "
+             "own 2-turn lookahead.")
     if st.button(f"Deep dive: {' / '.join(core)}", key=f"{key_prefix}_go"):
         with st.spinner("Racing every pair against every named enemy..."):
             try:
                 dive = core_deep_dive(
                     core, target_name_lists, merged, moves, natures,
                     typechart, turns=turns, excluded_items=excluded_items,
-                    item_overrides=item_overrides, move_overrides=move_overrides)
+                    item_overrides=item_overrides, move_overrides=move_overrides,
+                    worst_case_targeting=worst_case_targeting,
+                    evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                    ability_overrides=ability_overrides,
+                    enemy_item_overrides=enemy_item_overrides,
+                    enemy_move_overrides=enemy_move_overrides)
             except ValueError as e:
                 st.error(str(e))
                 dive = None
@@ -3687,7 +3711,7 @@ with tab_counter:
                 help="A team just seen, without saving it to data/my_teams "
                      "first -- the xlsx export's own 'Pokepaste' column "
                      "pastes straight in here too.")
-            vs_roster, _vs_sets = species_data.custom_team_from_export(
+            vs_roster, vs_sets = species_data.custom_team_from_export(
                 vs_paste, merged) if vs_paste.strip() else ([], {})
             unknown_vs = [n for n in vs_roster if n not in merged]
             if unknown_vs:
@@ -3697,6 +3721,7 @@ with tab_counter:
                 st.success(f"Parsed: {', '.join(vs_roster)}")
         else:
             vs_roster = list(teams[ct_vs_name])
+            vs_sets = team_meta.get(ct_vs_name, {}).get("sets") or {}
         SEARCH_POOL = "\U0001f50d Search a pool for the best team"
         PASTE_OUR = "\U0001f4cb Paste a pokepaste"
         ct_our_source = st.selectbox(
@@ -3786,6 +3811,30 @@ with tab_counter:
                               if s.get("item")}
             move_overrides = {n: s["moves"] for n, s in our_sets.items()
                               if s.get("moves")}
+            # A real, known set's EVs/Nature/Ability (ours OR the named
+            # enemy's) were silently dropped everywhere in the deep-dive/
+            # search engine until now -- only item/moves were ever
+            # respected, so a custom competitive spread (e.g. a pasted
+            # Showdown export) got mbsmogon.xlsx's usage-default stats
+            # instead of the real ones. `our_sets` wins on a name collision
+            # (a mirror match) since it's the side actually being decided
+            # here.
+            all_known_sets = {**vs_sets, **our_sets}
+            evs_overrides = {n: s["evs"] for n, s in all_known_sets.items()
+                             if s.get("evs")}
+            nature_overrides = {n: s["nature"] for n, s in all_known_sets.items()
+                                if s.get("nature")}
+            ability_overrides = {n: s["ability"] for n, s in all_known_sets.items()
+                                 if s.get("ability")}
+            # Same idea for the ENEMY's own item/moveset -- unlike `our_sets`,
+            # a named enemy's real pinned set was NEVER respected anywhere
+            # (only mbsmogon.xlsx's usage-derived top item/moveset), so a
+            # known enemy's actual moves (e.g. a real Tailwind set instead
+            # of whatever usage happens to rank 4th) went unmodelled.
+            enemy_item_overrides = {n: s["item"] for n, s in vs_sets.items()
+                                    if s.get("item")}
+            enemy_move_overrides = {n: s["moves"] for n, s in vs_sets.items()
+                                    if s.get("moves")}
             if not (3 <= len(our6) <= 6):
                 st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
                            "a pokepaste, or choose a preset above) -- 3 or 4 skips "
@@ -3803,7 +3852,12 @@ with tab_counter:
                                 turns=ct_turns, good_threshold=ct_good / 100,
                                 excluded_items=ct_excluded,
                                 item_overrides=item_overrides,
-                                move_overrides=move_overrides)
+                                move_overrides=move_overrides,
+                                evs_overrides=evs_overrides,
+                                nature_overrides=nature_overrides,
+                                ability_overrides=ability_overrides,
+                                enemy_item_overrides=enemy_item_overrides,
+                                enemy_move_overrides=enemy_move_overrides)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -3839,7 +3893,11 @@ with tab_counter:
                     _render_core_deep_dive(
                         bring4_rows[pick - 1]["bring4"], [vs_roster], [ct_vs_name],
                         ct_turns, ct_excluded, key_prefix=f"ctb4_dd_{pick}",
-                        item_overrides=item_overrides, move_overrides=move_overrides)
+                        item_overrides=item_overrides, move_overrides=move_overrides,
+                        evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                        ability_overrides=ability_overrides,
+                        enemy_item_overrides=enemy_item_overrides,
+                        enemy_move_overrides=enemy_move_overrides)
 
                 st.markdown("**Full deep dive: all of `Our 6`, every configuration**")
                 st.caption("Every C(6,2) pair `our6` can form -- covers every "
@@ -3849,11 +3907,48 @@ with tab_counter:
                 _render_core_deep_dive(
                     our6, [vs_roster], [ct_vs_name], ct_turns, ct_excluded,
                     key_prefix="ctb4_dd_all6_one",
-                    item_overrides=item_overrides, move_overrides=move_overrides)
+                    item_overrides=item_overrides, move_overrides=move_overrides,
+                    evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                    ability_overrides=ability_overrides,
+                    enemy_item_overrides=enemy_item_overrides,
+                    enemy_move_overrides=enemy_move_overrides)
+                allteams_worst_case = st.checkbox(
+                    "Worst-case enemy targeting",
+                    key="ctb4_dd_all6_allteams_worst_case",
+                    help="Exhaustively search the enemy's OWN per-turn "
+                         "targeting too, assuming whichever combo is worst "
+                         "for us, instead of the enemy's usual single "
+                         "greedy guess. Real cost: roughly squares the "
+                         "per-turn search on top of the engine's own "
+                         "2-turn lookahead.")
                 if st.button(f"Full deep dive: all of Our 6 vs ALL "
                             f"{len(teams)} saved enemy teams",
                             key="ctb4_dd_all6_allteams_go"):
                     all_target_lists = [list(t) for t in teams.values()]
+                    # Every named team's OWN pinned set (not just the one
+                    # roster picked above) needs its real EVs/Nature/Ability
+                    # respected here too -- this button races against ALL
+                    # of them, not just `vs_roster`.
+                    all_teams_sets = {}
+                    for tname in teams:
+                        all_teams_sets.update(team_meta.get(tname, {}).get("sets") or {})
+                    all_teams_sets.update(our_sets)
+                    allteams_evs_overrides = {n: s["evs"] for n, s in all_teams_sets.items()
+                                              if s.get("evs")}
+                    allteams_nature_overrides = {n: s["nature"] for n, s in all_teams_sets.items()
+                                                 if s.get("nature")}
+                    allteams_ability_overrides = {n: s["ability"] for n, s in all_teams_sets.items()
+                                                  if s.get("ability")}
+                    # Same idea for each enemy team's own item/moveset --
+                    # `our_sets` is excluded here (that's what `item_overrides`/
+                    # `move_overrides` above already pin for our own side).
+                    enemy_teams_sets = {}
+                    for tname in teams:
+                        enemy_teams_sets.update(team_meta.get(tname, {}).get("sets") or {})
+                    allteams_item_overrides = {n: s["item"] for n, s in enemy_teams_sets.items()
+                                               if s.get("item")}
+                    allteams_move_overrides = {n: s["moves"] for n, s in enemy_teams_sets.items()
+                                               if s.get("moves")}
                     with st.spinner(f"Racing every pair against every team "
                                     f"pair, across all {len(teams)} enemy "
                                     f"teams -- this is the expensive one..."):
@@ -3864,7 +3959,13 @@ with tab_counter:
                                 typechart, turns=ct_turns,
                                 excluded_items=ct_excluded,
                                 item_overrides=item_overrides,
-                                move_overrides=move_overrides)
+                                move_overrides=move_overrides,
+                                worst_case_targeting=allteams_worst_case,
+                                evs_overrides=allteams_evs_overrides,
+                                nature_overrides=allteams_nature_overrides,
+                                ability_overrides=allteams_ability_overrides,
+                                enemy_item_overrides=allteams_item_overrides,
+                                enemy_move_overrides=allteams_move_overrides)
                         except ValueError as e:
                             st.error(str(e))
                             dive = None
@@ -4018,13 +4119,19 @@ with tab_counter:
         ct_partner = j1.selectbox("Fixed partner", all_names, key="ct_jp_partner")
         ct_jp_vs = j2.selectbox("Enemy roster", list(teams), key="ct_jp_vs")
         top_n2 = st.slider("Show top N pairs", 1, 30, 10, key="ct_jp_topn")
+        ct_jp_worst_case = st.checkbox(
+            "Worst-case enemy targeting", key="ct_jp_worst_case",
+            help="Also exhaustively search the enemy's own per-turn target choice "
+                 "(not just their mega pick) and keep whichever is worst for us. "
+                 "Slower; off by default.")
         if st.button("Search partners", type="primary", key="ct_jp_go"):
             pool = build_candidate_pool(merged, top_n=pool_size2, prefs=prefs)
             vs_roster2 = list(teams[ct_jp_vs])
             with st.spinner(f"Searching {len(pool)} Pokemon as {ct_partner}'s partner..."):
                 rows = joint_pair_search(
                     pool, vs_roster2, ct_partner, merged, moves, natures, typechart,
-                    turns=ct_turns, excluded_items=ct_excluded)
+                    turns=ct_turns, excluded_items=ct_excluded,
+                    worst_case_targeting=ct_jp_worst_case)
             total = rows[0]["pairs_total"] if rows else 0
             st.dataframe(pd.DataFrame([
                 {"Name": r["name"], "Item": r["item"],

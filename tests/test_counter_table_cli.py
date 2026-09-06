@@ -2149,5 +2149,70 @@ class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
             os.unlink(path)
 
 
+class TestWorstCaseTargetingFlag(unittest.TestCase):
+    """"Try and implement that feature as an option, not just greedy guess"
+    -- `--worst-case-targeting` threads `worst_case_targeting=True` into
+    `deep_dive`/`joint_pair_search`/`joint_pool_search`/`core_deep_dive`,
+    the same functions `--turns` already reaches. Checked by spying on each
+    (matching `TestUniqueItemsScopedToTopRowsOnly`'s own style) rather than
+    asserting on race OUTCOMES, since whether a given fixture's outcome
+    actually changes depends on whether the enemy's greedy pick happens to
+    already be the worst one -- `counter_finder.py`'s own `TestWorstCase
+    Targeting` already covers the search's correctness directly."""
+
+    def test_deep_mode_receives_it(self):
+        from unittest.mock import patch
+        argv = ["--deep", "--our", "Ninetales-Alola,Mega Scizor",
+               "--vs", "Sableye,Ariados", "--turns", "2",
+               "--worst-case-targeting"]
+        with patch.object(ct, "deep_dive", wraps=ct.deep_dive) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
+
+    def test_deep_mode_defaults_to_false(self):
+        from unittest.mock import patch
+        argv = ["--deep", "--our", "Ninetales-Alola,Mega Scizor",
+               "--vs", "Sableye,Ariados", "--turns", "2"]
+        with patch.object(ct, "deep_dive", wraps=ct.deep_dive) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertFalse(spy.call_args.kwargs.get("worst_case_targeting"))
+
+    def test_joint_with_partner_receives_it(self):
+        from unittest.mock import patch
+        argv = ["--joint", "--partner", "Ninetales-Alola",
+               "--pool-size", "12", "--vs", "Sableye,Ariados",
+               "--turns", "2", "--worst-case-targeting"]
+        with patch.object(ct, "joint_pair_search", wraps=ct.joint_pair_search) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
+
+    def test_joint_without_partner_receives_it(self):
+        from unittest.mock import patch
+        argv = ["--joint", "--pool-size", "10", "--vs", "Sableye,Ariados",
+               "--turns", "2", "--worst-case-targeting"]
+        with patch.object(ct, "joint_pool_search", wraps=ct.joint_pool_search) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
+
+    def test_bring4_deep_dive_core_receives_it(self):
+        from unittest.mock import patch
+        argv = ["--bring4", "--our", "Ninetales-Alola,Mega Scizor,Sylveon,"
+               "Kingambit", "--vs", "Sableye,Ariados", "--turns", "2",
+               "--deep-dive-core", "1", "--worst-case-targeting"]
+        with patch.object(ct, "core_deep_dive", wraps=ct.core_deep_dive) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
+
+
 if __name__ == "__main__":
     unittest.main()

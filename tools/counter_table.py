@@ -2040,6 +2040,28 @@ def main():
     ap.add_argument("--turns", type=int, default=2, metavar="N",
                     help="--joint/--deep/--bring4/--multi-bring4 only: how "
                          "many turns to race (default 2)")
+    ap.add_argument("--worst-case-targeting", action="store_true",
+                    help="--joint/--deep/--bring4 (its Stage 1 pool search) "
+                         "only, plus --multi-bring4's own --deep-dive-core/"
+                         "--auto-deep-dive/--teamsheet-json follow-up (NOT "
+                         "--multi-bring4's own main coverage/ranking sweep, "
+                         "which stays greedy -- searching the enemy's "
+                         "targeting there too would multiply an already "
+                         "large pool-wide search): by default the ENEMY's "
+                         "own per-turn target choice is a single greedy "
+                         "guess (whichever of ours it ranks best on its own, "
+                         "with no view of what our OTHER member is doing) -- "
+                         "this makes the enemy's target choice ALSO "
+                         "exhaustively searched each turn, and whichever "
+                         "combo is worst for us is what gets played, "
+                         "mirroring the worst-case search already done for "
+                         "the enemy's own Mega-evolve choice. Off by "
+                         "default: a real cost (roughly squares the "
+                         "per-turn search on top of the engine's own 2-turn "
+                         "lookahead), so opt in only when you want 'assume "
+                         "the enemy targets as well as I do' rather than "
+                         "'assume the enemy just grabs its own best-looking "
+                         "target each turn'")
     ap.add_argument("--max-taken", type=float, default=None, metavar="PCT",
                     help="default mode only: drop any row where SOME named "
                          "target's best attack could do PCT%% or more to it "
@@ -2373,7 +2395,8 @@ def main():
         item1, item2, detail, summary = deep_dive(
             our_pair[0], our_pair[1], targets, merged, moves, natures,
             typechart, turns=args.turns, item_overrides=item_overrides,
-            move_overrides=move_overrides, excluded_items=excluded_items)
+            move_overrides=move_overrides, excluded_items=excluded_items,
+            worst_case_targeting=args.worst_case_targeting)
         _print_deep(our_pair[0], our_pair[1], item1, item2, targets, detail,
                    summary, args.turns)
         if args.switches:
@@ -2397,7 +2420,8 @@ def main():
             turns=args.turns, good_threshold=good_threshold,
             item_overrides=item_overrides, move_overrides=move_overrides,
             excluded_items=excluded_items,
-            enforce_item_clause=args.unique_items)
+            enforce_item_clause=args.unique_items,
+            worst_case_targeting=args.worst_case_targeting)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
         ranks = _parse_deep_dive_core(args.deep_dive_core)
@@ -2413,7 +2437,8 @@ def main():
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2434,7 +2459,8 @@ def main():
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
@@ -2548,7 +2574,8 @@ def main():
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2571,7 +2598,8 @@ def main():
                 multi_rows[0]["core"], vs_teams, merged, moves, natures,
                 typechart, turns=args.turns, item_overrides=item_overrides,
                 move_overrides=move_overrides, excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
@@ -2585,14 +2613,16 @@ def main():
                                  partner_item=args.partner_item or None,
                                  item_overrides=item_overrides,
                                  move_overrides=move_overrides,
-                                 excluded_items=excluded_items)
+                                 excluded_items=excluded_items,
+                                 worst_case_targeting=args.worst_case_targeting)
         _print_joint(rows, targets, args.top, args.partner, args.turns)
     elif args.joint:
         rows = joint_pool_search(pool, targets, merged, moves, natures,
                                  typechart, turns=args.turns,
                                  item_overrides=item_overrides,
                                  move_overrides=move_overrides,
-                                 excluded_items=excluded_items)
+                                 excluded_items=excluded_items,
+                                 worst_case_targeting=args.worst_case_targeting)
         _print_joint(rows, targets, args.top, "", args.turns)
     elif args.pairs:
         rows = pair_search(pool, targets, merged, moves, natures, typechart,
