@@ -2974,6 +2974,264 @@ class TestBring4SearchItemClauseIsOptIn(unittest.TestCase):
         self.assertNotEqual(items["Ninetales-Alola"], items["Rampardos"])
 
 
+class TestCapFocusSash(unittest.TestCase):
+    """`_cap_focus_sash` -- "the focus sash is just too broken and is
+    warping matchup assessment... I will ban the use of the focus sash, or
+    will only allow one pokemon to use the focus sash". Same single
+    ordered pass and build-order rule as `_resolve_unique_items`, scoped
+    to just this one item."""
+
+    NAMES = ["Excadrill", "Aegislash", "Gengar"]
+    TARGETS = ["Garchomp", "Incineroar"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.plain = {n: cf._answer_for(n, merged, moves, natures, typechart,
+                                        self.TARGETS)[0] for n in self.NAMES}
+
+    def test_a_real_focus_sash_collision_exists_in_this_fixture(self):
+        """Confirms the fixture itself: at least two of NAMES independently
+        want Focus Sash before any cap is applied -- otherwise every test
+        below would trivially pass for the wrong reason."""
+        sash_holders = [n for n, item in self.plain.items() if item == "Focus Sash"]
+        self.assertGreaterEqual(len(sash_holders), 2, self.plain)
+
+    def test_default_cap_of_one_keeps_only_the_first_in_build_order(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._cap_focus_sash(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS)
+        sash_holders = [n for n in self.NAMES if resolved[n] == "Focus Sash"]
+        self.assertEqual(sash_holders, ["Excadrill"])
+        # Every OTHER independently-sashed name still resolves to something
+        # real (its own next-best legal item), not None/dropped.
+        self.assertTrue(all(resolved.values()))
+
+    def test_a_pinned_item_override_is_never_touched(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._cap_focus_sash(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS,
+            item_overrides={"Gengar": "Focus Sash"})
+        self.assertEqual(resolved["Gengar"], "Focus Sash")
+
+    def test_max_focus_sash_zero_bans_it_outright(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._cap_focus_sash(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS,
+            max_focus_sash=0)
+        self.assertNotIn("Focus Sash", resolved.values())
+        self.assertTrue(all(resolved.values()), "every name still gets a "
+                        "real fallback item, not dropped entirely")
+
+    def test_max_focus_sash_none_disables_the_check(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._cap_focus_sash(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS,
+            max_focus_sash=None)
+        self.assertEqual(resolved, {})
+
+    def test_higher_cap_allows_more_than_one(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._cap_focus_sash(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS,
+            max_focus_sash=2)
+        sash_holders = [n for n in self.NAMES if resolved[n] == "Focus Sash"]
+        self.assertEqual(len(sash_holders), 2)
+
+
+class TestResolveTeamItems(unittest.TestCase):
+    """`_resolve_team_items` -- the one place `bring4_search`/`core_deep_
+    dive`/`deep_dive` compose the Focus-Sash cap with the (still opt-in)
+    full Item Clause, so the two can never disagree on how they combine."""
+
+    NAMES = ["Excadrill", "Aegislash", "Gengar"]
+    TARGETS = ["Garchomp", "Incineroar"]
+
+    def setUp(self):
+        self.W = world()
+
+    def test_default_caps_focus_sash_at_one(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._resolve_team_items(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS)
+        self.assertEqual(sum(1 for v in resolved.values() if v == "Focus Sash"), 1)
+
+    def test_full_item_clause_skips_the_redundant_cap_pass(self):
+        """A full Item Clause already caps every item (Focus Sash
+        included) at 1 -- `max_focus_sash`'s own default must not run a
+        second, redundant pass on top of it."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._resolve_team_items(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS,
+            enforce_item_clause=True)
+        vals = [v for v in resolved.values() if v]
+        self.assertEqual(len(vals), len(set(vals)))
+
+    def test_max_focus_sash_zero_still_fully_resolves_every_name(self):
+        """Regression: banning must not short-circuit to an empty dict --
+        every name still needs its own item resolved, just never Focus
+        Sash."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._resolve_team_items(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS,
+            max_focus_sash=0)
+        self.assertNotIn("Focus Sash", resolved.values())
+        self.assertTrue(all(resolved.get(n) for n in self.NAMES))
+
+    def test_max_focus_sash_none_opts_out_entirely(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        resolved = cf._resolve_team_items(
+            self.NAMES, merged, moves, natures, typechart, self.TARGETS,
+            max_focus_sash=None)
+        self.assertEqual(resolved, {})
+
+
+class TestFocusSashCapIsDefaultOn(unittest.TestCase):
+    """UNLIKE `enforce_item_clause` (TestBring4SearchItemClauseIsOptIn),
+    the Focus-Sash cap needs NO flag to take effect -- "this must apply to
+    every single team". `bring4_search`/`core_deep_dive`/`deep_dive` all
+    cap it at 1 by default; `max_focus_sash=None` is the explicit opt-out."""
+
+    OUR6 = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam",
+           "Sharpedo", "Kingambit"]
+    TARGETS = ["Garchomp", "Incineroar"]
+
+    def setUp(self):
+        self.W = world()
+
+    def _sash_count(self, items_by_name):
+        return sum(1 for v in items_by_name.values() if v == "Focus Sash")
+
+    def test_bring4_search_caps_it_with_no_flag_needed(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pair_rows, _br = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart)
+        items = {}
+        for r in pair_rows:
+            n1, n2 = r["pair"]
+            items[n1], items[n2] = r["item1"], r["item2"]
+        self.assertLessEqual(self._sash_count(items), 1)
+
+    def test_bring4_search_max_focus_sash_none_restores_the_old_behaviour(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pair_rows, _br = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            max_focus_sash=None)
+        items = {}
+        for r in pair_rows:
+            n1, n2 = r["pair"]
+            items[n1], items[n2] = r["item1"], r["item2"]
+        self.assertGreaterEqual(self._sash_count(items), 2)
+
+    def test_core_deep_dive_caps_it_with_no_flag_needed(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        dive = cf.core_deep_dive(
+            self.OUR6, [self.TARGETS], merged, moves, natures, typechart)
+        items = {n: s["item"] for n, s in dive["sets"].items()}
+        self.assertLessEqual(self._sash_count(items), 1)
+
+    def test_deep_dive_caps_it_with_no_flag_needed(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        item1, item2, _detail, _summary = cf.deep_dive(
+            "Excadrill", "Gengar", self.TARGETS, merged, moves, natures, typechart)
+        self.assertFalse(item1 == "Focus Sash" and item2 == "Focus Sash")
+
+    def test_max_focus_sash_zero_bans_it_across_the_team(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pair_rows, _br = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            max_focus_sash=0)
+        items = {}
+        for r in pair_rows:
+            n1, n2 = r["pair"]
+            items[n1], items[n2] = r["item1"], r["item2"]
+        self.assertEqual(self._sash_count(items), 0)
+
+
+class TestCoreRowFocusSashCap(unittest.TestCase):
+    """`_core_row`'s `focus_sash_context` -- the cheap-check-gates-an-
+    expensive-re-race shape `_apply_focus_sash_cap_to_top_rows` (tools/
+    counter_table.py) relies on for --multi-bring4's top rows, mirroring
+    `item_clause_context` exactly."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_no_context_reproduces_old_behaviour(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam"]
+        targets = [["Garchomp", "Incineroar"]]
+        coverage = cf.multi_bring4_coverage(pool, targets, merged, moves,
+                                            natures, typechart)
+        core = tuple(sorted(pool))
+        row = cf._core_row(core, coverage["pair_by_key"],
+                           coverage["target_name_lists"],
+                           pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"])
+        self.assertIsNone(row["item_clause_resolved_items"])
+
+    def test_a_real_collision_triggers_a_focus_sash_scoped_reresolve(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam"]
+        targets = [["Garchomp", "Incineroar"]]
+        coverage = cf.multi_bring4_coverage(pool, targets, merged, moves,
+                                            natures, typechart)
+        # Confirm the pool-wide fixed_items really do collide on Focus Sash
+        # for this core -- otherwise the test proves nothing.
+        core = tuple(sorted(pool))
+        fixed = coverage["fixed_items"]
+        self.assertGreaterEqual(
+            sum(1 for n in core if fixed.get(n) == "Focus Sash"), 2)
+        context = cf._focus_sash_context_from_coverage(coverage, max_focus_sash=1)
+        row = cf._core_row(core, coverage["pair_by_key"],
+                           coverage["target_name_lists"],
+                           pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
+                           focus_sash_context=context)
+        resolved = row["item_clause_resolved_items"]
+        self.assertIsNotNone(resolved)
+        self.assertLessEqual(
+            sum(1 for v in resolved.values() if v == "Focus Sash"), 1)
+
+    def test_item_clause_context_takes_precedence_when_both_given(self):
+        """A full Item Clause resolution already caps Focus Sash at 1 as a
+        side effect -- the Focus-Sash-only pass must not ALSO run
+        (redundant, and would just re-derive the same answer a second
+        time)."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Ninetales-Alola", "Rampardos"]
+        targets = [["Sableye", "Ariados"]]
+        coverage = cf.multi_bring4_coverage(pool, targets, merged, moves,
+                                            natures, typechart)
+        core = tuple(sorted(pool))
+        item_context = cf._item_clause_context_from_coverage(coverage)
+        sash_context = cf._focus_sash_context_from_coverage(coverage, max_focus_sash=1)
+        row = cf._core_row(core, coverage["pair_by_key"],
+                           coverage["target_name_lists"],
+                           pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
+                           item_clause_context=item_context,
+                           focus_sash_context=sash_context)
+        # The Life Orb collision (see TestResolveUniqueItems) is resolved
+        # by the FULL clause path -- item_clause_resolved_items is set.
+        self.assertIsNotNone(row["item_clause_resolved_items"])
+
+
 class TestBring4PairDepth(unittest.TestCase):
     """`bring4_pair_depth` -- "I would like the csv/xlsx export from the
     CLI to show the basic details of the 6 pairs for each bring4 (total,

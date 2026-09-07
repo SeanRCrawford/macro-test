@@ -390,6 +390,125 @@ class TestUniqueItemsScopedToTopRowsOnly(unittest.TestCase):
         spy.assert_not_called()
 
 
+class TestMaxFocusSashFlag(unittest.TestCase):
+    """"the focus sash is just too broken and is warping matchup
+    assessment... this must apply to every single team" -- UNLIKE
+    --unique-items, --max-focus-sash needs NO flag to take effect: a known
+    real Focus-Sash collision (Excadrill and Gengar both independently
+    pick Focus Sash against this fixture) is resolved with no flags at
+    all, and only reappears when explicitly disabled."""
+
+    OUR6 = "Excadrill,Aegislash,Gengar,Mega Alakazam"
+
+    def _set_line(self, out):
+        idx = out.find("set: ")
+        self.assertGreaterEqual(idx, 0, out)
+        return out[idx:out.find("\n", idx)]
+
+    def test_on_by_default_the_collision_is_already_resolved(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertEqual(line.count("Focus Sash"), 1, line)
+
+    def test_max_focus_sash_zero_bans_it_outright(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--max-focus-sash", "0"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertNotIn("Focus Sash", line)
+
+    def test_negative_disables_the_check_restoring_the_collision(self):
+        # All three of Excadrill/Aegislash/Gengar independently want it
+        # against this fixture -- confirmed via the default-on test above
+        # capping it to exactly 1, and the cap=2 test below capping it to
+        # exactly 2; disabling the check entirely restores all 3.
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--max-focus-sash", "-1"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertEqual(line.count("Focus Sash"), 3, line)
+
+    def test_a_higher_cap_allows_more_than_one(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--max-focus-sash", "2"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertEqual(line.count("Focus Sash"), 2, line)
+
+
+class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
+    """Same top-N-only scoping as `TestUniqueItemsScopedToTopRowsOnly`,
+    but for the DEFAULT-ON Focus-Sash cap -- the exhaustive/beam sweep
+    itself never sees it; `_apply_focus_sash_cap_to_top_rows` applies it
+    afterward, scoped to `--top`, unconditionally (no flag needed)."""
+
+    FOUR = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam"]
+    TARGETS = ["Garchomp", "Incineroar"]
+
+    def setUp(self):
+        from _harness import load_world
+        self.W = load_world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = ct.multi_bring4_coverage(
+            self.FOUR, [self.TARGETS], merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+        self.rows = ct.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.0, core_sizes=(4,))
+
+    def test_the_sweep_itself_never_caps_it(self):
+        self.assertEqual(len(self.rows), 1)
+        self.assertIsNone(self.rows[0]["item_clause_resolved_items"])
+
+    def test_top_n_rows_get_capped(self):
+        corrected = ct._apply_focus_sash_cap_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0)
+        resolved = corrected[0]["item_clause_resolved_items"]
+        self.assertIsNotNone(resolved)
+        self.assertLessEqual(
+            sum(1 for v in resolved.values() if v == "Focus Sash"), 1)
+
+    def test_max_focus_sash_none_is_a_no_op(self):
+        corrected = ct._apply_focus_sash_cap_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0, max_focus_sash=None)
+        self.assertEqual(corrected, self.rows)
+
+    def test_wired_into_the_cli_with_the_right_top_n_and_no_flag_needed(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt"]
+        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
+                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.args[1], 3)
+
+    def test_max_focus_sash_negative_one_skips_the_call(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt", "--max-focus-sash", "-1"]
+        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
+                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertIsNone(spy.call_args.kwargs.get("max_focus_sash"))
+
+
 class TestCoreSizesFlag(unittest.TestCase):
     """"I would like to output the best 3-pokemon cores against each team"
     -- `--core-sizes` (comma-separated, default "4,5,6", each 3-6) threads
@@ -449,6 +568,9 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
 
     def test_allow_scarf_is_parsed(self):
         self.assertIn("--allow-scarf", self.help_text)
+
+    def test_max_focus_sash_is_parsed(self):
+        self.assertIn("--max-focus-sash", self.help_text)
 
     def test_max_weak_is_parsed(self):
         self.assertIn("--max-weak", self.help_text)

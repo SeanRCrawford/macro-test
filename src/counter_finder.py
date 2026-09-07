@@ -1210,6 +1210,93 @@ def _resolve_unique_items(names, merged, moves_db, natures, typechart,
     return resolved
 
 
+DEFAULT_MAX_FOCUS_SASH = 1
+
+
+def _cap_focus_sash(names, merged, moves_db, natures, typechart, target_names,
+                    item_overrides=None, move_overrides=None,
+                    excluded_items=DEFAULT_EXCLUDED_ITEMS, max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
+    """"the focus sash is just too broken and is warping matchup
+    assessment" -- caps how many of `names` may independently resolve to
+    Focus Sash. Unlike `_resolve_unique_items`'s full Item Clause (opt-in,
+    real search cost when enforced everywhere), this runs BY DEFAULT
+    wherever a real team/pair's items get finalized: a search across many
+    candidate pairs routinely has EVERY one of them independently prefer
+    Focus Sash on its own -- correct for each in isolation, but no real
+    team can actually field more than a handful of sash-holders at once,
+    and left unconstrained, every matchup assessment silently assumes
+    every relevant Pokemon is sashed, systematically overrating
+    survivability across the board.
+
+    Same single ordered pass as `_resolve_unique_items`, scoped to one
+    named item with a configurable cap instead of "no duplicates of
+    anything" -- "not letting it sway pokemon selection too much": no
+    per-team search, no re-ranking by impact, just whichever name in
+    `names`' OWN existing order (the caller's, e.g. team-preview order or
+    a search's own ranking) resolves first keeps it; every later name that
+    also wants it falls back to its own next-best legal item instead,
+    exactly like `_resolve_unique_items`'s build-order rule.
+
+    `max_focus_sash=0` is a real, correctly-handled full ban -- `taken`
+    starts at 0 and the cap check (`taken >= max_focus_sash`) is already
+    true before the first name even resolves, so every name gets Focus
+    Sash excluded from the start; no special-casing needed. `max_focus_
+    sash=None` disables this check entirely -- the opt-out escape hatch
+    every caller below exposes.
+
+    Returns a NEW item_overrides dict (a superset of the input), same
+    contract as `_resolve_unique_items`.
+    """
+    if max_focus_sash is None:
+        return dict(item_overrides or {})
+    resolved = dict(item_overrides or {})
+    taken = 0
+    for name in names:
+        if name not in resolved:
+            exclude = (excluded_items | {"Focus Sash"}) if taken >= max_focus_sash else excluded_items
+            item, _mv, _w = _answer_for(
+                name, merged, moves_db, natures, typechart, target_names,
+                item_overrides=item_overrides, move_overrides=move_overrides,
+                excluded_items=exclude)
+            resolved[name] = item
+        if resolved[name] == "Focus Sash":
+            taken += 1
+    return resolved
+
+
+def _resolve_team_items(names, merged, moves_db, natures, typechart, target_names,
+                        item_overrides=None, move_overrides=None,
+                        excluded_items=DEFAULT_EXCLUDED_ITEMS, enforce_item_clause=False,
+                        max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
+    """The one place every "finalize a real team/pair's items" caller below
+    (`bring4_search`, `core_deep_dive`, `deep_dive`) resolves `names`'
+    items, so the Focus-Sash cap and the opt-in full Item Clause can never
+    drift apart on how they compose:
+
+    - `enforce_item_clause=True`: VGC's real Item Clause (`_resolve_unique_
+      items`) already caps EVERY item, Focus Sash included, at 1 -- the
+      dedicated cap pass would be redundant (and `max_focus_sash` is
+      ignored), so it's skipped entirely.
+    - Otherwise: `max_focus_sash` alone decides it, via `_cap_focus_sash`
+      (0 is a real, correctly-handled full ban there -- not a special
+      case here; `None` opts out of this function doing anything at all).
+
+    Returns a NEW item_overrides dict, same contract as both functions it
+    wraps.
+    """
+    if enforce_item_clause:
+        return _resolve_unique_items(
+            names, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items)
+    if max_focus_sash is not None:
+        return _cap_focus_sash(
+            names, merged, moves_db, natures, typechart, target_names,
+            item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items, max_focus_sash=max_focus_sash)
+    return dict(item_overrides or {})
+
+
 def _fixed_sets_from_pair_rows(pair_rows, merged, moves_db, natures, typechart,
                                target_names, excluded_items=DEFAULT_EXCLUDED_ITEMS):
     """{name: item}, {name: [move, ...]} read back from `pair_rows` (a
@@ -4045,7 +4132,8 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
                   enforce_item_clause=False, worst_case_targeting=False,
                   evs_overrides=None, nature_overrides=None, ability_overrides=None,
-                  enemy_item_overrides=None, enemy_move_overrides=None):
+                  enemy_item_overrides=None, enemy_move_overrides=None,
+                  max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
@@ -4110,6 +4198,13 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     so no two of `our6` end up holding the same item. Useful for verifying
     an already-decided team; leave off for anything performance-sensitive.
 
+    `max_focus_sash`: UNLIKE `enforce_item_clause`, on by default (see
+    `_resolve_team_items`) -- "the focus sash is just too broken and is
+    warping matchup assessment... this must apply to every single team."
+    Caps how many of `our6` may independently resolve to Focus Sash before
+    any racing (default 1; 0 bans it outright; `None` opts out of this
+    check entirely, restoring the old unconstrained behaviour).
+
     Returns (pair_rows, bring4_rows):
       pair_rows -- `joint_pool_search`'s own row-per-pair output (its
         `forced_base` bookkeeping field stripped back out -- this stays
@@ -4130,11 +4225,11 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     if overlap:
         raise ValueError(f"can't bring both a Mega and its own base form: "
                          f"{', '.join(sorted(overlap))}")
-    if enforce_item_clause:
-        item_overrides = _resolve_unique_items(
-            our6, merged, moves_db, natures, typechart, target_names,
-            item_overrides=item_overrides, move_overrides=move_overrides,
-            excluded_items=excluded_items)
+    item_overrides = _resolve_team_items(
+        our6, merged, moves_db, natures, typechart, target_names,
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        excluded_items=excluded_items, enforce_item_clause=enforce_item_clause,
+        max_focus_sash=max_focus_sash)
     megas = [n for n in our6 if n.startswith("Mega ")]
     extra_forced_base = frozenset(megas) if len(megas) == 2 else frozenset()
     rows = joint_pool_search(our6, target_names, merged, moves_db, natures,
@@ -4538,8 +4633,43 @@ def _core_item_clause_pair_by_key(core, target_name_lists, item_clause_context):
     return out, resolved_items
 
 
+def _core_focus_sash_pair_by_key(core, target_name_lists, focus_sash_context):
+    """The Focus-Sash-only sibling of `_core_item_clause_pair_by_key`: same
+    shape, same reason (the pool-wide Stage A search can't see "who else is
+    on THIS specific core"), same build-order-dependent re-race -- but
+    `_resolve_team_items`'s cheap cap (`max_focus_sash`) instead of a full
+    Item Clause, so this stays correct without paying for uniqueness on
+    every OTHER item too. `focus_sash_context`: same shape as
+    `item_clause_context` plus a `max_focus_sash` key (see
+    `_focus_sash_context_from_coverage`)."""
+    fixed_items = focus_sash_context["fixed_items"]
+    fixed_moves = focus_sash_context["fixed_moves"]
+    merged = focus_sash_context["merged"]
+    moves_db = focus_sash_context["moves_db"]
+    natures = focus_sash_context["natures"]
+    typechart = focus_sash_context["typechart"]
+    turns = focus_sash_context["turns"]
+    excluded_items = focus_sash_context["excluded_items"]
+    max_focus_sash = focus_sash_context["max_focus_sash"]
+    all_enemies = sorted({n for t in target_name_lists for n in t})
+    resolved_items = _cap_focus_sash(
+        list(core), merged, moves_db, natures, typechart, all_enemies,
+        move_overrides=fixed_moves, excluded_items=excluded_items,
+        max_focus_sash=max_focus_sash)
+    out = {}
+    for target_names in target_name_lists:
+        rows = joint_pool_search(list(core), target_names, merged, moves_db,
+                                 natures, typechart, turns=turns,
+                                 item_overrides=resolved_items,
+                                 move_overrides=fixed_moves,
+                                 excluded_items=excluded_items)
+        out[tuple(target_names)] = {frozenset(r["pair"]): r for r in rows}
+    return out, resolved_items
+
+
 def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
-              pair_by_key_forced_base_list=None, item_clause_context=None):
+              pair_by_key_forced_base_list=None, item_clause_context=None,
+              focus_sash_context=None):
     """For a candidate CORE (4, 5, or 6 Pokemon -- see `multi_bring4_
     exhaustive`'s own note on why fewer than 6 is a real, often BETTER
     answer, not a fallback) against SEVERAL enemy rosters: the BEST bring-4
@@ -4599,6 +4729,17 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
     `item_clause_context` itself was `None`) -- a caller displaying this
     core's set should prefer this over the pool-wide `fixed_items` whenever
     it is not `None`, so what's shown always matches what was raced.
+
+    `focus_sash_context`: the Focus-Sash-only sibling of `item_clause_
+    context` -- same shape plus a `max_focus_sash` key (see `_focus_sash_
+    context_from_coverage`). UNLIKE `item_clause_context`, meant to be
+    passed by every caller by default (not opt-in) -- "the focus sash is
+    just too broken and is warping matchup assessment... this must apply
+    to every single team." Same cheap-check-gates-an-expensive-re-race
+    shape, just checking a Focus-Sash COUNT against `max_focus_sash`
+    instead of a `len(list) != len(set)` collision. Skipped entirely
+    whenever `item_clause_context` already ran on this core (a full Item
+    Clause already caps Focus Sash at 1 as a side effect).
     """
     core = tuple(sorted(core))
     megas = tuple(n for n in core if n.startswith("Mega "))
@@ -4609,6 +4750,19 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
         if len(held) != len(set(held)):
             conflict_pair_by_key, core_resolved_items = _core_item_clause_pair_by_key(
                 core, target_name_lists, item_clause_context)
+            pair_by_key_list = [conflict_pair_by_key[tuple(target_names)]
+                                for target_names in target_name_lists]
+    # A full Item Clause resolution (just above) already caps Focus Sash at
+    # 1 as a side effect, so this only ever runs when that DIDN'T -- either
+    # `item_clause_context` is None (the common case: Item Clause itself
+    # stays opt-in), or it ran but found no conflict on THIS core.
+    elif focus_sash_context is not None:
+        fixed_items = focus_sash_context["fixed_items"]
+        max_focus_sash = focus_sash_context["max_focus_sash"]
+        sash_count = sum(1 for n in core if fixed_items.get(n) == "Focus Sash")
+        if max_focus_sash is not None and sash_count > max_focus_sash:
+            conflict_pair_by_key, core_resolved_items = _core_focus_sash_pair_by_key(
+                core, target_name_lists, focus_sash_context)
             pair_by_key_list = [conflict_pair_by_key[tuple(target_names)]
                                 for target_names in target_name_lists]
     per_enemy = []
@@ -4953,6 +5107,12 @@ def _item_clause_context_from_coverage(coverage):
            "turns": coverage["turns"], "excluded_items": coverage["excluded_items"]}
 
 
+def _focus_sash_context_from_coverage(coverage, max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
+    """The Focus-Sash-cap sibling of `_item_clause_context_from_coverage` --
+    same shape, plus the cap itself."""
+    return {**_item_clause_context_from_coverage(coverage), "max_focus_sash": max_focus_sash}
+
+
 def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_candidates=_EXHAUSTIVE_POOL_CEILING,
                             max_weak=None, type_limits=None, max_megas=2,
@@ -5158,7 +5318,8 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
              typechart, turns=2, item_overrides=None, move_overrides=None,
              excluded_items=DEFAULT_EXCLUDED_ITEMS, worst_case_targeting=False,
              evs_overrides=None, nature_overrides=None, ability_overrides=None,
-             enemy_item_overrides=None, enemy_move_overrides=None):
+             enemy_item_overrides=None, enemy_move_overrides=None,
+             max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
     """The full report for ONE SPECIFIC, already-chosen pair (not a pool
     search) against every pair drawn from `target_names`.
 
@@ -5195,10 +5356,20 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     option for a real Tailwind-setter enemy whose usage-derived moveset
     happened to prefer a different 4th move) until these existed.
 
+    `max_focus_sash`: ON by default -- see `bring4_search`'s own docstring
+    and `_resolve_team_items`. A pair is small enough that this rarely
+    matters (both independently wanting it happens, but not often), but
+    "this must apply to every single team" means every finalized pair/team
+    here too, not just the 4-6-member searches.
+
     Returns (item1, item2, detail, summary) -- `detail`/`summary` are
     `_pair_vs_targets`'s own shape, `grid`/`ohko_risk` included on every
     entry.
     """
+    item_overrides = _resolve_team_items(
+        [name1, name2], merged, moves_db, natures, typechart, target_names,
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        excluded_items=excluded_items, max_focus_sash=max_focus_sash)
     item1, moves1, _w1 = _answer_for(
         name1, merged, moves_db, natures, typechart, target_names,
         item_overrides=item_overrides, move_overrides=move_overrides,
@@ -5270,7 +5441,8 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
                    excluded_items=DEFAULT_EXCLUDED_ITEMS,
                    enforce_item_clause=False, worst_case_targeting=False,
                    evs_overrides=None, nature_overrides=None, ability_overrides=None,
-                   enemy_item_overrides=None, enemy_move_overrides=None):
+                   enemy_item_overrides=None, enemy_move_overrides=None,
+                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
     """The full report for an ALREADY-CHOSEN core (the `--multi-bring4`
     result the user actually wants to inspect, not a fresh search): every
     one of its C(size,2) pairs, raced against every enemy pair drawn from
@@ -5298,6 +5470,9 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     items with VGC's real Item Clause enforced (`_resolve_unique_items`)
     before any racing, so `sets` never shows two members holding the same
     item. See `bring4_search`'s own docstring for why this is opt-in.
+
+    `max_focus_sash`: ON by default, unlike `enforce_item_clause` -- see
+    `bring4_search`'s own docstring and `_resolve_team_items`.
 
     `worst_case_targeting`: off by default -- passed straight through to
     every `_pair_vs_targets` call this makes. See `_best_turn`'s own
@@ -5344,11 +5519,11 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     core = list(dict.fromkeys(core))
     target_name_lists = [list(t) for t in target_name_lists]
     all_enemies = sorted({n for t in target_name_lists for n in t})
-    if enforce_item_clause:
-        item_overrides = _resolve_unique_items(
-            core, merged, moves_db, natures, typechart, all_enemies,
-            item_overrides=item_overrides, move_overrides=move_overrides,
-            excluded_items=excluded_items)
+    item_overrides = _resolve_team_items(
+        core, merged, moves_db, natures, typechart, all_enemies,
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        excluded_items=excluded_items, enforce_item_clause=enforce_item_clause,
+        max_focus_sash=max_focus_sash)
     sets = {}
     for name in core:
         item, move_names, _weather = _answer_for(
