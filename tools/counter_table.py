@@ -212,13 +212,15 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
                             _item_clause_context_from_coverage, _pair_sort_key,
                             bring4_damage_output, bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, core_damage_output,
-                            deep_dive, enemy_has_real_tailwind, joint_pair_search,
+                            deep_dive, enemy_has_real_tailwind, find_pair_cores,
+                            joint_pair_search,
                             joint_pool_search, member_weakness_summary,
                             multi_bring4_beam, multi_bring4_coverage,
                             multi_bring4_exhaustive, net_weakness_by_type,
                             own_pair_has_real_tailwind,
                             pair_search, recommended_lead, speed_tiers,
-                            switch_in_search, tailwind_focus_pool, threshold_search)
+                            switch_in_search, tailwind_focus_pool, threshold_search,
+                            two_two_two_teams)
 
 
 def _parse_item_overrides(spec):
@@ -1764,6 +1766,66 @@ def _print_switches(switch_results, bench_size):
         print()
 
 
+def _print_two_two_two(pair_rows, team_rows, top_pairs, max_net_weakness=None):
+    """`find_pair_cores`'s own rows (already sorted) + `two_two_two_teams`'s
+    own rows (Stage 2). Prints the top `top_pairs` pairs (the same ones
+    Stage 2 drew its team combinations from) with all three criteria, then
+    a "mutual coverage" side list (pairs that perfectly or mostly cover
+    each other's weaknesses via an actual RESIST, not just "not also
+    weak"), then the top teams."""
+    print(f"Top {min(top_pairs, len(pair_rows))} pair cores (of "
+         f"{len(pair_rows)} total), ranked by fewest shared weaknesses, "
+         f"then most threat-coverage, then highest avg Score:\n")
+    for i, r in enumerate(pair_rows[:top_pairs], start=1):
+        n1, n2 = r["pair"]
+        tc = r["threat_coverage"]
+        weather = f"  weather={r['weather_synergy']}" if r["weather_synergy"] else ""
+        print(f"  {i:>2}. {n1} + {n2}")
+        print(f"       shared_weak={len(r['shared_weak'])} "
+             f"({', '.join(r['shared_weak']) or '-'})  "
+             f"covered_weak={len(r['covered_weak'])}  "
+             f"coverage={tc['total_covered']}/{tc['total_losses']}  "
+             f"avg_score={r['avg_score']:.1f}{weather}")
+    weather_pairs = [r for r in pair_rows if r["weather_synergy"]]
+    if weather_pairs:
+        print(f"\nWeather-lead pairs (setter + speed-boost match), "
+             f"{len(weather_pairs)} found:\n")
+        for r in weather_pairs[:top_pairs]:
+            n1, n2 = r["pair"]
+            print(f"  {n1} + {n2}  ({r['weather_synergy']})  "
+                 f"shared_weak={len(r['shared_weak'])}  "
+                 f"avg_score={r['avg_score']:.1f}")
+    mutual_pairs = sorted(
+        (r for r in pair_rows if r["mutual_resist"]["coverage_frac"] > 0),
+        key=lambda r: (-r["mutual_resist"]["perfect"], -r["mutual_resist"]["coverage_frac"]))
+    if mutual_pairs:
+        perfect_count = sum(1 for r in mutual_pairs if r["mutual_resist"]["perfect"])
+        print(f"\nMutual-coverage pairs (each RESISTS what's "
+             f"super-effective against the other), {perfect_count} "
+             f"perfect of {len(mutual_pairs)} found:\n")
+        for r in mutual_pairs[:top_pairs]:
+            n1, n2 = r["pair"]
+            mr = r["mutual_resist"]
+            tag = "PERFECT" if mr["perfect"] else f"{mr['coverage_frac']*100:.0f}%"
+            print(f"  {n1} + {n2}  ({tag})  "
+                 f"{mr['a_weak_resisted_by_b']}/{mr['a_weak_total']} + "
+                 f"{mr['b_weak_resisted_by_a']}/{mr['b_weak_total']} "
+                 f"weaknesses resisted")
+    cap_note = (f" (max net weakness <= {max_net_weakness})"
+               if max_net_weakness is not None else "")
+    print(f"\nTop {len(team_rows)} 2-2-2 teams (3 disjoint pairs){cap_note}, "
+         f"ranked by lowest worst-case team-wide net weakness:\n")
+    if not team_rows:
+        print("  No 3-disjoint-pair team could be formed -- widen "
+             "--top-pairs/the pool, or raise --max-net-weakness.")
+        return
+    for i, r in enumerate(team_rows, start=1):
+        print(f"  {i:>2}. {' / '.join(r['team'])}")
+        print(f"       pairs: {' | '.join(f'{a}+{b}' for a, b in r['pairs'])}")
+        print(f"       worst_net_weakness={r['worst_net_weakness']}  "
+             f"total_net_weakness={r['total_net_weakness']}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vs", default="",
@@ -1856,12 +1918,45 @@ def main():
                          "a good pair for --min-enemies of the named "
                          "enemies); pass --beam for a broader, non-"
                          "exhaustive search over the whole pool instead")
+    ap.add_argument("--two-two-two", action="store_true",
+                    help="'2-2-2 teambuilding': find PAIR cores (drawn from "
+                         "the pool) scored three ways -- defensive synergy "
+                         "(does one resist what the other is weak to), "
+                         "weather-lead synergy (a real weather-setter + "
+                         "weather-abusing speed-boost ability pair, e.g. "
+                         "Drought+Chlorophyll), and threat coverage (does "
+                         "one beat, in a simple 1v1, what the other loses "
+                         "to among every named team's own Pokemon) plus "
+                         "average roster.csv Score -- then combine the best "
+                         "of those pairs into whole teams of 6 made of 3 "
+                         "disjoint pairs, ranked by team-wide weakness "
+                         "coverage. Enemy universe is every named team by "
+                         "default; narrow it with --vs-team (repeated)")
+    ap.add_argument("--top-pairs", type=int, default=15, metavar="N",
+                    help="--two-two-two only: how many top-ranked pairs to "
+                         "print, and how many of them Stage 2 draws its "
+                         "3-disjoint-pair team combinations from (default "
+                         "15 -- C(15,3)=455 combinations, fast; raising "
+                         "this searches a wider net of pairs at roughly "
+                         "cubic cost)")
+    ap.add_argument("--top-teams", type=int, default=10, metavar="N",
+                    help="--two-two-two only: how many top-ranked 6-Pokemon "
+                         "teams to print (default 10)")
+    ap.add_argument("--max-net-weakness", type=int, default=None, metavar="N",
+                    help="--two-two-two only: hard cap on a team's single "
+                         "WORST (most exposed) type's net weakness (weak "
+                         "members minus resist members, same reading "
+                         "net_weakness_by_type/--type-limit's own max_net "
+                         "already use) -- a team exceeding it is dropped "
+                         "outright, not just ranked after the ones that "
+                         "pass. Unset (default) applies no cap")
     ap.add_argument("--vs-team", action="append", default=[],
                     metavar="POKEMON,...|TEAM NAME",
-                    help="--multi-bring4/--bring4 only: an enemy roster, "
-                         "EITHER comma-separated Pokemon, or the name of a "
-                         "saved team (a data/teams.csv row, or a pokepaste "
-                         "in data/teams/ or data/my_teams/ -- the same "
+                    help="--multi-bring4/--bring4/--two-two-two only: an "
+                         "enemy roster, EITHER comma-separated Pokemon, or "
+                         "the name of a saved team (a data/teams.csv row, "
+                         "or a pokepaste in data/teams/ or data/my_teams/ "
+                         "-- the same "
                          "library --team already searches). --multi-bring4: "
                          "repeat for each enemy team (1+ required -- a "
                          "single --vs-team searches the best core against "
@@ -2040,6 +2135,28 @@ def main():
     ap.add_argument("--turns", type=int, default=2, metavar="N",
                     help="--joint/--deep/--bring4/--multi-bring4 only: how "
                          "many turns to race (default 2)")
+    ap.add_argument("--worst-case-targeting", action="store_true",
+                    help="--joint/--deep/--bring4 (its Stage 1 pool search) "
+                         "only, plus --multi-bring4's own --deep-dive-core/"
+                         "--auto-deep-dive/--teamsheet-json follow-up (NOT "
+                         "--multi-bring4's own main coverage/ranking sweep, "
+                         "which stays greedy -- searching the enemy's "
+                         "targeting there too would multiply an already "
+                         "large pool-wide search): by default the ENEMY's "
+                         "own per-turn target choice is a single greedy "
+                         "guess (whichever of ours it ranks best on its own, "
+                         "with no view of what our OTHER member is doing) -- "
+                         "this makes the enemy's target choice ALSO "
+                         "exhaustively searched each turn, and whichever "
+                         "combo is worst for us is what gets played, "
+                         "mirroring the worst-case search already done for "
+                         "the enemy's own Mega-evolve choice. Off by "
+                         "default: a real cost (roughly squares the "
+                         "per-turn search on top of the engine's own 2-turn "
+                         "lookahead), so opt in only when you want 'assume "
+                         "the enemy targets as well as I do' rather than "
+                         "'assume the enemy just grabs its own best-looking "
+                         "target each turn'")
     ap.add_argument("--max-taken", type=float, default=None, metavar="PCT",
                     help="default mode only: drop any row where SOME named "
                          "target's best attack could do PCT%% or more to it "
@@ -2157,11 +2274,23 @@ def main():
                               or args.chip_from or args.speed):
         raise SystemExit("--multi-bring4 cannot be combined with --joint/"
                          "--deep/--bring4/--pairs/--chip-from/--speed")
-    if not args.multi_bring4 and not args.bring4 and not args.vs:
+    if args.two_two_two and (args.joint or args.deep or args.bring4
+                             or args.multi_bring4 or args.pairs
+                             or args.chip_from or args.speed):
+        raise SystemExit("--two-two-two cannot be combined with --joint/"
+                         "--deep/--bring4/--multi-bring4/--pairs/"
+                         "--chip-from/--speed")
+    if not args.multi_bring4 and not args.bring4 and not args.two_two_two and not args.vs:
         raise SystemExit("--vs is required (except with --multi-bring4/"
-                         "--bring4, which can use --vs-team instead)")
+                         "--bring4, which can use --vs-team instead, and "
+                         "--two-two-two, which uses every named team by "
+                         "default)")
     if args.multi_bring4 and args.vs:
         raise SystemExit("--multi-bring4 uses --vs-team (repeated), not --vs")
+    if args.two_two_two and args.vs:
+        raise SystemExit("--two-two-two uses --vs-team (repeated, optional) "
+                         "instead of --vs -- omit --vs-team entirely to use "
+                         "every named team")
     if args.vs_all_teams and args.vs_team:
         raise SystemExit("--vs-all-teams can't be combined with --vs-team -- "
                          "it already runs against every saved team")
@@ -2179,8 +2308,12 @@ def main():
             raise SystemExit("--bring4 takes at most one --vs-team (a "
                              "single enemy roster) -- --multi-bring4 is "
                              "for several at once")
-    if args.vs_team and not (args.multi_bring4 or args.bring4):
-        raise SystemExit("--vs-team requires --multi-bring4 or --bring4")
+    if args.vs_team and not (args.multi_bring4 or args.bring4 or args.two_two_two):
+        raise SystemExit("--vs-team requires --multi-bring4/--bring4/--two-two-two")
+    if (args.top_pairs != 15 or args.top_teams != 10) and not args.two_two_two:
+        raise SystemExit("--top-pairs/--top-teams only apply to --two-two-two")
+    if args.max_net_weakness is not None and not args.two_two_two:
+        raise SystemExit("--max-net-weakness only applies to --two-two-two")
     if args.deep_dive_core and not (args.multi_bring4 or args.bring4):
         raise SystemExit("--deep-dive-core requires --multi-bring4 or --bring4")
     if args.auto_deep_dive and not args.multi_bring4:
@@ -2286,6 +2419,13 @@ def main():
             raise SystemExit(f"--min-enemies must be between 1 and the "
                              f"number of --vs-team entries ({len(vs_teams)})")
         args.jobs, _jobs_warning = blas_limits.workers_advice(args.jobs)
+    two_two_two_enemy_teams = {}
+    if args.two_two_two:
+        if args.vs_team:
+            two_two_two_enemy_teams = {raw: _resolve_vs_team(raw, W["teams"], merged)
+                                       for raw in args.vs_team}
+        else:
+            two_two_two_enemy_teams = dict(W["teams"])
     # --deep/--bring4 alone need no pool at all (a fixed pair/six); --switches
     # needs one UNLESS --bench already named the exact candidates to try.
     pool = (_pool(args, merged)
@@ -2349,6 +2489,9 @@ def main():
             if _jobs_warning:
                 print(f"WARNING  : {_jobs_warning}")
         print()
+    elif args.two_two_two:
+        print(f"2-2-2 teambuilding: {len(pool)} Pokemon vs "
+             f"{len(two_two_two_enemy_teams)} named team(s)\n")
     else:
         print(f"Searching {len(pool)} Pokemon vs {', '.join(targets)}\n")
 
@@ -2373,7 +2516,8 @@ def main():
         item1, item2, detail, summary = deep_dive(
             our_pair[0], our_pair[1], targets, merged, moves, natures,
             typechart, turns=args.turns, item_overrides=item_overrides,
-            move_overrides=move_overrides, excluded_items=excluded_items)
+            move_overrides=move_overrides, excluded_items=excluded_items,
+            worst_case_targeting=args.worst_case_targeting)
         _print_deep(our_pair[0], our_pair[1], item1, item2, targets, detail,
                    summary, args.turns)
         if args.switches:
@@ -2397,7 +2541,8 @@ def main():
             turns=args.turns, good_threshold=good_threshold,
             item_overrides=item_overrides, move_overrides=move_overrides,
             excluded_items=excluded_items,
-            enforce_item_clause=args.unique_items)
+            enforce_item_clause=args.unique_items,
+            worst_case_targeting=args.worst_case_targeting)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
         ranks = _parse_deep_dive_core(args.deep_dive_core)
@@ -2413,7 +2558,8 @@ def main():
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2434,7 +2580,8 @@ def main():
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
@@ -2548,7 +2695,8 @@ def main():
                 natures, typechart, turns=args.turns,
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2571,8 +2719,16 @@ def main():
                 multi_rows[0]["core"], vs_teams, merged, moves, natures,
                 typechart, turns=args.turns, item_overrides=item_overrides,
                 move_overrides=move_overrides, excluded_items=excluded_items,
-                enforce_item_clause=args.unique_items)
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting)
             _write_teamsheet_json(args.teamsheet_json, dive)
+    elif args.two_two_two:
+        pair_rows = find_pair_cores(pool, merged, moves, natures, typechart,
+                                    two_two_two_enemy_teams)
+        team_rows = two_two_two_teams(pair_rows, merged,
+                                      top_pairs=args.top_pairs, top_n=args.top_teams,
+                                      max_net_weakness=args.max_net_weakness)
+        _print_two_two_two(pair_rows, team_rows, args.top_pairs, args.max_net_weakness)
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
         rows = speed_tiers(names, targets, merged, moves, natures, typechart,
@@ -2585,14 +2741,16 @@ def main():
                                  partner_item=args.partner_item or None,
                                  item_overrides=item_overrides,
                                  move_overrides=move_overrides,
-                                 excluded_items=excluded_items)
+                                 excluded_items=excluded_items,
+                                 worst_case_targeting=args.worst_case_targeting)
         _print_joint(rows, targets, args.top, args.partner, args.turns)
     elif args.joint:
         rows = joint_pool_search(pool, targets, merged, moves, natures,
                                  typechart, turns=args.turns,
                                  item_overrides=item_overrides,
                                  move_overrides=move_overrides,
-                                 excluded_items=excluded_items)
+                                 excluded_items=excluded_items,
+                                 worst_case_targeting=args.worst_case_targeting)
         _print_joint(rows, targets, args.top, "", args.turns)
     elif args.pairs:
         rows = pair_search(pool, targets, merged, moves, natures, typechart,

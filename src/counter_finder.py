@@ -157,8 +157,10 @@ from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, Move
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
                     hits_ally, is_spread_move, move_from_showdown,
                     grassy_glide_priority_bonus)
-from engine import FieldState, WEATHER_SETTERS, TERRAIN_SETTERS, effective_speed
-from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
+from engine import (FieldState, WEATHER_SETTERS, WEATHER_SPEED_BOOST,
+                    TERRAIN_SETTERS, effective_speed)
+from optimize_sets import (best_item, best_moveset, legal_items, team_weather_for,
+                           move_value_table, enemy_individuals)
 from solver import FIRST_TURN_ONLY_MOVES, build_moveset
 from species_data import NO_MEGA, resolve_team_mega_slot
 
@@ -200,7 +202,8 @@ def _build(name, merged, natures, item=None):
     return _build_form(name, merged, natures, item=item, stay_base=False)
 
 
-def _build_form(name, merged, natures, item=None, stay_base=False):
+def _build_form(name, merged, natures, item=None, stay_base=False,
+                evs=None, nature=None, ability=None):
     """One Combatant in a SPECIFIC form. `stay_base=True` mirrors
     `combatants.make_team`'s `force_base_form` -- base stats/types/ability
     (e.g. Gyarados keeps Intimidate instead of gaining Mold Breaker), still
@@ -210,9 +213,19 @@ def _build_form(name, merged, natures, item=None, stay_base=False):
     is a no-op for a `force_base_form=True` combatant already, since
     `is_mega_pick` comes back False for one -- there is nothing to
     conditionally skip).
+
+    `evs`/`nature`/`ability`: optional per-instance overrides (a real,
+    known set -- e.g. a Showdown-export paste -- instead of mbsmogon.xlsx's
+    usage-default spread for this species). `make_combatant` already
+    supports all three; a Mega-stone holder's `ability` override always
+    applies to its BASE form's ability (see `combatants.py`'s own comment
+    on `base_ability` -- a paste's "Ability:" line for a Mega pick is
+    always its pre-evolution ability, never the mega-exclusive one), which
+    is exactly the semantics a real Showdown export needs here.
     """
     c = _mega_project(make_combatant(name, merged, natures, item=item,
-                                     force_base_form=stay_base))
+                                     force_base_form=stay_base,
+                                     evs=evs, nature=nature, ability=ability))
     c.current_hp = c.max_hp()
     return c
 
@@ -379,7 +392,309 @@ def net_weakness_by_type(core, merged):
     return out
 
 
-def _build_forms(names, merged, natures, moves_db, items=None):
+# --------------------------------------------------------- 2-2-2 team building
+#
+# "2-2-2 teambuilding: using core pairs that work well together to make your
+# lead unpredictable." Three DISTINCT reasons a pair might be a good core --
+# these are kept as three separate readings on every pair, not blended into
+# one opinion of "good", since a defensively airtight pair and a strong-lead
+# weather pair answer different questions:
+#   1. `_pair_defensive_synergy` -- do they cover each other's weaknesses
+#      (ideally no type is super-effective against BOTH)?
+#   2. `_weather_lead_synergy` -- a real weather-setter + weather-abusing
+#      speed ability (Drought/Chlorophyll, etc.), a strong generic lead.
+#   3. `_pair_threat_coverage` (+ each member's own roster.csv Score) -- do
+#      they cover each other's individual 1v1 losses against every named
+#      team's own roster, while still being individually strong?
+# `find_pair_cores` computes all three for every pair in a pool; `two_two_
+# two_teams` (Stage 2) combines the best of those into whole 6-member teams
+# built from 3 disjoint pairs.
+
+def _pair_defensive_synergy(name1, name2, merged):
+    """How closely (name1, name2) cover each other's weaknesses defensively
+    -- "find pairs of pokemon that closely or perfectly cover one another
+    defensively (e.g., all super effective attacks into one are resisted by
+    the other)".
+
+    For every type, reads each member's own `defensive_chart` (roster.csv's
+    per-type multiplier -- the SAME source `_weak_resist`/`member_weakness_
+    summary` already read, so "weak to" means the same thing everywhere in
+    this module): `shared_weak` is every type BOTH members take super-
+    effective damage from (a real gap this pair has NO answer to); `covered_
+    weak` is every type exactly ONE of them is weak to while the other
+    resists or is neutral/immune (a weakness the partner actually patches).
+
+    Returns {"shared_weak": [type, ...], "covered_weak": [type, ...]} -- a
+    PERFECTLY covering pair has an empty `shared_weak`.
+    """
+    from species_data import TYPES
+    dc1 = merged[name1]["defensive_chart"]
+    dc2 = merged[name2]["defensive_chart"]
+    shared, covered = [], []
+    for t in TYPES:
+        w1, w2 = dc1.get(t, 1.0) > 1.0, dc2.get(t, 1.0) > 1.0
+        if w1 and w2:
+            shared.append(t)
+        elif w1 != w2:
+            covered.append(t)
+    return {"shared_weak": shared, "covered_weak": covered}
+
+
+def _pair_mutual_resist_coverage(name1, name2, merged):
+    """A STRICTER reading of defensive synergy than `_pair_defensive_
+    synergy`'s own `covered_weak` (which only requires the partner to not
+    ALSO be weak -- neutral counts) -- "find pairs... that perfectly or
+    mostly cover type weaknesses (e.g., each mutually resists all the types
+    that are super effective against the other)": for every type
+    super-effective against `name1`, does `name2` actually RESIST it
+    (< 1.0, not merely <= 1.0), and symmetrically for `name2`'s own
+    weaknesses covered by `name1`.
+
+    Returns {"a_weak_total": int, "a_weak_resisted_by_b": int,
+    "b_weak_total": int, "b_weak_resisted_by_a": int, "coverage_frac":
+    float (0.0-1.0, combined across both sides -- 1.0 when neither has any
+    weakness at all), "perfect": bool} -- `perfect` is True when EVERY
+    weakness on both sides is actually resisted by the partner (trivially
+    true for a side with no weaknesses at all), the "side feature" this
+    was asked for: a pair that "perfectly... covers type weaknesses"."""
+    from species_data import TYPES
+    dc1 = merged[name1]["defensive_chart"]
+    dc2 = merged[name2]["defensive_chart"]
+    a_weak = [t for t in TYPES if dc1.get(t, 1.0) > 1.0]
+    b_weak = [t for t in TYPES if dc2.get(t, 1.0) > 1.0]
+    a_resisted_by_b = sum(1 for t in a_weak if dc2.get(t, 1.0) < 1.0)
+    b_resisted_by_a = sum(1 for t in b_weak if dc1.get(t, 1.0) < 1.0)
+    total_weak = len(a_weak) + len(b_weak)
+    total_resisted = a_resisted_by_b + b_resisted_by_a
+    coverage_frac = (total_resisted / total_weak) if total_weak else 1.0
+    perfect = (a_resisted_by_b == len(a_weak)) and (b_resisted_by_a == len(b_weak))
+    return {"a_weak_total": len(a_weak), "a_weak_resisted_by_b": a_resisted_by_b,
+           "b_weak_total": len(b_weak), "b_weak_resisted_by_a": b_resisted_by_a,
+           "coverage_frac": coverage_frac, "perfect": perfect}
+
+
+def _weather_lead_synergy(name1, name2, merged):
+    """Weather-setter + weather-abusing-speed-ability lead synergy --
+    "perform very well as a lead against most teams (e.g., pair with
+    abilities of Weather setter and Weather speed boost - like Drought/
+    Chlorophyll etc - Mega Charizard Y, Venusaur)". Reuses `engine.py`'s own
+    `WEATHER_SETTERS`/`WEATHER_SPEED_BOOST` tables (the SAME ones the real
+    turn engine keys weather-driven speed off), not a separate ability list.
+
+    Uses each name's own usage-derived ability (`_default_ability`, the
+    single-ability convention every combatant build in this module already
+    assumes -- a Pokemon here has one canonical set, not a menu of
+    abilities to search over).
+
+    Returns the weather name ("sun"/"rain"/"sand"/"snow") if EITHER
+    ordering of (name1, name2) is a real setter + matching-speed-boost
+    pair, else None.
+    """
+    from combatants import _default_ability
+    a1 = _default_ability(merged[name1]["abilities_usage"])
+    a2 = _default_ability(merged[name2]["abilities_usage"])
+    for setter, booster in ((a1, a2), (a2, a1)):
+        weather = WEATHER_SETTERS.get(setter)
+        boost = WEATHER_SPEED_BOOST.get(booster)
+        if weather and boost and boost[0] == weather:
+            return weather
+    return None
+
+
+def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
+    """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
+    enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
+    calculation"), computed ONCE and reused by every candidate pair's own
+    `_pair_threat_coverage` check instead of re-running per pair.
+
+    Each side's own best single hit is `optimize_sets.move_value_table`'s
+    per-move fraction (already OHKO/priority-aware -- see its own
+    docstring), computed ONCE per name against the WHOLE combined pool+
+    enemy universe in a single call (not once per opposing name), matching
+    `optimize_sets.py`'s own "1v1 damage calculations, not full battles"
+    cost model. Whichever side's best hit clears 100% of the other's max HP
+    wins; if both do, real base Speed (deliberately no item/ability/weather
+    speed modifiers -- this stays a SIMPLE screening pass, not a re-run of
+    `_joint_race`) breaks the tie; if neither does, "no_ko".
+
+    A pool member is never matched against an identical enemy entry of the
+    same name (a literal self-mirror isn't a meaningful "does my own team
+    have an answer to this enemy" question for MY OWN pool).
+    """
+    universe = list(dict.fromkeys(list(pool) + list(enemy_names)))
+    offense = {}
+    for name in universe:
+        table = move_value_table(name, merged, moves_db, natures, typechart, universe)
+        offense[name] = {en: max((row.get(en, 0.0) for row in table.values()), default=0.0)
+                         for en in universe if en != name}
+    matrix = {}
+    for name in pool:
+        matrix[name] = {}
+        for enemy_name in enemy_names:
+            if enemy_name == name:
+                continue
+            my_ohko = offense[name][enemy_name] >= 1.0
+            their_ohko = offense[enemy_name][name] >= 1.0
+            if my_ohko and not their_ohko:
+                outcome = "win"
+            elif their_ohko and not my_ohko:
+                outcome = "loss"
+            elif not my_ohko and not their_ohko:
+                outcome = "no_ko"
+            else:
+                my_spe = merged[name]["base_stats"]["spe"]
+                their_spe = merged[enemy_name]["base_stats"]["spe"]
+                outcome = "win" if my_spe >= their_spe else "loss"
+            matrix[name][enemy_name] = outcome
+    return matrix
+
+
+def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart):
+    """Single-pair convenience wrapper around `_one_v_one_matrix` (same
+    logic, no batching) -- for an ad-hoc "does X beat Y" query rather than
+    a whole pool's worth."""
+    return _one_v_one_matrix([name], [enemy_name], merged, moves_db,
+                             natures, typechart)[name][enemy_name]
+
+
+def _pair_threat_coverage(name1, name2, matrix):
+    """How well (name1, name2) cover each other's individual 1v1 losses
+    against `matrix`'s own enemy universe -- "what pokemon in all named
+    teams does a pokemon lose to, is there a complementary partner pokemon
+    which beats that before it KOs the other pokemon". `matrix`: `_one_v_
+    one_matrix`'s own {name: {enemy: outcome}} map.
+
+    Returns {"losses1": [...], "losses2": [...], "covered1": int,
+    "covered2": int, "total_losses": int, "total_covered": int,
+    "uncovered": [(loser, enemy), ...]} -- `coveredN` counts how many of
+    that member's own losses the OTHER member turns into a win; `uncovered`
+    lists every (loser, enemy) neither of them beats.
+    """
+    losses1 = [e for e, o in matrix.get(name1, {}).items() if o == "loss"]
+    losses2 = [e for e, o in matrix.get(name2, {}).items() if o == "loss"]
+    m1, m2 = matrix.get(name1, {}), matrix.get(name2, {})
+    covered1 = [e for e in losses1 if m2.get(e) == "win"]
+    covered2 = [e for e in losses2 if m1.get(e) == "win"]
+    uncovered = ([(name1, e) for e in losses1 if e not in covered1] +
+                [(name2, e) for e in losses2 if e not in covered2])
+    return {"losses1": losses1, "losses2": losses2,
+           "covered1": len(covered1), "covered2": len(covered2),
+           "total_losses": len(losses1) + len(losses2),
+           "total_covered": len(covered1) + len(covered2),
+           "uncovered": uncovered}
+
+
+def find_pair_cores(pool, merged, moves_db, natures, typechart, teams,
+                    enemy_names=None):
+    """"2-2-2 teambuilding" Stage 1: every pair drawn from `pool`, scored on
+    the three criteria above -- each pair carries all three so a caller can
+    rank/filter by whichever one it actually cares about, rather than this
+    baking in one blended opinion of "good".
+
+    `enemy_names` defaults to `optimize_sets.enemy_individuals(teams)` --
+    every distinct Pokemon across every named roster in `teams`
+    (`species_data.load_teams()`'s own dict) -- "what pokemon in all named
+    teams".
+
+    Returns rows: {"pair": (name1, name2), "shared_weak": [...],
+    "covered_weak": [...], "weather_synergy": "sun"/None/etc,
+    "threat_coverage": `_pair_threat_coverage`'s own dict, "mutual_resist":
+    `_pair_mutual_resist_coverage`'s own dict, "avg_score": float}, sorted
+    by (fewest shared/unpatched weaknesses first -- a real, concrete
+    defensive gap always outweighs a coverage or Score edge, then most
+    threat-coverage, then highest avg roster.csv Score). Weather-lead
+    synergy and mutual-resist coverage are both informational only, not
+    folded into this sort key -- "a good lead pair" (or a "perfectly
+    covers" pair) isn't strictly orderable against "a good defensive pair"
+    the way the other two criteria are against each other; a caller wanting
+    THAT reading specifically re-sorts/filters on `mutual_resist` itself
+    (e.g. `perfect=True` first) -- "as an example, maybe side feature".
+    """
+    if enemy_names is None:
+        enemy_names = enemy_individuals(teams)
+    # A handful of names (e.g. "Floette", a base form only ever recorded in
+    # mbsmogon.xlsx as a mislabeled Mega row, per `species_data.load_
+    # mbsmogon`'s own duplicate-handling comment) have no roster.csv
+    # weakness chart at all -- `merged[n]["defensive_chart"]` is `None`,
+    # not an empty dict. `_weak_resist`'s own convention is to skip such a
+    # member from weakness accounting entirely rather than guess; a pair
+    # containing one can't be scored for defensive synergy at all, so it's
+    # dropped from the pool here instead of raising deep inside the loop.
+    pool = [n for n in pool if merged[n].get("defensive_chart")]
+    matrix = _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
+    rows = []
+    for n1, n2 in itertools.combinations(pool, 2):
+        defense = _pair_defensive_synergy(n1, n2, merged)
+        weather = _weather_lead_synergy(n1, n2, merged)
+        coverage = _pair_threat_coverage(n1, n2, matrix)
+        mutual_resist = _pair_mutual_resist_coverage(n1, n2, merged)
+        avg_score = (merged[n1]["score"] + merged[n2]["score"]) / 2.0
+        rows.append({
+            "pair": (n1, n2), "shared_weak": defense["shared_weak"],
+            "covered_weak": defense["covered_weak"],
+            "weather_synergy": weather, "threat_coverage": coverage,
+            "mutual_resist": mutual_resist, "avg_score": avg_score,
+        })
+    rows.sort(key=lambda r: (len(r["shared_weak"]), -r["threat_coverage"]["total_covered"],
+                             -r["avg_score"]))
+    return rows
+
+
+def two_two_two_teams(pair_rows, merged, top_pairs=30, top_n=10,
+                      max_net_weakness=None):
+    """"2-2-2 teambuilding" Stage 2: combine the best `top_pairs` pair cores
+    (`find_pair_cores`'s own sort already ranks them) into every possible
+    team of 6 made of 3 DISJOINT pairs (no repeated Pokemon) -- "generate
+    pair cores, then... combine pair cores into a team of 6 that is most
+    complementary altogether".
+
+    Each candidate team is scored by `net_weakness_by_type` across all 6
+    members at once (the SAME whole-team synergy read `multi_bring4_
+    coverage`'s own weakness gates use) -- a team can look fine pair-by-pair
+    and still stack a real team-wide weakness none of the 3 pairs' own
+    `shared_weak` caught alone (e.g. three DIFFERENT members all weak to
+    the same type, spread one per pair). Ranked by the single worst (most
+    exposed) type's net weakness first, then total exposure across every
+    type, then how highly `find_pair_cores` itself ranked the 3 pairs
+    (their index sum, lower = better pairs used).
+
+    `max_net_weakness`: optional hard cap -- "let me establish net
+    weakness caps for a 2-2-2 team" -- a team whose single WORST (most
+    exposed) type's net weakness exceeds this is dropped outright rather
+    than merely sorted after the ones that pass, mirroring `--max-weak`/
+    `--type-limit`'s own "a hard filter, not just a ranking nudge"
+    convention for `multi_bring4_coverage`. `None` (the default) applies no
+    cap, unchanged from before this existed.
+
+    Returns rows: {"team": (n1..n6) sorted, "pairs": (pair1, pair2, pair3),
+    "net_weakness": {type: net}, "worst_net_weakness": int,
+    "total_net_weakness": int, "pair_rank_sum": int} for the top `top_n`.
+    """
+    candidates = list(enumerate(pair_rows[:top_pairs]))
+    rows = []
+    for (i1, c1), (i2, c2), (i3, c3) in itertools.combinations(candidates, 3):
+        names = set(c1["pair"]) | set(c2["pair"]) | set(c3["pair"])
+        if len(names) != 6:
+            continue  # a Pokemon repeated across 2 of the 3 pairs -- illegal team
+        team = tuple(sorted(names))
+        net = net_weakness_by_type(team, merged)
+        worst_net_weakness = max(net.values())
+        if max_net_weakness is not None and worst_net_weakness > max_net_weakness:
+            continue
+        rows.append({
+            "team": team, "pairs": (c1["pair"], c2["pair"], c3["pair"]),
+            "net_weakness": net, "worst_net_weakness": worst_net_weakness,
+            "total_net_weakness": sum(v for v in net.values() if v > 0),
+            "pair_rank_sum": i1 + i2 + i3,
+        })
+    rows.sort(key=lambda r: (r["worst_net_weakness"], r["total_net_weakness"],
+                             r["pair_rank_sum"]))
+    return rows[:top_n]
+
+
+def _build_forms(names, merged, natures, moves_db, items=None,
+                 move_overrides=None, evs_overrides=None,
+                 nature_overrides=None, ability_overrides=None):
     """{name: {"mega": Combatant, "base": Combatant, "moves": [MoveInfo,...]}}
     for every name in `names`, built ONCE regardless of how many pairs drawn
     from `names` end up using it (`make_combatant`'s own template cache
@@ -392,16 +707,39 @@ def _build_forms(names, merged, natures, moves_db, items=None):
     Shared by BOTH our own pair and the enemy pair -- a pool search's
     per-pair mega-choice resolution never has two different code paths for
     "ours" vs "theirs".
+
+    `move_overrides`: optional {name: [move, ...]} DIRECT pin (no search,
+    unlike `deep_dive`/`core_deep_dive`'s own `move_overrides` param, which
+    goes through `_answer_for`'s search-with-fallback for OUR side only) --
+    a name absent here still gets mbsmogon.xlsx's usage-derived top moveset,
+    same as always. Lets a caller pin theENEMY's real, known moveset too
+    (`items` already could -- pass a name's real item here the same way --
+    but had no per-name moveset pin at all until this existed).
+
+    `evs_overrides`/`nature_overrides`/`ability_overrides`: optional
+    {name: value} pins for a real, known set (a pasted Showdown export),
+    same shape as `items` -- a name absent from one of these maps still
+    falls back to mbsmogon.xlsx's usage-default spread for that stat, same
+    as it always has.
     """
     items = items or {}
+    move_overrides = move_overrides or {}
+    evs_overrides = evs_overrides or {}
+    nature_overrides = nature_overrides or {}
+    ability_overrides = ability_overrides or {}
     out = {}
     for name in names:
-        mvs = [mi for mi, _pct in build_moveset(merged[name], moves_db)]
+        mv_pin = move_overrides.get(name)
+        mvs = (_move_infos(name, merged, moves_db, mv_pin) if mv_pin
+              else [mi for mi, _pct in build_moveset(merged[name], moves_db)])
+        evs = evs_overrides.get(name)
+        nat = nature_overrides.get(name)
+        abil = ability_overrides.get(name)
         out[name] = {
             "mega": _build_form(name, merged, natures, item=items.get(name),
-                               stay_base=False),
+                               stay_base=False, evs=evs, nature=nat, ability=abil),
             "base": _build_form(name, merged, natures, item=items.get(name),
-                               stay_base=True),
+                               stay_base=True, evs=evs, nature=nat, ability=abil),
             "moves": mvs,
         }
     return out
@@ -2333,11 +2671,19 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   recharging_roles=frozenset(), tailwind_setter_role=None,
                   terrain=None, dmg_mult_by_role=None,
                   half_damage_roles=frozenset(), own_speed_mult=1.0,
-                  def_mult_by_role=None):
-    """One turn, given OUR target hints ({role: enemy_role_or_None}) -- the
-    enemy side chooses independently and greedily (`_choose_action` with no
-    hint), same "no coordination" behaviour `_sequential_pair_outcome`
-    already gives E1/E2. Does NOT mutate `hp` -- returns a fresh dict, log,
+                  def_mult_by_role=None, enemy_hints=None):
+    """One turn, given OUR target hints ({role: enemy_role_or_None}) -- by
+    default the enemy side chooses independently and greedily (`_choose_
+    action` with no hint), same "no coordination" behaviour `_sequential_
+    pair_outcome` already gives E1/E2. `enemy_hints` ({role: our_role_or_
+    None}), when given, hints the enemy's OWN single-target move choice the
+    exact same way `our_hints` does for ours -- `_best_turn`'s own `worst_
+    case_targeting` option is what actually populates this (see its
+    docstring), exhaustively trying every enemy hint combo and keeping
+    whichever is worst for us, instead of leaving the enemy's target
+    unhinted. `None` (the default, and every caller that doesn't pass it)
+    is a no-op, identical to this parameter not existing. Does NOT mutate
+    `hp` -- returns a fresh dict, log,
     whether an enemy actually got to act, which side (if either) was fully
     fainted DURING this turn's resolution (checked after every actor's hits
     land, so a true same-turn mutual wipe is still attributed to whichever
@@ -2459,6 +2805,7 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
         else:
             plan[role] = _choose_action(c, moves_by_role[role], ours_live,
                                         typechart, weather=weather,
+                                        hinted_target=(enemy_hints or {}).get(role),
                                         attacker_hp_frac=hp[role],
                                         target_hp_fracs=hp, auras=auras,
                                         terrain=terrain, attacker_role=role,
@@ -2495,9 +2842,10 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
         seen |= newly_stuck
         live_targets_by_role = {r: theirs_live for r in ours_live}
         live_targets_by_role.update({r: ours_live for r in theirs_live})
+        all_hints = {**our_hints, **(enemy_hints or {})}
         plan = _reconsider_for_survival(
             plan, doomed, sp_wasted, combatants, moves_by_role, hp, typechart,
-            weather, field, live_targets_by_role, our_hints, enemy_speed_mult,
+            weather, field, live_targets_by_role, all_hints, enemy_speed_mult,
             protected_roles, auras, dmg_mult_by_role=dmg_mult_by_role,
             half_damage_roles=half_damage_roles, own_speed_mult=own_speed_mult,
             def_mult_by_role=def_mult_by_role)
@@ -2554,12 +2902,53 @@ def _advance_turn_state(turn_log, dmg_mult_by_role, def_mult_by_role,
     return new_dmg_mult, new_def_mult, new_half_damage
 
 
+def _resolve_turn_worst_case(combatants, moves_by_role, hp, typechart, weather,
+                             our_hints, ours_live, theirs_live_roles, **resolve_kwargs):
+    """`_resolve_turn`, but the ENEMY's own target choice is ALSO exhaustively
+    searched -- mirroring `_best_turn`'s own "try every hint combo, keep the
+    best" treatment of OUR side -- instead of the enemy's usual single
+    greedy, unhinted guess. This is what `_best_turn`'s `worst_case_
+    targeting` option actually calls: "assume the enemy plays their
+    targeting as well as we play ours," not just their own best-immediate-
+    move guess.
+
+    Every legal enemy-hint combo (each of E1/E2's target drawn from
+    `ours_live`, the same `itertools.product` shape `_best_turn` uses for
+    OUR combos) is tried via `_resolve_turn`, and whichever comes back WORST
+    for us is returned -- ranked by the exact mirror of `_best_turn`'s own
+    (enemies_ko, -ours_ko, net_dmg) key: fewest enemies KO'd, most of ours
+    KO'd, least (their damage dealt minus ours) is worst. A true minimax
+    would also let the enemy look ahead the way our own `lookahead` does,
+    but this only searches ONE turn deep for the enemy's own pick -- the
+    same "cheap arithmetic screen, not exhaustive" scoping this module
+    already applies elsewhere; nesting a full lookahead on BOTH sides at
+    once would square the cost of an already real (opt-in) slowdown.
+    """
+    enemy_hint_options = ours_live or [None]
+    worst = None
+    for combo in itertools.product(enemy_hint_options, repeat=max(1, len(theirs_live_roles))):
+        enemy_hints = dict(zip(theirs_live_roles, combo))
+        result = _resolve_turn(combatants, moves_by_role, hp, typechart, weather,
+                               our_hints, enemy_hints=enemy_hints, **resolve_kwargs)
+        new_hp = result[0]
+        enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and new_hp[r] <= 0)
+        ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and new_hp[r] <= 0)
+        dmg_dealt = sum(hp[r] - new_hp[r] for r in ("E1", "E2"))
+        dmg_taken = sum(hp[r] - new_hp[r] for r in ("C", "P"))
+        worst_key = (-enemies_ko, ours_ko, dmg_taken - dmg_dealt)
+        if worst is None or worst_key > worst[0]:
+            worst = (worst_key, result)
+        if not theirs_live_roles:
+            break  # nothing of theirs can act -- one combo (the empty one) is all there is
+    return worst[1]
+
+
 def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               enemy_speed_mult=1.0, protected_roles=frozenset(),
               recharging_roles=frozenset(), tailwind_setter_role=None,
               terrain=None, dmg_mult_by_role=None,
               half_damage_roles=frozenset(), own_speed_mult=1.0,
-              def_mult_by_role=None, lookahead=1):
+              def_mult_by_role=None, lookahead=1, worst_case_targeting=False):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -2612,6 +3001,32 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     that already existed, just looking one ply further before it grades any
     combo.
 
+    `worst_case_targeting` (default False, an explicit opt-in): by default
+    the enemy's OWN target choice each turn is a single greedy, unhinted
+    `_choose_action` guess -- "the enemy side chooses independently and
+    greedily," per `_resolve_turn`'s own docstring. This is a real blind
+    spot the OTHER direction from the lookahead bug above: "I will note that
+    Kingambit is the enemy team" -- once Kingambit is on the enemy side,
+    NEITHER the lookahead NOR the exhaustive hint search above ever
+    considers whether Kingambit might deliberately pick the target that
+    hurts us most, since only OUR OWN hint combos are searched. Enabling
+    this makes `_resolve_turn_worst_case` (not a plain `_resolve_turn` call)
+    resolve the enemy's half of the turn too: every legal enemy-hint combo
+    is tried, and whichever is WORST for us is what this combo is actually
+    graded on -- "assume the enemy plays their targeting as well as we play
+    ours," mirroring the worst-case search `_pair_vs_targets` already runs
+    over the enemy's MEGA choice, just extended to their per-turn TARGET
+    choice too. Threaded into the lookahead's own recursive `_best_turn`
+    call too, so a preview turn keeps the same worst-case assumption instead
+    of quietly reverting to greedy enemy play one ply down. A real cost,
+    not just a nested loop: the enemy's own hint combos are now searched
+    THIS turn, and the lookahead preview (already a second full turn of
+    search) searches them again one ply deeper, so this roughly SQUARES the
+    per-turn branching factor on top of the lookahead's own -- expected,
+    since a genuine minimax over both sides costs more than optimizing one
+    side against a greedy opponent, which is exactly why this stays opt-in
+    rather than the default.
+
     A combo that already wins or already loses outright THIS turn skips the
     preview entirely (there's nothing deeper to learn -- an immediate sweep
     or an immediate full wipe already fully decides it), and so does a turn
@@ -2642,16 +3057,31 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     # correctness change: it only skips the preview in exactly the cases
     # where no comparison ever happens.
     total_combos = len(hint_options) ** max(1, len(ours_live))
+    # Same shortcut as the lookahead's own guard, mirrored for the enemy's
+    # side: with at most one legal enemy-hint combo, `_resolve_turn_worst_
+    # case`'s own search is moot (there is nothing to pick between), so
+    # skip it and fall back to the plain, cheaper `_resolve_turn` call.
+    enemy_total_combos = len(ours_live or [None]) ** max(1, len(theirs_live_roles))
     best = None
     for combo in itertools.product(hint_options, repeat=max(1, len(ours_live))):
         hints = dict(zip(ours_live, combo))
-        new_hp, log, enemy_acted, wiped, recharging_next = _resolve_turn(
-            combatants, moves_by_role, hp, typechart, weather, hints,
-            enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
-            recharging_roles=recharging_roles,
-            tailwind_setter_role=tailwind_setter_role, terrain=terrain,
-            dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
-            own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role)
+        if worst_case_targeting and enemy_total_combos > 1:
+            new_hp, log, enemy_acted, wiped, recharging_next = _resolve_turn_worst_case(
+                combatants, moves_by_role, hp, typechart, weather, hints,
+                ours_live, theirs_live_roles,
+                enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
+                recharging_roles=recharging_roles,
+                tailwind_setter_role=tailwind_setter_role, terrain=terrain,
+                dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
+                own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role)
+        else:
+            new_hp, log, enemy_acted, wiped, recharging_next = _resolve_turn(
+                combatants, moves_by_role, hp, typechart, weather, hints,
+                enemy_speed_mult=enemy_speed_mult, protected_roles=protected_roles,
+                recharging_roles=recharging_roles,
+                tailwind_setter_role=tailwind_setter_role, terrain=terrain,
+                dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
+                own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role)
         final_hp = new_hp
         both_sides_still_live = (wiped is None
                                  and any(new_hp[r] > 0 for r in ("C", "P"))
@@ -2666,7 +3096,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 enemy_speed_mult=enemy_speed_mult, recharging_roles=recharging_next,
                 terrain=terrain, dmg_mult_by_role=next_dmg_mult,
                 half_damage_roles=next_half_damage, own_speed_mult=own_speed_mult,
-                def_mult_by_role=next_def_mult, lookahead=lookahead - 1)
+                def_mult_by_role=next_def_mult, lookahead=lookahead - 1,
+                worst_case_targeting=worst_case_targeting)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and final_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and final_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - final_hp[r] for r in ("E1", "E2"))
@@ -2682,7 +3113,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0, first_turn_moves_override=None,
                 first_turn_protected_role=None, first_turn_tailwind_role=None,
-                terrain=None, own_speed_mult=1.0):
+                terrain=None, own_speed_mult=1.0, worst_case_targeting=False):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -2779,6 +3210,11 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     writer). Scoped to Contrary specifically, matching `_intimidate_mult_
     by_role`'s own Contrary branch -- a non-Contrary user's drop from one of
     these moves stays deliberately unmodeled, exactly as before.
+
+    `worst_case_targeting`: passed straight through to every real `_best_
+    turn` call this loop makes -- see its own docstring for what it does
+    (an opt-in minimax over the ENEMY's own per-turn target choice too, not
+    just ours). Default False changes nothing.
     """
     hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
     any_enemy_acted = False
@@ -2829,7 +3265,7 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn,
             terrain=terrain, dmg_mult_by_role=dmg_mult_by_role,
             half_damage_roles=half_damage, own_speed_mult=own_mult_this_turn,
-            def_mult_by_role=def_mult_by_role)
+            def_mult_by_role=def_mult_by_role, worst_case_targeting=worst_case_targeting)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
@@ -2992,12 +3428,18 @@ def _pruned_entry():
 
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                      turns, want_grid=False, merged=None, prune_below=None,
-                     forced_base_names=frozenset()):
+                     forced_base_names=frozenset(), worst_case_targeting=False):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
     (partner fixed) and `joint_pool_search` (both slots searched) can never
     drift apart on what "beats" means.
+
+    `worst_case_targeting`: passed straight through to every `_joint_race`
+    call this function makes (the main race, the Tailwind replay, both
+    Protect replays) -- see `_best_turn`'s own docstring for what it does
+    (an opt-in minimax over the ENEMY's own per-turn target choice, not
+    just ours). Default False changes nothing.
 
     `forced_base_names`: passed straight through to `_resolve_forms` for OUR
     side only (the enemy's own mega choice stays unconstrained) -- a name in
@@ -3197,24 +3639,28 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 terrain = _field_terrain(combatants)
                 outcome, turns_used, hp, log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
-                    terrain=terrain)
+                    terrain=terrain, worst_case_targeting=worst_case_targeting)
                 if tailwind_setter_roles:
                     tw_outcome, tw_turns_used, tw_hp, tw_log = max(
                         (_joint_race(combatants, moves_by_role, typechart, weather,
                                     turns, first_turn_tailwind_role=role,
-                                    terrain=terrain)
+                                    terrain=terrain,
+                                    worst_case_targeting=worst_case_targeting)
                          for role in tailwind_setter_roles),
                         key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
                 else:
                     tw_outcome, tw_turns_used, tw_hp, tw_log = _joint_race(
                         combatants, moves_by_role, typechart, weather, turns,
-                        enemy_speed_mult=2.0, terrain=terrain)
+                        enemy_speed_mult=2.0, terrain=terrain,
+                        worst_case_targeting=worst_case_targeting)
                 pr_e1_outcome, _pr1_t, _pr1_hp, _pr1_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="E1", terrain=terrain)
+                    first_turn_protected_role="E1", terrain=terrain,
+                    worst_case_targeting=worst_case_targeting)
                 pr_e2_outcome, _pr2_t, _pr2_hp, _pr2_log = _joint_race(
                     combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="E2", terrain=terrain)
+                    first_turn_protected_role="E2", terrain=terrain,
+                    worst_case_targeting=worst_case_targeting)
                 protect_outcomes = {"E1": pr_e1_outcome, "E2": pr_e2_outcome}
                 tailwind_forced = (real_tailwind_threat and
                                    _JOINT_OUTCOME_RANK[tw_outcome] >
@@ -3233,7 +3679,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     own_tw_outcome, own_tw_turns_used, own_tw_hp, own_tw_log = min(
                         (_joint_race(combatants, moves_by_role, typechart, weather,
                                     turns, first_turn_tailwind_role=role,
-                                    own_speed_mult=2.0, terrain=terrain)
+                                    own_speed_mult=2.0, terrain=terrain,
+                                    worst_case_targeting=worst_case_targeting)
                          for role in own_tailwind_setter_roles),
                         key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
                 else:
@@ -3330,7 +3777,10 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
 def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
                       natures, typechart, turns=2, partner_item=None,
                       item_overrides=None, move_overrides=None,
-                      excluded_items=DEFAULT_EXCLUDED_ITEMS):
+                      excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                      worst_case_targeting=False, evs_overrides=None,
+                      nature_overrides=None, ability_overrides=None,
+                      enemy_item_overrides=None, enemy_move_overrides=None):
     """Paired with `partner_name` (a fixed second attacker, both using their
     own real optimised set -- not one fixed move), for each pool member:
     against every pair drawn from `target_names`, does the joint pair beat
@@ -3384,7 +3834,12 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
         partner_name, merged, moves_db, natures, typechart, target_names,
         item=partner_item, excluded_items=excluded_items)
     partner_moves = _move_infos(partner_name, merged, moves_db, partner_move_names)
-    enemy_built = _build_forms(target_names, merged, natures, moves_db)
+    enemy_built = _build_forms(target_names, merged, natures, moves_db,
+                               items=enemy_item_overrides,
+                               move_overrides=enemy_move_overrides,
+                               evs_overrides=evs_overrides,
+                               nature_overrides=nature_overrides,
+                               ability_overrides=ability_overrides)
 
     rows = []
     for name in pool:
@@ -3399,7 +3854,10 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
         moves = _move_infos(name, merged, moves_db, move_names)
 
         our_built = _build_forms([name, partner_name], merged, natures, moves_db,
-                                 items={name: item, partner_name: partner_item})
+                                 items={name: item, partner_name: partner_item},
+                                 evs_overrides=evs_overrides,
+                                 nature_overrides=nature_overrides,
+                                 ability_overrides=ability_overrides)
         # The optimised set (not `_build_forms`' own usage-derived default)
         # is what this function actually attacks with -- same convention
         # `_answer_for`'s callers everywhere else in this module follow.
@@ -3408,7 +3866,8 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 
         detail, summary = _pair_vs_targets(
             name, partner_name, our_built, target_names, enemy_built,
-            typechart, turns, merged=merged)
+            typechart, turns, merged=merged,
+            worst_case_targeting=worst_case_targeting)
         rows.append({"name": name, "item": item, "detail": detail, **summary})
     rows.sort(key=_pair_sort_key)
     return rows
@@ -3417,7 +3876,10 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
 def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       typechart, turns=2, item_overrides=None,
                       move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
-                      prune_below=None, extra_forced_base=frozenset()):
+                      prune_below=None, extra_forced_base=frozenset(),
+                      worst_case_targeting=False, evs_overrides=None,
+                      nature_overrides=None, ability_overrides=None,
+                      enemy_item_overrides=None, enemy_move_overrides=None):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
     genuinely searched (not one fixed), against every pair drawn from
@@ -3468,17 +3930,25 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
         if not move_names:
             continue
         entry = _build_forms([name], merged, natures, moves_db,
-                             items={name: item})[name]
+                             items={name: item}, evs_overrides=evs_overrides,
+                             nature_overrides=nature_overrides,
+                             ability_overrides=ability_overrides)[name]
         entry["moves"] = _move_infos(name, merged, moves_db, move_names)
         entry["item"] = item
         built[name] = entry
-    enemy_built = _build_forms(target_names, merged, natures, moves_db)
+    enemy_built = _build_forms(target_names, merged, natures, moves_db,
+                               items=enemy_item_overrides,
+                               move_overrides=enemy_move_overrides,
+                               evs_overrides=evs_overrides,
+                               nature_overrides=nature_overrides,
+                               ability_overrides=ability_overrides)
 
     rows = []
     for n1, n2 in itertools.combinations(built, 2):
         detail, summary = _pair_vs_targets(n1, n2, built, target_names,
                                            enemy_built, typechart, turns,
-                                           merged=merged, prune_below=prune_below)
+                                           merged=merged, prune_below=prune_below,
+                                           worst_case_targeting=worst_case_targeting)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                     "item2": built[n2]["item"], "detail": detail,
                     "forced_base": None, **summary})
@@ -3492,7 +3962,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
             detail, summary = _pair_vs_targets(
                 n1, n2, built, target_names, enemy_built, typechart, turns,
                 merged=merged, prune_below=prune_below,
-                forced_base_names=frozenset({forced_name}))
+                forced_base_names=frozenset({forced_name}),
+                worst_case_targeting=worst_case_targeting)
             rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                         "item2": built[n2]["item"], "detail": detail,
                         "forced_base": forced_name, **summary})
@@ -3549,7 +4020,9 @@ def _pair_sort_key(row):
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   turns=2, good_threshold=1.0, item_overrides=None,
                   move_overrides=None, excluded_items=DEFAULT_EXCLUDED_ITEMS,
-                  enforce_item_clause=False):
+                  enforce_item_clause=False, worst_case_targeting=False,
+                  evs_overrides=None, nature_overrides=None, ability_overrides=None,
+                  enemy_item_overrides=None, enemy_move_overrides=None):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
@@ -3646,7 +4119,13 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                              item_overrides=item_overrides,
                              move_overrides=move_overrides,
                              excluded_items=excluded_items,
-                             extra_forced_base=extra_forced_base)
+                             extra_forced_base=extra_forced_base,
+                             worst_case_targeting=worst_case_targeting,
+                             evs_overrides=evs_overrides,
+                             nature_overrides=nature_overrides,
+                             ability_overrides=ability_overrides,
+                             enemy_item_overrides=enemy_item_overrides,
+                             enemy_move_overrides=enemy_move_overrides)
     pair_lookup_forced_base = None
     if extra_forced_base:
         # Built BEFORE popping "forced_base" below -- that pop mutates the
@@ -4654,7 +5133,9 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
 
 def deep_dive(name1, name2, target_names, merged, moves_db, natures,
              typechart, turns=2, item_overrides=None, move_overrides=None,
-             excluded_items=DEFAULT_EXCLUDED_ITEMS):
+             excluded_items=DEFAULT_EXCLUDED_ITEMS, worst_case_targeting=False,
+             evs_overrides=None, nature_overrides=None, ability_overrides=None,
+             enemy_item_overrides=None, enemy_move_overrides=None):
     """The full report for ONE SPECIFIC, already-chosen pair (not a pool
     search) against every pair drawn from `target_names`.
 
@@ -4674,6 +5155,23 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     OHKO-risk read (`_damage_grid`/`_ohko_risk`) are the whole point here and
     a single pair against a handful of enemy pairs is cheap regardless.
 
+    `evs_overrides`/`nature_overrides`/`ability_overrides`: optional
+    {name: value} pins for a real, known set (e.g. a pasted Showdown
+    export) -- covers ANY name here, ours (`name1`/`name2`) or the named
+    enemy roster (`target_names`) alike, same as `_build_forms` itself.
+    Without these every combatant used mbsmogon.xlsx's usage-default EVs/
+    Nature/ability regardless of a caller's own real, exact set -- only
+    `item_overrides`/`move_overrides` were ever respected.
+
+    `enemy_item_overrides`/`enemy_move_overrides`: the same DIRECT pin
+    (`_build_forms`'s own `items`/`move_overrides`, no `_answer_for` search
+    involved), for `target_names` instead. `item_overrides`/`move_overrides`
+    above only ever apply to `name1`/`name2` -- the enemy always got
+    mbsmogon.xlsx's own usage-derived top item/moveset regardless of a
+    caller's real, known enemy set (e.g. Tailwind never even being a legal
+    option for a real Tailwind-setter enemy whose usage-derived moveset
+    happened to prefer a different 4th move) until these existed.
+
     Returns (item1, item2, detail, summary) -- `detail`/`summary` are
     `_pair_vs_targets`'s own shape, `grid`/`ohko_risk` included on every
     entry.
@@ -4687,13 +5185,22 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
         item_overrides=item_overrides, move_overrides=move_overrides,
         excluded_items=excluded_items)
     our_built = _build_forms([name1, name2], merged, natures, moves_db,
-                             items={name1: item1, name2: item2})
+                             items={name1: item1, name2: item2},
+                             evs_overrides=evs_overrides,
+                             nature_overrides=nature_overrides,
+                             ability_overrides=ability_overrides)
     our_built[name1]["moves"] = _move_infos(name1, merged, moves_db, moves1)
     our_built[name2]["moves"] = _move_infos(name2, merged, moves_db, moves2)
-    enemy_built = _build_forms(target_names, merged, natures, moves_db)
+    enemy_built = _build_forms(target_names, merged, natures, moves_db,
+                               items=enemy_item_overrides,
+                               move_overrides=enemy_move_overrides,
+                               evs_overrides=evs_overrides,
+                               nature_overrides=nature_overrides,
+                               ability_overrides=ability_overrides)
     detail, summary = _pair_vs_targets(name1, name2, our_built, target_names,
                                        enemy_built, typechart, turns,
-                                       want_grid=True, merged=merged)
+                                       want_grid=True, merged=merged,
+                                       worst_case_targeting=worst_case_targeting)
     return item1, item2, detail, summary
 
 
@@ -4711,7 +5218,8 @@ def _sum_rows(rows):
 
 
 def _core_deep_dive_race(core, target_name_lists, our_built, enemy_built_by_team,
-                         typechart, turns, merged, sets, forced_base_names):
+                         typechart, turns, merged, sets, forced_base_names,
+                         worst_case_targeting=False):
     """`core_deep_dive`'s own racing body, factored out so it can be run
     TWICE (once per mega hypothesis) when the core carries 2 stone-holders
     -- see `core_deep_dive`'s own docstring."""
@@ -4722,7 +5230,8 @@ def _core_deep_dive_race(core, target_name_lists, our_built, enemy_built_by_team
         for target_names, enemy_built in zip(target_name_lists, enemy_built_by_team):
             detail, summary = _pair_vs_targets(
                 n1, n2, our_built, target_names, enemy_built, typechart,
-                turns, merged=merged, forced_base_names=forced_base_names)
+                turns, merged=merged, forced_base_names=forced_base_names,
+                worst_case_targeting=worst_case_targeting)
             per_enemy.append({"target_names": target_names, "detail": detail,
                              "summary": summary})
         pair_total = _sum_rows([pe["summary"] for pe in per_enemy])
@@ -4736,7 +5245,9 @@ def _core_deep_dive_race(core, target_name_lists, our_built, enemy_built_by_team
 def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart,
                    turns=2, item_overrides=None, move_overrides=None,
                    excluded_items=DEFAULT_EXCLUDED_ITEMS,
-                   enforce_item_clause=False):
+                   enforce_item_clause=False, worst_case_targeting=False,
+                   evs_overrides=None, nature_overrides=None, ability_overrides=None,
+                   enemy_item_overrides=None, enemy_move_overrides=None):
     """The full report for an ALREADY-CHOSEN core (the `--multi-bring4`
     result the user actually wants to inspect, not a fresh search): every
     one of its C(size,2) pairs, raced against every enemy pair drawn from
@@ -4764,6 +5275,26 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     items with VGC's real Item Clause enforced (`_resolve_unique_items`)
     before any racing, so `sets` never shows two members holding the same
     item. See `bring4_search`'s own docstring for why this is opt-in.
+
+    `worst_case_targeting`: off by default -- passed straight through to
+    every `_pair_vs_targets` call this makes. See `_best_turn`'s own
+    docstring for what it does (an opt-in minimax over the ENEMY's own
+    per-turn target choice, not just ours).
+
+    `evs_overrides`/`nature_overrides`/`ability_overrides`: optional
+    {name: value} pins for a real, known set (e.g. a pasted Showdown
+    export) -- covers ANY name here, `core`'s own members or the named
+    enemy rosters in `target_name_lists` alike. Without these every
+    combatant used mbsmogon.xlsx's usage-default EVs/Nature/ability
+    regardless of a caller's own real, exact set -- only `item_overrides`/
+    `move_overrides` were ever respected.
+
+    `enemy_item_overrides`/`enemy_move_overrides`: the same DIRECT pin
+    (`_build_forms`'s own `items`/`move_overrides`, no `_answer_for` search
+    involved), for each enemy roster in `target_name_lists` instead.
+    `item_overrides`/`move_overrides` above only ever apply to `core` -- an
+    enemy always got mbsmogon.xlsx's own usage-derived top item/moveset
+    regardless of a caller's real, known enemy set until these existed.
 
     BRING-4-CONSISTENT MEGA CHOICE: when `core` carries exactly 2 Mega-stone
     holders, this function (unlike `bring4_search`) doesn't do bring-4
@@ -4806,27 +5337,38 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
                              f"{all_enemies}")
         sets[name] = {"item": item, "moves": move_names}
     our_built = _build_forms(core, merged, natures, moves_db,
-                             items={n: s["item"] for n, s in sets.items()})
+                             items={n: s["item"] for n, s in sets.items()},
+                             evs_overrides=evs_overrides,
+                             nature_overrides=nature_overrides,
+                             ability_overrides=ability_overrides)
     for n, s in sets.items():
         our_built[n]["moves"] = _move_infos(n, merged, moves_db, s["moves"])
-    enemy_built_by_team = [_build_forms(t, merged, natures, moves_db)
+    enemy_built_by_team = [_build_forms(t, merged, natures, moves_db,
+                                        items=enemy_item_overrides,
+                                        move_overrides=enemy_move_overrides,
+                                        evs_overrides=evs_overrides,
+                                        nature_overrides=nature_overrides,
+                                        ability_overrides=ability_overrides)
                            for t in target_name_lists]
 
     megas = [n for n in core if n.startswith("Mega ")]
     if len(megas) == 2:
         dive_a = _core_deep_dive_race(
             core, target_name_lists, our_built, enemy_built_by_team, typechart,
-            turns, merged, sets, forced_base_names=frozenset({megas[1]}))
+            turns, merged, sets, forced_base_names=frozenset({megas[1]}),
+            worst_case_targeting=worst_case_targeting)
         dive_a["mega_used"] = megas[0]
         dive_b = _core_deep_dive_race(
             core, target_name_lists, our_built, enemy_built_by_team, typechart,
-            turns, merged, sets, forced_base_names=frozenset({megas[0]}))
+            turns, merged, sets, forced_base_names=frozenset({megas[0]}),
+            worst_case_targeting=worst_case_targeting)
         dive_b["mega_used"] = megas[1]
         return dive_a if (_pair_sort_key(dive_a["overall"])
                           <= _pair_sort_key(dive_b["overall"])) else dive_b
     result = _core_deep_dive_race(core, target_name_lists, our_built,
                                   enemy_built_by_team, typechart, turns, merged,
-                                  sets, forced_base_names=frozenset())
+                                  sets, forced_base_names=frozenset(),
+                                  worst_case_targeting=worst_case_targeting)
     result["mega_used"] = megas[0] if len(megas) == 1 else None
     return result
 

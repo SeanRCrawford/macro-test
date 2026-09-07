@@ -3495,7 +3495,9 @@ def _render_teamsheet_export(core, sets, key_prefix):
 
 def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                            excluded_items, key_prefix, item_overrides=None,
-                           move_overrides=None):
+                           move_overrides=None, evs_overrides=None,
+                           nature_overrides=None, ability_overrides=None,
+                           enemy_item_overrides=None, enemy_move_overrides=None):
     """"I want to be able to choose a specific team to deep dive into" --
     an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
     (any bring-4, or a multi-bring4 core), the app-side counterpart to the
@@ -3513,6 +3515,14 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     Counter Table doesn't use the actual moveset of the loaded team").
     `None` (the default) reproduces the old behaviour, correct for a
     freshly pool-searched core that has no pre-decided set to respect.
+
+    `evs_overrides`/`nature_overrides`/`ability_overrides`: same idea, for
+    a real, known set's EVs/Nature/Ability -- covers ANY name here, `core`'s
+    own members or a named enemy roster in `target_name_lists` alike (a
+    pasted or saved custom team's `sets` dict already carries all three,
+    same as item/moves; only item/moves were ever actually threaded through
+    before this existed, so a custom competitive spread silently raced
+    with mbsmogon.xlsx's usage-default stats instead of the real ones).
 
     Also renders the teamsheet export (`_render_teamsheet_export`) for
     `core` using the deep dive's own `sets` -- one call answers both "show
@@ -3535,13 +3545,27 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     from that (lead / back)".
     """
     from counter_finder import core_deep_dive, bring4_from_deep_dive, recommended_lead
+    worst_case_targeting = st.checkbox(
+        "Worst-case enemy targeting", key=f"{key_prefix}_worst_case",
+        help="By default the enemy's own per-turn target choice is a "
+             "single greedy guess. Check this to also exhaustively search "
+             "the enemy's OWN targeting each turn and assume whichever "
+             "combo is worst for us -- mirrors the worst-case search "
+             "already done for the enemy's Mega-evolve choice. Real cost: "
+             "roughly squares the per-turn search on top of the engine's "
+             "own 2-turn lookahead.")
     if st.button(f"Deep dive: {' / '.join(core)}", key=f"{key_prefix}_go"):
         with st.spinner("Racing every pair against every named enemy..."):
             try:
                 dive = core_deep_dive(
                     core, target_name_lists, merged, moves, natures,
                     typechart, turns=turns, excluded_items=excluded_items,
-                    item_overrides=item_overrides, move_overrides=move_overrides)
+                    item_overrides=item_overrides, move_overrides=move_overrides,
+                    worst_case_targeting=worst_case_targeting,
+                    evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                    ability_overrides=ability_overrides,
+                    enemy_item_overrides=enemy_item_overrides,
+                    enemy_move_overrides=enemy_move_overrides)
             except ValueError as e:
                 st.error(str(e))
                 dive = None
@@ -3653,12 +3677,13 @@ with tab_counter:
                "punish/exploitability audit -- a fast SCREEN, same role it plays for "
                "the CLI). Use Lead / Back Search for the slow, honest, real-solver "
                "verification of whatever this recommends.")
-    from counter_finder import DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search
+    from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search,
+                                find_pair_cores, two_two_two_teams)
     from team_search import build_candidate_pool
 
     ct_mode = st.radio(
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
-                 "Joint pair search"], key="ct_mode", horizontal=True)
+                 "Joint pair search", "2-2-2 teambuilding"], key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
         "Allow Choice Scarf", value=False, key="ct_allow_scarf",
@@ -3687,7 +3712,7 @@ with tab_counter:
                 help="A team just seen, without saving it to data/my_teams "
                      "first -- the xlsx export's own 'Pokepaste' column "
                      "pastes straight in here too.")
-            vs_roster, _vs_sets = species_data.custom_team_from_export(
+            vs_roster, vs_sets = species_data.custom_team_from_export(
                 vs_paste, merged) if vs_paste.strip() else ([], {})
             unknown_vs = [n for n in vs_roster if n not in merged]
             if unknown_vs:
@@ -3697,6 +3722,7 @@ with tab_counter:
                 st.success(f"Parsed: {', '.join(vs_roster)}")
         else:
             vs_roster = list(teams[ct_vs_name])
+            vs_sets = team_meta.get(ct_vs_name, {}).get("sets") or {}
         SEARCH_POOL = "\U0001f50d Search a pool for the best team"
         PASTE_OUR = "\U0001f4cb Paste a pokepaste"
         ct_our_source = st.selectbox(
@@ -3786,6 +3812,30 @@ with tab_counter:
                               if s.get("item")}
             move_overrides = {n: s["moves"] for n, s in our_sets.items()
                               if s.get("moves")}
+            # A real, known set's EVs/Nature/Ability (ours OR the named
+            # enemy's) were silently dropped everywhere in the deep-dive/
+            # search engine until now -- only item/moves were ever
+            # respected, so a custom competitive spread (e.g. a pasted
+            # Showdown export) got mbsmogon.xlsx's usage-default stats
+            # instead of the real ones. `our_sets` wins on a name collision
+            # (a mirror match) since it's the side actually being decided
+            # here.
+            all_known_sets = {**vs_sets, **our_sets}
+            evs_overrides = {n: s["evs"] for n, s in all_known_sets.items()
+                             if s.get("evs")}
+            nature_overrides = {n: s["nature"] for n, s in all_known_sets.items()
+                                if s.get("nature")}
+            ability_overrides = {n: s["ability"] for n, s in all_known_sets.items()
+                                 if s.get("ability")}
+            # Same idea for the ENEMY's own item/moveset -- unlike `our_sets`,
+            # a named enemy's real pinned set was NEVER respected anywhere
+            # (only mbsmogon.xlsx's usage-derived top item/moveset), so a
+            # known enemy's actual moves (e.g. a real Tailwind set instead
+            # of whatever usage happens to rank 4th) went unmodelled.
+            enemy_item_overrides = {n: s["item"] for n, s in vs_sets.items()
+                                    if s.get("item")}
+            enemy_move_overrides = {n: s["moves"] for n, s in vs_sets.items()
+                                    if s.get("moves")}
             if not (3 <= len(our6) <= 6):
                 st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
                            "a pokepaste, or choose a preset above) -- 3 or 4 skips "
@@ -3803,7 +3853,12 @@ with tab_counter:
                                 turns=ct_turns, good_threshold=ct_good / 100,
                                 excluded_items=ct_excluded,
                                 item_overrides=item_overrides,
-                                move_overrides=move_overrides)
+                                move_overrides=move_overrides,
+                                evs_overrides=evs_overrides,
+                                nature_overrides=nature_overrides,
+                                ability_overrides=ability_overrides,
+                                enemy_item_overrides=enemy_item_overrides,
+                                enemy_move_overrides=enemy_move_overrides)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -3839,7 +3894,11 @@ with tab_counter:
                     _render_core_deep_dive(
                         bring4_rows[pick - 1]["bring4"], [vs_roster], [ct_vs_name],
                         ct_turns, ct_excluded, key_prefix=f"ctb4_dd_{pick}",
-                        item_overrides=item_overrides, move_overrides=move_overrides)
+                        item_overrides=item_overrides, move_overrides=move_overrides,
+                        evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                        ability_overrides=ability_overrides,
+                        enemy_item_overrides=enemy_item_overrides,
+                        enemy_move_overrides=enemy_move_overrides)
 
                 st.markdown("**Full deep dive: all of `Our 6`, every configuration**")
                 st.caption("Every C(6,2) pair `our6` can form -- covers every "
@@ -3849,11 +3908,48 @@ with tab_counter:
                 _render_core_deep_dive(
                     our6, [vs_roster], [ct_vs_name], ct_turns, ct_excluded,
                     key_prefix="ctb4_dd_all6_one",
-                    item_overrides=item_overrides, move_overrides=move_overrides)
+                    item_overrides=item_overrides, move_overrides=move_overrides,
+                    evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                    ability_overrides=ability_overrides,
+                    enemy_item_overrides=enemy_item_overrides,
+                    enemy_move_overrides=enemy_move_overrides)
+                allteams_worst_case = st.checkbox(
+                    "Worst-case enemy targeting",
+                    key="ctb4_dd_all6_allteams_worst_case",
+                    help="Exhaustively search the enemy's OWN per-turn "
+                         "targeting too, assuming whichever combo is worst "
+                         "for us, instead of the enemy's usual single "
+                         "greedy guess. Real cost: roughly squares the "
+                         "per-turn search on top of the engine's own "
+                         "2-turn lookahead.")
                 if st.button(f"Full deep dive: all of Our 6 vs ALL "
                             f"{len(teams)} saved enemy teams",
                             key="ctb4_dd_all6_allteams_go"):
                     all_target_lists = [list(t) for t in teams.values()]
+                    # Every named team's OWN pinned set (not just the one
+                    # roster picked above) needs its real EVs/Nature/Ability
+                    # respected here too -- this button races against ALL
+                    # of them, not just `vs_roster`.
+                    all_teams_sets = {}
+                    for tname in teams:
+                        all_teams_sets.update(team_meta.get(tname, {}).get("sets") or {})
+                    all_teams_sets.update(our_sets)
+                    allteams_evs_overrides = {n: s["evs"] for n, s in all_teams_sets.items()
+                                              if s.get("evs")}
+                    allteams_nature_overrides = {n: s["nature"] for n, s in all_teams_sets.items()
+                                                 if s.get("nature")}
+                    allteams_ability_overrides = {n: s["ability"] for n, s in all_teams_sets.items()
+                                                  if s.get("ability")}
+                    # Same idea for each enemy team's own item/moveset --
+                    # `our_sets` is excluded here (that's what `item_overrides`/
+                    # `move_overrides` above already pin for our own side).
+                    enemy_teams_sets = {}
+                    for tname in teams:
+                        enemy_teams_sets.update(team_meta.get(tname, {}).get("sets") or {})
+                    allteams_item_overrides = {n: s["item"] for n, s in enemy_teams_sets.items()
+                                               if s.get("item")}
+                    allteams_move_overrides = {n: s["moves"] for n, s in enemy_teams_sets.items()
+                                               if s.get("moves")}
                     with st.spinner(f"Racing every pair against every team "
                                     f"pair, across all {len(teams)} enemy "
                                     f"teams -- this is the expensive one..."):
@@ -3864,7 +3960,13 @@ with tab_counter:
                                 typechart, turns=ct_turns,
                                 excluded_items=ct_excluded,
                                 item_overrides=item_overrides,
-                                move_overrides=move_overrides)
+                                move_overrides=move_overrides,
+                                worst_case_targeting=allteams_worst_case,
+                                evs_overrides=allteams_evs_overrides,
+                                nature_overrides=allteams_nature_overrides,
+                                ability_overrides=allteams_ability_overrides,
+                                enemy_item_overrides=allteams_item_overrides,
+                                enemy_move_overrides=allteams_move_overrides)
                         except ValueError as e:
                             st.error(str(e))
                             dive = None
@@ -4008,7 +4110,7 @@ with tab_counter:
                                               excluded_items=ct_excluded,
                                               key_prefix=f"ctmb4_{i}")
 
-    else:  # Joint pair search
+    elif ct_mode == "Joint pair search":
         st.caption("GENERATE a partner for a fixed Pokemon: every legal pool member "
                    "paired with it, both fully searched (item + moveset), against "
                    "every pair drawn from the enemy roster.")
@@ -4018,13 +4120,19 @@ with tab_counter:
         ct_partner = j1.selectbox("Fixed partner", all_names, key="ct_jp_partner")
         ct_jp_vs = j2.selectbox("Enemy roster", list(teams), key="ct_jp_vs")
         top_n2 = st.slider("Show top N pairs", 1, 30, 10, key="ct_jp_topn")
+        ct_jp_worst_case = st.checkbox(
+            "Worst-case enemy targeting", key="ct_jp_worst_case",
+            help="Also exhaustively search the enemy's own per-turn target choice "
+                 "(not just their mega pick) and keep whichever is worst for us. "
+                 "Slower; off by default.")
         if st.button("Search partners", type="primary", key="ct_jp_go"):
             pool = build_candidate_pool(merged, top_n=pool_size2, prefs=prefs)
             vs_roster2 = list(teams[ct_jp_vs])
             with st.spinner(f"Searching {len(pool)} Pokemon as {ct_partner}'s partner..."):
                 rows = joint_pair_search(
                     pool, vs_roster2, ct_partner, merged, moves, natures, typechart,
-                    turns=ct_turns, excluded_items=ct_excluded)
+                    turns=ct_turns, excluded_items=ct_excluded,
+                    worst_case_targeting=ct_jp_worst_case)
             total = rows[0]["pairs_total"] if rows else 0
             st.dataframe(pd.DataFrame([
                 {"Name": r["name"], "Item": r["item"],
@@ -4034,6 +4142,129 @@ with tab_counter:
                  "Tailwind-safe": r["pairs_tailwind_safe"],
                  "Protect-safe": r["pairs_protect_safe"]}
                 for r in rows[:top_n2]]), width='stretch', hide_index=True)
+
+    else:  # 2-2-2 teambuilding
+        st.caption("'2-2-2 teambuilding': using core PAIRS that work well "
+                   "together to make your lead unpredictable. Every pair "
+                   "drawn from the pool is scored three ways -- defensive "
+                   "synergy (does one resist what the other is weak to), "
+                   "weather-lead synergy (a real weather-setter + weather-"
+                   "abusing speed-boost ability pair, e.g. Drought + "
+                   "Chlorophyll -- Mega Charizard Y + Venusaur), and threat "
+                   "coverage (does one beat, in a simple 1v1, what the "
+                   "other loses to among every named team's own Pokemon) "
+                   "plus average roster.csv Score. Stage 2 then combines "
+                   "the best pairs into whole teams of 6 made of 3 "
+                   "disjoint pairs, ranked by team-wide weakness coverage.")
+        pool_size3 = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 60,
+                               key="ct_222_pool")
+        ct_222_teams = st.multiselect(
+            "Enemy universe (named teams)", list(teams), default=list(teams),
+            key="ct_222_teams",
+            help="Every distinct Pokemon across the selected teams forms "
+                 "the '1v1 threat coverage' universe -- defaults to every "
+                 "saved team.")
+        c1, c2 = st.columns(2)
+        top_pairs3 = c1.slider("Top pairs to show / feed Stage 2", 5, 60, 15,
+                               key="ct_222_top_pairs")
+        top_teams3 = c2.slider("Top teams to show", 1, 20, 10, key="ct_222_top_teams")
+        cap_on = st.checkbox(
+            "Cap a team's worst net weakness", key="ct_222_cap_on",
+            help="'Let me establish net weakness caps for a 2-2-2 team' -- "
+                 "drops any candidate team whose single most-exposed type's "
+                 "net weakness (weak members minus resist members) exceeds "
+                 "this, instead of just ranking it lower.")
+        max_net3 = (st.slider("Max net weakness", 0, 6, 2, key="ct_222_max_net")
+                   if cap_on else None)
+        if st.button("Find 2-2-2 cores", type="primary", key="ct_222_go"):
+            if not ct_222_teams:
+                st.warning("Select at least one named team.")
+            else:
+                pool = build_candidate_pool(merged, top_n=pool_size3, prefs=prefs)
+                enemy_teams = {n: list(teams[n]) for n in ct_222_teams}
+                with st.spinner(f"Scoring every pair drawn from {len(pool)} "
+                                f"Pokemon vs {len(ct_222_teams)} named team(s)..."):
+                    pair_rows = find_pair_cores(pool, merged, moves, natures,
+                                                typechart, enemy_teams)
+                    team_rows = two_two_two_teams(pair_rows, merged,
+                                                  top_pairs=top_pairs3, top_n=top_teams3,
+                                                  max_net_weakness=max_net3)
+                st.session_state["ct_222_pair_rows"] = pair_rows
+                st.session_state["ct_222_team_rows"] = team_rows
+                st.session_state["ct_222_top_pairs_shown"] = top_pairs3
+
+        pair_rows = st.session_state.get("ct_222_pair_rows")
+        team_rows = st.session_state.get("ct_222_team_rows")
+        if pair_rows:
+            shown_pairs = pair_rows[:st.session_state.get("ct_222_top_pairs_shown", 15)]
+            st.markdown(f"**Top {len(shown_pairs)} pair cores** (of "
+                       f"{len(pair_rows)} total) -- fewest shared "
+                       f"weaknesses first, then most threat-coverage, "
+                       f"then highest avg Score:")
+            st.dataframe(pd.DataFrame([
+                {"Pair": f"{n1} + {n2}",
+                 "Shared weak": len(r["shared_weak"]),
+                 "Shared types": ", ".join(r["shared_weak"]) or "-",
+                 "Covered weak": len(r["covered_weak"]),
+                 "Threat coverage": f"{r['threat_coverage']['total_covered']}/"
+                                    f"{r['threat_coverage']['total_losses']}",
+                 "Avg Score": round(r["avg_score"], 1),
+                 "Weather lead": r["weather_synergy"] or "-"}
+                for r in shown_pairs
+                for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
+
+            weather_pairs = [r for r in pair_rows if r["weather_synergy"]]
+            if weather_pairs:
+                with st.expander(f"Weather-lead pairs ({len(weather_pairs)} found)"):
+                    st.dataframe(pd.DataFrame([
+                        {"Pair": f"{n1} + {n2}", "Weather": r["weather_synergy"],
+                         "Shared weak": len(r["shared_weak"]),
+                         "Avg Score": round(r["avg_score"], 1)}
+                        for r in weather_pairs
+                        for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
+
+            mutual_pairs = sorted(
+                (r for r in pair_rows if r["mutual_resist"]["coverage_frac"] > 0),
+                key=lambda r: (-r["mutual_resist"]["perfect"],
+                              -r["mutual_resist"]["coverage_frac"]))
+            if mutual_pairs:
+                perfect_count = sum(1 for r in mutual_pairs if r["mutual_resist"]["perfect"])
+                with st.expander(f"Mutual-coverage pairs ({perfect_count} perfect of "
+                                f"{len(mutual_pairs)} found)"):
+                    st.caption("Each RESISTS what's super-effective against the "
+                              "other -- a stricter reading than 'Covered weak' "
+                              "above, which only requires the partner to not "
+                              "ALSO be weak (neutral counts there).")
+                    st.dataframe(pd.DataFrame([
+                        {"Pair": f"{n1} + {n2}",
+                         "Coverage": "PERFECT" if r["mutual_resist"]["perfect"]
+                                    else f"{r['mutual_resist']['coverage_frac']*100:.0f}%",
+                         "A's weaknesses resisted": f"{r['mutual_resist']['a_weak_resisted_by_b']}/"
+                                                    f"{r['mutual_resist']['a_weak_total']}",
+                         "B's weaknesses resisted": f"{r['mutual_resist']['b_weak_resisted_by_a']}/"
+                                                    f"{r['mutual_resist']['b_weak_total']}",
+                         "Avg Score": round(r["avg_score"], 1)}
+                        for r in mutual_pairs
+                        for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
+
+        if team_rows:
+            st.markdown(f"**Top {len(team_rows)} 2-2-2 teams** (3 disjoint "
+                       f"pairs) -- lowest worst-case team-wide net "
+                       f"weakness first:")
+            for i, r in enumerate(team_rows, start=1):
+                pairs_str = " | ".join(f"{a}+{b}" for a, b in r["pairs"])
+                with st.expander(f"#{i}: {' / '.join(r['team'])}", expanded=(i == 1)):
+                    st.caption(f"Pairs: {pairs_str}")
+                    st.caption(f"Worst-case net weakness: "
+                              f"{r['worst_net_weakness']}  |  "
+                              f"Total net weakness: {r['total_net_weakness']}")
+                    exposed = {t: n for t, n in r["net_weakness"].items() if n > 0}
+                    if exposed:
+                        st.caption("Net-weak types: " + ", ".join(
+                            f"{t} ({n})" for t, n in exposed.items()))
+        elif pair_rows:
+            st.info("No 3-disjoint-pair team could be formed from the top "
+                    "pairs shown -- raise 'Top pairs to show'.")
 
 
 # ------------------------------------------------------------------ battle

@@ -1307,6 +1307,7 @@ class Battle:
                            else self._best_replacement(alive_bench, opp.active))
                 side.bench[:] = [b for b in side.bench if b is not incoming]
                 side.active[slot] = incoming
+                incoming.choice_locked_move = None
                 arrivals.append((side, slot, incoming, c))
                 self.log.add(f"{side.name} sends in {self.tag(incoming)} "
                              f"(replacing fainted {self.tag(c)})")

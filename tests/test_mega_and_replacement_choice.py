@@ -191,6 +191,40 @@ class TestReplacementChoices(unittest.TestCase):
         battle.run_turn(p1, p2, replacement_choices={id(garchomp): wanted})
         self.assertIs(battle.p1.active[0], wanted)
 
+    def test_replacement_resets_a_stale_choice_lock(self):
+        """"Choice Items should reset the move lock on switch out, so a new
+        move can be selected afterwards" -- a voluntary switch and a pivot-
+        move switch already reset the INCOMING Pokemon's `choice_locked_
+        move` (see `Battle.run_turn`'s own two switch-handling call sites,
+        directly confirmed to clear it correctly); `_replace_fainted`
+        (sending in a replacement for a fainted ally) was the one switch-IN
+        path missing that reset, so a Choice-item holder already benched
+        with a stale lock from an earlier stint (a real prior switch would
+        have carried it there, unchanged, since a lock only clears on the
+        NEXT return to the field) came back in via a faint-replacement
+        still illegally locked into whatever it used before."""
+        our4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+        their4 = ["Kingambit", "Basculegion"]
+        oc = make_team(our4, self.W["merged"], self.W["natures"],
+                       sets={"Garchomp": {"item": "Choice Band"}})
+        ec = make_team(their4, self.W["merged"], self.W["natures"])
+        battle = Battle(oc, ec, self.W["typechart"], self.W["moves"])
+        garchomp = battle.p1.active[0]
+        hydreigon = next(c for c in battle.p1.bench if c.name == "Hydreigon")
+        # Swap Garchomp to the bench (carrying a stale lock from an earlier
+        # stint) and Hydreigon into its slot -- isolates _replace_fainted's
+        # own reset behavior from the switch paths already known-good.
+        battle.p1.bench.remove(hydreigon)
+        battle.p1.bench.append(garchomp)
+        battle.p1.active[0] = hydreigon
+        garchomp.choice_locked_move = "Earthquake"
+        incineroar = battle.p1.active[1]
+        incineroar.fainted = True
+        incineroar.current_hp = 0
+        battle._replace_fainted(replacement_choices={id(incineroar): garchomp})
+        self.assertIs(battle.p1.active[1], garchomp)
+        self.assertIsNone(garchomp.choice_locked_move)
+
 
 if __name__ == "__main__":
     unittest.main()
