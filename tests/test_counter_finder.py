@@ -7106,3 +7106,75 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
                                              top_pairs=len(pair_rows), top_n=50,
                                              max_net_weakness=None)
         self.assertEqual([r["team"] for r in default], [r["team"] for r in explicit_none])
+
+
+class TestLastRespectsFaintedAllyBoost(unittest.TestCase):
+    """"another loss which is treated as a win, my side is Metagross/
+    Dragonite" -- once Basculegion's own partner (e.g. Arcanine-Hisui) had
+    already fainted earlier in the same joint race, its Last Respects should
+    hit at the real boosted 100 BP (`battle.py`'s own "50 BP base, +50 per
+    fainted ally" rule), not the flat 50 BP `_move_infos` gives every move by
+    default -- this cheap model had no such scaling at all until now, so a
+    Basculegion whose ally had already gone down looked far weaker than it
+    really is, letting a race that should end in a loss for the OTHER side
+    (Last Respects finishing what it should) get scored as a win instead."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_last_respects_doubles_once_the_ally_has_fainted(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        basculegion = cf._build("Basculegion", merged, natures, item="Life Orb")
+        dragonite = cf._build("Dragonite", merged, natures)
+        last_respects = cf._move_infos("Basculegion", merged, moves, ["Last Respects"])
+        live_targets = {"P": dragonite}
+        hits_alive, _mv = cf._choose_action(
+            basculegion, last_respects, live_targets, typechart,
+            attacker_hp_frac=1.0, target_hp_fracs={"P": 1.0, "E2": 1.0},
+            attacker_role="E1")
+        hits_fainted, _mv2 = cf._choose_action(
+            basculegion, last_respects, live_targets, typechart,
+            attacker_hp_frac=1.0, target_hp_fracs={"P": 1.0, "E2": 0.0},
+            attacker_role="E1")
+        # ~2x (100 BP vs 50 BP) -- not exactly 2x because of the formula's
+        # own flat "+2" term, same reasoning `damage_roll`'s own docstring
+        # gives for every base-power special case.
+        ratio = hits_fainted["P"].avg / hits_alive["P"].avg
+        self.assertGreater(ratio, 1.8)
+        self.assertLess(ratio, 2.0)
+
+    def test_last_respects_unaffected_when_the_attacker_has_no_role(self):
+        """`attacker_role=None` (every caller outside the joint race, e.g.
+        the 2x2 damage-grid display) is a deliberate no-op -- same "cruder,
+        documented hypothesis" scoping as every other per-role stand-in in
+        this module."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        basculegion = cf._build("Basculegion", merged, natures, item="Life Orb")
+        dragonite = cf._build("Dragonite", merged, natures)
+        last_respects = cf._move_infos("Basculegion", merged, moves, ["Last Respects"])
+        hits, _mv = cf._choose_action(
+            basculegion, last_respects, {"P": dragonite}, typechart,
+            attacker_hp_frac=1.0, target_hp_fracs={"P": 1.0, "E2": 0.0})
+        hits_role_but_ally_alive, _mv2 = cf._choose_action(
+            basculegion, last_respects, {"P": dragonite}, typechart,
+            attacker_hp_frac=1.0, target_hp_fracs={"P": 1.0, "E2": 1.0},
+            attacker_role="E1")
+        self.assertAlmostEqual(hits["P"].avg, hits_role_but_ally_alive["P"].avg, places=6)
+
+    def test_other_moves_are_unaffected(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        basculegion = cf._build("Basculegion", merged, natures, item="Life Orb")
+        dragonite = cf._build("Dragonite", merged, natures)
+        aqua_jet = cf._move_infos("Basculegion", merged, moves, ["Aqua Jet"])
+        hits_alive, _mv = cf._choose_action(
+            basculegion, aqua_jet, {"P": dragonite}, typechart,
+            attacker_hp_frac=1.0, target_hp_fracs={"P": 1.0, "E2": 1.0},
+            attacker_role="E1")
+        hits_fainted, _mv2 = cf._choose_action(
+            basculegion, aqua_jet, {"P": dragonite}, typechart,
+            attacker_hp_frac=1.0, target_hp_fracs={"P": 1.0, "E2": 0.0},
+            attacker_role="E1")
+        self.assertAlmostEqual(hits_alive["P"].avg, hits_fainted["P"].avg, places=6)

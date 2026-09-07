@@ -2233,6 +2233,28 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                   lo=got.lo * mult, avg=got.avg * mult, hi=got.hi * mult,
                   eff=got.eff, num_targets_hit=got.num_targets_hit)
 
+    def _for_damage(mv):
+        """`battle.py`'s own Last Respects rule ("50 BP base, +50 per
+        fainted ally on the user's own team", see its comment) was missing
+        here entirely -- every use scored at the flat 50 BP `_move_infos`
+        gives it, regardless of whether this attacker's partner had already
+        fainted earlier in the SAME race. This board only ever has ONE
+        possible ally, so once it is gone the real power is a flat 100
+        (never the higher multi-ally tiers `battle.py`'s formula also
+        covers). A power-adjusted `copy.copy` of `mv`, used ONLY for the
+        `_raw_hit` call right below each site -- `mv` itself (name, flags,
+        recoil, priority, category) stays the real `MoveInfo` everywhere
+        else, exactly like `_move_infos`'s own Hard Press/Low Kick
+        resolve-power-once handling."""
+        if mv.name != "Last Respects" or attacker_role is None:
+            return mv
+        ally_role = _ALLY_OF.get(attacker_role)
+        if ally_role is None or (target_hp_fracs or {}).get(ally_role, 1.0) > 0:
+            return mv
+        boosted = copy.copy(mv)
+        boosted.power = 100
+        return boosted
+
     # Two passes: gather every candidate action's raw hits FIRST (tracking
     # the best single-hit damage this attacker can put on each target,
     # across every move here), then rank -- the lookahead below needs to
@@ -2247,8 +2269,9 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
             continue
         blocked = _priority_blocked(attacker, mv, defending_side)
         if is_spread_move(mv.target) and n_live > 1:
+            dmg_mv = _for_damage(mv)
             hits = {role: _scaled(NO_HIT if blocked else
-                          _raw_hit(attacker, mv, d, typechart, weather=weather,
+                          _raw_hit(attacker, dmg_mv, d, typechart, weather=weather,
                                    roll="avg", num_targets_hit=n_live,
                                    attacker_hp_frac=attacker_hp_frac,
                                    defender_hp_frac=(target_hp_fracs or {}).get(role),
@@ -2262,7 +2285,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                       else list(live_targets))
         for role in candidates:
             got = _scaled(NO_HIT if blocked else _raw_hit(
-                attacker, mv, live_targets[role], typechart, weather=weather,
+                attacker, _for_damage(mv), live_targets[role], typechart, weather=weather,
                 roll="avg", attacker_hp_frac=attacker_hp_frac,
                 defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras,
                 terrain=terrain), mv, role)

@@ -380,23 +380,32 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     return list(all_names), {}
 
 
-def their_side_pool(key_prefix, teams, all_names):
+def their_side_pool(key_prefix, teams, all_names, team_meta=None):
     """Where THEIR six come from. Mirrors our_side_pool.
 
     The Battle Viewer could only face a saved team, so a matchup against six
     Pokemon you had just seen -- the actual team-preview situation -- could not
     be set up there at all.
+
+    Returns (names, sets), same "THE SETS TRAVEL WITH THE NAMES" contract
+    `our_side_pool` already documents -- a saved/pasted team's real per-mon
+    item/ability/nature/EVs (`team_meta[pick]["sets"]`) used to be silently
+    dropped here, so a real team.txt paste's Choice Scarf/Life Orb/etc. never
+    reached the Battle Viewer or Battle Simulator's actual combatants; every
+    enemy mon fell back to mbsmogon.xlsx's usage-default item instead (e.g. a
+    real Life-Orb Basculegion silently became a Choice-Scarf one, since that's
+    its own usage-default item).
     """
     source = st.radio("Their side", ["A saved team", "Pick 6"], index=0,
                       horizontal=True, key=f"{key_prefix}_foe_source")
     if source == "A saved team":
         if not teams:
             st.warning("No saved teams in data/teams.")
-            return []
+            return [], {}
         pick = st.selectbox("Opponent team", list(teams), key=f"{key_prefix}_foe_saved")
-        return list(teams[pick])
+        return list(teams[pick]), dict((team_meta or {}).get(pick, {}).get("sets") or {})
     return st.multiselect("Their six", all_names, max_selections=6,
-                          key=f"{key_prefix}_foe_manual")
+                          key=f"{key_prefix}_foe_manual"), {}
 
 
 def enemy_side_input(key_prefix, teams, team_meta, all_names, merged,
@@ -1364,7 +1373,8 @@ def sim_build_battle(our4, their4, merged, moves_db, natures, typechart,
     return battle, movesets
 
 
-def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, our_sets=None):
+def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, our_sets=None,
+                          enemy_sets=None):
     """Every one of their C(6,2)=15 possible leads, each paired with a
     plausible back pair, ranked worst-for-us first -- via `fast_eval.
     fast_pair_score`, the SAME cheap threat-matrix screen `matchup_search.
@@ -1399,11 +1409,11 @@ def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, ou
     ranked = []
     for lead, backs in by_lead.items():
         lead_score = fast_pair_score(our_lead, lead, merged, moves_db, natures, typechart,
-                                     our_sets=our_sets)
+                                     our_sets=our_sets, enemy_sets=enemy_sets)
         best_back, best_back_margin = backs[0], None
         for back in backs:
             back_score = fast_pair_score(our_lead, back, merged, moves_db, natures, typechart,
-                                         our_sets=our_sets)
+                                         our_sets=our_sets, enemy_sets=enemy_sets)
             if best_back_margin is None or back_score["margin"] < best_back_margin:
                 best_back_margin, best_back = back_score["margin"], back
         ranked.append((lead_score["margin"], list(lead) + list(best_back), list(lead)))
@@ -4311,7 +4321,7 @@ with tab_battle:
         our_pool = our_pool or list(all_names)
         our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
-        their_pool = their_side_pool("bv", teams, all_names)
+        their_pool, bv_their_sets = their_side_pool("bv", teams, all_names, team_meta)
         # Feeds the scripted-opponent lookup, so it must be a REAL team name
         # or None. A hand-picked six has no script, and inventing a label for
         # it would send a name into all_scripts that means nothing.
@@ -4345,7 +4355,7 @@ with tab_battle:
         with solver_mode(nash=bv_nash, depth=bv_depth):
             w, t, btl, variant_idx = play_scripted_worst_case(
                 our4, their4, merged, moves, natures, typechart, opp, turns,
-                our_sets=bv_our_sets)
+                our_sets=bv_our_sets, enemy_sets=bv_their_sets)
         ourm = next((c.name for c in btl.p1.roster if c.is_mega_pick and c.mega_evolved), None)
         theirm = next((c.name for c in btl.p2.roster if c.is_mega_pick and c.mega_evolved), None)
         r1, r2, r3 = st.columns(3)
@@ -4365,13 +4375,13 @@ with tab_battle:
             with st.spinner(f"Rolling {n_roll} games..."), \
                     solver_mode(nash=bv_nash, depth=bv_depth):
                 fair = evaluate_risk(our4, their4, merged, moves, natures, typechart, turns,
-                                      our_sets=bv_our_sets,
+                                      our_sets=bv_our_sets, enemy_sets=bv_their_sets,
                                       n_random=n_roll, tie_bias=None)
                 adv = evaluate_risk(our4, their4, merged, moves, natures, typechart, turns,
-                                     our_sets=bv_our_sets,
+                                     our_sets=bv_our_sets, enemy_sets=bv_their_sets,
                                      n_random=n_roll, tie_bias="p2")
                 tb = evaluate_tie_branches(our4, their4, merged, moves, natures, typechart,
-                                            turns, our_sets=bv_our_sets,
+                                            turns, our_sets=bv_our_sets, enemy_sets=bv_their_sets,
                                             n_random=0)
             p1, p2, p3 = st.columns(3)
             p1.metric("Win % (fair coin ties)", f"{100*fair['win_rate']:.0f}%",
@@ -4412,13 +4422,18 @@ with tab_battle:
         from solver import build_moveset, build_wide_movesets, solver_mode
         from robustness import describe_action, line_report
         oc = make_team(our4, merged, natures, sets=bv_our_sets)
-        ec = make_team(their4, merged, natures)
+        ec = make_team(their4, merged, natures, sets=bv_their_sets)
         # The SET's four moves, not the usage-standard four -- make_team applies
-        # the item and ability from bv_our_sets and this used to drop the moves.
+        # the item and ability from bv_our_sets/bv_their_sets and this used to
+        # drop the moves.
         ms = {c.name: build_moveset(
                   merged[c.name], moves,
                   only_moves=((bv_our_sets or {}).get(c.name) or {}).get("moves"))
-              for c in oc + ec}
+              for c in oc}
+        ms.update({c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((bv_their_sets or {}).get(c.name) or {}).get("moves"))
+              for c in ec})
         btl3 = Battle(oc, ec, typechart, moves)
         btl3.movesets = ms
         btl3.wide_movesets = {**ms, **build_wide_movesets(
@@ -4477,11 +4492,15 @@ with tab_battle:
         from turn_game import solve_turn
         our_sets = bv_our_sets
         oc = make_team(our4, merged, natures, sets=our_sets)
-        ec = make_team(their4, merged, natures)
+        ec = make_team(their4, merged, natures, sets=bv_their_sets)
         ms = {c.name: build_moveset(
                   merged[c.name], moves,
                   only_moves=((our_sets or {}).get(c.name) or {}).get("moves"))
-              for c in oc + ec}
+              for c in oc}
+        ms.update({c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((bv_their_sets or {}).get(c.name) or {}).get("moves"))
+              for c in ec})
         btl2 = Battle(oc, ec, typechart, moves)
         btl2.movesets = ms
         with st.spinner(f"Solving (depth {bv_depth})..."):
@@ -4538,7 +4557,7 @@ with tab_battle:
         lo4, lt4, lturns = last_pc
         with st.spinner("Playing the match, checking every turn against every legal response..."):
             pc_res = full_game_punish_audit(lo4, lt4, merged, moves, natures, typechart, lturns,
-                                             our_sets=bv_our_sets)
+                                             our_sets=bv_our_sets, enemy_sets=bv_their_sets)
         render_punish_audit(pc_res)
 
     # --- Path explorer: tie x roll scenario matrix -----------------------------
@@ -5552,7 +5571,7 @@ with tab_sim:
                 sim_our_mega = NO_MEGA if our_mega_choice == "Neither" else our_mega_choice
         with sc2:
             st.markdown("**Their side**")
-            sim_their6 = their_side_pool("sim", teams, all_names)
+            sim_their6, sim_their_sets = their_side_pool("sim", teams, all_names, team_meta)
             sim_mode = st.radio(
                 "Their bring", ["Their optimal bring", "Step through all 15 leads",
                                 "I choose their bring"],
@@ -5605,19 +5624,22 @@ with tab_sim:
                     sim_leads = None
                 else:
                     ranked = sim_rank_enemy_brings(sim_our4, sim_their6, merged, moves,
-                                                   natures, typechart, our_sets=sim_our_sets)
+                                                   natures, typechart, our_sets=sim_our_sets,
+                                                   enemy_sets=sim_their_sets)
                     sim_leads = ranked if sim_mode == "Step through all 15 leads" else None
                     _margin, their4, _lead = ranked[0]
                     their_mega = None  # make_team's own default: first Mega in the bring
                 battle, movesets = sim_build_battle(
                     sim_our4, their4, merged, moves, natures, typechart,
-                    our_sets=sim_our_sets, our_mega=sim_our_mega, enemy_mega=their_mega)
+                    our_sets=sim_our_sets, enemy_sets=sim_their_sets,
+                    our_mega=sim_our_mega, enemy_mega=their_mega)
                 st.session_state["sim_battle"] = battle
                 st.session_state["sim_movesets"] = movesets
                 st.session_state["sim_our4"] = sim_our4
                 st.session_state["sim_our_sets"] = sim_our_sets
                 st.session_state["sim_our_mega"] = sim_our_mega
                 st.session_state["sim_their4"] = their4
+                st.session_state["sim_their_sets"] = sim_their_sets
                 st.session_state["sim_mode"] = sim_mode
                 st.session_state["sim_turn_log"] = []
                 if sim_leads is not None:
@@ -5632,8 +5654,8 @@ with tab_sim:
 
         if st.button("🔄 Reset battle (back to team selection)"):
             for key in ("sim_battle", "sim_movesets", "sim_our4", "sim_our_sets",
-                       "sim_our_mega", "sim_their4", "sim_mode", "sim_turn_log",
-                       "sim_leads", "sim_lead_idx", "sim_pending_turn"):
+                       "sim_our_mega", "sim_their4", "sim_their_sets", "sim_mode",
+                       "sim_turn_log", "sim_leads", "sim_lead_idx", "sim_pending_turn"):
                 st.session_state.pop(key, None)
             st.rerun()
 
@@ -5712,6 +5734,7 @@ with tab_sim:
                         battle2, movesets2 = sim_build_battle(
                             our4, next_their4, merged, moves, natures, typechart,
                             our_sets=st.session_state.get("sim_our_sets"),
+                            enemy_sets=st.session_state.get("sim_their_sets"),
                             our_mega=st.session_state.get("sim_our_mega"))
                         st.session_state["sim_battle"] = battle2
                         st.session_state["sim_movesets"] = movesets2
