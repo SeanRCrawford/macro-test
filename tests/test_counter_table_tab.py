@@ -33,14 +33,15 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_three_modes_are_offered(self):
+    def test_the_four_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
         self.assertEqual(set(radios[0].options),
                          {"Bring-4 (one enemy roster)",
                           "Multi-bring4 (several enemy rosters)",
-                          "Joint pair search"})
+                          "Joint pair search",
+                          "2-2-2 teambuilding"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
         at = app()
@@ -49,6 +50,15 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any(s.key == "ct_mb4_pool" for s in at.slider))
         self.assertTrue(any(m.key == "ct_mb4_vs" for m in at.multiselect))
+
+    def test_switching_to_two_two_two_mode_renders_its_controls(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "2-2-2 teambuilding").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_222_pool" for s in at.slider))
+        self.assertTrue(any(m.key == "ct_222_teams" for m in at.multiselect))
+        self.assertTrue(any(c.key == "ct_222_cap_on" for c in at.checkbox))
 
     def test_switching_to_joint_pair_mode_renders_its_controls(self):
         at = app()

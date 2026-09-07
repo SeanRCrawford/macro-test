@@ -157,8 +157,10 @@ from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, Move
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
                     hits_ally, is_spread_move, move_from_showdown,
                     grassy_glide_priority_bonus)
-from engine import FieldState, WEATHER_SETTERS, TERRAIN_SETTERS, effective_speed
-from optimize_sets import best_item, best_moveset, legal_items, team_weather_for
+from engine import (FieldState, WEATHER_SETTERS, WEATHER_SPEED_BOOST,
+                    TERRAIN_SETTERS, effective_speed)
+from optimize_sets import (best_item, best_moveset, legal_items, team_weather_for,
+                           move_value_table, enemy_individuals)
 from solver import FIRST_TURN_ONLY_MOVES, build_moveset
 from species_data import NO_MEGA, resolve_team_mega_slot
 
@@ -388,6 +390,306 @@ def net_weakness_by_type(core, merged):
         weak, resist = _weak_resist(list(core), merged, t)
         out[t] = len(weak) - len(resist)
     return out
+
+
+# --------------------------------------------------------- 2-2-2 team building
+#
+# "2-2-2 teambuilding: using core pairs that work well together to make your
+# lead unpredictable." Three DISTINCT reasons a pair might be a good core --
+# these are kept as three separate readings on every pair, not blended into
+# one opinion of "good", since a defensively airtight pair and a strong-lead
+# weather pair answer different questions:
+#   1. `_pair_defensive_synergy` -- do they cover each other's weaknesses
+#      (ideally no type is super-effective against BOTH)?
+#   2. `_weather_lead_synergy` -- a real weather-setter + weather-abusing
+#      speed ability (Drought/Chlorophyll, etc.), a strong generic lead.
+#   3. `_pair_threat_coverage` (+ each member's own roster.csv Score) -- do
+#      they cover each other's individual 1v1 losses against every named
+#      team's own roster, while still being individually strong?
+# `find_pair_cores` computes all three for every pair in a pool; `two_two_
+# two_teams` (Stage 2) combines the best of those into whole 6-member teams
+# built from 3 disjoint pairs.
+
+def _pair_defensive_synergy(name1, name2, merged):
+    """How closely (name1, name2) cover each other's weaknesses defensively
+    -- "find pairs of pokemon that closely or perfectly cover one another
+    defensively (e.g., all super effective attacks into one are resisted by
+    the other)".
+
+    For every type, reads each member's own `defensive_chart` (roster.csv's
+    per-type multiplier -- the SAME source `_weak_resist`/`member_weakness_
+    summary` already read, so "weak to" means the same thing everywhere in
+    this module): `shared_weak` is every type BOTH members take super-
+    effective damage from (a real gap this pair has NO answer to); `covered_
+    weak` is every type exactly ONE of them is weak to while the other
+    resists or is neutral/immune (a weakness the partner actually patches).
+
+    Returns {"shared_weak": [type, ...], "covered_weak": [type, ...]} -- a
+    PERFECTLY covering pair has an empty `shared_weak`.
+    """
+    from species_data import TYPES
+    dc1 = merged[name1]["defensive_chart"]
+    dc2 = merged[name2]["defensive_chart"]
+    shared, covered = [], []
+    for t in TYPES:
+        w1, w2 = dc1.get(t, 1.0) > 1.0, dc2.get(t, 1.0) > 1.0
+        if w1 and w2:
+            shared.append(t)
+        elif w1 != w2:
+            covered.append(t)
+    return {"shared_weak": shared, "covered_weak": covered}
+
+
+def _pair_mutual_resist_coverage(name1, name2, merged):
+    """A STRICTER reading of defensive synergy than `_pair_defensive_
+    synergy`'s own `covered_weak` (which only requires the partner to not
+    ALSO be weak -- neutral counts) -- "find pairs... that perfectly or
+    mostly cover type weaknesses (e.g., each mutually resists all the types
+    that are super effective against the other)": for every type
+    super-effective against `name1`, does `name2` actually RESIST it
+    (< 1.0, not merely <= 1.0), and symmetrically for `name2`'s own
+    weaknesses covered by `name1`.
+
+    Returns {"a_weak_total": int, "a_weak_resisted_by_b": int,
+    "b_weak_total": int, "b_weak_resisted_by_a": int, "coverage_frac":
+    float (0.0-1.0, combined across both sides -- 1.0 when neither has any
+    weakness at all), "perfect": bool} -- `perfect` is True when EVERY
+    weakness on both sides is actually resisted by the partner (trivially
+    true for a side with no weaknesses at all), the "side feature" this
+    was asked for: a pair that "perfectly... covers type weaknesses"."""
+    from species_data import TYPES
+    dc1 = merged[name1]["defensive_chart"]
+    dc2 = merged[name2]["defensive_chart"]
+    a_weak = [t for t in TYPES if dc1.get(t, 1.0) > 1.0]
+    b_weak = [t for t in TYPES if dc2.get(t, 1.0) > 1.0]
+    a_resisted_by_b = sum(1 for t in a_weak if dc2.get(t, 1.0) < 1.0)
+    b_resisted_by_a = sum(1 for t in b_weak if dc1.get(t, 1.0) < 1.0)
+    total_weak = len(a_weak) + len(b_weak)
+    total_resisted = a_resisted_by_b + b_resisted_by_a
+    coverage_frac = (total_resisted / total_weak) if total_weak else 1.0
+    perfect = (a_resisted_by_b == len(a_weak)) and (b_resisted_by_a == len(b_weak))
+    return {"a_weak_total": len(a_weak), "a_weak_resisted_by_b": a_resisted_by_b,
+           "b_weak_total": len(b_weak), "b_weak_resisted_by_a": b_resisted_by_a,
+           "coverage_frac": coverage_frac, "perfect": perfect}
+
+
+def _weather_lead_synergy(name1, name2, merged):
+    """Weather-setter + weather-abusing-speed-ability lead synergy --
+    "perform very well as a lead against most teams (e.g., pair with
+    abilities of Weather setter and Weather speed boost - like Drought/
+    Chlorophyll etc - Mega Charizard Y, Venusaur)". Reuses `engine.py`'s own
+    `WEATHER_SETTERS`/`WEATHER_SPEED_BOOST` tables (the SAME ones the real
+    turn engine keys weather-driven speed off), not a separate ability list.
+
+    Uses each name's own usage-derived ability (`_default_ability`, the
+    single-ability convention every combatant build in this module already
+    assumes -- a Pokemon here has one canonical set, not a menu of
+    abilities to search over).
+
+    Returns the weather name ("sun"/"rain"/"sand"/"snow") if EITHER
+    ordering of (name1, name2) is a real setter + matching-speed-boost
+    pair, else None.
+    """
+    from combatants import _default_ability
+    a1 = _default_ability(merged[name1]["abilities_usage"])
+    a2 = _default_ability(merged[name2]["abilities_usage"])
+    for setter, booster in ((a1, a2), (a2, a1)):
+        weather = WEATHER_SETTERS.get(setter)
+        boost = WEATHER_SPEED_BOOST.get(booster)
+        if weather and boost and boost[0] == weather:
+            return weather
+    return None
+
+
+def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
+    """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
+    enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
+    calculation"), computed ONCE and reused by every candidate pair's own
+    `_pair_threat_coverage` check instead of re-running per pair.
+
+    Each side's own best single hit is `optimize_sets.move_value_table`'s
+    per-move fraction (already OHKO/priority-aware -- see its own
+    docstring), computed ONCE per name against the WHOLE combined pool+
+    enemy universe in a single call (not once per opposing name), matching
+    `optimize_sets.py`'s own "1v1 damage calculations, not full battles"
+    cost model. Whichever side's best hit clears 100% of the other's max HP
+    wins; if both do, real base Speed (deliberately no item/ability/weather
+    speed modifiers -- this stays a SIMPLE screening pass, not a re-run of
+    `_joint_race`) breaks the tie; if neither does, "no_ko".
+
+    A pool member is never matched against an identical enemy entry of the
+    same name (a literal self-mirror isn't a meaningful "does my own team
+    have an answer to this enemy" question for MY OWN pool).
+    """
+    universe = list(dict.fromkeys(list(pool) + list(enemy_names)))
+    offense = {}
+    for name in universe:
+        table = move_value_table(name, merged, moves_db, natures, typechart, universe)
+        offense[name] = {en: max((row.get(en, 0.0) for row in table.values()), default=0.0)
+                         for en in universe if en != name}
+    matrix = {}
+    for name in pool:
+        matrix[name] = {}
+        for enemy_name in enemy_names:
+            if enemy_name == name:
+                continue
+            my_ohko = offense[name][enemy_name] >= 1.0
+            their_ohko = offense[enemy_name][name] >= 1.0
+            if my_ohko and not their_ohko:
+                outcome = "win"
+            elif their_ohko and not my_ohko:
+                outcome = "loss"
+            elif not my_ohko and not their_ohko:
+                outcome = "no_ko"
+            else:
+                my_spe = merged[name]["base_stats"]["spe"]
+                their_spe = merged[enemy_name]["base_stats"]["spe"]
+                outcome = "win" if my_spe >= their_spe else "loss"
+            matrix[name][enemy_name] = outcome
+    return matrix
+
+
+def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart):
+    """Single-pair convenience wrapper around `_one_v_one_matrix` (same
+    logic, no batching) -- for an ad-hoc "does X beat Y" query rather than
+    a whole pool's worth."""
+    return _one_v_one_matrix([name], [enemy_name], merged, moves_db,
+                             natures, typechart)[name][enemy_name]
+
+
+def _pair_threat_coverage(name1, name2, matrix):
+    """How well (name1, name2) cover each other's individual 1v1 losses
+    against `matrix`'s own enemy universe -- "what pokemon in all named
+    teams does a pokemon lose to, is there a complementary partner pokemon
+    which beats that before it KOs the other pokemon". `matrix`: `_one_v_
+    one_matrix`'s own {name: {enemy: outcome}} map.
+
+    Returns {"losses1": [...], "losses2": [...], "covered1": int,
+    "covered2": int, "total_losses": int, "total_covered": int,
+    "uncovered": [(loser, enemy), ...]} -- `coveredN` counts how many of
+    that member's own losses the OTHER member turns into a win; `uncovered`
+    lists every (loser, enemy) neither of them beats.
+    """
+    losses1 = [e for e, o in matrix.get(name1, {}).items() if o == "loss"]
+    losses2 = [e for e, o in matrix.get(name2, {}).items() if o == "loss"]
+    m1, m2 = matrix.get(name1, {}), matrix.get(name2, {})
+    covered1 = [e for e in losses1 if m2.get(e) == "win"]
+    covered2 = [e for e in losses2 if m1.get(e) == "win"]
+    uncovered = ([(name1, e) for e in losses1 if e not in covered1] +
+                [(name2, e) for e in losses2 if e not in covered2])
+    return {"losses1": losses1, "losses2": losses2,
+           "covered1": len(covered1), "covered2": len(covered2),
+           "total_losses": len(losses1) + len(losses2),
+           "total_covered": len(covered1) + len(covered2),
+           "uncovered": uncovered}
+
+
+def find_pair_cores(pool, merged, moves_db, natures, typechart, teams,
+                    enemy_names=None):
+    """"2-2-2 teambuilding" Stage 1: every pair drawn from `pool`, scored on
+    the three criteria above -- each pair carries all three so a caller can
+    rank/filter by whichever one it actually cares about, rather than this
+    baking in one blended opinion of "good".
+
+    `enemy_names` defaults to `optimize_sets.enemy_individuals(teams)` --
+    every distinct Pokemon across every named roster in `teams`
+    (`species_data.load_teams()`'s own dict) -- "what pokemon in all named
+    teams".
+
+    Returns rows: {"pair": (name1, name2), "shared_weak": [...],
+    "covered_weak": [...], "weather_synergy": "sun"/None/etc,
+    "threat_coverage": `_pair_threat_coverage`'s own dict, "mutual_resist":
+    `_pair_mutual_resist_coverage`'s own dict, "avg_score": float}, sorted
+    by (fewest shared/unpatched weaknesses first -- a real, concrete
+    defensive gap always outweighs a coverage or Score edge, then most
+    threat-coverage, then highest avg roster.csv Score). Weather-lead
+    synergy and mutual-resist coverage are both informational only, not
+    folded into this sort key -- "a good lead pair" (or a "perfectly
+    covers" pair) isn't strictly orderable against "a good defensive pair"
+    the way the other two criteria are against each other; a caller wanting
+    THAT reading specifically re-sorts/filters on `mutual_resist` itself
+    (e.g. `perfect=True` first) -- "as an example, maybe side feature".
+    """
+    if enemy_names is None:
+        enemy_names = enemy_individuals(teams)
+    # A handful of names (e.g. "Floette", a base form only ever recorded in
+    # mbsmogon.xlsx as a mislabeled Mega row, per `species_data.load_
+    # mbsmogon`'s own duplicate-handling comment) have no roster.csv
+    # weakness chart at all -- `merged[n]["defensive_chart"]` is `None`,
+    # not an empty dict. `_weak_resist`'s own convention is to skip such a
+    # member from weakness accounting entirely rather than guess; a pair
+    # containing one can't be scored for defensive synergy at all, so it's
+    # dropped from the pool here instead of raising deep inside the loop.
+    pool = [n for n in pool if merged[n].get("defensive_chart")]
+    matrix = _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
+    rows = []
+    for n1, n2 in itertools.combinations(pool, 2):
+        defense = _pair_defensive_synergy(n1, n2, merged)
+        weather = _weather_lead_synergy(n1, n2, merged)
+        coverage = _pair_threat_coverage(n1, n2, matrix)
+        mutual_resist = _pair_mutual_resist_coverage(n1, n2, merged)
+        avg_score = (merged[n1]["score"] + merged[n2]["score"]) / 2.0
+        rows.append({
+            "pair": (n1, n2), "shared_weak": defense["shared_weak"],
+            "covered_weak": defense["covered_weak"],
+            "weather_synergy": weather, "threat_coverage": coverage,
+            "mutual_resist": mutual_resist, "avg_score": avg_score,
+        })
+    rows.sort(key=lambda r: (len(r["shared_weak"]), -r["threat_coverage"]["total_covered"],
+                             -r["avg_score"]))
+    return rows
+
+
+def two_two_two_teams(pair_rows, merged, top_pairs=30, top_n=10,
+                      max_net_weakness=None):
+    """"2-2-2 teambuilding" Stage 2: combine the best `top_pairs` pair cores
+    (`find_pair_cores`'s own sort already ranks them) into every possible
+    team of 6 made of 3 DISJOINT pairs (no repeated Pokemon) -- "generate
+    pair cores, then... combine pair cores into a team of 6 that is most
+    complementary altogether".
+
+    Each candidate team is scored by `net_weakness_by_type` across all 6
+    members at once (the SAME whole-team synergy read `multi_bring4_
+    coverage`'s own weakness gates use) -- a team can look fine pair-by-pair
+    and still stack a real team-wide weakness none of the 3 pairs' own
+    `shared_weak` caught alone (e.g. three DIFFERENT members all weak to
+    the same type, spread one per pair). Ranked by the single worst (most
+    exposed) type's net weakness first, then total exposure across every
+    type, then how highly `find_pair_cores` itself ranked the 3 pairs
+    (their index sum, lower = better pairs used).
+
+    `max_net_weakness`: optional hard cap -- "let me establish net
+    weakness caps for a 2-2-2 team" -- a team whose single WORST (most
+    exposed) type's net weakness exceeds this is dropped outright rather
+    than merely sorted after the ones that pass, mirroring `--max-weak`/
+    `--type-limit`'s own "a hard filter, not just a ranking nudge"
+    convention for `multi_bring4_coverage`. `None` (the default) applies no
+    cap, unchanged from before this existed.
+
+    Returns rows: {"team": (n1..n6) sorted, "pairs": (pair1, pair2, pair3),
+    "net_weakness": {type: net}, "worst_net_weakness": int,
+    "total_net_weakness": int, "pair_rank_sum": int} for the top `top_n`.
+    """
+    candidates = list(enumerate(pair_rows[:top_pairs]))
+    rows = []
+    for (i1, c1), (i2, c2), (i3, c3) in itertools.combinations(candidates, 3):
+        names = set(c1["pair"]) | set(c2["pair"]) | set(c3["pair"])
+        if len(names) != 6:
+            continue  # a Pokemon repeated across 2 of the 3 pairs -- illegal team
+        team = tuple(sorted(names))
+        net = net_weakness_by_type(team, merged)
+        worst_net_weakness = max(net.values())
+        if max_net_weakness is not None and worst_net_weakness > max_net_weakness:
+            continue
+        rows.append({
+            "team": team, "pairs": (c1["pair"], c2["pair"], c3["pair"]),
+            "net_weakness": net, "worst_net_weakness": worst_net_weakness,
+            "total_net_weakness": sum(v for v in net.values() if v > 0),
+            "pair_rank_sum": i1 + i2 + i3,
+        })
+    rows.sort(key=lambda r: (r["worst_net_weakness"], r["total_net_weakness"],
+                             r["pair_rank_sum"]))
+    return rows[:top_n]
 
 
 def _build_forms(names, merged, natures, moves_db, items=None,

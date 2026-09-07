@@ -2214,5 +2214,95 @@ class TestWorstCaseTargetingFlag(unittest.TestCase):
         self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
 
 
+class TestTwoTwoTwoFlag(unittest.TestCase):
+    """"2-2-2 teambuilding" -- `--two-two-two` finds pair cores
+    (`counter_finder.find_pair_cores`) then combines the best ones into
+    whole teams (`counter_finder.two_two_two_teams`). Validation is
+    checked directly (fast, no `load_world()`); the real end-to-end run
+    is narrowed to a single small saved team and a tiny `--pool-size` to
+    stay fast while still exercising the real functions."""
+
+    def test_requires_no_vs(self):
+        msg, out = run_main(["--two-two-two", "--vs", "Sableye,Ariados"])
+        self.assertIsNotNone(msg, out)
+        self.assertIn("--vs-team", msg)
+
+    def test_cannot_combine_with_other_modes(self):
+        msg, out = run_main(["--two-two-two", "--joint"])
+        self.assertIsNotNone(msg, out)
+        self.assertIn("--two-two-two cannot be combined", msg)
+
+    def test_top_pairs_requires_two_two_two(self):
+        msg, out = run_main(["--vs", "Sableye,Ariados", "--top-pairs", "5"])
+        self.assertIsNotNone(msg, out)
+        self.assertIn("--top-pairs/--top-teams only apply to --two-two-two", msg)
+
+    def test_top_teams_requires_two_two_two(self):
+        msg, out = run_main(["--vs", "Sableye,Ariados", "--top-teams", "3"])
+        self.assertIsNotNone(msg, out)
+        self.assertIn("--top-pairs/--top-teams only apply to --two-two-two", msg)
+
+    def test_vs_team_allowed_with_two_two_two(self):
+        """A real end-to-end run, narrowed to one small saved team and a
+        tiny pool -- confirms `find_pair_cores`/`two_two_two_teams` are
+        actually called (not just that validation passes) and produces
+        the expected console markers."""
+        from unittest.mock import patch
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+               "--top-pairs", "5", "--top-teams", "3"]
+        with patch.object(ct, "find_pair_cores", wraps=ct.find_pair_cores) as fp_spy, \
+             patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as tt_spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        fp_spy.assert_called_once()
+        tt_spy.assert_called_once()
+        self.assertIn("2-2-2 teambuilding:", out)
+        self.assertIn("pair cores", out)
+        self.assertIn("2-2-2 teams", out)
+
+    def test_default_enemy_universe_is_every_named_team(self):
+        """Omitting --vs-team entirely (the documented default) resolves
+        the enemy universe to every team `species_data.load_teams` knows
+        about, not just one -- spy on the `teams` dict `find_pair_cores`
+        actually receives."""
+        from unittest.mock import patch
+        argv = ["--two-two-two", "--pool-size", "10", "--top-pairs", "3",
+               "--top-teams", "2"]
+        with patch.object(ct, "find_pair_cores", wraps=ct.find_pair_cores) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        enemy_teams_arg = spy.call_args.args[5]
+        self.assertGreater(len(enemy_teams_arg), 1)
+
+    def test_max_net_weakness_requires_two_two_two(self):
+        msg, out = run_main(["--vs", "Sableye,Ariados", "--max-net-weakness", "1"])
+        self.assertIsNotNone(msg, out)
+        self.assertIn("--max-net-weakness only applies to --two-two-two", msg)
+
+    def test_max_net_weakness_reaches_two_two_two_teams(self):
+        """"let me establish net weakness caps for a 2-2-2 team" -- the CLI
+        flag actually threads through to `two_two_two_teams`, not just
+        past validation."""
+        from unittest.mock import patch
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+               "--top-pairs", "5", "--top-teams", "3", "--max-net-weakness", "2"]
+        with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.kwargs.get("max_net_weakness"), 2)
+
+    def test_max_net_weakness_defaults_to_none(self):
+        from unittest.mock import patch
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+               "--top-pairs", "5", "--top-teams", "3"]
+        with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertIsNone(spy.call_args.kwargs.get("max_net_weakness"))
+
+
 if __name__ == "__main__":
     unittest.main()

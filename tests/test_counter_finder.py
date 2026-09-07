@@ -6837,3 +6837,272 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
             self.vs_roster, self.merged, self.natures, self.moves,
             items=self.enemy_item_overrides, move_overrides=self.enemy_move_overrides)
         self.assertIn("Low Kick", {mi.name for mi in enemy_forms["Kingambit"]["moves"]})
+
+
+class TestSalamenceAdditions(unittest.TestCase):
+    """"Add Salamence and Mega Salamence" -- both roster.csv (defensive
+    chart + Score) and mbsmogon.xlsx (Nature/EVs/moveset/item/ability
+    usage) rows, resolved the same way every other Mega/base pair in this
+    dataset is (`_mega_project`, `base_form_name`)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_both_forms_resolve_with_real_dragon_flying_stats(self):
+        merged = self.W["merged"]
+        for name in ("Salamence", "Mega Salamence"):
+            self.assertIn(name, merged)
+            self.assertEqual(merged[name]["types"], ["Dragon", "Flying"])
+            self.assertIsNotNone(merged[name].get("defensive_chart"))
+
+    def test_defensive_chart_matches_real_dragon_flying_weaknesses(self):
+        """Ice 4x (both types weak), Rock/Dragon/Fairy 2x (Flying/Dragon
+        respectively), immune to Ground (Flying), Electric neutral (Flying's
+        own weakness to it is cancelled by Dragon's resistance) -- the
+        real, well-known Salamence weakness profile, not an invented one."""
+        merged = self.W["merged"]
+        for name in ("Salamence", "Mega Salamence"):
+            dc = merged[name]["defensive_chart"]
+            self.assertEqual(dc["Ice"], 4.0)
+            self.assertEqual(dc["Rock"], 2.0)
+            self.assertEqual(dc["Dragon"], 2.0)
+            self.assertEqual(dc["Fairy"], 2.0)
+            self.assertEqual(dc["Ground"], 0.0)
+            self.assertEqual(dc["Electric"], 1.0)
+            self.assertEqual(dc["Grass"], 0.25)
+
+    def test_base_form_keeps_intimidate_mega_form_gets_aerilate(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        base = cf.make_combatant("Salamence", merged, natures)
+        self.assertEqual(base.ability, "Intimidate")
+        mega_pick = cf.make_combatant("Mega Salamence", merged, natures)
+        self.assertEqual(mega_pick.ability, "Intimidate")  # pre-projection
+        projected = cf._mega_project(mega_pick)
+        self.assertEqual(projected.ability, "Aerilate")
+        self.assertGreater(projected.stats["atk"], base.stats["atk"])
+
+    def test_mega_salamence_holds_its_stone(self):
+        merged = self.W["merged"]
+        self.assertEqual(merged["Mega Salamence"]["items_usage"][0][0], "Salamencite")
+
+    def test_moves_resolve_to_the_intended_sets(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        base_moves = {mi.name for mi, _pct in build_moveset(merged["Salamence"], moves)}
+        self.assertEqual(base_moves, {"Protect", "Draco Meteor", "Hydro Pump", "Fire Blast"})
+        mega_moves = {mi.name for mi, _pct in build_moveset(merged["Mega Salamence"], moves)}
+        self.assertEqual(mega_moves, {"Double-Edge", "Protect", "Dragon Claw", "Tailwind"})
+
+
+class TestTwoTwoTwoTeambuilding(unittest.TestCase):
+    """"2-2-2 teambuilding: using core pairs that work well together to
+    make your lead unpredictable" -- three DISTINCT pair-scoring criteria
+    (`_pair_defensive_synergy`, `_weather_lead_synergy`, `_pair_threat_
+    coverage`), combined by `find_pair_cores` (Stage 1) and `two_two_two_
+    teams` (Stage 2, combining pairs into whole teams of 6)."""
+
+    def setUp(self):
+        self.W = world()
+        self.merged = self.W["merged"]
+
+    def test_defensive_synergy_hydreigon_metagross_has_no_shared_weakness(self):
+        """The user's own example: "Hydreigon and Metagross, mostly beat
+        one another's weaknesses" -- ZERO types super-effective against
+        both at once."""
+        r = cf._pair_defensive_synergy("Hydreigon", "Metagross", self.merged)
+        self.assertEqual(r["shared_weak"], [])
+        self.assertGreater(len(r["covered_weak"]), 0)
+
+    def test_defensive_synergy_detects_a_real_shared_weakness(self):
+        """Two real Ice-4x-weak Dragon/Flying-ish types share a gap
+        neither patches -- Salamence and Mega Garchomp (Dragon/Ground,
+        also 4x Ice-weak) both take Ice super-effectively."""
+        r = cf._pair_defensive_synergy("Salamence", "Mega Garchomp", self.merged)
+        self.assertIn("Ice", r["shared_weak"])
+
+    def test_weather_lead_synergy_detects_drought_chlorophyll(self):
+        """The user's own example: Mega Charizard Y (Drought) + Venusaur
+        (Chlorophyll)."""
+        self.assertEqual(
+            cf._weather_lead_synergy("Mega Charizard Y", "Venusaur", self.merged), "sun")
+        # Order-independent.
+        self.assertEqual(
+            cf._weather_lead_synergy("Venusaur", "Mega Charizard Y", self.merged), "sun")
+
+    def test_weather_lead_synergy_none_for_an_unrelated_pair(self):
+        self.assertIsNone(cf._weather_lead_synergy("Hydreigon", "Metagross", self.merged))
+
+    def test_weather_lead_synergy_requires_the_matching_weather(self):
+        """A setter paired with a DIFFERENT weather's speed-booster isn't
+        a synergy -- Drought (sun) + Swift Swim (rain) don't combine."""
+        # Ninetales-Alola sets snow (Snow Warning), not sun -- paired with
+        # a Chlorophyll user (sun-only), no match.
+        self.assertIsNone(
+            cf._weather_lead_synergy("Ninetales-Alola", "Venusaur", self.merged))
+
+    def test_one_v_one_matrix_and_single_outcome_wrapper_agree(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        matrix = cf._one_v_one_matrix(
+            ["Hydreigon", "Metagross"], ["Kingambit", "Basculegion"],
+            self.merged, moves, natures, typechart)
+        for name in ("Hydreigon", "Metagross"):
+            for enemy in ("Kingambit", "Basculegion"):
+                self.assertEqual(
+                    matrix[name][enemy],
+                    cf._one_v_one_outcome(name, enemy, self.merged, moves, natures, typechart))
+
+    def test_one_v_one_matrix_never_self_mirrors(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        matrix = cf._one_v_one_matrix(
+            ["Kingambit"], ["Kingambit", "Basculegion"], self.merged, moves, natures, typechart)
+        self.assertNotIn("Kingambit", matrix["Kingambit"])
+        self.assertIn("Basculegion", matrix["Kingambit"])
+
+    def test_pair_threat_coverage_counts_correctly_on_a_synthetic_matrix(self):
+        """Exercises the pure counting logic directly, independent of real
+        damage calc, so the coverage arithmetic itself is pinned exactly."""
+        matrix = {
+            "A": {"E1": "loss", "E2": "loss", "E3": "win"},
+            "B": {"E1": "win", "E2": "loss", "E3": "loss"},
+        }
+        r = cf._pair_threat_coverage("A", "B", matrix)
+        self.assertEqual(sorted(r["losses1"]), ["E1", "E2"])
+        self.assertEqual(sorted(r["losses2"]), ["E2", "E3"])
+        self.assertEqual(r["covered1"], 1)   # B beats E1 (A's loss)
+        self.assertEqual(r["covered2"], 1)   # A beats E3 (B's loss)
+        self.assertEqual(r["total_losses"], 4)
+        self.assertEqual(r["total_covered"], 2)
+        self.assertIn(("A", "E2"), r["uncovered"])
+        self.assertIn(("B", "E2"), r["uncovered"])
+        self.assertNotIn(("A", "E1"), r["uncovered"])
+        self.assertNotIn(("B", "E3"), r["uncovered"])
+
+    def test_find_pair_cores_end_to_end_small_pool(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Hydreigon", "Mega Metagross", "Garchomp", "Kingambit",
+               "Mega Charizard Y", "Venusaur"]
+        rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                  self.W["teams"])
+        import itertools as _it
+        self.assertEqual(len(rows), len(list(_it.combinations(pool, 2))))
+        # Sorted: fewest shared_weak first.
+        shared_counts = [len(r["shared_weak"]) for r in rows]
+        self.assertEqual(shared_counts, sorted(shared_counts))
+        pairs = {frozenset(r["pair"]) for r in rows}
+        self.assertIn(frozenset({"Hydreigon", "Mega Metagross"}), pairs)
+        weather_row = next(r for r in rows
+                           if set(r["pair"]) == {"Mega Charizard Y", "Venusaur"})
+        self.assertEqual(weather_row["weather_synergy"], "sun")
+
+    def test_find_pair_cores_skips_names_with_no_defensive_chart(self):
+        """"Floette" (base form) has usage/moves data but no roster.csv
+        weakness row (`merged["Floette"]["defensive_chart"]` is `None`) --
+        must be dropped from the pool instead of crashing (the real bug
+        hit when running this over the full default pool)."""
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        self.assertIsNone(self.merged["Floette"].get("defensive_chart"))
+        pool = ["Floette", "Hydreigon", "Mega Metagross"]
+        rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                  self.W["teams"])
+        for r in rows:
+            self.assertNotIn("Floette", r["pair"])
+
+    def test_two_two_two_teams_produces_disjoint_teams_of_six(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Hydreigon", "Mega Metagross", "Garchomp", "Mega Garchomp",
+               "Kingambit", "Mega Charizard Y", "Venusaur", "Salamence",
+               "Mega Salamence", "Dragonite"]
+        pair_rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                       self.W["teams"])
+        team_rows = cf.two_two_two_teams(pair_rows, self.merged,
+                                         top_pairs=len(pair_rows), top_n=10)
+        self.assertGreater(len(team_rows), 0)
+        for r in team_rows:
+            self.assertEqual(len(r["team"]), 6)
+            self.assertEqual(len(set(r["team"])), 6)  # no repeats
+            flat = [n for pair in r["pairs"] for n in pair]
+            self.assertEqual(sorted(flat), sorted(r["team"]))
+            self.assertIn("worst_net_weakness", r)
+            self.assertIn("total_net_weakness", r)
+        # Sorted worst-case-first.
+        worst_vals = [r["worst_net_weakness"] for r in team_rows]
+        self.assertEqual(worst_vals, sorted(worst_vals))
+
+    def test_two_two_two_teams_no_op_with_fewer_than_three_pairs(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Hydreigon", "Mega Metagross", "Garchomp"]
+        pair_rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                       self.W["teams"])
+        self.assertEqual(cf.two_two_two_teams(pair_rows, self.merged), [])
+
+    def test_pair_mutual_resist_coverage_perfect_case(self):
+        """"each mutually resists all the types that are super effective
+        against the other" -- a real, hand-verified pair: Salamence
+        (Dragon/Flying, weak Ice/Rock/Dragon/Fairy) + Mega Aggron
+        (Steel/Rock in this dataset's usage, resisting all four) should
+        register as perfectly covering EACH OTHER."""
+        r = cf._pair_mutual_resist_coverage("Salamence", "Mega Aggron", self.merged)
+        self.assertTrue(r["perfect"])
+        self.assertEqual(r["coverage_frac"], 1.0)
+        self.assertEqual(r["a_weak_resisted_by_b"], r["a_weak_total"])
+        self.assertEqual(r["b_weak_resisted_by_a"], r["b_weak_total"])
+
+    def test_pair_mutual_resist_coverage_is_stricter_than_covered_weak(self):
+        """Hydreigon+Metagross has 0 SHARED weaknesses (`_pair_defensive_
+        synergy`), but mutual-resist coverage is a strictly harder bar
+        (an actual RESIST, not merely "not also weak") -- confirmed NOT
+        perfect for this real pair, i.e. genuinely different information."""
+        defense = cf._pair_defensive_synergy("Hydreigon", "Metagross", self.merged)
+        mutual = cf._pair_mutual_resist_coverage("Hydreigon", "Metagross", self.merged)
+        self.assertEqual(defense["shared_weak"], [])
+        self.assertFalse(mutual["perfect"])
+        self.assertGreater(mutual["coverage_frac"], 0.0)
+        self.assertLess(mutual["coverage_frac"], 1.0)
+
+    def test_pair_mutual_resist_coverage_self_mirror_is_not_trivially_perfect(self):
+        """Confirms "perfect" isn't accidentally always True -- Salamence
+        mirrored against itself shares every real weakness (Ice/Rock/
+        Dragon/Fairy) and resists none of them for its mirror copy, so
+        coverage is exactly 0, not the "no weaknesses" trivial case."""
+        r = cf._pair_mutual_resist_coverage("Salamence", "Salamence", self.merged)
+        self.assertFalse(r["perfect"])
+        self.assertEqual(r["coverage_frac"], 0.0)
+
+    def test_find_pair_cores_rows_carry_mutual_resist(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Salamence", "Mega Garchomp"]
+        rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                  self.W["teams"])
+        self.assertEqual(len(rows), 1)
+        self.assertIn("mutual_resist", rows[0])
+        self.assertIn("perfect", rows[0]["mutual_resist"])
+
+    def test_two_two_two_teams_max_net_weakness_cap_filters_teams(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Hydreigon", "Mega Metagross", "Garchomp", "Mega Garchomp",
+               "Kingambit", "Mega Charizard Y", "Venusaur", "Salamence",
+               "Mega Salamence", "Dragonite"]
+        pair_rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                       self.W["teams"])
+        uncapped = cf.two_two_two_teams(pair_rows, self.merged,
+                                        top_pairs=len(pair_rows), top_n=50)
+        self.assertGreater(len(uncapped), 0)
+        strict = cf.two_two_two_teams(pair_rows, self.merged,
+                                      top_pairs=len(pair_rows), top_n=50,
+                                      max_net_weakness=0)
+        self.assertLess(len(strict), len(uncapped))
+        for r in strict:
+            self.assertLessEqual(r["worst_net_weakness"], 0)
+
+    def test_two_two_two_teams_default_max_net_weakness_is_a_no_op(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Hydreigon", "Mega Metagross", "Garchomp", "Mega Garchomp",
+               "Kingambit", "Mega Charizard Y", "Venusaur", "Salamence",
+               "Mega Salamence", "Dragonite"]
+        pair_rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                       self.W["teams"])
+        default = cf.two_two_two_teams(pair_rows, self.merged,
+                                       top_pairs=len(pair_rows), top_n=50)
+        explicit_none = cf.two_two_two_teams(pair_rows, self.merged,
+                                             top_pairs=len(pair_rows), top_n=50,
+                                             max_net_weakness=None)
+        self.assertEqual([r["team"] for r in default], [r["team"] for r in explicit_none])

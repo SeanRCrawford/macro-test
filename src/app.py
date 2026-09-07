@@ -3677,12 +3677,13 @@ with tab_counter:
                "punish/exploitability audit -- a fast SCREEN, same role it plays for "
                "the CLI). Use Lead / Back Search for the slow, honest, real-solver "
                "verification of whatever this recommends.")
-    from counter_finder import DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search
+    from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search,
+                                find_pair_cores, two_two_two_teams)
     from team_search import build_candidate_pool
 
     ct_mode = st.radio(
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
-                 "Joint pair search"], key="ct_mode", horizontal=True)
+                 "Joint pair search", "2-2-2 teambuilding"], key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
         "Allow Choice Scarf", value=False, key="ct_allow_scarf",
@@ -4109,7 +4110,7 @@ with tab_counter:
                                               excluded_items=ct_excluded,
                                               key_prefix=f"ctmb4_{i}")
 
-    else:  # Joint pair search
+    elif ct_mode == "Joint pair search":
         st.caption("GENERATE a partner for a fixed Pokemon: every legal pool member "
                    "paired with it, both fully searched (item + moveset), against "
                    "every pair drawn from the enemy roster.")
@@ -4141,6 +4142,129 @@ with tab_counter:
                  "Tailwind-safe": r["pairs_tailwind_safe"],
                  "Protect-safe": r["pairs_protect_safe"]}
                 for r in rows[:top_n2]]), width='stretch', hide_index=True)
+
+    else:  # 2-2-2 teambuilding
+        st.caption("'2-2-2 teambuilding': using core PAIRS that work well "
+                   "together to make your lead unpredictable. Every pair "
+                   "drawn from the pool is scored three ways -- defensive "
+                   "synergy (does one resist what the other is weak to), "
+                   "weather-lead synergy (a real weather-setter + weather-"
+                   "abusing speed-boost ability pair, e.g. Drought + "
+                   "Chlorophyll -- Mega Charizard Y + Venusaur), and threat "
+                   "coverage (does one beat, in a simple 1v1, what the "
+                   "other loses to among every named team's own Pokemon) "
+                   "plus average roster.csv Score. Stage 2 then combines "
+                   "the best pairs into whole teams of 6 made of 3 "
+                   "disjoint pairs, ranked by team-wide weakness coverage.")
+        pool_size3 = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 60,
+                               key="ct_222_pool")
+        ct_222_teams = st.multiselect(
+            "Enemy universe (named teams)", list(teams), default=list(teams),
+            key="ct_222_teams",
+            help="Every distinct Pokemon across the selected teams forms "
+                 "the '1v1 threat coverage' universe -- defaults to every "
+                 "saved team.")
+        c1, c2 = st.columns(2)
+        top_pairs3 = c1.slider("Top pairs to show / feed Stage 2", 5, 60, 15,
+                               key="ct_222_top_pairs")
+        top_teams3 = c2.slider("Top teams to show", 1, 20, 10, key="ct_222_top_teams")
+        cap_on = st.checkbox(
+            "Cap a team's worst net weakness", key="ct_222_cap_on",
+            help="'Let me establish net weakness caps for a 2-2-2 team' -- "
+                 "drops any candidate team whose single most-exposed type's "
+                 "net weakness (weak members minus resist members) exceeds "
+                 "this, instead of just ranking it lower.")
+        max_net3 = (st.slider("Max net weakness", 0, 6, 2, key="ct_222_max_net")
+                   if cap_on else None)
+        if st.button("Find 2-2-2 cores", type="primary", key="ct_222_go"):
+            if not ct_222_teams:
+                st.warning("Select at least one named team.")
+            else:
+                pool = build_candidate_pool(merged, top_n=pool_size3, prefs=prefs)
+                enemy_teams = {n: list(teams[n]) for n in ct_222_teams}
+                with st.spinner(f"Scoring every pair drawn from {len(pool)} "
+                                f"Pokemon vs {len(ct_222_teams)} named team(s)..."):
+                    pair_rows = find_pair_cores(pool, merged, moves, natures,
+                                                typechart, enemy_teams)
+                    team_rows = two_two_two_teams(pair_rows, merged,
+                                                  top_pairs=top_pairs3, top_n=top_teams3,
+                                                  max_net_weakness=max_net3)
+                st.session_state["ct_222_pair_rows"] = pair_rows
+                st.session_state["ct_222_team_rows"] = team_rows
+                st.session_state["ct_222_top_pairs_shown"] = top_pairs3
+
+        pair_rows = st.session_state.get("ct_222_pair_rows")
+        team_rows = st.session_state.get("ct_222_team_rows")
+        if pair_rows:
+            shown_pairs = pair_rows[:st.session_state.get("ct_222_top_pairs_shown", 15)]
+            st.markdown(f"**Top {len(shown_pairs)} pair cores** (of "
+                       f"{len(pair_rows)} total) -- fewest shared "
+                       f"weaknesses first, then most threat-coverage, "
+                       f"then highest avg Score:")
+            st.dataframe(pd.DataFrame([
+                {"Pair": f"{n1} + {n2}",
+                 "Shared weak": len(r["shared_weak"]),
+                 "Shared types": ", ".join(r["shared_weak"]) or "-",
+                 "Covered weak": len(r["covered_weak"]),
+                 "Threat coverage": f"{r['threat_coverage']['total_covered']}/"
+                                    f"{r['threat_coverage']['total_losses']}",
+                 "Avg Score": round(r["avg_score"], 1),
+                 "Weather lead": r["weather_synergy"] or "-"}
+                for r in shown_pairs
+                for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
+
+            weather_pairs = [r for r in pair_rows if r["weather_synergy"]]
+            if weather_pairs:
+                with st.expander(f"Weather-lead pairs ({len(weather_pairs)} found)"):
+                    st.dataframe(pd.DataFrame([
+                        {"Pair": f"{n1} + {n2}", "Weather": r["weather_synergy"],
+                         "Shared weak": len(r["shared_weak"]),
+                         "Avg Score": round(r["avg_score"], 1)}
+                        for r in weather_pairs
+                        for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
+
+            mutual_pairs = sorted(
+                (r for r in pair_rows if r["mutual_resist"]["coverage_frac"] > 0),
+                key=lambda r: (-r["mutual_resist"]["perfect"],
+                              -r["mutual_resist"]["coverage_frac"]))
+            if mutual_pairs:
+                perfect_count = sum(1 for r in mutual_pairs if r["mutual_resist"]["perfect"])
+                with st.expander(f"Mutual-coverage pairs ({perfect_count} perfect of "
+                                f"{len(mutual_pairs)} found)"):
+                    st.caption("Each RESISTS what's super-effective against the "
+                              "other -- a stricter reading than 'Covered weak' "
+                              "above, which only requires the partner to not "
+                              "ALSO be weak (neutral counts there).")
+                    st.dataframe(pd.DataFrame([
+                        {"Pair": f"{n1} + {n2}",
+                         "Coverage": "PERFECT" if r["mutual_resist"]["perfect"]
+                                    else f"{r['mutual_resist']['coverage_frac']*100:.0f}%",
+                         "A's weaknesses resisted": f"{r['mutual_resist']['a_weak_resisted_by_b']}/"
+                                                    f"{r['mutual_resist']['a_weak_total']}",
+                         "B's weaknesses resisted": f"{r['mutual_resist']['b_weak_resisted_by_a']}/"
+                                                    f"{r['mutual_resist']['b_weak_total']}",
+                         "Avg Score": round(r["avg_score"], 1)}
+                        for r in mutual_pairs
+                        for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
+
+        if team_rows:
+            st.markdown(f"**Top {len(team_rows)} 2-2-2 teams** (3 disjoint "
+                       f"pairs) -- lowest worst-case team-wide net "
+                       f"weakness first:")
+            for i, r in enumerate(team_rows, start=1):
+                pairs_str = " | ".join(f"{a}+{b}" for a, b in r["pairs"])
+                with st.expander(f"#{i}: {' / '.join(r['team'])}", expanded=(i == 1)):
+                    st.caption(f"Pairs: {pairs_str}")
+                    st.caption(f"Worst-case net weakness: "
+                              f"{r['worst_net_weakness']}  |  "
+                              f"Total net weakness: {r['total_net_weakness']}")
+                    exposed = {t: n for t, n in r["net_weakness"].items() if n > 0}
+                    if exposed:
+                        st.caption("Net-weak types: " + ", ".join(
+                            f"{t} ({n})" for t, n in exposed.items()))
+        elif pair_rows:
+            st.info("No 3-disjoint-pair team could be formed from the top "
+                    "pairs shown -- raise 'Top pairs to show'.")
 
 
 # ------------------------------------------------------------------ battle
