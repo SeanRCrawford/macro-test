@@ -76,6 +76,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertTrue(any(s.key == "ct_cov_pool" for s in at.slider))
         self.assertTrue(any(m.key == "ct_cov_teams" for m in at.multiselect))
         self.assertTrue(any(m.key == "ct_cov_include" for m in at.multiselect))
+        self.assertTrue(any(m.key == "ct_cov_suggested" for m in at.multiselect))
         self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
         self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
         self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
@@ -106,6 +107,50 @@ class TestCounterTableTabExists(unittest.TestCase):
         pair_rows = at.session_state["ct_cov_pair_rows"]
         pool_names = {n for r in pair_rows for n in r["pair"]}
         self.assertIn(forced_name, pool_names)
+
+    def test_always_include_forces_membership_in_every_returned_group(self):
+        """The strengthened guarantee: not just "reached the pool" (the
+        test above), but present in EVERY returned group for the
+        requested size -- a real UI-level end-to-end check of the same
+        thing `test_must_include_appears_in_every_returned_group_not_
+        just_the_top_one` proves at the counter_finder.py level."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        forced_name = "Ariados"
+        [m for m in at.multiselect if m.key == "ct_cov_include"][0].set_value(
+            [forced_name]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"])
+        for row in results[3]["rows"]:
+            self.assertIn(forced_name, row["group"])
+
+    def test_suggested_pokemon_controls_render_and_apply_quorum(self):
+        """"Give a 'suggested' list as well, of which at least 3 (or n,
+        selected) must appear" -- the new multiselect + quorum slider
+        render, wire through, and every returned group meets the quorum."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        suggested_ms = [m for m in at.multiselect if m.key == "ct_cov_suggested"][0]
+        suggested_names = suggested_ms.options[:4]
+        suggested_ms.set_value(suggested_names).run()
+        self.assertFalse(at.exception, list(at.exception))
+        quorum_sliders = [s for s in at.slider if s.key == "ct_cov_suggested_min"]
+        self.assertTrue(quorum_sliders)
+        quorum_sliders[0].set_value(2).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[4]["rows"]:
+            self.assertGreaterEqual(
+                sum(1 for nm in row["group"] if nm in suggested_names), 2)
 
     def test_coverage_groups_search_runs_and_shows_results(self):
         """A real (small) run through the actual widget tree -- confirms the

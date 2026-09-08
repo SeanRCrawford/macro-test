@@ -7942,6 +7942,101 @@ class TestCoverageGroupSearchRanking(unittest.TestCase):
             min_avg_score=100.0, no_duplicate_typing=False)
         self.assertEqual(result[3]["rows"], [])
 
+    def test_must_include_appears_in_every_returned_group_not_just_the_top_one(self):
+        # 5 names, all pairs present -- C(5,3)=10 possible size-3 groups,
+        # C(4,2)=6 of them contain "A". A single lucky top-1 row wouldn't
+        # prove the HARD "every group" guarantee -- ask for all of them.
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            must_include=["A"], no_duplicate_typing=False)
+        rows_out = result[3]["rows"]
+        self.assertEqual(len(rows_out), 6)
+        for row in rows_out:
+            self.assertIn("A", row["group"])
+
+    def test_must_include_multiple_names_all_present_in_every_group(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(4,), top_n=50,
+            must_include=["A", "B"], no_duplicate_typing=False)
+        rows_out = result[4]["rows"]
+        self.assertTrue(rows_out)
+        for row in rows_out:
+            self.assertIn("A", row["group"])
+            self.assertIn("B", row["group"])
+
+    def test_must_include_count_exceeding_group_size_returns_empty_not_a_crash(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
+            must_include=["A", "B", "C", "D"], no_duplicate_typing=False)
+        self.assertEqual(result[3]["rows"], [])
+        self.assertEqual(result[3]["seen"], 0)
+
+    def test_must_include_still_respects_illegal_pair_and_typing_filters(self):
+        # "A" and "F" share the exact same typing -- forcing both in via
+        # must_include must still be rejected by no_duplicate_typing, same
+        # as the ordinary DFS path would reject it.
+        import itertools as _it
+        names = ["A", "F", "B", "C"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
+            must_include=["A", "F"], no_duplicate_typing=True)
+        self.assertEqual(result[3]["rows"], [])
+
+    def test_suggested_quorum_filters_out_groups_below_the_minimum(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            suggested=["A", "B", "C"], suggested_min=2,
+            no_duplicate_typing=False)
+        rows_out = result[3]["rows"]
+        self.assertTrue(rows_out)
+        for row in rows_out:
+            self.assertGreaterEqual(
+                sum(1 for nm in row["group"] if nm in ("A", "B", "C")), 2)
+
+    def test_suggested_min_zero_disables_the_quorum(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            suggested=["A", "B", "C"], suggested_min=0,
+            no_duplicate_typing=False)
+        self.assertEqual(len(result[3]["rows"]), 10)  # C(5,3), unfiltered
+
+    def test_must_include_and_suggested_compose(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            must_include=["A"], suggested=["B", "C"], suggested_min=1,
+            no_duplicate_typing=False)
+        rows_out = result[3]["rows"]
+        self.assertTrue(rows_out)
+        for row in rows_out:
+            self.assertIn("A", row["group"])
+            self.assertTrue({"B", "C"} & set(row["group"]))
+
 
 class TestCoverageGroupSearchRealData(unittest.TestCase):
     """End-to-end through `find_pair_cores` -> `coverage_group_search`,
@@ -7989,6 +8084,16 @@ class TestCoverageGroupSearchRealData(unittest.TestCase):
             max_missing_frac=1.0, no_duplicate_typing=False)
         self.assertTrue(result[3]["rows"])
         self.assertIn("Ariados", result[3]["rows"][0]["group"])
+
+    def test_must_include_holds_across_every_row_of_a_real_multi_row_result(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            must_include=["Ariados"], max_missing_frac=1.0,
+            no_duplicate_typing=False)
+        rows_out = result[4]["rows"]
+        self.assertGreater(len(rows_out), 1)
+        for row in rows_out:
+            self.assertIn("Ariados", row["group"])
 
     def test_max_net_weakness_caps_the_worst_type(self):
         uncapped = cf.coverage_group_search(

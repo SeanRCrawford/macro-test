@@ -4341,11 +4341,25 @@ with tab_counter:
                  "each pair against -- defaults to every saved team.")
         cov_include = st.multiselect(
             "Always include these Pokemon", all_names, key="ct_cov_include",
-            help="Guaranteed a real spot in the search -- unlike an "
-                 "ordinary pool member, these are never narrowed away for "
-                 "having a merely mediocre best link (see 'Search pool "
-                 "size' above), and are added to the pool even if they "
-                 "wouldn't otherwise rank in its top-Score cutoff.")
+            help="A HARD requirement: every returned group, of every size "
+                 "below, contains ALL of these names -- not just protected "
+                 "from being narrowed away (see 'Search pool size' above), "
+                 "but forced into every result. A size smaller than the "
+                 "number of names picked here can never produce a group at "
+                 "all -- that size will show 0 results.")
+        cov_suggested = st.multiselect(
+            "Suggested Pokemon", all_names, key="ct_cov_suggested",
+            help="A softer quorum: a group only survives if at least the "
+                 "chosen minimum below of these names are among its own "
+                 "members -- not all of them, just enough. A name on both "
+                 "this list and 'Always include' trivially counts toward "
+                 "its own quorum. Also protected from narrowing.")
+        cov_suggested_min = 0
+        if cov_suggested:
+            cov_suggested_min = st.slider(
+                "Minimum suggested Pokemon required per group", 1,
+                len(cov_suggested), min(3, len(cov_suggested)),
+                key="ct_cov_suggested_min")
         cov_sizes = st.multiselect("Group sizes", [3, 4, 5, 6], default=[3, 4, 6],
                                    key="ct_cov_sizes")
         cc1, cc2, cc3 = st.columns(3)
@@ -4411,11 +4425,12 @@ with tab_counter:
                 st.warning("Pick at least one group size.")
             else:
                 pool = build_candidate_pool(merged, top_n=cov_pool_size, prefs=prefs)
-                # "Always include" wins over the top-Score cutoff too --
-                # a name a user explicitly names belongs in the search
-                # pool even if its own roster.csv Score wouldn't otherwise
-                # earn it a spot, not just protected from narrowing later.
-                pool = sorted(set(pool) | set(cov_include))
+                # "Always include"/"Suggested" both win over the top-Score
+                # cutoff too -- a name a user explicitly names belongs in
+                # the search pool even if its own roster.csv Score wouldn't
+                # otherwise earn it a spot, not just protected from
+                # narrowing later.
+                pool = sorted(set(pool) | set(cov_include) | set(cov_suggested))
                 enemy_teams = {n: list(teams[n]) for n in ct_cov_teams}
                 sort_map = {"Perfect links": "perfect", "Mutual coverage": "coverage",
                            "Avg score": "score"}
@@ -4432,7 +4447,8 @@ with tab_counter:
                         no_duplicate_typing=cov_dup_typing,
                         max_net_weakness=cov_max_net,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
-                        must_include=cov_include)
+                        must_include=cov_include, suggested=cov_suggested,
+                        suggested_min=cov_suggested_min)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams
@@ -4441,7 +4457,7 @@ with tab_counter:
                     cov_all_names = sorted({n for r in cov_pair_rows for n in r["pair"]})
                     narrowed_names = narrow_coverage_pool_names(
                         cov_pair_rows, cov_all_names, cov_real_win_names,
-                        must_include=cov_include)
+                        must_include=sorted(set(cov_include) | set(cov_suggested)))
                     # Per ENEMY TEAM, not a cross-team union: a "pair" made
                     # of two Pokemon from two DIFFERENT saved teams never
                     # actually gets fielded together, and racing every
@@ -4513,7 +4529,12 @@ with tab_counter:
                 st.markdown(f"**Groups of {size}** -- {r['seen']:,} checked{note}, "
                            f"showing {len(r['rows'])}:")
                 if not r["rows"]:
-                    st.info("No groups of this size passed the current filters.")
+                    if len(cov_include) > size:
+                        st.info(f"No groups of this size: {len(cov_include)} "
+                               f"'Always include' Pokemon can't fit in a "
+                               f"group of {size}.")
+                    else:
+                        st.info("No groups of this size passed the current filters.")
                     continue
                 shown_rows = r["rows"]
                 if cov_resort == "Real pair win rate":

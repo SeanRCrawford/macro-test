@@ -900,7 +900,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           max_eval=_COVERAGE_GROUP_MAX_EVAL,
                           keep_cap=_COVERAGE_GROUP_KEEP_CAP,
                           max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES,
-                          must_include=None):
+                          must_include=None, suggested=None, suggested_min=0):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -981,12 +981,37 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     time it takes to find it. `None` disables this (the old unbounded
     behaviour, for a caller that already knows its pool is small).
 
-    `must_include`: "specify individual Pokemon to include" -- names that
-    survive `max_search_names`' own narrowing NO MATTER how weak their
-    best single link ranks (see `narrow_coverage_pool_names`'s own doc).
-    Passed straight through, so a name absent from `pool`/`pair_rows`
-    entirely is silently a no-op rather than an error -- the caller only
-    guarantees "if this name IS in the pool, keep it," not "add it."
+    `must_include`: "make sure the Pokemon is present on EVERY identified
+    team" -- a HARD requirement, not just a narrowing exemption: every
+    returned group, for every requested size, contains ALL of these names
+    (silently ignoring any name absent from `pool`/`pair_rows` entirely --
+    the guarantee is "if it's a real candidate, force it in," not "add a
+    name that was never there"). Also exempted from `max_search_names`'
+    narrowing, same reasoning as before -- there is no point protecting a
+    name from being narrowed away only to then let it be narrowed out of
+    every actual result anyway. A size smaller than the number of
+    (in-pool) `must_include` names can never produce a group at all --
+    that size's own `"rows"` comes back empty, `"seen"` 0, distinguishable
+    from "searched and nothing passed the other filters" only by knowing
+    the counts don't fit; a caller displaying this should say so plainly.
+
+    Internally this switches from the ordinary branch-and-bound DFS to
+    directly enumerating `C(candidates - len(must_include), size -
+    len(must_include))` combinations for the REMAINING seats (still
+    bounded by `max_search_names`, so still cheap) -- a plain
+    generate-then-legality-check loop, not incremental pruning, since
+    forcing specific members isn't naturally expressible as "pick indices
+    in increasing order" the ordinary DFS relies on.
+
+    `suggested`/`suggested_min`: a SOFTER quorum -- "give a suggested list
+    too, of which at least N must appear" -- a group only survives if at
+    least `suggested_min` of `suggested`'s (in-pool) names are among its
+    own members (0, the default, disables this: no quorum required).
+    Composes with `must_include` (a forced-include name that's ALSO on
+    the suggested list trivially counts toward the quorum). Names on
+    EITHER list are protected from `max_search_names`' narrowing, so the
+    quorum stays satisfiable by construction rather than accidentally
+    narrowed into impossibility.
 
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
@@ -1000,10 +1025,13 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         names = sorted({n for r in pair_rows for n in r["pair"]})
     else:
         names = list(dict.fromkeys(pool))
+    protect = list(dict.fromkeys(list(must_include or ()) + list(suggested or ())))
     names = narrow_coverage_pool_names(pair_rows, names, max_search_names,
-                                       must_include=must_include)
+                                       must_include=protect)
     n = len(names)
     idx = {name: i for i, name in enumerate(names)}
+    forced_indices = sorted({idx[nm] for nm in dict.fromkeys(must_include or ()) if nm in idx})
+    suggested_idx_set = {idx[nm] for nm in (suggested or ()) if nm in idx}
     edge = {}
     for r in pair_rows:
         a, b = r["pair"]
@@ -1049,12 +1077,11 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     def search_one_size(size):
         E = size * (size - 1) // 2
         max_missing = E if max_missing_frac >= 1 else round(max_missing_frac * E)
-        pick = [0] * size
         out = []
         state = {"worst": None, "seen": 0, "aborted": False}
         used = [0] * len(prefix_limits)
 
-        def evaluate():
+        def evaluate(pick):
             perfect = known = 0
             total_frac = 0.0
             score_sum = 0.0
@@ -1090,6 +1117,66 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 del out[keep_cap // 2:]
                 state["worst"] = out[-1]
 
+        def quorum_ok(pick):
+            if suggested_min <= 0:
+                return True
+            return sum(1 for i in pick if i in suggested_idx_set) >= suggested_min
+
+        if forced_indices:
+            # `must_include` forces specific indices into EVERY group at this
+            # size -- not naturally expressible as "pick indices in
+            # increasing order", which the ordinary DFS below relies on for
+            # its incremental pruning. So instead: directly enumerate
+            # combinations for the remaining seats and legality-check each
+            # full candidate in one pass (still bounded by `max_search_names`
+            # and `max_eval`, so still cheap).
+            if len(forced_indices) > size:
+                return [], 0, False
+
+            forced_set = set(forced_indices)
+            free = [i for i in range(n) if i not in forced_set]
+            remaining_size = size - len(forced_indices)
+
+            def group_is_legal(pick):
+                seen_types = set()
+                local_used = [0] * len(prefix_limits)
+                missing = 0
+                for x in range(size):
+                    i = pick[x]
+                    if no_duplicate_typing:
+                        if type_sig[i] in seen_types:
+                            return False
+                        seen_types.add(type_sig[i])
+                    for pi in tags[i]:
+                        local_used[pi] += 1
+                        if local_used[pi] > caps[pi]:
+                            return False
+                    for y in range(x + 1, size):
+                        j = pick[y]
+                        if illegal_pair[i][j]:
+                            return False
+                        if (i, j) not in edge:
+                            missing += 1
+                if missing > max_missing:
+                    return False
+                return True
+
+            for combo in itertools.combinations(free, remaining_size):
+                state["seen"] += 1
+                if state["seen"] > max_eval:
+                    state["aborted"] = True
+                    break
+                pick = sorted(forced_indices + list(combo))
+                if not group_is_legal(pick):
+                    continue
+                if not quorum_ok(pick):
+                    continue
+                keep(evaluate(pick))
+            out.sort(key=sort_key)
+            return out, state["seen"], state["aborted"]
+
+        pick = [0] * size
+
         def rec(start, k, missing, seen_types):
             if state["aborted"]:
                 return
@@ -1098,7 +1185,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 if state["seen"] > max_eval:
                     state["aborted"] = True
                     return
-                keep(evaluate())
+                if quorum_ok(pick):
+                    keep(evaluate(pick))
                 return
             if n - start < size - k:
                 return
