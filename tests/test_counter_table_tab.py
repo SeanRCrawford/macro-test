@@ -75,9 +75,37 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any(s.key == "ct_cov_pool" for s in at.slider))
         self.assertTrue(any(m.key == "ct_cov_teams" for m in at.multiselect))
+        self.assertTrue(any(m.key == "ct_cov_include" for m in at.multiselect))
         self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
         self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
         self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
+
+    def test_always_include_forces_a_name_through_a_tiny_pool(self):
+        """"specify individual Pokemon to include" -- a name outside the
+        top-Score pool cutoff must still show up in the results once
+        named in "Always include these Pokemon"."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        include_ms = [m for m in at.multiselect if m.key == "ct_cov_include"][0]
+        # A real, low-Score species (never a top-10-by-Score pick on its
+        # own) -- its presence in the actual search pool can only be
+        # explained by the "always include" wiring.
+        forced_name = "Ariados"
+        self.assertIn(forced_name, include_ms.options)
+        include_ms.set_value([forced_name]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        # Whether it lands in a top-ranked GROUP is a search-ranking
+        # question already covered at the counter_finder.py level
+        # (test_must_include_forces_a_name_through_narrowing) -- this
+        # checks the UI wiring itself: the forced name actually reached
+        # the search pool find_pair_cores scored pairs for.
+        pair_rows = at.session_state["ct_cov_pair_rows"]
+        pool_names = {n for r in pair_rows for n in r["pair"]}
+        self.assertIn(forced_name, pool_names)
 
     def test_coverage_groups_search_runs_and_shows_results(self):
         """A real (small) run through the actual widget tree -- confirms the

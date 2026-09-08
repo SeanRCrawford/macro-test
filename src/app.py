@@ -4339,6 +4339,13 @@ with tab_counter:
             help="Every distinct Pokemon across the selected teams forms "
                  "the '1v1 threat coverage' universe find_pair_cores scores "
                  "each pair against -- defaults to every saved team.")
+        cov_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_cov_include",
+            help="Guaranteed a real spot in the search -- unlike an "
+                 "ordinary pool member, these are never narrowed away for "
+                 "having a merely mediocre best link (see 'Search pool "
+                 "size' above), and are added to the pool even if they "
+                 "wouldn't otherwise rank in its top-Score cutoff.")
         cov_sizes = st.multiselect("Group sizes", [3, 4, 5, 6], default=[3, 4, 6],
                                    key="ct_cov_sizes")
         cc1, cc2, cc3 = st.columns(3)
@@ -4404,6 +4411,11 @@ with tab_counter:
                 st.warning("Pick at least one group size.")
             else:
                 pool = build_candidate_pool(merged, top_n=cov_pool_size, prefs=prefs)
+                # "Always include" wins over the top-Score cutoff too --
+                # a name a user explicitly names belongs in the search
+                # pool even if its own roster.csv Score wouldn't otherwise
+                # earn it a spot, not just protected from narrowing later.
+                pool = sorted(set(pool) | set(cov_include))
                 enemy_teams = {n: list(teams[n]) for n in ct_cov_teams}
                 sort_map = {"Perfect links": "perfect", "Mutual coverage": "coverage",
                            "Avg score": "score"}
@@ -4419,15 +4431,17 @@ with tab_counter:
                         max_missing_frac=cov_missing_pct / 100.0,
                         no_duplicate_typing=cov_dup_typing,
                         max_net_weakness=cov_max_net,
-                        sort_by=sort_map[cov_sort_label], top_n=cov_top_n)
+                        sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
+                        must_include=cov_include)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams
                 st.session_state["ct_cov_win_by_key"] = None
                 if cov_real_wins:
-                    all_names = sorted({n for r in cov_pair_rows for n in r["pair"]})
+                    cov_all_names = sorted({n for r in cov_pair_rows for n in r["pair"]})
                     narrowed_names = narrow_coverage_pool_names(
-                        cov_pair_rows, all_names, cov_real_win_names)
+                        cov_pair_rows, cov_all_names, cov_real_win_names,
+                        must_include=cov_include)
                     # Per ENEMY TEAM, not a cross-team union: a "pair" made
                     # of two Pokemon from two DIFFERENT saved teams never
                     # actually gets fielded together, and racing every

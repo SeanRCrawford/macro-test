@@ -7977,6 +7977,19 @@ class TestCoverageGroupSearchRealData(unittest.TestCase):
         for row in result[4]["rows"]:
             self.assertEqual(row["worst_net_weakness"], max(row["net_weakness"].values()))
 
+    def test_must_include_forces_a_name_through_narrowing(self):
+        """"specify individual Pokemon to include" end-to-end: with
+        `max_search_names` pinned to exactly the group size, narrowing
+        leaves only ONE possible group -- deterministic proof the forced
+        name survives regardless of how its own links would otherwise
+        rank."""
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(3,), top_n=1,
+            max_search_names=3, must_include=["Ariados"],
+            max_missing_frac=1.0, no_duplicate_typing=False)
+        self.assertTrue(result[3]["rows"])
+        self.assertIn("Ariados", result[3]["rows"][0]["group"])
+
     def test_max_net_weakness_caps_the_worst_type(self):
         uncapped = cf.coverage_group_search(
             self.pair_rows, self.merged, group_sizes=(4,), top_n=20)
@@ -8134,4 +8147,29 @@ class TestNarrowCoveragePoolNames(unittest.TestCase):
     def test_a_name_with_no_links_at_all_still_sorts_in_deterministically(self):
         rows = [_fake_coverage_row(("A", "B"), True, 90.0, 0.0)]
         narrowed = cf.narrow_coverage_pool_names(rows, ["A", "B", "Z"], 2)
+        self.assertEqual(set(narrowed), {"A", "B"})
+
+    def test_must_include_survives_a_weak_link(self):
+        """"specify individual Pokemon to include" -- Z's only link is
+        weak (10%), so ordinary narrowing to 2 would drop it in favour of
+        A/B's strong 90% link; `must_include` must override that."""
+        rows = [
+            _fake_coverage_row(("A", "B"), True, 90.0, 0.0),
+            _fake_coverage_row(("Z", "A"), False, 10.0, 0.0),
+        ]
+        narrowed = cf.narrow_coverage_pool_names(
+            rows, ["A", "B", "Z"], 2, must_include=["Z"])
+        self.assertIn("Z", narrowed)
+        self.assertEqual(len(narrowed), 2)
+
+    def test_must_include_beyond_the_cap_keeps_all_of_them(self):
+        rows = [_fake_coverage_row(("A", "B"), True, 50.0, 0.0)]
+        narrowed = cf.narrow_coverage_pool_names(
+            rows, ["A", "B", "C"], 1, must_include=["A", "B", "C"])
+        self.assertEqual(set(narrowed), {"A", "B", "C"})
+
+    def test_must_include_name_absent_from_pool_is_a_silent_no_op(self):
+        rows = [_fake_coverage_row(("A", "B"), True, 90.0, 0.0)]
+        narrowed = cf.narrow_coverage_pool_names(
+            rows, ["A", "B"], 2, must_include=["Nonexistent"])
         self.assertEqual(set(narrowed), {"A", "B"})

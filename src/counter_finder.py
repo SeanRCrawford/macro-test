@@ -849,7 +849,7 @@ _COVERAGE_GROUP_MAX_EVAL = 2_000_000
 _COVERAGE_GROUP_MAX_SEARCH_NAMES = 40
 
 
-def narrow_coverage_pool_names(pair_rows, names, max_search_names):
+def narrow_coverage_pool_names(pair_rows, names, max_search_names, must_include=None):
     """`coverage_group_search`'s own pool-narrowing step, factored out so a
     caller wanting to run something ELSE (e.g. a real `joint_pool_search`
     win-rate pass) against the SAME narrowed candidate set doesn't have to
@@ -857,10 +857,25 @@ def narrow_coverage_pool_names(pair_rows, names, max_search_names):
     O(pairs): each name is ranked by its own best single link (highest
     `mutual_resist.coverage_frac`, tie-broken by `avg_score`), and only the
     top `max_search_names` survive. `None` (or a `names` already at or
-    under the cap) returns `names` unchanged."""
+    under the cap) returns `names` unchanged.
+
+    `must_include`: names (from `names`; anything else is ignored) that
+    are NEVER narrowed away, regardless of how weak their own best link
+    ranks -- "specify individual Pokemon to include" needs a real
+    guarantee, not just a nudge that a big enough pool could still drop.
+    Only the remaining `max_search_names - len(must_include)` slots are
+    filled by the ordinary best-link ranking; if `must_include` alone
+    exceeds `max_search_names`, every one of them is kept anyway (the
+    explicit request wins over the cap, same as an explicit override
+    always wins over a computed default elsewhere in this module)."""
+    names = list(dict.fromkeys(names))
     if max_search_names is None or len(names) <= max_search_names:
-        return list(dict.fromkeys(names))
+        return names
     names_set = set(names)
+    kept = [nm for nm in dict.fromkeys(must_include or ()) if nm in names_set]
+    kept_set = set(kept)
+    remaining = [nm for nm in names if nm not in kept_set]
+    slots = max(0, max_search_names - len(kept))
     best_link = {}
     for r in pair_rows:
         a, b = r["pair"]
@@ -871,10 +886,10 @@ def narrow_coverage_pool_names(pair_rows, names, max_search_names):
         for nm in (a, b):
             if key > best_link.get(nm, (-1.0, float("-inf"))):
                 best_link[nm] = key
-    narrowed = sorted(names, key=lambda nm: best_link.get(nm, (-1.0, float("-inf"))),
-                      reverse=True)[:max_search_names]
-    narrowed.sort()
-    return narrowed
+    narrowed = sorted(remaining, key=lambda nm: best_link.get(nm, (-1.0, float("-inf"))),
+                      reverse=True)[:slots]
+    result = sorted(kept + narrowed)
+    return result
 
 
 def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
@@ -884,7 +899,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           sort_by="perfect", top_n=40,
                           max_eval=_COVERAGE_GROUP_MAX_EVAL,
                           keep_cap=_COVERAGE_GROUP_KEEP_CAP,
-                          max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES):
+                          max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES,
+                          must_include=None):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -965,6 +981,13 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     time it takes to find it. `None` disables this (the old unbounded
     behaviour, for a caller that already knows its pool is small).
 
+    `must_include`: "specify individual Pokemon to include" -- names that
+    survive `max_search_names`' own narrowing NO MATTER how weak their
+    best single link ranks (see `narrow_coverage_pool_names`'s own doc).
+    Passed straight through, so a name absent from `pool`/`pair_rows`
+    entirely is silently a no-op rather than an error -- the caller only
+    guarantees "if this name IS in the pool, keep it," not "add it."
+
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
     "perfect_links": int, "known_links": int, "total_links": int,
@@ -977,7 +1000,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         names = sorted({n for r in pair_rows for n in r["pair"]})
     else:
         names = list(dict.fromkeys(pool))
-    names = narrow_coverage_pool_names(pair_rows, names, max_search_names)
+    names = narrow_coverage_pool_names(pair_rows, names, max_search_names,
+                                       must_include=must_include)
     n = len(names)
     idx = {name: i for i, name in enumerate(names)}
     edge = {}
