@@ -3688,7 +3688,9 @@ with tab_counter:
                "the CLI). Use Lead / Back Search for the slow, honest, real-solver "
                "verification of whatever this recommends.")
     from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search,
-                                find_pair_cores, two_two_two_teams, coverage_group_search)
+                                joint_pool_search, find_pair_cores, two_two_two_teams,
+                                coverage_group_search, narrow_coverage_pool_names,
+                                _pair_beaten_frac)
     from team_search import build_candidate_pool
 
     # Shared with the "Coverage groups" mode's own "Send to Bring-4" button
@@ -4363,6 +4365,38 @@ with tab_counter:
             "Cap a group's worst net weakness", key="ct_cov_cap_on")
         cov_max_net = (st.slider("Max net weakness", 0, 6, 2, key="ct_cov_max_net")
                       if cov_cap_on else None)
+        cov_real_wins = st.checkbox(
+            "Also assess real pair wins (joint-race engine)", key="ct_cov_real_wins",
+            help="\"assess all of the pairs in the counter table\" -- runs "
+                 "the SAME real turn-by-turn engine Bring-4/Multi-bring4 use "
+                 "(joint_pool_search) against each selected enemy team's own "
+                 "roster (never a cross-team hypothetical pair -- those never "
+                 "actually get fielded together). A real beaten-fraction per "
+                 "pair, not just the synergy/weakness reading above. Off by "
+                 "default: real racing is genuinely slow, unlike everything "
+                 "else on this tab.")
+        cov_real_win_names = 15
+        if cov_real_wins:
+            cov_real_win_names = st.slider(
+                "Names to real-race (best-linked first)", 6, 40, 15,
+                key="ct_cov_real_win_names",
+                help="Kept small by default -- real racing costs roughly "
+                     "(names choose 2) x (enemy pairs) x a real per-race "
+                     "cost that can run tens of milliseconds each, so this "
+                     "grows fast. A live estimate appears below once you "
+                     "pick your enemy teams. Groups pulling in a name "
+                     "outside this smaller set simply show 'no real-raced "
+                     "pair' for that link.")
+            if ct_cov_teams:
+                n = cov_real_win_names
+                our_pairs = n * (n - 1) // 2
+                enemy_pair_total = sum(
+                    len(teams[t]) * (len(teams[t]) - 1) // 2 for t in ct_cov_teams)
+                est_seconds = our_pairs * enemy_pair_total * 0.03
+                st.caption(f"Estimated: {our_pairs} pairs x {enemy_pair_total} "
+                          f"enemy pairs (across {len(ct_cov_teams)} team(s)) "
+                          f"-- roughly {est_seconds:.0f}s, environment-"
+                          f"dependent.")
         if st.button("Find coverage groups", type="primary", key="ct_cov_go"):
             if not ct_cov_teams:
                 st.warning("Select at least one named team.")
@@ -4389,12 +4423,69 @@ with tab_counter:
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams
+                st.session_state["ct_cov_win_by_key"] = None
+                if cov_real_wins:
+                    all_names = sorted({n for r in cov_pair_rows for n in r["pair"]})
+                    narrowed_names = narrow_coverage_pool_names(
+                        cov_pair_rows, all_names, cov_real_win_names)
+                    # Per ENEMY TEAM, not a cross-team union: a "pair" made
+                    # of two Pokemon from two DIFFERENT saved teams never
+                    # actually gets fielded together, and racing every
+                    # cross-team combination would grow quadratically in
+                    # the total enemy-individual count instead of linearly
+                    # in team count -- the same reasoning `multi_bring4_
+                    # coverage`'s own per-enemy Stage A loop already
+                    # follows for exactly this cost reason.
+                    win_by_key_per_team = {}
+                    progress = st.progress(
+                        0.0, text=f"Real-racing {len(narrowed_names)} best-linked "
+                                 f"Pokemon vs enemy team 1/{len(enemy_teams)}...")
+                    for idx, (enemy_name, enemy_roster) in enumerate(enemy_teams.items()):
+                        win_rows = joint_pool_search(
+                            narrowed_names, enemy_roster, merged, moves, natures,
+                            typechart, excluded_items=ct_excluded)
+                        win_by_key_per_team[enemy_name] = {
+                            frozenset(r["pair"]): r for r in win_rows}
+                        progress.progress(
+                            (idx + 1) / len(enemy_teams),
+                            text=f"Real-racing... {idx + 1}/{len(enemy_teams)} "
+                                 f"enemy team(s) done")
+                    progress.empty()
+                    st.session_state["ct_cov_win_by_key"] = win_by_key_per_team
 
         cov_results = st.session_state.get("ct_cov_results")
         cov_pair_rows = st.session_state.get("ct_cov_pair_rows")
         cov_enemy_teams = st.session_state.get("ct_cov_enemy_teams") or {}
+        cov_win_by_key = st.session_state.get("ct_cov_win_by_key")
         cov_pair_by_key = ({frozenset(r["pair"]): r for r in cov_pair_rows}
                            if cov_pair_rows else {})
+
+        def _real_win_fracs(group):
+            """`_pair_beaten_frac` for `group`'s own internal links, once
+            per enemy TEAM in `cov_win_by_key` (`{enemy_name: {frozenset
+            (pair): row}}`) -- empty if none of the group's own links were
+            in the real-raced narrowed pool (e.g. the group leans on a
+            name outside the best-linked set)."""
+            if not cov_win_by_key:
+                return []
+            return [_pair_beaten_frac(team_dict[frozenset({n1, n2})])
+                   for team_dict in cov_win_by_key.values()
+                   for n1, n2 in itertools.combinations(group, 2)
+                   if frozenset({n1, n2}) in team_dict]
+
+        def _real_win_rate(group):
+            fracs = _real_win_fracs(group)
+            return sum(fracs) / len(fracs) if fracs else None
+
+        cov_resort = "(search order)"
+        if cov_win_by_key:
+            cov_resort = st.selectbox(
+                "Re-sort shown results by", ["(search order)", "Real pair win rate"],
+                key="ct_cov_resort",
+                help="Re-orders what's already shown -- does not re-run the "
+                     "search. Groups with no real-raced pair at all sort "
+                     "last.")
+
         # "for the top 5 in each group show the pair performance" -- cheap,
         # no new racing (straight off `cov_pair_by_key`, already computed
         # by the search above), unlike the opt-in "Run bring-4" button
@@ -4410,7 +4501,13 @@ with tab_counter:
                 if not r["rows"]:
                     st.info("No groups of this size passed the current filters.")
                     continue
-                for i, row in enumerate(r["rows"], start=1):
+                shown_rows = r["rows"]
+                if cov_resort == "Real pair win rate":
+                    shown_rows = sorted(
+                        shown_rows,
+                        key=lambda row: (_real_win_rate(row["group"]) is None,
+                                         -(_real_win_rate(row["group"]) or 0.0)))
+                for i, row in enumerate(shown_rows, start=1):
                     exposed = {t: n for t, n in row["net_weakness"].items() if n > 0}
                     score_str = f"{row['avg_score']:.1f}" if row["avg_score"] is not None else "-"
                     with st.expander(f"#{i}: {' / '.join(row['group'])}",
@@ -4421,6 +4518,14 @@ with tab_counter:
                             f"Measured links: {row['known_links']}/{row['total_links']}  |  "
                             f"Mutual coverage: {row['coverage_pct']:.0f}%  |  "
                             f"Avg Score: {score_str}")
+                        if cov_win_by_key:
+                            real_fracs = _real_win_fracs(row["group"])
+                            wr_str = (f"{sum(real_fracs)/len(real_fracs)*100:.0f}%"
+                                     if real_fracs else "no real-raced pair")
+                            possible = row["total_links"] * len(cov_win_by_key)
+                            st.caption(f"Real pair win rate: {wr_str} "
+                                      f"({len(real_fracs)}/{possible} "
+                                      f"link-vs-enemy-team combos raced)")
                         weak_str = ("Worst net weakness: " + str(row["worst_net_weakness"])
                                    + ("  |  Net-weak types: " + ", ".join(
                                        f"{t} ({n})" for t, n in exposed.items())

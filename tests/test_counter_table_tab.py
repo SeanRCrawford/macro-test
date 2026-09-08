@@ -116,6 +116,30 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         self.assertGreater(len(at.dataframe), dataframes_before)
 
+    def test_real_win_rate_checkbox_runs_and_shows_estimate_and_results(self):
+        """"assess all of the pairs in the counter table and link that to
+        the coverage group search" -- the opt-in real-racing checkbox must
+        show a cost estimate, run without crashing on a small scope, and
+        surface a real win-rate reading."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        teams_ms = [m for m in at.multiselect if m.key == "ct_cov_teams"][0]
+        self.assertTrue(teams_ms.options)
+        teams_ms.set_value([teams_ms.options[0]]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_real_wins"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        win_sliders = [s for s in at.slider if s.key == "ct_cov_real_win_names"]
+        self.assertTrue(win_sliders)
+        win_sliders[0].set_value(6).run()
+        self.assertTrue(any("Estimated:" in c.value for c in at.caption))
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(sb.key == "ct_cov_resort" for sb in at.selectbox))
+        self.assertTrue(any("Real pair win rate" in c.value for c in at.caption))
+
     def test_choice_scarf_is_excluded_by_default(self):
         at = app()
         cb = [c for c in at.checkbox if c.key == "ct_allow_scarf"][0]

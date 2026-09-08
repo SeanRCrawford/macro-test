@@ -849,6 +849,34 @@ _COVERAGE_GROUP_MAX_EVAL = 2_000_000
 _COVERAGE_GROUP_MAX_SEARCH_NAMES = 40
 
 
+def narrow_coverage_pool_names(pair_rows, names, max_search_names):
+    """`coverage_group_search`'s own pool-narrowing step, factored out so a
+    caller wanting to run something ELSE (e.g. a real `joint_pool_search`
+    win-rate pass) against the SAME narrowed candidate set doesn't have to
+    duplicate -- or silently drift from -- this ranking. Cheap, one-pass,
+    O(pairs): each name is ranked by its own best single link (highest
+    `mutual_resist.coverage_frac`, tie-broken by `avg_score`), and only the
+    top `max_search_names` survive. `None` (or a `names` already at or
+    under the cap) returns `names` unchanged."""
+    if max_search_names is None or len(names) <= max_search_names:
+        return list(dict.fromkeys(names))
+    names_set = set(names)
+    best_link = {}
+    for r in pair_rows:
+        a, b = r["pair"]
+        if a not in names_set or b not in names_set:
+            continue
+        key = ((r.get("mutual_resist") or {}).get("coverage_frac", 0.0),
+              r.get("avg_score") or 0.0)
+        for nm in (a, b):
+            if key > best_link.get(nm, (-1.0, float("-inf"))):
+                best_link[nm] = key
+    narrowed = sorted(names, key=lambda nm: best_link.get(nm, (-1.0, float("-inf"))),
+                      reverse=True)[:max_search_names]
+    narrowed.sort()
+    return narrowed
+
+
 def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           pool=None, prefix_limits=(("Mega ", 2),),
                           max_missing_frac=0.4, no_duplicate_typing=True,
@@ -949,21 +977,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         names = sorted({n for r in pair_rows for n in r["pair"]})
     else:
         names = list(dict.fromkeys(pool))
-    if max_search_names is not None and len(names) > max_search_names:
-        names_set = set(names)
-        best_link = {}
-        for r in pair_rows:
-            a, b = r["pair"]
-            if a not in names_set or b not in names_set:
-                continue
-            key = ((r.get("mutual_resist") or {}).get("coverage_frac", 0.0),
-                  r.get("avg_score") or 0.0)
-            for nm in (a, b):
-                if key > best_link.get(nm, (-1.0, float("-inf"))):
-                    best_link[nm] = key
-        names = sorted(names, key=lambda nm: best_link.get(nm, (-1.0, float("-inf"))),
-                      reverse=True)[:max_search_names]
-        names.sort()
+    names = narrow_coverage_pool_names(pair_rows, names, max_search_names)
     n = len(names)
     idx = {name: i for i, name in enumerate(names)}
     edge = {}

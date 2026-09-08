@@ -8102,3 +8102,36 @@ class TestCoverageGroupSearchLargePoolNarrowing(unittest.TestCase):
             rows, merged, pool=names, group_sizes=(3,), top_n=5,
             no_duplicate_typing=False, max_search_names=None)
         self.assertTrue(result[3]["rows"])
+
+
+class TestNarrowCoveragePoolNames(unittest.TestCase):
+    """`narrow_coverage_pool_names`, `coverage_group_search`'s own
+    pool-narrowing step factored out so a caller running something else
+    (a real `joint_pool_search` win-rate pass) against the SAME narrowed
+    set doesn't have to duplicate the ranking."""
+
+    def test_keeps_the_best_linked_names_by_coverage_then_score(self):
+        rows = [
+            _fake_coverage_row(("A", "B"), True, 90.0, 100.0),
+            _fake_coverage_row(("A", "C"), True, 10.0, 100.0),
+            _fake_coverage_row(("B", "C"), True, 10.0, 100.0),
+            _fake_coverage_row(("D", "E"), True, 5.0, 500.0),
+        ]
+        # A and B each have a strong (90%) link; C/D/E only ever reach 10%
+        # or worse -- narrowing to 2 must keep exactly {A, B}.
+        narrowed = cf.narrow_coverage_pool_names(rows, ["A", "B", "C", "D", "E"], 2)
+        self.assertEqual(narrowed, ["A", "B"])
+
+    def test_returns_unchanged_when_already_at_or_under_the_cap(self):
+        rows = [_fake_coverage_row(("A", "B"), True, 50.0, 0.0)]
+        self.assertEqual(cf.narrow_coverage_pool_names(rows, ["A", "B"], 5), ["A", "B"])
+
+    def test_none_cap_returns_names_unchanged(self):
+        rows = [_fake_coverage_row(("A", "B"), True, 50.0, 0.0)]
+        names = ["B", "A", "C"]
+        self.assertEqual(cf.narrow_coverage_pool_names(rows, names, None), names)
+
+    def test_a_name_with_no_links_at_all_still_sorts_in_deterministically(self):
+        rows = [_fake_coverage_row(("A", "B"), True, 90.0, 0.0)]
+        narrowed = cf.narrow_coverage_pool_names(rows, ["A", "B", "Z"], 2)
+        self.assertEqual(set(narrowed), {"A", "B"})
