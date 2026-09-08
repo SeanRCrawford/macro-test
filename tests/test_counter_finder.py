@@ -8003,3 +8003,102 @@ class TestCoverageGroupSearchRealData(unittest.TestCase):
         for row in result[4]["rows"]:
             sigs = [frozenset(self.merged[n]["types"]) for n in row["group"]]
             self.assertEqual(len(sigs), len(set(sigs)), row["group"])
+
+
+class TestCoverageGroupSearchMegaLegality(unittest.TestCase):
+    """`coverage_group_search`'s own hard exclusion for a Mega alongside
+    its own base form -- distinct from `find_pair_cores`'s pairwise
+    exclusion (which this function reuses via `edge`, not recomputes),
+    since a caller can widen `max_missing_frac` far enough to otherwise
+    let an illegal pair slip through as merely 'unmeasured'."""
+
+    # Charizard X changes type (Fire/Dragon) from its base form
+    # (Fire/Flying) -- `no_duplicate_typing` alone would NOT catch this
+    # collision, isolating the dedicated `illegal_pair` check.
+    POOL = ["Mega Charizard X", "Charizard", "Mega Gyarados", "Gyarados",
+           "Kingambit", "Garchomp", "Whimsicott", "Sinistcha"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.merged = merged
+        self.pair_rows = cf.find_pair_cores(
+            self.POOL, merged, moves, natures, typechart, self.W["teams"])
+
+    def test_mega_and_own_base_form_never_share_a_group_even_at_full_missing_budget(self):
+        import itertools as _it
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(3, 4, 6), top_n=200,
+            max_missing_frac=1.0, no_duplicate_typing=False,
+            prefix_limits=(("Mega ", 6),))
+        for r in result.values():
+            for row in r["rows"]:
+                for a, b in _it.combinations(row["group"], 2):
+                    self.assertFalse(cf._mega_base_overlap((a, b)), row["group"])
+
+    def test_two_different_megas_may_share_a_group(self):
+        """UNLIKE `find_pair_cores`'s own pairwise "never two megas as a
+        LEAD PAIR" rule, a coverage GROUP is a team-composition question
+        -- two different Megas (neither the other's base form) may
+        legally appear together, their own unscoreable link simply
+        counting as 'missing'."""
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4, 6), top_n=200,
+            max_missing_frac=1.0, no_duplicate_typing=False,
+            prefix_limits=(("Mega ", 6),))
+        found = any(
+            sum(1 for n in row["group"] if n.startswith("Mega ")) >= 2
+            for r in result.values() for row in r["rows"])
+        self.assertTrue(found, "expected at least one group with 2 different Megas")
+
+    def test_a_returned_group_with_two_megas_never_crashes_bring4_search(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4, 6), top_n=200,
+            max_missing_frac=1.0, no_duplicate_typing=False,
+            prefix_limits=(("Mega ", 6),))
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        two_mega_groups = [
+            row["group"] for r in result.values() for row in r["rows"]
+            if sum(1 for n in row["group"] if n.startswith("Mega ")) >= 2]
+        self.assertTrue(two_mega_groups)
+        for group in two_mega_groups[:3]:
+            cf.bring4_search(list(group), ["Sableye", "Ariados"], merged, moves,
+                             natures, typechart)  # must not raise
+
+
+class TestCoverageGroupSearchLargePoolNarrowing(unittest.TestCase):
+    """`max_search_names`: "expand the search pool to 300" must not make
+    the DFS itself combinatorial in the raw pool size -- a cheap, one-pass
+    pre-narrow to the best-linked `max_search_names` names keeps the
+    search bounded regardless of how big `pool` is."""
+
+    def test_narrows_a_large_synthetic_pool_before_searching(self):
+        import itertools as _it
+        names = [f"M{i}" for i in range(120)]
+        merged = {n: {"types": ["Normal"]} for n in names}
+        # Every pair scored, so there is no missing-link pruning to lean
+        # on -- exactly the "real roster data has almost no missing
+        # links" case the docstring calls out.
+        rows = [_fake_coverage_row(p, True, 50.0, float(i))
+               for i, p in enumerate(_it.combinations(names, 2))]
+        result = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=5,
+            no_duplicate_typing=False, max_search_names=15)
+        # C(120,6) would be ~300M -- if this ran unnarrowed it would blow
+        # way past `max_eval`; narrowed to 15 candidates, C(15,6)=5005 is
+        # small enough to finish exhaustively.
+        self.assertFalse(result[6]["aborted"])
+        self.assertLess(result[6]["seen"], 6000)
+
+    def test_max_search_names_none_restores_the_old_unbounded_behaviour(self):
+        import itertools as _it
+        names = [f"M{i}" for i in range(10)]
+        merged = {n: {"types": ["Normal"]} for n in names}
+        rows = [_fake_coverage_row(p, True, 50.0, 0.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(3,), top_n=5,
+            no_duplicate_typing=False, max_search_names=None)
+        self.assertTrue(result[3]["rows"])

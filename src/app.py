@@ -4324,12 +4324,13 @@ with tab_counter:
                    "tool, sourced from this roster's own real pair data "
                    "(find_pair_cores) instead of a pasted table.")
         cov_pool_size = st.slider(
-            "Search pool size (top-Score Pokemon)", 10, 40, 25, key="ct_cov_pool",
-            help="Kept modest so the search is actually exhaustive (fully "
-                 "checked), not a partial best-effort sample -- pool<=30 "
-                 "for group-of-6 stays fast and complete, matching the "
-                 "same pool-size discipline every other exhaustive search "
-                 "in this tab already relies on.")
+            "Search pool size (top-Score Pokemon)", 10, 300, 25, key="ct_cov_pool",
+            help="How many top-Score Pokemon find_pair_cores scores pairs "
+                 "for -- cheap even at 300 (a single O(pool^2) pass). The "
+                 "group search itself then narrows to the best-connected "
+                 "~40 of those before searching combinations, so raising "
+                 "this widens what gets CONSIDERED without the search "
+                 "itself blowing up.")
         ct_cov_teams = st.multiselect(
             "Enemy universe (named teams)", list(teams), default=list(teams),
             key="ct_cov_teams",
@@ -4386,8 +4387,19 @@ with tab_counter:
                         max_net_weakness=cov_max_net,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n)
                 st.session_state["ct_cov_results"] = cov_results
+                st.session_state["ct_cov_pair_rows"] = cov_pair_rows
+                st.session_state["ct_cov_enemy_teams"] = enemy_teams
 
         cov_results = st.session_state.get("ct_cov_results")
+        cov_pair_rows = st.session_state.get("ct_cov_pair_rows")
+        cov_enemy_teams = st.session_state.get("ct_cov_enemy_teams") or {}
+        cov_pair_by_key = ({frozenset(r["pair"]): r for r in cov_pair_rows}
+                           if cov_pair_rows else {})
+        # "for the top 5 in each group show the pair performance" -- cheap,
+        # no new racing (straight off `cov_pair_by_key`, already computed
+        # by the search above), unlike the opt-in "Run bring-4" button
+        # below which is a real re-race and so stays behind a click.
+        PAIR_DETAIL_TOP = 5
         if cov_results:
             first_shown = True
             for size in sorted(cov_results):
@@ -4414,6 +4426,55 @@ with tab_counter:
                                        f"{t} ({n})" for t, n in exposed.items())
                                       if exposed else ""))
                         st.caption(weak_str)
+                        if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
+                            st.caption("Pair performance (this group's own links):")
+                            pair_table = []
+                            for n1, n2 in itertools.combinations(row["group"], 2):
+                                pr = cov_pair_by_key.get(frozenset({n1, n2}))
+                                if pr is None:
+                                    pair_table.append({"Pair": f"{n1} + {n2}",
+                                                       "Coverage": "no data (illegal pair)",
+                                                       "Shared weak": "-", "Avg Score": "-"})
+                                    continue
+                                mr = pr["mutual_resist"]
+                                pair_table.append({
+                                    "Pair": f"{n1} + {n2}",
+                                    "Coverage": "PERFECT" if mr["perfect"]
+                                               else f"{mr['coverage_frac']*100:.0f}%",
+                                    "Shared weak": len(pr["shared_weak"]),
+                                    "Avg Score": round(pr["avg_score"], 1)})
+                            st.dataframe(pd.DataFrame(pair_table), width='stretch',
+                                        hide_index=True)
+                        if i <= PAIR_DETAIL_TOP and cov_enemy_teams:
+                            if st.button("Run bring-4 vs enemy teams",
+                                        key=f"ct_cov_b4_{size}_{i}"):
+                                b4_rows = []
+                                with st.spinner(f"Running bring-4 for this group "
+                                                f"against {len(cov_enemy_teams)} "
+                                                f"enemy team(s)..."):
+                                    for enemy_name, enemy_roster in cov_enemy_teams.items():
+                                        _pairs, bring4_rows = bring4_search(
+                                            list(row["group"]), enemy_roster, merged,
+                                            moves, natures, typechart,
+                                            excluded_items=ct_excluded)
+                                        best = bring4_rows[0] if bring4_rows else None
+                                        if best is None:
+                                            continue
+                                        wr = best["worst_pair_row"]
+                                        beaten = wr["pairs_swept"] + wr["pairs_traded"]
+                                        b4_rows.append({
+                                            "Enemy team": enemy_name,
+                                            "Best bring-4": " / ".join(best["bring4"]),
+                                            "Worst pair beaten": f"{beaten}/{wr['pairs_total']}",
+                                            "Uncovered enemy pairs":
+                                                len(best["uncovered_enemy_pairs"]),
+                                            "Pairs good": f"{best['pairs_good']}/"
+                                                         f"{best['pairs_total']}"})
+                                st.session_state[f"ct_cov_b4_result_{size}_{i}"] = b4_rows
+                            b4_result = st.session_state.get(f"ct_cov_b4_result_{size}_{i}")
+                            if b4_result:
+                                st.dataframe(pd.DataFrame(b4_result), width='stretch',
+                                            hide_index=True)
                         if st.button("Send to Bring-4", key=f"ct_cov_send_{size}_{i}"):
                             st.session_state["ct_mode"] = "Bring-4 (one enemy roster)"
                             st.session_state["ct_b4_our"] = _PASTE_OUR_LABEL

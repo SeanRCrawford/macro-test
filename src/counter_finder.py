@@ -846,6 +846,7 @@ def two_two_two_teams(pair_rows, merged, top_pairs=30, top_n=10,
 _COVERAGE_GROUP_SIZES = (3, 4, 6)
 _COVERAGE_GROUP_KEEP_CAP = 20_000
 _COVERAGE_GROUP_MAX_EVAL = 2_000_000
+_COVERAGE_GROUP_MAX_SEARCH_NAMES = 40
 
 
 def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
@@ -854,7 +855,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           max_net_weakness=None, min_avg_score=None,
                           sort_by="perfect", top_n=40,
                           max_eval=_COVERAGE_GROUP_MAX_EVAL,
-                          keep_cap=_COVERAGE_GROUP_KEEP_CAP):
+                          keep_cap=_COVERAGE_GROUP_KEEP_CAP,
+                          max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -918,6 +920,23 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     every other exhaustive search in this module already relies on) for a
     search that's actually exhaustive rather than a partial sample.
 
+    `max_search_names`: the REAL fix for "expand the search pool" requests
+    that would otherwise make this take hours -- `find_pair_cores` itself
+    (an O(pool^2) pair-score, already cheap) can be run against a large
+    pool just fine, but the DFS below is combinatorial in that pool size,
+    and real roster data has almost no MISSING links to prune on (unlike
+    the standalone tool's own pasted-table gaps), so `max_missing_frac`
+    barely narrows anything -- a 300-name pool would otherwise just
+    enumerate most of C(300,6) before `max_eval` even kicks in. Before the
+    DFS runs, `pool`/`pair_rows`'s own names are narrowed to the best
+    `max_search_names` by each name's OWN best single link (highest
+    `coverage_frac`, tie-broken by `avg_score`) -- a cheap, one-pass
+    O(pairs) ranking, not a second combinatorial search. A name whose best
+    partner is mediocre is exactly the one least likely to anchor a
+    top-ranked GROUP anyway, so this rarely changes the answer, just the
+    time it takes to find it. `None` disables this (the old unbounded
+    behaviour, for a caller that already knows its pool is small).
+
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
     "perfect_links": int, "known_links": int, "total_links": int,
@@ -930,6 +949,21 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         names = sorted({n for r in pair_rows for n in r["pair"]})
     else:
         names = list(dict.fromkeys(pool))
+    if max_search_names is not None and len(names) > max_search_names:
+        names_set = set(names)
+        best_link = {}
+        for r in pair_rows:
+            a, b = r["pair"]
+            if a not in names_set or b not in names_set:
+                continue
+            key = ((r.get("mutual_resist") or {}).get("coverage_frac", 0.0),
+                  r.get("avg_score") or 0.0)
+            for nm in (a, b):
+                if key > best_link.get(nm, (-1.0, float("-inf"))):
+                    best_link[nm] = key
+        names = sorted(names, key=lambda nm: best_link.get(nm, (-1.0, float("-inf"))),
+                      reverse=True)[:max_search_names]
+        names.sort()
     n = len(names)
     idx = {name: i for i, name in enumerate(names)}
     edge = {}
@@ -945,6 +979,24 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     tags = [[pi for pi, (prefix, _cap) in enumerate(prefix_limits)
             if nm.startswith(prefix)] for nm in names]
     caps = [cap for _prefix, cap in prefix_limits]
+    # A Mega alongside its own base form is a HARD exclusion (the SAME
+    # Pokemon counted twice, not two teammates) -- `find_pair_cores` never
+    # generates that pair's row at all, which would otherwise let it slip
+    # through as merely a "missing" link within `max_missing_frac`'s
+    # budget. Checked here too, incrementally, so a caller handing a
+    # returned group straight to `bring4_search` never hits its own "can't
+    # bring both a Mega and its own base form" ValueError. UNLIKE
+    # `find_pair_cores`'s own pairwise exclusion, two DIFFERENT Megas are
+    # NOT hard-excluded here: that rule is about a LEAD PAIR (an unscoreable
+    # question -- "does this pair cover weaknesses" doesn't apply when only
+    # one could ever be transformed at once), but a coverage GROUP is a
+    # team-composition question (`prefix_limits`'s own "how many may share
+    # one group" already governs it, same as `multi_bring4_exhaustive`'s
+    # `max_megas`) -- `bring4_search` already handles 2 megas in one team
+    # gracefully via its own bring-4-consistent-mega machinery, no crash
+    # risk there. The missing Mega-vs-Mega link still counts against
+    # `max_missing_frac`'s budget like any other unscored pair.
+    illegal_pair = [[bool(_mega_base_overlap((a, b))) for b in names] for a in names]
 
     def score_for_sort(row):
         return row["avg_score"] if row["avg_score"] is not None else float("-inf")
@@ -1014,6 +1066,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 return
             for i in range(start, n):
                 if no_duplicate_typing and type_sig[i] in seen_types:
+                    continue
+                if any(illegal_pair[pick[t]][i] for t in range(k)):
                     continue
                 add = sum(1 for t in range(k) if (pick[t], i) not in edge)
                 if missing + add > max_missing:

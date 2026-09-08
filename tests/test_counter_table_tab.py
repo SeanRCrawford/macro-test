@@ -91,6 +91,30 @@ class TestCounterTableTabExists(unittest.TestCase):
         [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any("Groups of 3" in md.value for md in at.markdown))
+        # "for the top 5 in each group show the pair performance" -- a
+        # dataframe of the group's own internal pairs, no button needed.
+        self.assertTrue(len(at.dataframe) >= 1)
+
+    def test_coverage_groups_run_bring4_button_works(self):
+        """"add an option to run the actual pair performance vs enemy
+        teams in a proper bring 4" -- clicking it must not crash and must
+        render a real bring-4 result table."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(12).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        teams_ms = [m for m in at.multiselect if m.key == "ct_cov_teams"][0]
+        if teams_ms.options:
+            teams_ms.set_value([teams_ms.options[0]]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        b4_buttons = [b for b in at.button if b.key and b.key.startswith("ct_cov_b4_3_")]
+        self.assertTrue(b4_buttons)
+        dataframes_before = len(at.dataframe)
+        b4_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertGreater(len(at.dataframe), dataframes_before)
 
     def test_choice_scarf_is_excluded_by_default(self):
         at = app()
