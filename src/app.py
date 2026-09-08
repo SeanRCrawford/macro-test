@@ -380,23 +380,32 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     return list(all_names), {}
 
 
-def their_side_pool(key_prefix, teams, all_names):
+def their_side_pool(key_prefix, teams, all_names, team_meta=None):
     """Where THEIR six come from. Mirrors our_side_pool.
 
     The Battle Viewer could only face a saved team, so a matchup against six
     Pokemon you had just seen -- the actual team-preview situation -- could not
     be set up there at all.
+
+    Returns (names, sets), same "THE SETS TRAVEL WITH THE NAMES" contract
+    `our_side_pool` already documents -- a saved/pasted team's real per-mon
+    item/ability/nature/EVs (`team_meta[pick]["sets"]`) used to be silently
+    dropped here, so a real team.txt paste's Choice Scarf/Life Orb/etc. never
+    reached the Battle Viewer or Battle Simulator's actual combatants; every
+    enemy mon fell back to mbsmogon.xlsx's usage-default item instead (e.g. a
+    real Life-Orb Basculegion silently became a Choice-Scarf one, since that's
+    its own usage-default item).
     """
     source = st.radio("Their side", ["A saved team", "Pick 6"], index=0,
                       horizontal=True, key=f"{key_prefix}_foe_source")
     if source == "A saved team":
         if not teams:
             st.warning("No saved teams in data/teams.")
-            return []
+            return [], {}
         pick = st.selectbox("Opponent team", list(teams), key=f"{key_prefix}_foe_saved")
-        return list(teams[pick])
+        return list(teams[pick]), dict((team_meta or {}).get(pick, {}).get("sets") or {})
     return st.multiselect("Their six", all_names, max_selections=6,
-                          key=f"{key_prefix}_foe_manual")
+                          key=f"{key_prefix}_foe_manual"), {}
 
 
 def enemy_side_input(key_prefix, teams, team_meta, all_names, merged,
@@ -1364,7 +1373,8 @@ def sim_build_battle(our4, their4, merged, moves_db, natures, typechart,
     return battle, movesets
 
 
-def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, our_sets=None):
+def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, our_sets=None,
+                          enemy_sets=None):
     """Every one of their C(6,2)=15 possible leads, each paired with a
     plausible back pair, ranked worst-for-us first -- via `fast_eval.
     fast_pair_score`, the SAME cheap threat-matrix screen `matchup_search.
@@ -1399,11 +1409,11 @@ def sim_rank_enemy_brings(our4, their6, merged, moves_db, natures, typechart, ou
     ranked = []
     for lead, backs in by_lead.items():
         lead_score = fast_pair_score(our_lead, lead, merged, moves_db, natures, typechart,
-                                     our_sets=our_sets)
+                                     our_sets=our_sets, enemy_sets=enemy_sets)
         best_back, best_back_margin = backs[0], None
         for back in backs:
             back_score = fast_pair_score(our_lead, back, merged, moves_db, natures, typechart,
-                                         our_sets=our_sets)
+                                         our_sets=our_sets, enemy_sets=enemy_sets)
             if best_back_margin is None or back_score["margin"] < best_back_margin:
                 best_back_margin, best_back = back_score["margin"], back
         ranked.append((lead_score["margin"], list(lead) + list(best_back), list(lead)))
@@ -3678,12 +3688,21 @@ with tab_counter:
                "the CLI). Use Lead / Back Search for the slow, honest, real-solver "
                "verification of whatever this recommends.")
     from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search,
-                                find_pair_cores, two_two_two_teams)
+                                joint_pool_search, find_pair_cores, two_two_two_teams,
+                                coverage_group_search, narrow_coverage_pool_names,
+                                _pair_beaten_frac)
     from team_search import build_candidate_pool
+
+    # Shared with the "Coverage groups" mode's own "Send to Bring-4" button
+    # below, which pre-fills Bring-4 mode's own paste box with a candidate
+    # group -- both must agree on this exact label for the hand-off to land
+    # on the right widget option.
+    _PASTE_OUR_LABEL = "\U0001f4cb Paste a pokepaste"
 
     ct_mode = st.radio(
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
-                 "Joint pair search", "2-2-2 teambuilding"], key="ct_mode", horizontal=True)
+                 "Joint pair search", "2-2-2 teambuilding", "Coverage groups"],
+        key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
         "Allow Choice Scarf", value=False, key="ct_allow_scarf",
@@ -3724,7 +3743,7 @@ with tab_counter:
             vs_roster = list(teams[ct_vs_name])
             vs_sets = team_meta.get(ct_vs_name, {}).get("sets") or {}
         SEARCH_POOL = "\U0001f50d Search a pool for the best team"
-        PASTE_OUR = "\U0001f4cb Paste a pokepaste"
+        PASTE_OUR = _PASTE_OUR_LABEL
         ct_our_source = st.selectbox(
             "Our 6", ["(current Team Builder team)", SEARCH_POOL, PASTE_OUR] + list(teams),
             key="ct_b4_our",
@@ -4143,7 +4162,7 @@ with tab_counter:
                  "Protect-safe": r["pairs_protect_safe"]}
                 for r in rows[:top_n2]]), width='stretch', hide_index=True)
 
-    else:  # 2-2-2 teambuilding
+    elif ct_mode == "2-2-2 teambuilding":
         st.caption("'2-2-2 teambuilding': using core PAIRS that work well "
                    "together to make your lead unpredictable. Every pair "
                    "drawn from the pool is scored three ways -- defensive "
@@ -4176,6 +4195,14 @@ with tab_counter:
                  "this, instead of just ranking it lower.")
         max_net3 = (st.slider("Max net weakness", 0, 6, 2, key="ct_222_max_net")
                    if cap_on else None)
+        max_megas3 = st.slider("Max Mega-stone users on a team", 0, 6, 2,
+                               key="ct_222_max_megas",
+                               help="VGC's real 'only one Mega Evolution per "
+                                    "team per game' -- a pair is never two "
+                                    "Megas to begin with (find_pair_cores' own "
+                                    "rule), so a team at this cap always has "
+                                    "its (at most 2) stone-holders split "
+                                    "across two different pairs.")
         if st.button("Find 2-2-2 cores", type="primary", key="ct_222_go"):
             if not ct_222_teams:
                 st.warning("Select at least one named team.")
@@ -4188,7 +4215,8 @@ with tab_counter:
                                                 typechart, enemy_teams)
                     team_rows = two_two_two_teams(pair_rows, merged,
                                                   top_pairs=top_pairs3, top_n=top_teams3,
-                                                  max_net_weakness=max_net3)
+                                                  max_net_weakness=max_net3,
+                                                  max_megas=max_megas3)
                 st.session_state["ct_222_pair_rows"] = pair_rows
                 st.session_state["ct_222_team_rows"] = team_rows
                 st.session_state["ct_222_top_pairs_shown"] = top_pairs3
@@ -4247,6 +4275,28 @@ with tab_counter:
                         for r in mutual_pairs
                         for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
 
+            pin_pairs = sorted(
+                (r for r in pair_rows if r["offensive_pin"] is not None),
+                key=lambda r: -r["offensive_pin"]["coverage_frac"])
+            if pin_pairs:
+                perfect_count = sum(1 for r in pin_pairs
+                                    if r["offensive_pin"]["coverage_frac"] >= 1.0)
+                with st.expander(f"Offensive-pin pairs ({perfect_count} perfect of "
+                                f"{len(pin_pairs)} found)"):
+                    st.caption("A real spread move (hits both opposing Pokemon at "
+                              "once) backed by a partner move that answers most of "
+                              "what would otherwise resist it -- the enemy can't "
+                              "safely Protect, switch, or stay in.")
+                    st.dataframe(pd.DataFrame([
+                        {"Pin": f"{op['pin_user']} ({op['pin_move']}, {op['pin_type']})",
+                         "Follow-up": f"{op['follow_up_user']} ({op['follow_up_move'] or '-'})",
+                         "Coverage": ("PERFECT" if op["coverage_frac"] >= 1.0
+                                     else f"{op['coverage_frac']*100:.0f}%"),
+                         "Resistors answered": f"{len(op['covered'])}/{len(op['resisted_by'])}",
+                         "Avg Score": round(r["avg_score"], 1)}
+                        for r in pin_pairs
+                        for op in [r["offensive_pin"]]]), width='stretch', hide_index=True)
+
         if team_rows:
             st.markdown(f"**Top {len(team_rows)} 2-2-2 teams** (3 disjoint "
                        f"pairs) -- lowest worst-case team-wide net "
@@ -4265,6 +4315,290 @@ with tab_counter:
         elif pair_rows:
             st.info("No 3-disjoint-pair team could be formed from the top "
                     "pairs shown -- raise 'Top pairs to show'.")
+
+    else:  # Coverage groups
+        st.caption("\"Coverage group finder\": every legal group of the "
+                   "sizes below drawn from the pool, ranked by how "
+                   "completely its OWN internal pairs -- every one of the "
+                   "group's own links, not just 3 designated ones the way "
+                   "2-2-2 teambuilding combines disjoint pairs -- mutually "
+                   "cover each other's weaknesses. Ported from a standalone "
+                   "tool, sourced from this roster's own real pair data "
+                   "(find_pair_cores) instead of a pasted table.")
+        cov_pool_size = st.slider(
+            "Search pool size (top-Score Pokemon)", 10, 300, 25, key="ct_cov_pool",
+            help="How many top-Score Pokemon find_pair_cores scores pairs "
+                 "for -- cheap even at 300 (a single O(pool^2) pass). The "
+                 "group search itself then narrows to the best-connected "
+                 "~40 of those before searching combinations, so raising "
+                 "this widens what gets CONSIDERED without the search "
+                 "itself blowing up.")
+        ct_cov_teams = st.multiselect(
+            "Enemy universe (named teams)", list(teams), default=list(teams),
+            key="ct_cov_teams",
+            help="Every distinct Pokemon across the selected teams forms "
+                 "the '1v1 threat coverage' universe find_pair_cores scores "
+                 "each pair against -- defaults to every saved team.")
+        cov_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_cov_include",
+            help="Guaranteed a real spot in the search -- unlike an "
+                 "ordinary pool member, these are never narrowed away for "
+                 "having a merely mediocre best link (see 'Search pool "
+                 "size' above), and are added to the pool even if they "
+                 "wouldn't otherwise rank in its top-Score cutoff.")
+        cov_sizes = st.multiselect("Group sizes", [3, 4, 5, 6], default=[3, 4, 6],
+                                   key="ct_cov_sizes")
+        cc1, cc2, cc3 = st.columns(3)
+        cov_sort_label = cc1.selectbox(
+            "Rank by", ["Perfect links", "Mutual coverage", "Avg score"],
+            key="ct_cov_sort")
+        cov_top_n = cc2.slider("Top groups to show", 5, 40, 15, key="ct_cov_top_n")
+        cov_missing_pct = cc3.slider(
+            "Unmeasured links allowed (%)", 0, 100, 40, key="ct_cov_missing",
+            help="How much of a group's own links may have no scored pair "
+                 "at all (a Mega alongside its own base form, or two "
+                 "different Megas together, are never scored as a pair to "
+                 "begin with) before the group is dropped.")
+        cov_dup_typing = st.checkbox(
+            "Prevent duplicate typing", value=True, key="ct_cov_dup",
+            help="No two members of a group may share the exact same "
+                 "two-type combination (e.g. two Dragon/Flying members) -- "
+                 "a redundant matchup profile even when their movepools "
+                 "differ.")
+        cov_max_megas = st.slider(
+            "Max Mega-stone users in a group", 0, 6, 2, key="ct_cov_max_megas",
+            help="VGC's real 'only one Mega Evolution per team per game'.")
+        cov_cap_on = st.checkbox(
+            "Cap a group's worst net weakness", key="ct_cov_cap_on")
+        cov_max_net = (st.slider("Max net weakness", 0, 6, 2, key="ct_cov_max_net")
+                      if cov_cap_on else None)
+        cov_real_wins = st.checkbox(
+            "Also assess real pair wins (joint-race engine)", key="ct_cov_real_wins",
+            help="\"assess all of the pairs in the counter table\" -- runs "
+                 "the SAME real turn-by-turn engine Bring-4/Multi-bring4 use "
+                 "(joint_pool_search) against each selected enemy team's own "
+                 "roster (never a cross-team hypothetical pair -- those never "
+                 "actually get fielded together). A real beaten-fraction per "
+                 "pair, not just the synergy/weakness reading above. Off by "
+                 "default: real racing is genuinely slow, unlike everything "
+                 "else on this tab.")
+        cov_real_win_names = 15
+        if cov_real_wins:
+            cov_real_win_names = st.slider(
+                "Names to real-race (best-linked first)", 6, 40, 15,
+                key="ct_cov_real_win_names",
+                help="Kept small by default -- real racing costs roughly "
+                     "(names choose 2) x (enemy pairs) x a real per-race "
+                     "cost that can run tens of milliseconds each, so this "
+                     "grows fast. A live estimate appears below once you "
+                     "pick your enemy teams. Groups pulling in a name "
+                     "outside this smaller set simply show 'no real-raced "
+                     "pair' for that link.")
+            if ct_cov_teams:
+                n = cov_real_win_names
+                our_pairs = n * (n - 1) // 2
+                enemy_pair_total = sum(
+                    len(teams[t]) * (len(teams[t]) - 1) // 2 for t in ct_cov_teams)
+                est_seconds = our_pairs * enemy_pair_total * 0.03
+                st.caption(f"Estimated: {our_pairs} pairs x {enemy_pair_total} "
+                          f"enemy pairs (across {len(ct_cov_teams)} team(s)) "
+                          f"-- roughly {est_seconds:.0f}s, environment-"
+                          f"dependent.")
+        if st.button("Find coverage groups", type="primary", key="ct_cov_go"):
+            if not ct_cov_teams:
+                st.warning("Select at least one named team.")
+            elif not cov_sizes:
+                st.warning("Pick at least one group size.")
+            else:
+                pool = build_candidate_pool(merged, top_n=cov_pool_size, prefs=prefs)
+                # "Always include" wins over the top-Score cutoff too --
+                # a name a user explicitly names belongs in the search
+                # pool even if its own roster.csv Score wouldn't otherwise
+                # earn it a spot, not just protected from narrowing later.
+                pool = sorted(set(pool) | set(cov_include))
+                enemy_teams = {n: list(teams[n]) for n in ct_cov_teams}
+                sort_map = {"Perfect links": "perfect", "Mutual coverage": "coverage",
+                           "Avg score": "score"}
+                with st.spinner(f"Scoring every pair drawn from {len(pool)} "
+                                f"Pokemon vs {len(ct_cov_teams)} named team(s), "
+                                f"then searching groups of "
+                                f"{', '.join(str(s) for s in sorted(cov_sizes))}..."):
+                    cov_pair_rows = find_pair_cores(pool, merged, moves, natures,
+                                                    typechart, enemy_teams)
+                    cov_results = coverage_group_search(
+                        cov_pair_rows, merged, group_sizes=tuple(sorted(cov_sizes)),
+                        prefix_limits=(("Mega ", cov_max_megas),),
+                        max_missing_frac=cov_missing_pct / 100.0,
+                        no_duplicate_typing=cov_dup_typing,
+                        max_net_weakness=cov_max_net,
+                        sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
+                        must_include=cov_include)
+                st.session_state["ct_cov_results"] = cov_results
+                st.session_state["ct_cov_pair_rows"] = cov_pair_rows
+                st.session_state["ct_cov_enemy_teams"] = enemy_teams
+                st.session_state["ct_cov_win_by_key"] = None
+                if cov_real_wins:
+                    cov_all_names = sorted({n for r in cov_pair_rows for n in r["pair"]})
+                    narrowed_names = narrow_coverage_pool_names(
+                        cov_pair_rows, cov_all_names, cov_real_win_names,
+                        must_include=cov_include)
+                    # Per ENEMY TEAM, not a cross-team union: a "pair" made
+                    # of two Pokemon from two DIFFERENT saved teams never
+                    # actually gets fielded together, and racing every
+                    # cross-team combination would grow quadratically in
+                    # the total enemy-individual count instead of linearly
+                    # in team count -- the same reasoning `multi_bring4_
+                    # coverage`'s own per-enemy Stage A loop already
+                    # follows for exactly this cost reason.
+                    win_by_key_per_team = {}
+                    progress = st.progress(
+                        0.0, text=f"Real-racing {len(narrowed_names)} best-linked "
+                                 f"Pokemon vs enemy team 1/{len(enemy_teams)}...")
+                    for idx, (enemy_name, enemy_roster) in enumerate(enemy_teams.items()):
+                        win_rows = joint_pool_search(
+                            narrowed_names, enemy_roster, merged, moves, natures,
+                            typechart, excluded_items=ct_excluded)
+                        win_by_key_per_team[enemy_name] = {
+                            frozenset(r["pair"]): r for r in win_rows}
+                        progress.progress(
+                            (idx + 1) / len(enemy_teams),
+                            text=f"Real-racing... {idx + 1}/{len(enemy_teams)} "
+                                 f"enemy team(s) done")
+                    progress.empty()
+                    st.session_state["ct_cov_win_by_key"] = win_by_key_per_team
+
+        cov_results = st.session_state.get("ct_cov_results")
+        cov_pair_rows = st.session_state.get("ct_cov_pair_rows")
+        cov_enemy_teams = st.session_state.get("ct_cov_enemy_teams") or {}
+        cov_win_by_key = st.session_state.get("ct_cov_win_by_key")
+        cov_pair_by_key = ({frozenset(r["pair"]): r for r in cov_pair_rows}
+                           if cov_pair_rows else {})
+
+        def _real_win_fracs(group):
+            """`_pair_beaten_frac` for `group`'s own internal links, once
+            per enemy TEAM in `cov_win_by_key` (`{enemy_name: {frozenset
+            (pair): row}}`) -- empty if none of the group's own links were
+            in the real-raced narrowed pool (e.g. the group leans on a
+            name outside the best-linked set)."""
+            if not cov_win_by_key:
+                return []
+            return [_pair_beaten_frac(team_dict[frozenset({n1, n2})])
+                   for team_dict in cov_win_by_key.values()
+                   for n1, n2 in itertools.combinations(group, 2)
+                   if frozenset({n1, n2}) in team_dict]
+
+        def _real_win_rate(group):
+            fracs = _real_win_fracs(group)
+            return sum(fracs) / len(fracs) if fracs else None
+
+        cov_resort = "(search order)"
+        if cov_win_by_key:
+            cov_resort = st.selectbox(
+                "Re-sort shown results by", ["(search order)", "Real pair win rate"],
+                key="ct_cov_resort",
+                help="Re-orders what's already shown -- does not re-run the "
+                     "search. Groups with no real-raced pair at all sort "
+                     "last.")
+
+        # "for the top 5 in each group show the pair performance" -- cheap,
+        # no new racing (straight off `cov_pair_by_key`, already computed
+        # by the search above), unlike the opt-in "Run bring-4" button
+        # below which is a real re-race and so stays behind a click.
+        PAIR_DETAIL_TOP = 5
+        if cov_results:
+            first_shown = True
+            for size in sorted(cov_results):
+                r = cov_results[size]
+                note = " (search stopped early -- narrow the pool for exhaustive results)" if r["aborted"] else ""
+                st.markdown(f"**Groups of {size}** -- {r['seen']:,} checked{note}, "
+                           f"showing {len(r['rows'])}:")
+                if not r["rows"]:
+                    st.info("No groups of this size passed the current filters.")
+                    continue
+                shown_rows = r["rows"]
+                if cov_resort == "Real pair win rate":
+                    shown_rows = sorted(
+                        shown_rows,
+                        key=lambda row: (_real_win_rate(row["group"]) is None,
+                                         -(_real_win_rate(row["group"]) or 0.0)))
+                for i, row in enumerate(shown_rows, start=1):
+                    exposed = {t: n for t, n in row["net_weakness"].items() if n > 0}
+                    score_str = f"{row['avg_score']:.1f}" if row["avg_score"] is not None else "-"
+                    with st.expander(f"#{i}: {' / '.join(row['group'])}",
+                                     expanded=first_shown):
+                        first_shown = False
+                        st.caption(
+                            f"Perfect links: {row['perfect_links']}/{row['total_links']}  |  "
+                            f"Measured links: {row['known_links']}/{row['total_links']}  |  "
+                            f"Mutual coverage: {row['coverage_pct']:.0f}%  |  "
+                            f"Avg Score: {score_str}")
+                        if cov_win_by_key:
+                            real_fracs = _real_win_fracs(row["group"])
+                            wr_str = (f"{sum(real_fracs)/len(real_fracs)*100:.0f}%"
+                                     if real_fracs else "no real-raced pair")
+                            possible = row["total_links"] * len(cov_win_by_key)
+                            st.caption(f"Real pair win rate: {wr_str} "
+                                      f"({len(real_fracs)}/{possible} "
+                                      f"link-vs-enemy-team combos raced)")
+                        weak_str = ("Worst net weakness: " + str(row["worst_net_weakness"])
+                                   + ("  |  Net-weak types: " + ", ".join(
+                                       f"{t} ({n})" for t, n in exposed.items())
+                                      if exposed else ""))
+                        st.caption(weak_str)
+                        if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
+                            st.caption("Pair performance (this group's own links):")
+                            pair_table = []
+                            for n1, n2 in itertools.combinations(row["group"], 2):
+                                pr = cov_pair_by_key.get(frozenset({n1, n2}))
+                                if pr is None:
+                                    pair_table.append({"Pair": f"{n1} + {n2}",
+                                                       "Coverage": "no data (illegal pair)",
+                                                       "Shared weak": "-", "Avg Score": "-"})
+                                    continue
+                                mr = pr["mutual_resist"]
+                                pair_table.append({
+                                    "Pair": f"{n1} + {n2}",
+                                    "Coverage": "PERFECT" if mr["perfect"]
+                                               else f"{mr['coverage_frac']*100:.0f}%",
+                                    "Shared weak": len(pr["shared_weak"]),
+                                    "Avg Score": round(pr["avg_score"], 1)})
+                            st.dataframe(pd.DataFrame(pair_table), width='stretch',
+                                        hide_index=True)
+                        if i <= PAIR_DETAIL_TOP and cov_enemy_teams:
+                            if st.button("Run bring-4 vs enemy teams",
+                                        key=f"ct_cov_b4_{size}_{i}"):
+                                b4_rows = []
+                                with st.spinner(f"Running bring-4 for this group "
+                                                f"against {len(cov_enemy_teams)} "
+                                                f"enemy team(s)..."):
+                                    for enemy_name, enemy_roster in cov_enemy_teams.items():
+                                        _pairs, bring4_rows = bring4_search(
+                                            list(row["group"]), enemy_roster, merged,
+                                            moves, natures, typechart,
+                                            excluded_items=ct_excluded)
+                                        best = bring4_rows[0] if bring4_rows else None
+                                        if best is None:
+                                            continue
+                                        wr = best["worst_pair_row"]
+                                        beaten = wr["pairs_swept"] + wr["pairs_traded"]
+                                        b4_rows.append({
+                                            "Enemy team": enemy_name,
+                                            "Best bring-4": " / ".join(best["bring4"]),
+                                            "Worst pair beaten": f"{beaten}/{wr['pairs_total']}",
+                                            "Uncovered enemy pairs":
+                                                len(best["uncovered_enemy_pairs"]),
+                                            "Pairs good": f"{best['pairs_good']}/"
+                                                         f"{best['pairs_total']}"})
+                                st.session_state[f"ct_cov_b4_result_{size}_{i}"] = b4_rows
+                            b4_result = st.session_state.get(f"ct_cov_b4_result_{size}_{i}")
+                            if b4_result:
+                                st.dataframe(pd.DataFrame(b4_result), width='stretch',
+                                            hide_index=True)
+                        if st.button("Send to Bring-4", key=f"ct_cov_send_{size}_{i}"):
+                            st.session_state["ct_mode"] = "Bring-4 (one enemy roster)"
+                            st.session_state["ct_b4_our"] = _PASTE_OUR_LABEL
+                            st.session_state["ct_b4_our_paste"] = "\n\n".join(row["group"])
+                            st.rerun()
 
 
 # ------------------------------------------------------------------ battle
@@ -4311,7 +4645,7 @@ with tab_battle:
         our_pool = our_pool or list(all_names)
         our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
-        their_pool = their_side_pool("bv", teams, all_names)
+        their_pool, bv_their_sets = their_side_pool("bv", teams, all_names, team_meta)
         # Feeds the scripted-opponent lookup, so it must be a REAL team name
         # or None. A hand-picked six has no script, and inventing a label for
         # it would send a name into all_scripts that means nothing.
@@ -4345,7 +4679,7 @@ with tab_battle:
         with solver_mode(nash=bv_nash, depth=bv_depth):
             w, t, btl, variant_idx = play_scripted_worst_case(
                 our4, their4, merged, moves, natures, typechart, opp, turns,
-                our_sets=bv_our_sets)
+                our_sets=bv_our_sets, enemy_sets=bv_their_sets)
         ourm = next((c.name for c in btl.p1.roster if c.is_mega_pick and c.mega_evolved), None)
         theirm = next((c.name for c in btl.p2.roster if c.is_mega_pick and c.mega_evolved), None)
         r1, r2, r3 = st.columns(3)
@@ -4365,13 +4699,13 @@ with tab_battle:
             with st.spinner(f"Rolling {n_roll} games..."), \
                     solver_mode(nash=bv_nash, depth=bv_depth):
                 fair = evaluate_risk(our4, their4, merged, moves, natures, typechart, turns,
-                                      our_sets=bv_our_sets,
+                                      our_sets=bv_our_sets, enemy_sets=bv_their_sets,
                                       n_random=n_roll, tie_bias=None)
                 adv = evaluate_risk(our4, their4, merged, moves, natures, typechart, turns,
-                                     our_sets=bv_our_sets,
+                                     our_sets=bv_our_sets, enemy_sets=bv_their_sets,
                                      n_random=n_roll, tie_bias="p2")
                 tb = evaluate_tie_branches(our4, their4, merged, moves, natures, typechart,
-                                            turns, our_sets=bv_our_sets,
+                                            turns, our_sets=bv_our_sets, enemy_sets=bv_their_sets,
                                             n_random=0)
             p1, p2, p3 = st.columns(3)
             p1.metric("Win % (fair coin ties)", f"{100*fair['win_rate']:.0f}%",
@@ -4412,13 +4746,18 @@ with tab_battle:
         from solver import build_moveset, build_wide_movesets, solver_mode
         from robustness import describe_action, line_report
         oc = make_team(our4, merged, natures, sets=bv_our_sets)
-        ec = make_team(their4, merged, natures)
+        ec = make_team(their4, merged, natures, sets=bv_their_sets)
         # The SET's four moves, not the usage-standard four -- make_team applies
-        # the item and ability from bv_our_sets and this used to drop the moves.
+        # the item and ability from bv_our_sets/bv_their_sets and this used to
+        # drop the moves.
         ms = {c.name: build_moveset(
                   merged[c.name], moves,
                   only_moves=((bv_our_sets or {}).get(c.name) or {}).get("moves"))
-              for c in oc + ec}
+              for c in oc}
+        ms.update({c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((bv_their_sets or {}).get(c.name) or {}).get("moves"))
+              for c in ec})
         btl3 = Battle(oc, ec, typechart, moves)
         btl3.movesets = ms
         btl3.wide_movesets = {**ms, **build_wide_movesets(
@@ -4477,11 +4816,15 @@ with tab_battle:
         from turn_game import solve_turn
         our_sets = bv_our_sets
         oc = make_team(our4, merged, natures, sets=our_sets)
-        ec = make_team(their4, merged, natures)
+        ec = make_team(their4, merged, natures, sets=bv_their_sets)
         ms = {c.name: build_moveset(
                   merged[c.name], moves,
                   only_moves=((our_sets or {}).get(c.name) or {}).get("moves"))
-              for c in oc + ec}
+              for c in oc}
+        ms.update({c.name: build_moveset(
+                  merged[c.name], moves,
+                  only_moves=((bv_their_sets or {}).get(c.name) or {}).get("moves"))
+              for c in ec})
         btl2 = Battle(oc, ec, typechart, moves)
         btl2.movesets = ms
         with st.spinner(f"Solving (depth {bv_depth})..."):
@@ -4538,7 +4881,7 @@ with tab_battle:
         lo4, lt4, lturns = last_pc
         with st.spinner("Playing the match, checking every turn against every legal response..."):
             pc_res = full_game_punish_audit(lo4, lt4, merged, moves, natures, typechart, lturns,
-                                             our_sets=bv_our_sets)
+                                             our_sets=bv_our_sets, enemy_sets=bv_their_sets)
         render_punish_audit(pc_res)
 
     # --- Path explorer: tie x roll scenario matrix -----------------------------
@@ -5552,7 +5895,7 @@ with tab_sim:
                 sim_our_mega = NO_MEGA if our_mega_choice == "Neither" else our_mega_choice
         with sc2:
             st.markdown("**Their side**")
-            sim_their6 = their_side_pool("sim", teams, all_names)
+            sim_their6, sim_their_sets = their_side_pool("sim", teams, all_names, team_meta)
             sim_mode = st.radio(
                 "Their bring", ["Their optimal bring", "Step through all 15 leads",
                                 "I choose their bring"],
@@ -5605,19 +5948,22 @@ with tab_sim:
                     sim_leads = None
                 else:
                     ranked = sim_rank_enemy_brings(sim_our4, sim_their6, merged, moves,
-                                                   natures, typechart, our_sets=sim_our_sets)
+                                                   natures, typechart, our_sets=sim_our_sets,
+                                                   enemy_sets=sim_their_sets)
                     sim_leads = ranked if sim_mode == "Step through all 15 leads" else None
                     _margin, their4, _lead = ranked[0]
                     their_mega = None  # make_team's own default: first Mega in the bring
                 battle, movesets = sim_build_battle(
                     sim_our4, their4, merged, moves, natures, typechart,
-                    our_sets=sim_our_sets, our_mega=sim_our_mega, enemy_mega=their_mega)
+                    our_sets=sim_our_sets, enemy_sets=sim_their_sets,
+                    our_mega=sim_our_mega, enemy_mega=their_mega)
                 st.session_state["sim_battle"] = battle
                 st.session_state["sim_movesets"] = movesets
                 st.session_state["sim_our4"] = sim_our4
                 st.session_state["sim_our_sets"] = sim_our_sets
                 st.session_state["sim_our_mega"] = sim_our_mega
                 st.session_state["sim_their4"] = their4
+                st.session_state["sim_their_sets"] = sim_their_sets
                 st.session_state["sim_mode"] = sim_mode
                 st.session_state["sim_turn_log"] = []
                 if sim_leads is not None:
@@ -5632,8 +5978,8 @@ with tab_sim:
 
         if st.button("🔄 Reset battle (back to team selection)"):
             for key in ("sim_battle", "sim_movesets", "sim_our4", "sim_our_sets",
-                       "sim_our_mega", "sim_their4", "sim_mode", "sim_turn_log",
-                       "sim_leads", "sim_lead_idx", "sim_pending_turn"):
+                       "sim_our_mega", "sim_their4", "sim_their_sets", "sim_mode",
+                       "sim_turn_log", "sim_leads", "sim_lead_idx", "sim_pending_turn"):
                 st.session_state.pop(key, None)
             st.rerun()
 
@@ -5712,6 +6058,7 @@ with tab_sim:
                         battle2, movesets2 = sim_build_battle(
                             our4, next_their4, merged, moves, natures, typechart,
                             our_sets=st.session_state.get("sim_our_sets"),
+                            enemy_sets=st.session_state.get("sim_their_sets"),
                             our_mega=st.session_state.get("sim_our_mega"))
                         st.session_state["sim_battle"] = battle2
                         st.session_state["sim_movesets"] = movesets2

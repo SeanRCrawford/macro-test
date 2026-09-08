@@ -390,6 +390,225 @@ class TestUniqueItemsScopedToTopRowsOnly(unittest.TestCase):
         spy.assert_not_called()
 
 
+class TestMaxFocusSashFlag(unittest.TestCase):
+    """"the focus sash is just too broken and is warping matchup
+    assessment... this must apply to every single team" -- UNLIKE
+    --unique-items, --max-focus-sash needs NO flag to take effect: a known
+    real Focus-Sash collision (Excadrill and Gengar both independently
+    pick Focus Sash against this fixture) is resolved with no flags at
+    all, and only reappears when explicitly disabled."""
+
+    OUR6 = "Excadrill,Aegislash,Gengar,Mega Alakazam"
+
+    def _set_line(self, out):
+        idx = out.find("set: ")
+        self.assertGreaterEqual(idx, 0, out)
+        return out[idx:out.find("\n", idx)]
+
+    def test_on_by_default_the_collision_is_already_resolved(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertEqual(line.count("Focus Sash"), 1, line)
+
+    def test_max_focus_sash_zero_bans_it_outright(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--max-focus-sash", "0"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertNotIn("Focus Sash", line)
+
+    def test_negative_disables_the_check_restoring_the_collision(self):
+        # All three of Excadrill/Aegislash/Gengar independently want it
+        # against this fixture -- confirmed via the default-on test above
+        # capping it to exactly 1, and the cap=2 test below capping it to
+        # exactly 2; disabling the check entirely restores all 3.
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--max-focus-sash", "-1"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertEqual(line.count("Focus Sash"), 3, line)
+
+    def test_a_higher_cap_allows_more_than_one(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1",
+             "--max-focus-sash", "2"])
+        self.assertIsNone(msg, out)
+        line = self._set_line(out)
+        self.assertEqual(line.count("Focus Sash"), 2, line)
+
+
+class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
+    """Same top-N-only scoping as `TestUniqueItemsScopedToTopRowsOnly`,
+    but for the DEFAULT-ON Focus-Sash cap -- the exhaustive/beam sweep
+    itself never sees it; `_apply_focus_sash_cap_to_top_rows` applies it
+    afterward, scoped to `--top`, unconditionally (no flag needed)."""
+
+    FOUR = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam"]
+    TARGETS = ["Garchomp", "Incineroar"]
+
+    def setUp(self):
+        from _harness import load_world
+        self.W = load_world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = ct.multi_bring4_coverage(
+            self.FOUR, [self.TARGETS], merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+        self.rows = ct.multi_bring4_exhaustive(
+            self.coverage, good_threshold=0.0, core_sizes=(4,))
+
+    def test_the_sweep_itself_never_caps_it(self):
+        self.assertEqual(len(self.rows), 1)
+        self.assertIsNone(self.rows[0]["item_clause_resolved_items"])
+
+    def test_top_n_rows_get_capped(self):
+        corrected = ct._apply_focus_sash_cap_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0)
+        resolved = corrected[0]["item_clause_resolved_items"]
+        self.assertIsNotNone(resolved)
+        self.assertLessEqual(
+            sum(1 for v in resolved.values() if v == "Focus Sash"), 1)
+
+    def test_max_focus_sash_none_is_a_no_op(self):
+        corrected = ct._apply_focus_sash_cap_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0, max_focus_sash=None)
+        self.assertEqual(corrected, self.rows)
+
+    def test_wired_into_the_cli_with_the_right_top_n_and_no_flag_needed(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt"]
+        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
+                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.args[1], 3)
+
+    def test_max_focus_sash_negative_one_skips_the_call(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt", "--max-focus-sash", "-1"]
+        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
+                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertIsNone(spy.call_args.kwargs.get("max_focus_sash"))
+
+
+class TestDeadMegaRebuildScopedToTopRowsOnly(unittest.TestCase):
+    """"every single match only uses one of the megas... may as well give
+    the other mega a useful item and leave it as base form if it never
+    megas" -- `_apply_dead_mega_rebuild_to_top_rows`, same top-N-only
+    scoping as Item Clause/Focus-Sash-cap, run BY DEFAULT (no flag
+    needed), turned off with --no-dead-mega-rebuild.
+
+    Same fixture as test_counter_finder.py's `TestCoreDeadMegaRebuild`:
+    Mega Floette wins both named enemies, so Mega Scizor (always brought,
+    the core is exactly 4 members) is never the chosen mega -- and
+    "Scizor" (the base form) is in the pool, so a real rebuild is
+    possible."""
+
+    POOL = ["Mega Scizor", "Mega Floette", "Scizor", "Garchomp", "Kingambit",
+           "Whimsicott", "Sinistcha"]
+    ENEMIES = [["Kingambit", "Basculegion", "Sableye", "Ariados"],
+              ["Sableye", "Ariados", "Basculegion", "Sinistcha"]]
+    CORE = ("Garchomp", "Kingambit", "Mega Floette", "Mega Scizor")
+
+    def setUp(self):
+        from _harness import load_world
+        self.W = load_world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = ct.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+        self.row = ct._core_row(
+            self.CORE, self.coverage["pair_by_key"], self.coverage["target_name_lists"],
+            good_threshold=0.0,
+            pair_by_key_forced_base_list=self.coverage["pair_by_key_forced_base"])
+        self.rows = [self.row]
+
+    def test_the_sweep_itself_never_flags_or_rebuilds(self):
+        """Precondition: `_core_row` (what the sweep calls per candidate)
+        reports `dead_megas` but never rebuilds anything on its own --
+        `_apply_dead_mega_rebuild_to_top_rows` is what does the work."""
+        self.assertEqual(self.row["dead_megas"], ("Mega Scizor",))
+        self.assertNotIn("dead_mega_rebuilt", self.row)
+
+    def test_top_n_rows_get_checked_for_a_rebuild(self):
+        corrected = ct._apply_dead_mega_rebuild_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0)
+        self.assertEqual(len(corrected), 1)
+        # Either the rebuild measurably won (tagged `dead_mega_rebuilt`,
+        # `dead_megas` now empty on the substitute core) or it didn't and
+        # the original all-mega-stone row is kept untouched -- either way
+        # this must not raise, and the row must stay internally consistent.
+        got = corrected[0]
+        if "dead_mega_rebuilt" in got:
+            self.assertEqual(got["dead_mega_rebuilt"], {"Mega Scizor": "Scizor"})
+            self.assertEqual(got["core"],
+                             ("Garchomp", "Kingambit", "Mega Floette", "Scizor"))
+            self.assertEqual(got["dead_megas"], ())
+        else:
+            self.assertEqual(got, self.row)
+
+    def test_top_n_zero_leaves_everything_unchecked(self):
+        corrected = ct._apply_dead_mega_rebuild_to_top_rows(
+            self.rows, 0, self.coverage, good_threshold=0.0)
+        self.assertEqual(corrected, self.rows)
+
+    def test_a_core_with_no_dead_megas_passes_through_unchanged(self):
+        # Both-used fixture: force each enemy to favour a different mega
+        # by racing the SAME core against just Mega Scizor's own good
+        # matchup, mirroring the "no dead megas" branch cheaply -- reuse
+        # `_core_row` directly with an artificial `dead_megas`-empty row
+        # instead of re-deriving a whole new real matchup.
+        clean_row = dict(self.row)
+        clean_row["dead_megas"] = ()
+        corrected = ct._apply_dead_mega_rebuild_to_top_rows(
+            [clean_row], 1, self.coverage, good_threshold=0.0)
+        self.assertEqual(corrected, [clean_row])
+
+    def test_wired_into_the_cli_with_the_right_top_n_and_no_flag_needed(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt"]
+        with patch.object(ct, "_apply_dead_mega_rebuild_to_top_rows",
+                         wraps=ct._apply_dead_mega_rebuild_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.args[1], 3)
+
+    def test_no_dead_mega_rebuild_flag_skips_the_call(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt", "--no-dead-mega-rebuild"]
+        with patch.object(ct, "_apply_dead_mega_rebuild_to_top_rows",
+                         wraps=ct._apply_dead_mega_rebuild_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_not_called()
+
+
 class TestCoreSizesFlag(unittest.TestCase):
     """"I would like to output the best 3-pokemon cores against each team"
     -- `--core-sizes` (comma-separated, default "4,5,6", each 3-6) threads
@@ -449,6 +668,13 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
 
     def test_allow_scarf_is_parsed(self):
         self.assertIn("--allow-scarf", self.help_text)
+
+    def test_max_focus_sash_is_parsed(self):
+        self.assertIn("--max-focus-sash", self.help_text)
+
+    def test_dead_mega_rebuild_is_parsed(self):
+        self.assertIn("--dead-mega-rebuild", self.help_text)
+        self.assertIn("--no-dead-mega-rebuild", self.help_text)
 
     def test_max_weak_is_parsed(self):
         self.assertIn("--max-weak", self.help_text)
@@ -2302,6 +2528,36 @@ class TestTwoTwoTwoFlag(unittest.TestCase):
         self.assertIsNone(msg, out)
         spy.assert_called_once()
         self.assertIsNone(spy.call_args.kwargs.get("max_net_weakness"))
+
+    def test_max_megas_reaches_two_two_two_teams(self):
+        """"A team should not have more than two megas" -- --max-megas
+        (already an existing --multi-bring4 flag) now also threads
+        through to --two-two-two's own two_two_two_teams call."""
+        from unittest.mock import patch
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+               "--top-pairs", "5", "--top-teams", "3", "--max-megas", "1"]
+        with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.kwargs.get("max_megas"), 1)
+
+    def test_max_megas_defaults_to_two(self):
+        from unittest.mock import patch
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+               "--top-pairs", "5", "--top-teams", "3"]
+        with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.kwargs.get("max_megas"), 2)
+
+    def test_offensive_pin_section_appears_when_a_real_pin_is_found(self):
+        argv = ["--two-two-two", "--pool-size", "30", "--vs-team", "Rain",
+               "--top-pairs", "15", "--top-teams", "3"]
+        msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("Offensive-pin pairs", out)
 
 
 if __name__ == "__main__":

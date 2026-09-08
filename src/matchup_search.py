@@ -455,7 +455,8 @@ if __name__ == "__main__":
 # --------------------------------------------------------------- risk analysis
 
 def evaluate_risk(our_names, enemy_names, merged, moves_db, natures, typechart,
-                   max_turns=MAX_TURNS, our_sets=None, n_random=24, seed=0, tie_bias="p2"):
+                   max_turns=MAX_TURNS, our_sets=None, enemy_sets=None, n_random=24, seed=0,
+                   tie_bias="p2"):
     """How robust is a line, rather than just 'does the average roll win'?
 
     The default engine uses the average damage roll, which reports a result as
@@ -471,7 +472,7 @@ def evaluate_risk(our_names, enemy_names, merged, moves_db, natures, typechart,
     Returns a dict; `win_rate` is the fraction of randomised runs won.
     """
     base = play_out_worst_case(our_names, enemy_names, merged, moves_db, natures, typechart,
-                                max_turns, our_sets=our_sets)
+                                max_turns, our_sets=our_sets, enemy_sets=enemy_sets)
     avg_winner, avg_turns, avg_battle = base
 
     # IMPORTANT: speed ties are forced to the OPPONENT here (tie_bias="p2").
@@ -483,8 +484,8 @@ def evaluate_risk(our_names, enemy_names, merged, moves_db, natures, typechart,
     outcomes = []
     for i in range(n_random):
         w, t, b = play_out_pair(our_names, enemy_names, merged, moves_db, natures, typechart,
-                                 max_turns, our_sets=our_sets, rng_seed=seed + i,
-                                 tie_bias=tie_bias)
+                                 max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
+                                 rng_seed=seed + i, tie_bias=tie_bias)
         outcomes.append(w)
 
     wins = sum(1 for w in outcomes if w == "p1")
@@ -499,7 +500,8 @@ def evaluate_risk(our_names, enemy_names, merged, moves_db, natures, typechart,
 
 
 def evaluate_tie_branches(our_names, enemy_names, merged, moves_db, natures, typechart,
-                           max_turns=MAX_TURNS, our_sets=None, n_random=30, seed=0):
+                           max_turns=MAX_TURNS, our_sets=None, enemy_sets=None, n_random=30,
+                           seed=0):
     """Run a matchup with speed ties forced BOTH ways.
 
     A line that only wins when you win the coin flip is not a plan. This
@@ -515,14 +517,15 @@ def evaluate_tie_branches(our_names, enemy_names, merged, moves_db, natures, typ
                 w, t, b = play_out_pair(our_names, enemy_names, merged, moves_db, natures,
                                          typechart, max_turns, our_mega_transforms=ov,
                                          enemy_mega_transforms=ev, our_sets=our_sets,
-                                         tie_bias=who)
+                                         enemy_sets=enemy_sets, tie_bias=who)
                 rank = (2, -t) if w == "p2" else ((0, t) if w == "p1" else (1, 0))
                 if best is None or rank > best[0]:
                     best = (rank, (w, t, b))
         out[label] = {"winner": best[1][0], "turns": best[1][1], "battle": best[1][2],
                       "ties": best[1][2].speed_ties}
     rng = evaluate_risk(our_names, enemy_names, merged, moves_db, natures, typechart,
-                         max_turns, our_sets=our_sets, n_random=n_random, seed=seed)
+                         max_turns, our_sets=our_sets, enemy_sets=enemy_sets,
+                         n_random=n_random, seed=seed)
     out["random_win_rate"] = rng["win_rate"]
     out["random_detail"] = f"{rng['wins']}W-{rng['losses']}L-{rng['other']}o"
     return out

@@ -112,6 +112,15 @@ class Battle:
         self.speed_ties = []  # (turn, name_a, name_b) 50/50s encountered
         self._departed_slots = {}
         self.turn_num = 0
+        # Set the instant a side's last Pokemon faints, BEFORE any of that
+        # same hit's own recoil/drain/Life-Orb self-damage (applied right
+        # after, in `_resolve_move`) gets a chance to also faint the other
+        # side -- see `winner()`. Real rule, not an invention: KOing the
+        # opponent's last Pokemon wins the battle even if the move that did
+        # it (Flare Blitz, Wood Hammer, a Life-Orb hit, ...) then faints the
+        # user to its own recoil -- the game ends the moment the OPPONENT
+        # hits zero, so that self-damage can never turn a win into a draw.
+        self._decided_winner = None
         self.rng = random.Random(rng_seed) if rng_seed is not None else None
         # 'p1' | 'p2' | None -- which side wins EXACT speed ties. Real games flip a
         # coin; forcing it lets a line be checked against losing the flip.
@@ -231,6 +240,12 @@ class Battle:
         new.force_roll_index = getattr(self, 'force_roll_index', None)
         new._departed_slots = {}
         new.tie_bias = self.tie_bias
+        # Must survive the copy for the same reason force_roll_index does --
+        # the solver evaluates candidates on copies, and a already-decided
+        # winner (see `_maybe_lock_winner`) silently reverting to "undecided"
+        # on every one of them would let a copy's own subsequent self-damage
+        # re-open a battle that's already over.
+        new._decided_winner = self._decided_winner
         return new
 
     def tag(self, c):
@@ -971,6 +986,12 @@ class Battle:
                                        actor=target.name, detail=self._fmt_boosts(changed),
                                        source=move.name)
 
+        # Lock in the winner now, if this hit alone just decided it -- BEFORE
+        # any of this same move's own recoil/drain/Life-Orb self-damage
+        # below gets a chance to also faint the attacker's side (see
+        # `_maybe_lock_winner`'s own docstring).
+        self._maybe_lock_winner()
+
         # Self stat changes (Draco Meteor / Overheat / Leaf Storm -2 SpA, Close Combat -1 Def/SpD).
         # Applies once per move use, only if it actually hit something, and is NOT blocked by
         # Clear Body nor does it proc Defiant/Competitive (self-inflicted, not from a foe).
@@ -1465,10 +1486,30 @@ class Battle:
                 self.log.add(f"The {TERRAIN_NAMES.get(self.field.terrain, self.field.terrain)} faded.")
                 self.field.terrain = None
 
+    def _maybe_lock_winner(self):
+        """Called right after a hit's direct damage is applied, before that
+        same move's own recoil/drain/Life-Orb self-damage runs -- if exactly
+        ONE side has now lost, that side's loss is final (the battle ended
+        right here), regardless of what the attacker's own follow-up self-
+        damage does to it a moment later. A no-op once already decided, and
+        a no-op if somehow BOTH sides are already lost at this exact point
+        (a genuine simultaneous double-KO from the hit itself, with no
+        ordering to break the tie -- `winner()`'s own draw handling covers
+        that, unchanged)."""
+        if self._decided_winner is not None:
+            return
+        p1_lost, p2_lost = self.p1.has_lost(), self.p2.has_lost()
+        if p1_lost and not p2_lost:
+            self._decided_winner = "p2"
+        elif p2_lost and not p1_lost:
+            self._decided_winner = "p1"
+
     def is_over(self):
-        return self.p1.has_lost() or self.p2.has_lost()
+        return self._decided_winner is not None or self.p1.has_lost() or self.p2.has_lost()
 
     def winner(self):
+        if self._decided_winner is not None:
+            return self._decided_winner
         if self.p1.has_lost() and self.p2.has_lost():
             return "draw"
         if self.p1.has_lost():

@@ -33,7 +33,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_four_modes_are_offered(self):
+    def test_the_five_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
@@ -41,7 +41,8 @@ class TestCounterTableTabExists(unittest.TestCase):
                          {"Bring-4 (one enemy roster)",
                           "Multi-bring4 (several enemy rosters)",
                           "Joint pair search",
-                          "2-2-2 teambuilding"})
+                          "2-2-2 teambuilding",
+                          "Coverage groups"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
         at = app()
@@ -66,6 +67,106 @@ class TestCounterTableTabExists(unittest.TestCase):
             "Joint pair search").run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any(s.key == "ct_jp_partner" for s in at.selectbox))
+
+    def test_switching_to_coverage_groups_mode_renders_its_controls(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_cov_pool" for s in at.slider))
+        self.assertTrue(any(m.key == "ct_cov_teams" for m in at.multiselect))
+        self.assertTrue(any(m.key == "ct_cov_include" for m in at.multiselect))
+        self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
+        self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
+        self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
+
+    def test_always_include_forces_a_name_through_a_tiny_pool(self):
+        """"specify individual Pokemon to include" -- a name outside the
+        top-Score pool cutoff must still show up in the results once
+        named in "Always include these Pokemon"."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        include_ms = [m for m in at.multiselect if m.key == "ct_cov_include"][0]
+        # A real, low-Score species (never a top-10-by-Score pick on its
+        # own) -- its presence in the actual search pool can only be
+        # explained by the "always include" wiring.
+        forced_name = "Ariados"
+        self.assertIn(forced_name, include_ms.options)
+        include_ms.set_value([forced_name]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        # Whether it lands in a top-ranked GROUP is a search-ranking
+        # question already covered at the counter_finder.py level
+        # (test_must_include_forces_a_name_through_narrowing) -- this
+        # checks the UI wiring itself: the forced name actually reached
+        # the search pool find_pair_cores scored pairs for.
+        pair_rows = at.session_state["ct_cov_pair_rows"]
+        pool_names = {n for r in pair_rows for n in r["pair"]}
+        self.assertIn(forced_name, pool_names)
+
+    def test_coverage_groups_search_runs_and_shows_results(self):
+        """A real (small) run through the actual widget tree -- confirms the
+        button click wires through to `coverage_group_search` and back into
+        rendered output, not just that the controls exist."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(12).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Groups of 3" in md.value for md in at.markdown))
+        # "for the top 5 in each group show the pair performance" -- a
+        # dataframe of the group's own internal pairs, no button needed.
+        self.assertTrue(len(at.dataframe) >= 1)
+
+    def test_coverage_groups_run_bring4_button_works(self):
+        """"add an option to run the actual pair performance vs enemy
+        teams in a proper bring 4" -- clicking it must not crash and must
+        render a real bring-4 result table."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(12).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        teams_ms = [m for m in at.multiselect if m.key == "ct_cov_teams"][0]
+        if teams_ms.options:
+            teams_ms.set_value([teams_ms.options[0]]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        b4_buttons = [b for b in at.button if b.key and b.key.startswith("ct_cov_b4_3_")]
+        self.assertTrue(b4_buttons)
+        dataframes_before = len(at.dataframe)
+        b4_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertGreater(len(at.dataframe), dataframes_before)
+
+    def test_real_win_rate_checkbox_runs_and_shows_estimate_and_results(self):
+        """"assess all of the pairs in the counter table and link that to
+        the coverage group search" -- the opt-in real-racing checkbox must
+        show a cost estimate, run without crashing on a small scope, and
+        surface a real win-rate reading."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        teams_ms = [m for m in at.multiselect if m.key == "ct_cov_teams"][0]
+        self.assertTrue(teams_ms.options)
+        teams_ms.set_value([teams_ms.options[0]]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_real_wins"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        win_sliders = [s for s in at.slider if s.key == "ct_cov_real_win_names"]
+        self.assertTrue(win_sliders)
+        win_sliders[0].set_value(6).run()
+        self.assertTrue(any("Estimated:" in c.value for c in at.caption))
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(sb.key == "ct_cov_resort" for sb in at.selectbox))
+        self.assertTrue(any("Real pair win rate" in c.value for c in at.caption))
 
     def test_choice_scarf_is_excluded_by_default(self):
         at = app()

@@ -207,8 +207,11 @@ import argparse  # noqa: E402
 
 import _harness  # noqa: E402,F401
 
-from counter_finder import (DEFAULT_EXCLUDED_ITEMS, _answer_for,  # noqa: E402
-                            _core_row, _fixed_sets_from_pair_rows,
+from counter_finder import (DEFAULT_EXCLUDED_ITEMS, DEFAULT_MAX_FOCUS_SASH,  # noqa: E402
+                            _answer_for, _base_species_name,
+                            _core_dead_mega_rebuild, _core_row,
+                            _fixed_sets_from_pair_rows,
+                            _focus_sash_context_from_coverage,
                             _item_clause_context_from_coverage, _pair_sort_key,
                             bring4_damage_output, bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, core_damage_output,
@@ -999,6 +1002,11 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
     for i, r in enumerate(rows[:top], start=1):
         core = r["core"]
         print(f"  {i:>3} ({r['core_size']}) {' / '.join(core)}")
+        if r.get("dead_mega_rebuilt"):
+            rebuilt = ", ".join(f"{old} -> {new}"
+                                for old, new in r["dead_mega_rebuilt"].items())
+            print(f"        dead mega rebuilt (never the chosen mega vs any "
+                 f"named enemy -- now base form with a real item): {rebuilt}")
         weak = member_weakness_summary(core, merged)
         types_2plus = sum(1 for c in weak["per_type"].values() if c >= 2)
         print(f"        synergy: weak to 2+ types: {weak['weak_to_2plus']}, "
@@ -1422,6 +1430,89 @@ def _apply_item_clause_to_top_rows(rows, top_n, coverage, good_threshold):
     return corrected + rows[top_n:]
 
 
+def _apply_focus_sash_cap_to_top_rows(rows, top_n, coverage, good_threshold,
+                                      max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
+    """"the focus sash is just too broken and is warping matchup
+    assessment... this must apply to every single team" -- the Focus-Sash
+    sibling of `_apply_item_clause_to_top_rows`, run BY DEFAULT (not behind
+    `--unique-items`) for every `--multi-bring4` call, same reasoning and
+    same top-N-only scoping: Stage A's pool-wide `fixed_items` routinely
+    has MANY candidates independently prefer Focus Sash (correct for each
+    in isolation), and re-racing every one of the sweep's candidate cores
+    to catch that would cost real time for cores nobody will ever see --
+    `_core_row`'s own cheap count-check first, exactly like Item Clause,
+    keeps this fast for `top_n` small regardless of sweep size.
+
+    Same accepted tradeoff as Item Clause's own top-N scoping, stated
+    plainly: the SWEEP's own ranking (which cores even make it into the
+    top `top_n` in the first place) is still computed against the
+    uncapped, pool-wide numbers -- only the DISPLAYED rows for the ones
+    that already made the cut get corrected. `max_focus_sash=None` skips
+    this entirely (the escape hatch back to the old, unconstrained
+    behaviour).
+    """
+    if max_focus_sash is None:
+        return rows
+    context = _focus_sash_context_from_coverage(coverage, max_focus_sash)
+    corrected = [
+        _core_row(r["core"], coverage["pair_by_key"], coverage["target_name_lists"],
+                 good_threshold,
+                 pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
+                 focus_sash_context=context)
+        for r in rows[:top_n]]
+    return corrected + rows[top_n:]
+
+
+def _apply_dead_mega_rebuild_to_top_rows(rows, top_n, coverage, good_threshold):
+    """"I have two megas on a generated team, but every single match only
+    uses one of the megas... may as well give the other mega a useful item
+    and leave it as base form if it never megas" -- the dead-mega sibling
+    of `_apply_item_clause_to_top_rows`/`_apply_focus_sash_cap_to_top_rows`:
+    same top-`top_n`-only scoping (a core's own `dead_megas` -- see
+    `_core_row` -- is cheap to CHECK, but acting on it means a real
+    core-scoped re-race, so this only ever runs for rows anyone will
+    actually see), run BY DEFAULT like Focus-Sash-cap (gated behind
+    `--no-dead-mega-rebuild`, not opt-in) since a dead Mega Stone slot is
+    exactly the kind of silent, always-present inefficiency Focus-Sash-cap
+    itself was written to catch.
+
+    For each of `rows[:top_n]` whose `dead_megas` is non-empty,
+    `_core_dead_mega_rebuild` re-races a substitute core (that member's
+    base-species name, real item, no longer eligible to transform) and
+    this keeps whichever of the two `_core_row`s ranks better by the exact
+    same `worst_enemy_score_key` the sweep itself ranks on -- a tie goes to
+    the rebuild, since freeing a Mega Stone slot that was never actually
+    exercised is a strict improvement in real-team terms even when the
+    numbers come back identical. A core whose rebuild isn't possible (no
+    already-vetted real set for the base form -- see `_core_dead_mega_
+    rebuild`'s own `None` case) is left exactly as the sweep found it.
+    """
+    context = _item_clause_context_from_coverage(coverage)
+    out = []
+    for r in rows[:top_n]:
+        dead_megas = r.get("dead_megas") or ()
+        if not dead_megas:
+            out.append(r)
+            continue
+        rebuild = _core_dead_mega_rebuild(
+            r["core"], dead_megas, coverage["target_name_lists"], context)
+        if rebuild is None:
+            out.append(r)
+            continue
+        substitute_core, pair_by_key_per_enemy = rebuild
+        pair_by_key_list = [pair_by_key_per_enemy[tuple(t)]
+                            for t in coverage["target_name_lists"]]
+        new_row = _core_row(substitute_core, pair_by_key_list,
+                            coverage["target_name_lists"], good_threshold)
+        if new_row["worst_enemy_score_key"] <= r["worst_enemy_score_key"]:
+            new_row["dead_mega_rebuilt"] = {dm: _base_species_name(dm)
+                                            for dm in dead_megas}
+            out.append(new_row)
+        else:
+            out.append(r)
+    return out + rows[top_n:]
+
+
 def _pairs_note(pair_rows):
     """A compact "name+name beaten/total" note for EVERY one of a bring-4's
     own internal pairs (6 for a 4-Pokemon bring, fewer for a 3-Pokemon
@@ -1493,7 +1584,7 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
 
     ws = wb.active
     ws.title = "Cores"
-    header = ["#", "Core", "Size", "Bottleneck Enemy",
+    header = ["#", "Core", "Dead Mega Rebuilt", "Size", "Bottleneck Enemy",
               "Weak to 2+ types (members)", "Weak to 1 type (members)",
               "Weak to 0 types (members)", "Types with 2+ weak members",
               "Weaknesses by type", "Average Score",
@@ -1567,7 +1658,10 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
         sum_3rd_tw = sum((d["tailwind_safe_3rd"] or 0) for _pe, d in per_enemy_depths)
         sum_3rd_pr = sum((d["protect_safe_3rd"] or 0) for _pe, d in per_enemy_depths)
         sum_3rd_nf = sum((d["no_faint_3rd"] or 0) for _pe, d in per_enemy_depths)
-        row = [rank, " / ".join(core), r["core_size"], r["worst_enemy_idx"] + 1,
+        dead_mega_note = ", ".join(f"{old} -> {new}" for old, new in
+                                   r.get("dead_mega_rebuilt", {}).items())
+        row = [rank, " / ".join(core), dead_mega_note, r["core_size"],
+              r["worst_enemy_idx"] + 1,
               weak["weak_to_2plus"], weak["weak_to_1"], weak["weak_to_0"],
               types_2plus, ", ".join(f"{t} {c}" for t, c in by_type),
               round(avg_score, 1) if avg_score is not None else "",
@@ -1772,7 +1866,9 @@ def _print_two_two_two(pair_rows, team_rows, top_pairs, max_net_weakness=None):
     Stage 2 drew its team combinations from) with all three criteria, then
     a "mutual coverage" side list (pairs that perfectly or mostly cover
     each other's weaknesses via an actual RESIST, not just "not also
-    weak"), then the top teams."""
+    weak"), then an "offensive pin" side list (a real spread move backed
+    by a partner move that answers most of what would otherwise resist
+    it), then the top teams."""
     print(f"Top {min(top_pairs, len(pair_rows))} pair cores (of "
          f"{len(pair_rows)} total), ranked by fewest shared weaknesses, "
          f"then most threat-coverage, then highest avg Score:\n")
@@ -1811,6 +1907,24 @@ def _print_two_two_two(pair_rows, team_rows, top_pairs, max_net_weakness=None):
                  f"{mr['a_weak_resisted_by_b']}/{mr['a_weak_total']} + "
                  f"{mr['b_weak_resisted_by_a']}/{mr['b_weak_total']} "
                  f"weaknesses resisted")
+    pin_pairs = sorted(
+        (r for r in pair_rows if r["offensive_pin"] is not None),
+        key=lambda r: -r["offensive_pin"]["coverage_frac"])
+    if pin_pairs:
+        perfect_count = sum(1 for r in pin_pairs
+                            if r["offensive_pin"]["coverage_frac"] >= 1.0)
+        print(f"\nOffensive-pin pairs (a real spread move backed by an "
+             f"answer to most of what resists it), {perfect_count} "
+             f"perfect of {len(pin_pairs)} found:\n")
+        for r in pin_pairs[:top_pairs]:
+            op = r["offensive_pin"]
+            tag = ("PERFECT" if op["coverage_frac"] >= 1.0
+                  else f"{op['coverage_frac']*100:.0f}%")
+            follow = op["follow_up_move"] or "-"
+            print(f"  {op['pin_user']} ({op['pin_move']}, {op['pin_type']}) + "
+                 f"{op['follow_up_user']} ({follow})  ({tag})  "
+                 f"{len(op['covered'])}/{len(op['resisted_by'])} "
+                 f"resistors answered")
     cap_note = (f" (max net weakness <= {max_net_weakness})"
                if max_net_weakness is not None else "")
     print(f"\nTop {len(team_rows)} 2-2-2 teams (3 disjoint pairs){cap_note}, "
@@ -2030,16 +2144,20 @@ def main():
                          "possible bring (itself, 3 pairs), the same "
                          "degenerate case a 4-member core already is")
     ap.add_argument("--max-megas", type=int, default=2, metavar="N",
-                    help="--multi-bring4 only: hard cap on how many "
-                         "Mega-stone-capable members a candidate CORE may "
-                         "contain (default 2, VGC's real team-composition "
-                         "limit -- 'a full team can only have two mega "
-                         "stone users'). In an actual pair, EITHER may "
-                         "still choose to transform depending on the "
-                         "specific matchup -- that per-battle choice is "
-                         "the existing mega-vs-stay-base minimax, unaffected "
-                         "by this; this only caps how many are BROUGHT at "
-                         "all")
+                    help="--multi-bring4/--two-two-two only: hard cap on "
+                         "how many Mega-stone-capable members a candidate "
+                         "CORE/2-2-2 team may contain (default 2, VGC's "
+                         "real team-composition limit -- 'a full team can "
+                         "only have two mega stone users'). In an actual "
+                         "pair, EITHER may still choose to transform "
+                         "depending on the specific matchup -- that "
+                         "per-battle choice is the existing mega-vs-stay-"
+                         "base minimax, unaffected by this; this only caps "
+                         "how many are BROUGHT at all. --two-two-two never "
+                         "even generates a pair of two Megas to begin with "
+                         "(find_pair_cores' own rule), so a team at this "
+                         "cap always has its stone-holders split across "
+                         "two different pairs")
     ap.add_argument("--allow-scarf", action="store_true",
                     help="by default Choice Scarf is excluded from every "
                          "item SEARCH (it's legal in Regulation MB, but too "
@@ -2066,6 +2184,38 @@ def main():
                          "--deep-dive-core/--auto-deep-dive's own follow-up "
                          "dives are unaffected -- already scoped to one "
                          "core at a time")
+    ap.add_argument("--max-focus-sash", type=int, default=DEFAULT_MAX_FOCUS_SASH,
+                    metavar="N",
+                    help="\"the focus sash is just too broken and is "
+                         "warping matchup assessment\" -- caps how many of "
+                         "a team's own Pokemon may hold Focus Sash. UNLIKE "
+                         "--unique-items, this applies BY DEFAULT (N=1: at "
+                         "most one sash holder) to every --deep/--bring4/"
+                         "--multi-bring4 team/pair, no flag needed to turn "
+                         "it on. N=0 bans Focus Sash outright (same cheap "
+                         "mechanism as --allow-scarf's own "
+                         "DEFAULT_EXCLUDED_ITEMS, just for this item); a "
+                         "negative N disables the check entirely, "
+                         "restoring the old unconstrained per-member "
+                         "search. Under --multi-bring4 this is applied to "
+                         "the TOP --top rows only, same scoping and same "
+                         "reasoning as --unique-items (the exhaustive/beam "
+                         "sweep's own ranking is unaffected)")
+    ap.add_argument("--dead-mega-rebuild", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="--multi-bring4 only: \"every single match only "
+                         "uses one of the megas... may as well give the "
+                         "other mega a useful item and leave it as base "
+                         "form if it never megas\" -- when a core's 2nd "
+                         "Mega-stone holder is never the one actually "
+                         "chosen to transform across ANY of the named "
+                         "enemies, re-race that member as its base form "
+                         "holding a real item and keep whichever version "
+                         "ranks better. On BY DEFAULT, same top --top-rows-"
+                         "only scoping as --unique-items/--max-focus-sash "
+                         "(the exhaustive/beam sweep's own ranking is "
+                         "unaffected); pass --no-dead-mega-rebuild to turn "
+                         "it off")
     ap.add_argument("--tailwind-focus", action="store_true",
                     help="--multi-bring4 only: a LIGHTWEIGHT lens for the "
                          "hyper-offense 'Tailwind opener into spread "
@@ -2444,6 +2594,7 @@ def main():
     item_overrides = _parse_item_overrides(args.item)
     move_overrides = _parse_move_overrides(args.moves)
     excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
     type_limits = _parse_type_limits(args.type_limit)
     strict_weak_types = _resolve_strict_weak_types(args.strict_weak_types)
     type_limits = _merge_strict_weak_types(type_limits, strict_weak_types)
@@ -2517,7 +2668,8 @@ def main():
             our_pair[0], our_pair[1], targets, merged, moves, natures,
             typechart, turns=args.turns, item_overrides=item_overrides,
             move_overrides=move_overrides, excluded_items=excluded_items,
-            worst_case_targeting=args.worst_case_targeting)
+            worst_case_targeting=args.worst_case_targeting,
+            max_focus_sash=max_focus_sash)
         _print_deep(our_pair[0], our_pair[1], item1, item2, targets, detail,
                    summary, args.turns)
         if args.switches:
@@ -2542,7 +2694,8 @@ def main():
             item_overrides=item_overrides, move_overrides=move_overrides,
             excluded_items=excluded_items,
             enforce_item_clause=args.unique_items,
-            worst_case_targeting=args.worst_case_targeting)
+            worst_case_targeting=args.worst_case_targeting,
+            max_focus_sash=max_focus_sash)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
         ranks = _parse_deep_dive_core(args.deep_dive_core)
@@ -2559,7 +2712,8 @@ def main():
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting)
+                worst_case_targeting=args.worst_case_targeting,
+                max_focus_sash=max_focus_sash)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2581,7 +2735,8 @@ def main():
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting)
+                worst_case_targeting=args.worst_case_targeting,
+                max_focus_sash=max_focus_sash)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
@@ -2653,6 +2808,22 @@ def main():
         if args.unique_items and multi_rows:
             multi_rows = _apply_item_clause_to_top_rows(
                 multi_rows, args.top, coverage, good_threshold)
+        # BY DEFAULT (unlike --unique-items above), not gated behind a
+        # flag -- "this must apply to every single team". Same top-N-only
+        # scoping and same reasoning: see _apply_focus_sash_cap_to_top_rows.
+        if multi_rows:
+            multi_rows = _apply_focus_sash_cap_to_top_rows(
+                multi_rows, args.top, coverage, good_threshold,
+                max_focus_sash=max_focus_sash)
+        # Same top-N-only scoping and same reasoning as Item Clause/
+        # Focus-Sash-cap just above: a core's own `dead_megas` is cheap to
+        # CHECK (already computed by every _core_row call), but acting on
+        # it means a real core-scoped re-race, so this only runs for rows
+        # anyone will actually see. BY DEFAULT like Focus-Sash-cap, not
+        # opt-in like Item Clause -- see --dead-mega-rebuild's own help.
+        if multi_rows and args.dead_mega_rebuild:
+            multi_rows = _apply_dead_mega_rebuild_to_top_rows(
+                multi_rows, args.top, coverage, good_threshold)
         _print_multi_bring4(multi_rows, vs_teams, args.top, mode_label,
                             good_threshold, len(coverage["candidate_pool"]),
                             len(pool), merged, moves, natures, typechart,
@@ -2696,7 +2867,8 @@ def main():
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting)
+                worst_case_targeting=args.worst_case_targeting,
+                max_focus_sash=max_focus_sash)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2720,14 +2892,16 @@ def main():
                 typechart, turns=args.turns, item_overrides=item_overrides,
                 move_overrides=move_overrides, excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting)
+                worst_case_targeting=args.worst_case_targeting,
+                max_focus_sash=max_focus_sash)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.two_two_two:
         pair_rows = find_pair_cores(pool, merged, moves, natures, typechart,
                                     two_two_two_enemy_teams)
         team_rows = two_two_two_teams(pair_rows, merged,
                                       top_pairs=args.top_pairs, top_n=args.top_teams,
-                                      max_net_weakness=args.max_net_weakness)
+                                      max_net_weakness=args.max_net_weakness,
+                                      max_megas=args.max_megas)
         _print_two_two_two(pair_rows, team_rows, args.top_pairs, args.max_net_weakness)
     elif args.speed:
         names = targets + [n for n in pool if n not in targets]
