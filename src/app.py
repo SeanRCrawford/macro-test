@@ -3688,12 +3688,19 @@ with tab_counter:
                "the CLI). Use Lead / Back Search for the slow, honest, real-solver "
                "verification of whatever this recommends.")
     from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search,
-                                find_pair_cores, two_two_two_teams)
+                                find_pair_cores, two_two_two_teams, coverage_group_search)
     from team_search import build_candidate_pool
+
+    # Shared with the "Coverage groups" mode's own "Send to Bring-4" button
+    # below, which pre-fills Bring-4 mode's own paste box with a candidate
+    # group -- both must agree on this exact label for the hand-off to land
+    # on the right widget option.
+    _PASTE_OUR_LABEL = "\U0001f4cb Paste a pokepaste"
 
     ct_mode = st.radio(
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
-                 "Joint pair search", "2-2-2 teambuilding"], key="ct_mode", horizontal=True)
+                 "Joint pair search", "2-2-2 teambuilding", "Coverage groups"],
+        key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
         "Allow Choice Scarf", value=False, key="ct_allow_scarf",
@@ -3734,7 +3741,7 @@ with tab_counter:
             vs_roster = list(teams[ct_vs_name])
             vs_sets = team_meta.get(ct_vs_name, {}).get("sets") or {}
         SEARCH_POOL = "\U0001f50d Search a pool for the best team"
-        PASTE_OUR = "\U0001f4cb Paste a pokepaste"
+        PASTE_OUR = _PASTE_OUR_LABEL
         ct_our_source = st.selectbox(
             "Our 6", ["(current Team Builder team)", SEARCH_POOL, PASTE_OUR] + list(teams),
             key="ct_b4_our",
@@ -4153,7 +4160,7 @@ with tab_counter:
                  "Protect-safe": r["pairs_protect_safe"]}
                 for r in rows[:top_n2]]), width='stretch', hide_index=True)
 
-    else:  # 2-2-2 teambuilding
+    elif ct_mode == "2-2-2 teambuilding":
         st.caption("'2-2-2 teambuilding': using core PAIRS that work well "
                    "together to make your lead unpredictable. Every pair "
                    "drawn from the pool is scored three ways -- defensive "
@@ -4186,6 +4193,14 @@ with tab_counter:
                  "this, instead of just ranking it lower.")
         max_net3 = (st.slider("Max net weakness", 0, 6, 2, key="ct_222_max_net")
                    if cap_on else None)
+        max_megas3 = st.slider("Max Mega-stone users on a team", 0, 6, 2,
+                               key="ct_222_max_megas",
+                               help="VGC's real 'only one Mega Evolution per "
+                                    "team per game' -- a pair is never two "
+                                    "Megas to begin with (find_pair_cores' own "
+                                    "rule), so a team at this cap always has "
+                                    "its (at most 2) stone-holders split "
+                                    "across two different pairs.")
         if st.button("Find 2-2-2 cores", type="primary", key="ct_222_go"):
             if not ct_222_teams:
                 st.warning("Select at least one named team.")
@@ -4198,7 +4213,8 @@ with tab_counter:
                                                 typechart, enemy_teams)
                     team_rows = two_two_two_teams(pair_rows, merged,
                                                   top_pairs=top_pairs3, top_n=top_teams3,
-                                                  max_net_weakness=max_net3)
+                                                  max_net_weakness=max_net3,
+                                                  max_megas=max_megas3)
                 st.session_state["ct_222_pair_rows"] = pair_rows
                 st.session_state["ct_222_team_rows"] = team_rows
                 st.session_state["ct_222_top_pairs_shown"] = top_pairs3
@@ -4257,6 +4273,28 @@ with tab_counter:
                         for r in mutual_pairs
                         for n1, n2 in [r["pair"]]]), width='stretch', hide_index=True)
 
+            pin_pairs = sorted(
+                (r for r in pair_rows if r["offensive_pin"] is not None),
+                key=lambda r: -r["offensive_pin"]["coverage_frac"])
+            if pin_pairs:
+                perfect_count = sum(1 for r in pin_pairs
+                                    if r["offensive_pin"]["coverage_frac"] >= 1.0)
+                with st.expander(f"Offensive-pin pairs ({perfect_count} perfect of "
+                                f"{len(pin_pairs)} found)"):
+                    st.caption("A real spread move (hits both opposing Pokemon at "
+                              "once) backed by a partner move that answers most of "
+                              "what would otherwise resist it -- the enemy can't "
+                              "safely Protect, switch, or stay in.")
+                    st.dataframe(pd.DataFrame([
+                        {"Pin": f"{op['pin_user']} ({op['pin_move']}, {op['pin_type']})",
+                         "Follow-up": f"{op['follow_up_user']} ({op['follow_up_move'] or '-'})",
+                         "Coverage": ("PERFECT" if op["coverage_frac"] >= 1.0
+                                     else f"{op['coverage_frac']*100:.0f}%"),
+                         "Resistors answered": f"{len(op['covered'])}/{len(op['resisted_by'])}",
+                         "Avg Score": round(r["avg_score"], 1)}
+                        for r in pin_pairs
+                        for op in [r["offensive_pin"]]]), width='stretch', hide_index=True)
+
         if team_rows:
             st.markdown(f"**Top {len(team_rows)} 2-2-2 teams** (3 disjoint "
                        f"pairs) -- lowest worst-case team-wide net "
@@ -4275,6 +4313,112 @@ with tab_counter:
         elif pair_rows:
             st.info("No 3-disjoint-pair team could be formed from the top "
                     "pairs shown -- raise 'Top pairs to show'.")
+
+    else:  # Coverage groups
+        st.caption("\"Coverage group finder\": every legal group of the "
+                   "sizes below drawn from the pool, ranked by how "
+                   "completely its OWN internal pairs -- every one of the "
+                   "group's own links, not just 3 designated ones the way "
+                   "2-2-2 teambuilding combines disjoint pairs -- mutually "
+                   "cover each other's weaknesses. Ported from a standalone "
+                   "tool, sourced from this roster's own real pair data "
+                   "(find_pair_cores) instead of a pasted table.")
+        cov_pool_size = st.slider(
+            "Search pool size (top-Score Pokemon)", 10, 40, 25, key="ct_cov_pool",
+            help="Kept modest so the search is actually exhaustive (fully "
+                 "checked), not a partial best-effort sample -- pool<=30 "
+                 "for group-of-6 stays fast and complete, matching the "
+                 "same pool-size discipline every other exhaustive search "
+                 "in this tab already relies on.")
+        ct_cov_teams = st.multiselect(
+            "Enemy universe (named teams)", list(teams), default=list(teams),
+            key="ct_cov_teams",
+            help="Every distinct Pokemon across the selected teams forms "
+                 "the '1v1 threat coverage' universe find_pair_cores scores "
+                 "each pair against -- defaults to every saved team.")
+        cov_sizes = st.multiselect("Group sizes", [3, 4, 5, 6], default=[3, 4, 6],
+                                   key="ct_cov_sizes")
+        cc1, cc2, cc3 = st.columns(3)
+        cov_sort_label = cc1.selectbox(
+            "Rank by", ["Perfect links", "Mutual coverage", "Avg score"],
+            key="ct_cov_sort")
+        cov_top_n = cc2.slider("Top groups to show", 5, 40, 15, key="ct_cov_top_n")
+        cov_missing_pct = cc3.slider(
+            "Unmeasured links allowed (%)", 0, 100, 40, key="ct_cov_missing",
+            help="How much of a group's own links may have no scored pair "
+                 "at all (a Mega alongside its own base form, or two "
+                 "different Megas together, are never scored as a pair to "
+                 "begin with) before the group is dropped.")
+        cov_dup_typing = st.checkbox(
+            "Prevent duplicate typing", value=True, key="ct_cov_dup",
+            help="No two members of a group may share the exact same "
+                 "two-type combination (e.g. two Dragon/Flying members) -- "
+                 "a redundant matchup profile even when their movepools "
+                 "differ.")
+        cov_max_megas = st.slider(
+            "Max Mega-stone users in a group", 0, 6, 2, key="ct_cov_max_megas",
+            help="VGC's real 'only one Mega Evolution per team per game'.")
+        cov_cap_on = st.checkbox(
+            "Cap a group's worst net weakness", key="ct_cov_cap_on")
+        cov_max_net = (st.slider("Max net weakness", 0, 6, 2, key="ct_cov_max_net")
+                      if cov_cap_on else None)
+        if st.button("Find coverage groups", type="primary", key="ct_cov_go"):
+            if not ct_cov_teams:
+                st.warning("Select at least one named team.")
+            elif not cov_sizes:
+                st.warning("Pick at least one group size.")
+            else:
+                pool = build_candidate_pool(merged, top_n=cov_pool_size, prefs=prefs)
+                enemy_teams = {n: list(teams[n]) for n in ct_cov_teams}
+                sort_map = {"Perfect links": "perfect", "Mutual coverage": "coverage",
+                           "Avg score": "score"}
+                with st.spinner(f"Scoring every pair drawn from {len(pool)} "
+                                f"Pokemon vs {len(ct_cov_teams)} named team(s), "
+                                f"then searching groups of "
+                                f"{', '.join(str(s) for s in sorted(cov_sizes))}..."):
+                    cov_pair_rows = find_pair_cores(pool, merged, moves, natures,
+                                                    typechart, enemy_teams)
+                    cov_results = coverage_group_search(
+                        cov_pair_rows, merged, group_sizes=tuple(sorted(cov_sizes)),
+                        prefix_limits=(("Mega ", cov_max_megas),),
+                        max_missing_frac=cov_missing_pct / 100.0,
+                        no_duplicate_typing=cov_dup_typing,
+                        max_net_weakness=cov_max_net,
+                        sort_by=sort_map[cov_sort_label], top_n=cov_top_n)
+                st.session_state["ct_cov_results"] = cov_results
+
+        cov_results = st.session_state.get("ct_cov_results")
+        if cov_results:
+            first_shown = True
+            for size in sorted(cov_results):
+                r = cov_results[size]
+                note = " (search stopped early -- narrow the pool for exhaustive results)" if r["aborted"] else ""
+                st.markdown(f"**Groups of {size}** -- {r['seen']:,} checked{note}, "
+                           f"showing {len(r['rows'])}:")
+                if not r["rows"]:
+                    st.info("No groups of this size passed the current filters.")
+                    continue
+                for i, row in enumerate(r["rows"], start=1):
+                    exposed = {t: n for t, n in row["net_weakness"].items() if n > 0}
+                    score_str = f"{row['avg_score']:.1f}" if row["avg_score"] is not None else "-"
+                    with st.expander(f"#{i}: {' / '.join(row['group'])}",
+                                     expanded=first_shown):
+                        first_shown = False
+                        st.caption(
+                            f"Perfect links: {row['perfect_links']}/{row['total_links']}  |  "
+                            f"Measured links: {row['known_links']}/{row['total_links']}  |  "
+                            f"Mutual coverage: {row['coverage_pct']:.0f}%  |  "
+                            f"Avg Score: {score_str}")
+                        weak_str = ("Worst net weakness: " + str(row["worst_net_weakness"])
+                                   + ("  |  Net-weak types: " + ", ".join(
+                                       f"{t} ({n})" for t, n in exposed.items())
+                                      if exposed else ""))
+                        st.caption(weak_str)
+                        if st.button("Send to Bring-4", key=f"ct_cov_send_{size}_{i}"):
+                            st.session_state["ct_mode"] = "Bring-4 (one enemy roster)"
+                            st.session_state["ct_b4_our"] = _PASTE_OUR_LABEL
+                            st.session_state["ct_b4_our_paste"] = "\n\n".join(row["group"])
+                            st.rerun()
 
 
 # ------------------------------------------------------------------ battle

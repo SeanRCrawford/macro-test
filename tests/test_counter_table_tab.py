@@ -33,7 +33,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_four_modes_are_offered(self):
+    def test_the_five_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
@@ -41,7 +41,8 @@ class TestCounterTableTabExists(unittest.TestCase):
                          {"Bring-4 (one enemy roster)",
                           "Multi-bring4 (several enemy rosters)",
                           "Joint pair search",
-                          "2-2-2 teambuilding"})
+                          "2-2-2 teambuilding",
+                          "Coverage groups"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
         at = app()
@@ -66,6 +67,30 @@ class TestCounterTableTabExists(unittest.TestCase):
             "Joint pair search").run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any(s.key == "ct_jp_partner" for s in at.selectbox))
+
+    def test_switching_to_coverage_groups_mode_renders_its_controls(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_cov_pool" for s in at.slider))
+        self.assertTrue(any(m.key == "ct_cov_teams" for m in at.multiselect))
+        self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
+        self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
+        self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
+
+    def test_coverage_groups_search_runs_and_shows_results(self):
+        """A real (small) run through the actual widget tree -- confirms the
+        button click wires through to `coverage_group_search` and back into
+        rendered output, not just that the controls exist."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(12).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Groups of 3" in md.value for md in at.markdown))
 
     def test_choice_scarf_is_excluded_by_default(self):
         at = app()

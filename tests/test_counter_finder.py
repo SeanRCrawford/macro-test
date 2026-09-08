@@ -3928,6 +3928,168 @@ class TestMultiBring4CoverageMegaConsistency(unittest.TestCase):
             self.assertEqual(best["mega_used"], "Mega Floette")
 
 
+class TestCoreRowDeadMegaDetection(unittest.TestCase):
+    """`_core_row`'s new `dead_megas` field: "I have two megas on a
+    generated team, but every single match only uses one of the megas...
+    may as well give the other mega a useful item and leave it as base
+    form if it never megas." Hand-built fixtures (`_fake_pair_row`, no
+    real racing), same style as `TestCoreRowRespectsMegaConsistency`."""
+
+    TARGETS1 = ("E1", "E2")
+    TARGETS2 = ("E3", "E4")
+    WIN1 = {TARGETS1}
+    WIN2 = {TARGETS2}
+    LOSS = set()
+
+    def _fixture(self, six, targets, win_set, winner_name):
+        """Every pair touching `winner_name` wins `targets`'s one enemy
+        pair; every other pair (including ones touching the OTHER mega, if
+        any) loses -- mirrors `TestCoreRowRespectsMegaConsistency.setUp`'s
+        own touching_a/touching_b split, parameterised on the winner."""
+        import itertools as _it
+        pair_lookup = {frozenset(p): _fake_pair_row(p, self.LOSS, targets)
+                       for p in _it.combinations(six, 2)}
+        touching_winner = [p for p in _it.combinations(six, 2) if winner_name in p]
+        forced_base = {winner_name: {frozenset(p): _fake_pair_row(p, self.LOSS, targets)
+                                     for p in touching_winner}}
+        # The OTHER stone holder (if `six` has one), forced to base, is
+        # what actually lets `winner_name` transform -- same shape as
+        # `TestCoreRowRespectsMegaConsistency`'s own `touching_b`/`touching_a`.
+        megas = [n for n in six if n.startswith("Mega ")]
+        other = next((m for m in megas if m != winner_name), None)
+        if other is not None:
+            touching_other = [p for p in _it.combinations(six, 2) if other in p]
+            forced_base[other] = {frozenset(p): _fake_pair_row(p, win_set, targets)
+                                  for p in touching_other}
+        return pair_lookup, forced_base
+
+    def test_no_dead_megas_with_fewer_than_two_stone_holders(self):
+        six = ["Mega A", "C", "D", "E"]
+        pair_lookup, _fb = self._fixture(six, self.TARGETS1, self.WIN1, "Mega A")
+        row = cf._core_row(six, [pair_lookup], [self.TARGETS1], good_threshold=0.0)
+        self.assertEqual(row["dead_megas"], ())
+
+    def test_dead_megas_empty_when_each_mega_wins_a_different_enemy(self):
+        six = ["Mega A", "Mega B", "C", "D"]
+        lookup1, fb1 = self._fixture(six, self.TARGETS1, self.WIN1, "Mega A")
+        lookup2, fb2 = self._fixture(six, self.TARGETS2, self.WIN2, "Mega B")
+        row = cf._core_row(
+            six, [lookup1, lookup2], [self.TARGETS1, self.TARGETS2], good_threshold=0.0,
+            pair_by_key_forced_base_list=[fb1, fb2])
+        self.assertEqual(
+            {pe["best_bring4_row"]["mega_used"] for pe in row["per_enemy"]},
+            {"Mega A", "Mega B"})
+        self.assertEqual(row["dead_megas"], ())
+
+    def test_dead_megas_flags_the_stone_holder_never_chosen_anywhere(self):
+        """"Mega A" wins BOTH enemies here -- "Mega B" is brought every
+        time (the six is exactly 4 members, so the one bring4 IS the whole
+        six) but never once the actual chosen mega."""
+        six = ["Mega A", "Mega B", "C", "D"]
+        lookup1, fb1 = self._fixture(six, self.TARGETS1, self.WIN1, "Mega A")
+        lookup2, fb2 = self._fixture(six, self.TARGETS2, self.WIN2, "Mega A")
+        row = cf._core_row(
+            six, [lookup1, lookup2], [self.TARGETS1, self.TARGETS2], good_threshold=0.0,
+            pair_by_key_forced_base_list=[fb1, fb2])
+        self.assertEqual(
+            [pe["best_bring4_row"]["mega_used"] for pe in row["per_enemy"]],
+            ["Mega A", "Mega A"])
+        self.assertEqual(row["dead_megas"], ("Mega B",))
+        self.assertEqual(row["unused"], ())
+
+    def test_a_fully_unused_stone_holder_is_not_double_flagged(self):
+        """A stone holder that's never even BROUGHT (already `_core_row`'s
+        own `unused`) must not also show up in `dead_megas` -- that's a
+        different, stronger statement ("brought, just never the mega")
+        `_core_dead_mega_rebuild` isn't built to act on the same way."""
+        import itertools as _it
+        six = ["Mega A", "Mega B", "C", "D", "E"]
+        pair_lookup = {}
+        for p in _it.combinations(six, 2):
+            beats = self.WIN1 if "Mega B" not in p else self.LOSS
+            pair_lookup[frozenset(p)] = _fake_pair_row(p, beats, self.TARGETS1)
+        row = cf._core_row(six, [pair_lookup], [self.TARGETS1], good_threshold=0.0)
+        best = row["per_enemy"][0]["best_bring4_row"]
+        self.assertNotIn("Mega B", best["bring4"])
+        self.assertEqual(row["unused"], ("Mega B",))
+        self.assertEqual(row["dead_megas"], ())
+
+
+class TestCoreDeadMegaRebuild(unittest.TestCase):
+    """`_core_dead_mega_rebuild`, real-data end-to-end (like
+    `TestMultiBring4CoverageMegaConsistency`): a core carrying 2 real
+    Mega-stone holders where one is never the chosen mega across either
+    named enemy gets re-raced with that member swapped for its own
+    base-species name and a real item."""
+
+    POOL = ["Mega Scizor", "Mega Floette", "Scizor", "Garchomp", "Kingambit",
+           "Whimsicott", "Sinistcha"]
+    ENEMIES = [["Kingambit", "Basculegion", "Sableye", "Ariados"],
+              ["Sableye", "Ariados", "Basculegion", "Sinistcha"]]
+    CORE = ("Garchomp", "Kingambit", "Mega Floette", "Mega Scizor")
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+        self.row = cf._core_row(
+            self.CORE, self.coverage["pair_by_key"], self.coverage["target_name_lists"],
+            good_threshold=0.0,
+            pair_by_key_forced_base_list=self.coverage["pair_by_key_forced_base"])
+
+    def test_mega_scizor_is_flagged_dead_in_this_fixture(self):
+        """Ground truth this whole class relies on: Mega Floette wins both
+        named enemies here, so Mega Scizor (brought every time -- the core
+        is exactly 4 members) is never the chosen mega."""
+        self.assertEqual(
+            [pe["best_bring4_row"]["mega_used"] for pe in self.row["per_enemy"]],
+            ["Mega Floette", "Mega Floette"])
+        self.assertEqual(self.row["dead_megas"], ("Mega Scizor",))
+
+    def test_rebuild_substitutes_the_base_species_name(self):
+        context = cf._item_clause_context_from_coverage(self.coverage)
+        rebuild = cf._core_dead_mega_rebuild(
+            self.row["core"], self.row["dead_megas"],
+            self.coverage["target_name_lists"], context)
+        self.assertIsNotNone(rebuild)
+        substitute_core, pair_by_key_per_enemy = rebuild
+        self.assertEqual(substitute_core,
+                         ("Garchomp", "Kingambit", "Mega Floette", "Scizor"))
+        self.assertEqual(set(pair_by_key_per_enemy),
+                         {tuple(t) for t in self.coverage["target_name_lists"]})
+        # A valid `_core_row` call: the substitute core only carries 1
+        # mega now, so no `pair_by_key_forced_base_list`/`megas` needed.
+        pair_by_key_list = [pair_by_key_per_enemy[tuple(t)]
+                            for t in self.coverage["target_name_lists"]]
+        new_row = cf._core_row(substitute_core, pair_by_key_list,
+                               self.coverage["target_name_lists"], good_threshold=0.0)
+        self.assertEqual(new_row["core"], substitute_core)
+        self.assertEqual(new_row["dead_megas"], ())
+
+    def test_rebuild_returns_none_when_the_base_form_was_never_in_the_pool(self):
+        """No already-vetted real set for "Scizor" to substitute in when
+        the pool-wide search never named it (a fixed `--our` that only
+        ever listed "Mega Scizor")."""
+        pool_no_base = [n for n in self.POOL if n != "Scizor"]
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        coverage = cf.multi_bring4_coverage(
+            pool_no_base, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=1)
+        row = cf._core_row(
+            self.CORE, coverage["pair_by_key"], coverage["target_name_lists"],
+            good_threshold=0.0,
+            pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"])
+        self.assertEqual(row["dead_megas"], ("Mega Scizor",))
+        context = cf._item_clause_context_from_coverage(coverage)
+        rebuild = cf._core_dead_mega_rebuild(
+            row["core"], row["dead_megas"], coverage["target_name_lists"], context)
+        self.assertIsNone(rebuild)
+
+
 class TestMultiBring4CoverageItemClause(unittest.TestCase):
     """`multi_bring4_coverage`/`_core_row`'s Item Clause fix ("Fix B"):
     Stage A's pool-wide `fixed_items` (one item per POOL member, searched
@@ -7241,7 +7403,12 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
         rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
                                   self.W["teams"])
         import itertools as _it
-        self.assertEqual(len(rows), len(list(_it.combinations(pool, 2))))
+        # One fewer than the full C(6,2): "Mega Metagross + Mega Charizard
+        # Y" (two Megas paired together) is never even generated -- see
+        # TestFindPairCoresMegaRules below.
+        self.assertEqual(len(rows), len(list(_it.combinations(pool, 2))) - 1)
+        self.assertNotIn(frozenset({"Mega Metagross", "Mega Charizard Y"}),
+                         {frozenset(r["pair"]) for r in rows})
         # Sorted: fewest shared_weak first.
         shared_counts = [len(r["shared_weak"]) for r in rows]
         self.assertEqual(shared_counts, sorted(shared_counts))
@@ -7366,6 +7533,184 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
         self.assertEqual([r["team"] for r in default], [r["team"] for r in explicit_none])
 
 
+class TestFindPairCoresMegaRules(unittest.TestCase):
+    """"you cannot have both a mega and its non-mega form. A pair should
+    never be two megas" -- two pairs `find_pair_cores` must never even
+    generate, regardless of how well they'd otherwise score."""
+
+    def setUp(self):
+        self.W = world()
+        self.merged = self.W["merged"]
+
+    def _pairs(self, pool):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                  self.W["teams"])
+        return {frozenset(r["pair"]) for r in rows}
+
+    def test_a_mega_and_its_own_base_form_are_never_paired(self):
+        pairs = self._pairs(["Garchomp", "Mega Garchomp", "Hydreigon"])
+        self.assertNotIn(frozenset({"Garchomp", "Mega Garchomp"}), pairs)
+        # The OTHER two pairs (each with Hydreigon) are still legal.
+        self.assertIn(frozenset({"Garchomp", "Hydreigon"}), pairs)
+        self.assertIn(frozenset({"Mega Garchomp", "Hydreigon"}), pairs)
+
+    def test_two_different_megas_are_never_paired(self):
+        pairs = self._pairs(["Mega Garchomp", "Mega Metagross", "Hydreigon"])
+        self.assertNotIn(frozenset({"Mega Garchomp", "Mega Metagross"}), pairs)
+        self.assertIn(frozenset({"Mega Garchomp", "Hydreigon"}), pairs)
+        self.assertIn(frozenset({"Mega Metagross", "Hydreigon"}), pairs)
+
+    def test_no_illegal_pair_survives_a_larger_pool(self):
+        pool = ["Hydreigon", "Mega Metagross", "Garchomp", "Mega Garchomp",
+               "Kingambit", "Mega Charizard Y", "Venusaur", "Salamence",
+               "Mega Salamence", "Dragonite"]
+        pairs = self._pairs(pool)
+        for p in pairs:
+            n1, n2 = tuple(p)
+            self.assertFalse(n1.startswith("Mega ") and n2.startswith("Mega "), p)
+            self.assertFalse(cf._mega_base_overlap((n1, n2)), p)
+
+
+class TestTwoTwoTwoTeamsMaxMegas(unittest.TestCase):
+    """"A team should not have more than two megas, and the pairs should
+    combine such that the megas dont both need to come" -- `max_megas`
+    (default 2, matching `bring4_search`/`multi_bring4_exhaustive`'s own
+    convention) hard-drops any candidate team over the cap; since
+    `find_pair_cores` never generates a two-Mega pair, a team AT the cap
+    always has its stone-holders split across two different pairs."""
+
+    def setUp(self):
+        self.W = world()
+        self.merged = self.W["merged"]
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Hydreigon", "Mega Metagross", "Garchomp", "Mega Garchomp",
+               "Kingambit", "Mega Charizard Y", "Venusaur", "Salamence",
+               "Mega Salamence", "Dragonite"]
+        self.pair_rows = cf.find_pair_cores(pool, self.merged, moves, natures,
+                                            typechart, self.W["teams"])
+
+    def _mega_count(self, team):
+        return sum(1 for n in team if n.startswith("Mega "))
+
+    def test_default_caps_every_team_at_two_megas(self):
+        rows = cf.two_two_two_teams(self.pair_rows, self.merged,
+                                    top_pairs=len(self.pair_rows), top_n=200)
+        self.assertGreater(len(rows), 0)
+        for r in rows:
+            self.assertLessEqual(self._mega_count(r["team"]), 2)
+
+    def test_max_megas_none_allows_more_than_two(self):
+        capped = cf.two_two_two_teams(self.pair_rows, self.merged,
+                                      top_pairs=len(self.pair_rows), top_n=200)
+        uncapped = cf.two_two_two_teams(self.pair_rows, self.merged,
+                                        top_pairs=len(self.pair_rows), top_n=200,
+                                        max_megas=None)
+        self.assertGreaterEqual(len(uncapped), len(capped))
+        self.assertTrue(any(self._mega_count(r["team"]) > 2 for r in uncapped),
+                        "fixture assumes at least one candidate team really "
+                        "does carry more than 2 stone-holders when uncapped")
+
+    def test_a_team_at_the_cap_never_needs_both_megas_in_one_pair(self):
+        rows = cf.two_two_two_teams(self.pair_rows, self.merged,
+                                    top_pairs=len(self.pair_rows), top_n=200)
+        for r in rows:
+            if self._mega_count(r["team"]) < 2:
+                continue
+            for pair in r["pairs"]:
+                self.assertFalse(pair[0].startswith("Mega ") and pair[1].startswith("Mega "),
+                                 (r["team"], pair))
+
+    def test_stricter_max_megas_drops_teams(self):
+        rows0 = cf.two_two_two_teams(self.pair_rows, self.merged,
+                                     top_pairs=len(self.pair_rows), top_n=200,
+                                     max_megas=0)
+        for r in rows0:
+            self.assertEqual(self._mega_count(r["team"]), 0)
+
+
+class TestPairOffensivePin(unittest.TestCase):
+    """"Offensive pins": one member's real spread move backed by a
+    partner move that answers most of what would otherwise resist it --
+    "Fire (Heat Wave) + Ground (High Horsepower, Earthquake): Fire is
+    resisted by fire, rock, water - ground hits 2/3 for super effective"."""
+
+    def setUp(self):
+        self.W = world()
+        self.merged = self.W["merged"]
+        self.moves, self.typechart = self.W["moves"], self.W["typechart"]
+
+    def test_types_resisting_fire_matches_the_real_type_chart(self):
+        resisted = cf._types_resisting("Fire", self.typechart)
+        # The user's own worked example (Fire, Rock, Water) plus Dragon,
+        # which the real chart also resists Fire with (0.5x) -- confirmed
+        # directly against damage.type_multiplier below, not assumed.
+        for t in ("Fire", "Rock", "Water", "Dragon"):
+            self.assertIn(t, resisted)
+        self.assertNotIn("Grass", resisted)  # Fire is super-effective vs Grass
+
+    def test_real_damaging_moves_excludes_status_and_the_other_bucket(self):
+        moves = cf._real_damaging_moves("Garchomp", self.merged, self.moves)
+        names = [mv.name for mv in moves]
+        self.assertNotIn("Protect", names)   # Status
+        self.assertNotIn("Other", names)     # not a real move
+        self.assertIn("Earthquake", names)
+
+    def test_best_move_of_kind_spread_only_finds_a_real_spread_move(self):
+        mv = cf._best_move_of_kind("Mega Charizard Y", self.merged, self.moves,
+                                   spread_only=True)
+        self.assertIsNotNone(mv)
+        self.assertEqual(mv.name, "Heat Wave")
+
+    def test_a_real_offensive_pin_is_scored_and_covers_most_resistors(self):
+        row = cf._pair_offensive_pin("Mega Charizard Y", "Garchomp",
+                                     self.merged, self.moves, self.typechart)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["pin_user"], "Mega Charizard Y")
+        self.assertEqual(row["pin_move"], "Heat Wave")
+        self.assertEqual(row["pin_type"], "Fire")
+        self.assertEqual(row["follow_up_user"], "Garchomp")
+        self.assertGreater(row["coverage_frac"], 0.0)
+        self.assertLessEqual(row["coverage_frac"], 1.0)
+        self.assertEqual(len(row["covered"]), len(set(row["covered"])))
+        self.assertTrue(set(row["covered"]) <= set(row["resisted_by"]))
+
+    def test_the_better_of_both_directions_is_kept(self):
+        """Both members here have a real spread move (Heat Wave / Earth
+        Power-style Ground move); whichever direction scores higher is
+        the one returned, not always name1-leads."""
+        row_ab = cf._pair_offensive_pin("Mega Charizard Y", "Garchomp",
+                                        self.merged, self.moves, self.typechart)
+        row_ba = cf._pair_offensive_pin("Garchomp", "Mega Charizard Y",
+                                        self.merged, self.moves, self.typechart)
+        # Order of the ARGUMENTS doesn't matter -- both directions are
+        # tried internally either way, so the two calls agree.
+        self.assertEqual(row_ab["pin_user"], row_ba["pin_user"])
+        self.assertEqual(row_ab["coverage_frac"], row_ba["coverage_frac"])
+
+    def test_returns_none_when_neither_side_has_a_real_spread_move(self):
+        # Neither Kingambit nor Incineroar's own top usage moves include a
+        # real spread move (both are single-target-focused sets) --
+        # confirmed directly via _best_move_of_kind(spread_only=True)
+        # returning None for both, not assumed.
+        self.assertIsNone(cf._best_move_of_kind(
+            "Kingambit", self.merged, self.moves, spread_only=True))
+        self.assertIsNone(cf._best_move_of_kind(
+            "Incineroar", self.merged, self.moves, spread_only=True))
+        row = cf._pair_offensive_pin("Kingambit", "Incineroar", self.merged,
+                                     self.moves, self.typechart)
+        self.assertIsNone(row)
+
+    def test_find_pair_cores_carries_the_offensive_pin_field(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Mega Charizard Y", "Garchomp", "Hydreigon"]
+        rows = cf.find_pair_cores(pool, self.merged, moves, natures, typechart,
+                                  self.W["teams"])
+        row = next(r for r in rows if set(r["pair"]) == {"Mega Charizard Y", "Garchomp"})
+        self.assertIsNotNone(row["offensive_pin"])
+        self.assertEqual(row["offensive_pin"]["pin_move"], "Heat Wave")
+
+
 class TestLastRespectsFaintedAllyBoost(unittest.TestCase):
     """"another loss which is treated as a win, my side is Metagross/
     Dragonite" -- once Basculegion's own partner (e.g. Arcanine-Hisui) had
@@ -7436,3 +7781,225 @@ class TestLastRespectsFaintedAllyBoost(unittest.TestCase):
             attacker_hp_frac=1.0, target_hp_fracs={"P": 1.0, "E2": 0.0},
             attacker_role="E1")
         self.assertAlmostEqual(hits_alive["P"].avg, hits_fainted["P"].avg, places=6)
+
+
+def _fake_coverage_row(pair, perfect, coverage_frac, avg_score=None):
+    """A synthetic `find_pair_cores`-shaped row -- only the fields
+    `coverage_group_search` actually reads (`pair`, `mutual_resist`'s
+    `perfect`/`coverage_frac`, `avg_score`), no real racing/weakness math."""
+    return {"pair": pair, "avg_score": avg_score,
+           "mutual_resist": {"perfect": perfect, "coverage_frac": coverage_frac}}
+
+
+# A member lacking "defensive_chart" entirely is treated as weakness-neutral
+# by `team_search._weak_resist` (skipped, contributes 0 either way) -- so
+# `net_weakness_by_type` (always computed per returned row, "a genuine
+# display column") is a harmless no-op against this fixture, letting these
+# tests isolate pure ranking/filter logic without needing real weakness data.
+_FAKE_MERGED = {
+    name: {"types": types} for name, types in {
+        "A": ["Fire"], "B": ["Water"], "C": ["Grass"], "D": ["Electric"],
+        "E": ["Ice"], "F": ["Fire"],            # F shares A's exact typing
+        "Mega G": ["Dragon", "Flying"], "Mega H": ["Steel", "Psychic"],
+        "Mega I": ["Ghost"],
+    }.items()
+}
+
+
+class TestCoverageGroupSearchRanking(unittest.TestCase):
+    """`coverage_group_search`'s pure ranking/filter logic -- hand-built
+    pair rows (`_fake_coverage_row`, no real racing), same isolation style
+    as `TestCoreRowRespectsMegaConsistency`. Ported from the user's own
+    standalone "Coverage group finder" HTML tool: same DFS-with-pruning
+    shape, sourced from `find_pair_cores`-shaped data instead of a pasted
+    table."""
+
+    def test_ranks_by_perfect_links_first(self):
+        import itertools as _it
+        names = ["A", "B", "C"]
+        rows = [_fake_coverage_row(p, True, 100.0, 500.0)
+               for p in _it.combinations(names, 2)]
+        # A worse-scoring, non-perfect trio that must still rank below.
+        rows2 = [_fake_coverage_row(p, False, 40.0, 900.0)
+                for p in _it.combinations(["D", "E", "A"], 2)]
+        result = cf.coverage_group_search(
+            rows + rows2, _FAKE_MERGED, group_sizes=(3,), no_duplicate_typing=False)
+        top = result[3]["rows"][0]
+        self.assertEqual(set(top["group"]), {"A", "B", "C"})
+        self.assertEqual(top["perfect_links"], 3)
+
+    def test_sort_by_coverage_ignores_perfect_count(self):
+        import itertools as _it
+        names = ["A", "B", "C"]
+        perfect_but_low_cov = [_fake_coverage_row(p, True, 34.0, 100.0)
+                               for p in _it.combinations(names, 2)]
+        high_cov_not_perfect = [_fake_coverage_row(p, False, 90.0, 100.0)
+                                for p in _it.combinations(["D", "E", "A"], 2)]
+        result = cf.coverage_group_search(
+            perfect_but_low_cov + high_cov_not_perfect, _FAKE_MERGED,
+            group_sizes=(3,), sort_by="coverage", no_duplicate_typing=False)
+        top = result[3]["rows"][0]
+        self.assertEqual(set(top["group"]), {"D", "E", "A"})
+
+    def test_sort_by_score_ranks_on_avg_score(self):
+        import itertools as _it
+        names = ["A", "B", "C"]
+        low_score = [_fake_coverage_row(p, True, 100.0, 100.0)
+                    for p in _it.combinations(names, 2)]
+        high_score = [_fake_coverage_row(p, True, 100.0, 999.0)
+                     for p in _it.combinations(["D", "E", "A"], 2)]
+        result = cf.coverage_group_search(
+            low_score + high_score, _FAKE_MERGED,
+            group_sizes=(3,), sort_by="score", no_duplicate_typing=False)
+        top = result[3]["rows"][0]
+        self.assertEqual(set(top["group"]), {"D", "E", "A"})
+
+    def test_missing_link_zero_budget_excludes_an_incomplete_group(self):
+        # C+E has no row at all -- a group needing it is illegal at
+        # max_missing_frac=0.
+        rows = [_fake_coverage_row(("A", "B"), True, 100.0, 100.0),
+               _fake_coverage_row(("A", "C"), True, 100.0, 100.0),
+               _fake_coverage_row(("B", "C"), True, 100.0, 100.0)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=["A", "B", "C", "D"], group_sizes=(3,),
+            max_missing_frac=0.0, no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"A", "B", "C"}, groups)
+        for g in groups:
+            self.assertNotIn("D", g)  # every pair touching D is missing
+
+    def test_a_higher_missing_budget_allows_the_incomplete_group(self):
+        rows = [_fake_coverage_row(("A", "B"), True, 100.0, 100.0),
+               _fake_coverage_row(("A", "D"), True, 100.0, 100.0)]
+        # B+D is entirely missing -- 1 of 3 links in a size-3 group, i.e.
+        # 1/3 =~ 0.33, allowed once the budget covers it.
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=["A", "B", "D"], group_sizes=(3,),
+            max_missing_frac=0.4, no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"A", "B", "D"}, groups)
+
+    def test_prefix_limit_excludes_a_group_over_the_cap(self):
+        import itertools as _it
+        names = ["Mega G", "Mega H", "Mega I"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
+            prefix_limits=(("Mega ", 2),), no_duplicate_typing=False)
+        self.assertEqual(result[3]["rows"], [])
+
+    def test_prefix_limit_allows_exactly_the_cap(self):
+        rows = [_fake_coverage_row(("Mega G", "Mega H"), True, 100.0, 100.0),
+               _fake_coverage_row(("Mega G", "A"), True, 100.0, 100.0),
+               _fake_coverage_row(("Mega H", "A"), True, 100.0, 100.0)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=["Mega G", "Mega H", "A"], group_sizes=(3,),
+            prefix_limits=(("Mega ", 2),), no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"Mega G", "Mega H", "A"}, groups)
+
+    def test_no_duplicate_typing_excludes_a_shared_type_pair(self):
+        # "A" and "F" both have exactly ["Fire"] -- redundant typing.
+        rows = [_fake_coverage_row(("A", "F"), True, 100.0, 100.0),
+               _fake_coverage_row(("A", "B"), True, 100.0, 100.0),
+               _fake_coverage_row(("F", "B"), True, 100.0, 100.0)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=["A", "F", "B"], group_sizes=(3,),
+            no_duplicate_typing=True)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertNotIn({"A", "F", "B"}, groups)
+
+    def test_no_duplicate_typing_off_allows_it(self):
+        rows = [_fake_coverage_row(("A", "F"), True, 100.0, 100.0),
+               _fake_coverage_row(("A", "B"), True, 100.0, 100.0),
+               _fake_coverage_row(("F", "B"), True, 100.0, 100.0)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=["A", "F", "B"], group_sizes=(3,),
+            no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"A", "F", "B"}, groups)
+
+    def test_group_sizes_are_scoped_independently(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3, 4),
+            no_duplicate_typing=False)
+        self.assertEqual(set(result.keys()), {3, 4})
+        self.assertTrue(all(r["size"] == 3 for r in result[3]["rows"]))
+        self.assertTrue(all(r["size"] == 4 for r in result[4]["rows"]))
+
+    def test_min_avg_score_filters_low_scoring_groups(self):
+        import itertools as _it
+        names = ["A", "B", "C"]
+        rows = [_fake_coverage_row(p, True, 100.0, 50.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
+            min_avg_score=100.0, no_duplicate_typing=False)
+        self.assertEqual(result[3]["rows"], [])
+
+
+class TestCoverageGroupSearchRealData(unittest.TestCase):
+    """End-to-end through `find_pair_cores` -> `coverage_group_search`,
+    real roster data -- confirms the real `mutual_resist`/`avg_score`
+    fields wire through correctly and `net_weakness_by_type` (a genuine
+    per-type recomputation, unlike the synthetic fixtures above) produces
+    sane, internally-consistent results."""
+
+    POOL = ["Garchomp", "Kingambit", "Incineroar", "Whimsicott", "Sinistcha",
+           "Basculegion", "Sableye", "Ariados", "Mega Metagross",
+           "Mega Charizard Y"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.merged = merged
+        self.pair_rows = cf.find_pair_cores(
+            self.POOL, merged, moves, natures, typechart, self.W["teams"])
+
+    def test_returns_rows_for_every_requested_size(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(3, 4, 6), top_n=5)
+        self.assertEqual(set(result.keys()), {3, 4, 6})
+        for size in (3, 4, 6):
+            self.assertTrue(result[size]["rows"])
+            for row in result[size]["rows"]:
+                self.assertEqual(len(row["group"]), size)
+
+    def test_net_weakness_is_internally_consistent(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=5)
+        for row in result[4]["rows"]:
+            self.assertEqual(row["worst_net_weakness"], max(row["net_weakness"].values()))
+
+    def test_max_net_weakness_caps_the_worst_type(self):
+        uncapped = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20)
+        cap = 0
+        capped = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            max_net_weakness=cap)
+        for row in capped[4]["rows"]:
+            self.assertLessEqual(row["worst_net_weakness"], cap)
+        self.assertLess(len(capped[4]["rows"]), len(uncapped[4]["rows"]))
+
+    def test_two_different_megas_never_both_appear_beyond_the_cap(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=50,
+            prefix_limits=(("Mega ", 1),))
+        for row in result[4]["rows"]:
+            n_megas = sum(1 for n in row["group"] if n.startswith("Mega "))
+            self.assertLessEqual(n_megas, 1)
+
+    def test_no_duplicate_typing_holds_across_real_groups(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=50,
+            no_duplicate_typing=True)
+        for row in result[4]["rows"]:
+            sigs = [frozenset(self.merged[n]["types"]) for n in row["group"]]
+            self.assertEqual(len(sigs), len(set(sigs)), row["group"])

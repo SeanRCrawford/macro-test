@@ -156,7 +156,7 @@ from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, MoveInfo,
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
                     hits_ally, is_spread_move, move_from_showdown,
-                    grassy_glide_priority_bonus)
+                    grassy_glide_priority_bonus, type_multiplier)
 from engine import (FieldState, WEATHER_SETTERS, WEATHER_SPEED_BOOST,
                     TERRAIN_SETTERS, effective_speed)
 from optimize_sets import (best_item, best_moveset, legal_items, team_weather_for,
@@ -501,6 +501,114 @@ def _weather_lead_synergy(name1, name2, merged):
     return None
 
 
+def _types_resisting(move_type, typechart):
+    """Every one of the 18 types that, as a hypothetical PURE single type,
+    resists a move of `move_type` (< 1.0x) -- the abstract "safe switch-in
+    profile" a move's type alone defines, the level "Fire is resisted by
+    fire, rock, water" reasoning works at. A real Pokemon's actual dual
+    typing (or an ability like Levitate) can move it off this list either
+    way -- this is the type-chart-only starting point `_pair_offensive_
+    pin` builds its own, real defensive-chart-based coverage check on top
+    of, not the final word on whether a specific Pokemon is actually safe.
+    """
+    from species_data import TYPES
+    return frozenset(t for t in TYPES if type_multiplier(move_type, [t], typechart) < 1.0)
+
+
+def _real_damaging_moves(name, merged, moves_db):
+    """This Pokemon's own real, usage-ranked damaging moves
+    (`merged[name]["moves_usage"]`, already usage-ranked -- no per-name
+    move search here, matching this whole "2-2-2" pool's cheap, static-
+    data-only cost) as `[MoveInfo, ...]`, in usage order. Skips Status
+    moves and the "Other" usage bucket (`species_data.load_mbsmogon`'s own
+    catch-all for everything below its per-move usage cutoff -- not a
+    real, nameable move). The search space `_pair_offensive_pin`'s
+    follow-up half picks its best answer from.
+    """
+    out = []
+    for mv_name, _pct in merged[name].get("moves_usage") or []:
+        if mv_name == "Other":
+            continue
+        mv = _lookup_move(mv_name, moves_db)
+        if mv is None or mv.category == "Status" or not mv.power:
+            continue
+        out.append(mv)
+    return out
+
+
+def _best_move_of_kind(name, merged, moves_db, spread_only=False):
+    """This Pokemon's own single highest-usage real damaging move,
+    optionally restricted to spread moves (`is_spread_move`) -- see
+    `_real_damaging_moves`. `None` if it has no real move of the requested
+    kind in its own usage table at all."""
+    for mv in _real_damaging_moves(name, merged, moves_db):
+        if spread_only and not is_spread_move(mv.target):
+            continue
+        return mv
+    return None
+
+
+def _pair_offensive_pin(name1, name2, merged, moves_db, typechart):
+    """"Offensive pins": one member's real SPREAD move, backed by a
+    partner whose own best move answers most of what would otherwise
+    resist it -- "the enemy can't safely protect or switch, or even stay
+    in... Fire (Heat Wave) + Ground (High Horsepower, Earthquake): Fire is
+    resisted by fire, rock, water - ground hits 2/3 for super effective."
+    Spread damage specifically (not just strong damage) is the point --
+    "it mathematically outputs the most damage and puts things in range
+    of partners", i.e. it already hits BOTH opposing Pokemon at once, so
+    the pair only needs a good answer to the types that resist it, not to
+    an entire enemy team one at a time.
+
+    Tries BOTH directions (`name1`'s spread backed by `name2`, and vice
+    versa) and keeps whichever scores higher -- a real pair's better lead
+    order isn't assumed, it's picked. For the chosen direction: the pin
+    user's own highest-usage spread move sets `resisted_by` (`_types_
+    resisting`, the move's type alone); the follow-up half searches EVERY
+    one of the partner's own real moves (`_real_damaging_moves` -- "one
+    strong complementary move, or another spread move", not assumed to be
+    its single most-used move, which may be same-typed with the pin and
+    answer nothing) and keeps whichever ONE covers the most of
+    `resisted_by`, via `type_multiplier` against the type ITSELF (the same
+    single-pure-type abstraction `resisted_by` already uses) -- `covered`
+    is every one that comes back >= 1.0 (neutral or better counts as
+    covered: "Ground hits 2/3 for super effective" already only claims 2
+    of 3, leaving Water still resisted by both, and this reproduces
+    exactly that split).
+
+    Returns `None` if NEITHER member has a real spread move in its own
+    usage table at all -- nothing to score. Otherwise: {"pin_user": name,
+    "pin_move": str, "pin_type": str, "resisted_by": [type, ...],
+    "follow_up_user": name, "follow_up_move": str, "follow_up_type": str,
+    "covered": [type, ...], "coverage_frac": float (1.0 when `resisted_by`
+    is empty -- a spread move nothing resists is already a perfect pin on
+    its own)}.
+    """
+    best = None
+    for pin_user, follow_user in ((name1, name2), (name2, name1)):
+        pin_mv = _best_move_of_kind(pin_user, merged, moves_db, spread_only=True)
+        if pin_mv is None:
+            continue
+        resisted_by = _types_resisting(pin_mv.move_type, typechart)
+        follow_mv, covered = None, frozenset()
+        for mv in _real_damaging_moves(follow_user, merged, moves_db):
+            mv_covered = frozenset(t for t in resisted_by
+                                   if type_multiplier(mv.move_type, [t], typechart) >= 1.0)
+            if follow_mv is None or len(mv_covered) > len(covered):
+                follow_mv, covered = mv, mv_covered
+        coverage_frac = (len(covered) / len(resisted_by)) if resisted_by else 1.0
+        row = {"pin_user": pin_user, "pin_move": pin_mv.name,
+              "pin_type": pin_mv.move_type, "resisted_by": sorted(resisted_by),
+              "follow_up_user": follow_user,
+              "follow_up_move": follow_mv.name if follow_mv else None,
+              "follow_up_type": follow_mv.move_type if follow_mv else None,
+              "covered": sorted(covered), "coverage_frac": coverage_frac}
+        if best is None or (row["coverage_frac"], len(row["covered"])) > (
+                best["coverage_frac"], len(best["covered"])):
+            best = row
+    return best
+
+
 def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
     enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
@@ -596,19 +704,32 @@ def find_pair_cores(pool, merged, moves_db, natures, typechart, teams,
     (`species_data.load_teams()`'s own dict) -- "what pokemon in all named
     teams".
 
+    Two pairs are never even generated, let alone scored: a Mega and its
+    own base form together ("you cannot have both a mega and its non-mega
+    form" -- `_mega_base_overlap`, the same rule `bring4_search`'s own
+    validation enforces), and two DIFFERENT Mega picks paired together
+    (VGC's "only one Mega Evolution per team per game" means such a pair
+    could never put both on the field transformed at once -- see the
+    inline comment on that check for how this also guarantees a team's own
+    (at most 2, per `two_two_two_teams`'s own `max_megas`) stone-holders
+    always end up in separate pairs).
+
     Returns rows: {"pair": (name1, name2), "shared_weak": [...],
     "covered_weak": [...], "weather_synergy": "sun"/None/etc,
     "threat_coverage": `_pair_threat_coverage`'s own dict, "mutual_resist":
-    `_pair_mutual_resist_coverage`'s own dict, "avg_score": float}, sorted
+    `_pair_mutual_resist_coverage`'s own dict, "offensive_pin": `_pair_
+    offensive_pin`'s own dict or `None`, "avg_score": float}, sorted
     by (fewest shared/unpatched weaknesses first -- a real, concrete
     defensive gap always outweighs a coverage or Score edge, then most
     threat-coverage, then highest avg roster.csv Score). Weather-lead
-    synergy and mutual-resist coverage are both informational only, not
-    folded into this sort key -- "a good lead pair" (or a "perfectly
-    covers" pair) isn't strictly orderable against "a good defensive pair"
-    the way the other two criteria are against each other; a caller wanting
-    THAT reading specifically re-sorts/filters on `mutual_resist` itself
-    (e.g. `perfect=True` first) -- "as an example, maybe side feature".
+    synergy, mutual-resist coverage, and the offensive pin read are all
+    informational only, not folded into this sort key -- "a good lead
+    pair" (or a "perfectly covers" pair, or a strong offensive pin) isn't
+    strictly orderable against "a good defensive pair" the way the other
+    two criteria are against each other; a caller wanting THAT reading
+    specifically re-sorts/filters on `mutual_resist`/`offensive_pin`
+    itself (e.g. `perfect=True`, or highest `coverage_frac`, first) --
+    "as an example, maybe side feature".
     """
     if enemy_names is None:
         enemy_names = enemy_individuals(teams)
@@ -624,16 +745,34 @@ def find_pair_cores(pool, merged, moves_db, natures, typechart, teams,
     matrix = _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
     rows = []
     for n1, n2 in itertools.combinations(pool, 2):
+        # "You cannot have both a mega and its non-mega form" (same check
+        # bring4_search's own validation uses) -- illegal regardless of
+        # anything else about the pair. "A pair should never be two megas"
+        # is a SEPARATE rule, not the same thing: two DIFFERENT species'
+        # Mega forms paired together is a real roster (nothing stops you
+        # bringing both stones), but VGC's "only one Mega Evolution per
+        # team per game" means a pair of two Mega picks could never
+        # actually put both on the field transformed at once -- pointless
+        # as a LEAD pairing, and (combined with the team-wide "at most 2
+        # megas" cap two_two_two_teams enforces) this is also what
+        # guarantees a team's own 2 stone-holders, if both present, always
+        # land in two DIFFERENT pairs -- no bring ever needs both to come.
+        if _mega_base_overlap((n1, n2)):
+            continue
+        if n1.startswith("Mega ") and n2.startswith("Mega "):
+            continue
         defense = _pair_defensive_synergy(n1, n2, merged)
         weather = _weather_lead_synergy(n1, n2, merged)
         coverage = _pair_threat_coverage(n1, n2, matrix)
         mutual_resist = _pair_mutual_resist_coverage(n1, n2, merged)
+        offensive_pin = _pair_offensive_pin(n1, n2, merged, moves_db, typechart)
         avg_score = (merged[n1]["score"] + merged[n2]["score"]) / 2.0
         rows.append({
             "pair": (n1, n2), "shared_weak": defense["shared_weak"],
             "covered_weak": defense["covered_weak"],
             "weather_synergy": weather, "threat_coverage": coverage,
-            "mutual_resist": mutual_resist, "avg_score": avg_score,
+            "mutual_resist": mutual_resist, "offensive_pin": offensive_pin,
+            "avg_score": avg_score,
         })
     rows.sort(key=lambda r: (len(r["shared_weak"]), -r["threat_coverage"]["total_covered"],
                              -r["avg_score"]))
@@ -641,7 +780,7 @@ def find_pair_cores(pool, merged, moves_db, natures, typechart, teams,
 
 
 def two_two_two_teams(pair_rows, merged, top_pairs=30, top_n=10,
-                      max_net_weakness=None):
+                      max_net_weakness=None, max_megas=2):
     """"2-2-2 teambuilding" Stage 2: combine the best `top_pairs` pair cores
     (`find_pair_cores`'s own sort already ranks them) into every possible
     team of 6 made of 3 DISJOINT pairs (no repeated Pokemon) -- "generate
@@ -666,6 +805,14 @@ def two_two_two_teams(pair_rows, merged, top_pairs=30, top_n=10,
     convention for `multi_bring4_coverage`. `None` (the default) applies no
     cap, unchanged from before this existed.
 
+    `max_megas`: "a team should not have more than two megas" -- the SAME
+    team-wide cap `bring4_search`/`multi_bring4_exhaustive` already enforce
+    (2, VGC's real "only one Mega Evolution per team per game" combined
+    with wanting a backup stone in reserve), a hard filter here too. Since
+    `find_pair_cores` already refuses to generate a pair of two Megas at
+    all, a team with exactly `max_megas` stone-holders always has them
+    split across two DIFFERENT pairs -- no bring ever needs both to come.
+
     Returns rows: {"team": (n1..n6) sorted, "pairs": (pair1, pair2, pair3),
     "net_weakness": {type: net}, "worst_net_weakness": int,
     "total_net_weakness": int, "pair_rank_sum": int} for the top `top_n`.
@@ -677,6 +824,10 @@ def two_two_two_teams(pair_rows, merged, top_pairs=30, top_n=10,
         if len(names) != 6:
             continue  # a Pokemon repeated across 2 of the 3 pairs -- illegal team
         team = tuple(sorted(names))
+        if max_megas is not None:
+            n_megas = sum(1 for n in team if n.startswith("Mega "))
+            if n_megas > max_megas:
+                continue
         net = net_weakness_by_type(team, merged)
         worst_net_weakness = max(net.values())
         if max_net_weakness is not None and worst_net_weakness > max_net_weakness:
@@ -690,6 +841,217 @@ def two_two_two_teams(pair_rows, merged, top_pairs=30, top_n=10,
     rows.sort(key=lambda r: (r["worst_net_weakness"], r["total_net_weakness"],
                              r["pair_rank_sum"]))
     return rows[:top_n]
+
+
+_COVERAGE_GROUP_SIZES = (3, 4, 6)
+_COVERAGE_GROUP_KEEP_CAP = 20_000
+_COVERAGE_GROUP_MAX_EVAL = 2_000_000
+
+
+def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
+                          pool=None, prefix_limits=(("Mega ", 2),),
+                          max_missing_frac=0.4, no_duplicate_typing=True,
+                          max_net_weakness=None, min_avg_score=None,
+                          sort_by="perfect", top_n=40,
+                          max_eval=_COVERAGE_GROUP_MAX_EVAL,
+                          keep_cap=_COVERAGE_GROUP_KEEP_CAP):
+    """"Coverage group finder": every legal group of `group_sizes` members
+    (3, 4, and 6 by default) drawn from `pool` (defaults to every name
+    appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
+    pair table), ranked by how completely its OWN internal pairs (every
+    one of the group's C(size,2) links, NOT just 3 designated ones the way
+    `two_two_two_teams` builds a 2-2-2 team from disjoint pairs) mutually
+    cover each other's weaknesses. A branch-and-bound search ported
+    directly from the user's standalone "Coverage group finder" HTML tool
+    -- same DFS-with-pruning shape, same three sort options -- just sourced
+    from real roster data (`find_pair_cores`) instead of a pasted table.
+
+    Every link's quality comes straight from `find_pair_cores`'s own
+    `mutual_resist` field (`perfect`/`coverage_frac`) and `avg_score` --
+    reused, never recomputed. A pair `find_pair_cores` never generated at
+    all (a Mega alongside its own base form, or two different Megas
+    together -- see its own docstring) counts as a MISSING link here, same
+    as the standalone tool's own "unmeasured link" concept, just with a
+    concrete, principled reason for the gap instead of a data-entry hole.
+
+    HARD FILTERS, checked INCREMENTALLY during the search (a bad branch is
+    pruned immediately, never merely dropped at the end):
+      - `prefix_limits`: `[(prefix, max_count), ...]` -- "how many may
+        share one group" (default: at most 2 names starting with "Mega ",
+        the same team-wide cap `two_two_two_teams`/`multi_bring4_
+        exhaustive` already enforce elsewhere).
+      - `no_duplicate_typing`: no two members of a group may share the
+        EXACT same two-type combination (e.g. two Dragon/Flying members)
+        -- a redundant matchup profile even when their movepools differ.
+      - `max_missing_frac`: how much of a group's own C(size,2) links may
+        be missing (no `find_pair_cores` row at all) before it's dropped,
+        as a fraction of the group's own link count -- 0 demands every
+        link be a real, scored pair.
+
+    `max_net_weakness`/`min_avg_score` are checked AFTERWARD, only against
+    the search's own top few hundred candidates by `sort_by` (`max(top_n *
+    6, 200)` of them) -- `net_weakness_by_type` is a real per-type
+    recomputation (not a cheap lookup like everything above), so, matching
+    this module's own established "cheap check gates an expensive
+    re-race, top-N only" discipline (see `_core_dead_mega_rebuild`'s
+    docstring), it is never computed beyond that buffer. Accepted
+    tradeoff, stated plainly: a candidate ranked just outside that buffer
+    by the raw link quality, but that would have passed `max_net_weakness`
+    while several buffered candidates don't, is never seen -- exactly the
+    same "the sweep's own ranking is computed first, unaware of the
+    later-stage filter" tradeoff Item Clause/Focus-Sash-cap/dead-mega
+    rebuild already accept elsewhere in this module. `net_weakness` is
+    always computed for whatever ends up in the returned rows (a genuine
+    display column, "add type weakness assessment"), not gated behind
+    `max_net_weakness` being set.
+
+    `sort_by`: "perfect" (perfect-link count, most first, then coverage,
+    then avg score -- the default), "coverage" (mutual-coverage fraction
+    first), or "score" (avg roster.csv Score first) -- the same 3 readings
+    the standalone tool itself offers.
+
+    Search cost, stated plainly (same as the standalone tool): for a large
+    `pool`, C(pool, size) can vastly exceed `max_eval` -- the search then
+    returns whatever it found in ITS OWN exploration order before
+    aborting (`aborted=True` in that size's returned meta), not a
+    provably-best answer. Keep `pool` modest (the same pool-size control
+    every other exhaustive search in this module already relies on) for a
+    search that's actually exhaustive rather than a partial sample.
+
+    Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
+    `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
+    "perfect_links": int, "known_links": int, "total_links": int,
+    "coverage_pct": float (0-100, missing links count as 0, averaged over
+    every POSSIBLE link, not just the measured ones -- same convention the
+    standalone tool uses), "avg_score": float or None, "net_weakness":
+    {type: net}, "worst_net_weakness": int}.
+    """
+    if pool is None:
+        names = sorted({n for r in pair_rows for n in r["pair"]})
+    else:
+        names = list(dict.fromkeys(pool))
+    n = len(names)
+    idx = {name: i for i, name in enumerate(names)}
+    edge = {}
+    for r in pair_rows:
+        a, b = r["pair"]
+        if a not in idx or b not in idx:
+            continue
+        i, j = idx[a], idx[b]
+        if i > j:
+            i, j = j, i
+        edge[(i, j)] = r
+    type_sig = [frozenset(merged[nm]["types"]) for nm in names]
+    tags = [[pi for pi, (prefix, _cap) in enumerate(prefix_limits)
+            if nm.startswith(prefix)] for nm in names]
+    caps = [cap for _prefix, cap in prefix_limits]
+
+    def score_for_sort(row):
+        return row["avg_score"] if row["avg_score"] is not None else float("-inf")
+
+    def sort_key(row):
+        if sort_by == "coverage":
+            return (-row["coverage_pct"], -row["perfect_links"], -score_for_sort(row))
+        if sort_by == "score":
+            return (-score_for_sort(row), -row["perfect_links"], -row["coverage_pct"])
+        return (-row["perfect_links"], -row["coverage_pct"], -score_for_sort(row))
+
+    def search_one_size(size):
+        E = size * (size - 1) // 2
+        max_missing = E if max_missing_frac >= 1 else round(max_missing_frac * E)
+        pick = [0] * size
+        out = []
+        state = {"worst": None, "seen": 0, "aborted": False}
+        used = [0] * len(prefix_limits)
+
+        def evaluate():
+            perfect = known = 0
+            total_frac = 0.0
+            score_sum = 0.0
+            score_n = 0
+            for x in range(size):
+                for y in range(x + 1, size):
+                    r = edge.get((pick[x], pick[y]))
+                    if r is None:
+                        continue
+                    known += 1
+                    mr = r.get("mutual_resist") or {}
+                    if mr.get("perfect"):
+                        perfect += 1
+                    total_frac += mr.get("coverage_frac", 0.0)
+                    sc = r.get("avg_score")
+                    if sc is not None:
+                        score_sum += sc
+                        score_n += 1
+            return {
+                "group": tuple(names[i] for i in pick), "size": size,
+                "perfect_links": perfect, "known_links": known, "total_links": E,
+                "coverage_pct": (total_frac / E * 100.0) if E else 0.0,
+                "avg_score": (score_sum / score_n) if score_n else None,
+                "net_weakness": None, "worst_net_weakness": None,
+            }
+
+        def keep(row):
+            if state["worst"] is not None and sort_key(row) > sort_key(state["worst"]):
+                return
+            out.append(row)
+            if len(out) >= keep_cap:
+                out.sort(key=sort_key)
+                del out[keep_cap // 2:]
+                state["worst"] = out[-1]
+
+        def rec(start, k, missing, seen_types):
+            if state["aborted"]:
+                return
+            if k == size:
+                state["seen"] += 1
+                if state["seen"] > max_eval:
+                    state["aborted"] = True
+                    return
+                keep(evaluate())
+                return
+            if n - start < size - k:
+                return
+            for i in range(start, n):
+                if no_duplicate_typing and type_sig[i] in seen_types:
+                    continue
+                add = sum(1 for t in range(k) if (pick[t], i) not in edge)
+                if missing + add > max_missing:
+                    continue
+                if any(used[pi] + 1 > caps[pi] for pi in tags[i]):
+                    continue
+                for pi in tags[i]:
+                    used[pi] += 1
+                pick[k] = i
+                rec(i + 1, k + 1, missing + add,
+                    seen_types | {type_sig[i]} if no_duplicate_typing else seen_types)
+                for pi in tags[i]:
+                    used[pi] -= 1
+                if state["aborted"]:
+                    return
+
+        rec(0, 0, 0, frozenset())
+        out.sort(key=sort_key)
+        return out, state["seen"], state["aborted"]
+
+    results = {}
+    for size in group_sizes:
+        candidates, seen, aborted = search_one_size(size)
+        buffer_n = max(top_n * 6, 200)
+        final = []
+        for row in candidates[:buffer_n]:
+            if min_avg_score is not None and (
+                    row["avg_score"] is None or row["avg_score"] < min_avg_score):
+                continue
+            net = net_weakness_by_type(row["group"], merged)
+            worst = max(net.values())
+            if max_net_weakness is not None and worst > max_net_weakness:
+                continue
+            final.append({**row, "net_weakness": net, "worst_net_weakness": worst})
+            if len(final) >= top_n:
+                break
+        results[size] = {"rows": final, "seen": seen, "aborted": aborted}
+    return results
 
 
 def _build_forms(names, merged, natures, moves_db, items=None,
@@ -4667,6 +5029,70 @@ def _core_focus_sash_pair_by_key(core, target_name_lists, focus_sash_context):
     return out, resolved_items
 
 
+def _core_dead_mega_rebuild(core, dead_megas, target_name_lists, dead_mega_context):
+    """Re-race a SUBSTITUTE core with each name in `dead_megas` (from
+    `_core_row`'s own field of that name) swapped for its own base-species
+    name, holding whatever REAL item Stage A's pool-wide search already
+    picked for that base-form roster entry -- so a caller can compare the
+    substitute's own `_core_row` against the original on the same ranking
+    key and keep whichever is actually better:
+
+        "every single match only uses one of the megas... may as well give
+         the other mega a useful item and leave it as base form if it
+         never megas."
+
+    Same "cheap check gates an expensive re-race, core-scoped not
+    pool-wide" shape as `_core_item_clause_pair_by_key`/`_core_focus_sash_
+    pair_by_key` -- just this core's own C(size,2) pairs, once per enemy,
+    not a pool-wide re-search. `dead_mega_context`: the exact same shape as
+    `item_clause_context` (reuse `_item_clause_context_from_coverage` to
+    build it -- both need merged/moves_db/natures/typechart/turns/
+    excluded_items/fixed_items/fixed_moves, nothing extra).
+
+    Returns `None` when any name in `dead_megas` has a base-species name
+    that was never part of Stage A's own pool-wide search (no already-
+    vetted real item/moveset to substitute in -- most commonly a fixed
+    `--our` that never named the base form), leaving the caller to keep
+    the original all-mega-stone core untouched. Otherwise returns
+    `(substitute_core, pair_by_key_per_enemy)`, `pair_by_key_per_enemy`
+    shaped `{tuple(target_names): {frozenset(pair): row}}` exactly like
+    `_core_item_clause_pair_by_key`'s own return, ready for `_core_row`.
+
+    KNOWN LIMITATION, stated plainly, same shape as `_core_item_clause_
+    pair_by_key`'s own: does not re-verify Item Clause/Focus-Sash legality
+    for the substitute core's new composition -- the substituted member's
+    item comes straight from the pool-wide `fixed_items`, the same one
+    every other non-mega candidate already uses untouched. A NEW collision
+    introduced specifically by this substitution is possible in principle
+    but narrow (the member being swapped out held a Mega Stone, which
+    never collides with anything); a known, accepted gap rather than a
+    silent one.
+    """
+    fixed_items = dead_mega_context["fixed_items"]
+    fixed_moves = dead_mega_context["fixed_moves"]
+    rename = {}
+    for dm in dead_megas:
+        base_name = _base_species_name(dm)
+        if base_name is None or base_name not in fixed_moves:
+            return None
+        rename[dm] = base_name
+    merged = dead_mega_context["merged"]
+    moves_db = dead_mega_context["moves_db"]
+    natures = dead_mega_context["natures"]
+    typechart = dead_mega_context["typechart"]
+    turns = dead_mega_context["turns"]
+    excluded_items = dead_mega_context["excluded_items"]
+    substitute_core = tuple(rename.get(n, n) for n in core)
+    out = {}
+    for target_names in target_name_lists:
+        rows = joint_pool_search(list(substitute_core), target_names, merged,
+                                 moves_db, natures, typechart, turns=turns,
+                                 item_overrides=fixed_items, move_overrides=fixed_moves,
+                                 excluded_items=excluded_items)
+        out[tuple(target_names)] = {frozenset(r["pair"]): r for r in rows}
+    return substitute_core, out
+
+
 def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
               pair_by_key_forced_base_list=None, item_clause_context=None,
               focus_sash_context=None):
@@ -4697,6 +5123,16 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
     `multi_bring4_exhaustive`/`multi_bring4_beam` both drop any row where
     this is non-empty, since the identical-scoring smaller core is already
     enumerated on its own.
+
+    Also reports `dead_megas`: for a core carrying exactly 2 Mega-stone
+    holders, whichever of them IS actually brought somewhere (so `unused`
+    above doesn't already cover it) but is never the one `mega_used` picks
+    across ANY of `target_name_lists` -- "every single match only uses one
+    of the megas... may as well give the other mega a useful item and
+    leave it as base form if it never megas." `()` when the core doesn't
+    carry 2 stone-holders, or both of them do get chosen somewhere.
+    `_core_dead_mega_rebuild` (below) is what a caller re-races against to
+    actually act on this -- `_core_row` itself only ever reports it.
 
     `pair_by_key_forced_base_list` (one `{name: {frozenset(pair): row}}` per
     enemy, from `multi_bring4_coverage`): when `core` carries exactly 2
@@ -4782,9 +5218,21 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
         used.update(best["bring4"])
         if worst_key is None or key > worst_key:
             worst_key, worst_idx = key, i
+    dead_megas = ()
+    if len(megas) == 2:
+        # A stone-holder that's brought (in `used`, so `unused` above
+        # already doesn't cover it) but never once the ACTUAL chosen mega
+        # across any of `target_name_lists` -- "every single match only
+        # uses one of the megas... may as well give the other mega a
+        # useful item and leave it as base form if it never megas." Both
+        # can come back dead at once (a core where nobody ever benefits
+        # from transforming at all, still legal, just doubly wasteful).
+        mega_used_anywhere = {pe["best_bring4_row"].get("mega_used") for pe in per_enemy}
+        dead_megas = tuple(m for m in megas if m in used and m not in mega_used_anywhere)
     return {"core": core, "core_size": len(core), "per_enemy": per_enemy,
            "worst_enemy_idx": worst_idx, "worst_enemy_score_key": worst_key,
            "unused": tuple(sorted(set(core) - used)),
+           "dead_megas": dead_megas,
            "item_clause_resolved_items": core_resolved_items}
 
 
