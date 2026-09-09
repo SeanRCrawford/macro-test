@@ -477,7 +477,13 @@ def _offensive_ability_mult(attacker: "Combatant", move: "MoveInfo", type_eff: f
         mult *= 1.5
     if ab == "Tinted Lens" and type_eff < 1.0:
         mult *= 2.0
-    if ab in ("Iron Fist",) and (move.flags or {}).get("punch"):
+    # Real-game Iron Fist only boosts moves carrying the "punch" flag, and
+    # Double Shock (Pawmot's own signature move) does NOT actually carry
+    # that flag despite the fist-themed name -- a real, if disappointing,
+    # gap in the official games. Regulation M-C house rule (explicit user
+    # ruling): Double Shock IS boosted here anyway, on top of the real
+    # "punch"-flagged set (Ice Punch and friends).
+    if ab == "Iron Fist" and ((move.flags or {}).get("punch") or move.name == "Double Shock"):
         mult *= 1.2
     if ab == "Strong Jaw" and (move.flags or {}).get("bite"):
         mult *= 1.5

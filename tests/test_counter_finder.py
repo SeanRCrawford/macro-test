@@ -17,6 +17,7 @@
      permutations, and can include chip from ally. For a spread move such as
      Blizzard, make sure the chip is adjusted correctly (0.75x)"
 """
+import copy
 import os
 import sys
 import unittest
@@ -7541,6 +7542,101 @@ class TestSalamenceAdditions(unittest.TestCase):
         self.assertEqual(base_moves, {"Protect", "Draco Meteor", "Hydro Pump", "Fire Blast"})
         mega_moves = {mi.name for mi, _pct in build_moveset(merged["Mega Salamence"], moves)}
         self.assertEqual(mega_moves, {"Double-Edge", "Protect", "Dragon Claw", "Tailwind"})
+
+
+class TestPawmotAddition(unittest.TestCase):
+    """"Pawmot has also been added" -- Electric/Fighting, the real base
+    stats given, Iron Fist, and a fixed 4-move set (Fake Out/Close Combat/
+    Ice Punch/Double Shock). Iron Fist's real "punch"-flag boost (Ice
+    Punch) stays exactly as implemented; Double Shock -- Pawmot's own
+    signature move, thematically fist-shaped but NOT actually "punch"-
+    flagged in the real games -- is boosted anyway as an explicit
+    Regulation M-C house rule (the user's own words: "Iron Fist ...
+    boosts punching moves like Double Shock ... and Ice Punch")."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_resolves_with_the_given_stats_and_typing(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        self.assertEqual(merged["Pawmot"]["types"], ["Electric", "Fighting"])
+        c = cf.make_combatant("Pawmot", merged, natures)
+        self.assertEqual(c.ability, "Iron Fist")
+        self.assertEqual(c.item, "Life Orb")
+        base = merged["Pawmot"]["base_stats"]
+        self.assertEqual(base, {"hp": 70, "atk": 115, "def": 70,
+                                "spa": 70, "spd": 60, "spe": 105})
+
+    def test_moves_resolve_to_the_given_set(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        move_names = {mi.name for mi, _pct in build_moveset(merged["Pawmot"], moves)}
+        self.assertEqual(move_names, {"Fake Out", "Close Combat", "Ice Punch", "Double Shock"})
+
+    def test_iron_fist_boosts_the_real_punch_flagged_move(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        pawmot = cf._build("Pawmot", merged, natures)
+        target = cf._build("Garchomp", merged, natures)
+        ice_punch = cf._lookup_move("Ice Punch", moves)
+        boosted = cf._raw_hit(pawmot, ice_punch, target, typechart, roll="avg")
+        no_ability = copy.copy(pawmot)
+        no_ability.ability = "Volt Absorb"
+        unboosted = cf._raw_hit(no_ability, ice_punch, target, typechart, roll="avg")
+        self.assertAlmostEqual(boosted.frac / unboosted.frac, 1.2, places=3)
+
+    def test_iron_fist_boosts_double_shock_as_a_house_rule(self):
+        """Real-game Double Shock has no "punch" flag -- this is
+        deliberately NOT what the actual games do, per the explicit
+        ruling."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        double_shock = cf._lookup_move("Double Shock", moves)
+        self.assertNotIn("punch", double_shock.flags or {})
+        pawmot = cf._build("Pawmot", merged, natures)
+        target = cf._build("Charizard", merged, natures)
+        boosted = cf._raw_hit(pawmot, double_shock, target, typechart, roll="avg")
+        no_ability = copy.copy(pawmot)
+        no_ability.ability = "Volt Absorb"
+        unboosted = cf._raw_hit(no_ability, double_shock, target, typechart, roll="avg")
+        self.assertAlmostEqual(boosted.frac / unboosted.frac, 1.2, places=3)
+
+    def test_iron_fist_does_not_boost_an_unrelated_move(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        pawmot = cf._build("Pawmot", merged, natures)
+        target = cf._build("Kingambit", merged, natures)
+        close_combat = cf._lookup_move("Close Combat", moves)
+        boosted = cf._raw_hit(pawmot, close_combat, target, typechart, roll="avg")
+        no_ability = copy.copy(pawmot)
+        no_ability.ability = "Volt Absorb"
+        unboosted = cf._raw_hit(no_ability, close_combat, target, typechart, roll="avg")
+        self.assertAlmostEqual(boosted.frac, unboosted.frac, places=6)
+
+    def test_outspeeds_and_ohkos_the_named_targets(self):
+        """"He could make a big difference as he outspeeds and OHKOs for
+        instance Charizard, Basculegion, Kingambit, and Garchomp" --
+        checked at the real per-matchup best move (Double Shock's own
+        Electric/Fighting-neutral-but-type-favorable hits on Charizard/
+        Basculegion, Close Combat's real 4x on Kingambit, Ice Punch's real
+        4x on Garchomp), worst-roll guaranteed, not just an average-roll
+        near-miss."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        pawmot = cf._build("Pawmot", merged, natures)
+        matchups = {
+            "Charizard": "Double Shock",
+            "Basculegion-F": "Double Shock",
+            "Kingambit": "Close Combat",
+            "Garchomp": "Ice Punch",
+        }
+        for enemy_name, move_name in matchups.items():
+            enemy = cf._build(enemy_name, merged, natures)
+            self.assertGreater(pawmot.stats["spe"], enemy.stats["spe"],
+                               f"Pawmot should outspeed {enemy_name}")
+            mv = cf._lookup_move(move_name, moves)
+            hit = cf._raw_hit(pawmot, mv, enemy, typechart, roll="lo")
+            self.assertGreaterEqual(hit.frac, 1.0,
+                                    f"{move_name} should guarantee an OHKO on {enemy_name}")
 
 
 class TestTwoTwoTwoTeambuilding(unittest.TestCase):
