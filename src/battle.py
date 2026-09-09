@@ -29,7 +29,7 @@ from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_
                     defensive_stat, move_from_showdown,
                      apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
                      WEIGHT_BASED_POWER, weight_based_power, DEFENDER_HP_BASED_POWER,
-                     defender_hp_based_power, is_grounded)
+                     defender_hp_based_power, is_grounded, effective_move_target)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS, TERRAIN_NAMES)
 
@@ -639,9 +639,18 @@ class Battle:
         target_side = self.side_of(target)
         if target.protecting:
             return True
-        if target_side.wide_guard and is_spread_move(attacker.move.target):
+        if target_side.wide_guard and is_spread_move(
+                effective_move_target(attacker.move, attacker.combatant, self.field.terrain)):
             return True
         if target_side.quick_guard and attacker.move.priority > 0:
+            return True
+        # Psychic Terrain: no priority move can hit a GROUNDED target, full
+        # stop -- a field effect, not an ability, so it is NOT bypassed by
+        # Mold Breaker/Teravolt/Turboblaze the way the ability-based block
+        # just below is (those only ignore the DEFENDER's own ability).
+        if self.field.terrain == "psychic" and attacker.move.priority > 0 and is_grounded(target):
+            self.log.add(f"{self.tag(target)} is protected by Psychic Terrain "
+                         f"from the priority move!")
             return True
         # Queenly Majesty / Dazzling / Armor Tail block ALL incoming priority moves
         # aimed at that side -- the standard answer to a Fake Out lead. Held by the
@@ -799,7 +808,7 @@ class Battle:
         # opposing side gets pulled onto the redirector instead. Spread moves are
         # unaffected, and a fainted/absent redirector doesn't redirect.
         target_side = self.side_of(live_targets[0]) if live_targets else None
-        single_target = (not is_spread_move(move.target)
+        single_target = (not is_spread_move(effective_move_target(move, attacker, self.field.terrain))
                          and move.category != "Status")
         ignores_redirect = attacker.ability in ("Stalwart", "Propeller Tail")
         if (target_side is not None and target_side.follow_me_target is not None
@@ -834,7 +843,9 @@ class Battle:
         blocked = [t for t in live_targets if t not in hit_targets]
         for t in blocked:
             self.log.add(f"{self.tag(attacker)}'s {move.name} was blocked by {self.tag(t)}'s guard!")
-        num_hit = len(hit_targets) if is_spread_move(move.target) else min(1, len(hit_targets))
+        num_hit = (len(hit_targets)
+                  if is_spread_move(effective_move_target(move, attacker, self.field.terrain))
+                  else min(1, len(hit_targets)))
         total_damage_dealt = 0  # summed across targets; drives recoil/drain amounts
         # Last Respects: 50 BP base, +50 per fainted ally on the user's own team
         # (bench included, not just the current partner), capped at 200 -- so it
@@ -1096,16 +1107,16 @@ class Battle:
                 self.field.tailwind_p2 = 4
             self.log.add(f"Tailwind blew from behind {attacker.name}'s side!")
             self._emit(event="tailwind", side=action.side, actor=attacker.name)
-        elif move.name == "Grassy Terrain":
+        elif move.name in ("Grassy Terrain", "Psychic Terrain"):
             # Regulation M-C. A move-cast terrain always (re)sets the full
-            # duration -- unlike `on_switch_in`'s Grassy Surge, which
+            # duration -- unlike `on_switch_in`'s Grassy/Psychic Surge, which
             # deliberately does NOT refresh a same-terrain re-switch (see
             # its own comment); there's no equivalent "re-using the exact
             # same move" concern here.
-            self.field.terrain = "grassy"
+            new_terrain = "grassy" if move.name == "Grassy Terrain" else "psychic"
+            self.field.terrain = new_terrain
             self.field.terrain_turns_left = 5
-            self.log.add(f"{attacker.name} made the ground turn to grass! "
-                         f"{TERRAIN_NAMES['grassy']} active.")
+            self.log.add(f"{attacker.name} set up {TERRAIN_NAMES[new_terrain]}!")
             self._emit(event="terrain", side=action.side, actor=attacker.name,
                        terrain_now=self.field.terrain)
         elif move.name == "Perish Song":

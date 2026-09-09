@@ -156,7 +156,8 @@ from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, MoveInfo,
                     damage_roll, defensive_stat, effective_stat, hit_count_for,
                     hits_ally, is_spread_move, move_from_showdown,
-                    grassy_glide_priority_bonus, type_multiplier)
+                    grassy_glide_priority_bonus, type_multiplier,
+                    is_grounded, effective_move_target)
 from engine import (FieldState, WEATHER_SETTERS, WEATHER_SPEED_BOOST,
                     TERRAIN_SETTERS, effective_speed)
 from optimize_sets import (best_item, best_moveset, legal_items, team_weather_for,
@@ -2897,7 +2898,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         if not mv.power and mv.name not in ZERO_BASE_POWER_MOVES:
             continue
         blocked = _priority_blocked(attacker, mv, defending_side)
-        if is_spread_move(mv.target) and n_live > 1:
+        if is_spread_move(effective_move_target(mv, attacker, terrain)) and n_live > 1:
             dmg_mv = _for_damage(mv)
             hits = {role: _scaled(NO_HIT if blocked else
                           _raw_hit(attacker, dmg_mv, d, typechart, weather=weather,
@@ -2913,7 +2914,13 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         candidates = ([hinted_target] if hinted_target in live_targets
                       else list(live_targets))
         for role in candidates:
-            got = _scaled(NO_HIT if blocked else _raw_hit(
+            # Psychic Terrain blocks a priority move against a GROUNDED
+            # target specifically -- unlike the ability-block above (a real
+            # whole-side effect), so this is checked per candidate ROLE,
+            # not folded into `blocked`.
+            terrain_blocked = (terrain == "psychic" and mv.priority > 0
+                              and is_grounded(live_targets[role]))
+            got = _scaled(NO_HIT if (blocked or terrain_blocked) else _raw_hit(
                 attacker, _for_damage(mv), live_targets[role], typechart, weather=weather,
                 roll="avg", attacker_hp_frac=attacker_hp_frac,
                 defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras,

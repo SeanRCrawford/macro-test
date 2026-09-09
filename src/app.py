@@ -1165,7 +1165,7 @@ def render_punish_audit(res):
 # `solver.build_moveset`, `Battle.run_turn`, `solver.greedy_opponent_joint_
 # action`), not a second battle engine.
 
-def sim_legal_actions(c, side_name, allies, foes, moveset):
+def sim_legal_actions(c, side_name, allies, foes, moveset, terrain=None):
     """Every REAL legal action for one non-fainted active Pokemon, for a
     HUMAN to pick from directly.
 
@@ -1189,7 +1189,7 @@ def sim_legal_actions(c, side_name, allies, foes, moveset):
     available and whether this slot is a forced replacement).
     """
     from battle import CHOICE_ITEMS, PROTECT_MOVES
-    from damage import is_spread_move, spread_targets
+    from damage import is_spread_move, spread_targets, effective_move_target
     from engine import Action
     from solver import FIRST_TURN_ONLY_MOVES
 
@@ -1229,8 +1229,9 @@ def sim_legal_actions(c, side_name, allies, foes, moveset):
             continue
         if not live_foes:
             continue
-        if is_spread_move(move.target):
-            tgts = spread_targets(move.target, live_foes, allies, c)
+        eff_target = effective_move_target(move, c, terrain)
+        if is_spread_move(eff_target):
+            tgts = spread_targets(eff_target, live_foes, allies, c)
             if not tgts:
                 continue
             out.append((f"{move.name} (hits {'/'.join(t.name for t in tgts)})",
@@ -1250,7 +1251,7 @@ def sim_legal_actions(c, side_name, allies, foes, moveset):
     return out
 
 
-def sim_grouped_actions(c, side_name, allies, foes, moveset):
+def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
     """`sim_legal_actions`, grouped by move name -- [(move_name,
     [(target_label, Action), ...]), ...], move order preserved.
 
@@ -1262,7 +1263,7 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset):
     `sim_legal_actions` actually built.
     """
     groups, order = {}, []
-    for _label, action in sim_legal_actions(c, side_name, allies, foes, moveset):
+    for _label, action in sim_legal_actions(c, side_name, allies, foes, moveset, terrain=terrain):
         mv_name = action.move.name if action.move is not None else "Protect"
         if mv_name not in groups:
             groups[mv_name] = []
@@ -6253,7 +6254,7 @@ with tab_sim:
                     chosen_action = None
                     if menu == "Attack":
                         groups = sim_grouped_actions(c, "p1", battle.p1.active, battle.p2.active,
-                                                     movesets[c.name])
+                                                     movesets[c.name], terrain=battle.field.terrain)
                         if groups:
                             move_key = f"sim_move_{i}_{battle.turn_num}"
                             move_name = st.selectbox(

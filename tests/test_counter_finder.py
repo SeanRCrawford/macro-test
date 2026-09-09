@@ -5491,6 +5491,81 @@ class TestGrassyTerrainCheapModel(unittest.TestCase):
         self.assertFalse(race(None))
 
 
+class TestPsychicTerrainCheapModel(unittest.TestCase):
+    """Indeedee's Psychic Surge: grounded Psychic moves get +50% power,
+    priority moves fail outright against a grounded target, and Expanding
+    Force (normally single-target, 80 power) becomes a spread move at 120
+    power for a grounded user. Same footprint/style as
+    `TestGrassyTerrainCheapModel` right above."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_field_terrain_reads_psychic_surge(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        combatants = {"C": cf._build("Indeedee-F", merged, natures),
+                     "P": cf._build("Kingambit", merged, natures),
+                     "E1": cf._build("Garchomp", merged, natures),
+                     "E2": cf._build("Sinistcha", merged, natures)}
+        self.assertEqual(cf._field_terrain(combatants), "psychic")
+
+    def test_raw_hit_applies_the_psychic_boost_under_terrain(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        indeedee = cf._build("Indeedee-F", merged, natures)
+        target = cf._build("Garchomp", merged, natures)
+        psychic = cf._lookup_move("Psychic", moves)
+        no_terrain = cf._raw_hit(indeedee, psychic, target, typechart, roll="avg")
+        psychic_terrain = cf._raw_hit(indeedee, psychic, target, typechart, roll="avg",
+                                      terrain="psychic")
+        self.assertAlmostEqual(psychic_terrain.frac / no_terrain.frac, 1.5, places=3)
+
+    def test_expanding_force_is_120_power_and_spread_under_terrain(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        indeedee = cf._build("Indeedee-F", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        ef = cf._lookup_move("Expanding Force", moves)
+
+        hits_terrain, _mv = cf._choose_action(
+            indeedee, [ef], {"E1": e1, "E2": e2}, typechart, terrain="psychic")
+        self.assertEqual(set(hits_terrain.keys()), {"E1", "E2"})
+        self.assertGreater(hits_terrain["E1"].frac, 0.0)
+        self.assertGreater(hits_terrain["E2"].frac, 0.0)
+
+        hits_no_terrain, _mv2 = cf._choose_action(
+            indeedee, [ef], {"E1": e1, "E2": e2}, typechart, terrain=None,
+            hinted_target="E1")
+        self.assertEqual(set(hits_no_terrain.keys()), {"E1"})
+
+        # 120 power + the 1.5x terrain boost together comfortably beat the
+        # single-target 80-power no-terrain hit on the SAME target.
+        self.assertGreater(hits_terrain["E1"].frac, hits_no_terrain["E1"].frac)
+
+    def test_priority_move_fails_against_a_grounded_target_under_terrain(self):
+        merged, natures, typechart = (
+            self.W["merged"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        indeedee = cf._build("Indeedee-F", merged, natures)   # grounded (Psychic/Normal)
+        aqua_jet = cf.MoveInfo("Aqua Jet", 40, "Water", "Physical", "normal", priority=1)
+
+        hits, _mv = cf._choose_action(
+            kingambit, [aqua_jet], {"E1": indeedee}, typechart, terrain="psychic")
+        self.assertEqual(hits["E1"].frac, 0.0)
+
+    def test_priority_move_still_lands_on_an_ungrounded_target_under_terrain(self):
+        merged, natures, typechart = (
+            self.W["merged"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        pelipper = cf._build("Pelipper", merged, natures)   # Flying -- not grounded
+        aqua_jet = cf.MoveInfo("Aqua Jet", 40, "Water", "Physical", "normal", priority=1)
+
+        hits, _mv = cf._choose_action(
+            kingambit, [aqua_jet], {"E1": pelipper}, typechart, terrain="psychic")
+        self.assertGreater(hits["E1"].frac, 0.0)
+
+
 class TestPreferencesReducePool(unittest.TestCase):
     """"Make sure preferences.csv is taken into account (includes, excludes)
     so that it reduces the pool of eligible mons." """
