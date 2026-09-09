@@ -1565,32 +1565,49 @@ class Battle:
 PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset({"Mold Breaker", "Teravolt", "Turboblaze"})
 
 
-def priority_blocked_by_side(attacker_ability, move, defending_side_actives):
+def priority_blocked_by_side(attacker_ability, move, defending_side_actives,
+                              terrain=None, target=None):
     """True if `move` (used by a Pokemon with `attacker_ability`) would be
     blocked outright by Queenly Majesty / Dazzling / Armor Tail held by any
-    living member of `defending_side_actives` -- "priority blocking
-    abilities ... lead to the enemy trying to click priority moves anyway.
-    They should not attempt to use priority moves if these abilities are
-    present."
+    living member of `defending_side_actives`, OR by Psychic Terrain against
+    a GROUNDED `target` -- "an enemy should never use a priority move when
+    priority blocking is up, such as Psychic Terrain, Armor Tail." Both are
+    "priority blocking ... lead to the enemy trying to click priority moves
+    anyway. They should not attempt to use priority moves if these are
+    present," just from two different sources.
 
-    The AI-facing sibling of `Battle._blocked_by_guard`'s own ability-block
-    branch: that method ALSO checks `target.protecting`/Wide Guard/Quick
+    The AI-facing sibling of `Battle._blocked_by_guard`'s own two block
+    branches: that method ALSO checks `target.protecting`/Wide Guard/Quick
     Guard, which only make sense mid-resolution once actions are already
-    locked in; this is the narrower, ability-only check a move-CHOICE
-    heuristic needs BEFORE any of that is decided, so `solver.py`'s greedy
-    opponent AI and `fast_eval.py`'s fast screening playouts can see "this
-    priority move will do nothing" before they ever value or pick it --
-    exactly the gap that let them keep clicking a doomed Fake Out/Sucker
-    Punch/etc. into a Farigiraf or Tsareena. `counter_finder.py`'s own
-    `_priority_blocked` mirrors this same narrower scope for its cheap
-    model; kept as a separate, smaller copy there rather than imported,
-    since that module doesn't otherwise depend on `battle.py`.
+    locked in; this is the narrower check a move-CHOICE heuristic needs
+    BEFORE any of that is decided, so `solver.py`'s greedy opponent AI and
+    `fast_eval.py`'s fast screening playouts can see "this priority move
+    will do nothing" before they ever value or pick it -- exactly the gap
+    that let them keep clicking a doomed Fake Out/Sucker Punch/etc. into a
+    Farigiraf or Tsareena (the ability case), or a grounded target under
+    Psychic Terrain (the terrain case, added later). `counter_finder.py`'s
+    own `_choose_action`/`_choose_move` mirror this same scope for its cheap
+    model directly (not via this shared function, since that module doesn't
+    otherwise depend on `battle.py`).
 
-    Ignored by Mold Breaker/Teravolt/Turboblaze, matching real game rules
-    and `_blocked_by_guard`'s own ignoring-abilities branch.
+    `terrain`/`target`: Psychic Terrain's block is a FIELD effect, not an
+    ability, so unlike the ability-block below it is NOT bypassed by Mold
+    Breaker/Teravolt/Turboblaze -- checked first, and independently of
+    `attacker_ability`. It is also per-TARGET (a grounded target is
+    protected, an airborne one on the same side isn't), unlike the ability
+    check's whole-side reach -- so `target` is the SPECIFIC Pokemon this use
+    of `move` is aimed at, not a side list. Either omitted (the default)
+    skips this half of the check entirely, e.g. a caller that hasn't picked
+    a specific target yet.
+
+    The ability half is ignored by Mold Breaker/Teravolt/Turboblaze,
+    matching real game rules and `_blocked_by_guard`'s own ignoring-
+    abilities branch.
     """
     if move is None or move.priority <= 0:
         return False
+    if terrain == "psychic" and target is not None and is_grounded(target):
+        return True
     if attacker_ability in PRIORITY_BLOCK_IGNORING_ABILITIES:
         return False
     return any(c is not None and not c.fainted

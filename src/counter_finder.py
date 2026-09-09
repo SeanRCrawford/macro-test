@@ -1431,7 +1431,7 @@ NO_HIT = Hit(move_name=None, frac=0.0, lo=0.0, avg=0.0, hi=0.0, eff=1.0)
 
 def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
             num_targets_hit=1, attacker_hp_frac=None, defender_hp_frac=None,
-            auras=None, terrain=None):
+            auras=None, terrain=None, helping_hand=False):
     """The full `Hit` `move` (already on `attacker`, item applied by the
     caller via `_build`) does to `defender`.
 
@@ -1473,6 +1473,17 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     simplification is the same one `solver.py`/`fast_eval.py` already make
     for their own non-real-engine heuristics: never a live candidate without
     the matching weather, full stop.
+
+    `helping_hand`: True when an ally used Helping Hand for this attacker
+    THIS turn -- a flat 1.5x on the realized damage (`battle.py`'s own
+    `move_power = base_power * 1.5` rule, applied here as a post-hoc scale
+    on the finished Hit instead of a pre-scaled `power`, since `power` isn't
+    this function's own value to mutate -- same "scale the Hit, not the
+    move" shape `_choose_action`'s `_scaled` closure already uses for
+    Intimidate/Draco-halving/Contrary). Caller's job to know whether the
+    ally's Helping Hand actually landed (see `_choose_action`'s own
+    `helping_hand_boost` and `_sequential_pair_outcome`'s `partner_move`
+    check) -- this function has no board-wide view of its own.
 
     `attacker_hp_frac`/`defender_hp_frac`: optional current-HP fractions
     (0.0-1.0) for callers that track HP across a running multi-turn
@@ -1526,6 +1537,10 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     hits = hit_count_for(move.name, attacker)
     cur = defender.current_hp or 1
     lo_f, avg_f, hi_f = (lo * hits) / cur, (avg * hits) / cur, (hi * hits) / cur
+    if helping_hand:
+        lo_f *= 1.5
+        avg_f *= 1.5
+        hi_f *= 1.5
     frac = avg_f if roll == "avg" else lo_f
     return Hit(move_name=move.name, frac=frac, lo=lo_f, avg=avg_f, hi=hi_f,
               eff=eff, num_targets_hit=num_targets_hit)
@@ -1584,19 +1599,30 @@ INTIMIDATE_BLOCKED = frozenset({"Clear Body", "White Smoke", "Full Metal Body",
                                 "Hyper Cutter", "Inner Focus"})
 
 
-def _priority_blocked(attacker, mv, defending_side):
+def _priority_blocked(attacker, mv, defending_side, terrain=None, target=None):
     """True if `mv` would fail outright against `defending_side` (an
     iterable of the Combatants on the target's side -- `None` entries for an
     absent/fainted slot are fine). Mirrors `battle.py`'s
-    `Battle._blocked_by_guard` priority-block rule exactly: Queenly Majesty /
+    `Battle._blocked_by_guard` priority-block rules exactly: Queenly Majesty /
     Dazzling / Armor Tail, held by ANY still-living member of the defending
     side, blocks an incoming priority move aimed at that side entirely --
     "Make sure anti-priority like Farigiraf's armor tail ability is taken
     into account" -- unless the attacker itself has Mold Breaker / Teravolt /
-    Turboblaze.
+    Turboblaze. Psychic Terrain blocks it too, against a GROUNDED `target`
+    specifically -- "an enemy should never use a priority move when priority
+    blocking is up, such as Psychic Terrain, Armor Tail." Checked BEFORE the
+    Mold-Breaker-style exemption (a field effect, not an ability -- it is
+    not bypassed by ignoring the attacker's own ability the way the
+    ability-block is).
+
+    `terrain`/`target`: pass both to also check the terrain half; either
+    omitted (the default) skips it, e.g. a caller with no single target
+    picked yet.
     """
     if mv is None or mv.priority <= 0:
         return False
+    if terrain == "psychic" and target is not None and is_grounded(target):
+        return True
     if attacker.ability in _PRIORITY_BLOCK_IGNORING_ABILITIES:
         return False
     return any(c is not None and c.ability in PRIORITY_BLOCK_ABILITIES
@@ -1604,7 +1630,8 @@ def _priority_blocked(attacker, mv, defending_side):
 
 
 def _choose_move(attacker, moves, defender, typechart, weather=None,
-                 defending_side=None, auras=None, terrain=None):
+                 defending_side=None, auras=None, terrain=None,
+                 helping_hand=False):
     """The move `attacker` would actually use against `defender`, searched on
     the AVERAGE roll: prefer one that KOes outright; failing that, prefer one
     that sets up a KO within a FOLLOW-UP turn (below); failing THAT, prefer
@@ -1663,6 +1690,12 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`), passed straight through to `_raw_hit`.
+
+    `helping_hand`: True when an ally's Helping Hand is boosting THIS
+    attacker's move this turn -- passed straight through to `_raw_hit` (see
+    its own docstring) so the boost is already baked into every candidate's
+    damage BEFORE ranking, the same reason it matters for `_choose_action`'s
+    own ranking: a 1.5x swing can flip which move actually secures a KO.
     """
     defending_side = defending_side if defending_side is not None else (defender,)
     candidates = []
@@ -1672,8 +1705,8 @@ def _choose_move(attacker, moves, defender, typechart, weather=None,
         if not mv.power and mv.name not in ZERO_BASE_POWER_MOVES:
             continue
         got = _raw_hit(attacker, mv, defender, typechart, weather=weather, roll="avg",
-                       auras=auras, terrain=terrain)
-        if _priority_blocked(attacker, mv, defending_side):
+                       auras=auras, terrain=terrain, helping_hand=helping_hand)
+        if _priority_blocked(attacker, mv, defending_side, terrain=terrain, target=defender):
             got = NO_HIT
         candidates.append((mv, got))
     if not candidates:
@@ -2275,7 +2308,7 @@ _JOINT_OUTCOME_RANK = {"sweep": 0, "out_trade": 1, "no_ko": 2, "loss": 3}
 
 def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
                    weather=None, roll="avg", defending_side=None, auras=None,
-                   terrain=None):
+                   terrain=None, helping_hand=False):
     """{role: Hit} for whatever `mv` actually damages: every role in
     `defenders` if it's a spread move landing on more than one of them (the
     doubles 0.75x penalty applied via `num_targets_hit`), else just
@@ -2294,21 +2327,26 @@ def _hit_or_spread(attacker, mv, intended_role, defenders, typechart,
 
     `terrain`: the board's active terrain (`_field_terrain`), passed straight
     through to `_raw_hit`.
+
+    `helping_hand`: True when an ally's Helping Hand is boosting `attacker`
+    this turn -- passed straight through to `_raw_hit`.
     """
     if mv is None:
         return {}
     defending_side = (defending_side if defending_side is not None
                       else list(defenders.values()))
-    if _priority_blocked(attacker, mv, defending_side):
+    if _priority_blocked(attacker, mv, defending_side, terrain=terrain,
+                         target=defenders.get(intended_role)):
         return {}
-    if is_spread_move(mv.target) and len(defenders) > 1:
+    if is_spread_move(effective_move_target(mv, attacker, terrain)) and len(defenders) > 1:
         n = len(defenders)
         return {role: _raw_hit(attacker, mv, d, typechart, weather=weather,
                                roll=roll, num_targets_hit=n, auras=auras,
-                               terrain=terrain)
+                               terrain=terrain, helping_hand=helping_hand)
                for role, d in defenders.items()}
     got = _raw_hit(attacker, mv, defenders[intended_role], typechart,
-                   weather=weather, roll=roll, auras=auras, terrain=terrain)
+                   weather=weather, roll=roll, auras=auras, terrain=terrain,
+                   helping_hand=helping_hand)
     return {intended_role: got}
 
 
@@ -2320,7 +2358,11 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
     `attacker` going for `candidate_target` (with `partner`'s fixed move
     helping, aimed at `partner_target` -- defaults to `candidate_target` --
     unless the move is a spread move, which always hits both regardless of
-    "target"). Every actor's move is chosen ONCE against the FULL-health
+    "target"). If `partner_move` IS Helping Hand, "helping" is literal: it
+    deals no damage of its own, but boosts `attacker`'s own move 1.5x this
+    turn (real-game rule), applied before `attacker`'s move is even chosen
+    so a KO the boost newly secures is correctly ranked ahead of one that
+    doesn't need it. Every actor's move is chosen ONCE against the FULL-health
     version of its target(s) (`_choose_move`), and the resulting %-of-max-HP
     is then subtracted from a running HP fraction as the turn plays out -- the
     same fixed-fraction-per-hit convention `lead_scan`'s own arithmetic race
@@ -2368,12 +2410,21 @@ def _sequential_pair_outcome(attacker, atk_moves, e1_name, e1, e1_moves,
 
     our_side = [combatants.get("C"), combatants.get("P")]
 
+    # "with `partner`'s fixed move helping" -- Helping Hand is itself a
+    # zero-power Status move (no hit of its own, handled the same as any
+    # other status move below), but a REAL, boosting one: it multiplies
+    # `attacker`'s own damage 1.5x this turn. Checked here, once, rather
+    # than inside `_choose_move`/`_hit_or_spread` themselves, since only
+    # this function actually knows what the partner's fixed move IS.
+    helping_hand = partner_move is not None and partner_move.name == "Helping Hand"
+
     plan = {}
     got, mv = _choose_move(attacker, atk_moves, combatants[target_role], typechart,
                            weather=weather, defending_side=[e1, e2], auras=auras,
-                           terrain=terrain)
+                           terrain=terrain, helping_hand=helping_hand)
     plan["C"] = (_hit_or_spread(attacker, mv, target_role, defenders, typechart,
-                                weather=weather, auras=auras, terrain=terrain), mv)
+                                weather=weather, auras=auras, terrain=terrain,
+                                helping_hand=helping_hand), mv)
     for role, e, e_moves in (("E1", e1, e1_moves), ("E2", e2, e2_moves)):
         got, mv = _choose_move(e, e_moves, attacker, typechart, weather=weather,
                                defending_side=our_side, auras=auras, terrain=terrain)
@@ -2710,11 +2761,22 @@ def _tailwind_move_for(combatant):
     return MoveInfo("Tailwind", 0, "Normal", "Status", "allySide", priority=priority)
 
 
+def _helping_hand_move_for(combatant):
+    """A no-op stand-in for "this role used Helping Hand this turn" -- same
+    role `_tailwind_move_for` plays right above. Helping Hand's real
+    priority is a flat +5 (not ability-dependent, unlike Tailwind), so this
+    could be a single module-level constant, but is built fresh per
+    combatant anyway to match `_tailwind_move_for`'s own shape (and in case
+    a future ability-priority interaction needs it)."""
+    return MoveInfo("Helping Hand", 0, "Normal", "Status", "adjacentAlly", priority=5)
+
+
 def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None, attacker_hp_frac=None,
                    target_hp_fracs=None, auras=None, terrain=None,
                    attacker_role=None, dmg_mult_by_role=None,
-                   half_damage_roles=frozenset(), def_mult_by_role=None):
+                   half_damage_roles=frozenset(), def_mult_by_role=None,
+                   helping_hand_boost=False):
     """Best (hits: {role: Hit}, MoveInfo) for `attacker` against whichever of
     `live_targets` ({role: Combatant}) it ends up hitting.
 
@@ -2756,6 +2818,13 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
     `terrain`: the board's active terrain (`_field_terrain`) -- passed
     straight through to `_raw_hit`.
+
+    `helping_hand_boost`: True when `attacker`'s ally used Helping Hand FOR
+    it this turn (`_resolve_turn`'s own `helping_hand_setter_role`) -- a
+    flat 1.5x on every candidate move's damage, applied by `_scaled` before
+    ranking (same point `dmg_mult_by_role`/`def_mult_by_role` apply their
+    own multipliers), so a KO the boost newly secures is correctly ranked
+    ahead of one that doesn't need it, not just reported bigger afterward.
 
     A spread move that's actually live (more than one target still standing)
     always hits EVERY entry in `live_targets` at once (doubles 0.75x penalty,
@@ -2842,10 +2911,11 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
     def _scaled(got, mv, target_role=None):
         """Apply the Intimidate/Defiant/Competitive static multiplier, the
-        Draco-Meteor-family halving, and a Contrary target's own Def/SpD
-        boost to a freshly-computed Hit, before it's used for ranking. A
-        no-op (returns `got` unchanged) whenever neither `attacker_role` nor
-        `def_mult_by_role` applies here."""
+        Draco-Meteor-family halving, an ally's Helping Hand, and a Contrary
+        target's own Def/SpD boost to a freshly-computed Hit, before it's
+        used for ranking. A no-op (returns `got` unchanged) whenever none of
+        `attacker_role`/`helping_hand_boost`/`def_mult_by_role` applies
+        here."""
         if got is NO_HIT:
             return got
         mult = 1.0
@@ -2855,6 +2925,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                 mult *= dmg_mult_by_role.get(attacker_role, {}).get(cat, 1.0)
             if attacker_role in half_damage_roles:
                 mult *= 0.5
+        if helping_hand_boost:
+            mult *= 1.5
         if def_mult_by_role and target_role is not None:
             mult *= def_mult_by_role.get(target_role, {}).get(cat, 1.0)
         if mult == 1.0:
@@ -2916,11 +2988,12 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         for role in candidates:
             # Psychic Terrain blocks a priority move against a GROUNDED
             # target specifically -- unlike the ability-block above (a real
-            # whole-side effect), so this is checked per candidate ROLE,
-            # not folded into `blocked`.
-            terrain_blocked = (terrain == "psychic" and mv.priority > 0
-                              and is_grounded(live_targets[role]))
-            got = _scaled(NO_HIT if (blocked or terrain_blocked) else _raw_hit(
+            # whole-side effect), so this is checked per candidate ROLE, via
+            # `_priority_blocked`'s own `terrain`/`target` args, not folded
+            # into the whole-move `blocked` computed above.
+            role_blocked = _priority_blocked(attacker, mv, defending_side,
+                                             terrain=terrain, target=live_targets[role])
+            got = _scaled(NO_HIT if role_blocked else _raw_hit(
                 attacker, _for_damage(mv), live_targets[role], typechart, weather=weather,
                 roll="avg", attacker_hp_frac=attacker_hp_frac,
                 defender_hp_frac=(target_hp_fracs or {}).get(role), auras=auras,
@@ -3330,7 +3403,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   recharging_roles=frozenset(), tailwind_setter_role=None,
                   terrain=None, dmg_mult_by_role=None,
                   half_damage_roles=frozenset(), own_speed_mult=1.0,
-                  def_mult_by_role=None, enemy_hints=None):
+                  def_mult_by_role=None, enemy_hints=None,
+                  helping_hand_setter_role=None):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- by
     default the enemy side chooses independently and greedily (`_choose_
     action` with no hint), same "no coordination" behaviour `_sequential_
@@ -3395,6 +3469,18 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     `own_speed_mult`: the exact mirror of `enemy_speed_mult`, for OUR OWN
     side. Default 1.0 (no-op).
 
+    `helping_hand_setter_role`: one role -- "C"/"P"/"E1"/"E2" -- that casts
+    Helping Hand THIS turn instead of attacking, `_helping_hand_move_for`
+    substituted directly (same "still a real action, lands no hit" pattern
+    `tailwind_setter_role` uses), and whose ALLY (`_ALLY_OF`) gets
+    `helping_hand_boost=True` on its own `_choose_action` call this same
+    turn. Unlike Tailwind, there is no cross-turn state or "does setting it
+    actually help" search wrapper here -- Helping Hand's effect is single-
+    turn only, so `_joint_race` need only re-pass the same role turn after
+    turn for a caller that wants to test "this role Helping-Hands every
+    turn instead of ever attacking" (a caller-specified hypothesis, not
+    something this module infers on its own the way it does for Tailwind).
+
     `weather` is the ONE shared field value (`_field_weather`'s own return)
     -- applied to BOTH sides' damage (a Fire move is sun-boosted no matter
     which side casts it) and, via a real `FieldState(weather=weather)`
@@ -3439,11 +3525,14 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     auras = _active_auras(combatants, hp)
 
     plan = {}
+    helping_hand_target = _ALLY_OF.get(helping_hand_setter_role)
     for role, c in ours_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
         elif role == tailwind_setter_role:
             plan[role] = ({}, _tailwind_move_for(c))
+        elif role == helping_hand_setter_role:
+            plan[role] = ({}, _helping_hand_move_for(c))
         else:
             plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
                                         typechart, weather=weather,
@@ -3453,12 +3542,15 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                         terrain=terrain, attacker_role=role,
                                         dmg_mult_by_role=dmg_mult_by_role,
                                         half_damage_roles=half_damage_roles,
-                                        def_mult_by_role=def_mult_by_role)
+                                        def_mult_by_role=def_mult_by_role,
+                                        helping_hand_boost=(role == helping_hand_target))
     for role, c in theirs_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
         elif role == tailwind_setter_role:
             plan[role] = ({}, _tailwind_move_for(c))
+        elif role == helping_hand_setter_role:
+            plan[role] = ({}, _helping_hand_move_for(c))
         elif role in protected_roles:
             plan[role] = ({}, _PROTECT_MOVE)
         else:
@@ -3470,7 +3562,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                                         terrain=terrain, attacker_role=role,
                                         dmg_mult_by_role=dmg_mult_by_role,
                                         half_damage_roles=half_damage_roles,
-                                        def_mult_by_role=def_mult_by_role)
+                                        def_mult_by_role=def_mult_by_role,
+                                        helping_hand_boost=(role == helping_hand_target))
 
     plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
     hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
@@ -3607,7 +3700,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               recharging_roles=frozenset(), tailwind_setter_role=None,
               terrain=None, dmg_mult_by_role=None,
               half_damage_roles=frozenset(), own_speed_mult=1.0,
-              def_mult_by_role=None, lookahead=1, worst_case_targeting=False):
+              def_mult_by_role=None, lookahead=1, worst_case_targeting=False,
+              helping_hand_setter_role=None):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -3616,10 +3710,16 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     to one live attacker or the other side to one live target), so this stays
     cheap per turn.
 
-    `protected_roles`/`recharging_roles`/`tailwind_setter_role` are passed
-    straight through to `_resolve_turn` -- see its own docstring for how a
-    protected, recharging, or tailwind-casting role naturally falls out of
+    `protected_roles`/`recharging_roles`/`tailwind_setter_role`/
+    `helping_hand_setter_role` are passed straight through to `_resolve_
+    turn` -- see its own docstring for how a protected, recharging,
+    tailwind-casting, or Helping-Hand-casting role naturally falls out of
     OUR side's ranking here with no change to the ranking itself.
+    `helping_hand_setter_role` is NOT propagated into the `lookahead`
+    recursive call below, same as `tailwind_setter_role`/`protected_roles`
+    already aren't -- both are turn-scoped hypotheses a caller supplies for
+    THIS turn, not state this cheap 2-turn-deep ranking aid re-derives for
+    an imagined next turn.
 
     Ranked by (enemies KO'd, -ours KO'd, net fractional damage) -- "best FOR
     US", matching every other joint search in this module ranking on the
@@ -3732,7 +3832,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 recharging_roles=recharging_roles,
                 tailwind_setter_role=tailwind_setter_role, terrain=terrain,
                 dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
-                own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role)
+                own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role,
+                helping_hand_setter_role=helping_hand_setter_role)
         else:
             new_hp, log, enemy_acted, wiped, recharging_next = _resolve_turn(
                 combatants, moves_by_role, hp, typechart, weather, hints,
@@ -3740,7 +3841,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 recharging_roles=recharging_roles,
                 tailwind_setter_role=tailwind_setter_role, terrain=terrain,
                 dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
-                own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role)
+                own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role,
+                helping_hand_setter_role=helping_hand_setter_role)
         final_hp = new_hp
         both_sides_still_live = (wiped is None
                                  and any(new_hp[r] > 0 for r in ("C", "P"))
@@ -3772,7 +3874,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
 def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0, first_turn_moves_override=None,
                 first_turn_protected_role=None, first_turn_tailwind_role=None,
-                terrain=None, own_speed_mult=1.0, worst_case_targeting=False):
+                terrain=None, own_speed_mult=1.0, worst_case_targeting=False,
+                first_turn_helping_hand_role=None):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -3834,6 +3937,22 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     side -- `_pair_vs_targets`'s own-tailwind check passes 2.0 here (and
     `first_turn_tailwind_role="C"` or `"P"`) instead of `enemy_speed_mult`.
     Default 1.0 (no-op) leaves every existing caller unaffected.
+
+    `first_turn_helping_hand_role`: optional single role ("C"/"P"/"E1"/
+    "E2") that spends turn 1 CASTING Helping Hand instead of attacking --
+    "the turn Indeedee switches in [Expanding Force] should [be] a boosted
+    spread move." UNLIKE Tailwind, this boost applies the SAME turn it's
+    cast, not starting next turn: `_resolve_turn` builds its whole `plan`
+    (every role's hits) before any turn-order resolution happens, so the
+    ally's `_choose_action` call already sees `helping_hand_boost=True`
+    within this same `_best_turn` call -- no intra-turn re-sort needed the
+    way Tailwind's SPEED effect would (this module has none, see
+    `first_turn_tailwind_role`'s own note on that gap; Helping Hand's is a
+    same-turn power multiplier, not a persisting field/speed effect, so the
+    gap simply doesn't apply here). Only turn 1 -- a caller wanting "this
+    role Helping-Hands every turn instead of ever attacking" would need to
+    call `_best_turn`/`_resolve_turn` directly per turn, the same way this
+    convenience wrapper doesn't expose an every-turn Tailwind option either.
 
     RECHARGE (Hyper Beam, Giga Impact, ...): `_best_turn`'s own
     `recharging_next` return is carried forward as the NEXT call's
@@ -3909,6 +4028,9 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                     if turn_i == 0 and first_turn_protected_role else frozenset())
         tailwind_role_this_turn = (first_turn_tailwind_role
                                    if turn_i == 0 and first_turn_tailwind_role else None)
+        helping_hand_role_this_turn = (first_turn_helping_hand_role
+                                       if turn_i == 0 and first_turn_helping_hand_role
+                                       else None)
         # Whichever SIDE is actually casting this turn races at normal
         # speed (the boost doesn't exist until the cast resolves); the
         # OTHER side's own multiplier (usually just 1.0, unused) is
@@ -3924,7 +4046,8 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             recharging_roles=recharging, tailwind_setter_role=tailwind_role_this_turn,
             terrain=terrain, dmg_mult_by_role=dmg_mult_by_role,
             half_damage_roles=half_damage, own_speed_mult=own_mult_this_turn,
-            def_mult_by_role=def_mult_by_role, worst_case_targeting=worst_case_targeting)
+            def_mult_by_role=def_mult_by_role, worst_case_targeting=worst_case_targeting,
+            helping_hand_setter_role=helping_hand_role_this_turn)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1

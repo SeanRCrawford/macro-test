@@ -729,13 +729,15 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
             modifier *= 0.5
 
     # Psychic Terrain (Indeedee's Psychic Surge): grounded Psychic moves get
-    # +50% power. (The other half of Psychic Terrain -- blocking priority
-    # moves against grounded targets -- has no damage-formula effect and is
-    # enforced upstream of this function, at move-legality time: see
-    # `battle.Battle._blocked_by_guard` and `counter_finder.
-    # priority_blocked_by_side`.)
+    # +30% power -- same rate as every other terrain's own-type boost
+    # (Grassy/Electric/Psychic all give +30%; Misty is the odd one out,
+    # halving Dragon damage instead of boosting Fairy). (The other half of
+    # Psychic Terrain -- blocking priority moves against grounded targets --
+    # has no damage-formula effect and is enforced upstream of this
+    # function, at move-legality time: see `battle.Battle._blocked_by_guard`
+    # and `counter_finder._choose_action`'s own inline terrain check.)
     if terrain == "psychic" and move.move_type == "Psychic" and is_grounded(attacker):
-        modifier *= 1.5
+        modifier *= 1.3
 
     # Crit (gen6+: flat 1.5x; stage resets handled by caller via stat selection)
     if is_crit:

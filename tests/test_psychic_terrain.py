@@ -5,6 +5,10 @@ move block, and Expanding Force.
      1.5x, and the mechanics of expanding force (single target 80bp psychic
      special move -> 120bp spread psychic target move)"
 
+The boost is actually +30% (matching Grassy/Electric Terrain's own rate),
+not the +50% first requested -- corrected per the user's own follow-up
+("Psychic Terrain ... should actually do 1.3x for psychic").
+
 Mirrors `test_grassy_terrain.py` point for point wherever Psychic Terrain
 shares Grassy Terrain's own shape (switch-in setter, same-terrain no-refresh,
 per-hit damage multiplier, move-cast version, duration countdown) -- new
@@ -137,10 +141,10 @@ class TestPsychicMoveDamageBoost(unittest.TestCase):
                                           num_targets_hit=1, terrain=terrain)
         return avg
 
-    def test_psychic_move_is_boosted_fifty_percent_under_terrain(self):
+    def test_psychic_move_is_boosted_thirty_percent_under_terrain(self):
         no_terrain = self.damage_with(None)
         psychic_terrain = self.damage_with("psychic")
-        self.assertAlmostEqual(psychic_terrain / no_terrain, 1.5, places=3)
+        self.assertAlmostEqual(psychic_terrain / no_terrain, 1.3, places=3)
 
     def test_an_airborne_attacker_gets_no_boost(self):
         no_terrain = self.damage_with(None, attacker_name="Talonflame",
@@ -207,6 +211,71 @@ class TestPriorityMoveBlock(unittest.TestCase):
         self.assertLess(indeedee.current_hp, before)
 
 
+class TestAIAvoidsBlockedPriorityMoves(unittest.TestCase):
+    """"an enemy should never use a priority move when priority blocking is
+    up, such as Psychic Terrain, Armor Tail" -- `priority_blocked_by_side`
+    (the AI-facing sibling of `Battle._blocked_by_guard`, consumed by
+    `solver.py`'s greedy opponent AI and `fast_eval.py`'s screening
+    playouts) needed the SAME terrain awareness `_blocked_by_guard` itself
+    already had, or those AI layers would keep valuing/clicking a doomed
+    priority move under Psychic Terrain even though real resolution zeroed
+    it out."""
+
+    def test_blocks_a_priority_move_against_a_grounded_target(self):
+        from battle import priority_blocked_by_side
+        b = fresh(["Indeedee-F", "Garchomp"], ["Kingambit", "Sinistcha"])
+        indeedee = b.p1.active[0]
+        aqua_jet = b.make_move("aquajet")
+        self.assertTrue(priority_blocked_by_side(
+            "Defiant", aqua_jet, [indeedee], terrain="psychic", target=indeedee))
+
+    def test_does_not_block_an_ungrounded_target(self):
+        from battle import priority_blocked_by_side
+        b = fresh(["Pelipper", "Garchomp"], ["Kingambit", "Sinistcha"])
+        pelipper = b.p1.active[0]
+        aqua_jet = b.make_move("aquajet")
+        self.assertFalse(priority_blocked_by_side(
+            "Defiant", aqua_jet, [pelipper], terrain="psychic", target=pelipper))
+
+    def test_mold_breaker_bypasses_the_ability_block_but_not_terrain(self):
+        from battle import priority_blocked_by_side
+        b = fresh(["Indeedee-F", "Garchomp"], ["Kingambit", "Sinistcha"])
+        indeedee = b.p1.active[0]
+        aqua_jet = b.make_move("aquajet")
+        # Ability block (Armor Tail etc.) IS bypassed by Mold Breaker --
+        # here there is no such ability on the defending side, only terrain,
+        # so Mold Breaker must NOT bypass the block.
+        self.assertTrue(priority_blocked_by_side(
+            "Mold Breaker", aqua_jet, [indeedee], terrain="psychic", target=indeedee))
+
+    def test_no_terrain_no_block(self):
+        from battle import priority_blocked_by_side
+        b = fresh(["Indeedee-F", "Garchomp"], ["Kingambit", "Sinistcha"])
+        indeedee = b.p1.active[0]
+        aqua_jet = b.make_move("aquajet")
+        self.assertFalse(priority_blocked_by_side(
+            "Defiant", aqua_jet, [indeedee], terrain=None, target=indeedee))
+
+    def test_greedy_opponent_ai_avoids_a_doomed_sucker_punch(self):
+        """Real end-to-end check: Kingambit's own moveset carries Sucker
+        Punch (priority) -- `fast_eval._pick_greedy_action` must pick
+        Kowtow Cleave (real STAB, no priority) instead of a Sucker Punch
+        that Psychic Terrain would reduce to zero damage against the
+        grounded Indeedee-F."""
+        import solver
+        import fast_eval
+        b = fresh(["Indeedee-F", "Incineroar"], ["Kingambit", "Garchomp"])
+        kingambit = b.p2.active[0]
+        indeedee, incineroar = b.p1.active
+        kg_moveset = solver.build_moveset(world()["merged"]["Kingambit"], world()["moves"])
+        self.assertTrue(any(mv.name == "Sucker Punch" for mv, _pct in kg_moveset))
+        action = fast_eval._pick_greedy_action(b, kingambit, "p2",
+                                               [indeedee, incineroar], kg_moveset)
+        self.assertIsNotNone(action)
+        self.assertIsNotNone(action.move)
+        self.assertNotEqual(action.move.name, "Sucker Punch")
+
+
 class TestExpandingForce(unittest.TestCase):
     """80 power, single-target, Psychic Special -- becomes 120 power and
     hits BOTH opposing Pokemon when its user is grounded on Psychic
@@ -266,7 +335,7 @@ class TestExpandingForce(unittest.TestCase):
 
     def test_120_power_beats_80_power_single_target_on_the_same_matchup(self):
         """Direct `damage_roll` comparison, isolating the power/terrain
-        change from targeting -- 120 power under Psychic Terrain's own 1.5x
+        change from targeting -- 120 power under Psychic Terrain's own 1.3x
         boost against the SAME single target must clear 80 power with no
         terrain by more than a spread move's own 0.75x penalty could ever
         give back."""

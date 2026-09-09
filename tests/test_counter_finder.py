@@ -5518,7 +5518,7 @@ class TestPsychicTerrainCheapModel(unittest.TestCase):
         no_terrain = cf._raw_hit(indeedee, psychic, target, typechart, roll="avg")
         psychic_terrain = cf._raw_hit(indeedee, psychic, target, typechart, roll="avg",
                                       terrain="psychic")
-        self.assertAlmostEqual(psychic_terrain.frac / no_terrain.frac, 1.5, places=3)
+        self.assertAlmostEqual(psychic_terrain.frac / no_terrain.frac, 1.3, places=3)
 
     def test_expanding_force_is_120_power_and_spread_under_terrain(self):
         merged, moves, natures, typechart = (
@@ -5564,6 +5564,121 @@ class TestPsychicTerrainCheapModel(unittest.TestCase):
         hits, _mv = cf._choose_action(
             kingambit, [aqua_jet], {"E1": pelipper}, typechart, terrain="psychic")
         self.assertGreater(hits["E1"].frac, 0.0)
+
+
+class TestHelpingHand(unittest.TestCase):
+    """"I don't think helping hand is boosting partner moves 1.5x" -- it
+    wasn't: the real engine (`battle.py`) already applied it correctly, but
+    this module's own cheap 2v2 model had no Helping Hand concept anywhere
+    at all. Threaded through the whole chain a real caller actually uses:
+    `_raw_hit` (the one source of truth) -> `_choose_move`/`_hit_or_spread`
+    (`_sequential_pair_outcome`'s `partner_move` pathway, i.e. `pair_search`)
+    -> `_choose_action` (the real `_joint_race` engine, via `_resolve_turn`'s
+    new `helping_hand_setter_role`)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_raw_hit_applies_the_flat_boost(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        target = cf._build("Garchomp", merged, natures)
+        cleave = cf._lookup_move("Kowtow Cleave", moves)
+        plain = cf._raw_hit(kingambit, cleave, target, typechart, roll="avg")
+        boosted = cf._raw_hit(kingambit, cleave, target, typechart, roll="avg",
+                              helping_hand=True)
+        self.assertAlmostEqual(boosted.frac / plain.frac, 1.5, places=6)
+
+    def test_sequential_pair_outcome_boosts_the_candidate_with_a_fixed_helping_hand(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        indeedee = cf._build("Indeedee-F", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        import solver
+        kg_moves = [mi for mi, _pct in solver.build_moveset(merged["Kingambit"], moves)]
+        helping_hand = cf._lookup_move("Helping Hand", moves)
+
+        boosted = cf._sequential_pair_outcome(
+            kingambit, kg_moves, "Garchomp", e1, [], "Sinistcha", e2, [],
+            typechart, candidate_target="Garchomp",
+            partner=indeedee, partner_move=helping_hand, partner_target="Garchomp")
+        plain = cf._sequential_pair_outcome(
+            kingambit, kg_moves, "Garchomp", e1, [], "Sinistcha", e2, [],
+            typechart, candidate_target="Garchomp",
+            partner=indeedee, partner_move=None, partner_target=None)
+        self.assertAlmostEqual(
+            boosted["hits"]["C"]["E1"].frac / plain["hits"]["C"]["E1"].frac,
+            1.5, places=6)
+
+    def test_choose_action_helping_hand_boost_applies_before_ranking(self):
+        merged, natures, typechart = (
+            self.W["merged"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        target = cf._build("Garchomp", merged, natures)
+        cleave = cf.MoveInfo("Kowtow Cleave", 85, "Dark", "Physical", "normal")
+
+        boosted, _mv = cf._choose_action(
+            kingambit, [cleave], {"E1": target}, typechart, helping_hand_boost=True)
+        plain, _mv2 = cf._choose_action(
+            kingambit, [cleave], {"E1": target}, typechart, helping_hand_boost=False)
+        self.assertAlmostEqual(
+            boosted["E1"].frac / plain["E1"].frac, 1.5, places=6)
+
+    def test_resolve_turn_setter_role_substitutes_and_boosts_the_ally_same_turn(self):
+        """Helping Hand's boost lands the SAME turn it's cast -- unlike
+        Tailwind's speed effect (which this module deliberately only makes
+        available starting the turn AFTER, see `_joint_race`'s own note),
+        Helping Hand's power boost needs no intra-turn re-sort since the
+        whole `plan` (every role's hits) is built before any turn-order
+        resolution happens."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        import solver
+        kingambit = cf._build("Kingambit", merged, natures)
+        indeedee = cf._build("Indeedee-F", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        kg_moves = [mi for mi, _pct in solver.build_moveset(merged["Kingambit"], moves)]
+        combatants = {"C": kingambit, "P": indeedee, "E1": e1, "E2": e2}
+        moves_by_role = {"C": kg_moves, "P": [], "E1": [], "E2": []}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+
+        _hp, boosted_log, _ea, _w, _rc = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, None, {"C": "E1"},
+            helping_hand_setter_role="P")
+        _hp2, plain_log, _ea2, _w2, _rc2 = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, None, {"C": "E1"})
+
+        # Indeedee-F ("P") lands no hit of its own -- Helping Hand is a
+        # zero-power status move, same as Tailwind's own no-op substitution.
+        self.assertFalse(any(role == "P" for role, _tgt, _h in boosted_log))
+        boosted_hit = next(h for role, _tgt, h in boosted_log if role == "C")
+        plain_hit = next(h for role, _tgt, h in plain_log if role == "C")
+        self.assertAlmostEqual(boosted_hit.frac / plain_hit.frac, 1.5, places=6)
+
+    def test_joint_race_first_turn_helping_hand_role_only_applies_turn_one(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        import solver
+        kingambit = cf._build("Kingambit", merged, natures)
+        indeedee = cf._build("Indeedee-F", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)
+        e2 = cf._build("Sinistcha", merged, natures)
+        kg_moves = [mi for mi, _pct in solver.build_moveset(merged["Kingambit"], moves)]
+        combatants = {"C": kingambit, "P": indeedee, "E1": e1, "E2": e2}
+        moves_by_role = {"C": kg_moves, "P": [], "E1": [], "E2": []}
+
+        _outcome, _turns, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, None, 2,
+            first_turn_helping_hand_role="P")
+        # Turn 1: Kingambit alone acts (boosted); turn 2: no setter role
+        # anymore, so Kingambit's own turn-2 hit is the plain, unboosted rate.
+        turn1_roles = {role for role, _tgt, _h in log[0]}
+        self.assertNotIn("P", turn1_roles)
+        self.assertIn("C", turn1_roles)
 
 
 class TestPreferencesReducePool(unittest.TestCase):
