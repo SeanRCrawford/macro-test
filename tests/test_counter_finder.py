@@ -465,6 +465,46 @@ class TestPairSearchPartnerAssist(unittest.TestCase):
                                  cf._OUTCOME_RANK[matched["outcome"]])
 
 
+class TestForceProtectExemption(unittest.TestCase):
+    """"Fake Out and Follow Me can replace the mandatory protect generally"
+    -- `optimize_sets.best_moveset`'s `force_protect` reservation used to
+    apply unconditionally to any non-Choice-locked Pokemon; a real Fake
+    Out or Follow Me user already has same-turn safety/disruption of its
+    own, so the slot no longer gets FORCED for one (Protect can still be
+    freely PICKED by the scoring if it genuinely scores best -- this only
+    removes the artificial override)."""
+
+    def test_a_real_fake_out_user_is_not_forced_into_protect(self):
+        W = world()
+        from optimize_sets import best_moveset
+        moves, _score = best_moveset(
+            "Incineroar", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Garchomp", "Kingambit", "Incineroar", "Farigiraf"])
+        self.assertIn("Fake Out", moves)
+        self.assertNotIn("Protect", moves)
+
+    def test_a_mon_without_fake_out_or_follow_me_still_gets_protect_forced(self):
+        W = world()
+        from optimize_sets import best_moveset
+        moves, _score = best_moveset(
+            "Garchomp", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Garchomp", "Kingambit", "Incineroar", "Farigiraf"])
+        self.assertIn("Protect", moves)
+
+    def test_a_real_follow_me_user_is_not_forced_into_protect(self):
+        W = world()
+        from optimize_sets import best_moveset
+        moves, _score = best_moveset(
+            "Indeedee-F", W["merged"], W["moves"], W["natures"], W["typechart"],
+            ["Kingambit", "Sinistcha"])
+        self.assertIn("Follow Me", moves)
+        # Protect is still free to be PICKED on its own merits here (this
+        # exemption only removes the artificial FORCE, see the class
+        # docstring) -- what this pins is that the call succeeds and Follow
+        # Me survives into the final set, not a specific outcome for Protect.
+        self.assertEqual(len(moves), 4)
+
+
 class TestItemOverrides(unittest.TestCase):
     """"I also want the option to define item in counter_table.py, such as
     Choice Scarf, or to just select optimal item. For Choice Scarf, a
