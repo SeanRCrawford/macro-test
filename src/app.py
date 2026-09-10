@@ -3268,13 +3268,25 @@ with tab_search:
 
 def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold,
                              min_enemies, max_weak, max_megas, search_kind,
-                             beam_width, excluded_items, max_weak_types=None):
+                             beam_width, excluded_items, max_weak_types=None,
+                             always_include=None):
     """Pool-wide search for the best team-of-4/5/6 across `target_name_lists`
     (one enemy roster or several) -- `multi_bring4_coverage` then
     `multi_bring4_exhaustive`/`multi_bring4_beam`, shared by the Counter
-    Table tab's Bring-4 mode ("search a pool" option, one roster) and its
-    Multi-bring4 mode (several rosters) so the two never drift apart on
-    what a pool search actually does.
+    Table tab's Bring-4 mode ("search a pool" option, one roster), its
+    Multi-bring4 mode (several rosters), and Joint Pair Search's own
+    "Search best team" option, so none of them drift apart on what a pool
+    search actually does.
+
+    `always_include`: "let me force include pokemon in each view" -- names
+    unioned into the raw candidate pool even if their own roster.csv Score
+    wouldn't otherwise earn them a spot. A SOFTER guarantee than Coverage
+    groups' own "Always include" (`must_include=`, forced into every
+    returned GROUP) -- here a forced name still has to clear the SAME
+    good-pair `min_enemies` bar as everything else to survive into
+    `candidate_pool`, and still has to actually rank well to appear in a
+    returned core; this only guarantees it's genuinely CONSIDERED, not that
+    it wins.
 
     Returns (coverage, rows) -- `rows` is None if the search never ran (the
     candidate pool came back too small, or Exhaustive's own pool-size cap
@@ -3284,6 +3296,8 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     from counter_finder import multi_bring4_beam, multi_bring4_coverage, multi_bring4_exhaustive
     from team_search import build_candidate_pool
     pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
+    if always_include:
+        pool = sorted(set(pool) | set(always_include))
     with st.spinner(f"Pair-searching {len(pool)} Pokemon against "
                     f"{len(target_name_lists)} enemy roster(s)..."):
         coverage = multi_bring4_coverage(
@@ -3783,6 +3797,17 @@ with tab_counter:
                 help="A team just seen, without saving it to data/my_teams "
                      "first -- the xlsx export's own 'Pokepaste' column "
                      "pastes straight in here too.")
+            # `st.text_area` only syncs its typed/pasted content back to
+            # Python on blur or Ctrl+Enter -- unavailable on mobile, where
+            # tapping away doesn't reliably fire a blur either. A plain
+            # button gives mobile a tap target that forces the same rerun
+            # (any widget interaction flushes every widget's CURRENT value
+            # together, this text area's included) -- parsing below already
+            # runs on every rerun regardless, so the button needs no
+            # branching of its own; it exists purely as that rerun trigger.
+            st.button("Apply pasted team", key="ct_b4_vs_paste_apply",
+                      help="For mobile, where Ctrl+Enter isn't available: "
+                           "tap this after pasting to parse the team above.")
             vs_roster, vs_sets = species_data.custom_team_from_export(
                 vs_paste, merged) if vs_paste.strip() else ([], {})
             unknown_vs = [n for n in vs_roster if n not in merged]
@@ -3822,6 +3847,12 @@ with tab_counter:
         if ct_our_source == SEARCH_POOL:
             pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
                                   key="ct_b4_pool")
+            ct_b4_include = st.multiselect(
+                "Always include these Pokemon", all_names, key="ct_b4_include",
+                help="Forced into the search pool even if their own "
+                     "roster.csv Score wouldn't otherwise earn them a spot "
+                     "-- doesn't guarantee a forced name wins, only that "
+                     "it's actually considered.")
             c1, c2, c2b = st.columns(3)
             ct_max_weak = c1.slider("Max weaknesses per type", 0, 6, 2, key="ct_b4_maxweak")
             ct_max_megas = c2.slider("Max Mega-stone users on a team", 0, 6, 2,
@@ -3848,7 +3879,8 @@ with tab_counter:
                     _coverage, rows = _run_multi_bring4_search(
                         pool_size, [vs_roster], ct_turns, ct_good / 100, 1,
                         ct_max_weak, ct_max_megas, ct_search_kind, ct_beam_width,
-                        ct_excluded, max_weak_types=ct_max_weak_types)
+                        ct_excluded, max_weak_types=ct_max_weak_types,
+                        always_include=ct_b4_include)
                     if rows:
                         st.session_state["ct_b4_pool_rows"] = rows
                         st.session_state["ct_b4_pool_vs"] = [ct_vs_name]
@@ -4132,6 +4164,12 @@ with tab_counter:
                    "a real tournament team can't be re-optimised battle to battle.")
         pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
                               key="ct_mb4_pool")
+        ct_mb4_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_mb4_include",
+            help="Forced into the search pool even if their own roster.csv "
+                 "Score wouldn't otherwise earn them a spot -- doesn't "
+                 "guarantee a forced name wins, only that it's actually "
+                 "considered.")
         ct_vs_names = st.multiselect("Enemy rosters", list(teams),
                                      default=list(teams)[:3], key="ct_mb4_vs")
         c1, c2, c3 = st.columns(3)
@@ -4176,7 +4214,8 @@ with tab_counter:
                 pool_size, target_name_lists, ct_turns, ct_good2 / 100,
                 ct_min_enemies, ct_max_weak, ct_max_megas, ct_search_kind,
                 ct_beam_width if ct_search_kind != "Exhaustive" else 40,
-                ct_excluded, max_weak_types=ct_max_weak_types)
+                ct_excluded, max_weak_types=ct_max_weak_types,
+                always_include=ct_mb4_include)
             if rows:
                 st.session_state["ct_mb4_rows"] = rows
                 st.session_state["ct_mb4_vs_names"] = ct_vs_names
@@ -4197,9 +4236,23 @@ with tab_counter:
                    "every pair drawn from the enemy roster.")
         pool_size2 = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
                                key="ct_jp_pool")
+        ct_jp_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_jp_include",
+            help="Forced into the search pool even if their own roster.csv "
+                 "Score wouldn't otherwise earn them a spot -- doesn't "
+                 "guarantee a forced name wins, only that it's actually "
+                 "considered.")
         j1, j2 = st.columns(2)
         ct_partner = j1.selectbox("Fixed partner", all_names, key="ct_jp_partner")
-        ct_jp_vs = j2.selectbox("Enemy roster", list(teams), key="ct_jp_vs")
+        ct_jp_vs_all = st.checkbox(
+            "vs ALL saved enemy teams", key="ct_jp_vs_all",
+            help="\"run the joint pair search with a given partner vs all "
+                 "enemy teams\" -- races every saved team's own internal "
+                 "pairs at once (never a cross-team pair -- two mons from "
+                 "different saved teams never actually get fielded "
+                 "together), instead of picking one roster below.")
+        ct_jp_vs = j2.selectbox("Enemy roster", list(teams), key="ct_jp_vs",
+                                disabled=ct_jp_vs_all)
         top_n2 = st.slider("Show top N pairs", 1, 30, 10, key="ct_jp_topn")
         ct_jp_worst_case = st.checkbox(
             "Worst-case enemy targeting", key="ct_jp_worst_case",
@@ -4208,12 +4261,24 @@ with tab_counter:
                  "Slower; off by default.")
         if st.button("Search partners", type="primary", key="ct_jp_go"):
             pool = build_candidate_pool(merged, top_n=pool_size2, prefs=prefs)
-            vs_roster2 = list(teams[ct_jp_vs])
-            with st.spinner(f"Searching {len(pool)} Pokemon as {ct_partner}'s partner..."):
+            pool = sorted(set(pool) | set(ct_jp_include))
+            if ct_jp_vs_all:
+                import itertools as _it
+                jp_enemy_pairs = [p for tname in teams
+                                  for p in _it.combinations(teams[tname], 2)]
+                vs_roster2 = sorted({n for pair in jp_enemy_pairs for n in pair})
+                search_label = f"all {len(teams)} saved enemy teams"
+            else:
+                jp_enemy_pairs = None
+                vs_roster2 = list(teams[ct_jp_vs])
+                search_label = ct_jp_vs
+            with st.spinner(f"Searching {len(pool)} Pokemon as {ct_partner}'s "
+                            f"partner vs {search_label}..."):
                 rows = joint_pair_search(
                     pool, vs_roster2, ct_partner, merged, moves, natures, typechart,
                     turns=ct_turns, excluded_items=ct_excluded,
-                    worst_case_targeting=ct_jp_worst_case)
+                    worst_case_targeting=ct_jp_worst_case,
+                    enemy_pairs=jp_enemy_pairs)
             total = rows[0]["pairs_total"] if rows else 0
             st.dataframe(pd.DataFrame([
                 {"Name": r["name"], "Item": r["item"],
@@ -4223,6 +4288,88 @@ with tab_counter:
                  "Tailwind-safe": r["pairs_tailwind_safe"],
                  "Protect-safe": r["pairs_protect_safe"]}
                 for r in rows[:top_n2]]), width='stretch', hide_index=True)
+
+        st.divider()
+        st.markdown("**Or: search against a custom list of enemy pairs**")
+        st.caption("\"let me enter a list of enemy pairs and try to find a "
+                  "pair or a team with the best performance against those "
+                  "pairs\" -- hand-picked matchups (not necessarily from one "
+                  "saved roster, and not every pairwise combo of one).")
+        jpp1, jpp2, jpp3 = st.columns([3, 3, 1])
+        jp_pair_a = jpp1.selectbox("Enemy A", all_names, key="ct_jp_pairs_a")
+        jp_pair_b = jpp2.selectbox("Enemy B", all_names, key="ct_jp_pairs_b")
+        jpp3.write("")
+        jpp3.write("")
+        if jpp3.button("Add pair", key="ct_jp_pairs_add"):
+            if jp_pair_a == jp_pair_b:
+                st.warning("Pick two different Pokemon.")
+            else:
+                pair = tuple(sorted((jp_pair_a, jp_pair_b)))
+                pairs_list = st.session_state.setdefault("ct_jp_pairs_list", [])
+                if pair in pairs_list:
+                    st.warning(f"{pair[0]} + {pair[1]} is already in the list.")
+                else:
+                    pairs_list.append(pair)
+        pairs_list = st.session_state.get("ct_jp_pairs_list") or []
+        if pairs_list:
+            for i, (pa, pb) in enumerate(pairs_list):
+                rc1, rc2 = st.columns([5, 1])
+                rc1.write(f"{i + 1}. {pa} + {pb}")
+                if rc2.button("Remove", key=f"ct_jp_pairs_remove_{i}"):
+                    pairs_list.pop(i)
+                    st.rerun()
+            if st.button("Clear all pairs", key="ct_jp_pairs_clear"):
+                st.session_state["ct_jp_pairs_list"] = []
+                st.rerun()
+            jp_good = st.slider("Good-pair bar for 'Search best team' (%)", 0, 100,
+                                100, key="ct_jp_pairs_good",
+                                help="Only used by 'Search best team' -- a "
+                                     "pair 'clears the bar' if it beats at "
+                                     "least this %% of the given enemy pairs.")
+            top_n_pairs = st.slider("Show top N", 1, 30, 10, key="ct_jp_pairs_topn")
+            min_enemies = (st.slider(
+                "Min pairs a member must be 'good' against (for 'Search best team')",
+                1, len(pairs_list), min(2, len(pairs_list)),
+                key="ct_jp_pairs_minenemies")
+                if len(pairs_list) > 1 else 1)
+            pc1, pc2 = st.columns(2)
+            if pc1.button("Search best pair", key="ct_jp_pairs_go_pair"):
+                pool = build_candidate_pool(merged, top_n=pool_size2, prefs=prefs)
+                pool = sorted(set(pool) | set(ct_jp_include))
+                union_names = sorted({n for pair in pairs_list for n in pair})
+                with st.spinner(f"Searching {len(pool)} Pokemon as pairs "
+                                f"against {len(pairs_list)} enemy pair(s)..."):
+                    pair_rows = joint_pool_search(
+                        pool, union_names, merged, moves, natures, typechart,
+                        turns=ct_turns, excluded_items=ct_excluded,
+                        worst_case_targeting=ct_jp_worst_case,
+                        enemy_pairs=pairs_list)
+                st.session_state["ct_jp_pairs_result"] = pair_rows
+                st.session_state["ct_jp_pairs_result_kind"] = "pair"
+            if pc2.button("Search best team", key="ct_jp_pairs_go_team"):
+                target_name_lists = [list(pair) for pair in pairs_list]
+                _coverage, team_rows = _run_multi_bring4_search(
+                    pool_size2, target_name_lists, ct_turns, jp_good / 100,
+                    min_enemies, 2, 2, "Exhaustive", 40, ct_excluded,
+                    always_include=ct_jp_include)
+                st.session_state["ct_jp_pairs_result"] = team_rows
+                st.session_state["ct_jp_pairs_result_kind"] = "team"
+                st.session_state["ct_jp_pairs_shown_vs"] = [
+                    f"{a} + {b}" for a, b in pairs_list]
+            result = st.session_state.get("ct_jp_pairs_result")
+            result_kind = st.session_state.get("ct_jp_pairs_result_kind")
+            if result and result_kind == "pair":
+                st.dataframe(_pair_rows_df(result[:top_n_pairs]),
+                            width='stretch', hide_index=True)
+            elif result and result_kind == "team":
+                shown_vs = st.session_state.get("ct_jp_pairs_shown_vs") or []
+                for i, r in enumerate(result[:top_n_pairs], start=1):
+                    with st.expander(f"#{i} ({r['core_size']}) "
+                                     f"{' / '.join(r['core'])}",
+                                     expanded=(i == 1)):
+                        _render_multi_bring4_core(r, shown_vs, turns=ct_turns,
+                                                  excluded_items=ct_excluded,
+                                                  key_prefix=f"ctjppair_{i}")
 
     elif ct_mode == "2-2-2 teambuilding":
         st.caption("'2-2-2 teambuilding': using core PAIRS that work well "
@@ -4239,6 +4386,12 @@ with tab_counter:
                    "disjoint pairs, ranked by team-wide weakness coverage.")
         pool_size3 = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 60,
                                key="ct_222_pool")
+        ct_222_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_222_include",
+            help="Forced into the search pool even if their own roster.csv "
+                 "Score wouldn't otherwise earn them a spot -- doesn't "
+                 "guarantee a forced name wins, only that it's actually "
+                 "considered.")
         ct_222_teams = st.multiselect(
             "Enemy universe (named teams)", list(teams), default=list(teams),
             key="ct_222_teams",
@@ -4270,6 +4423,7 @@ with tab_counter:
                 st.warning("Select at least one named team.")
             else:
                 pool = build_candidate_pool(merged, top_n=pool_size3, prefs=prefs)
+                pool = sorted(set(pool) | set(ct_222_include))
                 enemy_teams = {n: list(teams[n]) for n in ct_222_teams}
                 with st.spinner(f"Scoring every pair drawn from {len(pool)} "
                                 f"Pokemon vs {len(ct_222_teams)} named team(s)..."):

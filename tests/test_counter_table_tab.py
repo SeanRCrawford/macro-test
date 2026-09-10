@@ -219,6 +219,211 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertFalse(cb.value)
 
 
+class TestJointPairSearchVsAllTeams(unittest.TestCase):
+    """"let me run the joint pair search with a given partner vs all enemy
+    teams" -- a checkbox next to the single-team picker that races every
+    saved team's own internal pairs at once (never a cross-team pair)."""
+
+    def _goto(self, at):
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Joint pair search").run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at
+
+    def test_the_checkbox_is_offered_and_disables_the_single_roster_picker(self):
+        at = self._goto(app())
+        self.assertTrue(any(c.key == "ct_jp_vs_all" for c in at.checkbox))
+        sb = [s for s in at.selectbox if s.key == "ct_jp_vs"][0]
+        self.assertFalse(sb.disabled)
+        at = [c for c in at.checkbox if c.key == "ct_jp_vs_all"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        sb = [s for s in at.selectbox if s.key == "ct_jp_vs"][0]
+        self.assertTrue(sb.disabled)
+
+    def test_searching_vs_all_teams_runs_without_error(self):
+        at = self._goto(app())
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(12).run()
+        at = [c for c in at.checkbox if c.key == "ct_jp_vs_all"][0].set_value(True).run()
+        at = [b for b in at.button if b.key == "ct_jp_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(d.value is not None for d in at.dataframe))
+
+
+class TestForceIncludeAcrossViews(unittest.TestCase):
+    """"let me force include pokemon in each view" -- the SAME "Always
+    include these Pokemon" pattern Coverage groups already had (`ct_cov_
+    include`), extended to every other pool-based search in this tab.
+    Unlike Coverage groups' own `must_include=` (a hard requirement on
+    every returned GROUP), these just union into the raw search pool --
+    `_run_multi_bring4_search`'s own docstring is explicit that a forced
+    name still has to clear the same good-pair bar as everything else."""
+
+    def test_bring4_search_pool_offers_and_honours_always_include(self):
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        at = sb.set_value("\U0001f50d Search a pool for the best team").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(m.key == "ct_b4_include" for m in at.multiselect))
+        vs_sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        vs_sb.set_value("Rain").run()
+        # A real, low-Score species that a small top-Score pool would
+        # otherwise never include.
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_b4_include"][0].set_value(
+            [forced_name]).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_multi_bring4_offers_and_honours_always_include(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Multi-bring4 (several enemy rosters)").run()
+        self.assertTrue(any(m.key == "ct_mb4_include" for m in at.multiselect))
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_mb4_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_mb4_include"][0].set_value(
+            [forced_name]).run()
+        at = [m for m in at.multiselect if m.key == "ct_mb4_vs"][0].set_value(
+            ["Rain"]).run()
+        at = [b for b in at.button if b.key == "ct_mb4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_joint_pair_search_offers_and_honours_always_include(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Joint pair search").run()
+        self.assertTrue(any(m.key == "ct_jp_include" for m in at.multiselect))
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_jp_include"][0].set_value(
+            [forced_name]).run()
+        at = [b for b in at.button if b.key == "ct_jp_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_two_two_two_offers_and_honours_always_include(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "2-2-2 teambuilding").run()
+        self.assertTrue(any(m.key == "ct_222_include" for m in at.multiselect))
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_222_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_222_include"][0].set_value(
+            [forced_name]).run()
+        at = [b for b in at.button if b.key == "ct_222_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+
+class TestJointPairSearchCustomEnemyPairs(unittest.TestCase):
+    """"in the joint pair search, let me enter a list of enemy pairs and
+    try to find a pair or a team with the best performance against those
+    pairs" -- a new sub-section under "Joint pair search" mode: build up a
+    list of hand-picked (Enemy A, Enemy B) matchups (Add/Remove rows, no
+    typing on mobile), then either "Search best pair" (both slots free-
+    searched, `joint_pool_search`'s new `enemy_pairs` param -- races
+    EXACTLY the given pairs, not every C(n,2) of their union) or "Search
+    best team" (reuses the existing Multi-bring4 machinery, each pair fed
+    in as its own 2-member "roster")."""
+
+    def _goto(self, at):
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Joint pair search").run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at
+
+    def _add_pair(self, at, a, b):
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_a"][0].set_value(a).run()
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_b"][0].set_value(b).run()
+        at = [btn for btn in at.button if btn.key == "ct_jp_pairs_add"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at
+
+    def test_the_add_pair_controls_are_offered(self):
+        at = self._goto(app())
+        self.assertTrue(any(s.key == "ct_jp_pairs_a" for s in at.selectbox))
+        self.assertTrue(any(s.key == "ct_jp_pairs_b" for s in at.selectbox))
+        self.assertTrue(any(b.key == "ct_jp_pairs_add" for b in at.button))
+
+    def test_adding_a_pair_shows_it_in_the_list(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        self.assertEqual(at.session_state["ct_jp_pairs_list"],
+                         [("Basculegion", "Kingambit")])
+        self.assertTrue(any("Basculegion + Kingambit" in w.value
+                            for w in at.markdown))
+
+    def test_adding_the_same_pokemon_twice_is_rejected(self):
+        at = self._goto(app())
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_a"][0].set_value(
+            "Kingambit").run()
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_b"][0].set_value(
+            "Kingambit").run()
+        at = [btn for btn in at.button if btn.key == "ct_jp_pairs_add"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        try:
+            stored = at.session_state["ct_jp_pairs_list"]
+        except KeyError:
+            stored = []
+        self.assertEqual(stored, [])
+        self.assertTrue(any(w.value for w in at.warning))
+
+    def test_adding_a_duplicate_pair_is_rejected(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Basculegion", "Kingambit")  # reversed order
+        self.assertEqual(len(at.session_state["ct_jp_pairs_list"]), 1)
+
+    def test_removing_a_pair_takes_it_out_of_the_list(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Garchomp", "Incineroar")
+        self.assertEqual(len(at.session_state["ct_jp_pairs_list"]), 2)
+        at = [b for b in at.button if b.key == "ct_jp_pairs_remove_0"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["ct_jp_pairs_list"],
+                         [("Garchomp", "Incineroar")])
+
+    def test_clear_all_empties_the_list(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = [b for b in at.button if b.key == "ct_jp_pairs_clear"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["ct_jp_pairs_list"], [])
+
+    def test_search_best_pair_races_exactly_the_given_pairs(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Garchomp", "Incineroar")
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(10).run()
+        at = [b for b in at.button
+             if b.key == "ct_jp_pairs_go_pair"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        result = at.session_state["ct_jp_pairs_result"]
+        self.assertEqual(at.session_state["ct_jp_pairs_result_kind"], "pair")
+        self.assertTrue(result)
+        for row in result:
+            self.assertEqual(row["pairs_total"], 2)
+            self.assertEqual(set(row["detail"].keys()),
+                             {("Basculegion", "Kingambit"),
+                              ("Garchomp", "Incineroar")})
+
+    def test_search_best_team_uses_each_pair_as_its_own_enemy(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Garchomp", "Incineroar")
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(12).run()
+        at = [b for b in at.button
+             if b.key == "ct_jp_pairs_go_team"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        result = at.session_state["ct_jp_pairs_result"]
+        self.assertEqual(at.session_state["ct_jp_pairs_result_kind"], "team")
+        shown_vs = at.session_state["ct_jp_pairs_shown_vs"]
+        self.assertEqual(set(shown_vs),
+                         {"Basculegion + Kingambit", "Garchomp + Incineroar"})
+        if result:
+            self.assertEqual(len(result[0]["per_enemy"]), 2)
+
+
 class TestBring4ModeRunsEndToEnd(unittest.TestCase):
     """The fastest of the three real searches -- one enemy roster, our
     already-loaded 6 -- run for real (not just rendered) to prove the
@@ -545,6 +750,24 @@ class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):
         self.assertTrue(any("Archaludon" in s.value for s in at.success))
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
+
+    def test_an_apply_button_is_offered_for_mobile(self):
+        """"for mobile I need to have a button to apply the team" --
+        `st.text_area` only syncs to Python on blur/Ctrl+Enter, unavailable
+        on mobile; a plain button gives a tap target that forces the same
+        rerun. Parsing itself already runs on every rerun regardless (see
+        `test_a_valid_pasted_enemy_roster_parses_and_can_search` above,
+        which never touches this button), so clicking it must not error
+        and the parse must still be visible afterward."""
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        self.assertTrue(any(b.key == "ct_b4_vs_paste_apply" for b in at.button))
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.RAIN_PASTE).run()
+        at = [b for b in at.button if b.key == "ct_b4_vs_paste_apply"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Archaludon" in s.value for s in at.success))
 
     def test_pasting_our_6_reveals_a_text_area_and_parses(self):
         at = app(team=[])

@@ -4255,12 +4255,24 @@ def _pruned_entry():
 
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                      turns, want_grid=False, merged=None, prune_below=None,
-                     forced_base_names=frozenset(), worst_case_targeting=False):
+                     forced_base_names=frozenset(), worst_case_targeting=False,
+                     enemy_pairs=None):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
     (partner fixed) and `joint_pool_search` (both slots searched) can never
     drift apart on what "beats" means.
+
+    `enemy_pairs`: optional explicit [(e1_name, e2_name), ...] to race
+    INSTEAD OF every C(`target_names`,2) combination -- "let me enter a list
+    of enemy pairs" (hand-picked matchups, not every pairwise combo of one
+    roster; two names appearing in `target_names` but never paired together
+    here are simply never raced against each other). `target_names` still
+    controls the item/moveset SEARCH scope for both sides (unaffected by
+    this -- a caller passing `enemy_pairs` is expected to pass the union of
+    names appearing in it as `target_names` too, so every named enemy still
+    gets a real, fully-searched set). `None` (the default) is the original
+    behaviour, unchanged: every enemy pair drawn from `target_names`.
 
     `worst_case_targeting`: passed straight through to every `_joint_race`
     call this function makes (the main race, the Tailwind replay, both
@@ -4430,7 +4442,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     existing win/loss-based search.
     """
     m1, m2 = our_built[n1]["moves"], our_built[n2]["moves"]
-    all_enemy_pairs = list(itertools.combinations(target_names, 2))
+    all_enemy_pairs = (list(enemy_pairs) if enemy_pairs is not None
+                       else list(itertools.combinations(target_names, 2)))
     total_pairs = len(all_enemy_pairs)
     detail = {}
     for pair_idx, (e1_name, e2_name) in enumerate(all_enemy_pairs):
@@ -4607,11 +4620,23 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
                       excluded_items=DEFAULT_EXCLUDED_ITEMS,
                       worst_case_targeting=False, evs_overrides=None,
                       nature_overrides=None, ability_overrides=None,
-                      enemy_item_overrides=None, enemy_move_overrides=None):
+                      enemy_item_overrides=None, enemy_move_overrides=None,
+                      enemy_pairs=None):
     """Paired with `partner_name` (a fixed second attacker, both using their
     own real optimised set -- not one fixed move), for each pool member:
     against every pair drawn from `target_names`, does the joint pair beat
     it?
+
+    `enemy_pairs`: optional explicit [(e1_name, e2_name), ...], passed
+    straight through to `_pair_vs_targets` -- see its own docstring. "Run
+    the joint pair search with a given partner vs all enemy teams": the
+    right reading of "all teams" is every SAVED team's own internal pairs
+    (never a cross-team pair -- two mons from different saved teams never
+    actually get fielded together), so a caller wanting that unions each
+    saved team's own `itertools.combinations(roster, 2)` into one flat list
+    here, with `target_names` set to the union of names appearing in it.
+    `None` (the default) races every C(`target_names`, 2) combination,
+    unchanged from before this existed.
 
         "against a given enemy pair, my pair either out trade all possible
          enemy pairs to a win (including spread damage ...), outspeed and ko
@@ -4694,7 +4719,8 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
         detail, summary = _pair_vs_targets(
             name, partner_name, our_built, target_names, enemy_built,
             typechart, turns, merged=merged,
-            worst_case_targeting=worst_case_targeting)
+            worst_case_targeting=worst_case_targeting,
+            enemy_pairs=enemy_pairs)
         rows.append({"name": name, "item": item, "detail": detail, **summary})
     rows.sort(key=_pair_sort_key)
     return rows
@@ -4706,13 +4732,24 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       prune_below=None, extra_forced_base=frozenset(),
                       worst_case_targeting=False, evs_overrides=None,
                       nature_overrides=None, ability_overrides=None,
-                      enemy_item_overrides=None, enemy_move_overrides=None):
+                      enemy_item_overrides=None, enemy_move_overrides=None,
+                      enemy_pairs=None):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
     genuinely searched (not one fixed), against every pair drawn from
     `target_names`.
 
         "I want it to generate my pair, i.e., mine and partner"
+
+    `enemy_pairs`: optional explicit [(e1_name, e2_name), ...], passed
+    straight through to every `_pair_vs_targets` call below -- see its own
+    docstring. "Let me enter a list of enemy pairs and try to find ... a
+    pair ... with the best performance against those pairs": `target_names`
+    should still be the union of names appearing in `enemy_pairs` (controls
+    the item/moveset search scope for the enemy side), while this controls
+    which SPECIFIC combinations actually get raced. `None` (the default)
+    races every C(`target_names`, 2) combination, unchanged from before
+    this existed.
 
     The expensive part -- `optimize_sets.best_item`/`best_moveset` -- is
     still paid ONCE per pool member (`_answer_for`), same as everywhere else
@@ -4775,7 +4812,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
         detail, summary = _pair_vs_targets(n1, n2, built, target_names,
                                            enemy_built, typechart, turns,
                                            merged=merged, prune_below=prune_below,
-                                           worst_case_targeting=worst_case_targeting)
+                                           worst_case_targeting=worst_case_targeting,
+                                           enemy_pairs=enemy_pairs)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                     "item2": built[n2]["item"], "detail": detail,
                     "forced_base": None, **summary})
@@ -4790,7 +4828,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                 n1, n2, built, target_names, enemy_built, typechart, turns,
                 merged=merged, prune_below=prune_below,
                 forced_base_names=frozenset({forced_name}),
-                worst_case_targeting=worst_case_targeting)
+                worst_case_targeting=worst_case_targeting,
+                enemy_pairs=enemy_pairs)
             rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                         "item2": built[n2]["item"], "detail": detail,
                         "forced_base": forced_name, **summary})

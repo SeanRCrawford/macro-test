@@ -2636,6 +2636,125 @@ class TestJointPoolSearch(unittest.TestCase):
         self.assertEqual(protect_safe, sorted(protect_safe, reverse=True))
 
 
+class TestExplicitEnemyPairs(unittest.TestCase):
+    """"let me enter a list of enemy pairs and try to find a pair or a team
+    with the best performance against those pairs" -- `_pair_vs_targets`'s/
+    `joint_pool_search`'s new `enemy_pairs` param: race EXACTLY the given
+    combinations, not every C(target_names, 2) of their union."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_only_the_explicit_pairs_are_raced_not_every_combination(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        our_built = cf._build_forms(["Garchomp", "Milotic"], merged, natures,
+                                    self.W["moves"])
+        union = ["Kingambit", "Basculegion", "Sinistcha", "Whimsicott"]
+        enemy_built = cf._build_forms(union, merged, natures, self.W["moves"])
+        enemy_pairs = [("Kingambit", "Basculegion"), ("Sinistcha", "Whimsicott")]
+        detail, summary = cf._pair_vs_targets(
+            "Garchomp", "Milotic", our_built, union, enemy_built,
+            self.W["typechart"], turns=2, merged=merged, enemy_pairs=enemy_pairs)
+        self.assertEqual(set(detail.keys()), set(enemy_pairs))
+        self.assertEqual(summary["pairs_total"], 2)
+
+    def test_none_falls_back_to_every_combination_unchanged(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        our_built = cf._build_forms(["Garchomp", "Milotic"], merged, natures,
+                                    self.W["moves"])
+        targets = ["Kingambit", "Basculegion", "Sinistcha"]
+        enemy_built = cf._build_forms(targets, merged, natures, self.W["moves"])
+        detail, _summary = cf._pair_vs_targets(
+            "Garchomp", "Milotic", our_built, targets, enemy_built,
+            self.W["typechart"], turns=2, merged=merged)
+        import itertools as _it
+        self.assertEqual(set(detail.keys()),
+                         set(_it.combinations(targets, 2)))
+
+    def test_joint_pool_search_threads_enemy_pairs_through(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola"]
+        union = ["Kingambit", "Basculegion", "Sinistcha", "Whimsicott"]
+        enemy_pairs = [("Kingambit", "Basculegion"), ("Sinistcha", "Whimsicott")]
+        rows = cf.joint_pool_search(pool, union, merged, moves, natures,
+                                    typechart, enemy_pairs=enemy_pairs)
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(r["pairs_total"], 2)
+            self.assertEqual(set(r["detail"].keys()), set(enemy_pairs))
+
+    def test_joint_pool_search_default_none_is_unaffected(self):
+        """Regression guard: adding the new param must not change existing
+        callers that never pass it."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola"]
+        targets = ["Sableye", "Ariados"]
+        with_default = cf.joint_pool_search(pool, targets, merged, moves,
+                                            natures, typechart)
+        explicit_none = cf.joint_pool_search(pool, targets, merged, moves,
+                                             natures, typechart, enemy_pairs=None)
+        self.assertEqual(with_default, explicit_none)
+
+    def test_joint_pair_search_threads_enemy_pairs_through(self):
+        """"run the joint pair search with a given partner vs all enemy
+        teams" -- `joint_pair_search` (the FIXED-partner search) gets the
+        same `enemy_pairs` param `joint_pool_search`/`_pair_vs_targets`
+        already have, so a caller can race a fixed partner against every
+        SAVED TEAM's own internal pairs at once, never a cross-team pair."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Mega Gengar", "Ninetales-Alola"]
+        union = ["Kingambit", "Basculegion", "Sinistcha", "Whimsicott"]
+        enemy_pairs = [("Kingambit", "Basculegion"), ("Sinistcha", "Whimsicott")]
+        rows = cf.joint_pair_search(pool, union, "Mega Alakazam", merged, moves,
+                                    natures, typechart, enemy_pairs=enemy_pairs)
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(r["pairs_total"], 2)
+            self.assertEqual(set(r["detail"].keys()), set(enemy_pairs))
+
+    def test_joint_pair_search_default_none_is_unaffected(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        pool = ["Mega Gengar", "Ninetales-Alola"]
+        targets = ["Sableye", "Ariados"]
+        with_default = cf.joint_pair_search(pool, targets, "Mega Alakazam",
+                                            merged, moves, natures, typechart)
+        explicit_none = cf.joint_pair_search(pool, targets, "Mega Alakazam",
+                                             merged, moves, natures, typechart,
+                                             enemy_pairs=None)
+        self.assertEqual(with_default, explicit_none)
+
+    def test_all_teams_pairs_never_mix_two_different_teams(self):
+        """A concrete end-to-end demonstration of the "vs all enemy teams"
+        reading: unioning each saved team's own C(len,2) internal pairs
+        (never a cross-team pair between two different rosters) is exactly
+        what the app's own "vs ALL saved enemy teams" checkbox builds."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        teams = {"Team A": ["Kingambit", "Basculegion"],
+                "Team B": ["Sinistcha", "Whimsicott", "Garchomp"]}
+        import itertools as _it
+        enemy_pairs = [p for roster in teams.values()
+                      for p in _it.combinations(roster, 2)]
+        union = sorted({n for pair in enemy_pairs for n in pair})
+        rows = cf.joint_pair_search(
+            ["Mega Gengar"], union, "Mega Alakazam", merged, moves, natures,
+            typechart, enemy_pairs=enemy_pairs)
+        self.assertTrue(rows)
+        raced = set(rows[0]["detail"].keys())
+        # Every raced pair's two members must come from the SAME team.
+        for e1, e2 in raced:
+            same_team = any(e1 in roster and e2 in roster
+                            for roster in teams.values())
+            self.assertTrue(same_team, f"{e1}+{e2} mixes two different teams")
+        # Kingambit+Sinistcha (one from each team) must never appear.
+        self.assertNotIn(("Kingambit", "Sinistcha"), raced)
+        self.assertNotIn(("Sinistcha", "Kingambit"), raced)
+
+
 class TestPruneBelow(unittest.TestCase):
     """`joint_pool_search`'s `prune_below` -- once a pair's remaining,
     not-yet-raced enemy pairs could not possibly push it up to
