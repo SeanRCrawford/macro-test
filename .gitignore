@@ -13,3 +13,7 @@ tools/*.xlsx
 
 # Screener margin cache: machine-local, rebuilt from the pool in ~30s
 matrix_cache.pkl
+
+# tools/_harness.py's load_world() cache: machine-local, rebuilt automatically
+# whenever the underlying data files change (see _fingerprint())
+tools/.world_cache.pkl

@@ -374,6 +374,24 @@ def weak_type_breadth(core, merged, threshold=2):
     return sum(1 for c in per_type.values() if c >= threshold)
 
 
+def net_weak_type_breadth(core, merged, threshold=2):
+    """How many DIFFERENT types have NET weakness (weak members minus
+    resistant/immune members, `net_weakness_by_type`) of at least
+    `threshold` -- the net-weakness sibling of `weak_type_breadth`, for "I
+    want an argument to be able to restrict generated teams to a certain
+    number of types with more than 1 net weakness" (threshold=2, i.e. net
+    weakness > 1).
+
+    Unlike `weak_type_breadth`, this is NOT monotonic under core growth --
+    same reason `net_weakness_by_type`'s own per-type value isn't (a later
+    addition can add a resist and pull a type's net back under the
+    threshold), so callers must only check this once a candidate has
+    reached a real core size, never as a growth-time prune (see
+    `multi_bring4_beam`'s own `max_net_weak_types` handling)."""
+    net = net_weakness_by_type(core, merged)
+    return sum(1 for v in net.values() if v >= threshold)
+
+
 def net_weakness_by_type(core, merged):
     """{type: net} for every type -- net = (members weak to it) - (members
     resistant/immune to it), via `team_search._weak_resist` (the SAME split
@@ -4081,13 +4099,24 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
 
 
 def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
-              auras=None, terrain=None):
+              auras=None, terrain=None, dmg_mult_by_role=None,
+              attacker_role=None):
     """The best `Hit` `attacker`'s own moveset can land on `target`
     SPECIFICALLY -- one cell of the 2x2 damage grid, not the move a
     target-choosing AI would actually pick (that's `_choose_action`).
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`), same field-wide reading `_choose_action` gets.
+
+    `dmg_mult_by_role`/`attacker_role`: the STATIC Intimidate/Defiant/
+    Competitive multiplier (`_intimidate_mult_by_role`, same shape
+    `_choose_action`'s own `_scaled` reads) -- this "right now" snapshot is
+    taken before any turn has actually played out, so only the STATIC
+    switch-in effect applies here, never the Draco-Meteor-family halving or
+    Contrary's own move-triggered def boost (both are turn-dynamic and
+    require a move to have already been used, which a single-hit preview
+    has no way to have happened yet). `None`/no entry for this role changes
+    nothing, matching every other optional per-role map in this module.
 
     A spread move still takes the doubles 0.75x penalty whenever
     `other_live` (the OTHER Pokemon on the target's side) is not None --
@@ -4131,6 +4160,14 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
             got = _raw_hit(attacker, mv, target, typechart, weather=weather,
                            roll="avg", num_targets_hit=n, auras=auras,
                            terrain=terrain)
+            if got is not NO_HIT and dmg_mult_by_role and attacker_role is not None:
+                cat = "physical" if mv.category == "Physical" else "special"
+                mult = dmg_mult_by_role.get(attacker_role, {}).get(cat, 1.0)
+                if mult != 1.0:
+                    got = Hit(move_name=got.move_name, frac=got.frac * mult,
+                             lo=got.lo * mult, avg=got.avg * mult,
+                             hi=got.hi * mult, eff=got.eff,
+                             num_targets_hit=got.num_targets_hit)
         candidates.append((mv, got))
     if not candidates:
         return NO_HIT
@@ -4152,19 +4189,27 @@ def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather,
     not just which line the race happened to choose. Returns {"ours": {("C",
     "E1"): Hit, ("C","E2"): Hit, ("P","E1"): Hit, ("P","E2"): Hit}, "theirs":
     {("E1","C"): Hit, ("E1","P"): Hit, ("E2","C"): Hit, ("E2","P"): Hit}}.
+
+    Intimidate/Defiant/Competitive (`_intimidate_mult_by_role`, the SAME
+    static switch-in multiplier the real race applies via `_joint_race`)
+    are folded in here too -- "always account for intimidate (as well as
+    defiant boosts)" applies to this preview grid just as much as the real
+    race, not just a documented gap left for later.
     """
-    auras = _active_auras({"C": c1, "P": c2, "E1": e1c, "E2": e2c})
+    combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
+    auras = _active_auras(combatants)
+    dmg_mult_by_role = _intimidate_mult_by_role(combatants)
     ours = {
-        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain),
-        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain),
-        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain),
-        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain),
+        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C"),
+        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C"),
+        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P"),
+        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P"),
     }
     theirs = {
-        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain),
-        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain),
-        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain),
-        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain),
+        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1"),
+        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1"),
+        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2"),
+        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2"),
     }
     return {"ours": ours, "theirs": theirs}
 
@@ -5791,7 +5836,7 @@ def _effective_type_limits(max_weak=None, type_limits=None):
 
 
 def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
-                              max_weak_types=None):
+                              max_weak_types=None, max_net_weak_types=None):
     """True if `core` (any size) may be proposed as a multi-bring4
     candidate at all: "you cannot have both a mega and its non-mega form"
     (always enforced, `_mega_base_overlap`), "a full team can only have two
@@ -5805,10 +5850,16 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
     `team_search.hard_violations` already implements -- reused directly,
     never reimplemented -- plus, when `max_weak_types` is given, the
     `weak_type_breadth` cap ("no more than N types may have 2+ weak
-    members"). `max_megas` and `max_weak_types` are both checked
+    members"), plus, when `max_net_weak_types` is given, the
+    `net_weak_type_breadth` cap ("no more than N types may have net
+    weakness > 1"). `max_megas` and `max_weak_types` are both checked
     MONOTONICALLY safe to prune on during partial-core growth too
     (`multi_bring4_beam`'s own use of this function): a partial core
     already over either cap can never fix that by adding more members.
+    `max_net_weak_types` is NOT monotonic (same reason `max_net` itself
+    isn't -- see `net_weak_type_breadth`'s own docstring), so a caller doing
+    incremental growth must only pass it once `core` is a genuine final-size
+    core, never as a growth-time prune.
     """
     if _mega_base_overlap(core):
         return False
@@ -5819,6 +5870,9 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
         if hard_violations(list(core), merged, type_limits=effective_limits):
             return False
     if max_weak_types is not None and weak_type_breadth(core, merged) > max_weak_types:
+        return False
+    if (max_net_weak_types is not None
+            and net_weak_type_breadth(core, merged) > max_net_weak_types):
         return False
     return True
 
@@ -5874,7 +5928,8 @@ def _focus_sash_context_from_coverage(coverage, max_focus_sash=DEFAULT_MAX_FOCUS
 def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_candidates=_EXHAUSTIVE_POOL_CEILING,
                             max_weak=None, type_limits=None, max_megas=2,
-                            max_weak_types=None, core_sizes=_CORE_SIZES,
+                            max_weak_types=None, max_net_weak_types=None,
+                            core_sizes=_CORE_SIZES,
                             enforce_item_clause=False):
     """Every possible CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3, "I would like to output the best 3-pokemon
@@ -5894,11 +5949,15 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     enumerated on its own, so keeping the padded version would only ever
     duplicate a real answer with dead weight attached. Also drops any core
     with both a Mega and its own base form, one that breaks
-    `max_weak`/`type_limits` (`team_search.hard_violations`, reused), and
-    (when `max_weak_types` is given) one where more than `max_weak_types`
-    DIFFERENT types have 2+ weak members (`weak_type_breadth`) -- "no more
+    `max_weak`/`type_limits` (`team_search.hard_violations`, reused), one
+    that breaks (when `max_weak_types` is given) more than `max_weak_types`
+    DIFFERENT types having 2+ weak members (`weak_type_breadth`) -- "no more
     than 3 types that have 2 members weak to it", a breadth cap distinct
-    from `max_weak`'s own per-type ceiling.
+    from `max_weak`'s own per-type ceiling -- and one that breaks (when
+    `max_net_weak_types` is given) more than `max_net_weak_types` DIFFERENT
+    types having net weakness > 1 (`net_weak_type_breadth`) -- "restrict
+    generated teams to a certain number of types with more than 1 net
+    weakness".
 
     Raises if the candidate pool is bigger than `max_candidates` -- narrow
     with a higher `--min-enemies`/`--good-threshold`, or use
@@ -5937,7 +5996,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
         for core in itertools.combinations(pool, size):
             if not _core_passes_hard_filters(core, merged, effective_limits,
                                              max_megas=max_megas,
-                                             max_weak_types=max_weak_types):
+                                             max_weak_types=max_weak_types,
+                                             max_net_weak_types=max_net_weak_types):
                 continue
             row = _core_row(core, coverage["pair_by_key"],
                             coverage["target_name_lists"], good_threshold,
@@ -5952,7 +6012,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
 
 def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                       max_weak=None, type_limits=None, max_megas=2,
-                      max_weak_types=None, core_sizes=_CORE_SIZES,
+                      max_weak_types=None, max_net_weak_types=None,
+                      core_sizes=_CORE_SIZES,
                       enforce_item_clause=False):
     """Beam-search a CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3) over the WHOLE pool
@@ -6003,6 +6064,12 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     # monotonic the same way `max_weak`/`max_megas` are -- see
     # `weak_type_breadth`'s own docstring -- so it's passed to every
     # `_core_passes_hard_filters` call below, growth-time and final alike.
+    # `max_net_weak_types` is NOT monotonic (same reason `max_net` itself
+    # isn't -- `net_weak_type_breadth`'s own docstring), so it is
+    # deliberately withheld from every growth-time call below and only
+    # applied at the final `found`-capture step, mirroring how `max_net`
+    # itself is excluded from `growth_limits` and only checked there via
+    # the full `effective_limits`.
     growth_limits = _monotonic_limits(effective_limits)
     pool = sorted({n for pbk in pair_by_key_list for fs in pbk for n in fs})
 
@@ -6029,6 +6096,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
              if _core_passes_hard_filters(p, merged, growth_limits,
                                           max_megas=max_megas,
                                           max_weak_types=max_weak_types)]
+    # `max_net_weak_types` withheld above -- not monotonic, see comment
+    # above `growth_limits`.
     seeds.sort(key=lambda x: x[0])
     beam = [t for _, t in seeds[:beam_width]]
 
@@ -6045,7 +6114,7 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                 if not _core_passes_hard_filters(key, merged, growth_limits,
                                                  max_megas=max_megas,
                                                  max_weak_types=max_weak_types):
-                    continue
+                    continue  # max_net_weak_types withheld -- not monotonic
                 cand[key] = score(list(key))
         ranked = sorted(cand.items(), key=lambda kv: kv[1])[:beam_width]
         beam = [list(k) for k, _ in ranked]
@@ -6058,8 +6127,9 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                     continue
                 if not _core_passes_hard_filters(key, merged, effective_limits,
                                                  max_megas=max_megas,
-                                                 max_weak_types=max_weak_types):
-                    continue  # catches a max_net violation growth couldn't see
+                                                 max_weak_types=max_weak_types,
+                                                 max_net_weak_types=max_net_weak_types):
+                    continue  # catches a max_net/max_net_weak_types violation growth couldn't see
                 row = _core_row(team, pair_by_key_list, target_name_lists,
                                 good_threshold,
                                 pair_by_key_forced_base_list=pair_by_key_forced_base_list,

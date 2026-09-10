@@ -3395,6 +3395,57 @@ def _bring4_rows_df(bring4_rows, total):
         for b in bring4_rows])
 
 
+def _all_teams_summary_df(team_names, target_lists, our6, dive):
+    """One row per enemy team's own best bring-4 (`bring4_from_deep_dive`,
+    already computed from `dive` -- no new racing) -- "first give a summary
+    table of all enemy teams; your bring/lead vs each, full performance
+    (beats, under tailwind, under protect, best pair/3rd best/worst and so
+    on as done elsewhere)". "As done elsewhere" is the CLI's own xlsx Cores
+    sheet (`counter_table.py`'s `_write_multi_bring4_xlsx`, per-enemy
+    columns) -- the SAME `bring4_pair_depth` breakdown, just one row per
+    team here instead of one column block per team, for a quick at-a-glance
+    overview above the existing team-by-team detail loop."""
+    from counter_finder import bring4_from_deep_dive, bring4_pair_depth, recommended_lead
+
+    def _frac(depth, key, denom):
+        v = depth[key]
+        return f"{v}/{denom}" if v is not None else "-"
+
+    rows = []
+    for team_name, targets in zip(team_names, target_lists):
+        best = bring4_from_deep_dive(our6, dive, targets)[0]
+        depth = bring4_pair_depth(best)
+        pt = depth["pairs_total"]
+        n_pairs = len(best["pair_rows"])
+        wr = best["worst_pair_row"]
+        lb = recommended_lead(best)
+        rows.append({
+            "Enemy team": team_name,
+            "Bring-4": " / ".join(best["bring4"]),
+            "Lead": " + ".join(lb["lead"]),
+            "Backup": " + ".join(lb["backup"]),
+            "Mega used": best.get("mega_used") or "-",
+            "Worst pair beaten": (f"{wr['pairs_swept'] + wr['pairs_traded']}"
+                                  f"/{wr['pairs_total']}"),
+            "Beaten total": f"{depth['beaten_total']}/{n_pairs * pt}",
+            "Beaten 3rd best": _frac(depth, "beaten_3rd", pt),
+            "Beaten 4th best": _frac(depth, "beaten_4th", pt),
+            "Beaten worst": _frac(depth, "beaten_worst", pt),
+            "Tailwind-safe total": f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
+            "Tailwind-safe best": _frac(depth, "tailwind_safe_best", pt),
+            "Tailwind-safe 3rd best": _frac(depth, "tailwind_safe_3rd", pt),
+            "Protect-safe total": f"{depth['protect_safe_total']}/{n_pairs * pt}",
+            "Protect-safe best": _frac(depth, "protect_safe_best", pt),
+            "Protect-safe 3rd best": _frac(depth, "protect_safe_3rd", pt),
+            "Clean win total": f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
+            "No-faint best": _frac(depth, "no_faint_best", pt),
+            "No-faint 3rd best": _frac(depth, "no_faint_3rd", pt),
+            "No answer to": ", ".join(f"{a}+{b}" for a, b
+                                      in best["uncovered_enemy_pairs"]) or "-",
+        })
+    return pd.DataFrame(rows)
+
+
 def _bring4_mega_caption(bring4_row):
     """"It should also show the chosen mega vs a given six" -- the BASIC
     (non-deep-dive) per-enemy bring-4 line (`_render_multi_bring4_core`,
@@ -4017,6 +4068,16 @@ with tab_counter:
                         f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
                         f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} "
                         f"clean win")
+                    st.markdown("**Summary: best bring-4 vs each enemy team**")
+                    st.caption("Same worst-case-across-pairs bring-4 each "
+                              "team's own detail below re-derives "
+                              "(`bring4_from_deep_dive`, no new racing) -- "
+                              "one row per team for a quick overview before "
+                              "the full per-pair breakdown.")
+                    st.dataframe(
+                        _all_teams_summary_df(all_shown_vs, all_target_lists,
+                                              our6, all_dive),
+                        width='stretch', hide_index=True)
                     only_losses = st.checkbox(
                         "Only show enemy pairs each pair loses to",
                         key="ctb4_dd_all6_allteams_onlyloss",
@@ -4024,7 +4085,7 @@ with tab_counter:
                              "specific enemy pairs my given pair loses "
                              "against\" -- filters every matchup list "
                              "below to just the unconditional losses.")
-                    st.markdown("**Best bring-4, team by team**")
+                    st.markdown("**Best bring-4, team by team (full detail)**")
                     st.caption("\"I should look team by team for the best "
                               "brings, rather than just individual pair "
                               "performance versus all enemies\" -- each "

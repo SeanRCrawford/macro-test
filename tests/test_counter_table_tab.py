@@ -981,6 +981,90 @@ class TestBestBring4TeamByTeam(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
 
 
+class TestAllTeamsSummaryTable(unittest.TestCase):
+    """"first give a summary table of all enemy teams; your bring/lead vs
+    each, full performance (beats, under tailwind, under protect, best
+    pair/3rd best/worst and so on as done elsewhere)" -- a `st.dataframe`
+    overview, one row per enemy team, ABOVE the existing "team by team
+    (full detail)" markdown loop (`TestBestBring4TeamByTeam`), matching the
+    CLI's own per-enemy `bring4_pair_depth` breakdown (`_write_multi_
+    bring4_xlsx`'s Cores sheet)."""
+
+    def test_a_summary_dataframe_is_shown_with_one_row_per_team(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Enemy team" in d.value.columns]
+        self.assertTrue(dfs, "expected a summary dataframe with an 'Enemy "
+                         "team' column")
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        self.assertEqual(len(dfs[0]), len(W["teams"]))
+        self.assertEqual(set(dfs[0]["Enemy team"]), set(W["teams"]))
+
+    def test_it_appears_before_the_full_detail_section(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        markdowns = [m.value for m in at.markdown]
+        summary_idx = next(i for i, v in enumerate(markdowns)
+                           if "Summary: best bring-4 vs each enemy team" in v)
+        detail_idx = next(i for i, v in enumerate(markdowns)
+                          if "Best bring-4, team by team" in v)
+        self.assertLess(summary_idx, detail_idx)
+
+    def test_the_full_performance_columns_are_present(self):
+        """"full performance (beats, under tailwind, under protect, best
+        pair/3rd best/worst and so on as done elsewhere)" -- the SAME
+        `bring4_pair_depth` fields the CLI's xlsx Cores sheet already
+        surfaces per enemy, not just the beaten count."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        dfs = [d.value for d in at.dataframe if "Enemy team" in d.value.columns]
+        cols = set(dfs[0].columns)
+        for expected in ("Bring-4", "Lead", "Backup", "Worst pair beaten",
+                         "Beaten total", "Beaten 3rd best", "Beaten 4th best",
+                         "Beaten worst", "Tailwind-safe total",
+                         "Tailwind-safe best", "Tailwind-safe 3rd best",
+                         "Protect-safe total", "Protect-safe best",
+                         "Protect-safe 3rd best", "Clean win total"):
+            self.assertIn(expected, cols)
+
+    def test_a_rows_values_match_a_direct_call(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        dive = at.session_state["ctb4_dd_all6_allteams_dive"]
+        dfs = [d.value for d in at.dataframe if "Enemy team" in d.value.columns]
+        df = dfs[0]
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import (bring4_from_deep_dive, bring4_pair_depth,
+                                    recommended_lead)
+        W = load_world()
+        name0 = list(W["teams"])[0]
+        best = bring4_from_deep_dive(TEAM, dive, list(W["teams"][name0]))[0]
+        depth = bring4_pair_depth(best)
+        pt = depth["pairs_total"]
+        n_pairs = len(best["pair_rows"])
+        lb = recommended_lead(best)
+
+        row = df[df["Enemy team"] == name0].iloc[0]
+        self.assertEqual(row["Bring-4"], " / ".join(best["bring4"]))
+        self.assertEqual(row["Lead"], " + ".join(lb["lead"]))
+        self.assertEqual(row["Backup"], " + ".join(lb["backup"]))
+        self.assertEqual(row["Beaten total"], f"{depth['beaten_total']}/{n_pairs * pt}")
+        self.assertEqual(row["Tailwind-safe total"],
+                         f"{depth['tailwind_safe_total']}/{n_pairs * pt}")
+        self.assertEqual(row["Protect-safe total"],
+                         f"{depth['protect_safe_total']}/{n_pairs * pt}")
+
+
 class TestMegaEvolutionVisibility(unittest.TestCase):
     """"I'm not sure enemy pokemon or my pokemon are mega evolving in
     Counter Table in the streamlit app, it should match the CLI" -- every

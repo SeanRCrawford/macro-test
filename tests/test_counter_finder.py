@@ -4487,6 +4487,132 @@ class TestMultiBring4MaxWeakTypes(unittest.TestCase):
                         "fixture assumes the cap actually excludes something")
 
 
+class TestNetWeakTypeBreadth(unittest.TestCase):
+    """"I want an argument to be able to restrict generated teams to a
+    certain number of types with more than 1 net weakness (default 4)."
+    The net-weakness sibling of `TestWeakTypeBreadth`'s `weak_type_breadth`
+    -- counts types by NET weakness (weak minus resist/immune members,
+    `net_weakness_by_type`) instead of raw weak-member count."""
+
+    def test_matches_a_hand_count_of_per_type_net_weaknesses(self):
+        merged = world()["merged"]
+        core = ["Mega Charizard Y", "Mega Floette", "Whimsicott", "Corviknight"]
+        net = cf.net_weakness_by_type(core, merged)
+        want = sum(1 for v in net.values() if v >= 2)
+        self.assertEqual(cf.net_weak_type_breadth(core, merged), want)
+
+    def test_a_lower_threshold_can_only_count_as_many_or_more_types(self):
+        merged = world()["merged"]
+        core = ["Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Whimsicott", "Corviknight"]
+        self.assertGreaterEqual(
+            cf.net_weak_type_breadth(core, merged, threshold=1),
+            cf.net_weak_type_breadth(core, merged, threshold=2))
+
+    def test_core_passes_hard_filters_rejects_a_core_over_the_cap(self):
+        merged = world()["merged"]
+        core = ("Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Whimsicott", "Corviknight")
+        breadth = cf.net_weak_type_breadth(core, merged)
+        self.assertGreater(breadth, 0, "fixture assumes at least one type "
+                           "already has net weakness > 1")
+        self.assertFalse(cf._core_passes_hard_filters(
+            core, merged, {}, max_megas=3, max_net_weak_types=breadth - 1))
+        self.assertTrue(cf._core_passes_hard_filters(
+            core, merged, {}, max_megas=3, max_net_weak_types=breadth))
+
+    def test_none_disables_the_cap_entirely(self):
+        merged = world()["merged"]
+        core = ("Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Whimsicott", "Corviknight")
+        self.assertTrue(cf._core_passes_hard_filters(
+            core, merged, {}, max_megas=3, max_net_weak_types=None))
+
+    def test_not_monotonic_a_later_resist_can_pull_a_type_back_under(self):
+        """Unlike `weak_type_breadth`, adding a member CAN lower
+        `net_weak_type_breadth` (a resist pulls a type's net back down) --
+        the reason `max_net_weak_types` must never be applied as a
+        growth-time prune, only at final core size. Whimsicott/Corviknight
+        are both weak to Fire (net 2 with just the two of them); adding
+        Mega Charizard Y, itself Fire-RESISTANT, pulls Fire's net down to 1
+        -- fewer types now cross the threshold=2 bar than before."""
+        merged = world()["merged"]
+        core_a = ["Whimsicott", "Corviknight"]
+        core_b = core_a + ["Mega Charizard Y"]
+        net_a = cf.net_weakness_by_type(core_a, merged)["Fire"]
+        net_b = cf.net_weakness_by_type(core_b, merged)["Fire"]
+        self.assertGreater(net_a, net_b, "fixture assumes Mega Charizard Y "
+                           "is Fire-resistant enough to lower net Fire "
+                           "weakness when added")
+        self.assertGreater(cf.net_weak_type_breadth(core_a, merged, threshold=2),
+                           cf.net_weak_type_breadth(core_b, merged, threshold=2))
+
+    def test_multi_bring4_beam_final_capture_still_enforces_the_cap(self):
+        """The beam's growth-time filtering deliberately withholds
+        `max_net_weak_types` (not monotonic), but the final `found`-capture
+        step must still enforce it -- no returned row may exceed the cap."""
+        W = world()
+        merged, moves = W["merged"], W["moves"]
+        natures, typechart = W["natures"], W["typechart"]
+        pool = ["Mega Charizard Y", "Mega Floette", "Mega Metagross",
+               "Mega Tyranitar", "Whimsicott", "Corviknight"]
+        enemies = [["Sableye", "Ariados"], ["Basculegion", "Sinistcha"]]
+        coverage = cf.multi_bring4_coverage(
+            pool, enemies, merged, moves, natures, typechart,
+            good_threshold=0.3, min_enemies=1)
+        rows = cf.multi_bring4_beam(coverage, good_threshold=0.3,
+                                    beam_width=20, max_megas=4,
+                                    max_net_weak_types=1)
+        for r in rows:
+            self.assertLessEqual(
+                cf.net_weak_type_breadth(list(r["core"]), merged), 1, r["core"])
+
+
+class TestMultiBring4MaxNetWeakTypes(unittest.TestCase):
+    """`max_net_weak_types` threaded through `multi_bring4_exhaustive`/
+    `multi_bring4_beam`, mirroring `TestMultiBring4MaxWeakTypes`."""
+
+    def setUp(self):
+        self.W = world()
+        self.pool = ["Mega Charizard Y", "Mega Floette", "Mega Metagross",
+                    "Mega Tyranitar", "Whimsicott", "Corviknight"]
+        self.enemies = [["Sableye", "Ariados"], ["Basculegion", "Sinistcha"]]
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.pool, self.enemies, merged, moves, natures, typechart,
+            good_threshold=0.3, min_enemies=1)
+
+    def test_exhaustive_never_returns_a_core_over_the_cap(self):
+        merged = self.W["merged"]
+        rows = cf.multi_bring4_exhaustive(self.coverage, good_threshold=0.3,
+                                          max_megas=4, max_net_weak_types=1)
+        for r in rows:
+            self.assertLessEqual(cf.net_weak_type_breadth(list(r["core"]), merged),
+                                 1, r["core"])
+
+    def test_beam_never_returns_a_core_over_the_cap(self):
+        merged = self.W["merged"]
+        rows = cf.multi_bring4_beam(self.coverage, good_threshold=0.3,
+                                    beam_width=20, max_megas=4,
+                                    max_net_weak_types=1)
+        for r in rows:
+            self.assertLessEqual(cf.net_weak_type_breadth(list(r["core"]), merged),
+                                 1, r["core"])
+
+    def test_a_tighter_cap_actually_changes_the_result(self):
+        loose_cores = {tuple(sorted(r["core"]))
+                      for r in cf.multi_bring4_exhaustive(
+                          self.coverage, good_threshold=0.3, max_megas=4)}
+        tight_cores = {tuple(sorted(r["core"]))
+                      for r in cf.multi_bring4_exhaustive(
+                          self.coverage, good_threshold=0.3, max_megas=4,
+                          max_net_weak_types=0)}
+        self.assertTrue(tight_cores.issubset(loose_cores))
+        self.assertLess(len(tight_cores), len(loose_cores),
+                        "fixture assumes the cap actually excludes something")
+
+
 class TestMultiBring4SetsStayFixedAcrossEnemies(unittest.TestCase):
     """"For a team, the moves must stay the same, i.e., they can't be
     adjusted battle to battle." Calling `joint_pool_search` once per enemy
@@ -6898,6 +7024,100 @@ class TestContraryDefenseBoostInTheJointRace(unittest.TestCase):
         self.assertIsNotNone(turn2, "Milotic should survive one hit")
         self.assertEqual(turn2[0], turn1[0], "same target both turns")
         self.assertAlmostEqual(turn2[1].frac / turn1[1].frac, 1.5, places=2)
+
+
+class TestIntimidateInTheDamageGrid(unittest.TestCase):
+    """"You must also always account for intimidate (as well as defiant
+    boosts) in the counter_table.py battle logic - I don't see it doing so
+    now." The real race (`_joint_race`, reached by every `--bring4`/
+    `--multi-bring4`/`--joint`/`--deep` search via `_pair_vs_targets`) has
+    modeled this since `TestIntimidateInTheJointRace` -- but `_grid_hit`/
+    `_damage_grid` (the `--deep`/`want_grid` 2x2 raw-hit preview, a
+    separate "right now" snapshot, not a played-out race) did not, a real,
+    confirmed gap this class closes. Only the STATIC switch-in multiplier
+    applies here (no Draco-Meteor-family halving, no Contrary move-
+    triggered def boost) -- see `_grid_hit`'s own docstring for why."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_defiant_doubles_the_grid_cell_against_an_intimidate_holder(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        kingambit = cf._build("Kingambit", merged, natures)
+        self.assertEqual(kingambit.ability, "Defiant")
+        partner = cf._build("Milotic", merged, natures)
+        e1_no = cf._build("Milotic", merged, natures)
+        e1_yes = cf._build("Milotic", merged, natures)
+        e1_yes.ability = "Intimidate"
+        e2 = cf._build("Sinistcha", merged, natures)
+        sucker_punch = cf._lookup_move("Sucker Punch", moves)
+        no_boost = cf._grid_hit(kingambit, [sucker_punch], e1_no, partner, typechart)
+        with_boost_combatants = {"C": e1_yes, "P": e2, "E1": kingambit, "E2": partner}
+        dmg_mult = cf._intimidate_mult_by_role(with_boost_combatants)
+        boosted = cf._grid_hit(kingambit, [sucker_punch], e1_yes, partner, typechart,
+                               dmg_mult_by_role=dmg_mult, attacker_role="E1")
+        self.assertAlmostEqual(boosted.frac / no_boost.frac, 2.0, places=6)
+
+    def test_ordinary_ability_takes_exactly_two_thirds_in_the_grid(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)  # Rough Skin -- ordinary here
+        partner = cf._build("Milotic", merged, natures)
+        e1_no = cf._build("Milotic", merged, natures)
+        e1_yes = cf._build("Milotic", merged, natures)
+        e1_yes.ability = "Intimidate"
+        e2 = cf._build("Sinistcha", merged, natures)
+        eq = cf._lookup_move("Earthquake", moves)
+        no_boost = cf._grid_hit(garchomp, [eq], e1_no, None, typechart)
+        combatants = {"C": garchomp, "P": partner, "E1": e1_yes, "E2": e2}
+        dmg_mult = cf._intimidate_mult_by_role(combatants)
+        reduced = cf._grid_hit(garchomp, [eq], e1_yes, None, typechart,
+                               dmg_mult_by_role=dmg_mult, attacker_role="C")
+        self.assertAlmostEqual(reduced.frac / no_boost.frac, 2 / 3, places=6)
+
+    def test_damage_grid_end_to_end_via_pair_vs_targets(self):
+        """Full integration through the actual `--deep`/`want_grid` path a
+        real counter_table.py run takes, not just the unit-level helper."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        our_built = cf._build_forms(["Incineroar", "Garchomp"], merged, natures, moves)
+        targets = ["Kingambit", "Basculegion"]
+        enemy_built = cf._build_forms(targets, merged, natures, moves)
+        detail, _summary = cf._pair_vs_targets(
+            "Incineroar", "Garchomp", our_built, targets, enemy_built,
+            typechart, turns=2, merged=merged, want_grid=True)
+        grid = detail[("Kingambit", "Basculegion")]["grid"]
+        kingambit_hit = grid["theirs"][("E1", "P")]
+        self.assertEqual(kingambit_hit.move_name, "Kowtow Cleave")
+
+        our_built_no_intim = cf._build_forms(["Whimsicott", "Garchomp"], merged, natures, moves)
+        detail_no_intim, _s = cf._pair_vs_targets(
+            "Whimsicott", "Garchomp", our_built_no_intim, targets, enemy_built,
+            typechart, turns=2, merged=merged, want_grid=True)
+        grid_no_intim = detail_no_intim[("Kingambit", "Basculegion")]["grid"]
+        baseline_hit = grid_no_intim["theirs"][("E1", "P")]
+        self.assertEqual(baseline_hit.move_name, "Kowtow Cleave")
+        self.assertAlmostEqual(kingambit_hit.frac / baseline_hit.frac, 2.0, places=2)
+
+    def test_no_ability_interaction_on_the_board_leaves_the_grid_unchanged(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        c1 = cf._build("Garchomp", merged, natures)
+        c2 = cf._build("Milotic", merged, natures)
+        e1c = cf._build("Sinistcha", merged, natures)
+        e2c = cf._build("Corviknight", merged, natures)
+        m1 = cf._move_infos("Garchomp", merged, moves, ["Earthquake"])
+        m2 = cf._move_infos("Milotic", merged, moves, ["Scald"])
+        e1m = cf._move_infos("Sinistcha", merged, moves, ["Shadow Ball"])
+        e2m = cf._move_infos("Corviknight", merged, moves, ["Body Press"])
+        grid = cf._damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, None)
+        self.assertEqual(cf._intimidate_mult_by_role(
+            {"C": c1, "P": c2, "E1": e1c, "E2": e2c}), {})
+        # No assertion beyond "this doesn't crash and returns real Hits" --
+        # the point is a board with NO Intimidate/Defiant/Competitive on it
+        # must not be affected by this change at all.
+        self.assertIsNotNone(grid["ours"][("C", "E1")])
 
 
 class TestBring4FromDeepDive(unittest.TestCase):
