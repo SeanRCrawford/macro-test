@@ -152,6 +152,69 @@ class TestBattleSimulatorSetup(unittest.TestCase):
         self.assertEqual(set(mega_sb.options), {"Mega Gyarados", "Neither"})
 
 
+class TestTheirSideAcceptsAPokepaste(unittest.TestCase):
+    """"Let me use a pokepaste for the battle simulator as well" -- "Our
+    side" already offered "Paste a pokepaste" (`our_side_pool`); "Their
+    side" only offered "A saved team"/"Pick 6" (`their_side_pool`,
+    shared with the Battle Viewer tab) until now."""
+
+    SIX_MON_PASTE = (
+        "Kingambit @ Black Glasses\nAbility: Defiant\nEVs: 4 HP / 252 Atk / 252 Spe\n"
+        "Adamant Nature\n- Sucker Punch\n- Kowtow Cleave\n- Protect\n- Iron Head\n\n"
+        "Basculegion @ Choice Scarf\nAbility: Adaptability\nEVs: 4 HP / 252 Atk / 252 Spe\n"
+        "Jolly Nature\n- Last Respects\n- Aqua Jet\n- Wave Crash\n- Protect\n\n"
+        "Whimsicott @ Focus Sash\nAbility: Prankster\nEVs: 4 HP / 252 SpA / 252 Spe\n"
+        "Timid Nature\n- Tailwind\n- Moonblast\n- Encore\n- Protect\n\n"
+        "Sinistcha @ Kasib Berry\nAbility: Hospitality\nEVs: 252 HP / 4 Def / 252 SpD\n"
+        "Bold Nature\n- Matcha Gotcha\n- Rage Powder\n- Trick Room\n- Protect\n\n"
+        "Garchomp @ Life Orb\nAbility: Rough Skin\nEVs: 4 HP / 252 Atk / 252 Spe\n"
+        "Jolly Nature\n- Dragon Claw\n- Rock Slide\n- Earthquake\n- Protect\n\n"
+        "Incineroar @ Sitrus Berry\nAbility: Intimidate\nEVs: 252 HP / 4 Atk / 252 SpD\n"
+        "Careful Nature\n- Fake Out\n- Parting Shot\n- Flare Blitz\n- Throat Chop")
+
+    def test_their_side_offers_a_paste_option(self):
+        at = fresh_app()
+        tab = sim_tab(at)
+        src_radio = next(r for r in tab.radio if r.label == "Their side")
+        self.assertIn("Paste a pokepaste", src_radio.options)
+
+    def test_pasting_their_six_parses_and_can_start_a_battle(self):
+        at = fresh_app()
+        tab = sim_tab(at)
+        our_radio = next(r for r in tab.radio if r.label == "Our side")
+        at = our_radio.set_value("Any Pokemon").run()
+        tab = sim_tab(at)
+        lead_ms = next(m for m in tab.multiselect if m.label == "Our lead (2)")
+        at = lead_ms.set_value(["Garchomp", "Incineroar"]).run()
+        tab = sim_tab(at)
+        back_ms = next(m for m in tab.multiselect if m.label == "Our back (2)")
+        at = back_ms.set_value(["Gallade", "Hydreigon"]).run()
+        tab = sim_tab(at)
+        their_radio = next(r for r in tab.radio if r.label == "Their side")
+        at = their_radio.set_value("Paste a pokepaste").run()
+        tab = sim_tab(at)
+        ta = next(t for t in tab.text_area
+                 if t.key and t.key.endswith("_foe_paste"))
+        at = ta.set_value(self.SIX_MON_PASTE).run()
+        self.assertFalse(at.exception, list(at.exception))
+        tab = sim_tab(at)
+        self.assertTrue(any("Kingambit" in s.value for s in tab.success))
+        mode_radio = next(r for r in tab.radio if r.label == "Their bring")
+        at = mode_radio.set_value("I choose their bring").run()
+        tab = sim_tab(at)
+        their_lead = next(m for m in tab.multiselect if m.label == "Their lead (2)")
+        at = their_lead.set_value(["Kingambit", "Basculegion"]).run()
+        tab = sim_tab(at)
+        their_back = next(m for m in tab.multiselect if m.label == "Their back (2)")
+        at = their_back.set_value(["Whimsicott", "Garchomp"]).run()
+        tab = sim_tab(at)
+        start = next(b for b in tab.button if b.label == "Start Battle")
+        self.assertFalse(start.disabled)
+        at = start.click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertIsNotNone(at.session_state["sim_battle"])
+
+
 class TestBattleSimulatorTurnLoop(unittest.TestCase):
     """Once a battle exists, the human's own action picker and Submit
     button drive a real `Battle.run_turn` -- no second engine."""
