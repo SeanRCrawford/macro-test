@@ -780,6 +780,91 @@ class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):
         self.assertTrue(any("Archaludon" in s.value for s in at.success))
 
 
+class TestBring4EnemyPastePlainSpeciesList(unittest.TestCase):
+    """"I get the following enemy team as this format Glimmora / Rillaboom
+    / Persian-Alola / Pawmot / Salamence / Milotic. I want to paste this in
+    the bring4 counter table. Maybe give me a checkbox to set certain
+    enemies as megas. If an enemy pokemon isn't recognised, just ignore
+    it." -- a bare name list (no "@"/"Ability:"/move lines) is detected
+    separately from a real Showdown export and parsed by matching each
+    token against the roster directly, instead of being swallowed whole as
+    one garbled "species" by `custom_team_from_export`."""
+
+    PLAIN_LIST = "Glimmora / Rillaboom / Persian-Alola / Pawmot / Salamence / Milotic"
+
+    def _goto_paste(self, at):
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at
+
+    def test_a_plain_list_parses_the_recognised_names(self):
+        at = self._goto_paste(app())
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.PLAIN_LIST).run()
+        self.assertFalse(at.exception, list(at.exception))
+        success = next(s.value for s in at.success if "Parsed:" in s.value)
+        for name in ("Glimmora", "Rillaboom", "Pawmot", "Salamence", "Milotic"):
+            self.assertIn(name, success)
+        self.assertNotIn("Persian-Alola", success)
+
+    def test_an_unrecognised_entry_is_ignored_not_blocking(self):
+        """"If an enemy pokemon isn't recognised, just ignore it" --
+        Persian-Alola isn't in this roster at all; the rest of the paste
+        must still parse and the search must still be runnable."""
+        at = self._goto_paste(app())
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.PLAIN_LIST).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Persian-Alola" in c.value for c in at.caption))
+        self.assertTrue(any(s.value.startswith("Parsed:") for s in at.success))
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_a_real_pokepaste_is_not_misdetected_as_a_plain_list(self):
+        """Regression guard: a genuine Showdown export (has "@"/"Ability:"/
+        move lines) must still go through `custom_team_from_export`, not
+        get mis-sniffed as a bare name list."""
+        at = self._goto_paste(app())
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(
+            "Garchomp @ Rocky Helmet\nAbility: Rough Skin\n"
+            "EVs: 252 Atk / 4 SpD / 252 Spe\nJolly Nature\n"
+            "- Earthquake\n- Protect\n- Dragon Claw\n- Stealth Rock").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Rocky Helmet" not in c.value for c in at.caption)
+                        or not at.caption)
+        self.assertTrue(any(s.value == "Parsed: Garchomp" for s in at.success))
+
+    def test_a_mega_checkbox_is_offered_for_a_single_variant_species(self):
+        """Salamence/Glimmora each have exactly one Mega form in this
+        roster -- a single checkbox, not a selectbox."""
+        at = self._goto_paste(app())
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.PLAIN_LIST).run()
+        self.assertTrue(any(c.key == "ct_b4_vs_mega_Salamence" for c in at.checkbox))
+        self.assertTrue(any(c.key == "ct_b4_vs_mega_Glimmora" for c in at.checkbox))
+        # Pawmot/Rillaboom/Milotic have no Mega form -- no checkbox for them.
+        self.assertFalse(any(c.key == "ct_b4_vs_mega_Pawmot" for c in at.checkbox))
+
+    def test_checking_the_mega_box_substitutes_the_mega_form(self):
+        at = self._goto_paste(app())
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.PLAIN_LIST).run()
+        cb = [c for c in at.checkbox if c.key == "ct_b4_vs_mega_Salamence"][0]
+        at = cb.set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        # The enemy roster actually raced includes "Mega Salamence", not
+        # plain "Salamence".
+        detail_names = {n for r in pair_rows for pair in r["detail"]
+                        for n in pair}
+        self.assertIn("Mega Salamence", detail_names)
+        self.assertNotIn("Salamence", detail_names)
+
+
 class TestPerBring4DeepDiveRespectsPinnedMoveset(unittest.TestCase):
     """"The Counter Table in the streamlit app doesn't use the actual
     moveset of the loaded team in bring 4." Root cause: `_render_core_

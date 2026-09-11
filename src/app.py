@@ -3460,6 +3460,52 @@ def _all_teams_summary_df(team_names, target_lists, our6, dive):
     return pd.DataFrame(rows)
 
 
+def _looks_like_plain_species_list(text):
+    """A bare "Name / Name / Name" (or comma/newline-separated) list has
+    none of a real Showdown export's own markers -- no "@" (item), no
+    "Ability:"/"EVs:" lines, no "- movename" lines. The dash-space check is
+    deliberately "- " (dash THEN space) so a hyphenated species name like
+    "Persian-Alola" (no space after its own hyphen) never false-positives
+    as a move line."""
+    return not any(marker in text for marker in ("@", "Ability:", "EVs:", "- "))
+
+
+def _parse_plain_species_list(text, merged):
+    """"Glimmora / Rillaboom / Persian-Alola / Pawmot / Salamence / Milotic"
+    -> (recognized names in this codebase's own roster, unrecognised
+    tokens) -- "if an enemy pokemon isn't recognised, just ignore it" -- a
+    misspelled or unsupported name never blocks the rest of the paste, it's
+    just dropped (and listed, so it's not silently mysterious). Case-
+    insensitive exact match against `merged`'s own keys; "/", ",", and
+    newlines all work as separators."""
+    import re as _re
+    tokens = [t.strip() for t in _re.split(r"[/,\n]+", text) if t.strip()]
+    lookup = {n.lower(): n for n in merged}
+    recognized, unknown = [], []
+    for t in tokens:
+        real = lookup.get(t.lower())
+        (recognized if real else unknown).append(real or t)
+    return recognized, unknown
+
+
+def _mega_variants_for(name, merged):
+    """Every "Mega {name}"/"Mega {name} X"/"...Y"/"...Z" roster name that
+    actually exists -- "give me a checkbox to set certain enemies as
+    megas". Most species have exactly one (or zero) variant; a couple
+    (Charizard, Raichu) have two (X/Y) -- the caller renders a single
+    checkbox for one variant, a small selectbox to disambiguate for more
+    than one."""
+    out = []
+    plain = f"Mega {name}"
+    if plain in merged:
+        out.append(plain)
+    for suffix in ("X", "Y", "Z"):
+        v = f"Mega {name} {suffix}"
+        if v in merged:
+            out.append(v)
+    return out
+
+
 def _bring4_mega_caption(bring4_row):
     """"It should also show the chosen mega vs a given six" -- the BASIC
     (non-deep-dive) per-enemy bring-4 line (`_render_multi_bring4_core`,
@@ -3808,14 +3854,47 @@ with tab_counter:
             st.button("Apply pasted team", key="ct_b4_vs_paste_apply",
                       help="For mobile, where Ctrl+Enter isn't available: "
                            "tap this after pasting to parse the team above.")
-            vs_roster, vs_sets = species_data.custom_team_from_export(
-                vs_paste, merged) if vs_paste.strip() else ([], {})
-            unknown_vs = [n for n in vs_roster if n not in merged]
-            if unknown_vs:
-                st.error(f"Unrecognised species: {', '.join(unknown_vs)}")
-                vs_roster = []
-            elif vs_roster:
-                st.success(f"Parsed: {', '.join(vs_roster)}")
+            vs_sets = {}
+            if vs_paste.strip() and _looks_like_plain_species_list(vs_paste):
+                # "Glimmora / Rillaboom / Persian-Alola / Pawmot / Salamence /
+                # Milotic" -- a bare name list, not a real Showdown export
+                # (no "@"/"Ability:"/"EVs:"/move lines) -- `custom_team_
+                # from_export` would otherwise swallow the whole line as one
+                # garbled "species". "If an enemy pokemon isn't recognised,
+                # just ignore it" -- unknown/misspelled tokens are dropped,
+                # never block the rest of the paste.
+                recognized, unknown_vs = _parse_plain_species_list(vs_paste, merged)
+                if unknown_vs:
+                    st.caption(f"Ignored (not recognised): {', '.join(unknown_vs)}")
+                if recognized:
+                    st.success(f"Parsed: {', '.join(recognized)}")
+                    st.caption("Mark any that should be their Mega form:")
+                    vs_roster = []
+                    for name in recognized:
+                        variants = _mega_variants_for(name, merged)
+                        if len(variants) == 1:
+                            is_mega = st.checkbox(
+                                f"{name} → {variants[0]}",
+                                key=f"ct_b4_vs_mega_{name}")
+                            vs_roster.append(variants[0] if is_mega else name)
+                        elif len(variants) > 1:
+                            choice = st.selectbox(
+                                f"{name} form", ["(base)"] + variants,
+                                key=f"ct_b4_vs_form_{name}")
+                            vs_roster.append(name if choice == "(base)" else choice)
+                        else:
+                            vs_roster.append(name)
+                else:
+                    vs_roster = []
+            else:
+                vs_roster, vs_sets = species_data.custom_team_from_export(
+                    vs_paste, merged) if vs_paste.strip() else ([], {})
+                unknown_vs = [n for n in vs_roster if n not in merged]
+                if unknown_vs:
+                    st.error(f"Unrecognised species: {', '.join(unknown_vs)}")
+                    vs_roster = []
+                elif vs_roster:
+                    st.success(f"Parsed: {', '.join(vs_roster)}")
         else:
             vs_roster = list(teams[ct_vs_name])
             vs_sets = team_meta.get(ct_vs_name, {}).get("sets") or {}
