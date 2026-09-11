@@ -95,13 +95,15 @@ def _pick_greedy_action(battle: Battle, c: Combatant, side_key: str, foes: list,
         # the same scale as the status-move values above. Using raw HP damage here made
         # every attack outrank every status move regardless of board state.
         def _pct(target, nhit):
-            # Queenly Majesty / Dazzling / Armor Tail on the TARGET's own side
-            # block this outright if it's priority -- checked against whichever
-            # side `target` actually belongs to, since a spread move can hit
-            # both an ally and a foe in the same turn ("the enemy trying to
-            # click priority moves anyway" against one of these).
+            # Queenly Majesty / Dazzling / Armor Tail on the TARGET's own side,
+            # or Psychic Terrain against a grounded target, block this
+            # outright if it's priority -- checked against whichever side
+            # `target` actually belongs to, since a spread move can hit both
+            # an ally and a foe in the same turn ("the enemy trying to click
+            # priority moves anyway" against one of these).
             side_roster = allies if (allies and target in allies) else live_foes
-            if priority_blocked_by_side(c.ability, move, side_roster):
+            if priority_blocked_by_side(c.ability, move, side_roster,
+                                        terrain=battle.field.terrain, target=target):
                 return 0.0, 0.0
             dmg = quick_damage_estimate(c, target, move, battle.typechart, battle.field,
                                          num_hit=nhit, battle=battle)

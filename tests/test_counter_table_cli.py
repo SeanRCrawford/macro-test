@@ -205,6 +205,11 @@ class TestModeRestrictionsOnTheNewFlags(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("--multi-bring4", msg)
 
+    def test_max_net_weak_types_without_multi_bring4_is_rejected(self):
+        msg, _out = run_main(["--vs", "Kingambit", "--max-net-weak-types", "3"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--multi-bring4", msg)
+
     def test_teamsheet_json_without_bring4_or_multi_bring4_is_rejected(self):
         msg, _out = run_main(["--vs", "Kingambit", "--teamsheet-json", "-"])
         self.assertIsNotNone(msg)
@@ -688,6 +693,10 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
     def test_deep_dive_core_is_parsed(self):
         self.assertIn("--deep-dive-core", self.help_text)
 
+    def test_deep_dive_worst_case_targeting_is_parsed(self):
+        self.assertIn("--deep-dive-worst-case-targeting", self.help_text)
+        self.assertIn("--no-deep-dive-worst-case-targeting", self.help_text)
+
     def test_xlsx_is_parsed(self):
         self.assertIn("--xlsx", self.help_text)
 
@@ -702,6 +711,9 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
 
     def test_max_weak_types_is_parsed(self):
         self.assertIn("--max-weak-types", self.help_text)
+
+    def test_max_net_weak_types_is_parsed(self):
+        self.assertIn("--max-net-weak-types", self.help_text)
 
     def test_teamsheet_json_is_parsed(self):
         self.assertIn("--teamsheet-json", self.help_text)
@@ -1389,6 +1401,72 @@ class TestMaxWeakTypesEndToEnd(unittest.TestCase):
             header = [ws.cell(row=1, column=c).value
                      for c in range(1, ws.max_column + 1)]
             self.assertIn("Types with 2+ weak members", header)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestMaxNetWeakTypesEndToEnd(unittest.TestCase):
+    """"I want to see types with net weaknesses in the xlsx export, and I
+    want an argument to be able to restrict generated teams to a certain
+    number of types with more than 1 net weakness (default 4)." The
+    net-weakness sibling of `TestMaxWeakTypesEndToEnd`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "16", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--good-threshold", "30", "--max-weak", "6", "--top", "3"]
+
+    def test_types_with_2plus_net_weakness_line_is_printed(self):
+        msg, out = run_main(self.argv)
+        self.assertIsNone(msg, out)
+        self.assertIn("types with 2+ net weakness:", out)
+        self.assertIn("net weaknesses by type:", out)
+
+    def test_the_cap_is_on_by_default_at_4(self):
+        msg, out = run_main(self.argv)
+        self.assertIsNone(msg, out)
+        # Default cap (4) should give the same result as passing it explicitly.
+        _msg2, out_explicit = run_main(self.argv + ["--max-net-weak-types", "4"])
+        self.assertEqual(out, out_explicit)
+
+    def test_a_tight_cap_actually_changes_the_printed_result(self):
+        _msg1, out_loose = run_main(self.argv + ["--max-net-weak-types", "18"])
+        _msg2, out_tight = run_main(self.argv + ["--max-net-weak-types", "0"])
+        self.assertNotEqual(out_loose, out_tight)
+
+    def test_csv_export_has_the_net_weakness_columns(self):
+        import csv
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as f:
+            path = f.name
+        try:
+            msg, _out = run_main(self.argv + ["--csv", path])
+            self.assertIsNone(msg)
+            with open(path, newline="", encoding="utf-8") as fh:
+                header = next(csv.reader(fh))
+            self.assertIn("types with 2+ net weakness", header)
+            self.assertIn("net weaknesses by type", header)
+        finally:
+            os.unlink(path)
+
+    def test_xlsx_export_has_the_net_weakness_columns(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.argv + ["--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb["Cores"]
+            header = [ws.cell(row=1, column=c).value
+                     for c in range(1, ws.max_column + 1)]
+            self.assertIn("Types with 2+ net weakness", header)
+            self.assertIn("Net weaknesses by type", header)
         finally:
             if os.path.exists(path):
                 os.unlink(path)
@@ -2428,7 +2506,12 @@ class TestWorstCaseTargetingFlag(unittest.TestCase):
         spy.assert_called_once()
         self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
 
-    def test_bring4_deep_dive_core_receives_it(self):
+    def test_bring4_deep_dive_core_is_unaffected_by_the_plain_flag(self):
+        """`--deep-dive-core`'s own `core_deep_dive` call reads the
+        SEPARATE `--deep-dive-worst-case-targeting` (see
+        `TestDeepDiveWorstCaseTargetingFlag`), not `--worst-case-targeting`
+        -- passing the plain flag alone must not change what `core_deep_
+        dive` receives (it stays at the deep-dive flag's own default, True)."""
         from unittest.mock import patch
         argv = ["--bring4", "--our", "Ninetales-Alola,Mega Scizor,Sylveon,"
                "Kingambit", "--vs", "Sableye,Ariados", "--turns", "2",
@@ -2439,6 +2522,61 @@ class TestWorstCaseTargetingFlag(unittest.TestCase):
         spy.assert_called_once()
         self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
 
+
+class TestDeepDiveWorstCaseTargetingFlag(unittest.TestCase):
+    """"add a flag for the deep dive on top n to run with worst case
+    targeting, default on" -- `--deep-dive-worst-case-targeting` is a
+    SEPARATE knob from `--worst-case-targeting` (which stays off by
+    default, scoped to the potentially-large Stage 1 pool search), applied
+    only to the deep-dive-on-top-N follow-up (`--deep-dive-core`/
+    `--auto-deep-dive`/the interactive prompt, plus the `--teamsheet-json`
+    fallback dive) -- cheap regardless since it only ever runs on a
+    handful of already-narrowed candidates."""
+
+    def test_bring4_deep_dive_core_defaults_to_true(self):
+        from unittest.mock import patch
+        argv = ["--bring4", "--our", "Ninetales-Alola,Mega Scizor,Sylveon,"
+               "Kingambit", "--vs", "Sableye,Ariados", "--turns", "2",
+               "--deep-dive-core", "1"]
+        with patch.object(ct, "core_deep_dive", wraps=ct.core_deep_dive) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
+
+    def test_no_deep_dive_worst_case_targeting_turns_it_off(self):
+        from unittest.mock import patch
+        argv = ["--bring4", "--our", "Ninetales-Alola,Mega Scizor,Sylveon,"
+               "Kingambit", "--vs", "Sableye,Ariados", "--turns", "2",
+               "--deep-dive-core", "1", "--no-deep-dive-worst-case-targeting"]
+        with patch.object(ct, "core_deep_dive", wraps=ct.core_deep_dive) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertFalse(spy.call_args.kwargs.get("worst_case_targeting"))
+
+    def test_multi_bring4_deep_dive_core_defaults_to_true(self):
+        from unittest.mock import patch
+        argv = ["--multi-bring4", "--pool-size", "12", "--vs-team",
+               "Sableye,Ariados,Basculegion,Sinistcha", "--good-threshold", "30",
+               "--min-enemies", "1", "--deep-dive-core", "1"]
+        with patch.object(ct, "core_deep_dive", wraps=ct.core_deep_dive) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertTrue(spy.call_args.kwargs.get("worst_case_targeting"))
+
+    def test_multi_bring4_no_deep_dive_worst_case_targeting_turns_it_off(self):
+        from unittest.mock import patch
+        argv = ["--multi-bring4", "--pool-size", "12", "--vs-team",
+               "Sableye,Ariados,Basculegion,Sinistcha", "--good-threshold", "30",
+               "--min-enemies", "1", "--deep-dive-core", "1",
+               "--no-deep-dive-worst-case-targeting"]
+        with patch.object(ct, "core_deep_dive", wraps=ct.core_deep_dive) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertFalse(spy.call_args.kwargs.get("worst_case_targeting"))
 
 class TestTwoTwoTwoFlag(unittest.TestCase):
     """"2-2-2 teambuilding" -- `--two-two-two` finds pair cores

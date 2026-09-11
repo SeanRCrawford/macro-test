@@ -7,6 +7,7 @@ references to Combatant objects, which deepcopy replaces) that having one
 correct implementation beats three.
 """
 import os
+import pickle
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -16,10 +17,82 @@ from combatants import make_team  # noqa: E402
 from battle import Battle  # noqa: E402
 from solver import build_moveset, build_wide_movesets, heuristic_eval  # noqa: E402
 
+# "Find a way to make the golden baseline much faster - it takes far too
+# long, especially for small changes." `build_merged_dataset` (parses
+# mbsmogon.xlsx/roster.csv) is the real cost here (~0.3s, MEASURED) on every
+# fresh process, even though a "small change" almost never touches those two
+# files -- only the SOURCE CODE being verified. `_fingerprint` is a cheap
+# (`os.stat`, no parsing) snapshot of just those two files; unchanged since
+# the last call, the parsed result is reloaded from a pickle instead of
+# re-parsed from scratch.
+#
+# `load_teams` is DELIBERATELY excluded from this cache -- it's already
+# fast (~4ms, MEASURED, negligible next to the xlsx/csv parse), and unlike
+# mbsmogon.xlsx/roster.csv its own data/teams/data/my_teams *.txt folders
+# are legitimately mutable DURING a run (the Streamlit app's own "Save to
+# My Teams" button writes there; so do this repo's own tests exercising
+# that flow) -- caching it risks a call seeing a stale team roster if a
+# file appears/disappears between one `load_world()` call and another's
+# cache write, for a few ms of savings not worth that risk. Every call
+# re-derives `teams`/`meta` fresh, keyed off the CACHED (or freshly built)
+# `merged` dict either way.
+#
+# NOTE: `build_merged_dataset`/`load_teams` stay imported unconditionally
+# above (not deferred into the cache-miss branch) because `combatants.py`
+# (also imported unconditionally, needed for `make_team`) already imports
+# `species_data` itself -- pandas/poke_env are paid for either way, so there
+# is nothing left to save by delaying this particular import.
+_CACHE_PATH = os.path.join(os.path.dirname(__file__), ".world_cache.pkl")
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+
+def _fingerprint():
+    """[(path, mtime_ns, size), ...] for mbsmogon.xlsx/roster.csv -- the
+    only two files `_dataset_only()` reads. Pure `os.stat`, no parsing, no
+    pandas. A missing path's `st_size`/`mtime_ns` come back as `None`,
+    distinct from any real stat result."""
+    out = []
+    for name in ("mbsmogon.xlsx", "roster.csv"):
+        p = os.path.join(_DATA_DIR, name)
+        try:
+            st = os.stat(p)
+            out.append((p, st.st_mtime_ns, st.st_size))
+        except FileNotFoundError:
+            out.append((p, None, None))
+    return out
+
+
+def _dataset_only():
+    """`build_merged_dataset()`'s own return, cached to disk -- see the
+    module-level comment above `_CACHE_PATH` for why `load_teams` is
+    deliberately NOT part of this cache. Every value in `merged`/`moves`/
+    `natures`/`typechart` is a plain dict/list/str/float already (confirmed
+    via direct inspection), so nothing here needs pandas to unpickle."""
+    fp = _fingerprint()
+    if os.path.exists(_CACHE_PATH):
+        try:
+            with open(_CACHE_PATH, "rb") as fh:
+                cached_fp, cached = pickle.load(fh)
+            if cached_fp == fp:
+                return cached
+        except Exception:
+            pass  # corrupt/stale/foreign-format cache -- rebuild for real
+    result = build_merged_dataset()
+    try:
+        with open(_CACHE_PATH, "wb") as fh:
+            pickle.dump((fp, result), fh)
+    except OSError:
+        pass  # a write failure (e.g. read-only checkout) just costs the
+              # next call its cache hit -- never worth failing THIS call over
+    return result
+
 
 def load_world():
-    """Dataset plus the team library. Slow (parses the sheets), so call once."""
-    merged, _usage, moves, natures, typechart = build_merged_dataset()
+    """Dataset plus the team library. `build_merged_dataset` is slow
+    (parses the sheets) on a cache miss (see `_dataset_only`); `load_teams`
+    always runs fresh, so a file dropped into/removed from data/teams or
+    data/my_teams between calls is never missed."""
+    merged, _usage, moves, natures, typechart = _dataset_only()
     teams, meta = load_teams(with_meta=True, merged=merged)
     return dict(merged=merged, moves=moves, natures=natures,
                 typechart=typechart, teams=teams, meta=meta)

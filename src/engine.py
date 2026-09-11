@@ -23,16 +23,18 @@ from damage import (Combatant, MoveInfo, is_spread_move, damage_roll, apply_inti
 # Display names, so the log reads like the game rather than like the code.
 WEATHER_NAMES = {"rain": "a rainstorm", "sun": "harsh sunlight",
                  "sand": "a sandstorm", "snow": "snow"}
-TERRAIN_NAMES = {"grassy": "Grassy Terrain"}
+TERRAIN_NAMES = {"grassy": "Grassy Terrain", "psychic": "Psychic Terrain"}
 
 WEATHER_SETTERS = {
     "Drizzle": "rain", "Drought": "sun", "Sand Stream": "sand", "Snow Warning": "snow",
 }
-# Regulation M-C: Rillaboom's Grassy Surge. Same shape as WEATHER_SETTERS,
-# a separate table (and a separate FieldState slot) because terrain and
-# weather are NOT exclusive -- both can be active at once in the real games.
+# Regulation M-C: Rillaboom's Grassy Surge, Indeedee's Psychic Surge. Same
+# shape as WEATHER_SETTERS, a separate table (and a separate FieldState
+# slot) because terrain and weather are NOT exclusive -- both can be active
+# at once in the real games.
 TERRAIN_SETTERS = {
     "Grassy Surge": "grassy",
+    "Psychic Surge": "psychic",
 }
 WEATHER_SPEED_BOOST = {
     # ability -> (weather required, multiplier)

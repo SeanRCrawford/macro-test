@@ -247,8 +247,9 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
             # FINISHES it, which is a different kind of value from chip and is
             # exactly what raw damage cannot express. Costs at most one extra
             # action per move, and only where a KO is actually on.
-            blocked = priority_blocked_by_side(attacker.ability, move, live_foes)
-            scored = [(0.0 if blocked else
+            scored = [(0.0 if priority_blocked_by_side(
+                              attacker.ability, move, live_foes,
+                              terrain=field.terrain, target=f) else
                       quick_damage_estimate(attacker, f, move, typechart, field), f)
                      for f in live_foes]
             best_target = max(scored, key=lambda pair: pair[0])[1]
@@ -322,12 +323,14 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
             own_side = battle.side_of(c)
             total_dealt = 0.0
             for t in a.targets:
-                # Queenly Majesty / Dazzling / Armor Tail on the target's side
-                # block this outright if it's priority -- the AI must see that
-                # BEFORE valuing the move, not just have `battle.py`'s real
+                # Queenly Majesty / Dazzling / Armor Tail on the target's side,
+                # or Psychic Terrain against a grounded target, block this
+                # outright if it's priority -- the AI must see that BEFORE
+                # valuing the move, not just have `battle.py`'s real
                 # resolution zero it out after the fact ("the enemy trying to
                 # click priority moves anyway" against one of these).
-                if priority_blocked_by_side(c.ability, a.move, battle.side_of(t).active):
+                if priority_blocked_by_side(c.ability, a.move, battle.side_of(t).active,
+                                            terrain=decision_field.terrain, target=t):
                     dmg = 0.0
                 else:
                     dmg = quick_damage_estimate(mega_view(battle, c), t, a.move,

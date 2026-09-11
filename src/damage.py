@@ -190,6 +190,22 @@ def is_spread_move(move_target: str) -> bool:
     return move_target in ("allAdjacentFoes", "allAdjacent", "all", "foeSide")
 
 
+def effective_move_target(move: "MoveInfo", attacker: "Combatant",
+                          terrain: str | None) -> str:
+    """The target string to actually use for THIS use of `move` -- almost
+    always just `move.target`, except Expanding Force: normally a single-
+    target Psychic move, it hits every adjacent foe instead when its user is
+    grounded while Psychic Terrain is up. `move` is an immutable, per-name
+    CACHED MoveInfo (`_MOVE_INFO_CACHE`, keyed by the raw dict's `id()`) shared
+    by every battle using that move, so this can never mutate `move.target`
+    itself -- every targeting decision (spread-vs-single, hit count, Wide
+    Guard, ...) must call this instead of reading `move.target` directly.
+    """
+    if move.name == "Expanding Force" and terrain == "psychic" and is_grounded(attacker):
+        return "allAdjacentFoes"
+    return move.target
+
+
 def hits_ally(move_target: str) -> bool:
     """True for moves that hit EVERY adjacent Pokemon including your partner.
 
@@ -461,7 +477,13 @@ def _offensive_ability_mult(attacker: "Combatant", move: "MoveInfo", type_eff: f
         mult *= 1.5
     if ab == "Tinted Lens" and type_eff < 1.0:
         mult *= 2.0
-    if ab in ("Iron Fist",) and (move.flags or {}).get("punch"):
+    # Real-game Iron Fist only boosts moves carrying the "punch" flag, and
+    # Double Shock (Pawmot's own signature move) does NOT actually carry
+    # that flag despite the fist-themed name -- a real, if disappointing,
+    # gap in the official games. Regulation M-C house rule (explicit user
+    # ruling): Double Shock IS boosted here anyway, on top of the real
+    # "punch"-flagged set (Ice Punch and friends).
+    if ab == "Iron Fist" and ((move.flags or {}).get("punch") or move.name == "Double Shock"):
         mult *= 1.2
     if ab == "Strong Jaw" and (move.flags or {}).get("bite"):
         mult *= 1.5
@@ -670,6 +692,12 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
         max_hp = attacker.max_hp()
         if max_hp:
             power = max(1, int(power * attacker.current_hp / max_hp))
+    # Expanding Force: 80 -> 120 power when its user is grounded on Psychic
+    # Terrain -- a flat override, not a stacking modifier (the real move
+    # simply HAS 120 power under those conditions), so it's resolved here
+    # alongside the other conditional-power moves, before `base` uses it.
+    if move.name == "Expanding Force" and terrain == "psychic" and is_grounded(attacker):
+        power = 120
 
     if power == 0 or move.category == "Status":
         return 0, 0, 0, 1.0
@@ -678,8 +706,10 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
 
     modifier = 1.0
 
-    # Spread move penalty (doubles: 0.75x if hitting 2 targets)
-    if is_spread_move(move.target) and num_targets_hit > 1:
+    # Spread move penalty (doubles: 0.75x if hitting 2 targets) -- goes
+    # through `effective_move_target`, not raw `move.target`, since
+    # Expanding Force's targeting itself is terrain-conditional (see there).
+    if is_spread_move(effective_move_target(move, attacker, terrain)) and num_targets_hit > 1:
         modifier *= 0.75
 
     # Weather
@@ -703,6 +733,17 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
             modifier *= 1.3
         if move.name in EARTHQUAKE_FAMILY and is_grounded(defender):
             modifier *= 0.5
+
+    # Psychic Terrain (Indeedee's Psychic Surge): grounded Psychic moves get
+    # +30% power -- same rate as every other terrain's own-type boost
+    # (Grassy/Electric/Psychic all give +30%; Misty is the odd one out,
+    # halving Dragon damage instead of boosting Fairy). (The other half of
+    # Psychic Terrain -- blocking priority moves against grounded targets --
+    # has no damage-formula effect and is enforced upstream of this
+    # function, at move-legality time: see `battle.Battle._blocked_by_guard`
+    # and `counter_finder._choose_action`'s own inline terrain check.)
+    if terrain == "psychic" and move.move_type == "Psychic" and is_grounded(attacker):
+        modifier *= 1.3
 
     # Crit (gen6+: flat 1.5x; stage resets handled by caller via stat selection)
     if is_crit:

@@ -76,6 +76,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertTrue(any(s.key == "ct_cov_pool" for s in at.slider))
         self.assertTrue(any(m.key == "ct_cov_teams" for m in at.multiselect))
         self.assertTrue(any(m.key == "ct_cov_include" for m in at.multiselect))
+        self.assertTrue(any(m.key == "ct_cov_suggested" for m in at.multiselect))
         self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
         self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
         self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
@@ -106,6 +107,50 @@ class TestCounterTableTabExists(unittest.TestCase):
         pair_rows = at.session_state["ct_cov_pair_rows"]
         pool_names = {n for r in pair_rows for n in r["pair"]}
         self.assertIn(forced_name, pool_names)
+
+    def test_always_include_forces_membership_in_every_returned_group(self):
+        """The strengthened guarantee: not just "reached the pool" (the
+        test above), but present in EVERY returned group for the
+        requested size -- a real UI-level end-to-end check of the same
+        thing `test_must_include_appears_in_every_returned_group_not_
+        just_the_top_one` proves at the counter_finder.py level."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        forced_name = "Ariados"
+        [m for m in at.multiselect if m.key == "ct_cov_include"][0].set_value(
+            [forced_name]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"])
+        for row in results[3]["rows"]:
+            self.assertIn(forced_name, row["group"])
+
+    def test_suggested_pokemon_controls_render_and_apply_quorum(self):
+        """"Give a 'suggested' list as well, of which at least 3 (or n,
+        selected) must appear" -- the new multiselect + quorum slider
+        render, wire through, and every returned group meets the quorum."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        suggested_ms = [m for m in at.multiselect if m.key == "ct_cov_suggested"][0]
+        suggested_names = suggested_ms.options[:4]
+        suggested_ms.set_value(suggested_names).run()
+        self.assertFalse(at.exception, list(at.exception))
+        quorum_sliders = [s for s in at.slider if s.key == "ct_cov_suggested_min"]
+        self.assertTrue(quorum_sliders)
+        quorum_sliders[0].set_value(2).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[4]["rows"]:
+            self.assertGreaterEqual(
+                sum(1 for nm in row["group"] if nm in suggested_names), 2)
 
     def test_coverage_groups_search_runs_and_shows_results(self):
         """A real (small) run through the actual widget tree -- confirms the
@@ -172,6 +217,211 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         cb = [c for c in at.checkbox if c.key == "ct_allow_scarf"][0]
         self.assertFalse(cb.value)
+
+
+class TestJointPairSearchVsAllTeams(unittest.TestCase):
+    """"let me run the joint pair search with a given partner vs all enemy
+    teams" -- a checkbox next to the single-team picker that races every
+    saved team's own internal pairs at once (never a cross-team pair)."""
+
+    def _goto(self, at):
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Joint pair search").run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at
+
+    def test_the_checkbox_is_offered_and_disables_the_single_roster_picker(self):
+        at = self._goto(app())
+        self.assertTrue(any(c.key == "ct_jp_vs_all" for c in at.checkbox))
+        sb = [s for s in at.selectbox if s.key == "ct_jp_vs"][0]
+        self.assertFalse(sb.disabled)
+        at = [c for c in at.checkbox if c.key == "ct_jp_vs_all"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        sb = [s for s in at.selectbox if s.key == "ct_jp_vs"][0]
+        self.assertTrue(sb.disabled)
+
+    def test_searching_vs_all_teams_runs_without_error(self):
+        at = self._goto(app())
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(12).run()
+        at = [c for c in at.checkbox if c.key == "ct_jp_vs_all"][0].set_value(True).run()
+        at = [b for b in at.button if b.key == "ct_jp_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(d.value is not None for d in at.dataframe))
+
+
+class TestForceIncludeAcrossViews(unittest.TestCase):
+    """"let me force include pokemon in each view" -- the SAME "Always
+    include these Pokemon" pattern Coverage groups already had (`ct_cov_
+    include`), extended to every other pool-based search in this tab.
+    Unlike Coverage groups' own `must_include=` (a hard requirement on
+    every returned GROUP), these just union into the raw search pool --
+    `_run_multi_bring4_search`'s own docstring is explicit that a forced
+    name still has to clear the same good-pair bar as everything else."""
+
+    def test_bring4_search_pool_offers_and_honours_always_include(self):
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        at = sb.set_value("\U0001f50d Search a pool for the best team").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(m.key == "ct_b4_include" for m in at.multiselect))
+        vs_sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        vs_sb.set_value("Rain").run()
+        # A real, low-Score species that a small top-Score pool would
+        # otherwise never include.
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_b4_include"][0].set_value(
+            [forced_name]).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_multi_bring4_offers_and_honours_always_include(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Multi-bring4 (several enemy rosters)").run()
+        self.assertTrue(any(m.key == "ct_mb4_include" for m in at.multiselect))
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_mb4_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_mb4_include"][0].set_value(
+            [forced_name]).run()
+        at = [m for m in at.multiselect if m.key == "ct_mb4_vs"][0].set_value(
+            ["Rain"]).run()
+        at = [b for b in at.button if b.key == "ct_mb4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_joint_pair_search_offers_and_honours_always_include(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Joint pair search").run()
+        self.assertTrue(any(m.key == "ct_jp_include" for m in at.multiselect))
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_jp_include"][0].set_value(
+            [forced_name]).run()
+        at = [b for b in at.button if b.key == "ct_jp_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+    def test_two_two_two_offers_and_honours_always_include(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "2-2-2 teambuilding").run()
+        self.assertTrue(any(m.key == "ct_222_include" for m in at.multiselect))
+        forced_name = "Ariados"
+        at = [s for s in at.slider if s.key == "ct_222_pool"][0].set_value(10).run()
+        at = [m for m in at.multiselect if m.key == "ct_222_include"][0].set_value(
+            [forced_name]).run()
+        at = [b for b in at.button if b.key == "ct_222_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+
+
+class TestJointPairSearchCustomEnemyPairs(unittest.TestCase):
+    """"in the joint pair search, let me enter a list of enemy pairs and
+    try to find a pair or a team with the best performance against those
+    pairs" -- a new sub-section under "Joint pair search" mode: build up a
+    list of hand-picked (Enemy A, Enemy B) matchups (Add/Remove rows, no
+    typing on mobile), then either "Search best pair" (both slots free-
+    searched, `joint_pool_search`'s new `enemy_pairs` param -- races
+    EXACTLY the given pairs, not every C(n,2) of their union) or "Search
+    best team" (reuses the existing Multi-bring4 machinery, each pair fed
+    in as its own 2-member "roster")."""
+
+    def _goto(self, at):
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Joint pair search").run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at
+
+    def _add_pair(self, at, a, b):
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_a"][0].set_value(a).run()
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_b"][0].set_value(b).run()
+        at = [btn for btn in at.button if btn.key == "ct_jp_pairs_add"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at
+
+    def test_the_add_pair_controls_are_offered(self):
+        at = self._goto(app())
+        self.assertTrue(any(s.key == "ct_jp_pairs_a" for s in at.selectbox))
+        self.assertTrue(any(s.key == "ct_jp_pairs_b" for s in at.selectbox))
+        self.assertTrue(any(b.key == "ct_jp_pairs_add" for b in at.button))
+
+    def test_adding_a_pair_shows_it_in_the_list(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        self.assertEqual(at.session_state["ct_jp_pairs_list"],
+                         [("Basculegion", "Kingambit")])
+        self.assertTrue(any("Basculegion + Kingambit" in w.value
+                            for w in at.markdown))
+
+    def test_adding_the_same_pokemon_twice_is_rejected(self):
+        at = self._goto(app())
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_a"][0].set_value(
+            "Kingambit").run()
+        at = [s for s in at.selectbox if s.key == "ct_jp_pairs_b"][0].set_value(
+            "Kingambit").run()
+        at = [btn for btn in at.button if btn.key == "ct_jp_pairs_add"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        try:
+            stored = at.session_state["ct_jp_pairs_list"]
+        except KeyError:
+            stored = []
+        self.assertEqual(stored, [])
+        self.assertTrue(any(w.value for w in at.warning))
+
+    def test_adding_a_duplicate_pair_is_rejected(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Basculegion", "Kingambit")  # reversed order
+        self.assertEqual(len(at.session_state["ct_jp_pairs_list"]), 1)
+
+    def test_removing_a_pair_takes_it_out_of_the_list(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Garchomp", "Incineroar")
+        self.assertEqual(len(at.session_state["ct_jp_pairs_list"]), 2)
+        at = [b for b in at.button if b.key == "ct_jp_pairs_remove_0"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["ct_jp_pairs_list"],
+                         [("Garchomp", "Incineroar")])
+
+    def test_clear_all_empties_the_list(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = [b for b in at.button if b.key == "ct_jp_pairs_clear"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["ct_jp_pairs_list"], [])
+
+    def test_search_best_pair_races_exactly_the_given_pairs(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Garchomp", "Incineroar")
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(10).run()
+        at = [b for b in at.button
+             if b.key == "ct_jp_pairs_go_pair"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        result = at.session_state["ct_jp_pairs_result"]
+        self.assertEqual(at.session_state["ct_jp_pairs_result_kind"], "pair")
+        self.assertTrue(result)
+        for row in result:
+            self.assertEqual(row["pairs_total"], 2)
+            self.assertEqual(set(row["detail"].keys()),
+                             {("Basculegion", "Kingambit"),
+                              ("Garchomp", "Incineroar")})
+
+    def test_search_best_team_uses_each_pair_as_its_own_enemy(self):
+        at = self._goto(app())
+        at = self._add_pair(at, "Kingambit", "Basculegion")
+        at = self._add_pair(at, "Garchomp", "Incineroar")
+        at = [s for s in at.slider if s.key == "ct_jp_pool"][0].set_value(12).run()
+        at = [b for b in at.button
+             if b.key == "ct_jp_pairs_go_team"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        result = at.session_state["ct_jp_pairs_result"]
+        self.assertEqual(at.session_state["ct_jp_pairs_result_kind"], "team")
+        shown_vs = at.session_state["ct_jp_pairs_shown_vs"]
+        self.assertEqual(set(shown_vs),
+                         {"Basculegion + Kingambit", "Garchomp + Incineroar"})
+        if result:
+            self.assertEqual(len(result[0]["per_enemy"]), 2)
 
 
 class TestBring4ModeRunsEndToEnd(unittest.TestCase):
@@ -500,6 +750,24 @@ class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):
         self.assertTrue(any("Archaludon" in s.value for s in at.success))
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
+
+    def test_an_apply_button_is_offered_for_mobile(self):
+        """"for mobile I need to have a button to apply the team" --
+        `st.text_area` only syncs to Python on blur/Ctrl+Enter, unavailable
+        on mobile; a plain button gives a tap target that forces the same
+        rerun. Parsing itself already runs on every rerun regardless (see
+        `test_a_valid_pasted_enemy_roster_parses_and_can_search` above,
+        which never touches this button), so clicking it must not error
+        and the parse must still be visible afterward."""
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = sb.set_value("\U0001f4cb Paste a pokepaste").run()
+        self.assertTrue(any(b.key == "ct_b4_vs_paste_apply" for b in at.button))
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(self.RAIN_PASTE).run()
+        at = [b for b in at.button if b.key == "ct_b4_vs_paste_apply"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Archaludon" in s.value for s in at.success))
 
     def test_pasting_our_6_reveals_a_text_area_and_parses(self):
         at = app(team=[])
@@ -934,6 +1202,90 @@ class TestBestBring4TeamByTeam(unittest.TestCase):
              if c.key == "ctb4_dd_all6_allteams_onlyloss"][0]
         at = cb.set_value(True).run()
         self.assertFalse(at.exception, list(at.exception))
+
+
+class TestAllTeamsSummaryTable(unittest.TestCase):
+    """"first give a summary table of all enemy teams; your bring/lead vs
+    each, full performance (beats, under tailwind, under protect, best
+    pair/3rd best/worst and so on as done elsewhere)" -- a `st.dataframe`
+    overview, one row per enemy team, ABOVE the existing "team by team
+    (full detail)" markdown loop (`TestBestBring4TeamByTeam`), matching the
+    CLI's own per-enemy `bring4_pair_depth` breakdown (`_write_multi_
+    bring4_xlsx`'s Cores sheet)."""
+
+    def test_a_summary_dataframe_is_shown_with_one_row_per_team(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Enemy team" in d.value.columns]
+        self.assertTrue(dfs, "expected a summary dataframe with an 'Enemy "
+                         "team' column")
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        self.assertEqual(len(dfs[0]), len(W["teams"]))
+        self.assertEqual(set(dfs[0]["Enemy team"]), set(W["teams"]))
+
+    def test_it_appears_before_the_full_detail_section(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        markdowns = [m.value for m in at.markdown]
+        summary_idx = next(i for i, v in enumerate(markdowns)
+                           if "Summary: best bring-4 vs each enemy team" in v)
+        detail_idx = next(i for i, v in enumerate(markdowns)
+                          if "Best bring-4, team by team" in v)
+        self.assertLess(summary_idx, detail_idx)
+
+    def test_the_full_performance_columns_are_present(self):
+        """"full performance (beats, under tailwind, under protect, best
+        pair/3rd best/worst and so on as done elsewhere)" -- the SAME
+        `bring4_pair_depth` fields the CLI's xlsx Cores sheet already
+        surfaces per enemy, not just the beaten count."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        dfs = [d.value for d in at.dataframe if "Enemy team" in d.value.columns]
+        cols = set(dfs[0].columns)
+        for expected in ("Bring-4", "Lead", "Backup", "Worst pair beaten",
+                         "Beaten total", "Beaten 3rd best", "Beaten 4th best",
+                         "Beaten worst", "Tailwind-safe total",
+                         "Tailwind-safe best", "Tailwind-safe 3rd best",
+                         "Protect-safe total", "Protect-safe best",
+                         "Protect-safe 3rd best", "Clean win total"):
+            self.assertIn(expected, cols)
+
+    def test_a_rows_values_match_a_direct_call(self):
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        dive = at.session_state["ctb4_dd_all6_allteams_dive"]
+        dfs = [d.value for d in at.dataframe if "Enemy team" in d.value.columns]
+        df = dfs[0]
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import (bring4_from_deep_dive, bring4_pair_depth,
+                                    recommended_lead)
+        W = load_world()
+        name0 = list(W["teams"])[0]
+        best = bring4_from_deep_dive(TEAM, dive, list(W["teams"][name0]))[0]
+        depth = bring4_pair_depth(best)
+        pt = depth["pairs_total"]
+        n_pairs = len(best["pair_rows"])
+        lb = recommended_lead(best)
+
+        row = df[df["Enemy team"] == name0].iloc[0]
+        self.assertEqual(row["Bring-4"], " / ".join(best["bring4"]))
+        self.assertEqual(row["Lead"], " + ".join(lb["lead"]))
+        self.assertEqual(row["Backup"], " + ".join(lb["backup"]))
+        self.assertEqual(row["Beaten total"], f"{depth['beaten_total']}/{n_pairs * pt}")
+        self.assertEqual(row["Tailwind-safe total"],
+                         f"{depth['tailwind_safe_total']}/{n_pairs * pt}")
+        self.assertEqual(row["Protect-safe total"],
+                         f"{depth['protect_safe_total']}/{n_pairs * pt}")
 
 
 class TestMegaEvolutionVisibility(unittest.TestCase):

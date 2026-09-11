@@ -49,6 +49,12 @@ SPECIES_ID_OVERRIDES = {
     "megacharizardx": "charizardmegax",
     "megamewtwoy": "mewtwomegay",
     "megamewtwox": "mewtwomegax",
+    # Showdown's dex has no separate male forme id -- the base "Indeedee"
+    # entry (Inner Focus/Synchronize/Psychic Surge) IS the male form, same
+    # as every other gendered species here (Basculegion's own male form is
+    # likewise the bare, suffix-less name). "Indeedee-F" already resolves
+    # on its own via the ordinary raw_id lookup above.
+    "indeedeem": "indeedee",
 }
 
 

@@ -219,7 +219,8 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, DEFAULT_MAX_FOCUS_SASH,  # n
                             joint_pair_search,
                             joint_pool_search, member_weakness_summary,
                             multi_bring4_beam, multi_bring4_coverage,
-                            multi_bring4_exhaustive, net_weakness_by_type,
+                            multi_bring4_exhaustive, net_weak_type_breadth,
+                            net_weakness_by_type,
                             own_pair_has_real_tailwind,
                             pair_search, recommended_lead, speed_tiers,
                             switch_in_search, tailwind_focus_pool, threshold_search,
@@ -1019,6 +1020,13 @@ def _print_multi_bring4(rows, target_name_lists, top, mode_label, good_threshold
                          key=lambda tc: -tc[1])
         print("        weaknesses by type: " + (
             ", ".join(f"{t} {c}" for t, c in by_type) if by_type else "none"))
+        net = net_weakness_by_type(core, merged)
+        net_2plus = sum(1 for v in net.values() if v >= 2)
+        net_by_type = sorted(((t, v) for t, v in net.items() if v > 0),
+                             key=lambda tv: -tv[1])
+        print(f"        types with 2+ net weakness: {net_2plus}")
+        print("        net weaknesses by type: " + (
+            ", ".join(f"{t} {v}" for t, v in net_by_type) if net_by_type else "none"))
         core_fixed_items = fixed_items
         if r.get("item_clause_resolved_items"):
             core_fixed_items = {**(fixed_items or {}), **r["item_clause_resolved_items"]}
@@ -1587,7 +1595,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     header = ["#", "Core", "Dead Mega Rebuilt", "Size", "Bottleneck Enemy",
               "Weak to 2+ types (members)", "Weak to 1 type (members)",
               "Weak to 0 types (members)", "Types with 2+ weak members",
-              "Weaknesses by type", "Average Score",
+              "Weaknesses by type", "Types with 2+ net weakness",
+              "Net weaknesses by type", "Average Score",
               "Avg Wins/90", "Avg Wins under Tailwind/90",
               "Avg Wins under Protect/90", "Clean wins/90",
               "Sum 3rd Best Pairs Beaten", "Sum 3rd Best Tailwind-Safe",
@@ -1623,6 +1632,10 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
         by_type = sorted(((t, c) for t, c in weak["per_type"].items() if c > 0),
                          key=lambda tc: -tc[1])
         types_2plus = sum(1 for c in weak["per_type"].values() if c >= 2)
+        net = net_weakness_by_type(core, merged)
+        net_by_type = sorted(((t, v) for t, v in net.items() if v > 0),
+                             key=lambda tv: -tv[1])
+        net_types_2plus = sum(1 for v in net.values() if v >= 2)
         # One `bring4_pair_depth` call per enemy, reused for BOTH the
         # core-level "Avg .../90" columns (averaged across every named
         # enemy below) and that enemy's own per-enemy columns further
@@ -1664,6 +1677,7 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               r["worst_enemy_idx"] + 1,
               weak["weak_to_2plus"], weak["weak_to_1"], weak["weak_to_0"],
               types_2plus, ", ".join(f"{t} {c}" for t, c in by_type),
+              net_types_2plus, ", ".join(f"{t} {v}" for t, v in net_by_type),
               round(avg_score, 1) if avg_score is not None else "",
               round(avg_wins, 1), round(avg_wins_tw, 1),
               round(avg_wins_pr, 1), round(avg_clean, 1),
@@ -2135,6 +2149,19 @@ def main():
                          "still being broadly fragile across many types at "
                          "once, which this catches instead. Off by default "
                          "(no breadth cap)")
+    ap.add_argument("--max-net-weak-types", type=int, default=4, metavar="N",
+                    help="--multi-bring4 only: hard-drop any candidate CORE "
+                         "where more than N DIFFERENT types have NET "
+                         "weakness (weak members minus resistant/immune "
+                         "members) greater than 1 -- 'restrict generated "
+                         "teams to a certain number of types with more "
+                         "than 1 net weakness' (default 4). Distinct from "
+                         "--max-weak-types (which counts raw weak-member "
+                         "breadth, ignoring resists) and from --type-limit's "
+                         "own per-type max_net (a ceiling on ONE type's net "
+                         "weakness, not a count of how many types cross "
+                         "it). Pass a high value (e.g. 18, the type count) "
+                         "to effectively disable it")
     ap.add_argument("--core-sizes", default="4,5,6", metavar="N,N,...",
                     help="--multi-bring4 only: which candidate CORE sizes "
                          "to search, comma-separated (default \"4,5,6\"). "
@@ -2286,13 +2313,14 @@ def main():
                     help="--joint/--deep/--bring4/--multi-bring4 only: how "
                          "many turns to race (default 2)")
     ap.add_argument("--worst-case-targeting", action="store_true",
-                    help="--joint/--deep/--bring4 (its Stage 1 pool search) "
-                         "only, plus --multi-bring4's own --deep-dive-core/"
-                         "--auto-deep-dive/--teamsheet-json follow-up (NOT "
-                         "--multi-bring4's own main coverage/ranking sweep, "
-                         "which stays greedy -- searching the enemy's "
-                         "targeting there too would multiply an already "
-                         "large pool-wide search): by default the ENEMY's "
+                    help="--joint/--deep/--bring4's own Stage 1 pool search "
+                         "only (NOT --multi-bring4's own main coverage/"
+                         "ranking sweep, which stays greedy -- searching the "
+                         "enemy's targeting there too would multiply an "
+                         "already large pool-wide search; the deep-dive-on-"
+                         "top-N follow-up common to --bring4/--multi-bring4 "
+                         "has its OWN separate --deep-dive-worst-case-"
+                         "targeting, on by default): by default the ENEMY's "
                          "own per-turn target choice is a single greedy "
                          "guess (whichever of ours it ranks best on its own, "
                          "with no view of what our OTHER member is doing) -- "
@@ -2307,6 +2335,22 @@ def main():
                          "the enemy targets as well as I do' rather than "
                          "'assume the enemy just grabs its own best-looking "
                          "target each turn'")
+    ap.add_argument("--deep-dive-worst-case-targeting",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="--bring4/--multi-bring4 only: whether the deep-"
+                         "dive-on-top-N follow-up (--deep-dive-core/"
+                         "--auto-deep-dive/the interactive prompt, plus the "
+                         "--teamsheet-json fallback dive) runs with worst-"
+                         "case enemy targeting (see --worst-case-targeting's "
+                         "own help for what that means). ON by default and "
+                         "SEPARATE from --worst-case-targeting itself -- the "
+                         "deep dive only ever runs on a handful of already-"
+                         "narrowed candidates (never the large pool-wide "
+                         "sweep --worst-case-targeting stays off-by-default "
+                         "for), so the extra rigor is cheap here regardless "
+                         "of whether the main search paid for it. Pass "
+                         "--no-deep-dive-worst-case-targeting to fall back "
+                         "to greedy enemy targeting for the deep dive too")
     ap.add_argument("--max-taken", type=float, default=None, metavar="PCT",
                     help="default mode only: drop any row where SOME named "
                          "target's best attack could do PCT%% or more to it "
@@ -2482,6 +2526,8 @@ def main():
         raise SystemExit("--max-weak/--type-limit only apply to --multi-bring4")
     if args.max_weak_types is not None and not args.multi_bring4:
         raise SystemExit("--max-weak-types only applies to --multi-bring4")
+    if args.max_net_weak_types != 4 and not args.multi_bring4:
+        raise SystemExit("--max-net-weak-types only applies to --multi-bring4")
     if args.strict_weak_types is not None and not args.multi_bring4:
         raise SystemExit("--strict-weak-types only applies to --multi-bring4")
     if args.core_sizes != "4,5,6" and not args.multi_bring4:
@@ -2712,7 +2758,7 @@ def main():
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting,
+                worst_case_targeting=args.deep_dive_worst_case_targeting,
                 max_focus_sash=max_focus_sash)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
@@ -2735,7 +2781,7 @@ def main():
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting,
+                worst_case_targeting=args.deep_dive_worst_case_targeting,
                 max_focus_sash=max_focus_sash)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
@@ -2772,7 +2818,8 @@ def main():
                 coverage, good_threshold=good_threshold,
                 beam_width=args.beam_width, max_weak=args.max_weak,
                 type_limits=type_limits, max_megas=args.max_megas,
-                max_weak_types=args.max_weak_types, core_sizes=core_sizes)
+                max_weak_types=args.max_weak_types,
+                max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes)
             mode_label = f"beam, width {args.beam_width}"
         else:
             try:
@@ -2780,7 +2827,8 @@ def main():
                     coverage, good_threshold=good_threshold,
                     max_candidates=args.max_candidates, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
+                    max_weak_types=args.max_weak_types,
+                    max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes)
                 mode_label = "exhaustive"
             except ValueError as e:
                 # "It should be very quick to compute the sets of 4 brings
@@ -2797,7 +2845,8 @@ def main():
                     coverage, good_threshold=good_threshold,
                     beam_width=args.beam_width, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
-                    max_weak_types=args.max_weak_types, core_sizes=core_sizes)
+                    max_weak_types=args.max_weak_types,
+                    max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes)
                 mode_label = f"beam, width {args.beam_width} (auto-fallback)"
         if args.tailwind_focus:
             # Re-sort what the search already found, ON TOP OF (not instead
@@ -2867,7 +2916,7 @@ def main():
                 item_overrides=item_overrides, move_overrides=move_overrides,
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting,
+                worst_case_targeting=args.deep_dive_worst_case_targeting,
                 max_focus_sash=max_focus_sash)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
@@ -2892,7 +2941,7 @@ def main():
                 typechart, turns=args.turns, item_overrides=item_overrides,
                 move_overrides=move_overrides, excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
-                worst_case_targeting=args.worst_case_targeting,
+                worst_case_targeting=args.deep_dive_worst_case_targeting,
                 max_focus_sash=max_focus_sash)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.two_two_two:
@@ -3036,6 +3085,10 @@ def main():
             by_type = sorted(((t, c) for t, c in weak["per_type"].items() if c > 0),
                              key=lambda tc: -tc[1])
             types_2plus = sum(1 for c in weak["per_type"].values() if c >= 2)
+            net = net_weakness_by_type(core, merged)
+            net_by_type = sorted(((t, v) for t, v in net.items() if v > 0),
+                                 key=lambda tv: -tv[1])
+            net_types_2plus = sum(1 for v in net.values() if v >= 2)
             row = {"core": " / ".join(core), "core size": r["core_size"],
                   "unused": " / ".join(r["unused"]),
                   "bottleneck enemy": r["worst_enemy_idx"] + 1,
@@ -3045,6 +3098,9 @@ def main():
                   "types with 2+ weak members": types_2plus,
                   "weaknesses by type": "; ".join(
                       f"{t}:{c}" for t, c in by_type),
+                  "types with 2+ net weakness": net_types_2plus,
+                  "net weaknesses by type": "; ".join(
+                      f"{t}:{v}" for t, v in net_by_type),
                   "per-member weak-type counts": ", ".join(
                       f"{n}={c}" for n, c in weak["per_member"].items())}
             for e_idx, pe in enumerate(r["per_enemy"], start=1):

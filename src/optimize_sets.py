@@ -367,8 +367,16 @@ def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=N
         # protect-type move: it blocks spread damage, stalls Trick Room / Tailwind
         # turns, and scouts. Reserve a slot for it when one is available and legal.
         # Choice items make Protect a dead slot (you'd be locked into it), so skip.
+        # "Fake Out and Follow Me can replace the mandatory protect generally" --
+        # both already give real same-turn safety/disruption (denying the
+        # opponent's turn outright, or redirecting their attack onto the
+        # redirector instead), so a set that already has one of them doesn't
+        # need Protect force-reserved too: it's still free to be PICKED by the
+        # scoring below (still worth 0.85 in UTILITY_VALUE), just not forced
+        # into the set over a genuinely better-scoring combo.
         forced = []
-        if force_protect and item not in CHOICE_ITEMS_SET:
+        if (force_protect and item not in CHOICE_ITEMS_SET
+                and not any(m in names for m in ("Fake Out", "Follow Me"))):
             have = [p for p in PROTECT_NAMES if p in names]
             if have:
                 forced = [have[0]]

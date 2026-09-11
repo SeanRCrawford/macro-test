@@ -29,7 +29,7 @@ from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_
                     defensive_stat, move_from_showdown,
                      apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
                      WEIGHT_BASED_POWER, weight_based_power, DEFENDER_HP_BASED_POWER,
-                     defender_hp_based_power, is_grounded)
+                     defender_hp_based_power, is_grounded, effective_move_target)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
                      WEATHER_SETTERS, TERRAIN_NAMES)
 
@@ -639,9 +639,18 @@ class Battle:
         target_side = self.side_of(target)
         if target.protecting:
             return True
-        if target_side.wide_guard and is_spread_move(attacker.move.target):
+        if target_side.wide_guard and is_spread_move(
+                effective_move_target(attacker.move, attacker.combatant, self.field.terrain)):
             return True
         if target_side.quick_guard and attacker.move.priority > 0:
+            return True
+        # Psychic Terrain: no priority move can hit a GROUNDED target, full
+        # stop -- a field effect, not an ability, so it is NOT bypassed by
+        # Mold Breaker/Teravolt/Turboblaze the way the ability-based block
+        # just below is (those only ignore the DEFENDER's own ability).
+        if self.field.terrain == "psychic" and attacker.move.priority > 0 and is_grounded(target):
+            self.log.add(f"{self.tag(target)} is protected by Psychic Terrain "
+                         f"from the priority move!")
             return True
         # Queenly Majesty / Dazzling / Armor Tail block ALL incoming priority moves
         # aimed at that side -- the standard answer to a Fake Out lead. Held by the
@@ -799,7 +808,7 @@ class Battle:
         # opposing side gets pulled onto the redirector instead. Spread moves are
         # unaffected, and a fainted/absent redirector doesn't redirect.
         target_side = self.side_of(live_targets[0]) if live_targets else None
-        single_target = (not is_spread_move(move.target)
+        single_target = (not is_spread_move(effective_move_target(move, attacker, self.field.terrain))
                          and move.category != "Status")
         ignores_redirect = attacker.ability in ("Stalwart", "Propeller Tail")
         if (target_side is not None and target_side.follow_me_target is not None
@@ -834,7 +843,9 @@ class Battle:
         blocked = [t for t in live_targets if t not in hit_targets]
         for t in blocked:
             self.log.add(f"{self.tag(attacker)}'s {move.name} was blocked by {self.tag(t)}'s guard!")
-        num_hit = len(hit_targets) if is_spread_move(move.target) else min(1, len(hit_targets))
+        num_hit = (len(hit_targets)
+                  if is_spread_move(effective_move_target(move, attacker, self.field.terrain))
+                  else min(1, len(hit_targets)))
         total_damage_dealt = 0  # summed across targets; drives recoil/drain amounts
         # Last Respects: 50 BP base, +50 per fainted ally on the user's own team
         # (bench included, not just the current partner), capped at 200 -- so it
@@ -1096,16 +1107,16 @@ class Battle:
                 self.field.tailwind_p2 = 4
             self.log.add(f"Tailwind blew from behind {attacker.name}'s side!")
             self._emit(event="tailwind", side=action.side, actor=attacker.name)
-        elif move.name == "Grassy Terrain":
+        elif move.name in ("Grassy Terrain", "Psychic Terrain"):
             # Regulation M-C. A move-cast terrain always (re)sets the full
-            # duration -- unlike `on_switch_in`'s Grassy Surge, which
+            # duration -- unlike `on_switch_in`'s Grassy/Psychic Surge, which
             # deliberately does NOT refresh a same-terrain re-switch (see
             # its own comment); there's no equivalent "re-using the exact
             # same move" concern here.
-            self.field.terrain = "grassy"
+            new_terrain = "grassy" if move.name == "Grassy Terrain" else "psychic"
+            self.field.terrain = new_terrain
             self.field.terrain_turns_left = 5
-            self.log.add(f"{attacker.name} made the ground turn to grass! "
-                         f"{TERRAIN_NAMES['grassy']} active.")
+            self.log.add(f"{attacker.name} set up {TERRAIN_NAMES[new_terrain]}!")
             self._emit(event="terrain", side=action.side, actor=attacker.name,
                        terrain_now=self.field.terrain)
         elif move.name == "Perish Song":
@@ -1554,32 +1565,49 @@ class Battle:
 PRIORITY_BLOCK_IGNORING_ABILITIES = frozenset({"Mold Breaker", "Teravolt", "Turboblaze"})
 
 
-def priority_blocked_by_side(attacker_ability, move, defending_side_actives):
+def priority_blocked_by_side(attacker_ability, move, defending_side_actives,
+                              terrain=None, target=None):
     """True if `move` (used by a Pokemon with `attacker_ability`) would be
     blocked outright by Queenly Majesty / Dazzling / Armor Tail held by any
-    living member of `defending_side_actives` -- "priority blocking
-    abilities ... lead to the enemy trying to click priority moves anyway.
-    They should not attempt to use priority moves if these abilities are
-    present."
+    living member of `defending_side_actives`, OR by Psychic Terrain against
+    a GROUNDED `target` -- "an enemy should never use a priority move when
+    priority blocking is up, such as Psychic Terrain, Armor Tail." Both are
+    "priority blocking ... lead to the enemy trying to click priority moves
+    anyway. They should not attempt to use priority moves if these are
+    present," just from two different sources.
 
-    The AI-facing sibling of `Battle._blocked_by_guard`'s own ability-block
-    branch: that method ALSO checks `target.protecting`/Wide Guard/Quick
+    The AI-facing sibling of `Battle._blocked_by_guard`'s own two block
+    branches: that method ALSO checks `target.protecting`/Wide Guard/Quick
     Guard, which only make sense mid-resolution once actions are already
-    locked in; this is the narrower, ability-only check a move-CHOICE
-    heuristic needs BEFORE any of that is decided, so `solver.py`'s greedy
-    opponent AI and `fast_eval.py`'s fast screening playouts can see "this
-    priority move will do nothing" before they ever value or pick it --
-    exactly the gap that let them keep clicking a doomed Fake Out/Sucker
-    Punch/etc. into a Farigiraf or Tsareena. `counter_finder.py`'s own
-    `_priority_blocked` mirrors this same narrower scope for its cheap
-    model; kept as a separate, smaller copy there rather than imported,
-    since that module doesn't otherwise depend on `battle.py`.
+    locked in; this is the narrower check a move-CHOICE heuristic needs
+    BEFORE any of that is decided, so `solver.py`'s greedy opponent AI and
+    `fast_eval.py`'s fast screening playouts can see "this priority move
+    will do nothing" before they ever value or pick it -- exactly the gap
+    that let them keep clicking a doomed Fake Out/Sucker Punch/etc. into a
+    Farigiraf or Tsareena (the ability case), or a grounded target under
+    Psychic Terrain (the terrain case, added later). `counter_finder.py`'s
+    own `_choose_action`/`_choose_move` mirror this same scope for its cheap
+    model directly (not via this shared function, since that module doesn't
+    otherwise depend on `battle.py`).
 
-    Ignored by Mold Breaker/Teravolt/Turboblaze, matching real game rules
-    and `_blocked_by_guard`'s own ignoring-abilities branch.
+    `terrain`/`target`: Psychic Terrain's block is a FIELD effect, not an
+    ability, so unlike the ability-block below it is NOT bypassed by Mold
+    Breaker/Teravolt/Turboblaze -- checked first, and independently of
+    `attacker_ability`. It is also per-TARGET (a grounded target is
+    protected, an airborne one on the same side isn't), unlike the ability
+    check's whole-side reach -- so `target` is the SPECIFIC Pokemon this use
+    of `move` is aimed at, not a side list. Either omitted (the default)
+    skips this half of the check entirely, e.g. a caller that hasn't picked
+    a specific target yet.
+
+    The ability half is ignored by Mold Breaker/Teravolt/Turboblaze,
+    matching real game rules and `_blocked_by_guard`'s own ignoring-
+    abilities branch.
     """
     if move is None or move.priority <= 0:
         return False
+    if terrain == "psychic" and target is not None and is_grounded(target):
+        return True
     if attacker_ability in PRIORITY_BLOCK_IGNORING_ABILITIES:
         return False
     return any(c is not None and not c.fainted
