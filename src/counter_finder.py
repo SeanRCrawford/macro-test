@@ -3263,6 +3263,20 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
             if (attacker_c.item == "Life Orb" and attacker_c.ability != "Magic Guard"
                     and not sheer_force_cancels_lo):
                 hp[role] = max(0.0, hp[role] - 0.10)
+            # Drain (Giga Drain/Leech Life 50%, Draining Kiss 75%, ...) heals
+            # the attacker as a fraction of TOTAL damage dealt this move --
+            # the sign-flipped counterpart of recoil above, same
+            # `raw_dmg_dealt` units, capped at full HP. Mirrors
+            # `battle.py:1030-1038` (no move in the dex carries both `recoil`
+            # and `drain`, so there's no real ordering question against the
+            # recoil/Life-Orb block above). Liquid Ooze (drain becomes
+            # damage against the DEFENDER instead) isn't modeled here --
+            # `battle.py`'s own real engine doesn't model it either, so this
+            # stays in step with that rather than opening a new gap.
+            if mv.drain and hp[role] > 0:
+                num, den = mv.drain
+                hp[role] = min(1.0, hp[role] + (raw_dmg_dealt * num / den)
+                              / attacker_c.max_hp())
         if rough_skin_loss:
             hp[role] = max(0.0, hp[role] - rough_skin_loss)
         if wiped is None:
