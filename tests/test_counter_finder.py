@@ -6426,6 +6426,50 @@ class TestMegaGolisopodToughClaws(unittest.TestCase):
         self.assertAlmostEqual(mega_hit.frac / plain_hit.frac, 1.3, places=2)
 
 
+class TestChoiceScarfEnemyMoveset(unittest.TestCase):
+    """"select an enemy as a choice scarf user (and hence will have 4
+    attacks)" -- `choice_scarf_enemy_moveset` drops Protect (and any other
+    Status move) from a named enemy's own usage-ranked moveset, keeping
+    the top 4 that remain, since a Choice item locks the holder into the
+    first move used and no real Scarf set would risk getting stuck on a
+    status move."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_drops_protect_and_swords_dance_keeping_the_top_4_attacks(self):
+        """Kingambit's own recorded usage: Sucker Punch 99.6%, Kowtow
+        Cleave 96.8%, Protect 76.8%, Iron Head 63.8%, Low Kick 34.0%,
+        Swords Dance 26.7% -- Protect ranks 3rd and Swords Dance is a
+        second Status move further down, so this fixture confirms BOTH
+        get skipped, not just Protect specifically."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        got = cf.choice_scarf_enemy_moveset("Kingambit", merged, moves)
+        self.assertEqual(got, ["Sucker Punch", "Kowtow Cleave", "Iron Head", "Low Kick"])
+
+    def test_returns_move_names_not_moveinfo_objects(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        got = cf.choice_scarf_enemy_moveset("Kingambit", merged, moves)
+        self.assertTrue(all(isinstance(n, str) for n in got))
+
+    def test_never_includes_a_status_move_across_the_roster(self):
+        """A broader sweep -- no species' own Choice-Scarf moveset should
+        ever carry a Status-category move, whatever its usage table looks
+        like."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        for name in ("Kingambit", "Incineroar", "Garchomp", "Whimsicott"):
+            got = cf.choice_scarf_enemy_moveset(name, merged, moves)
+            for mv_name in got:
+                mi = cf._lookup_move(mv_name, moves)
+                self.assertNotEqual(mi.category, "Status",
+                                    f"{name}'s Scarf moveset kept {mv_name!r}")
+
+    def test_top_k_is_respected(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        got = cf.choice_scarf_enemy_moveset("Kingambit", merged, moves, top_k=2)
+        self.assertEqual(got, ["Sucker Punch", "Kowtow Cleave"])
+
+
 class TestSpreadHitRecomputedIfATargetAlreadyFaintedThisTurn(unittest.TestCase):
     """"if Staraptor fainted then Heat Wave would have been single target
     damage rather than spread" -- `hits`/`num_targets_hit` are fixed at

@@ -1706,5 +1706,79 @@ class TestGameplansForABring4VsATeam(unittest.TestCase):
             self.assertIn(f"**{n1} + {n2}**", pair_headers)
 
 
+class TestEnemyChoiceScarfDropdown(unittest.TestCase):
+    """"In the bring4 vs a specific team, add a dropdown to select an
+    enemy as a choice scarf user (and hence will have 4 attacks), default
+    no choice scarf user." -- pins the chosen enemy's item to Choice Scarf
+    and its moveset to its own top-4 non-status moves by usage
+    (`choice_scarf_enemy_moveset`), instead of whatever mbsmogon.xlsx's
+    usage-derived top item/moveset happens to be (which can, and often
+    does, include Protect)."""
+
+    def _vs_roster(self, at):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        teams = load_world()["teams"]
+        vs_name = at.session_state["ct_b4_vs"]
+        return vs_name, list(teams[vs_name])
+
+    def test_dropdown_defaults_to_none_with_the_enemy_roster_as_options(self):
+        at = app()
+        sb = [s for s in at.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        self.assertEqual(sb.value, "(none)")
+        _vs_name, vs_roster = self._vs_roster(at)
+        self.assertEqual(sb.options, ["(none)"] + vs_roster)
+
+    def test_selecting_an_enemy_pins_choice_scarf_and_a_protect_free_moveset(self):
+        at = app()
+        _vs_name, vs_roster = self._vs_roster(at)
+        scarfed = vs_roster[0]
+        sb = [s for s in at.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        at = sb.set_value(scarfed).run()
+        self.assertFalse(at.exception, list(at.exception))
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        self.assertTrue(pair_rows)
+        # The scarfed enemy's own role in each pair's detail log -- "E1" if
+        # it's the first name racing (alphabetically sorted `target_names`)
+        # or "E2" otherwise -- must never show Protect, since a real Choice
+        # item locks the holder into the first move used and no real Scarf
+        # set carries a status move it could get stuck repeating.
+        seen_any_log = False
+        for row in pair_rows:
+            for (e1, e2), d in row["detail"].items():
+                scarfed_role = ("E1" if e1 == scarfed else
+                               "E2" if e2 == scarfed else None)
+                if scarfed_role is None:
+                    continue
+                for turn_hits in d["log"]:
+                    for role, _tgt, h in turn_hits:
+                        if role == scarfed_role:
+                            seen_any_log = True
+                            self.assertNotEqual(h.move_name, "Protect")
+        self.assertTrue(seen_any_log, "fixture never actually raced the "
+                                      "scarfed enemy -- test is vacuous")
+
+    def test_none_selected_leaves_the_search_unaffected(self):
+        """Precondition/contrast: the default ("(none)") must reproduce the
+        exact same result as never touching the dropdown at all -- no
+        override silently applied."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        baseline = at.session_state["ct_b4_pair_rows"]
+
+        at2 = app()
+        sb = [s for s in at2.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        at2 = sb.set_value("(none)").run()
+        at2 = [b for b in at2.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at2.exception, list(at2.exception))
+        touched = at2.session_state["ct_b4_pair_rows"]
+        self.assertEqual([r["pairs_total"] for r in baseline],
+                         [r["pairs_total"] for r in touched])
+        self.assertEqual([r["pair"] for r in baseline], [r["pair"] for r in touched])
+
+
 if __name__ == "__main__":
     unittest.main()
