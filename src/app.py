@@ -3854,7 +3854,7 @@ with tab_counter:
     from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search,
                                 joint_pool_search, find_pair_cores, two_two_two_teams,
                                 coverage_group_search, narrow_coverage_pool_names,
-                                _pair_beaten_frac)
+                                _pair_beaten_frac, choice_scarf_enemy_moveset)
     from team_search import build_candidate_pool
 
     # Shared with the "Coverage groups" mode's own "Send to Bring-4" button
@@ -4070,6 +4070,22 @@ with tab_counter:
                                     if s.get("item")}
             enemy_move_overrides = {n: s["moves"] for n, s in vs_sets.items()
                                     if s.get("moves")}
+            ct_b4_scarf = st.selectbox(
+                "Enemy Choice Scarf holder", ["(none)"] + vs_roster,
+                key="ct_b4_enemy_scarf",
+                help="\"select an enemy as a choice scarf user (and hence "
+                     "will have 4 attacks)\" -- pins that one enemy's item "
+                     "to Choice Scarf and its moveset to its own top 4 "
+                     "non-status (attacking) moves by usage, since a "
+                     "Choice item locks you into the first move used, "
+                     "making Protect (or any other status move) a dead "
+                     "slot no real Scarf set would carry.")
+            if ct_b4_scarf != "(none)":
+                enemy_item_overrides = dict(enemy_item_overrides)
+                enemy_item_overrides[ct_b4_scarf] = "Choice Scarf"
+                enemy_move_overrides = dict(enemy_move_overrides)
+                enemy_move_overrides[ct_b4_scarf] = choice_scarf_enemy_moveset(
+                    ct_b4_scarf, merged, moves)
             if not (3 <= len(our6) <= 6):
                 st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
                            "a pokepaste, or choose a preset above) -- 3 or 4 skips "
