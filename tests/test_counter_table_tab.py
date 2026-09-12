@@ -1444,14 +1444,22 @@ class TestMegaEvolutionVisibility(unittest.TestCase):
         if not megas_here:
             self.assertEqual(mega_captions, [])
         elif len(megas_here) == 1:
-            self.assertEqual(mega_captions,
-                            [f"Mega Evolution: {megas_here[0]} evolves."])
+            # Since the deep-dive button's own pick defaults to Stage 2's
+            # own top bring-4 (`bring4_rows[0]`, same as `picked_bring4`
+            # here), this exact sentence now ALSO comes from the Stage 2
+            # "Your best bring-4" highlight above (its own, separate fix --
+            # "you must show which of my bring megas in the bring4") --
+            # `_render_core_deep_dive`'s OWN caption is what this test
+            # actually checks, so `assertIn` rather than an exact list.
+            self.assertIn(f"Mega Evolution: {megas_here[0]} evolves.",
+                          mega_captions)
         else:
             used = dive["mega_used"]
             other = next(n for n in megas_here if n != used)
-            self.assertEqual(mega_captions, [
+            self.assertIn(
                 f"Mega Evolution: {used} evolves this whole dive -- "
-                f"{other} stays in base form (VGC: only one Mega per side)."])
+                f"{other} stays in base form (VGC: only one Mega per side).",
+                mega_captions)
 
     def test_the_vs_all_enemy_teams_dive_also_shows_it(self):
         at = app(team=self.TWO_MEGAS)
@@ -1559,6 +1567,143 @@ class TestBring4MegaVisibilityOutsideDeepDive(unittest.TestCase):
             expected = self._expected_bring4_mega_caption(best)
             if expected:
                 self.assertIn(expected, mega_captions)
+
+    def test_your_best_bring4_highlight_also_shows_the_mega_caption(self):
+        """"You must show which of my bring[s] [is a] mega[s] in the
+        bring4" -- the direct Bring-4 mode's (`ct_b4_go`) Stage 2 table
+        already had its own "Mega" column, but the single highlighted
+        "Your best bring-4" pick right below it never called
+        `_bring4_mega_caption` the way the pool-search/team-by-team paths
+        already did."""
+        at = app(team=self.ONE_MEGA)
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+        expected = self._expected_bring4_mega_caption(bring4_rows[0])
+        self.assertIsNotNone(expected)
+        self.assertIn(expected, [c.value for c in at.caption])
+
+    def test_the_all6_deep_dives_best_bring4_also_shows_the_mega_caption(self):
+        """Same gap in `_render_core_deep_dive`'s own "Best bring-4 (from
+        this deep dive)" section, reached via the "Full deep dive: all of
+        Our 6" button rather than Stage 2."""
+        at = app(team=self.ONE_MEGA)
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive
+        teams = load_world()["teams"]
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        # `ct_b4_vs`'s own current value is exactly the enemy roster
+        # `_render_core_deep_dive` was called with here (`[vs_roster]`,
+        # `[ct_vs_name]`) -- no separate bookkeeping key needed.
+        vs_name = at.session_state["ct_b4_vs"]
+        best = bring4_from_deep_dive(self.ONE_MEGA, dive,
+                                     list(teams[vs_name]))[0]
+        expected = self._expected_bring4_mega_caption(best)
+        self.assertIsNotNone(expected)
+        self.assertIn(expected, [c.value for c in at.caption])
+
+    def test_coverage_groups_bring4_table_carries_a_mega_column(self):
+        """Same gap in the Coverage Groups tab's own "Run bring-4 vs enemy
+        teams" table (`b4_rows`) -- it never carried the "Mega" column
+        `_bring4_rows_df` already had."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(12).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        teams_ms = [m for m in at.multiselect if m.key == "ct_cov_teams"][0]
+        if teams_ms.options:
+            teams_ms.set_value([teams_ms.options[0]]).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        b4_buttons = [b for b in at.button if b.key and b.key.startswith("ct_cov_b4_3_")]
+        self.assertTrue(b4_buttons)
+        at = b4_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        b4_dfs = [d.value for d in at.dataframe if "Best bring-4" in d.value.columns]
+        self.assertTrue(b4_dfs, "expected the coverage-groups bring-4 result table")
+        self.assertIn("Mega", b4_dfs[0].columns)
+
+
+class TestGameplansForABring4VsATeam(unittest.TestCase):
+    """"For a bring4 vs any team, I want to see the output of gamelogs" --
+    every place a "best bring-4 vs a specific enemy roster" result is
+    shown must include the real turn-by-turn move log
+    (`_render_pair_matchup_detail`'s own `st.code` output), not just the
+    numeric pair-outcome table. The underlying `detail`/`log` these draw
+    from always comes from the real multi-turn race (`_joint_race`, via
+    `joint_pool_search`/`bring4_search`), which already applies
+    Intimidate/Defiant/Competitive correctly (`_intimidate_mult_by_role`,
+    computed once at the top of `_joint_race`) -- unlike the SEPARATE
+    `--deep` damage-grid preview that needed its own fix earlier -- so no
+    engine change is needed here, only surfacing the log that already
+    exists."""
+
+    ONE_MEGA = ["Mega Metagross", "Incineroar", "Farigiraf", "Gallade",
+               "Hydreigon", "Whimsicott"]
+
+    def test_bring4_one_enemy_roster_shows_gameplans_for_its_best_bring4(self):
+        at = app(team=self.ONE_MEGA)
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+        n_pairs = len(bring4_rows[0]["pair_rows"])
+        self.assertGreater(len(at.code), 0, "expected at least one gamelog block")
+        pair_headers = {m.value for m in at.markdown}
+        for row in bring4_rows[0]["pair_rows"]:
+            n1, n2 = row["pair"]
+            self.assertIn(f"**{n1} + {n2}**", pair_headers)
+        self.assertTrue(any(c.key == "ct_b4_best_onlyloss" for c in at.checkbox))
+
+    def test_multi_bring4_pool_search_shows_gameplans_per_enemy(self):
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        sb.set_value("\U0001f50d Search a pool for the best team").run()
+        [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(16).run()
+        [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+        [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state["ct_b4_pool_rows"]
+        self.assertTrue(rows)
+        codes_before = len(at.code)
+        self.assertGreater(codes_before, 0, "expected gamelog blocks in the "
+                                            "default-expanded top result")
+        top_pair_rows = rows[0]["per_enemy"][0]["best_bring4_row"]["pair_rows"]
+        pair_headers = {m.value for m in at.markdown}
+        for row in top_pair_rows:
+            n1, n2 = row["pair"]
+            self.assertIn(f"**{n1} + {n2}**", pair_headers)
+
+    def test_coverage_groups_bring4_table_shows_gameplans_per_enemy(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(12).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        teams_ms = [m for m in at.multiselect if m.key == "ct_cov_teams"][0]
+        if teams_ms.options:
+            teams_ms.set_value([teams_ms.options[0]]).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        b4_buttons = [b for b in at.button if b.key and b.key.startswith("ct_cov_b4_3_")]
+        self.assertTrue(b4_buttons)
+        clicked = b4_buttons[0]
+        at = clicked.click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        result_key = "ct_cov_b4_result_" + clicked.key[len("ct_cov_b4_"):]
+        b4_result = at.session_state[result_key]
+        self.assertTrue(b4_result)
+        self.assertGreater(len(at.code), 0, "expected gamelog blocks for the "
+                                            "coverage-groups bring-4 result")
+        pair_headers = {m.value for m in at.markdown}
+        for row in b4_result[0]["pair_rows"]:
+            n1, n2 = row["pair"]
+            self.assertIn(f"**{n1} + {n2}**", pair_headers)
 
 
 if __name__ == "__main__":

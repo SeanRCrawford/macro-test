@@ -6312,6 +6312,120 @@ class TestRecoilInTheJointRace(unittest.TestCase):
         self.assertEqual(new_hp["C"], 1.0)
 
 
+class TestDrainHealingInTheJointRace(unittest.TestCase):
+    """"the fact that leech life heals 50% of the damage" -- `battle.py`
+    (the real engine) already heals the attacker on a `move.drain` hit
+    (Leech Life/Giga Drain 50%, Draining Kiss 75%, ...); `_apply_plan`
+    (the cheap model `counter_table.py` runs on) had recoil/Life-Orb/Rough-
+    Skin self-damage but never modeled drain's opposite-sign counterpart."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_leech_life_heals_the_attacker_half_the_damage_dealt(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Golisopod", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        combatants = {"C": attacker, "P": target, "E1": target, "E2": target}
+        leech_life = cf._lookup_move("Leech Life", moves)
+        self.assertEqual(leech_life.drain, [1, 2])
+        protect = cf._lookup_move("Protect", moves)
+        got = cf._raw_hit(attacker, leech_life, target, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, leech_life), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        # Start C below full HP so healing is actually observable (a full-HP
+        # attacker would clamp at 1.0 and the heal would be silently lost).
+        hp = {"C": 0.5, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        expected_heal = got.frac * target.max_hp() * 0.5 / attacker.max_hp()
+        self.assertAlmostEqual(new_hp["C"], 0.5 + expected_heal, places=6)
+
+    def test_healing_is_capped_at_full_hp(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Golisopod", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        combatants = {"C": attacker, "P": target, "E1": target, "E2": target}
+        leech_life = cf._lookup_move("Leech Life", moves)
+        protect = cf._lookup_move("Protect", moves)
+        got = cf._raw_hit(attacker, leech_life, target, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, leech_life), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["C"], 1.0)
+
+    def test_a_move_with_no_drain_heals_nothing(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        combatants = {"C": attacker, "P": target, "E1": target, "E2": target}
+        iron_head = cf._lookup_move("Iron Head", moves)
+        self.assertIsNone(iron_head.drain)
+        protect = cf._lookup_move("Protect", moves)
+        got = cf._raw_hit(attacker, iron_head, target, typechart, roll="avg")
+        plan = {"C": ({"E1": got}, iron_head), "P": ({}, protect),
+               "E1": ({}, protect), "E2": ({}, protect)}
+        hp = {"C": 0.5, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        from engine import FieldState
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset(), 1.0, FieldState())
+        self.assertEqual(new_hp["C"], 0.5)
+
+
+class TestMegaGolisopodToughClaws(unittest.TestCase):
+    """"Have you included Mega Golisopod's Tough Claws ability" --
+    mbsmogon.xlsx's own "Mega Golisopod" row already records Tough Claws
+    at 100% usage, so the SAME shared ability-resolution path every other
+    Mega already goes through (`combatants._default_ability`, used by both
+    the real engine and `counter_finder._build_form`) already resolves it
+    correctly with no special-case rule needed (unlike Dragonite, whose
+    usage data disagreed with the intended house rule and needed
+    `FORCED_BASE_ABILITY`). These tests lock that in as a regression check,
+    since nothing exercised it before."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_the_mega_form_resolves_to_tough_claws_and_bug_steel(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        mega = cf._build("Mega Golisopod", merged, natures)
+        self.assertEqual(mega.ability, "Tough Claws")
+        self.assertEqual(set(mega.types), {"Bug", "Steel"})
+
+    def test_the_base_form_keeps_emergency_exit_and_bug_water(self):
+        merged, natures = self.W["merged"], self.W["natures"]
+        base = cf._build_form("Mega Golisopod", merged, natures, stay_base=True)
+        self.assertEqual(base.ability, "Emergency Exit")
+        self.assertEqual(set(base.types), {"Bug", "Water"})
+
+    def test_tough_claws_boosts_a_contact_move_by_1_3x(self):
+        """Isolates JUST the ability -- comparing the mega form against the
+        base form directly would also confound the result with their
+        different stats (150 vs 125 Atk) and typing (Iron Head gets STAB
+        as Bug/Steel but not as Bug/Water), so this compares the mega form
+        against a copy of itself with a neutral ability instead, same
+        stats/typing throughout."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        mega = cf._build("Mega Golisopod", merged, natures)
+        no_ability = copy.copy(mega)
+        no_ability.ability = "Battle Armor"  # neutral, no damage effect
+        target = cf._build("Milotic", merged, natures)
+        iron_head = cf._lookup_move("Iron Head", moves)
+        self.assertTrue((iron_head.flags or {}).get("contact"))
+        mega_hit = cf._raw_hit(mega, iron_head, target, typechart, roll="avg")
+        plain_hit = cf._raw_hit(no_ability, iron_head, target, typechart, roll="avg")
+        self.assertGreater(plain_hit.frac, 0)
+        self.assertAlmostEqual(mega_hit.frac / plain_hit.frac, 1.3, places=2)
+
+
 class TestSpreadHitRecomputedIfATargetAlreadyFaintedThisTurn(unittest.TestCase):
     """"if Staraptor fainted then Heat Wave would have been single target
     damage rather than spread" -- `hits`/`num_targets_hit` are fixed at

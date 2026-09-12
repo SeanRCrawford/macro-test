@@ -380,7 +380,7 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     return list(all_names), {}
 
 
-def their_side_pool(key_prefix, teams, all_names, team_meta=None):
+def their_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     """Where THEIR six come from. Mirrors our_side_pool.
 
     The Battle Viewer could only face a saved team, so a matchup against six
@@ -395,17 +395,59 @@ def their_side_pool(key_prefix, teams, all_names, team_meta=None):
     enemy mon fell back to mbsmogon.xlsx's usage-default item instead (e.g. a
     real Life-Orb Basculegion silently became a Choice-Scarf one, since that's
     its own usage-default item).
+
+    "Let me use a pokepaste for the battle simulator as well" -- `our_side_pool`
+    already offered "Paste a pokepaste" (Battle Simulator's OWN side already
+    had it), but THEIR side, here, never did -- only "A saved team"/"Pick 6".
+    Mirrors `our_side_pool`'s own pokepaste branch exactly (parse, error on
+    an unrecognised name, offer Save to My Teams), no length check, same as
+    `our_side_pool`'s -- callers that need exactly 6 (or 4) already validate
+    that themselves (see Battle Simulator's own `ready` check).
     """
-    source = st.radio("Their side", ["A saved team", "Pick 6"], index=0,
-                      horizontal=True, key=f"{key_prefix}_foe_source")
+    source = st.radio("Their side", ["A saved team", "Pick 6", "Paste a pokepaste"],
+                      index=0, horizontal=True, key=f"{key_prefix}_foe_source")
     if source == "A saved team":
         if not teams:
             st.warning("No saved teams in data/teams.")
             return [], {}
         pick = st.selectbox("Opponent team", list(teams), key=f"{key_prefix}_foe_saved")
         return list(teams[pick]), dict((team_meta or {}).get(pick, {}).get("sets") or {})
-    return st.multiselect("Their six", all_names, max_selections=6,
-                          key=f"{key_prefix}_foe_manual"), {}
+    if source == "Pick 6":
+        return st.multiselect("Their six", all_names, max_selections=6,
+                              key=f"{key_prefix}_foe_manual"), {}
+    paste = st.text_area(
+        "Paste Showdown export text here (blank line between each Pokemon)",
+        height=200, key=f"{key_prefix}_foe_paste")
+    if not paste.strip():
+        return [], {}
+    from species_data import custom_team_from_export
+    roster, sets = custom_team_from_export(paste, merged or {})
+    unknown = [n for n in roster if n not in (merged or {})]
+    if unknown:
+        st.error(f"Unrecognised species (check spelling against "
+                 f"mbsmogon.xlsx): {unknown}")
+        return [], {}
+    if not roster:
+        st.error("Couldn't parse any Pokemon out of that paste.")
+        return [], {}
+    st.success(f"Parsed: {', '.join(roster)}")
+    with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
+        st.json(sets)
+    save_col, name_col = st.columns([1, 3])
+    team_name = name_col.text_input(
+        "Save as (data/my_teams/<name>.txt)", key=f"{key_prefix}_foe_save_name",
+        label_visibility="collapsed", placeholder="Save as (data/my_teams/<name>.txt)")
+    if save_col.button("Save to My Teams", key=f"{key_prefix}_foe_save_btn"):
+        try:
+            path = _save_pasted_team(paste, team_name or "My Team")
+        except ValueError as e:
+            st.error(str(e))
+        else:
+            st.success(f"Saved to {path.relative_to(species_data.DATA_DIR.parent)} "
+                      f"— pick it from 'A saved team' from now on.")
+            st.cache_data.clear()
+            st.rerun()
+    return list(roster), sets
 
 
 def enemy_side_input(key_prefix, teams, team_meta, all_names, merged,
@@ -3718,6 +3760,9 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
         bring4_rows = bring4_from_deep_dive(core, dive, target_name_lists[0])
         st.markdown("**Best bring-4 (from this deep dive)**")
         st.caption(" / ".join(bring4_rows[0]["bring4"]))
+        mega_cap = _bring4_mega_caption(bring4_rows[0])
+        if mega_cap:
+            st.caption(mega_cap)
         lb = recommended_lead(bring4_rows[0])
         st.caption(f"Lead: {' + '.join(lb['lead'])}  |  "
                   f"Back: {' + '.join(lb['backup'])}")
@@ -3783,6 +3828,13 @@ def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
             st.dataframe(_pair_rows_df(pe["best_bring4_row"]["pair_rows"],
                                        include_total=True),
                         width='stretch', hide_index=True)
+            e_only_losses = st.checkbox(
+                "Only show enemy pairs each pair loses to",
+                key=f"{key_prefix}_{e_idx}_onlyloss")
+            for row in pe["best_bring4_row"]["pair_rows"]:
+                n1, n2 = row["pair"]
+                st.markdown(f"**{n1} + {n2}**")
+                _render_pair_matchup_detail(n1, n2, row["detail"], e_only_losses)
     target_name_lists = [list(teams[n]) for n in shown_vs if n in teams]
     if target_name_lists:
         _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
@@ -4065,8 +4117,20 @@ with tab_counter:
 
                     st.markdown("**Your best bring-4, by its own 6 internal pairs:**")
                     st.caption(" / ".join(bring4_rows[0]["bring4"]))
+                    mega_cap = _bring4_mega_caption(bring4_rows[0])
+                    if mega_cap:
+                        st.caption(mega_cap)
                     st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                                 width='stretch', hide_index=True)
+                    b4_only_losses = st.checkbox(
+                        "Only show enemy pairs each pair loses to",
+                        key="ct_b4_best_onlyloss")
+                    with st.expander(f"Show gameplans (vs {ct_vs_name})"):
+                        for row in bring4_rows[0]["pair_rows"]:
+                            n1, n2 = row["pair"]
+                            st.markdown(f"**{n1} + {n2}**")
+                            _render_pair_matchup_detail(
+                                n1, n2, row["detail"], b4_only_losses)
 
                     st.markdown("**Deep dive a specific bring-4**")
                     pick = st.selectbox(
@@ -4900,16 +4964,31 @@ with tab_counter:
                                         b4_rows.append({
                                             "Enemy team": enemy_name,
                                             "Best bring-4": " / ".join(best["bring4"]),
+                                            "Mega": best.get("mega_used") or "-",
                                             "Worst pair beaten": f"{beaten}/{wr['pairs_total']}",
                                             "Uncovered enemy pairs":
                                                 len(best["uncovered_enemy_pairs"]),
                                             "Pairs good": f"{best['pairs_good']}/"
-                                                         f"{best['pairs_total']}"})
+                                                         f"{best['pairs_total']}",
+                                            "pair_rows": best["pair_rows"]})
                                 st.session_state[f"ct_cov_b4_result_{size}_{i}"] = b4_rows
                             b4_result = st.session_state.get(f"ct_cov_b4_result_{size}_{i}")
                             if b4_result:
-                                st.dataframe(pd.DataFrame(b4_result), width='stretch',
-                                            hide_index=True)
+                                summary_cols = [k for k in b4_result[0] if k != "pair_rows"]
+                                st.dataframe(pd.DataFrame(
+                                    [{k: r[k] for k in summary_cols} for r in b4_result]),
+                                    width='stretch', hide_index=True)
+                                cov_b4_only_losses = st.checkbox(
+                                    "Only show enemy pairs each pair loses to",
+                                    key=f"ct_cov_b4_onlyloss_{size}_{i}")
+                                for r in b4_result:
+                                    with st.expander(
+                                            f"Show gameplans (vs {r['Enemy team']})"):
+                                        for row in r["pair_rows"]:
+                                            n1, n2 = row["pair"]
+                                            st.markdown(f"**{n1} + {n2}**")
+                                            _render_pair_matchup_detail(
+                                                n1, n2, row["detail"], cov_b4_only_losses)
                         if st.button("Send to Bring-4", key=f"ct_cov_send_{size}_{i}"):
                             st.session_state["ct_mode"] = "Bring-4 (one enemy roster)"
                             st.session_state["ct_b4_our"] = _PASTE_OUR_LABEL
@@ -4961,7 +5040,8 @@ with tab_battle:
         our_pool = our_pool or list(all_names)
         our4 = _lead_back_picker("Our bring-4", our_pool, "bv_our_lead", "bv_our_back")
     with b2:
-        their_pool, bv_their_sets = their_side_pool("bv", teams, all_names, team_meta)
+        their_pool, bv_their_sets = their_side_pool("bv", teams, all_names, team_meta,
+                                                    merged=merged)
         # Feeds the scripted-opponent lookup, so it must be a REAL team name
         # or None. A hand-picked six has no script, and inventing a label for
         # it would send a name into all_scripts that means nothing.
@@ -6211,7 +6291,8 @@ with tab_sim:
                 sim_our_mega = NO_MEGA if our_mega_choice == "Neither" else our_mega_choice
         with sc2:
             st.markdown("**Their side**")
-            sim_their6, sim_their_sets = their_side_pool("sim", teams, all_names, team_meta)
+            sim_their6, sim_their_sets = their_side_pool("sim", teams, all_names, team_meta,
+                                                         merged=merged)
             sim_mode = st.radio(
                 "Their bring", ["Their optimal bring", "Step through all 15 leads",
                                 "I choose their bring"],
