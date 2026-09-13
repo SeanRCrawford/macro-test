@@ -46,7 +46,8 @@ def _data_fingerprint():
     to bump the fingerprint, since `load_teams_csv` below is cached on this
     tuple and adding a new file does not change any of the four sheet paths.
     """
-    files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv"]
+    files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv",
+             "default_sets.txt"]
     out = []
     for f in files:
         p = species_data.DATA_DIR / f
@@ -67,7 +68,9 @@ def load_all(fingerprint):
     combatants._TEMPLATE_CACHE.clear()
     merged, unresolved, moves, natures, typechart = build_merged_dataset()
     dups = getattr(build_merged_dataset, "last_duplicates", {}) or {}
-    return merged, unresolved, moves, natures, typechart, dups
+    default_set_issues = getattr(build_merged_dataset, "last_default_set_issues",
+                                 ([], [])) or ([], [])
+    return merged, unresolved, moves, natures, typechart, dups, default_set_issues
 
 
 @st.cache_data
@@ -77,7 +80,9 @@ def load_teams_csv(fingerprint=None, _merged=None):
     return t, meta
 
 
-merged, unresolved, moves, natures, typechart, dups = load_all(_data_fingerprint())
+(merged, unresolved, moves, natures, typechart, dups,
+ default_set_issues) = load_all(_data_fingerprint())
+default_set_incomplete, default_set_unrecognised = default_set_issues
 teams, team_meta = load_teams_csv(_data_fingerprint(), _merged=merged)
 prefs = load_preferences()
 all_names = sorted(merged.keys())
@@ -120,6 +125,15 @@ if hdr2.button("Reload data", help="Re-read mbsmogon.xlsx / roster.csv / teams.c
 if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
+if default_set_incomplete:
+    st.caption(f"Note: data/default_sets.txt has an incomplete set for "
+              f"{', '.join(default_set_incomplete)} (needs item, ability, "
+              f"nature, EVs, AND 4 moves to become that species' new "
+              f"default) -- ignored.")
+if default_set_unrecognised:
+    st.caption(f"Note: data/default_sets.txt names "
+              f"{', '.join(default_set_unrecognised)}, not a species in "
+              f"this dataset -- ignored.")
 
 tab_build, tab_gen, tab_search, tab_counter, tab_battle, tab_vs, tab_sim = st.tabs(
     ["Team Builder", "Generate Team", "Lead / Back Search", "Counter Table",
@@ -1522,6 +1536,55 @@ with tab_build:
                     st.session_state["team_analysis"] = analysis
                     _bump_builder_gen()
                     st.success(f"Loaded {len(pool)} Pokemon from pasted text")
+        with st.expander("Default sets (used when no team-specific set is given)"):
+            st.caption(
+                "\"let me create a 'default set' txt where I paste "
+                "pokepastes for individual pokemon, and for enemies this "
+                "should be the actual sets used by default\" -- one or "
+                "more COMPLETE Showdown exports (item, ability, nature, "
+                "EVs, AND 4 moves all specified), saved to "
+                "data/default_sets.txt. Once saved, that species' set "
+                "becomes THE default everywhere -- both our own side and "
+                "an enemy -- whenever no more specific set is already "
+                "pinned (a real known team, a paste, an explicit "
+                "override), replacing mbsmogon.xlsx's own usage-derived "
+                "pick. A paste missing any of the 5 fields is rejected "
+                "rather than half-applied.")
+            from species_data import (custom_team_from_export, load_default_sets,
+                                      team_to_showdown_export, DEFAULT_SETS_FIELDS)
+            existing_defaults, _incomplete = load_default_sets(merged)
+            if existing_defaults:
+                st.caption("Currently set: " + ", ".join(sorted(existing_defaults)))
+                if st.button("Clear all default sets", key="default_sets_clear"):
+                    (species_data.DATA_DIR / "default_sets.txt").unlink(missing_ok=True)
+                    st.cache_resource.clear(); st.cache_data.clear()
+                    st.rerun()
+            default_sets_paste = st.text_area(
+                "Paste one or more complete Showdown exports",
+                key="default_sets_paste", height=150)
+            if st.button("Save default set(s)", key="default_sets_save"):
+                if not default_sets_paste.strip():
+                    st.warning("Paste at least one Pokemon's full export first.")
+                else:
+                    names, sets = custom_team_from_export(default_sets_paste, merged)
+                    unknown = [n for n in names if n not in merged]
+                    incomplete = [n for n in names if n not in unknown
+                                 and not all(k in sets.get(n, {}) for k in DEFAULT_SETS_FIELDS)]
+                    if unknown:
+                        st.error(f"Unrecognised species: {', '.join(unknown)}")
+                    elif incomplete:
+                        st.error(f"Needs item, ability, nature, EVs, AND 4 "
+                                f"moves all specified: {', '.join(incomplete)}")
+                    else:
+                        merged_defaults = dict(existing_defaults)
+                        merged_defaults.update(sets)
+                        text = team_to_showdown_export(
+                            list(merged_defaults), merged_defaults, merged)
+                        (species_data.DATA_DIR / "default_sets.txt").write_text(
+                            text, encoding="utf-8")
+                        st.cache_resource.clear(); st.cache_data.clear()
+                        st.success(f"Saved default set(s) for {', '.join(names)}")
+                        st.rerun()
         if st.button("Use default 6", width='stretch'):
             st.session_state["team"] = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
                                          "Mega Skarmory", "Gholdengo"]

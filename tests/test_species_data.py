@@ -268,5 +268,99 @@ class TestRegulationMCAdditions(unittest.TestCase):
             self.assertIn(name, pool, name)
 
 
+class TestDefaultSets(unittest.TestCase):
+    """"let me create a 'default set' txt where I paste pokepastes for
+    individual pokemon, and for enemies this should be the actual sets
+    used by default (if no set or EVs specified)" -- data/default_sets.txt,
+    parsed the same way any other pokepaste is, bakes a COMPLETE (all 5
+    fields) override directly into `merged` so it becomes THE default
+    everywhere `merged[name]`'s own usage fields are read, both our own
+    side and an enemy's alike."""
+
+    def setUp(self):
+        import species_data
+        self.species_data = species_data
+        self.path = species_data.DATA_DIR / "default_sets.txt"
+        self._had_file = self.path.exists()
+        self._original = (self.path.read_text(encoding="utf-8")
+                          if self._had_file else None)
+
+    def tearDown(self):
+        if self._had_file:
+            self.path.write_text(self._original, encoding="utf-8")
+        elif self.path.exists():
+            self.path.unlink()
+
+    def _write(self, text):
+        self.path.write_text(text, encoding="utf-8")
+
+    def test_a_complete_set_becomes_the_new_default(self):
+        self._write(
+            "Kingambit @ Chople Berry\nAbility: Supreme Overlord\n"
+            "EVs: 4 HP / 252 Atk / 252 Spe\nAdamant Nature\n"
+            "- Sucker Punch\n- Kowtow Cleave\n- Iron Head\n- Low Kick")
+        merged, _u, _m, _n, _t = self.species_data.build_merged_dataset()
+        rec = merged["Kingambit"]
+        self.assertEqual(rec["items_usage"], [("Chople Berry", 100.0)])
+        self.assertEqual(rec["abilities_usage"], [("Supreme Overlord", 100.0)])
+        self.assertEqual(rec["nature"], "Adamant")
+        self.assertEqual(rec["evs"],
+                         {"hp": 4, "atk": 252, "def": 0, "spa": 0, "spd": 0, "spe": 252})
+        self.assertEqual(rec["moves_usage"],
+                         [("Sucker Punch", 100.0), ("Kowtow Cleave", 100.0),
+                          ("Iron Head", 100.0), ("Low Kick", 100.0)])
+        incomplete, unrecognised = self.species_data.build_merged_dataset.last_default_set_issues
+        self.assertEqual(incomplete, [])
+        self.assertEqual(unrecognised, [])
+
+    def test_an_incomplete_set_is_reported_not_applied(self):
+        """No EVs line -- must be dropped, not half-applied."""
+        self._write(
+            "Kingambit @ Chople Berry\nAbility: Supreme Overlord\n"
+            "Adamant Nature\n- Sucker Punch\n- Kowtow Cleave\n- Iron Head\n- Low Kick")
+        merged, _u, _m, _n, _t = self.species_data.build_merged_dataset()
+        self.assertNotEqual(merged["Kingambit"]["items_usage"], [("Chople Berry", 100.0)])
+        incomplete, _unrecognised = self.species_data.build_merged_dataset.last_default_set_issues
+        self.assertIn("Kingambit", incomplete)
+
+    def test_a_mega_entrys_ability_targets_the_base_species_not_the_mega_row(self):
+        """A paste's own "Ability:" line always means the BASE form's
+        ability -- "Mega Golisopod"'s OWN row must keep its real
+        mega-exclusive Tough Claws, untouched by this, while item/nature/
+        EVs/moves DO apply to the "Mega X" row itself (same row
+        `_build_combatant` reads them from for a Mega pick)."""
+        self._write(
+            "Golisopod @ Golisopite\nAbility: Emergency Exit\n"
+            "EVs: 252 HP / 252 Atk / 4 Spe\nAdamant Nature\n"
+            "- First Impression\n- Liquidation\n- Sucker Punch\n- Spikes")
+        merged, _u, _m, _n, _t = self.species_data.build_merged_dataset()
+        self.assertEqual(merged["Mega Golisopod"]["abilities_usage"],
+                         [("Tough Claws", 100.0)])
+        self.assertEqual(merged["Golisopod"]["abilities_usage"],
+                         [("Emergency Exit", 100.0)])
+        self.assertEqual(merged["Mega Golisopod"]["items_usage"],
+                         [("Golisopite", 100.0)])
+        self.assertEqual(merged["Mega Golisopod"]["nature"], "Adamant")
+
+    def test_an_unrecognised_species_is_reported(self):
+        self._write(
+            "Not A Real Species @ Leftovers\nAbility: Overgrow\n"
+            "EVs: 252 HP\nAdamant Nature\n- Tackle\n- Tackle\n- Tackle\n- Tackle")
+        self.species_data.build_merged_dataset()
+        _incomplete, unrecognised = self.species_data.build_merged_dataset.last_default_set_issues
+        self.assertIn("Not A Real Species", unrecognised)
+
+    def test_missing_file_is_a_no_op(self):
+        if self.path.exists():
+            self.path.unlink()
+        merged, _u, _m, _n, _t = self.species_data.build_merged_dataset()
+        incomplete, unrecognised = self.species_data.build_merged_dataset.last_default_set_issues
+        self.assertEqual(incomplete, [])
+        self.assertEqual(unrecognised, [])
+        # A real recorded default (Kingambit's own usage-derived Defiant)
+        # must still come through untouched.
+        self.assertIn("Defiant", dict(merged["Kingambit"]["abilities_usage"]))
+
+
 if __name__ == "__main__":
     unittest.main()

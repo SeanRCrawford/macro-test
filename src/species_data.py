@@ -424,6 +424,88 @@ def custom_team_from_export(text: str, merged: dict) -> tuple[list, dict]:
     return names, sets
 
 
+DEFAULT_SETS_FIELDS = ("item", "ability", "nature", "evs", "moves")
+
+
+def load_default_sets(merged):
+    """Parses data/default_sets.txt (if it exists) the same way any other
+    pokepaste in this app is parsed (`custom_team_from_export`) into
+    {name: spec}.
+
+    "let me create a 'default set' txt [file] where I paste pokepastes for
+    individual pokemon, and for enemies this should be the actual sets
+    used by default (if no set or EVs specified)" -- WHOLE SET ONLY: a
+    parsed entry must carry all 5 of `DEFAULT_SETS_FIELDS` to qualify as a
+    species' new default (a paste missing even one, e.g. no EVs, isn't a
+    full statement of what that Pokemon runs), so anything short of that
+    is reported back in `incomplete` (a list of names) instead of being
+    silently half-applied.
+
+    Returns ({name: complete_spec}, incomplete_names). `({}, [])` if the
+    file doesn't exist or is empty -- this feature is opt-in and inert
+    until the file has real content."""
+    path = DATA_DIR / "default_sets.txt"
+    if not path.exists():
+        return {}, []
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return {}, []
+    names, raw_sets = custom_team_from_export(text, merged)
+    complete, incomplete = {}, []
+    for name in names:
+        spec = raw_sets.get(name) or {}
+        if all(k in spec for k in DEFAULT_SETS_FIELDS):
+            complete[name] = spec
+        else:
+            incomplete.append(name)
+    return complete, incomplete
+
+
+def apply_default_sets(merged):
+    """Bakes `load_default_sets`'s complete overrides directly into
+    `merged` itself -- "for enemies this should be the actual sets used by
+    default" -- so a species with a custom default becomes THE
+    usage-derived default for every caller reading `merged[name]`'s own
+    item/ability/nature/evs/moves fields, both our own side and an
+    enemy's, with no new plumbing anywhere else (the same
+    single-source-of-truth role `merged` already plays for mbsmogon.xlsx's
+    own usage data).
+
+    ABILITY is the one field that does NOT go on a "Mega X" row directly:
+    a Showdown export's "Ability:" line always means the BASE form's
+    ability (see `resolve_export_fields`'s own comment -- a paste has no
+    way to express a MEGA-EXCLUSIVE ability), and nothing else in this
+    codebase overrides a Mega's own transformed ability either (`_build_
+    combatant`'s `mega_ability` always comes straight from `merged[name][
+    "abilities_usage"]`, unconditionally) -- so this redirects `ability`
+    to the base species' own row instead, leaving "Mega X"'s already-
+    correct mega-exclusive ability (e.g. Mega Golisopod's Tough Claws)
+    alone. Item/nature/EVs/moves apply directly to whichever row `name`
+    resolves to, matching `_build_combatant`'s own convention that a Mega
+    pick's nature/EVs/moveset/stone-item all live on ITS OWN "Mega X" row,
+    never the base species'.
+
+    Returns (incomplete, unrecognised) -- `incomplete` from `load_default_
+    sets` (pasted without a full 5-field set), `unrecognised` any complete
+    entry whose own name still isn't a real Pokemon in this dataset --
+    never raises, since a bad/leftover entry in this file must not break
+    the whole tool from loading."""
+    complete, incomplete = load_default_sets(merged)
+    unrecognised = []
+    for name, spec in complete.items():
+        if name not in merged:
+            unrecognised.append(name)
+            continue
+        merged[name]["items_usage"] = [(spec["item"], 100.0)]
+        merged[name]["nature"] = spec["nature"]
+        merged[name]["evs"] = spec["evs"]
+        merged[name]["moves_usage"] = [(m, 100.0) for m in spec["moves"]]
+        base = base_form_name(name)
+        ability_target = base if (base and base in merged) else name
+        merged[ability_target]["abilities_usage"] = [(spec["ability"], 100.0)]
+    return incomplete, unrecognised
+
+
 def fixed_lead(team_name, meta):
     """The declared lead for a team, or None if it may open any way."""
     return (meta.get(team_name) or {}).get("lead")
@@ -537,6 +619,7 @@ def build_merged_dataset():
     merged["_duplicates"] = duplicates  # surfaced by callers that want to warn
     dup = merged.pop("_duplicates")
     build_merged_dataset.last_duplicates = dup
+    build_merged_dataset.last_default_set_issues = apply_default_sets(merged)
     return merged, unresolved, moves, natures, typechart
 
 
