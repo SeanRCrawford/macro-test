@@ -3630,6 +3630,47 @@ def _bring4_mega_caption(bring4_row):
            f"(VGC: only one Mega per side).")
 
 
+# "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
+# own recorded Choice Scarf usage % must be, AND be that member's single
+# TOP item, before it's worth flagging as a suggestion. A judgment call,
+# not a real rule: high enough that Scarf is clearly the headline set for
+# that member (not a rare tech pick), low enough to still catch a real
+# usage split (e.g. Basculegion's own ~37% Scarf share, its own top item).
+HIGH_SCARF_USAGE_THRESHOLD = 20.0
+
+
+def _known_scarf_enemy(vs_roster, vs_sets):
+    """The first enemy in `vs_roster` whose REAL, KNOWN set (a real pasted
+    team or a saved team's own recorded sets -- `vs_sets`, never mbsmogon.
+    xlsx's usage-derived guess) actually holds a Choice Scarf -- "should
+    use the actual set if it comes from a paste or an existing team (which
+    specifies the items, such as Basculegion has the choice scarf)".
+    `None` if nothing in `vs_sets` says so (an under-specified roster, or
+    one with no Scarf holder at all)."""
+    return next((n for n in vs_roster
+                if (vs_sets.get(n) or {}).get("item") == "Choice Scarf"), None)
+
+
+def _suggested_scarf_enemy(vs_roster, merged, threshold=HIGH_SCARF_USAGE_THRESHOLD):
+    """"otherwise ... give a suggestion if a member(s) has high choice
+    scarf usage" -- among `vs_roster`, whichever member's OWN top-recorded
+    item is Choice Scarf at at least `threshold`% usage (the highest such
+    member if more than one qualifies), or `None` if nobody clears the
+    bar. A suggestion, not an assumption: unlike `_known_scarf_enemy`
+    (a real, known fact), this is a usage-based guess that's still wrong
+    most of the time even at 20%+ usage, so it's surfaced as a caption for
+    the user to act on, never auto-selected."""
+    best = None
+    for n in vs_roster:
+        items = (merged.get(n) or {}).get("items_usage") or []
+        if not items:
+            continue
+        top_item, pct = items[0]
+        if top_item == "Choice Scarf" and pct >= threshold and (best is None or pct > best[1]):
+            best = (n, pct)
+    return best
+
+
 def _mega_evolution_caption(core, dive):
     """"I'm not sure enemy pokemon or my pokemon are mega evolving in
     Counter Table in the streamlit app" -- every turn log always prints a
@@ -4133,22 +4174,43 @@ with tab_counter:
                                     if s.get("item")}
             enemy_move_overrides = {n: s["moves"] for n, s in vs_sets.items()
                                     if s.get("moves")}
+            # A fresh widget (hence a freshly-computed default) whenever the
+            # ENEMY ROSTER ITSELF changes -- `ct_vs_name` alone can't tell
+            # two different pastes apart (both share the same "Paste a
+            # pokepaste" sentinel value), so the key is fingerprinted on
+            # the roster's own contents instead. Sticky within the SAME
+            # roster (a manual pick/un-pick survives an unrelated rerun),
+            # reset only when the roster changes.
+            scarf_key = f"ct_b4_enemy_scarf_{hash(tuple(vs_roster))}"
+            known_scarf_enemy = _known_scarf_enemy(vs_roster, vs_sets)
+            st.session_state.setdefault(scarf_key, known_scarf_enemy or "(none)")
             ct_b4_scarf = st.selectbox(
                 "Enemy Choice Scarf holder", ["(none)"] + vs_roster,
-                key="ct_b4_enemy_scarf",
-                help="\"select an enemy as a choice scarf user (and hence "
-                     "will have 4 attacks)\" -- pins that one enemy's item "
-                     "to Choice Scarf and its moveset to its own top 4 "
+                key=scarf_key,
+                help="\"should use the actual set if it comes from a "
+                     "paste or an existing team\" -- defaults to whichever "
+                     "enemy a real known set already says holds one; "
+                     "otherwise defaults to none. Pins that enemy's item "
+                     "to Choice Scarf and (only if its real moveset isn't "
+                     "already known) its moveset to its own top 4 "
                      "non-status (attacking) moves by usage, since a "
                      "Choice item locks you into the first move used, "
                      "making Protect (or any other status move) a dead "
                      "slot no real Scarf set would carry.")
+            if known_scarf_enemy is None:
+                suggestion = _suggested_scarf_enemy(vs_roster, merged)
+                if suggestion:
+                    st.caption(f"Note: {suggestion[0]} commonly runs Choice "
+                              f"Scarf ({suggestion[1]:.0f}% usage) -- pick "
+                              f"it above if you don't have a more specific "
+                              f"set for it.")
             if ct_b4_scarf != "(none)":
                 enemy_item_overrides = dict(enemy_item_overrides)
                 enemy_item_overrides[ct_b4_scarf] = "Choice Scarf"
-                enemy_move_overrides = dict(enemy_move_overrides)
-                enemy_move_overrides[ct_b4_scarf] = choice_scarf_enemy_moveset(
-                    ct_b4_scarf, merged, moves)
+                if not (vs_sets.get(ct_b4_scarf) or {}).get("moves"):
+                    enemy_move_overrides = dict(enemy_move_overrides)
+                    enemy_move_overrides[ct_b4_scarf] = choice_scarf_enemy_moveset(
+                        ct_b4_scarf, merged, moves)
             if not (3 <= len(our6) <= 6):
                 st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
                            "a pokepaste, or choose a preset above) -- 3 or 4 skips "

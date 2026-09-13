@@ -1724,7 +1724,7 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
 
     def test_dropdown_defaults_to_none_with_the_enemy_roster_as_options(self):
         at = app()
-        sb = [s for s in at.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        sb = [s for s in at.selectbox if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
         self.assertEqual(sb.value, "(none)")
         _vs_name, vs_roster = self._vs_roster(at)
         self.assertEqual(sb.options, ["(none)"] + vs_roster)
@@ -1733,7 +1733,7 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
         at = app()
         _vs_name, vs_roster = self._vs_roster(at)
         scarfed = vs_roster[0]
-        sb = [s for s in at.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        sb = [s for s in at.selectbox if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
         at = sb.set_value(scarfed).run()
         self.assertFalse(at.exception, list(at.exception))
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
@@ -1770,7 +1770,7 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
         baseline = at.session_state["ct_b4_pair_rows"]
 
         at2 = app()
-        sb = [s for s in at2.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        sb = [s for s in at2.selectbox if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
         at2 = sb.set_value("(none)").run()
         at2 = [b for b in at2.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at2.exception, list(at2.exception))
@@ -1778,6 +1778,101 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
         self.assertEqual([r["pairs_total"] for r in baseline],
                          [r["pairs_total"] for r in touched])
         self.assertEqual([r["pair"] for r in baseline], [r["pair"] for r in touched])
+
+
+class TestEnemyChoiceScarfDropdownRealSets(unittest.TestCase):
+    """"The enemy choice scarf holder dropdown should use the actual set if
+    it comes from a paste or an existing team (which specifies the items,
+    such as Basculegion has the choice scarf), otherwise it should default
+    to none, or give a suggestion if a member(s) has high choice scarf
+    usage." -- refines the plain dropdown above: auto-select a REAL known
+    Scarf holder, suggest a high-usage one only when no real holder is
+    known, and never clobber a real known moveset with the derived one."""
+
+    PASTE_WITH_REAL_SCARF = (
+        "Basculegion @ Choice Scarf\nAbility: Adaptability\n"
+        "EVs: 4 HP / 252 Atk / 252 Spe\nJolly Nature\n"
+        "- Last Respects\n- Aqua Jet\n- Wave Crash\n- Flip Turn\n"
+        "\n"
+        "Whimsicott @ Focus Sash\nAbility: Prankster\n"
+        "EVs: 4 HP / 252 SpA / 252 Spe\nTimid Nature\n"
+        "- Tailwind\n- Moonblast\n- Encore\n- Protect")
+
+    PLAIN_SPECIES_LIST = "Basculegion / Whimsicott"
+
+    def _to_paste_mode(self, at):
+        vs = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = vs.set_value("\U0001f4cb Paste a pokepaste").run()
+        return at
+
+    def _paste(self, at, text):
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(text).run()
+        return at
+
+    def _scarf_selectbox(self, at):
+        return [s for s in at.selectbox
+                if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
+
+    def test_a_real_known_scarf_holder_is_auto_selected(self):
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PASTE_WITH_REAL_SCARF)
+        self.assertFalse(at.exception, list(at.exception))
+        sb = self._scarf_selectbox(at)
+        self.assertEqual(sb.value, "Basculegion")
+
+    def test_a_real_known_moveset_is_never_overwritten_by_the_derived_one(self):
+        """Basculegion's real recorded 4th move here is Flip Turn (not the
+        Protect its real set actually would carry, and not whatever
+        `choice_scarf_enemy_moveset` would derive) -- if the derived
+        moveset silently replaced the real one, Flip Turn would never show
+        up in any race log for Basculegion's role."""
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PASTE_WITH_REAL_SCARF)
+        self.assertFalse(at.exception, list(at.exception))
+        sb = self._scarf_selectbox(at)
+        self.assertEqual(sb.value, "Basculegion")
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        self.assertTrue(pair_rows)
+        seen_flip_turn = False
+        for row in pair_rows:
+            for (e1, e2), d in row["detail"].items():
+                scarfed_role = ("E1" if e1 == "Basculegion" else
+                               "E2" if e2 == "Basculegion" else None)
+                if scarfed_role is None:
+                    continue
+                for turn_hits in d["log"]:
+                    for role, _tgt, h in turn_hits:
+                        if role == scarfed_role and h.move_name == "Flip Turn":
+                            seen_flip_turn = True
+        self.assertTrue(seen_flip_turn, "Basculegion's real moveset (with "
+                        "Flip Turn) was never observed -- looks like it "
+                        "got overwritten by the derived usage-based one")
+
+    def test_no_suggestion_when_a_known_scarf_holder_already_exists(self):
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PASTE_WITH_REAL_SCARF)
+        self.assertFalse(at.exception, list(at.exception))
+        captions = [c.value for c in at.caption]
+        self.assertFalse(any("commonly runs Choice Scarf" in c for c in captions))
+
+    def test_a_suggestion_is_shown_when_no_known_set_but_high_scarf_usage(self):
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PLAIN_SPECIES_LIST)
+        self.assertFalse(at.exception, list(at.exception))
+        sb = self._scarf_selectbox(at)
+        self.assertEqual(sb.value, "(none)")
+        captions = [c.value for c in at.caption]
+        matches = [c for c in captions
+                  if "Basculegion" in c and "commonly runs Choice Scarf" in c]
+        self.assertTrue(matches, f"expected a Basculegion Choice Scarf "
+                        f"suggestion caption, got: {captions}")
 
 
 if __name__ == "__main__":
