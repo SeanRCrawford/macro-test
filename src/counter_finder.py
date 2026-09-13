@@ -1418,6 +1418,26 @@ def _move_infos(name, merged, moves_db, move_names):
     return [mi for mi, _pct in build_moveset(merged[name], moves_db, only_moves=move_names)]
 
 
+def choice_scarf_enemy_moveset(name, merged, moves_db, top_k=4):
+    """"select an enemy as a choice scarf user (and hence will have 4
+    attacks)" -- the moveset a NAMED ENEMY would actually run if pinned to
+    Choice Scarf: its own top-`top_k` usage-ranked moves, but with
+    Protect/any other Status move dropped first. A Choice item locks you
+    into the first move used, so a status move is a dead, wasted slot no
+    real Scarf set would carry -- `optimize_sets.best_moveset` already
+    enforces exactly this for OUR OWN side's real Choice-item search (see
+    its own "Choice locks you into the first move used" comment); this is
+    the same rule applied directly to a named ENEMY, without paying for a
+    full `best_moveset` search on their side (an enemy's moveset is always
+    a usage-derived top-K pick elsewhere in this module, never searched).
+
+    Returns a plain move-NAME list (`enemy_move_overrides`'s own shape),
+    or fewer than `top_k` names if `name`'s own recorded usage doesn't
+    carry that many non-Status moves."""
+    all_moves = build_moveset(merged[name], moves_db, top_k=len(merged[name]["moves_usage"]))
+    return [mi.name for mi, _pct in all_moves if mi.category != "Status"][:top_k]
+
+
 def _lookup_move(name, moves_db):
     """A single MoveInfo by name, even one not in anyone's usage table (e.g. a
     partner's chip move the user names by hand)."""
