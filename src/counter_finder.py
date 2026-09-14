@@ -2941,6 +2941,15 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
     higher-power recoil move never beats an equally kill-securing
     recoil-free one purely because it does more (moot, once both already
     guarantee the kill) overkill damage.
+
+    DRAIN IS THE VERY LAST TIE-BREAK, after raw damage: "between two moves
+    that deal the same damage, a healing move should be preferred" (Leech
+    Life heals 50% of the damage it deals). Placed after `got.frac`/the
+    spread total in the key, so it only ever decides between candidates
+    that ALREADY tie on every earlier criterion INCLUDING exact damage
+    output -- never a reason to pick a weaker draining move over a
+    stronger non-draining one, only to prefer the free HP back when the
+    damage itself is otherwise a wash.
     """
     if not live_targets:
         return {}, None
@@ -3090,6 +3099,11 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         atk_max = attacker.max_hp()
         return (dmg * num / den) / atk_max if atk_max else 0.0
 
+    def _drain_bonus(mv):
+        """1 for a draining move (Leech Life, Giga Drain, ...), else 0 --
+        see the DRAIN tie-break in this function's own docstring."""
+        return 1 if mv.drain else 0
+
     best_key, best_hits, best_move = None, {}, None
     for mv, role, got in single_candidates:
         bar = remaining(role)
@@ -3098,7 +3112,8 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                                  (got.frac + best_frac_by_role[role]) >= bar) else 0
         priority_if_kos_now = mv.priority if kos_now_count else 0
         key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
-              -_requires_recharge(mv), -_self_cost(mv, {role: got}), got.frac)
+              -_requires_recharge(mv), -_self_cost(mv, {role: got}), got.frac,
+              _drain_bonus(mv))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, {role: got}, mv
     for mv, hits in spread_candidates:
@@ -3110,7 +3125,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
         priority_if_kos_now = mv.priority if kos_now_count else 0
         key = (kos_now_count, kos_in_two_count, priority_if_kos_now,
               -_requires_recharge(mv), -_self_cost(mv, hits),
-              sum(h.frac for h in hits.values()))
+              sum(h.frac for h in hits.values()), _drain_bonus(mv))
         if best_key is None or key > best_key:
             best_key, best_hits, best_move = key, hits, mv
     return best_hits, best_move

@@ -6379,6 +6379,68 @@ class TestDrainHealingInTheJointRace(unittest.TestCase):
         self.assertEqual(new_hp["C"], 0.5)
 
 
+class TestChooseActionPrefersDrainOnATiedDamageMove(unittest.TestCase):
+    """"Leech Life is a bug move that heals 50% of the damage inflicted.
+    Between two moves that deal the same damage, a healing move should be
+    preferred" -- `_choose_action`'s own ranking key ended at raw damage
+    (`got.frac`), with nothing to prefer the free HP back once two
+    candidates already tie on it."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_the_draining_twin_of_an_identical_move_is_preferred(self):
+        """A synthetic drain-clone of Iron Head (same power/type/category,
+        `drain` the only difference) isolates the tie-break cleanly --
+        real dex moves rarely deal EXACTLY equal damage, so this is the
+        only way to test "same damage" without also changing something
+        else the ranking already cares about."""
+        import dataclasses
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures)
+        target = cf._build("Skarmory", merged, natures)
+        iron_head = cf._lookup_move("Iron Head", moves)
+        drain_twin = dataclasses.replace(
+            iron_head, name="Iron Head (drain twin)", drain=[1, 2])
+        hits_ih, _mv = cf._choose_action(
+            attacker, [iron_head], {"E": target}, typechart)
+        hits_dt, _mv2 = cf._choose_action(
+            attacker, [drain_twin], {"E": target}, typechart)
+        self.assertAlmostEqual(
+            hits_ih["E"].frac, hits_dt["E"].frac, places=9,
+            msg="fixture must deal identical damage for this to be a real "
+                "tie, not a difference in power")
+        self.assertLess(hits_ih["E"].frac, 1.0, "fixture must not KO -- a "
+                        "real tie needs kos_now_count to stay tied at 0 too")
+        hits, chosen = cf._choose_action(
+            attacker, [iron_head, drain_twin], {"E": target}, typechart)
+        self.assertEqual(chosen.name, "Iron Head (drain twin)")
+
+    def test_a_stronger_non_draining_move_still_wins(self):
+        """Drain is a late tie-break, not a blanket preference -- a move
+        that deals strictly MORE damage still wins even against a
+        draining alternative (Leech Life is resisted by Skarmory's Steel
+        typing, so Iron Head hits harder here despite not draining)."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        attacker = cf._build("Kingambit", merged, natures)
+        target = cf._build("Skarmory", merged, natures)
+        iron_head = cf._lookup_move("Iron Head", moves)
+        leech_life = cf._lookup_move("Leech Life", moves)
+        self.assertEqual(leech_life.drain, [1, 2])
+        hits_ih, _mv = cf._choose_action(
+            attacker, [iron_head], {"E": target}, typechart)
+        hits_ll, _mv2 = cf._choose_action(
+            attacker, [leech_life], {"E": target}, typechart)
+        self.assertGreater(hits_ih["E"].frac, hits_ll["E"].frac,
+                           "fixture must have Iron Head strictly outdamage "
+                           "Leech Life for this to test a real tradeoff")
+        hits, chosen = cf._choose_action(
+            attacker, [iron_head, leech_life], {"E": target}, typechart)
+        self.assertEqual(chosen.name, "Iron Head")
+
+
 class TestMegaGolisopodToughClaws(unittest.TestCase):
     """"Have you included Mega Golisopod's Tough Claws ability" --
     mbsmogon.xlsx's own "Mega Golisopod" row already records Tough Claws
