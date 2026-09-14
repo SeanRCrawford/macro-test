@@ -3630,6 +3630,64 @@ def _bring4_mega_caption(bring4_row):
            f"(VGC: only one Mega per side).")
 
 
+def _win_conditions_df(bring4_row):
+    """"I want to be able to identify win conditions -- perhaps Metagross
+    + Hydreigon is the only pair that beats Golisopod, or Hydreigon is
+    the only pokemon that beats Golisopod. I need to see what pokemon I
+    need to preserve to guarantee a win against certain pokemon in an
+    endgame." -- one row per enemy this bring-4 was raced against, reading
+    `bring4_win_conditions` (already computed, no new racing) into a plain
+    "what do I need alive" table. One safe MEMBER (regardless of partner)
+    is reported ahead of a specific safe PAIR, since it's the more useful,
+    less fragile answer when both are available; a genuinely uncovered
+    enemy (no pair beats every one of its pairings) is called out
+    directly rather than left blank.
+
+    "avoiding enemy tailwind and trick room may be key for a matchup
+    swinging from a win to a clear loss" -- a "Caveats" column reads
+    `tailwind_risk`/`protect_risk` (Tailwind and a turn-1 Protect scout
+    are always real, replayed hypotheses this module races) and `trick_
+    room_risk` (only present when the underlying search opted into
+    `check_trick_room` -- an extra-cost replay, not run by default) so a
+    win condition that LOOKS solid but actually flips against any of them
+    doesn't read as a plain, unconditional guarantee."""
+    from counter_finder import bring4_win_conditions
+    wc = bring4_win_conditions(bring4_row)
+    rows = []
+    for enemy in sorted(wc):
+        info = wc[enemy]
+        if info["uncovered"]:
+            preserve = "⚠️ none -- no pair here beats it every way it could show up"
+        elif info["safe_members"]:
+            preserve = " or ".join(info["safe_members"]) + " (any partner)"
+        else:
+            preserve = " or ".join(f"{n1} + {n2}" for n1, n2 in info["safe_pairs"])
+        caveats = []
+        if info["tailwind_risk"]:
+            caveats.append("breaks if enemy sets Tailwind")
+        if info["protect_risk"]:
+            caveats.append("Protect-timed 50/50")
+        if info["trick_room_risk"]:
+            caveats.append("breaks if enemy sets Trick Room")
+        rows.append({"Enemy": enemy, "Preserve": preserve,
+                    "Caveats": "; ".join(caveats)})
+    return pd.DataFrame(rows)
+
+
+def _render_win_conditions(bring4_row):
+    """Renders `_win_conditions_df` under a labelled section, skipped
+    entirely when the bring-4 was never actually raced against anything
+    (nothing to report)."""
+    df = _win_conditions_df(bring4_row)
+    if df.empty:
+        return
+    st.markdown("**Win conditions** -- what to preserve for a guaranteed answer")
+    st.caption("Per enemy: the bring-4 member(s) that beat EVERY way that "
+              "enemy could be paired with a teammate -- what you actually "
+              "need alive in an endgame to still guarantee beating it.")
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
 # "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
 # own recorded Choice Scarf usage % must be, AND be that member's single
 # TOP item, before it's worth flagging as a suggestion. A judgment call,
@@ -3822,6 +3880,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
              "already done for the enemy's Mega-evolve choice. Real cost: "
              "roughly squares the per-turn search on top of the engine's "
              "own 2-turn lookahead.")
+    check_trick_room = st.checkbox(
+        "Also check enemy Trick Room", key=f"{key_prefix}_check_tr",
+        help="\"avoiding enemy tailwind and trick room may be key for a "
+             "matchup swinging from a win to a clear loss\" -- opt-in "
+             "(real extra cost, a whole second replay per enemy pair): "
+             "when a named enemy really runs Trick Room, also test it "
+             "actually casting it turn 1 and see if that flips the "
+             "outcome, feeding the Win conditions table's own Trick Room "
+             "caveat below. Off leaves every result exactly as before.")
     if st.button(f"Deep dive: {' / '.join(core)}", key=f"{key_prefix}_go"):
         with st.spinner("Racing every pair against every named enemy..."):
             try:
@@ -3833,7 +3900,8 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                     ability_overrides=ability_overrides,
                     enemy_item_overrides=enemy_item_overrides,
-                    enemy_move_overrides=enemy_move_overrides)
+                    enemy_move_overrides=enemy_move_overrides,
+                    check_trick_room=check_trick_room)
             except ValueError as e:
                 st.error(str(e))
                 dive = None
@@ -3874,6 +3942,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     hide_index=True)
         st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                     width='stretch', hide_index=True)
+        _render_win_conditions(bring4_rows[0])
         st.markdown("**Deep dive: just the winning bring-4's own pairs**")
         st.caption("\"When all pairs are deep dived and the best bring4 is "
                   "found, then have a section which only shows the deep "
@@ -3887,6 +3956,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                              f"{row['pairs_total']} beaten"):
                 _render_pair_matchup_detail(n1, n2, row["detail"], only_losses)
         st.markdown("**Every pair in the core**")
+    elif len(target_name_lists) == 1:
+        # `core` is already AT the bring size (a "deep dive a specific
+        # bring-4" call, not the "all of Our 6" case above) -- its own
+        # C(len(core),2) pairs already ARE the bring's own pairs, no
+        # narrowing-down step needed first.
+        core_bring4_row = {"bring4": tuple(core), "pair_rows": [
+            {"pair": pair_key, "detail": pair["per_enemy"][0]["detail"]}
+            for pair_key, pair in dive["per_pair"].items()]}
+        _render_win_conditions(core_bring4_row)
     for (n1, n2), pair in dive["per_pair"].items():
         pt = pair["total"]
         with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"
@@ -4220,6 +4298,16 @@ with tab_counter:
                 st.warning("Provide an enemy roster (pick a saved team, or paste a "
                            "valid pokepaste) first.")
             else:
+                ct_check_tr = st.checkbox(
+                    "Also check enemy Trick Room", key="ct_b4_check_tr",
+                    help="\"avoiding enemy tailwind and trick room may be "
+                         "key for a matchup swinging from a win to a clear "
+                         "loss\" -- opt-in (real extra cost, a whole second "
+                         "replay per enemy pair): when a named enemy really "
+                         "runs Trick Room, also test it actually casting it "
+                         "turn 1 and see if that flips the outcome, feeding "
+                         "the Win conditions table's own Trick Room caveat "
+                         "below. Off leaves every result exactly as before.")
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
@@ -4233,7 +4321,8 @@ with tab_counter:
                                 nature_overrides=nature_overrides,
                                 ability_overrides=ability_overrides,
                                 enemy_item_overrides=enemy_item_overrides,
-                                enemy_move_overrides=enemy_move_overrides)
+                                enemy_move_overrides=enemy_move_overrides,
+                                check_trick_room=ct_check_tr)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -4263,6 +4352,7 @@ with tab_counter:
                         st.caption(mega_cap)
                     st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                                 width='stretch', hide_index=True)
+                    _render_win_conditions(bring4_rows[0])
                     b4_only_losses = st.checkbox(
                         "Only show enemy pairs each pair loses to",
                         key="ct_b4_best_onlyloss")

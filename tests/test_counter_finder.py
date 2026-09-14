@@ -1359,6 +1359,165 @@ class TestTailwindAsARealThreat(unittest.TestCase):
         self.assertEqual(d["outcome"], d["outcome_without_tailwind"])
 
 
+class TestEnemyTailwindAppliesTheRealSpeedBoostFromTurn2(unittest.TestCase):
+    """"avoiding enemy tailwind ... may be key for a matchup swinging from
+    a win to a clear loss" -- while wiring up a `tailwind_risk` caveat for
+    `bring4_win_conditions`, a real bug surfaced here: `_pair_vs_targets`'s
+    enemy-Tailwind replay (`tailwind_setter_roles`, above) forced the real
+    setter to spend turn 1 casting it, but never actually passed `enemy_
+    speed_mult=2.0` into the replay's own `_joint_race` call the way the
+    OWN-tailwind mirror already did (`own_tailwind_setter_roles` below,
+    `own_speed_mult=2.0`) -- so the enemy paid the real cost of casting
+    Tailwind (a wasted turn 1) but never actually GOT any faster from turn
+    2 onward, silently understating the real threat this whole feature
+    exists to model (`_joint_race`'s own docstring: "Whichever of
+    `enemy_speed_mult`/`own_speed_mult` belongs to THAT role's side ... is
+    only applied from turn 2 onward" -- a promise the enemy branch simply
+    didn't keep).
+
+    Fixture: hand-tuned speeds (`Combatant.stats["spe"]` set directly, the
+    real stats are irrelevant here) so ONLY the turn-2+ speed change --
+    not the turn-1 opportunity cost `TestTailwindAsARealThreat` already
+    covers -- can flip the outcome: Kingambit (E2, the real attacker) is
+    slower than Incineroar (C) normally (60 < 100) but faster once
+    doubled (120 > 100), while Corviknight (P, 200) and Whimsicott (E1,
+    the setter, 300) stay unaffected either way. Single pinned moves
+    (Flare Blitz/Iron Head/Moonblast/Iron Head) so raw speed order alone
+    decides who acts, matching `TestTailwindAsARealThreat`'s own reasoning
+    for pinning movesets."""
+
+    def test_the_enemy_actually_gets_faster_once_tailwind_is_up(self):
+        W = world()
+        merged, moves, natures = W["merged"], W["moves"], W["natures"]
+        typechart = W["typechart"]
+        our_built = cf._build_forms(["Incineroar", "Corviknight"], merged, natures, moves)
+        enemy_built = cf._build_forms(["Whimsicott", "Kingambit"], merged, natures, moves)
+        for d, spe in ((our_built["Incineroar"], 100), (our_built["Corviknight"], 200),
+                      (enemy_built["Whimsicott"], 300), (enemy_built["Kingambit"], 60)):
+            d["base"].stats["spe"] = spe
+            d["mega"].stats["spe"] = spe
+        our_built["Incineroar"]["moves"] = cf._move_infos(
+            "Incineroar", merged, moves, ["Flare Blitz"])
+        our_built["Corviknight"]["moves"] = cf._move_infos(
+            "Corviknight", merged, moves, ["Iron Head"])
+        enemy_built["Whimsicott"]["moves"] = cf._move_infos(
+            "Whimsicott", merged, moves, ["Moonblast"])
+        enemy_built["Kingambit"]["moves"] = cf._move_infos(
+            "Kingambit", merged, moves, ["Iron Head"])
+        detail, _summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", our_built, ["Whimsicott", "Kingambit"],
+            enemy_built, typechart, turns=3, merged=merged)
+        d = detail[("Whimsicott", "Kingambit")]
+        self.assertTrue(d["tailwind_is_real_threat"])
+        # The REAL bug this regression guards: before the fix, `tailwind_
+        # safe` read True here -- Kingambit's own real, post-boost speed
+        # advantage over Incineroar (C) was silently never modeled, so the
+        # replay only ever priced in the setter's wasted turn 1, which (on
+        # this fixture) made things look BETTER for us, not worse.
+        self.assertFalse(d["tailwind_safe"],
+                         "Kingambit outspeeding Incineroar (60*2=120 > 100) "
+                         "from turn 2 onward must make this pairing "
+                         "genuinely less safe under Tailwind, not more")
+
+
+class TestTrickRoomAsAnOptionalThreat(unittest.TestCase):
+    """"avoiding enemy tailwind and trick room may be key for a matchup
+    swinging from a win to a clear loss" -- `check_trick_room` (opt-in,
+    OFF by default -- a genuinely new engine cost, asked for explicitly
+    "as an option," not a default-on one every search now pays): the
+    enemy-side, pessimistic mirror of the Tailwind replay above, using
+    the SAME real-setter-casts-it-turn-1 mechanic, just inverting the
+    WHOLE field's speed comparison (`_apply_plan`'s own `trick_room` flag)
+    instead of a per-side magnitude multiplier."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _built(self, our_names, enemy_names, speeds, our_moves, enemy_moves):
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        our_built = cf._build_forms(our_names, merged, natures, moves)
+        enemy_built = cf._build_forms(enemy_names, merged, natures, moves)
+        for name, spe in speeds.items():
+            d = our_built.get(name) or enemy_built[name]
+            d["base"].stats["spe"] = spe
+            d["mega"].stats["spe"] = spe
+        for name, mv in our_moves.items():
+            our_built[name]["moves"] = cf._move_infos(name, merged, moves, [mv])
+        for name, mv in enemy_moves.items():
+            enemy_built[name]["moves"] = cf._move_infos(name, merged, moves, [mv])
+        return our_built, enemy_built
+
+    def test_off_by_default_no_trick_room_fields_at_all(self):
+        our_built, enemy_built = self._built(
+            ["Incineroar", "Corviknight"], ["Hatterene", "Kingambit"],
+            {"Incineroar": 200, "Corviknight": 200, "Hatterene": 300, "Kingambit": 50},
+            {"Incineroar": "Flare Blitz", "Corviknight": "Iron Head"},
+            {"Hatterene": "Dazzling Gleam", "Kingambit": "Iron Head"})
+        detail, _summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", our_built, ["Hatterene", "Kingambit"],
+            enemy_built, self.W["typechart"], turns=3, merged=self.W["merged"])
+        d = detail[("Hatterene", "Kingambit")]
+        for key in ("trick_room_is_real_threat", "trick_room_forced",
+                   "trick_room_outcome", "trick_room_safe"):
+            self.assertNotIn(key, d)
+
+    def test_a_real_setter_makes_the_enemy_genuinely_faster_from_turn_2(self):
+        """Kingambit (50 speed, normally the LAST to act against our 200s)
+        outspeeds Incineroar/Corviknight once Trick Room flips the whole
+        field's order from turn 2 onward -- the same "real cost paid, real
+        benefit gained" shape `TestTailwindAsARealThreat` established,
+        mirrored for the opposite (slow-goes-first) direction."""
+        our_built, enemy_built = self._built(
+            ["Incineroar", "Corviknight"], ["Hatterene", "Kingambit"],
+            {"Incineroar": 200, "Corviknight": 200, "Hatterene": 300, "Kingambit": 50},
+            {"Incineroar": "Flare Blitz", "Corviknight": "Iron Head"},
+            {"Hatterene": "Dazzling Gleam", "Kingambit": "Iron Head"})
+        detail, _summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", our_built, ["Hatterene", "Kingambit"],
+            enemy_built, self.W["typechart"], turns=3, merged=self.W["merged"],
+            check_trick_room=True)
+        d = detail[("Hatterene", "Kingambit")]
+        self.assertTrue(d["trick_room_is_real_threat"])
+        self.assertFalse(d["trick_room_safe"],
+                         "Kingambit going from last-to-act to first-to-act "
+                         "under Trick Room must make this pairing genuinely "
+                         "less safe, not more")
+
+    def test_no_promotion_when_no_enemy_in_the_pair_knows_trick_room(self):
+        our_built, enemy_built = self._built(
+            ["Incineroar", "Corviknight"], ["Kingambit", "Sylveon"],
+            {"Incineroar": 200, "Corviknight": 200, "Kingambit": 50, "Sylveon": 120},
+            {"Incineroar": "Flare Blitz", "Corviknight": "Iron Head"}, {})
+        detail, _summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", our_built, ["Kingambit", "Sylveon"],
+            enemy_built, self.W["typechart"], turns=3, merged=self.W["merged"],
+            check_trick_room=True)
+        d = detail[("Kingambit", "Sylveon")]
+        self.assertFalse(d["trick_room_is_real_threat"])
+        self.assertFalse(d["trick_room_forced"])
+        self.assertIsNone(d["trick_room_outcome"])
+        self.assertTrue(d["trick_room_safe"])
+
+    def test_never_makes_a_pair_look_better_than_its_tailwind_adjusted_baseline(self):
+        """Trick Room is chained AFTER both Tailwind checks (see docstring)
+        -- it can only ever match or WORSEN `chosen_outcome`, never improve
+        it, the same one-directional guarantee `tailwind_forced`/`own_
+        tailwind_used` each give in their own (opposite) direction."""
+        our_built, enemy_built = self._built(
+            ["Incineroar", "Corviknight"], ["Hatterene", "Kingambit"],
+            {"Incineroar": 200, "Corviknight": 200, "Hatterene": 300, "Kingambit": 50},
+            {"Incineroar": "Flare Blitz", "Corviknight": "Iron Head"},
+            {"Hatterene": "Dazzling Gleam", "Kingambit": "Iron Head"})
+        detail, _summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", our_built, ["Hatterene", "Kingambit"],
+            enemy_built, self.W["typechart"], turns=3, merged=self.W["merged"],
+            check_trick_room=True)
+        d = detail[("Hatterene", "Kingambit")]
+        self.assertGreaterEqual(cf._JOINT_OUTCOME_RANK[d["outcome"]],
+                                cf._JOINT_OUTCOME_RANK[d["outcome_without_tailwind"]])
+
+
 class TestOwnTailwindAsAMatchingAnswer(unittest.TestCase):
     """"I think it's important to be able to withstand tailwind versus
     opponents with Tailwind (or match with your own)" -- the mirror image
@@ -3525,6 +3684,234 @@ class TestRecommendedLead(unittest.TestCase):
             self.assertEqual(len(result["lead"]), 2)
             self.assertEqual(set(result["lead"]) | set(result["backup"]),
                              set(b["bring4"]))
+
+
+class TestBring4WinConditions(unittest.TestCase):
+    """`bring4_win_conditions` -- "I want to be able to identify win
+    conditions -- perhaps Metagross + Hydreigon is the only pair that
+    beats Golisopod, or Hydreigon is the only pokemon that beats
+    Golisopod. I need to see what pokemon I need to preserve to guarantee
+    a win against certain pokemon in an endgame." Hand-built `detail`
+    fixtures (no real racing) for precise control over which of a bring-
+    4's own 6 pairs beat which enemy pairings."""
+
+    BRING4 = ("A", "B", "C", "D")
+    WIN, LOSS = {"outcome": "sweep"}, {"outcome": "loss"}
+
+    def _row(self, pair, outcomes):
+        """`outcomes`: {(e1, e2): "win"|"loss"|<already-built detail dict>,
+        ...} -> a pair_rows entry. A plain "win"/"loss" string is the
+        common case (tailwind_safe/protect_safe implicitly True, same as
+        the `.get(..., True)` default `bring4_win_conditions` itself
+        falls back to); pass an explicit dict (e.g. via `self._win(...)`)
+        when a test needs to control those too."""
+        def entry(v):
+            if isinstance(v, dict):
+                return v
+            return self.WIN if v == "win" else self.LOSS
+        return {"pair": pair, "detail": {k: entry(v) for k, v in outcomes.items()}}
+
+    def _win(self, tailwind_safe=True, protect_safe=True, trick_room_safe=True):
+        return {"outcome": "sweep", "tailwind_safe": tailwind_safe,
+               "protect_safe": protect_safe, "trick_room_safe": trick_room_safe}
+
+    def test_exactly_one_pair_needs_both_members_preserved(self):
+        """"Metagross + Hydreigon is the only pair that beats Golisopod"
+        -- only A+B beats EVERY pairing of X (XY and XZ); every other
+        pair loses at least one of them."""
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): "win", ("X", "Z"): "win"}),
+            self._row(("A", "C"), {("X", "Y"): "win", ("X", "Z"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss", ("X", "Z"): "win"}),
+            self._row(("B", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "win", ("X", "Z"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss", ("X", "Z"): "win"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(wc["X"]["safe_pairs"], [("A", "B")])
+        self.assertEqual(wc["X"]["safe_members"], [])
+        self.assertFalse(wc["X"]["uncovered"])
+
+    def test_a_single_member_safe_regardless_of_partner(self):
+        """"Hydreigon is the only pokemon that beats Golisopod" -- A's OWN
+        pairing with every other bring-4 member (B, C, D alike) beats
+        every pairing of X, so A alone (survived, any partner) already
+        guarantees it."""
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): "win", ("X", "Z"): "win"}),
+            self._row(("A", "C"), {("X", "Y"): "win", ("X", "Z"): "win"}),
+            self._row(("A", "D"), {("X", "Y"): "win", ("X", "Z"): "win"}),
+            self._row(("B", "C"), {("X", "Y"): "loss", ("X", "Z"): "win"}),
+            self._row(("B", "D"), {("X", "Y"): "win", ("X", "Z"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(set(wc["X"]["safe_pairs"]),
+                         {("A", "B"), ("A", "C"), ("A", "D")})
+        self.assertEqual(wc["X"]["safe_members"], ["A"])
+        self.assertFalse(wc["X"]["uncovered"])
+
+    def test_no_pair_beats_every_pairing_is_flagged_uncovered(self):
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): "win", ("X", "Z"): "loss"}),
+            self._row(("A", "C"), {("X", "Y"): "loss", ("X", "Z"): "win"}),
+            self._row(("A", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "win", ("X", "Z"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss", ("X", "Z"): "win"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(wc["X"]["safe_pairs"], [])
+        self.assertEqual(wc["X"]["safe_members"], [])
+        self.assertTrue(wc["X"]["uncovered"])
+
+    def test_two_disjoint_safe_pairs_with_no_common_member(self):
+        """A+B and C+D both independently answer X, but no SINGLE member
+        does regardless of partner (A's own OTHER pairings, A+C/A+D,
+        aren't both safe) -- `safe_pairs` lists both real options,
+        `safe_members` stays empty since neither is safe alone."""
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): "win", ("X", "Z"): "win"}),
+            self._row(("A", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "win", ("X", "Z"): "win"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(set(wc["X"]["safe_pairs"]), {("A", "B"), ("C", "D")})
+        self.assertEqual(wc["X"]["safe_members"], [])
+        self.assertFalse(wc["X"]["uncovered"])
+
+    def test_every_enemy_appearing_in_the_detail_gets_an_entry(self):
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): "win"}),
+            self._row(("A", "C"), {("X", "Y"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(set(wc), {"X", "Y"})
+
+    def test_tailwind_risk_flagged_when_every_safe_pair_fails_it(self):
+        """"avoiding enemy tailwind ... may be key for a matchup swinging
+        from a win to a clear loss" -- A+B is the only pair that beats
+        every pairing of X, but it isn't `tailwind_safe` against XZ, so
+        the win condition itself is fragile to a real Tailwind cast."""
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): self._win(),
+                                   ("X", "Z"): self._win(tailwind_safe=False)}),
+            self._row(("A", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(wc["X"]["safe_pairs"], [("A", "B")])
+        self.assertTrue(wc["X"]["tailwind_risk"])
+        self.assertFalse(wc["X"]["protect_risk"])
+
+    def test_protect_risk_flagged_when_every_safe_pair_fails_it(self):
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): self._win(protect_safe=False)}),
+            self._row(("A", "C"), {("X", "Y"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(wc["X"]["safe_pairs"], [("A", "B")])
+        self.assertFalse(wc["X"]["tailwind_risk"])
+        self.assertTrue(wc["X"]["protect_risk"])
+
+    def test_trick_room_risk_flagged_when_every_safe_pair_fails_it(self):
+        """"avoiding enemy tailwind and trick room may be key for a
+        matchup swinging from a win to a clear loss" -- reads `trick_
+        room_safe` the exact same way as `tailwind_safe`/`protect_safe`
+        (only ever present in `detail` when the underlying search opted
+        into `check_trick_room`; `.get(..., True)` elsewhere)."""
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): self._win(trick_room_safe=False)}),
+            self._row(("A", "C"), {("X", "Y"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(wc["X"]["safe_pairs"], [("A", "B")])
+        self.assertFalse(wc["X"]["tailwind_risk"])
+        self.assertFalse(wc["X"]["protect_risk"])
+        self.assertTrue(wc["X"]["trick_room_risk"])
+
+    def test_no_risk_flagged_when_an_alternative_safe_pair_stays_robust(self):
+        """A+B is fragile to Tailwind, but C+D ALSO independently beats
+        every pairing of X and stays tailwind-safe -- the win condition
+        as a whole ("preserve at least one of these") isn't actually at
+        risk, since C+D covers it."""
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): self._win(),
+                                   ("X", "Z"): self._win(tailwind_safe=False)}),
+            self._row(("A", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "loss", ("X", "Z"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): self._win(), ("X", "Z"): self._win()}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertEqual(set(wc["X"]["safe_pairs"]), {("A", "B"), ("C", "D")})
+        self.assertFalse(wc["X"]["tailwind_risk"])
+
+    def test_no_risk_flagged_when_there_is_no_win_condition_at_all(self):
+        """`tailwind_risk`/`protect_risk` describe how fragile an EXISTING
+        win condition is -- they must not fire on top of `uncovered`,
+        which already says there's no guaranteed answer to begin with."""
+        bring4_row = {"bring4": self.BRING4, "pair_rows": [
+            self._row(("A", "B"), {("X", "Y"): "loss"}),
+            self._row(("A", "C"), {("X", "Y"): "loss"}),
+            self._row(("A", "D"), {("X", "Y"): "loss"}),
+            self._row(("B", "C"), {("X", "Y"): "loss"}),
+            self._row(("B", "D"), {("X", "Y"): "loss"}),
+            self._row(("C", "D"), {("X", "Y"): "loss"}),
+        ]}
+        wc = cf.bring4_win_conditions(bring4_row)
+        self.assertTrue(wc["X"]["uncovered"])
+        self.assertFalse(wc["X"]["tailwind_risk"])
+        self.assertFalse(wc["X"]["protect_risk"])
+        self.assertFalse(wc["X"]["trick_room_risk"])
+
+    def test_real_bring4_search_result_produces_sane_output(self):
+        """End-to-end sanity check against a real race -- every entry's
+        `safe_pairs` must actually be drawn from the bring-4's own 6
+        pairs, and `safe_members` only ever names bring-4 members."""
+        W = world()
+        merged, moves = W["merged"], W["moves"]
+        natures, typechart = W["natures"], W["typechart"]
+        our6 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
+               "Whimsicott", "Farigiraf"]
+        vs_roster = ["Archaludon", "Grimmsnarl", "Mega Metagross",
+                    "Pelipper", "Sinistcha", "Mega Swampert"]
+        _pair_rows, bring4_rows = cf.bring4_search(
+            our6, vs_roster, merged, moves, natures, typechart)
+        b = bring4_rows[0]
+        wc = cf.bring4_win_conditions(b)
+        own_pairs = {r["pair"] for r in b["pair_rows"]}
+        own_pair_sets = {frozenset(p) for p in own_pairs}
+        self.assertEqual(set(wc), set(vs_roster))
+        for enemy, info in wc.items():
+            for p in info["safe_pairs"]:
+                self.assertIn(frozenset(p), own_pair_sets)
+            for m in info["safe_members"]:
+                self.assertIn(m, b["bring4"])
+            self.assertEqual(info["uncovered"], not info["safe_pairs"])
+            if info["uncovered"]:
+                self.assertFalse(info["tailwind_risk"])
+                self.assertFalse(info["protect_risk"])
+                self.assertFalse(info["trick_room_risk"])
 
 
 class TestPairsBeatenWithoutFainting(unittest.TestCase):

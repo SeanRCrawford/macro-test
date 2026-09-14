@@ -2799,6 +2799,14 @@ def _tailwind_move_for(combatant):
     return MoveInfo("Tailwind", 0, "Normal", "Status", "allySide", priority=priority)
 
 
+def _trick_room_move_for(combatant):
+    """A no-op stand-in for "this role used Trick Room this turn" -- same
+    role `_tailwind_move_for` plays for Tailwind, same Prankster priority
+    rule (Trick Room is a plain Status move, no move-specific exception)."""
+    priority = 1 if combatant.ability == "Prankster" else 0
+    return MoveInfo("Trick Room", 0, "Psychic", "Status", "all", priority=priority)
+
+
 def _helping_hand_move_for(combatant):
     """A no-op stand-in for "this role used Helping Hand this turn" -- same
     role `_tailwind_move_for` plays right above. Helping Hand's real
@@ -3132,7 +3140,7 @@ def _choose_action(attacker, moves, live_targets, typechart, weather=None,
 
 
 def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
-                own_speed_mult=1.0):
+                own_speed_mult=1.0, trick_room=False):
     """Resolve `plan` ({role: (hits, MoveInfo)}) in priority-then-speed
     order and apply every hit (Focus Sash/Sturdy honoured, a hit aimed at a
     protected role dropped) -- the one place `_resolve_turn`'s real
@@ -3145,6 +3153,16 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
     OUR OWN side ("C"/"P") instead of theirs -- see `_pair_vs_targets`'s
     "OUR OWN TAILWIND AS A MATCHING ANSWER". Default 1.0 (no-op) leaves
     every existing caller unaffected.
+
+    `trick_room`: True while a real Trick Room is active this turn --
+    UNLIKE Tailwind/`enemy_speed_mult`'s per-side magnitude multiplier,
+    Trick Room inverts raw speed comparison across the WHOLE field at
+    once (a slow enemy can act before a fast ally of ours), so this is a
+    plain sign flip on the speed component of the sort key, not another
+    multiplier -- `enemy_speed_mult`/`own_speed_mult` still apply on top
+    of it exactly as before (unchanged, though this module never actually
+    combines a real Tailwind AND Trick Room hypothesis in the same race).
+    Default False leaves every existing caller unaffected.
 
     Returns (hp, log, enemy_acted, wiped, doomed, sucker_punch_wasted) --
     `doomed`: roles whose hp was already <=0 by the time their own position
@@ -3185,7 +3203,7 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
         elif role in ("C", "P"):
             spd *= own_speed_mult
         theirs_first = 0 if role in ("E1", "E2") else 1  # ties resolve against us
-        return (-prio, -spd, theirs_first)
+        return (-prio, spd if trick_room else -spd, theirs_first)
 
     order = sorted(plan.keys(), key=speed_key)
     hp = dict(hp)
@@ -3327,7 +3345,8 @@ def _reconsider_for_survival(plan, doomed, sucker_punch_wasted, combatants,
                              live_targets_by_role, hint_by_role,
                              enemy_speed_mult, protected_roles, auras=None,
                              dmg_mult_by_role=None, half_damage_roles=frozenset(),
-                             own_speed_mult=1.0, def_mult_by_role=None):
+                             own_speed_mult=1.0, def_mult_by_role=None,
+                             trick_room=False):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk" -- a provisional `plan` chooses every
     actor's move independently, unaware of the others, so an actor can end
@@ -3399,7 +3418,7 @@ ONE PASS PER CALL, and only the SINGLE best-ranked alternative per role is
         trial_plan[role] = (hits, mv)
         _hp2, _log2, _ea2, _w2, doomed2, _sp2 = _apply_plan(
             trial_plan, combatants, hp, protected_roles, enemy_speed_mult, field,
-            own_speed_mult=own_speed_mult)
+            own_speed_mult=own_speed_mult, trick_room=trick_room)
         if role not in doomed2:
             new_plan[role] = (hits, mv)
     for role in sucker_punch_wasted:
@@ -3471,7 +3490,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   terrain=None, dmg_mult_by_role=None,
                   half_damage_roles=frozenset(), own_speed_mult=1.0,
                   def_mult_by_role=None, enemy_hints=None,
-                  helping_hand_setter_role=None):
+                  helping_hand_setter_role=None, trick_room=False,
+                  trick_room_setter_role=None):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- by
     default the enemy side chooses independently and greedily (`_choose_
     action` with no hint), same "no coordination" behaviour `_sequential_
@@ -3536,6 +3556,13 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     `own_speed_mult`: the exact mirror of `enemy_speed_mult`, for OUR OWN
     side. Default 1.0 (no-op).
 
+    `trick_room`: passed straight through to `_apply_plan` -- True while a
+    real Trick Room is active THIS turn (see its own docstring for the
+    sign-flip, whole-field mechanic, unlike Tailwind's per-side
+    multiplier). `trick_room_setter_role`: the mirror of `tailwind_setter_
+    role` for Trick Room -- casts it THIS turn (`_trick_room_move_for`)
+    instead of attacking, same pattern, checked in both loops below.
+
     `helping_hand_setter_role`: one role -- "C"/"P"/"E1"/"E2" -- that casts
     Helping Hand THIS turn instead of attacking, `_helping_hand_move_for`
     substituted directly (same "still a real action, lands no hit" pattern
@@ -3598,6 +3625,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = ({}, None)
         elif role == tailwind_setter_role:
             plan[role] = ({}, _tailwind_move_for(c))
+        elif role == trick_room_setter_role:
+            plan[role] = ({}, _trick_room_move_for(c))
         elif role == helping_hand_setter_role:
             plan[role] = ({}, _helping_hand_move_for(c))
         else:
@@ -3616,6 +3645,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = ({}, None)
         elif role == tailwind_setter_role:
             plan[role] = ({}, _tailwind_move_for(c))
+        elif role == trick_room_setter_role:
+            plan[role] = ({}, _trick_room_move_for(c))
         elif role == helping_hand_setter_role:
             plan[role] = ({}, _helping_hand_move_for(c))
         elif role in protected_roles:
@@ -3635,7 +3666,7 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
     hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
         plan, combatants, hp, protected_roles, enemy_speed_mult, field,
-        own_speed_mult=own_speed_mult)
+        own_speed_mult=own_speed_mult, trick_room=trick_room)
     final_doomed = doomed
     # Reconsidering ONE role can, as a side effect, newly doom or Sucker-
     # Punch-waste ANOTHER: "Metagross survives by switching to Bullet Punch
@@ -3667,11 +3698,11 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             weather, field, live_targets_by_role, all_hints, enemy_speed_mult,
             protected_roles, auras, dmg_mult_by_role=dmg_mult_by_role,
             half_damage_roles=half_damage_roles, own_speed_mult=own_speed_mult,
-            def_mult_by_role=def_mult_by_role)
+            def_mult_by_role=def_mult_by_role, trick_room=trick_room)
         plan = _with_ally_splash(plan, combatants, hp, typechart, weather, terrain, auras)
         hp2, log, enemy_acted, wiped, doomed, sp_wasted = _apply_plan(
             plan, combatants, hp, protected_roles, enemy_speed_mult, field,
-            own_speed_mult=own_speed_mult)
+            own_speed_mult=own_speed_mult, trick_room=trick_room)
         final_doomed = doomed
     recharging_next = {role for role, (_hits, mv) in plan.items()
                        if role not in final_doomed and mv is not None
@@ -3768,7 +3799,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               terrain=None, dmg_mult_by_role=None,
               half_damage_roles=frozenset(), own_speed_mult=1.0,
               def_mult_by_role=None, lookahead=1, worst_case_targeting=False,
-              helping_hand_setter_role=None):
+              helping_hand_setter_role=None, trick_room=False,
+              trick_room_setter_role=None):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -3900,7 +3932,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 tailwind_setter_role=tailwind_setter_role, terrain=terrain,
                 dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
                 own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role,
-                helping_hand_setter_role=helping_hand_setter_role)
+                helping_hand_setter_role=helping_hand_setter_role,
+                trick_room=trick_room, trick_room_setter_role=trick_room_setter_role)
         else:
             new_hp, log, enemy_acted, wiped, recharging_next = _resolve_turn(
                 combatants, moves_by_role, hp, typechart, weather, hints,
@@ -3909,7 +3942,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 tailwind_setter_role=tailwind_setter_role, terrain=terrain,
                 dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
                 own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role,
-                helping_hand_setter_role=helping_hand_setter_role)
+                helping_hand_setter_role=helping_hand_setter_role,
+                trick_room=trick_room, trick_room_setter_role=trick_room_setter_role)
         final_hp = new_hp
         both_sides_still_live = (wiped is None
                                  and any(new_hp[r] > 0 for r in ("C", "P"))
@@ -3925,7 +3959,7 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 terrain=terrain, dmg_mult_by_role=next_dmg_mult,
                 half_damage_roles=next_half_damage, own_speed_mult=own_speed_mult,
                 def_mult_by_role=next_def_mult, lookahead=lookahead - 1,
-                worst_case_targeting=worst_case_targeting)
+                worst_case_targeting=worst_case_targeting, trick_room=trick_room)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and final_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and final_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - final_hp[r] for r in ("E1", "E2"))
@@ -3942,7 +3976,8 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 enemy_speed_mult=1.0, first_turn_moves_override=None,
                 first_turn_protected_role=None, first_turn_tailwind_role=None,
                 terrain=None, own_speed_mult=1.0, worst_case_targeting=False,
-                first_turn_helping_hand_role=None):
+                first_turn_helping_hand_role=None,
+                first_turn_trick_room_role=None):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -4021,6 +4056,16 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     call `_best_turn`/`_resolve_turn` directly per turn, the same way this
     convenience wrapper doesn't expose an every-turn Tailwind option either.
 
+    `first_turn_trick_room_role`: the Trick Room mirror of `first_turn_
+    tailwind_role` -- same turn-1-only-cast shape, but UNLIKE Tailwind's
+    per-side magnitude multiplier, Trick Room flips the sign of the WHOLE
+    field's speed comparison at once once active (see `_apply_plan`'s own
+    `trick_room` docstring), so there is no `enemy_speed_mult`/`own_speed_
+    mult`-shaped "which side" argument to also pass here -- `trick_room`
+    (the plain boolean `_apply_plan` reads) is simply on for every role,
+    both sides alike, starting turn 2, same "not until the caster's own
+    action resolves" timing as Tailwind.
+
     RECHARGE (Hyper Beam, Giga Impact, ...): `_best_turn`'s own
     `recharging_next` return is carried forward as the NEXT call's
     `recharging_roles` -- the one piece of real cross-turn state this loop
@@ -4098,6 +4143,14 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
         helping_hand_role_this_turn = (first_turn_helping_hand_role
                                        if turn_i == 0 and first_turn_helping_hand_role
                                        else None)
+        trick_room_role_this_turn = (first_turn_trick_room_role
+                                     if turn_i == 0 and first_turn_trick_room_role
+                                     else None)
+        # No "which side" split needed here, unlike Tailwind -- Trick
+        # Room flips the WHOLE field's speed comparison once active, so a
+        # single boolean covers both sides at once (see `_apply_plan`'s
+        # own `trick_room` docstring).
+        trick_room_active_this_turn = bool(first_turn_trick_room_role) and turn_i >= 1
         # Whichever SIDE is actually casting this turn races at normal
         # speed (the boost doesn't exist until the cast resolves); the
         # OTHER side's own multiplier (usually just 1.0, unused) is
@@ -4114,7 +4167,9 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             terrain=terrain, dmg_mult_by_role=dmg_mult_by_role,
             half_damage_roles=half_damage, own_speed_mult=own_mult_this_turn,
             def_mult_by_role=def_mult_by_role, worst_case_targeting=worst_case_targeting,
-            helping_hand_setter_role=helping_hand_role_this_turn)
+            helping_hand_setter_role=helping_hand_role_this_turn,
+            trick_room=trick_room_active_this_turn,
+            trick_room_setter_role=trick_room_role_this_turn)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
@@ -4305,7 +4360,7 @@ def _pruned_entry():
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                      turns, want_grid=False, merged=None, prune_below=None,
                      forced_base_names=frozenset(), worst_case_targeting=False,
-                     enemy_pairs=None):
+                     enemy_pairs=None, check_trick_room=False):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
@@ -4431,6 +4486,27 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     `target_names`'s enemy pairs this specific answer actually mattered
     for.
 
+    TRICK ROOM (`check_trick_room`, opt-in and OFF by default -- "avoiding
+    enemy tailwind and trick room may be key for a matchup swinging from a
+    win to a clear loss," asked for explicitly "as an option," not a
+    default-on cost every search now pays): the PESSIMISTIC enemy-side
+    mirror of the Tailwind check above, not the own-side one -- when a real
+    Trick Room setter is on the enemy pair (usage-data check, `_has_trick_
+    room`), the race is replayed once per real setter with that role
+    casting it turn 1 (WORST-for-us kept, `max` by `_JOINT_OUTCOME_RANK`,
+    same shape as the enemy-Tailwind check), chained AFTER both Tailwind
+    checks above (their own `chosen_outcome` is the baseline this one tries
+    to beat downward) -- "which speed-control hypothesis is actually worst
+    for us" rather than three independently-reported numbers a reader has
+    to reconcile by hand. `trick_room_is_real_threat`/`trick_room_forced`/
+    `trick_room_outcome`/`trick_room_safe` mirror their Tailwind namesakes
+    exactly. `check_trick_room=False` (the default) skips this pass
+    entirely -- zero extra races, and these four fields are simply absent
+    from `entry` (not `None`/`False` placeholders) so a caller reading them
+    defensively (`d.get("trick_room_safe", True)`, the same pattern already
+    used for `tailwind_safe`/`protect_safe` elsewhere) sees the opted-out
+    state as "no known issue," never a false "unsafe."
+
     `prune_below`: optional fraction (e.g. `good_threshold`) -- once it is
     MATHEMATICALLY CERTAIN this pair cannot reach that share of
     `target_names`'s enemy pairs beaten (even if every remaining, not-yet-
@@ -4517,6 +4593,15 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                                      if _has_tailwind(name)]
         own_real_tailwind_threat = bool(own_tailwind_setter_roles)
 
+        def _has_trick_room(name):
+            return merged is not None and any(
+                mv_name == "Trick Room"
+                for mv_name, _pct in merged.get(name, {}).get("moves_usage", []))
+        trick_room_setter_roles = ([role for role, name in (("E1", e1_name), ("E2", e2_name))
+                                    if _has_trick_room(name)]
+                                   if check_trick_room else [])
+        real_trick_room_threat = bool(trick_room_setter_roles)
+
         best = None
         for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built,
                                                 forced_base_names=forced_base_names):
@@ -4533,7 +4618,7 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     tw_outcome, tw_turns_used, tw_hp, tw_log = max(
                         (_joint_race(combatants, moves_by_role, typechart, weather,
                                     turns, first_turn_tailwind_role=role,
-                                    terrain=terrain,
+                                    enemy_speed_mult=2.0, terrain=terrain,
                                     worst_case_targeting=worst_case_targeting)
                          for role in tailwind_setter_roles),
                         key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
@@ -4581,6 +4666,26 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 if own_tailwind_used:
                     chosen_outcome, chosen_hp = own_tw_outcome, own_tw_hp
                     chosen_turns_used, chosen_log = own_tw_turns_used, own_tw_log
+                # TRICK ROOM (see docstring) -- chained AFTER both Tailwind
+                # checks, same pessimistic `max`-by-rank shape as the
+                # enemy-Tailwind check above, but against `chosen_outcome`
+                # (whichever of the prior hypotheses already won), not the
+                # plain `outcome` -- "worse than whatever we'd otherwise
+                # assume" is the real question, not "worse than the
+                # no-speed-control baseline" alone.
+                if trick_room_setter_roles:
+                    tr_outcome, tr_turns_used, tr_hp, tr_log = max(
+                        (_joint_race(combatants, moves_by_role, typechart, weather,
+                                    turns, first_turn_trick_room_role=role,
+                                    terrain=terrain,
+                                    worst_case_targeting=worst_case_targeting)
+                         for role in trick_room_setter_roles),
+                        key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                    trick_room_forced = (_JOINT_OUTCOME_RANK[tr_outcome] >
+                                         _JOINT_OUTCOME_RANK[chosen_outcome])
+                    if trick_room_forced:
+                        chosen_outcome, chosen_hp = tr_outcome, tr_hp
+                        chosen_turns_used, chosen_log = tr_turns_used, tr_log
                 # Retained HP is only a meaningful QUALITY signal for an
                 # actual win -- for loss/no_ko the outcome bucket alone
                 # already says "bad", and `hp` can go slightly negative on
@@ -4628,6 +4733,16 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     "our_damage_output": our_damage_output,
                     "_c1": c1, "_c2": c2, "_e1c": e1c, "_e2c": e2c,
                 }
+                if check_trick_room:
+                    entry.update({
+                        "trick_room_is_real_threat": real_trick_room_threat,
+                        "trick_room_forced": (trick_room_forced
+                                              if trick_room_setter_roles else False),
+                        "trick_room_outcome": (tr_outcome
+                                               if trick_room_setter_roles else None),
+                        "trick_room_safe": (tr_outcome in ("sweep", "out_trade")
+                                            if trick_room_setter_roles else True),
+                    })
                 if (worst is None or _JOINT_OUTCOME_RANK[entry["outcome"]]
                         > _JOINT_OUTCOME_RANK[worst["outcome"]]):
                     worst = entry
@@ -4782,7 +4897,7 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       worst_case_targeting=False, evs_overrides=None,
                       nature_overrides=None, ability_overrides=None,
                       enemy_item_overrides=None, enemy_move_overrides=None,
-                      enemy_pairs=None):
+                      enemy_pairs=None, check_trick_room=False):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
     genuinely searched (not one fixed), against every pair drawn from
@@ -4862,7 +4977,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                                            enemy_built, typechart, turns,
                                            merged=merged, prune_below=prune_below,
                                            worst_case_targeting=worst_case_targeting,
-                                           enemy_pairs=enemy_pairs)
+                                           enemy_pairs=enemy_pairs,
+                                           check_trick_room=check_trick_room)
         rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                     "item2": built[n2]["item"], "detail": detail,
                     "forced_base": None, **summary})
@@ -4878,7 +4994,7 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                 merged=merged, prune_below=prune_below,
                 forced_base_names=frozenset({forced_name}),
                 worst_case_targeting=worst_case_targeting,
-                enemy_pairs=enemy_pairs)
+                enemy_pairs=enemy_pairs, check_trick_room=check_trick_room)
             rows.append({"pair": (n1, n2), "item1": built[n1]["item"],
                         "item2": built[n2]["item"], "detail": detail,
                         "forced_base": forced_name, **summary})
@@ -4938,7 +5054,7 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   enforce_item_clause=False, worst_case_targeting=False,
                   evs_overrides=None, nature_overrides=None, ability_overrides=None,
                   enemy_item_overrides=None, enemy_move_overrides=None,
-                  max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
+                  max_focus_sash=DEFAULT_MAX_FOCUS_SASH, check_trick_room=False):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
@@ -5048,7 +5164,8 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                              nature_overrides=nature_overrides,
                              ability_overrides=ability_overrides,
                              enemy_item_overrides=enemy_item_overrides,
-                             enemy_move_overrides=enemy_move_overrides)
+                             enemy_move_overrides=enemy_move_overrides,
+                             check_trick_room=check_trick_room)
     pair_lookup_forced_base = None
     if extra_forced_base:
         # Built BEFORE popping "forced_base" below -- that pop mutates the
@@ -5269,6 +5386,98 @@ def recommended_lead(bring4_row):
     lead = best_pair["pair"]
     backup = tuple(n for n in bring4_row["bring4"] if n not in lead)
     return {"lead": lead, "backup": backup}
+
+
+def bring4_win_conditions(bring4_row):
+    """"I want to be able to identify win conditions -- perhaps Metagross +
+    Hydreigon is the only pair that beats Golisopod, or Hydreigon is the
+    only pokemon that beats Golisopod. I need to see what pokemon I need
+    to preserve to guarantee a win against certain pokemon in an endgame."
+
+    For each enemy Pokemon E that appears anywhere in `bring4_row["pair_
+    rows"]`'s own `detail` (every enemy actually raced against this
+    bring-4), define `safe_pairs` as the subset of the bring-4's own
+    C(4,2)=6 internal pairs (3 for a 3-Pokemon core) that beat
+    (`outcome` in `("sweep", "out_trade")`) EVERY ONE of E's own pairings
+    that were raced here -- "guarantee" means worst case over which
+    specific partner the enemy actually brings out alongside E, since
+    that's exactly as unknown to us as our own bring/lead is to them.
+
+    A single member of OURS is only as good as its WORST partner: if
+    Hydreigon's own pairing with every other bring-4 member independently
+    clears that same bar, Hydreigon alone (survived, with literally any
+    partner still up, or even alone at the very end) already guarantees
+    beating E -- `safe_members` reads exactly that off `safe_pairs` (a
+    name is in it only when ALL of its own pairings within this bring-4
+    are themselves in `safe_pairs`, not just one of them). A `safe_pairs`
+    entry whose two members are BOTH still absent from `safe_members`
+    needs that SPECIFIC pair preserved together -- "Metagross + Hydreigon
+    is the only pair that beats Golisopod" is exactly `safe_pairs ==
+    [("Metagross", "Hydreigon")]` with `safe_members == []` (neither one
+    alone, paired with a DIFFERENT bring-4 member, still clears the bar).
+
+    "The win condition(s) ... may also include ... avoiding enemy tailwind
+    and trick room may be key for a matchup swinging from a win to a clear
+    loss." Two of those are already exactly what the real per-pairing race
+    computes (`tailwind_safe`/`protect_safe` -- Tailwind and a turn-1
+    Protect scout ARE modeled, replayed hypotheses, not extra work here),
+    so they're surfaced too: `tailwind_risk`/`protect_risk` are True only
+    when `safe_pairs` is non-empty but NONE of its own entries stay safe
+    under that specific caveat -- a real win condition whose every listed
+    answer would flip to a loss/no-KO if the enemy actually did that,
+    worth flagging directly rather than burying in each pair's own detail.
+    `trick_room_risk` is the same idea, reading `d.get("trick_room_safe",
+    True)` -- only ever present when the caller opted into `check_trick_
+    room` on the underlying search (`_pair_vs_targets`'s own opt-in, real
+    engine cost); a bring-4 raced WITHOUT that flag simply never sees this
+    caveat fire (the default-True fallback reads as "no known issue", not
+    "confirmed safe"). An HP-threshold breakpoint (e.g. "needs >=60% HP to
+    survive Sucker Punch") still isn't computed anywhere in this module --
+    that would need a genuinely different kind of pass (sweeping starting
+    HP and re-racing to find where the outcome flips), not a caveat this
+    function can read off already-computed `detail` the way the three
+    above can.
+
+    Returns {enemy_name: {"safe_pairs": [(n1, n2), ...], "safe_members":
+    [name, ...], "uncovered": bool, "tailwind_risk": bool, "protect_risk":
+    bool, "trick_room_risk": bool}}, one entry per enemy actually raced.
+    `uncovered` is True exactly when `safe_pairs` is empty -- no pair in
+    this bring-4 beats every one of E's own pairings, a genuine blind spot
+    this bring-4 has no guaranteed answer for at all (distinct from, and a
+    finer-grained read than, `_uncovered_enemy_pairs`'s own ENEMY-PAIR-
+    level "nothing beats this specific (e1, e2)" -- an enemy can be
+    individually uncovered here even when every enemy PAIR it appears in
+    is beaten by SOME pair, just not the SAME one every time).
+    """
+    bring4 = bring4_row["bring4"]
+    pair_rows = bring4_row["pair_rows"]
+    enemies = sorted({name for pr in pair_rows for pair in pr["detail"] for name in pair})
+    partners_of = {n: [m for m in bring4 if m != n] for n in bring4}
+    out = {}
+    for enemy in enemies:
+        safe_pairs, tailwind_robust, protect_robust, trick_room_robust = [], [], [], []
+        for pr in pair_rows:
+            enemy_pairings = [d for pair, d in pr["detail"].items() if enemy in pair]
+            if not enemy_pairings:
+                continue
+            if all(d["outcome"] in ("sweep", "out_trade") for d in enemy_pairings):
+                safe_pairs.append(pr["pair"])
+                if all(d.get("tailwind_safe", True) for d in enemy_pairings):
+                    tailwind_robust.append(pr["pair"])
+                if all(d.get("protect_safe", True) for d in enemy_pairings):
+                    protect_robust.append(pr["pair"])
+                if all(d.get("trick_room_safe", True) for d in enemy_pairings):
+                    trick_room_robust.append(pr["pair"])
+        safe_pair_sets = [frozenset(p) for p in safe_pairs]
+        safe_members = [n for n in bring4
+                        if partners_of[n]
+                        and all(frozenset((n, m)) in safe_pair_sets for m in partners_of[n])]
+        out[enemy] = {"safe_pairs": safe_pairs, "safe_members": safe_members,
+                     "tailwind_risk": bool(safe_pairs) and not tailwind_robust,
+                     "protect_risk": bool(safe_pairs) and not protect_robust,
+                     "trick_room_risk": bool(safe_pairs) and not trick_room_robust,
+                     "uncovered": not safe_pairs}
+    return out
 
 
 def _pairs_beaten_without_fainting(row):
@@ -6329,7 +6538,7 @@ def _sum_rows(rows):
 
 def _core_deep_dive_race(core, target_name_lists, our_built, enemy_built_by_team,
                          typechart, turns, merged, sets, forced_base_names,
-                         worst_case_targeting=False):
+                         worst_case_targeting=False, check_trick_room=False):
     """`core_deep_dive`'s own racing body, factored out so it can be run
     TWICE (once per mega hypothesis) when the core carries 2 stone-holders
     -- see `core_deep_dive`'s own docstring."""
@@ -6341,7 +6550,8 @@ def _core_deep_dive_race(core, target_name_lists, our_built, enemy_built_by_team
             detail, summary = _pair_vs_targets(
                 n1, n2, our_built, target_names, enemy_built, typechart,
                 turns, merged=merged, forced_base_names=forced_base_names,
-                worst_case_targeting=worst_case_targeting)
+                worst_case_targeting=worst_case_targeting,
+                check_trick_room=check_trick_room)
             per_enemy.append({"target_names": target_names, "detail": detail,
                              "summary": summary})
         pair_total = _sum_rows([pe["summary"] for pe in per_enemy])
@@ -6358,7 +6568,7 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
                    enforce_item_clause=False, worst_case_targeting=False,
                    evs_overrides=None, nature_overrides=None, ability_overrides=None,
                    enemy_item_overrides=None, enemy_move_overrides=None,
-                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
+                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH, check_trick_room=False):
     """The full report for an ALREADY-CHOSEN core (the `--multi-bring4`
     result the user actually wants to inspect, not a fresh search): every
     one of its C(size,2) pairs, raced against every enemy pair drawn from
@@ -6470,19 +6680,22 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
         dive_a = _core_deep_dive_race(
             core, target_name_lists, our_built, enemy_built_by_team, typechart,
             turns, merged, sets, forced_base_names=frozenset({megas[1]}),
-            worst_case_targeting=worst_case_targeting)
+            worst_case_targeting=worst_case_targeting,
+            check_trick_room=check_trick_room)
         dive_a["mega_used"] = megas[0]
         dive_b = _core_deep_dive_race(
             core, target_name_lists, our_built, enemy_built_by_team, typechart,
             turns, merged, sets, forced_base_names=frozenset({megas[0]}),
-            worst_case_targeting=worst_case_targeting)
+            worst_case_targeting=worst_case_targeting,
+            check_trick_room=check_trick_room)
         dive_b["mega_used"] = megas[1]
         return dive_a if (_pair_sort_key(dive_a["overall"])
                           <= _pair_sort_key(dive_b["overall"])) else dive_b
     result = _core_deep_dive_race(core, target_name_lists, our_built,
                                   enemy_built_by_team, typechart, turns, merged,
                                   sets, forced_base_names=frozenset(),
-                                  worst_case_targeting=worst_case_targeting)
+                                  worst_case_targeting=worst_case_targeting,
+                                  check_trick_room=check_trick_room)
     result["mega_used"] = megas[0] if len(megas) == 1 else None
     return result
 

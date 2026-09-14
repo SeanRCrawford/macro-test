@@ -1043,6 +1043,131 @@ class TestBestBring4FromDeepDive(unittest.TestCase):
         self.assertTrue(any(c.value == expected_caption for c in at.caption))
 
 
+class TestWinConditionsSection(unittest.TestCase):
+    """"In bring4, I want to be able to identify win conditions -- perhaps
+    Metagross + Hydreigon is the only pair that beats Golisopod, or
+    Hydreigon is the only pokemon that beats Golisopod. I need to see
+    what pokemon I need to preserve to guarantee a win against certain
+    pokemon in an endgame." -- `bring4_win_conditions`, surfaced as a
+    "Win conditions" table wherever a specific bring-4 vs one enemy
+    roster is already shown."""
+
+    def _win_conditions_dfs(self, at):
+        return [d.value for d in at.dataframe
+               if list(d.value.columns) == ["Enemy", "Preserve", "Caveats"]]
+
+    def test_stage2_best_bring4_shows_win_conditions(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Win conditions" in m.value for m in at.markdown))
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from counter_finder import bring4_win_conditions
+        expected = bring4_win_conditions(bring4_rows[0])
+        dfs = self._win_conditions_dfs(at)
+        self.assertTrue(dfs, "expected an Enemy/Preserve win-conditions table")
+        shown = dict(zip(dfs[0]["Enemy"], dfs[0]["Preserve"]))
+        shown_caveats = dict(zip(dfs[0]["Enemy"], dfs[0]["Caveats"]))
+        self.assertEqual(set(shown), set(expected))
+        for enemy, info in expected.items():
+            if info["uncovered"]:
+                self.assertIn("none", shown[enemy])
+            elif info["safe_members"]:
+                for m in info["safe_members"]:
+                    self.assertIn(m, shown[enemy])
+            else:
+                for n1, n2 in info["safe_pairs"]:
+                    self.assertIn(n1, shown[enemy])
+                    self.assertIn(n2, shown[enemy])
+            self.assertEqual("Tailwind" in shown_caveats[enemy], info["tailwind_risk"])
+            self.assertEqual("Protect" in shown_caveats[enemy], info["protect_risk"])
+
+    def test_picked_bring4_deep_dive_shows_win_conditions(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Win conditions" in m.value for m in at.markdown))
+        self.assertTrue(self._win_conditions_dfs(at))
+
+    def test_all6_one_team_deep_dive_shows_win_conditions_for_its_best_bring4(self):
+        at = app()  # default TEAM has 6 members
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive, bring4_win_conditions
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        best = bring4_from_deep_dive(TEAM, dive, vs_roster)[0]
+        expected = bring4_win_conditions(best)
+        dfs = self._win_conditions_dfs(at)
+        self.assertTrue(dfs)
+        self.assertEqual(set(dfs[-1]["Enemy"]), set(expected))
+
+    def test_the_vs_all_enemy_teams_dive_shows_no_win_conditions_table(self):
+        """Win conditions only make sense against ONE known enemy roster
+        -- `_render_core_deep_dive`'s multi-roster branch (`target_name_
+        lists` with more than one entry) must not attempt it."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any("Win conditions" in m.value for m in at.markdown))
+
+
+class TestTrickRoomOptIn(unittest.TestCase):
+    """"avoiding enemy tailwind and trick room may be key for a matchup
+    swinging from a win to a clear loss ... Add it now as an option" --
+    a new opt-in "Also check enemy Trick Room" checkbox, unchecked by
+    default (no behavior change unless a user explicitly turns it on),
+    threaded into `bring4_search`/`core_deep_dive` as `check_trick_room`
+    and read back out via `bring4_win_conditions`'s own `trick_room_risk`
+    into the Win conditions table's Caveats column."""
+
+    def test_stage2_offers_the_checkbox_unchecked_by_default(self):
+        at = app()
+        cb = [c for c in at.checkbox if c.key == "ct_b4_check_tr"]
+        self.assertTrue(cb, "expected the Trick Room opt-in checkbox in "
+                        "Bring-4 (one enemy roster) mode")
+        self.assertFalse(cb[0].value)
+
+    def test_checking_it_threads_check_trick_room_into_the_search(self):
+        at = app()
+        [c for c in at.checkbox if c.key == "ct_b4_check_tr"][0].set_value(True).run()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        self.assertTrue(pair_rows)
+        first_detail = list(pair_rows[0]["detail"].values())[0]
+        self.assertIn("trick_room_safe", first_detail)
+
+    def test_leaving_it_unchecked_never_adds_trick_room_fields(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        first_detail = list(pair_rows[0]["detail"].values())[0]
+        self.assertNotIn("trick_room_safe", first_detail)
+
+    def test_picked_bring4_deep_dive_offers_the_checkbox_too(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_checks = [c for c in at.checkbox if c.key and c.key.startswith("ctb4_dd_")
+                    and c.key.endswith("_check_tr") and "all6" not in c.key]
+        self.assertTrue(dd_checks, "expected the Trick Room opt-in checkbox "
+                        "on the picked bring-4's own deep dive")
+        self.assertFalse(dd_checks[0].value)
+
+
 class TestPairRowsDfTotalsRow(unittest.TestCase):
     """"It shows the six pairs on the deep dive option, but not the totals
     for the six pairs" -- the winning bring-4's own 6-pair table (Beaten/
