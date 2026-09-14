@@ -7522,6 +7522,45 @@ class TestBring4FromDeepDive(unittest.TestCase):
             cf.bring4_from_deep_dive(self.CORE, self.dive,
                                      ["Garchomp", "Incineroar"])
 
+    def test_mega_used_matches_the_dives_own_already_decided_choice(self):
+        """"The bring4 team selection is saying do not mega either, but in
+        the battle log it clearly shows one is mega'd" -- `self.CORE`
+        carries 2 stone holders (Mega Gengar, Mega Alakazam), so `self.dive`
+        already committed to ONE of them for the whole core (`dive[
+        "mega_used"]`). Every bring4 subset carrying BOTH must report THAT
+        SAME mega, never `None` ("neither") -- `_bring4_candidates`'s own
+        generic per-bring recount would wrongly see 2 stone holders with no
+        way to prefer one, since it doesn't know `dive` already raced under
+        a single fixed hypothesis."""
+        self.assertIn(self.dive["mega_used"], self.CORE)
+        rows = cf.bring4_from_deep_dive(self.CORE, self.dive, self.TARGETS)
+        both = {"Mega Gengar", "Mega Alakazam"}
+        checked_any = False
+        for row in rows:
+            if both <= set(row["bring4"]):
+                checked_any = True
+                self.assertEqual(row["mega_used"], self.dive["mega_used"])
+        self.assertTrue(checked_any, "fixture never actually produced a "
+                        "bring4 carrying both stone holders -- test is vacuous")
+
+    def test_mega_used_is_none_for_a_bring4_that_excludes_the_dives_mega(self):
+        """A bring4 that leaves out `dive`'s own chosen mega (but still
+        carries the OTHER, non-transforming stone holder) never claims a
+        mega -- that member just never transformed in this dive, whichever
+        bring you look at."""
+        rows = cf.bring4_from_deep_dive(self.CORE, self.dive, self.TARGETS)
+        other_mega = next(m for m in ("Mega Gengar", "Mega Alakazam")
+                          if m != self.dive["mega_used"])
+        checked_any = False
+        for row in rows:
+            if (self.dive["mega_used"] not in row["bring4"]
+                    and other_mega in row["bring4"]):
+                checked_any = True
+                self.assertIsNone(row["mega_used"])
+        self.assertTrue(checked_any, "fixture never produced a bring4 "
+                        "excluding the dive's mega while keeping the other "
+                        "stone holder -- test is vacuous")
+
     def test_matches_across_several_enemy_rosters_scored_one_at_a_time(self):
         """A `dive` covering SEVERAL enemy rosters at once (the "vs all
         enemy teams" shape) can be scored roster-by-roster -- "I should

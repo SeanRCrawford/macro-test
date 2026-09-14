@@ -6522,6 +6522,19 @@ def bring4_from_deep_dive(core, dive, target_names, good_threshold=1.0):
     shape), so a caller can render the same matchup-by-matchup breakdown
     `core_deep_dive`'s own per-pair display already does, scoped to just
     the WINNING bring's own pairs.
+
+    "The bring4 team selection is saying do not mega either, but in the
+    battle log it clearly shows one is mega'd" -- `_bring4_candidates`'s
+    own `mega_used` field is built for a FRESH race, free to independently
+    pick which of a bring's (at most 2) stone holders transforms; `dive`
+    already settled that choice ONCE for the whole `core` (`core_deep_
+    dive`'s own "BRING-4-CONSISTENT MEGA CHOICE" paragraph -- every pair's
+    `detail` here was only ever raced under that one fixed hypothesis), so
+    a bring4 subset carrying BOTH of `core`'s stone holders must not
+    recount them as if it could choose again (that's where `mega_used`
+    landed on `None`, "neither", while the real per-pair log it came from
+    still shows the one `dive` actually chose transformed). Overridden
+    below to just read `dive`'s own single, already-decided answer.
     """
     core = list(dict.fromkeys(core))
     wanted = set(target_names)
@@ -6537,7 +6550,11 @@ def bring4_from_deep_dive(core, dive, target_names, good_threshold=1.0):
         row["pair"] = pair
         row["detail"] = match["detail"]
         pair_lookup[frozenset(pair)] = row
-    return _bring4_candidates(core, pair_lookup, target_names, good_threshold)
+    bring4_rows = _bring4_candidates(core, pair_lookup, target_names, good_threshold)
+    dive_mega = dive.get("mega_used")
+    for row in bring4_rows:
+        row["mega_used"] = dive_mega if dive_mega in row["bring4"] else None
+    return bring4_rows
 
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,
