@@ -252,19 +252,23 @@ class TestUniqueItemsFlag(unittest.TestCase):
     """"make the item uniqueness an option, but by default items will
     remain non-unique to reduce search time" -- `--unique-items` threads
     into `enforce_item_clause` on `bring4_search`/`core_deep_dive`. Off by
-    default: a known real collision (Ninetales-Alola and Rampardos both
-    independently pick Life Orb against this fixture -- see
-    TestResolveUniqueItems in test_counter_finder.py) shows up in the
-    printed deep-dive "set: ..." line unless the flag is passed."""
+    default: a known real collision (Garchomp and Incineroar both
+    independently pick Sitrus Berry against this fixture) shows up in the
+    printed deep-dive "set: ..." line unless the flag is passed.
+
+    Deliberately an UNCAPPED item (not Focus Sash/Life Orb) -- those are
+    now capped by DEFAULT (see TestFocusSashCapScopedToTopRowsOnly-style
+    tests), which would resolve a Sash/Orb collision even with
+    --unique-items off and prove nothing about Item Clause specifically."""
 
     # Exactly 4 names (not the padded-to-6 list this used to be) -- with
     # only one possible bring-4 to rank, both colliding members are
     # GUARANTEED to show up in the deep dive regardless of how any other
     # mechanic changes shift bring-4 ranking; a padded-to-6 list left this
     # fixture fragile to exactly that (a bring-4 search entirely avoiding
-    # Ninetales-Alola/Rampardos once other mechanics made a different
-    # 4-of-6 rank #1, silently no longer exercising the collision at all).
-    OUR6 = "Mega Gengar,Mega Alakazam,Ninetales-Alola,Rampardos"
+    # Garchomp/Incineroar once other mechanics made a different 4-of-6
+    # rank #1, silently no longer exercising the collision at all).
+    OUR6 = "Mega Gengar,Mega Alakazam,Garchomp,Incineroar"
 
     def _set_line(self, out):
         idx = out.find("set: ")
@@ -277,8 +281,8 @@ class TestUniqueItemsFlag(unittest.TestCase):
              "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
         self.assertIsNone(msg, out)
         line = self._set_line(out)
-        self.assertIn("Ninetales-Alola @ Life Orb", line)
-        self.assertIn("Rampardos @ Life Orb", line)
+        self.assertIn("Garchomp @ Sitrus Berry", line)
+        self.assertIn("Incineroar @ Sitrus Berry", line)
 
     def test_resolves_the_collision_in_bring4_deep_dive(self):
         msg, out = run_main(
@@ -287,8 +291,8 @@ class TestUniqueItemsFlag(unittest.TestCase):
              "--unique-items"])
         self.assertIsNone(msg, out)
         line = self._set_line(out)
-        self.assertIn("Ninetales-Alola @ Life Orb", line)
-        self.assertNotIn("Rampardos @ Life Orb", line)
+        self.assertIn("Garchomp @ Sitrus Berry", line)
+        self.assertNotIn("Incineroar @ Sitrus Berry", line)
 
     def test_resolves_the_collision_in_multi_bring4_deep_dive_core(self):
         argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
@@ -450,10 +454,11 @@ class TestMaxFocusSashFlag(unittest.TestCase):
         self.assertEqual(line.count("Focus Sash"), 2, line)
 
 
-class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
+class TestItemCapsScopedToTopRowsOnly(unittest.TestCase):
     """Same top-N-only scoping as `TestUniqueItemsScopedToTopRowsOnly`,
-    but for the DEFAULT-ON Focus-Sash cap -- the exhaustive/beam sweep
-    itself never sees it; `_apply_focus_sash_cap_to_top_rows` applies it
+    but for the DEFAULT-ON Focus-Sash/Life-Orb caps -- the exhaustive/beam
+    sweep itself never sees the real re-race; `_apply_item_caps_to_top_rows`
+    (shared with `src/app.py`, imported from `counter_finder`) applies it
     afterward, scoped to `--top`, unconditionally (no flag needed)."""
 
     FOUR = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam"]
@@ -475,16 +480,17 @@ class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
         self.assertIsNone(self.rows[0]["item_clause_resolved_items"])
 
     def test_top_n_rows_get_capped(self):
-        corrected = ct._apply_focus_sash_cap_to_top_rows(
-            self.rows, 1, self.coverage, good_threshold=0.0)
+        corrected = ct._apply_item_caps_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0,
+            item_caps={"Focus Sash": 1})
         resolved = corrected[0]["item_clause_resolved_items"]
         self.assertIsNotNone(resolved)
         self.assertLessEqual(
             sum(1 for v in resolved.values() if v == "Focus Sash"), 1)
 
-    def test_max_focus_sash_none_is_a_no_op(self):
-        corrected = ct._apply_focus_sash_cap_to_top_rows(
-            self.rows, 1, self.coverage, good_threshold=0.0, max_focus_sash=None)
+    def test_falsy_item_caps_is_a_no_op(self):
+        corrected = ct._apply_item_caps_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0, item_caps=None)
         self.assertEqual(corrected, self.rows)
 
     def test_wired_into_the_cli_with_the_right_top_n_and_no_flag_needed(self):
@@ -493,25 +499,44 @@ class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
                "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
                "--good-threshold", "0", "--min-enemies", "1",
                "--top", "3", "--no-prompt"]
-        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
-                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+        with patch.object(ct, "_apply_item_caps_to_top_rows",
+                         wraps=ct._apply_item_caps_to_top_rows) as spy:
             msg, out = run_main(argv)
         self.assertIsNone(msg, out)
         spy.assert_called_once()
         self.assertEqual(spy.call_args.args[1], 3)
+        self.assertEqual(spy.call_args.kwargs.get("item_caps"),
+                         {"Focus Sash": ct.DEFAULT_MAX_FOCUS_SASH,
+                          "Life Orb": ct.DEFAULT_MAX_LIFE_ORB})
 
-    def test_max_focus_sash_negative_one_skips_the_call(self):
+    def test_max_focus_sash_negative_one_drops_it_from_item_caps(self):
         from unittest.mock import patch
         argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
                "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
                "--good-threshold", "0", "--min-enemies", "1",
                "--top", "3", "--no-prompt", "--max-focus-sash", "-1"]
-        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
-                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+        with patch.object(ct, "_apply_item_caps_to_top_rows",
+                         wraps=ct._apply_item_caps_to_top_rows) as spy:
             msg, out = run_main(argv)
         self.assertIsNone(msg, out)
         spy.assert_called_once()
-        self.assertIsNone(spy.call_args.kwargs.get("max_focus_sash"))
+        item_caps = spy.call_args.kwargs.get("item_caps")
+        self.assertNotIn("Focus Sash", item_caps)
+        self.assertEqual(item_caps.get("Life Orb"), ct.DEFAULT_MAX_LIFE_ORB)
+
+    def test_both_caps_negative_one_calls_with_an_empty_item_caps(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt", "--max-focus-sash", "-1",
+               "--max-life-orb", "-1"]
+        with patch.object(ct, "_apply_item_caps_to_top_rows",
+                         wraps=ct._apply_item_caps_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.kwargs.get("item_caps"), {})
 
 
 class TestDeadMegaRebuildScopedToTopRowsOnly(unittest.TestCase):

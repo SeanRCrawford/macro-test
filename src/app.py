@@ -3398,7 +3398,9 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     rejected it) or `[]` if it ran and found nothing; either case has
     already shown the user an `st.error` explaining why.
     """
-    from counter_finder import multi_bring4_beam, multi_bring4_coverage, multi_bring4_exhaustive
+    from counter_finder import (DEFAULT_MAX_FOCUS_SASH, DEFAULT_MAX_LIFE_ORB,
+                                _apply_item_caps_to_top_rows, multi_bring4_beam,
+                                multi_bring4_coverage, multi_bring4_exhaustive)
     from team_search import build_candidate_pool
     pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
     if always_include:
@@ -3435,6 +3437,21 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
         st.error("No core (4, 5, or 6 Pokemon) found -- widen the pool, "
                  "lower the good-pair bar/min-enemies, relax max-weak, "
                  "or try Beam.")
+    elif rows:
+        # BY DEFAULT, same as the CLI's --multi-bring4 -- "this must apply
+        # to every single team". Every "Show top N" slider fed by this
+        # search DEFAULTS to 5-10 (their max runs to 20-30, but that's an
+        # edge the user has to deliberately drag to) -- correcting a top-
+        # 10 slice up front covers the common case for whatever the user
+        # later slides to, without re-running the search, while keeping
+        # the interactive UI's own real-race cost bounded (unlike the CLI,
+        # which has no click-and-wait budget to respect). See counter_
+        # finder._apply_item_caps_to_top_rows's own docstring for the
+        # top-N-only scoping/accepted tradeoff this shares with the CLI.
+        rows = _apply_item_caps_to_top_rows(
+            rows, 10, coverage, good_threshold,
+            item_caps={"Focus Sash": DEFAULT_MAX_FOCUS_SASH,
+                      "Life Orb": DEFAULT_MAX_LIFE_ORB})
     return coverage, rows
 
 
@@ -6650,10 +6667,15 @@ with tab_sim:
             if battle.p2.bench:
                 st.caption("Bench: " + "; ".join(_sim_mon_line(c) for c in battle.p2.bench))
 
+        from engine import TERRAIN_NAMES, WEATHER_NAMES
         fld = battle.field
         field_bits = []
         if fld.weather:
-            field_bits.append(f"Weather: {fld.weather} ({fld.weather_turns_left} left)")
+            field_bits.append(f"Weather: {WEATHER_NAMES.get(fld.weather, fld.weather)} "
+                              f"({fld.weather_turns_left} left)")
+        if fld.terrain:
+            field_bits.append(f"{TERRAIN_NAMES.get(fld.terrain, fld.terrain)} "
+                              f"({fld.terrain_turns_left} left)")
         if fld.trick_room:
             field_bits.append(f"Trick Room ({fld.trick_room_turns_left} left)")
         if fld.tailwind_p1:

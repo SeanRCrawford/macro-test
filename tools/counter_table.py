@@ -208,10 +208,11 @@ import argparse  # noqa: E402
 import _harness  # noqa: E402,F401
 
 from counter_finder import (DEFAULT_EXCLUDED_ITEMS, DEFAULT_MAX_FOCUS_SASH,  # noqa: E402
-                            _answer_for, _base_species_name,
+                            DEFAULT_MAX_LIFE_ORB,
+                            _answer_for, _apply_item_caps_to_top_rows,
+                            _base_species_name,
                             _core_dead_mega_rebuild, _core_row,
                             _fixed_sets_from_pair_rows,
-                            _focus_sash_context_from_coverage,
                             _item_clause_context_from_coverage, _pair_sort_key,
                             bring4_damage_output, bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, core_damage_output,
@@ -1438,44 +1439,11 @@ def _apply_item_clause_to_top_rows(rows, top_n, coverage, good_threshold):
     return corrected + rows[top_n:]
 
 
-def _apply_focus_sash_cap_to_top_rows(rows, top_n, coverage, good_threshold,
-                                      max_focus_sash=DEFAULT_MAX_FOCUS_SASH):
-    """"the focus sash is just too broken and is warping matchup
-    assessment... this must apply to every single team" -- the Focus-Sash
-    sibling of `_apply_item_clause_to_top_rows`, run BY DEFAULT (not behind
-    `--unique-items`) for every `--multi-bring4` call, same reasoning and
-    same top-N-only scoping: Stage A's pool-wide `fixed_items` routinely
-    has MANY candidates independently prefer Focus Sash (correct for each
-    in isolation), and re-racing every one of the sweep's candidate cores
-    to catch that would cost real time for cores nobody will ever see --
-    `_core_row`'s own cheap count-check first, exactly like Item Clause,
-    keeps this fast for `top_n` small regardless of sweep size.
-
-    Same accepted tradeoff as Item Clause's own top-N scoping, stated
-    plainly: the SWEEP's own ranking (which cores even make it into the
-    top `top_n` in the first place) is still computed against the
-    uncapped, pool-wide numbers -- only the DISPLAYED rows for the ones
-    that already made the cut get corrected. `max_focus_sash=None` skips
-    this entirely (the escape hatch back to the old, unconstrained
-    behaviour).
-    """
-    if max_focus_sash is None:
-        return rows
-    context = _focus_sash_context_from_coverage(coverage, max_focus_sash)
-    corrected = [
-        _core_row(r["core"], coverage["pair_by_key"], coverage["target_name_lists"],
-                 good_threshold,
-                 pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
-                 focus_sash_context=context, merged=coverage["merged"])
-        for r in rows[:top_n]]
-    return corrected + rows[top_n:]
-
-
 def _apply_dead_mega_rebuild_to_top_rows(rows, top_n, coverage, good_threshold):
     """"I have two megas on a generated team, but every single match only
     uses one of the megas... may as well give the other mega a useful item
     and leave it as base form if it never megas" -- the dead-mega sibling
-    of `_apply_item_clause_to_top_rows`/`_apply_focus_sash_cap_to_top_rows`:
+    of `_apply_item_clause_to_top_rows`/`_apply_item_caps_to_top_rows`:
     same top-`top_n`-only scoping (a core's own `dead_megas` -- see
     `_core_row` -- is cheap to CHECK, but acting on it means a real
     core-scoped re-race, so this only ever runs for rows anyone will
@@ -2260,6 +2228,13 @@ def main():
                          "the TOP --top rows only, same scoping and same "
                          "reasoning as --unique-items (the exhaustive/beam "
                          "sweep's own ranking is unaffected)")
+    ap.add_argument("--max-life-orb", type=int, default=DEFAULT_MAX_LIFE_ORB,
+                    metavar="N",
+                    help="the Life Orb sibling of --max-focus-sash -- \"same "
+                         "for life orb (which could just be replaced by "
+                         "type damage boost)\" -- same defaults, same N=0/"
+                         "negative-N rules, same top-N-only scoping under "
+                         "--multi-bring4")
     ap.add_argument("--dead-mega-rebuild", action=argparse.BooleanOptionalAction,
                     default=True,
                     help="--multi-bring4 only: \"every single match only "
@@ -2673,6 +2648,7 @@ def main():
     move_overrides = _parse_move_overrides(args.moves)
     excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
     max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
+    max_life_orb = None if args.max_life_orb < 0 else args.max_life_orb
     type_limits = _parse_type_limits(args.type_limit)
     strict_weak_types = _resolve_strict_weak_types(args.strict_weak_types)
     type_limits = _merge_strict_weak_types(type_limits, strict_weak_types)
@@ -2747,7 +2723,7 @@ def main():
             typechart, turns=args.turns, item_overrides=item_overrides,
             move_overrides=move_overrides, excluded_items=excluded_items,
             worst_case_targeting=args.worst_case_targeting,
-            max_focus_sash=max_focus_sash)
+            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
         _print_deep(our_pair[0], our_pair[1], item1, item2, targets, detail,
                    summary, args.turns)
         if args.switches:
@@ -2773,7 +2749,7 @@ def main():
             excluded_items=excluded_items,
             enforce_item_clause=args.unique_items,
             worst_case_targeting=args.worst_case_targeting,
-            max_focus_sash=max_focus_sash)
+            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
         ranks = _parse_deep_dive_core(args.deep_dive_core)
@@ -2791,7 +2767,7 @@ def main():
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
                 worst_case_targeting=args.deep_dive_worst_case_targeting,
-                max_focus_sash=max_focus_sash)
+                max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2814,7 +2790,7 @@ def main():
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
                 worst_case_targeting=args.deep_dive_worst_case_targeting,
-                max_focus_sash=max_focus_sash)
+                max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
@@ -2891,11 +2867,16 @@ def main():
                 multi_rows, args.top, coverage, good_threshold)
         # BY DEFAULT (unlike --unique-items above), not gated behind a
         # flag -- "this must apply to every single team". Same top-N-only
-        # scoping and same reasoning: see _apply_focus_sash_cap_to_top_rows.
+        # scoping and same reasoning: see _apply_item_caps_to_top_rows.
         if multi_rows:
-            multi_rows = _apply_focus_sash_cap_to_top_rows(
+            item_caps = {}
+            if max_focus_sash is not None:
+                item_caps["Focus Sash"] = max_focus_sash
+            if max_life_orb is not None:
+                item_caps["Life Orb"] = max_life_orb
+            multi_rows = _apply_item_caps_to_top_rows(
                 multi_rows, args.top, coverage, good_threshold,
-                max_focus_sash=max_focus_sash)
+                item_caps=item_caps)
         # Same top-N-only scoping and same reasoning as Item Clause/
         # Focus-Sash-cap just above: a core's own `dead_megas` is cheap to
         # CHECK (already computed by every _core_row call), but acting on
@@ -2949,7 +2930,7 @@ def main():
                 excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
                 worst_case_targeting=args.deep_dive_worst_case_targeting,
-                max_focus_sash=max_focus_sash)
+                max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
             _print_core_deep_dive(dive)
             core_dives.append((rank, dive))
         if args.xlsx:
@@ -2974,7 +2955,7 @@ def main():
                 move_overrides=move_overrides, excluded_items=excluded_items,
                 enforce_item_clause=args.unique_items,
                 worst_case_targeting=args.deep_dive_worst_case_targeting,
-                max_focus_sash=max_focus_sash)
+                max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.two_two_two:
         pair_rows = find_pair_cores(pool, merged, moves, natures, typechart,

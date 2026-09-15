@@ -2023,5 +2023,33 @@ class TestEnemyChoiceScarfDropdownRealSets(unittest.TestCase):
                         f"suggestion caption, got: {captions}")
 
 
+class TestItemCapsWiredIntoPoolSearches(unittest.TestCase):
+    """"so `src/app.py` can call the SAME function on whatever it
+    displays" -- `_run_multi_bring4_search` (shared by Bring-4's own
+    "search a pool" mode, Multi-bring4, and Joint Pair Search's "search
+    best team") must correct its rows through the exact same
+    `counter_finder._apply_item_caps_to_top_rows` the CLI's --multi-bring4
+    uses, not a separate, drifting copy -- and BY DEFAULT, no flag needed,
+    same as the CLI."""
+
+    def test_bring4_pool_search_applies_the_default_item_caps(self):
+        import unittest.mock as mock
+        import counter_finder as cf
+        with mock.patch.object(cf, "_apply_item_caps_to_top_rows",
+                              wraps=cf._apply_item_caps_to_top_rows) as spy:
+            at = app(team=[])
+            sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+            at = sb.set_value("\U0001f50d Search a pool for the best team").run()
+            at = [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(10).run()
+            at = [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+            at = [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+            at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.kwargs.get("item_caps"),
+                         {"Focus Sash": cf.DEFAULT_MAX_FOCUS_SASH,
+                          "Life Orb": cf.DEFAULT_MAX_LIFE_ORB})
+
+
 if __name__ == "__main__":
     unittest.main()

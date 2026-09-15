@@ -255,6 +255,48 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
                                             "target dropdown must offer both "
                                             "enemy leads, not just one")
 
+
+class TestFieldStatusShowsTerrainDuration(unittest.TestCase):
+    """"display the remaining duration of field effects like psychic
+    terrain and grassy terrain, along with the trick room/tailwind
+    timers" -- Trick Room/Tailwind were already shown; terrain (fully
+    tracked by `FieldState.terrain`/`terrain_turns_left` already) was the
+    one field-status line never rendered."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_grassy_terrain_shows_its_pretty_name_and_remaining_turns(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.field.terrain = "grassy"
+        battle.field.terrain_turns_left = 4
+        at.session_state["sim_battle"] = battle
+        at = at.run()
+        tab = sim_tab(at)
+        self.assertTrue(any("Grassy Terrain (4 left)" in c.value
+                            for c in tab.caption))
+
+    def test_no_terrain_shows_no_terrain_bit(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        self.assertFalse(any("Terrain" in c.value for c in tab.caption))
+
+    def test_weather_shows_its_pretty_name_not_the_raw_key(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.field.weather = "rain"
+        battle.field.weather_turns_left = 3
+        at.session_state["sim_battle"] = battle
+        at = at.run()
+        tab = sim_tab(at)
+        self.assertTrue(any("a rainstorm (3 left)" in c.value
+                            for c in tab.caption))
+        self.assertFalse(any("Weather: rain " in c.value for c in tab.caption))
+
     def test_switching_the_selected_move_changes_the_target_row(self):
         """The Move dropdown acts as a real menu -- picking a DIFFERENT
         move re-renders the target row for that move, not the first one's
