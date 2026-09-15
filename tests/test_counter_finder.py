@@ -5300,19 +5300,26 @@ class TestCoreRowAndBring4Candidates(unittest.TestCase):
                          [b["bring4"] for b in via_search])
 
     def test_core_row_picks_the_worse_enemy_as_the_bottleneck(self):
-        """A trivial two-enemy case using the SAME enemy pair twice: the
-        worst-case score across both must equal the single-enemy score,
-        and the bottleneck can be either (they're identical)."""
+        """A trivial two-enemy case using the SAME enemy pair twice: total
+        uncovered doubles (summed across both enemies), but the blended
+        average-across-enemies and worst-case-floor terms must equal the
+        single-enemy reading (averaging/reading off two identical enemies
+        changes nothing), and the bottleneck can be either (they're
+        identical)."""
         core = ("Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
                "Rampardos", "Kingambit")
         row = cf._core_row(core, [self.pair_by_key, self.pair_by_key],
                            [["Sableye", "Ariados"], ["Sableye", "Ariados"]],
                            good_threshold=1.0)
-        solo = cf._bring4_candidates(core, self.pair_by_key,
-                                     ["Sableye", "Ariados"], good_threshold=1.0)[0]
-        self.assertEqual(row["worst_enemy_score_key"],
-                         (len(solo["uncovered_enemy_pairs"]),)
-                         + cf._pair_sort_key(solo["worst_pair_row"]))
+        solo_row = cf._core_row(core, [self.pair_by_key],
+                                [["Sableye", "Ariados"]], good_threshold=1.0)
+        uncovered, floor_penalty, neg_blended, neg_score = row["worst_enemy_score_key"]
+        (solo_uncovered, solo_floor_penalty,
+         solo_neg_blended, solo_neg_score) = solo_row["worst_enemy_score_key"]
+        self.assertEqual(uncovered, 2 * solo_uncovered)
+        self.assertAlmostEqual(neg_blended, solo_neg_blended)
+        self.assertAlmostEqual(floor_penalty, solo_floor_penalty)
+        self.assertEqual(neg_score, solo_neg_score)
         self.assertIn(row["worst_enemy_idx"], (0, 1))
 
 
@@ -5331,7 +5338,12 @@ def _fake_pair_row(pair, beats, target_names):
     for ep in enemy_pairs:
         won = ep in beats
         detail[ep] = {"outcome": "out_trade" if won else "loss",
-                      "tailwind_safe": won, "protect_safe": won}
+                      "tailwind_safe": won, "protect_safe": won,
+                      # `bring4_pair_depth`/`_pairs_beaten_without_fainting`
+                      # read this on every row -- a real loss carries
+                      # {"C": 0.0, "P": 0.0} already, matching
+                      # `_pair_vs_targets`'s own convention.
+                      "our_hp": {"C": 1.0, "P": 1.0} if won else {"C": 0.0, "P": 0.0}}
     n_win = len(beats)
     return {"pair": pair, "detail": detail,
            "pairs_swept": 0, "pairs_traded": n_win,
@@ -5419,6 +5431,149 @@ class TestUncoveredEnemyPairsDominateRanking(unittest.TestCase):
                         "ABCE (no unconditional loss) must rank above ABCD "
                         "(loses Y+Z no matter which pair is sent out), even "
                         "though they tie on raw beaten count")
+
+
+class TestCoreRowBlendedRanking(unittest.TestCase):
+    """`_core_row`'s redesigned `worst_enemy_score_key`: "I am trying to
+    maximise overall wins and keep myself in winning matchups all the
+    time... but there will always be out of sample enemy teams so it
+    doesn't make sense just to over-focus on the worst team." A hand-built
+    two-enemy fixture (`_fake_pair_row`, no real racing, same style as
+    `TestUncoveredEnemyPairsDominateRanking`) isolates the new blend/floor
+    logic from any real engine race."""
+
+    TARGETS_A = ["P", "Q", "R"]
+    TARGETS_B = ["S", "T", "U"]
+    EP_A = [("P", "Q"), ("P", "R"), ("Q", "R")]
+    EP_B = [("S", "T"), ("S", "U"), ("T", "U")]
+
+    def _core_row_for(self, names, enemy_a_beats, enemy_b_beats, merged=None):
+        """`enemy_a_beats`/`enemy_b_beats`: one `beats` set per one of the
+        core's own 6 pairs, in `itertools.combinations(names, 2)` order,
+        against TARGETS_A/TARGETS_B respectively."""
+        import itertools as _it
+        pairs = list(_it.combinations(names, 2))
+        lookup_a = {frozenset(p): _fake_pair_row(p, b, self.TARGETS_A)
+                   for p, b in zip(pairs, enemy_a_beats)}
+        lookup_b = {frozenset(p): _fake_pair_row(p, b, self.TARGETS_B)
+                   for p, b in zip(pairs, enemy_b_beats)}
+        return cf._core_row(names, [lookup_a, lookup_b],
+                            [self.TARGETS_A, self.TARGETS_B], good_threshold=0.0,
+                            merged=merged)
+
+    def test_a_core_with_a_worse_worst_pair_but_better_average_ranks_higher(self):
+        PQ, PR, QR = self.EP_A
+        perfect_a = {PQ, PR, QR}
+        two_of_three_a = {PQ, PR}  # loses QR -- beaten_frac 2/3
+        ST, SU, TU = self.EP_B
+        perfect_b = {ST, SU, TU}
+
+        # CoreX: 5/6 pairs perfect vs A, 1 pair (worst) at 2/3 vs A;
+        # perfect everywhere vs B -- a high average.
+        core_x = self._core_row_for(
+            ["X1", "X2", "X3", "X4"],
+            enemy_a_beats=[perfect_a] * 5 + [two_of_three_a],
+            enemy_b_beats=[perfect_b] * 6)
+
+        # CoreY: EVERY pair wins exactly 2/3 against BOTH enemies (losses
+        # spread round-robin so every enemy sub-pair is still covered by
+        # SOME pair -- uncovered stays 0 for both cores). Ties CoreX on the
+        # worst-pair reading (2/3), but averages much lower.
+        def _spread(enemy_pairs):
+            return [set(enemy_pairs) - {enemy_pairs[i % 3]} for i in range(6)]
+        core_y = self._core_row_for(
+            ["Y1", "Y2", "Y3", "Y4"],
+            enemy_a_beats=_spread(self.EP_A),
+            enemy_b_beats=_spread(self.EP_B))
+
+        x_uncov, x_floor, x_neg_blend, _ = core_x["worst_enemy_score_key"]
+        y_uncov, y_floor, y_neg_blend, _ = core_y["worst_enemy_score_key"]
+
+        self.assertEqual(x_uncov, 0)
+        self.assertEqual(y_uncov, 0)
+        self.assertEqual(x_floor, 0.0, "CoreX's worst pair (2/3) clears the floor")
+        self.assertEqual(y_floor, 0.0, "CoreY's worst pair (2/3) clears the floor too")
+        self.assertLess(x_neg_blend, y_neg_blend,
+                        "CoreX's better average must outrank CoreY's, even "
+                        "though both tie on the worst-pair/floor reading -- "
+                        "the OLD maximin-only ranking could never see this")
+
+    def test_worst_case_floor_gates_before_average_is_even_consulted(self):
+        """A core that FAILS the floor must rank below one that clears it,
+        even when the failing core's average is otherwise better -- "I do
+        definitely need to have a good matchup even vs the worst team" is
+        a real gate, not just a tie-break after average."""
+        PQ, PR, QR = self.EP_A
+        perfect_a = {PQ, PR, QR}
+        ST, SU, TU = self.EP_B
+        perfect_b = {ST, SU, TU}
+
+        # CoreOK: worst pair at 2/3 vs A (clears the 0.5 floor), otherwise
+        # perfect -- a merely-good, not stellar, average.
+        core_ok = self._core_row_for(
+            ["Z1", "Z2", "Z3", "Z4"],
+            enemy_a_beats=[perfect_a] * 5 + [{PQ, PR}],
+            enemy_b_beats=[perfect_b] * 6)
+        # CoreBadFloor: worst pair at 1/3 vs A (BELOW the floor), but
+        # otherwise perfect too -- a HIGHER average than CoreOK.
+        core_bad_floor = self._core_row_for(
+            ["W1", "W2", "W3", "W4"],
+            enemy_a_beats=[perfect_a] * 5 + [{PQ}],
+            enemy_b_beats=[perfect_b] * 6)
+
+        ok_uncov, ok_floor, ok_neg_blend, _ = core_ok["worst_enemy_score_key"]
+        bad_uncov, bad_floor, bad_neg_blend, _ = core_bad_floor["worst_enemy_score_key"]
+
+        self.assertEqual(ok_uncov, 0)
+        self.assertEqual(bad_uncov, 0)
+        self.assertEqual(ok_floor, 0.0)
+        self.assertAlmostEqual(bad_floor, 0.5 - 1 / 3)
+        self.assertGreater(bad_neg_blend, ok_neg_blend,
+                           "fixture assumes CoreBadFloor's average really is "
+                           "better (less negative == higher blend) than "
+                           "CoreOK's, so the gate -- not average -- is what "
+                           "must decide this comparison")
+        self.assertLess(
+            (ok_uncov, ok_floor, ok_neg_blend),
+            (bad_uncov, bad_floor, bad_neg_blend),
+            "CoreOK (clears the floor) must still outrank CoreBadFloor "
+            "(fails it), even though CoreBadFloor's own average is better")
+
+    def test_avg_score_is_the_final_tie_break(self):
+        """Two cores identical on uncovered/floor/average differ only by
+        `merged`'s Score field -- "score (the overall stats of the
+        pokemon) are a proxy for" flexibility, read as the last tie-break."""
+        PQ, PR, QR = self.EP_A
+        perfect_a = {PQ, PR, QR}
+        ST, SU, TU = self.EP_B
+        perfect_b = {ST, SU, TU}
+        merged = {f"{side}{i}": {"score": score}
+                 for side, score in (("HI", 90.0), ("LO", 10.0))
+                 for i in (1, 2, 3, 4)}
+
+        core_hi = self._core_row_for(
+            ["HI1", "HI2", "HI3", "HI4"],
+            enemy_a_beats=[perfect_a] * 6, enemy_b_beats=[perfect_b] * 6,
+            merged=merged)
+        core_lo = self._core_row_for(
+            ["LO1", "LO2", "LO3", "LO4"],
+            enemy_a_beats=[perfect_a] * 6, enemy_b_beats=[perfect_b] * 6,
+            merged=merged)
+
+        hi_uncov, hi_floor, hi_neg_blend, hi_neg_score = core_hi["worst_enemy_score_key"]
+        lo_uncov, lo_floor, lo_neg_blend, lo_neg_score = core_lo["worst_enemy_score_key"]
+        self.assertEqual((hi_uncov, hi_floor, hi_neg_blend),
+                         (lo_uncov, lo_floor, lo_neg_blend))
+        self.assertLess(hi_neg_score, lo_neg_score,
+                        "the higher-Score core must rank first once "
+                        "everything else ties")
+
+    def test_merged_none_defaults_avg_score_to_zero_without_raising(self):
+        core = self._core_row_for(
+            ["N1", "N2", "N3", "N4"],
+            enemy_a_beats=[set(self.EP_A)] * 6, enemy_b_beats=[set(self.EP_B)] * 6,
+            merged=None)
+        self.assertEqual(core["worst_enemy_score_key"][3], -0.0)
 
 
 class TestBring4CandidatesRespectsMegaConsistency(unittest.TestCase):
@@ -5668,6 +5823,57 @@ class TestCoreDeepDive(unittest.TestCase):
 
     def test_mega_used_is_none_when_the_core_carries_no_stone_holder(self):
         self.assertIsNone(self.dive["mega_used"])
+
+
+class TestCoreDeepDiveItemResolutionEnemies(unittest.TestCase):
+    """`item_resolution_enemies` decouples `core_deep_dive`'s own item/
+    moveset search from which enemies a particular dive races/displays --
+    the fix for a single-opponent Streamlit deep dive independently
+    re-optimising the core's set against just that one roster ("if I knew
+    I only faced this team"), which made it look artificially better than
+    the SAME core's own vs-all-teams dive shows for it. `None` (the
+    default) must reproduce the old behaviour exactly; a given value must
+    override it, and two dives against DIFFERENT single enemies must agree
+    on `sets` once both are given the SAME `item_resolution_enemies`."""
+
+    CORE = ["Whimsicott", "Kingambit", "Garchomp", "Corviknight"]
+
+    def setUp(self):
+        self.W = world()
+
+    def test_default_none_resolves_against_target_name_lists_own_union(self):
+        import unittest.mock as mock
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        with mock.patch.object(cf, "_resolve_team_items",
+                               wraps=cf._resolve_team_items) as spy:
+            cf.core_deep_dive(self.CORE, [["Sableye", "Ariados"]], merged, moves,
+                              natures, typechart, turns=2)
+        self.assertEqual(spy.call_args.args[5], sorted(["Sableye", "Ariados"]))
+
+    def test_given_value_overrides_target_name_lists_union(self):
+        import unittest.mock as mock
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        with mock.patch.object(cf, "_resolve_team_items",
+                               wraps=cf._resolve_team_items) as spy:
+            cf.core_deep_dive(self.CORE, [["Sableye", "Ariados"]], merged, moves,
+                              natures, typechart, turns=2,
+                              item_resolution_enemies=["Basculegion", "Sinistcha"])
+        self.assertEqual(spy.call_args.args[5],
+                         sorted(["Basculegion", "Sinistcha"]))
+
+    def test_two_different_single_enemy_dives_agree_on_sets_given_the_same_resolution_enemies(self):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        wide = sorted({"Sableye", "Ariados", "Basculegion", "Sinistcha"})
+        dive_a = cf.core_deep_dive(self.CORE, [["Sableye", "Ariados"]], merged,
+                                   moves, natures, typechart, turns=2,
+                                   item_resolution_enemies=wide)
+        dive_b = cf.core_deep_dive(self.CORE, [["Basculegion", "Sinistcha"]], merged,
+                                   moves, natures, typechart, turns=2,
+                                   item_resolution_enemies=wide)
+        self.assertEqual(dive_a["sets"], dive_b["sets"])
 
 
 class TestCoreDeepDiveMegaUsed(unittest.TestCase):

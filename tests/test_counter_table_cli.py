@@ -2311,6 +2311,98 @@ class TestXlsxSum3rdBestAndLeadBackupColumns(unittest.TestCase):
         self.assertIn("own-tw", out)
 
 
+class TestXlsxBottleneckWorstPairColumns(unittest.TestCase):
+    """"Is this correct? ... the order does not seem to be sorted by
+    protect-safe win count" -- turned out the xlsx never showed the
+    numbers `worst_enemy_score_key` actually sorts on (the SINGLE worst of
+    the bottleneck enemy's best bring-4's 6 pairs), only aggregate per-
+    enemy totals. "Make sure to display worst result vs worst team so I
+    can sort it myself" -- new "Bottleneck Worst Pair ..." columns on the
+    'Cores' sheet expose exactly those numbers."""
+
+    COLUMNS = ("Bottleneck Worst Pair", "Bottleneck Worst Pair Uncovered Enemy Pairs",
+              "Bottleneck Worst Pair Beaten", "Bottleneck Worst Pair Protect-Safe",
+              "Bottleneck Worst Pair Tailwind-Safe", "Bottleneck Worst Pair Clean Win")
+
+    def test_columns_present_and_populated(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            for col in self.COLUMNS:
+                self.assertIn(col, header)
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            self.assertIn("+", row2["Bottleneck Worst Pair"])
+            self.assertIsInstance(row2["Bottleneck Worst Pair Uncovered Enemy Pairs"], int)
+            for col in ("Bottleneck Worst Pair Beaten", "Bottleneck Worst Pair Protect-Safe",
+                       "Bottleneck Worst Pair Tailwind-Safe",
+                       "Bottleneck Worst Pair Clean Win"):
+                self.assertIn("/", row2[col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_matches_the_row_used_by_worst_enemy_score_key(self):
+        """The exact `worst_pair_row` `_core_row` picked for this core's
+        own bottleneck enemy must be what the new columns show -- not a
+        re-derivation, a direct read of the same object the ranking used."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "1", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            from counter_finder import multi_bring4_coverage, multi_bring4_exhaustive
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Cores"][1]]
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            from _harness import load_world
+            W = load_world()
+            merged, moves = W["merged"], W["moves"]
+            natures, typechart = W["natures"], W["typechart"]
+            core = row2["Core"].split(" / ")
+            targets = [["Kingambit", "Basculegion"], ["Garchomp", "Incineroar"]]
+            coverage = multi_bring4_coverage(
+                core, targets, merged, moves, natures, typechart,
+                good_threshold=0.0, min_enemies=1)
+            rows = multi_bring4_exhaustive(coverage, good_threshold=0.0,
+                                           core_sizes=(len(core),))
+            self.assertEqual(len(rows), 1)
+            r = rows[0]
+            wr = r["per_enemy"][r["worst_enemy_idx"]]["best_bring4_row"]["worst_pair_row"]
+            self.assertEqual(set(row2["Bottleneck Worst Pair"].split(" + ")),
+                             set(wr["pair"]))
+            self.assertEqual(
+                row2["Bottleneck Worst Pair Beaten"],
+                f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}")
+            self.assertEqual(
+                row2["Bottleneck Worst Pair Protect-Safe"],
+                f"{wr['pairs_protect_safe']}/{wr['pairs_total']}")
+            self.assertEqual(
+                row2["Bottleneck Worst Pair Tailwind-Safe"],
+                f"{wr['pairs_tailwind_safe']}/{wr['pairs_total']}")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 class TestTailwindFocusFlag(unittest.TestCase):
     """"Is it possible to create a lighter weight counter_table.py that
     just checks for teams by running tailwind setter ... + attacker ...

@@ -3823,7 +3823,8 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                            excluded_items, key_prefix, item_overrides=None,
                            move_overrides=None, evs_overrides=None,
                            nature_overrides=None, ability_overrides=None,
-                           enemy_item_overrides=None, enemy_move_overrides=None):
+                           enemy_item_overrides=None, enemy_move_overrides=None,
+                           item_resolution_enemies=None):
     """"I want to be able to choose a specific team to deep dive into" --
     an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
     (any bring-4, or a multi-bring4 core), the app-side counterpart to the
@@ -3901,7 +3902,8 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     ability_overrides=ability_overrides,
                     enemy_item_overrides=enemy_item_overrides,
                     enemy_move_overrides=enemy_move_overrides,
-                    check_trick_room=check_trick_room)
+                    check_trick_room=check_trick_room,
+                    item_resolution_enemies=item_resolution_enemies)
             except ValueError as e:
                 st.error(str(e))
                 dive = None
@@ -4217,6 +4219,16 @@ with tab_counter:
             else:
                 our6 = list(teams[ct_our_source])
                 our_sets = team_meta.get(ct_our_source, {}).get("sets") or {}
+            # A single-opponent deep dive must fix `our6`'s item/moveset
+            # against the SAME enemy population as the "vs ALL saved teams"
+            # dive does, not just whichever one roster that particular dive
+            # is racing/showing -- otherwise it independently re-optimises
+            # against just that one team ("if I knew I only faced this
+            # team"), making it look artificially better than the identical
+            # core's own multi-enemy dive shows for it. `core_deep_dive`'s
+            # own `item_resolution_enemies` param exists for exactly this.
+            item_resolution_enemies = (sorted({n for t in teams.values() for n in t})
+                                       or vs_roster)
             # "In the CLI the bring4 beat 55/90, but the streamlit counter
             # table was 27/90. They must mirror rather than contradict." --
             # an already-decided team's own pinned item/moveset must be
@@ -4375,7 +4387,8 @@ with tab_counter:
                         evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                         ability_overrides=ability_overrides,
                         enemy_item_overrides=enemy_item_overrides,
-                        enemy_move_overrides=enemy_move_overrides)
+                        enemy_move_overrides=enemy_move_overrides,
+                        item_resolution_enemies=item_resolution_enemies)
 
                 st.markdown("**Full deep dive: all of `Our 6`, every configuration**")
                 st.caption("Every C(6,2) pair `our6` can form -- covers every "
@@ -4389,7 +4402,8 @@ with tab_counter:
                     evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                     ability_overrides=ability_overrides,
                     enemy_item_overrides=enemy_item_overrides,
-                    enemy_move_overrides=enemy_move_overrides)
+                    enemy_move_overrides=enemy_move_overrides,
+                    item_resolution_enemies=item_resolution_enemies)
                 allteams_worst_case = st.checkbox(
                     "Worst-case enemy targeting",
                     key="ctb4_dd_all6_allteams_worst_case",
@@ -4439,6 +4453,7 @@ with tab_counter:
                                 item_overrides=item_overrides,
                                 move_overrides=move_overrides,
                                 worst_case_targeting=allteams_worst_case,
+                                item_resolution_enemies=item_resolution_enemies,
                                 evs_overrides=allteams_evs_overrides,
                                 nature_overrides=allteams_nature_overrides,
                                 ability_overrides=allteams_ability_overrides,

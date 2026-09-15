@@ -932,6 +932,29 @@ class TestFullDeepDiveAllOfOur6VsOneEnemy(unittest.TestCase):
         caption = next(c.value for c in at.caption if c.value.startswith("Set:"))
         self.assertIn("Rocky Helmet", caption)
 
+    def test_its_sets_match_the_same_teams_row_in_the_vs_all_teams_dive(self):
+        """Regression: without `item_resolution_enemies`, this single-
+        enemy dive independently re-searched `our6`'s item/moveset against
+        JUST the one selected enemy roster, while the "vs ALL saved teams"
+        dive (below) searches the same `our6` against the union of every
+        saved team -- two different optimisation targets producing two
+        different sets, making the single-team dive look artificially
+        better than the identical core's own multi-enemy dive shows for
+        it. Both dives must now agree on `our6`'s `sets` for the SAME
+        selected enemy team."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        one_sets = at.session_state["ctb4_dd_all6_one_dive"]["sets"]
+
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        all_sets = at.session_state["ctb4_dd_all6_allteams_dive"]["sets"]
+
+        self.assertEqual(one_sets, all_sets)
+
 
 class TestFullDeepDiveAllOfOur6VsAllEnemyTeams(unittest.TestCase):
     """"and also full deep dive versus all enemy teams with my loaded

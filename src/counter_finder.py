@@ -5015,6 +5015,41 @@ def _pair_beaten_frac(row):
            if row["pairs_total"] else 0.0)
 
 
+DEFAULT_WORST_CASE_FLOOR = 0.5
+_CORE_BLEND_WEIGHTS = (0.5, 0.25, 0.25)  # (wins, tailwind-safe, protect-safe)
+
+
+def _rate_per_90(count, n_pairs, pairs_total):
+    """`count` (out of `n_pairs * pairs_total`) normalised to a fixed /90
+    unit, matching `tools/counter_table.py`'s own "Avg Wins/90" column so
+    a core's rank agrees with what the xlsx shows -- lets cores of
+    different sizes (3-6 members) and enemy rosters of different sizes
+    stay comparable instead of a smaller raw scale silently reading as
+    stronger or weaker than it is."""
+    denom = n_pairs * pairs_total
+    return (count / denom) * 90 if denom else 0.0
+
+
+def _core_avg_score(core, merged):
+    """Mean roster.csv Score across `core` -- the generalisation/
+    flexibility proxy `worst_enemy_score_key` reads as its own final tie-
+    break: "I am trying to maximise overall wins and keep myself in
+    winning matchups all the time and also be flexible, which things like
+    score (the overall stats of the pokemon) are a proxy for." Mirrors
+    `tools/counter_table.py`'s own `_avg_score` exactly (a name with no
+    Score data is skipped, not treated as 0, so one missing entry doesn't
+    drag the mean down for no reason); returns 0.0 instead of `None` when
+    `merged` is `None` or nothing in `core` has a Score, so it can always
+    sit directly in a sort-key tuple without a type-mixing comparison
+    error.
+    """
+    if merged is None:
+        return 0.0
+    scores = [merged[n]["score"] for n in core
+             if merged.get(n, {}).get("score") is not None]
+    return sum(scores) / len(scores) if scores else 0.0
+
+
 def _pair_sort_key(row):
     """The exact ranking `joint_pair_search`/`joint_pool_search` already sort
     their own rows by, factored out so `bring4_search` and the multi-enemy
@@ -5747,27 +5782,65 @@ def _core_dead_mega_rebuild(core, dead_megas, target_name_lists, dead_mega_conte
 
 def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
               pair_by_key_forced_base_list=None, item_clause_context=None,
-              focus_sash_context=None):
+              focus_sash_context=None, merged=None,
+              worst_case_floor=DEFAULT_WORST_CASE_FLOOR):
     """For a candidate CORE (4, 5, or 6 Pokemon -- see `multi_bring4_
     exhaustive`'s own note on why fewer than 6 is a real, often BETTER
     answer, not a fallback) against SEVERAL enemy rosters: the BEST bring-4
     available from `core` against EACH enemy (`_bring4_candidates`, reused
     -- a bring-4 may differ per opponent, matching real VGC's "you see
-    their team at Team Preview before choosing your bring-4"), then the
-    WORST of those per-enemy best scores -- the enemy this core is weakest
-    against, even playing its best available bring-4. Ranking candidate
-    cores on THIS (ascending -- lower `worst_enemy_score_key` is better) is
-    the multi-enemy generalisation of `bring4_search`'s own maximin.
+    their team at Team Preview before choosing your bring-4"), scored by a
+    BLEND of overall performance across every named enemy and a bounded
+    worst-case floor -- ranking candidate cores on THIS (ascending --
+    lower `worst_enemy_score_key` is better).
 
-    `worst_enemy_score_key` is `(uncovered_enemy_pairs_count, *_pair_sort_key(...))`
-    -- the same "uncovered enemy pairs dominate the ranking" rule
-    `_bring4_candidates` already applies to pick each enemy's own best
-    bring-4, carried up here so it also decides which enemy ROSTER counts
-    as this core's bottleneck, and which CORE (in `multi_bring4_exhaustive`/
-    `multi_bring4_beam`, which sort on this same field) ranks above
-    another: a core with an unconditional loss against one enemy composition
-    must rank below one that has an answer everywhere, even if the first
-    core's raw worst-pair fraction otherwise looks better.
+    `worst_enemy_score_key` is `(total_uncovered, worst_case_floor_penalty,
+    -blended_avg_wins, -avg_score)`:
+
+    - `total_uncovered`: the SUM (across every named enemy) of that
+      enemy's own uncovered-pair count -- an unconditional loss to some
+      enemy composition is still a hard, dominant filter (a real
+      auto-loss is categorically worse than a merely bad matchup), but
+      unlike before, a core's OTHER enemies no longer stop counting once
+      one of them has a gap.
+    - `worst_case_floor_penalty`: `max(0.0, worst_case_floor -
+      worst_pair_beaten_fraction)`, where `worst_pair_beaten_fraction` is
+      the SINGLE worst of the bottleneck enemy's best bring-4's own 6
+      pairs (`worst_pair_row`, same object `_bring4_candidates` already
+      picks) -- 0.0 (no penalty at all) once the worst case clears the
+      floor, growing only below it. Sits BEFORE the average below in the
+      tuple deliberately, as a real gate rather than a tie-break: "I do
+      definitely need to have a good matchup even vs the worst team," so
+      a core that fails the floor ranks below every floor-clearing core
+      regardless of how good its average is elsewhere. Every core that
+      DOES clear the floor ties at 0.0 here, though, so among them the
+      floor imposes no further preference -- a core is never punished
+      just for having a LOWER (but still safe) worst case than another
+      equally-floor-clearing core; that's what average performance below
+      decides instead.
+    - `-blended_avg_wins`: the negative of `_CORE_BLEND_WEIGHTS`-weighted
+      (0.5 wins, 0.25 tailwind-safe, 0.25 protect-safe) average /90 rate
+      across EVERY named enemy, not just the worst one -- "I am trying to
+      maximise overall wins and keep myself in winning matchups all the
+      time," weighted toward robust wins over fragile ones the same way
+      `_pair_sort_key` already prioritises protect-safe first for a single
+      pair. Matches `tools/counter_table.py`'s own "Avg Wins/90"/"Avg Wins
+      under Tailwind/90"/"Avg Wins under Protect/90" xlsx columns exactly,
+      so the ranking agrees with what's shown. Decides the order among
+      every core that already cleared the floor above -- "there will
+      always be out of sample enemy teams so it doesn't make sense just to
+      over-focus on the worst team."
+    - `-avg_score`: `_core_avg_score(core, merged)`, negated -- the final
+      tie-break, a generalisation/flexibility proxy for enemies OUTSIDE
+      the sample: "there will always be out of sample enemy teams... score
+      (the overall stats of the pokemon) are a proxy for" that.
+
+    The BOTTLENECK enemy (`worst_enemy_idx`, still reported for display/
+    the xlsx's own "Bottleneck ..." columns) is picked separately from the
+    ranking above -- whichever named enemy has the most uncovered pairs,
+    tied-broken by the lowest worst-pair beaten fraction -- so it still
+    reads as "the toughest matchup in the sample" even though the CORE's
+    own rank no longer depends on that enemy alone.
 
     Also reports `unused`: any core member that never appears in ANY
     enemy's best bring-4 -- dead weight ("There is no point including a
@@ -5854,7 +5927,6 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
             pair_by_key_list = [conflict_pair_by_key[tuple(target_names)]
                                 for target_names in target_name_lists]
     per_enemy = []
-    worst_key, worst_idx = None, None
     used = set()
     for i, (pair_lookup, target_names) in enumerate(zip(pair_by_key_list, target_name_lists)):
         forced_base = (pair_by_key_forced_base_list[i]
@@ -5864,12 +5936,40 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
             megas=megas if len(megas) == 2 and forced_base else None,
             pair_lookup_forced_base=forced_base)
         best = candidates[0]
-        key = (len(best["uncovered_enemy_pairs"]),) + _pair_sort_key(best["worst_pair_row"])
         per_enemy.append({"target_names": list(target_names),
                           "best_bring4": best["bring4"], "best_bring4_row": best})
         used.update(best["bring4"])
-        if worst_key is None or key > worst_key:
-            worst_key, worst_idx = key, i
+
+    def _worst_pair_beaten_frac(pe):
+        wr = pe["best_bring4_row"]["worst_pair_row"]
+        return _pair_beaten_frac(wr)
+
+    def _bottleneck_key(pe):
+        return (len(pe["best_bring4_row"]["uncovered_enemy_pairs"]),
+               -_worst_pair_beaten_frac(pe))
+
+    worst_idx = (max(range(len(per_enemy)), key=lambda i: _bottleneck_key(per_enemy[i]))
+                if per_enemy else None)
+    total_uncovered = sum(len(pe["best_bring4_row"]["uncovered_enemy_pairs"])
+                          for pe in per_enemy)
+    rates = []
+    for pe in per_enemy:
+        depth = bring4_pair_depth(pe["best_bring4_row"])
+        n_pairs = len(pe["best_bring4_row"]["pair_rows"])
+        rates.append((
+            _rate_per_90(depth["beaten_total"], n_pairs, depth["pairs_total"]),
+            _rate_per_90(depth["tailwind_safe_total"], n_pairs, depth["pairs_total"]),
+            _rate_per_90(depth["protect_safe_total"], n_pairs, depth["pairs_total"])))
+    w_win, w_tw, w_pr = _CORE_BLEND_WEIGHTS
+    blended_avg_wins = (
+        w_win * (sum(r[0] for r in rates) / len(rates)) +
+        w_tw * (sum(r[1] for r in rates) / len(rates)) +
+        w_pr * (sum(r[2] for r in rates) / len(rates))) if rates else 0.0
+    worst_case_floor_penalty = max(
+        0.0, worst_case_floor - (_worst_pair_beaten_frac(per_enemy[worst_idx])
+                                 if worst_idx is not None else 1.0))
+    worst_key = (total_uncovered, worst_case_floor_penalty, -blended_avg_wins,
+                -_core_avg_score(core, merged))
     dead_megas = ()
     if len(megas) == 2:
         # A stone-holder that's brought (in `used`, so `unused` above
@@ -6299,7 +6399,7 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
             row = _core_row(core, coverage["pair_by_key"],
                             coverage["target_name_lists"], good_threshold,
                             pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
-                            item_clause_context=item_clause_context)
+                            item_clause_context=item_clause_context, merged=merged)
             if row["unused"]:
                 continue
             rows.append(row)
@@ -6386,7 +6486,7 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
         return _core_row(team, pair_by_key_list, target_name_lists,
                          good_threshold,
                          pair_by_key_forced_base_list=pair_by_key_forced_base_list,
-                         item_clause_context=item_clause_context
+                         item_clause_context=item_clause_context, merged=merged
                          )["worst_enemy_score_key"]
 
     seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
@@ -6430,7 +6530,7 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                 row = _core_row(team, pair_by_key_list, target_name_lists,
                                 good_threshold,
                                 pair_by_key_forced_base_list=pair_by_key_forced_base_list,
-                                item_clause_context=item_clause_context)
+                                item_clause_context=item_clause_context, merged=merged)
                 if not row["unused"]:
                     found[key] = row
 
@@ -6568,7 +6668,8 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
                    enforce_item_clause=False, worst_case_targeting=False,
                    evs_overrides=None, nature_overrides=None, ability_overrides=None,
                    enemy_item_overrides=None, enemy_move_overrides=None,
-                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH, check_trick_room=False):
+                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH, check_trick_room=False,
+                   item_resolution_enemies=None):
     """The full report for an ALREADY-CHOSEN core (the `--multi-bring4`
     result the user actually wants to inspect, not a fresh search): every
     one of its C(size,2) pairs, raced against every enemy pair drawn from
@@ -6620,6 +6721,24 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     enemy always got mbsmogon.xlsx's own usage-derived top item/moveset
     regardless of a caller's real, known enemy set until these existed.
 
+    `item_resolution_enemies`: which enemy population `core`'s own item AND
+    moveset get searched/fixed against (`_resolve_team_items` + each
+    member's own `_answer_for` call) -- `None` (the default) reuses
+    `target_name_lists`'s own union exactly as before this existed. A
+    caller racing/showing just ONE enemy roster (a "peek at this specific
+    opponent") but wanting `core`'s set to match what it would be for the
+    WHOLE event should pass the full enemy population here instead of
+    leaving it to default to that one roster's union: "EVERY MEMBER'S SET
+    IS FIXED FOR THE WHOLE CORE... a real team's set is fixed for the
+    whole event" already says the set must not depend on which opponent is
+    being looked at -- only `target_name_lists` (which enemies get raced
+    and shown) should narrow for a single-opponent peek, never this.
+    Without it, a single-enemy dive independently re-optimises `core`'s set
+    against just that one roster, which can make it look stronger against
+    that one opponent than the SAME core's own multi-enemy dive shows for
+    it -- not a real difference in the matchup, just two different sets
+    being compared.
+
     BRING-4-CONSISTENT MEGA CHOICE: when `core` carries exactly 2 Mega-stone
     holders, this function (unlike `bring4_search`) doesn't do bring-4
     subsetting -- it reports every one of the core's own C(size,2) pairs
@@ -6645,20 +6764,22 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     core = list(dict.fromkeys(core))
     target_name_lists = [list(t) for t in target_name_lists]
     all_enemies = sorted({n for t in target_name_lists for n in t})
+    set_search_enemies = (sorted(set(item_resolution_enemies))
+                          if item_resolution_enemies is not None else all_enemies)
     item_overrides = _resolve_team_items(
-        core, merged, moves_db, natures, typechart, all_enemies,
+        core, merged, moves_db, natures, typechart, set_search_enemies,
         item_overrides=item_overrides, move_overrides=move_overrides,
         excluded_items=excluded_items, enforce_item_clause=enforce_item_clause,
         max_focus_sash=max_focus_sash)
     sets = {}
     for name in core:
         item, move_names, _weather = _answer_for(
-            name, merged, moves_db, natures, typechart, all_enemies,
+            name, merged, moves_db, natures, typechart, set_search_enemies,
             item_overrides=item_overrides, move_overrides=move_overrides,
             excluded_items=excluded_items)
         if not move_names:
             raise ValueError(f"{name!r} has no usable moveset against "
-                             f"{all_enemies}")
+                             f"{set_search_enemies}")
         sets[name] = {"item": item, "moves": move_names}
     our_built = _build_forms(core, merged, natures, moves_db,
                              items={n: s["item"] for n, s in sets.items()},

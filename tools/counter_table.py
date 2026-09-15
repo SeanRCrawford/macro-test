@@ -1433,7 +1433,7 @@ def _apply_item_clause_to_top_rows(rows, top_n, coverage, good_threshold):
         _core_row(r["core"], coverage["pair_by_key"], coverage["target_name_lists"],
                  good_threshold,
                  pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
-                 item_clause_context=context)
+                 item_clause_context=context, merged=coverage["merged"])
         for r in rows[:top_n]]
     return corrected + rows[top_n:]
 
@@ -1466,7 +1466,7 @@ def _apply_focus_sash_cap_to_top_rows(rows, top_n, coverage, good_threshold,
         _core_row(r["core"], coverage["pair_by_key"], coverage["target_name_lists"],
                  good_threshold,
                  pair_by_key_forced_base_list=coverage["pair_by_key_forced_base"],
-                 focus_sash_context=context)
+                 focus_sash_context=context, merged=coverage["merged"])
         for r in rows[:top_n]]
     return corrected + rows[top_n:]
 
@@ -1511,7 +1511,8 @@ def _apply_dead_mega_rebuild_to_top_rows(rows, top_n, coverage, good_threshold):
         pair_by_key_list = [pair_by_key_per_enemy[tuple(t)]
                             for t in coverage["target_name_lists"]]
         new_row = _core_row(substitute_core, pair_by_key_list,
-                            coverage["target_name_lists"], good_threshold)
+                            coverage["target_name_lists"], good_threshold,
+                            merged=coverage["merged"])
         if new_row["worst_enemy_score_key"] <= r["worst_enemy_score_key"]:
             new_row["dead_mega_rebuilt"] = {dm: _base_species_name(dm)
                                             for dm in dead_megas}
@@ -1584,6 +1585,17 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     `bring4_pair_depth` 3rd-best-pair reading, across every named enemy --
     "sum-of 3rd best pair for each of the relevant metrics across every
     enemy team in the summary".
+
+    The "Bottleneck Worst Pair ..." columns are the literal numbers
+    `worst_enemy_score_key` itself sorts cores on -- "display worst result
+    vs worst team so I can sort it myself" -- NOT the aggregate per-enemy
+    numbers further right (`depth`'s summed reading across all 6 of the
+    bottleneck's best bring-4's own pairs), but the SINGLE worst of those 6
+    pairs (`worst_pair_row`, exactly what `_core_row` ranks the core's
+    bottleneck enemy, and the core itself, on). Sorting the sheet by
+    Uncovered, then Protect-Safe (descending), then Beaten (descending),
+    then Clean Win (descending), then Tailwind-Safe (descending) exactly
+    reproduces the tool's own row order.
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _safe_sheet_name, _style_header
@@ -1593,6 +1605,9 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     ws = wb.active
     ws.title = "Cores"
     header = ["#", "Core", "Dead Mega Rebuilt", "Size", "Bottleneck Enemy",
+              "Bottleneck Worst Pair", "Bottleneck Worst Pair Uncovered Enemy Pairs",
+              "Bottleneck Worst Pair Beaten", "Bottleneck Worst Pair Protect-Safe",
+              "Bottleneck Worst Pair Tailwind-Safe", "Bottleneck Worst Pair Clean Win",
               "Weak to 2+ types (members)", "Weak to 1 type (members)",
               "Weak to 0 types (members)", "Types with 2+ weak members",
               "Weaknesses by type", "Types with 2+ net weakness",
@@ -1673,8 +1688,25 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
         sum_3rd_nf = sum((d["no_faint_3rd"] or 0) for _pe, d in per_enemy_depths)
         dead_mega_note = ", ".join(f"{old} -> {new}" for old, new in
                                    r.get("dead_mega_rebuilt", {}).items())
+        # The exact numbers `worst_enemy_score_key` itself sorts cores on --
+        # "display worst result vs worst team so I can sort it myself" --
+        # not the aggregate per-enemy `depth` stats further right (summed
+        # across ALL of the bottleneck's best bring-4's 6 pairs), but the
+        # SINGLE worst of those 6 pairs' own numbers, exactly as `_core_row`
+        # picks the bottleneck enemy and ranks cores against each other.
+        bottleneck_pe = r["per_enemy"][r["worst_enemy_idx"]]
+        bottleneck_best = bottleneck_pe["best_bring4_row"]
+        bottleneck_wr = bottleneck_best["worst_pair_row"]
         row = [rank, " / ".join(core), dead_mega_note, r["core_size"],
               r["worst_enemy_idx"] + 1,
+              " + ".join(bottleneck_wr["pair"]),
+              len(bottleneck_best["uncovered_enemy_pairs"]),
+              f"{bottleneck_wr['pairs_swept'] + bottleneck_wr['pairs_traded']}/"
+              f"{bottleneck_wr['pairs_total']}",
+              f"{bottleneck_wr['pairs_protect_safe']}/{bottleneck_wr['pairs_total']}",
+              f"{bottleneck_wr['pairs_tailwind_safe']}/{bottleneck_wr['pairs_total']}",
+              f"{bottleneck_wr['pairs_clean_win_total']:.1f}/"
+              f"{bottleneck_wr['pairs_total'] * 2}",
               weak["weak_to_2plus"], weak["weak_to_1"], weak["weak_to_0"],
               types_2plus, ", ".join(f"{t} {c}" for t, c in by_type),
               net_types_2plus, ", ".join(f"{t} {v}" for t, v in net_by_type),
