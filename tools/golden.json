@@ -148,12 +148,20 @@
         "turn": 4
       },
       {
-        "chosen": "Gallade:move:Sacred Sword->Maushold | Hydreigon:move:Dark Pulse->Sinistcha",
+        "chosen": "Gallade:move:Psycho Cut->Maushold | Hydreigon:move:Dark Pulse->Sinistcha",
         "eval": 154.2087,
         "eval_p2": -154.2087,
         "n_our_actions": 6,
-        "score": 10000,
+        "score": 95.0708,
         "turn": 5
+      },
+      {
+        "chosen": "Hydreigon:move:Dark Pulse->Maushold",
+        "eval": 28.1834,
+        "eval_p2": -28.1834,
+        "n_our_actions": 1,
+        "score": -10000,
+        "turn": 6
       }
     ]
   },
@@ -256,19 +264,19 @@
         "turn": 4
       },
       {
-        "chosen": "Gallade:move:Psycho Cut->Pelipper | Incineroar:move:Throat Chop->Pelipper",
-        "eval": 7.6564,
-        "eval_p2": -7.6564,
-        "n_our_actions": 14,
-        "score": 287.8542,
+        "chosen": "Gallade:move:Sacred Sword->Archaludon | Hydreigon:move:Draco Meteor->Pelipper",
+        "eval": -292.0488,
+        "eval_p2": 292.0488,
+        "n_our_actions": 16,
+        "score": 66.2964,
         "turn": 5
       },
       {
-        "chosen": "Gallade:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Mega Metagross",
-        "eval": 123.6328,
-        "eval_p2": -123.6328,
-        "n_our_actions": 14,
-        "score": 138.3971,
+        "chosen": "Gallade:move:Sacred Sword->Mega Metagross | Hydreigon:move:Dark Pulse->Mega Metagross",
+        "eval": 58.3986,
+        "eval_p2": -58.3986,
+        "n_our_actions": 10,
+        "score": 1.4637,
         "turn": 6
       }
     ]
@@ -314,19 +322,19 @@
         "turn": 4
       },
       {
-        "chosen": "Gallade:move:Psycho Cut->Pelipper | Incineroar:move:Throat Chop->Pelipper",
-        "eval": 74.8103,
-        "eval_p2": -74.8103,
-        "n_our_actions": 14,
-        "score": 328.0081,
+        "chosen": "Gallade:move:Sacred Sword->Archaludon | Hydreigon:move:Draco Meteor->Pelipper",
+        "eval": -224.895,
+        "eval_p2": 224.895,
+        "n_our_actions": 16,
+        "score": 84.4503,
         "turn": 5
       },
       {
-        "chosen": "Gallade:move:Psycho Cut->Mega Floette | Incineroar:move:Flare Blitz->Mega Floette",
-        "eval": 163.7866,
-        "eval_p2": -163.7866,
-        "n_our_actions": 14,
-        "score": 296.913,
+        "chosen": "Gallade:move:Sacred Sword->Mega Floette | Hydreigon:move:Dark Pulse->Pelipper",
+        "eval": 76.5525,
+        "eval_p2": -76.5525,
+        "n_our_actions": 7,
+        "score": -10000,
         "turn": 6
       }
     ]

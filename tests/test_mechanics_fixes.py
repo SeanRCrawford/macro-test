@@ -1189,5 +1189,150 @@ class TestSandSnowDefensiveBoostAppliedOnce(unittest.TestCase):
         self.assertAlmostEqual(avg, avg2, places=5)
 
 
+class TestSpeedControlSelfCancellation(unittest.TestCase):
+    """"an enemy should never counteract their own speed control, by using
+    tailwind while trick room is active for several more turns or using
+    trick room while tailwind is active -- though it may be a good idea if
+    it would lead to favourable speed order the next turn." Real-engine
+    `greedy_opponent_joint_action` (`solver.py`'s `action_value`)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _movesets(self, moves, merged, p1_names, p2_names, extra):
+        from solver import build_moveset
+        movesets = {}
+        for n in p1_names + p2_names:
+            only = extra.get(n)
+            movesets[n] = build_moveset(merged[n], moves, only_moves=only) \
+                if only else build_moveset(merged[n], moves)
+        return movesets
+
+    def test_tailwind_blocked_while_trick_room_leaves_it_worse_off(self):
+        """Torkoal+Kingambit (slow) already moving first under Trick Room
+        vs Hydreigon+Gholdengo (fast) -- doubling their own speed with
+        Tailwind on top would flip Kingambit to moving AFTER both foes
+        once Trick Room reverses the (now higher) speed comparison, a net
+        loss -- confirmed not blocked when Trick Room isn't up at all."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+
+        def run(trick_room):
+            b = battle(["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"])
+            if trick_room:
+                b.field.trick_room = True
+                b.field.trick_room_turns_left = 5
+            movesets = self._movesets(
+                moves, merged, ["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"],
+                {"Kingambit": ["Tailwind", "Protect"]})
+            joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+            return next(a for a in joint if a.combatant.name == "Kingambit")
+
+        self.assertEqual(run(False).move.name, "Tailwind")
+        blocked = run(True)
+        self.assertEqual(blocked.kind, "protect")
+
+    def test_trick_room_blocked_while_own_tailwind_leaves_it_worse_off(self):
+        """The reverse: Hydreigon+Gholdengo (fast) already moving first
+        under their own Tailwind vs Torkoal+Kingambit (slow) -- casting
+        Trick Room on top would flip that Tailwind-inflated speed
+        advantage into a Trick-Room-reversed disadvantage, a net loss --
+        confirmed not blocked when Tailwind isn't up at all."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+
+        def run(tailwind):
+            b = battle(["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"])
+            if tailwind:
+                b.field.tailwind_p1 = 4
+            movesets = self._movesets(
+                moves, merged, ["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"],
+                {"Gholdengo": ["Trick Room", "Protect"]})
+            joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+            return next(a for a in joint if a.combatant.name == "Gholdengo")
+
+        self.assertEqual(run(False).move.name, "Trick Room")
+        blocked = run(True)
+        self.assertEqual(blocked.kind, "protect")
+
+    def test_stacking_it_anyway_is_allowed_when_it_actually_helps(self):
+        """Not a blanket ban -- Torkoal+Kingambit (slow) with their own
+        Tailwind already up ALSO gains from Trick Room on top here (the
+        fast Torkoal Tailwind boost still doesn't out-speed the enemy, so
+        TR's reversal only adds Torkoal to the "moves first" side without
+        costing Kingambit anything): must NOT be blocked."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"])
+        b.field.tailwind_p1 = 4
+        movesets = self._movesets(
+            moves, merged, ["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"],
+            {"Kingambit": ["Trick Room", "Protect"]})
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Kingambit")
+        self.assertEqual(action.move.name, "Trick Room")
+
+
+class TestFollowMeRealEngineAiChoice(unittest.TestCase):
+    """"vs pokemon like Indeedee-F it is necessary that a team is resilient
+    to a fixed plan where the enemy just keeps clicking follow me ...
+    this is often a better strategy in the battle simulator too -- have
+    the enemy use it if it leads to a better state than the simple 2v2
+    attack." Real-engine `greedy_opponent_joint_action` must actually
+    VALUE Follow Me/Rage Powder by how much damage it saves the partner,
+    not the flat 5/-5 every other non-signature status move gets."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_redirects_a_hit_that_would_otherwise_hammer_the_frail_partner(self):
+        """Moonblast is 2x on Sableye (Dark/Ghost) but neutral on
+        Indeedee-F (Psychic/Normal) -- redirecting genuinely protects the
+        frailer partner without costing Indeedee-F much."""
+        from solver import build_moveset, greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Indeedee-F", "Sableye"], ["Ninetales-Alola", "Torkoal"])
+        movesets = {
+            "Indeedee-F": build_moveset(merged["Indeedee-F"], moves,
+                                        only_moves=["Follow Me", "Psychic"]),
+            "Sableye": build_moveset(merged["Sableye"], moves),
+            "Ninetales-Alola": build_moveset(merged["Ninetales-Alola"], moves,
+                                             only_moves=["Moonblast"]),
+            "Torkoal": build_moveset(merged["Torkoal"], moves)}
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Indeedee-F")
+        self.assertEqual(action.move.name, "Follow Me")
+
+    def test_rage_powder_also_gets_the_same_valuation(self):
+        from solver import build_moveset, greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Indeedee-F", "Sableye"], ["Ninetales-Alola", "Torkoal"])
+        movesets = {
+            "Indeedee-F": build_moveset(merged["Indeedee-F"], moves,
+                                        only_moves=["Rage Powder", "Psychic"]),
+            "Sableye": build_moveset(merged["Sableye"], moves),
+            "Ninetales-Alola": build_moveset(merged["Ninetales-Alola"], moves,
+                                             only_moves=["Moonblast"]),
+            "Torkoal": build_moveset(merged["Torkoal"], moves)}
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Indeedee-F")
+        self.assertEqual(action.move.name, "Rage Powder")
+
+    def test_not_worth_it_when_nobody_is_actually_threatened(self):
+        """Not a blanket preference -- with nothing dangerous incoming,
+        Indeedee-F's own attack must win over reflexively redirecting."""
+        from solver import build_moveset, greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Indeedee-F", "Sableye"], ["Torkoal", "Torkoal"])
+        movesets = {
+            "Indeedee-F": build_moveset(merged["Indeedee-F"], moves,
+                                        only_moves=["Follow Me", "Psychic"]),
+            "Sableye": build_moveset(merged["Sableye"], moves),
+            "Torkoal": build_moveset(merged["Torkoal"], moves, only_moves=["Body Press"])}
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Indeedee-F")
+        self.assertEqual(action.move.name, "Psychic")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -306,12 +306,85 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                 # a Whimsicott or Talonflame will take it whenever it isn't already up,
                 # not just on turn 1, and Prankster/Gale Wings makes it better still.
                 if a.move.name in ("Tailwind", "Trick Room"):
-                    already = (battle.field.trick_room if a.move.name == "Trick Room"
-                               else (battle.field.tailwind_p1 if a.side == "p1"
-                                     else battle.field.tailwind_p2) > 0)
-                    if already:
+                    own_tailwind_up = (battle.field.tailwind_p1 if a.side == "p1"
+                                       else battle.field.tailwind_p2) > 0
+                    if a.move.name == "Trick Room":
+                        same_already, opposite_up = battle.field.trick_room, own_tailwind_up
+                    else:
+                        same_already, opposite_up = own_tailwind_up, battle.field.trick_room
+                    if same_already:
                         return -20
+                    if opposite_up:
+                        # "an enemy should never counteract their own speed
+                        # control, by using tailwind while trick room is
+                        # active ... or using trick room while tailwind is
+                        # active -- though it may be a good idea if it
+                        # would lead to favourable speed order the next
+                        # turn." Only block it if casting anyway would
+                        # actually leave OUR side moving first LESS often
+                        # than the status quo -- the two together can
+                        # still net a favourable order.
+                        hyp_field = copy.deepcopy(battle.field)
+                        if a.move.name == "Trick Room":
+                            hyp_field.trick_room = True
+                        elif a.side == "p1":
+                            hyp_field.tailwind_p1 = 4
+                        else:
+                            hyp_field.tailwind_p2 = 4
+                        before = _speed_control_score(battle, side, opp_side)
+                        after = _speed_control_score(battle, side, opp_side, field=hyp_field)
+                        if after <= before:
+                            return -20
                     return 90 if c.ability in ("Prankster", "Gale Wings") else 75
+                if a.move.volatile_status in ("followme", "ragepowder"):
+                    # "vs pokemon like Indeedee-F it is necessary that a
+                    # team is resilient to a fixed plan where the enemy
+                    # just keeps clicking follow me ... this is often a
+                    # better strategy in the battle simulator too -- have
+                    # the enemy use it if it leads to a better state than
+                    # the simple 2v2 attack." A bounded, single-hit
+                    # heuristic, matching how every other candidate here is
+                    # valued (this whole function is a GREEDY one-ply
+                    # model, not a searcher): value redirecting by how much
+                    # damage it saves the partner from the hardest hit our
+                    # side could land on them this turn, net of the risk
+                    # the redirector takes on eating that hit instead -- a
+                    # KO'd redirector that saved nothing is a bad trade,
+                    # not "resilience". Follow Me/Rage Powder never
+                    # redirects a SPREAD move (real VGC mechanic), so those
+                    # are excluded from the incoming-damage estimate.
+                    partner = next((m for m in side.active if m is not c and not m.fainted), None)
+                    if partner is None:
+                        return 5 if turn_num == 1 else -5
+
+                    def _max_incoming(target):
+                        worst = 0.0
+                        for foe in opp_side.active:
+                            if foe.fainted:
+                                continue
+                            for mv, _pct in movesets.get(foe.name, []):
+                                if mv.category == "Status" or is_spread_move(mv.target):
+                                    continue
+                                if priority_blocked_by_side(
+                                        foe.ability, mv, side.active,
+                                        terrain=decision_field.terrain, target=target):
+                                    continue
+                                dmg = quick_damage_estimate(
+                                    mega_view(battle, foe), target, mv, battle.typechart,
+                                    decision_field, battle=battle)
+                                pct = (100.0 * min(dmg, target.current_hp) / target.max_hp()
+                                      if target.max_hp() else 0.0)
+                                worst = max(worst, pct)
+                        return worst
+
+                    worst_on_partner = _max_incoming(partner)
+                    worst_on_self = _max_incoming(c)
+                    value = (worst_on_partner - worst_on_self) * 0.8
+                    if worst_on_partner >= 100.0 * partner.current_hp / partner.max_hp():
+                        value += 40.0  # would otherwise have KO'd the partner
+                    if worst_on_self >= 100.0 * c.current_hp / c.max_hp():
+                        value -= 40.0  # redirecting draws a KO onto us instead
+                    return max(value, 5.0 if turn_num == 1 else -5.0)
                 return 5 if turn_num == 1 else -5
             # Damage must be NORMALISED to the same 0-100 scale the status values use.
             # Previously this returned raw HP damage, so any attack (~150) always beat
@@ -778,8 +851,16 @@ def _moves_first(mine, theirs, field, my_side, their_side) -> bool:
     return mine_spe > theirs_spe
 
 
-def _speed_control_score(battle, side, foe_side) -> float:
-    """SPEED_CONTROL_WEIGHT per opposing active that `side` moves before."""
+def _speed_control_score(battle, side, foe_side, field=None) -> float:
+    """SPEED_CONTROL_WEIGHT per opposing active that `side` moves before.
+
+    `field`: score against a HYPOTHETICAL field instead of `battle.field`
+    -- lets a caller ask "would casting this speed-control move actually
+    help?" without mutating the real battle state (see
+    `greedy_opponent_joint_action`'s own Tailwind-vs-Trick-Room self-
+    cancellation check)."""
+    if field is None:
+        field = battle.field
     ahead = 0
     for c in side.active:
         if c is None or c.fainted:
@@ -787,7 +868,7 @@ def _speed_control_score(battle, side, foe_side) -> float:
         for f in foe_side.active:
             if f is None or f.fainted:
                 continue
-            if _moves_first(c, f, battle.field, side.name, foe_side.name):
+            if _moves_first(c, f, field, side.name, foe_side.name):
                 ahead += 1
     return SPEED_CONTROL_WEIGHT * ahead
 

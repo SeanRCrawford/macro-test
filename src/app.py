@@ -46,7 +46,8 @@ def _data_fingerprint():
     to bump the fingerprint, since `load_teams_csv` below is cached on this
     tuple and adding a new file does not change any of the four sheet paths.
     """
-    files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv"]
+    files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv",
+             "default_sets.txt"]
     out = []
     for f in files:
         p = species_data.DATA_DIR / f
@@ -67,7 +68,9 @@ def load_all(fingerprint):
     combatants._TEMPLATE_CACHE.clear()
     merged, unresolved, moves, natures, typechart = build_merged_dataset()
     dups = getattr(build_merged_dataset, "last_duplicates", {}) or {}
-    return merged, unresolved, moves, natures, typechart, dups
+    default_set_issues = getattr(build_merged_dataset, "last_default_set_issues",
+                                 ([], [])) or ([], [])
+    return merged, unresolved, moves, natures, typechart, dups, default_set_issues
 
 
 @st.cache_data
@@ -77,7 +80,9 @@ def load_teams_csv(fingerprint=None, _merged=None):
     return t, meta
 
 
-merged, unresolved, moves, natures, typechart, dups = load_all(_data_fingerprint())
+(merged, unresolved, moves, natures, typechart, dups,
+ default_set_issues) = load_all(_data_fingerprint())
+default_set_incomplete, default_set_unrecognised = default_set_issues
 teams, team_meta = load_teams_csv(_data_fingerprint(), _merged=merged)
 prefs = load_preferences()
 all_names = sorted(merged.keys())
@@ -120,6 +125,15 @@ if hdr2.button("Reload data", help="Re-read mbsmogon.xlsx / roster.csv / teams.c
 if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
+if default_set_incomplete:
+    st.caption(f"Note: data/default_sets.txt has an incomplete set for "
+              f"{', '.join(default_set_incomplete)} (needs item, ability, "
+              f"nature, EVs, AND 4 moves to become that species' new "
+              f"default) -- ignored.")
+if default_set_unrecognised:
+    st.caption(f"Note: data/default_sets.txt names "
+              f"{', '.join(default_set_unrecognised)}, not a species in "
+              f"this dataset -- ignored.")
 
 tab_build, tab_gen, tab_search, tab_counter, tab_battle, tab_vs, tab_sim = st.tabs(
     ["Team Builder", "Generate Team", "Lead / Back Search", "Counter Table",
@@ -1522,6 +1536,55 @@ with tab_build:
                     st.session_state["team_analysis"] = analysis
                     _bump_builder_gen()
                     st.success(f"Loaded {len(pool)} Pokemon from pasted text")
+        with st.expander("Default sets (used when no team-specific set is given)"):
+            st.caption(
+                "\"let me create a 'default set' txt where I paste "
+                "pokepastes for individual pokemon, and for enemies this "
+                "should be the actual sets used by default\" -- one or "
+                "more COMPLETE Showdown exports (item, ability, nature, "
+                "EVs, AND 4 moves all specified), saved to "
+                "data/default_sets.txt. Once saved, that species' set "
+                "becomes THE default everywhere -- both our own side and "
+                "an enemy -- whenever no more specific set is already "
+                "pinned (a real known team, a paste, an explicit "
+                "override), replacing mbsmogon.xlsx's own usage-derived "
+                "pick. A paste missing any of the 5 fields is rejected "
+                "rather than half-applied.")
+            from species_data import (custom_team_from_export, load_default_sets,
+                                      team_to_showdown_export, DEFAULT_SETS_FIELDS)
+            existing_defaults, _incomplete = load_default_sets(merged)
+            if existing_defaults:
+                st.caption("Currently set: " + ", ".join(sorted(existing_defaults)))
+                if st.button("Clear all default sets", key="default_sets_clear"):
+                    (species_data.DATA_DIR / "default_sets.txt").unlink(missing_ok=True)
+                    st.cache_resource.clear(); st.cache_data.clear()
+                    st.rerun()
+            default_sets_paste = st.text_area(
+                "Paste one or more complete Showdown exports",
+                key="default_sets_paste", height=150)
+            if st.button("Save default set(s)", key="default_sets_save"):
+                if not default_sets_paste.strip():
+                    st.warning("Paste at least one Pokemon's full export first.")
+                else:
+                    names, sets = custom_team_from_export(default_sets_paste, merged)
+                    unknown = [n for n in names if n not in merged]
+                    incomplete = [n for n in names if n not in unknown
+                                 and not all(k in sets.get(n, {}) for k in DEFAULT_SETS_FIELDS)]
+                    if unknown:
+                        st.error(f"Unrecognised species: {', '.join(unknown)}")
+                    elif incomplete:
+                        st.error(f"Needs item, ability, nature, EVs, AND 4 "
+                                f"moves all specified: {', '.join(incomplete)}")
+                    else:
+                        merged_defaults = dict(existing_defaults)
+                        merged_defaults.update(sets)
+                        text = team_to_showdown_export(
+                            list(merged_defaults), merged_defaults, merged)
+                        (species_data.DATA_DIR / "default_sets.txt").write_text(
+                            text, encoding="utf-8")
+                        st.cache_resource.clear(); st.cache_data.clear()
+                        st.success(f"Saved default set(s) for {', '.join(names)}")
+                        st.rerun()
         if st.button("Use default 6", width='stretch'):
             st.session_state["team"] = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
                                          "Mega Skarmory", "Gholdengo"]
@@ -3335,7 +3398,9 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     rejected it) or `[]` if it ran and found nothing; either case has
     already shown the user an `st.error` explaining why.
     """
-    from counter_finder import multi_bring4_beam, multi_bring4_coverage, multi_bring4_exhaustive
+    from counter_finder import (DEFAULT_MAX_FOCUS_SASH, DEFAULT_MAX_LIFE_ORB,
+                                _apply_item_caps_to_top_rows, multi_bring4_beam,
+                                multi_bring4_coverage, multi_bring4_exhaustive)
     from team_search import build_candidate_pool
     pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
     if always_include:
@@ -3372,6 +3437,21 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
         st.error("No core (4, 5, or 6 Pokemon) found -- widen the pool, "
                  "lower the good-pair bar/min-enemies, relax max-weak, "
                  "or try Beam.")
+    elif rows:
+        # BY DEFAULT, same as the CLI's --multi-bring4 -- "this must apply
+        # to every single team". Every "Show top N" slider fed by this
+        # search DEFAULTS to 5-10 (their max runs to 20-30, but that's an
+        # edge the user has to deliberately drag to) -- correcting a top-
+        # 10 slice up front covers the common case for whatever the user
+        # later slides to, without re-running the search, while keeping
+        # the interactive UI's own real-race cost bounded (unlike the CLI,
+        # which has no click-and-wait budget to respect). See counter_
+        # finder._apply_item_caps_to_top_rows's own docstring for the
+        # top-N-only scoping/accepted tradeoff this shares with the CLI.
+        rows = _apply_item_caps_to_top_rows(
+            rows, 10, coverage, good_threshold,
+            item_caps={"Focus Sash": DEFAULT_MAX_FOCUS_SASH,
+                      "Life Orb": DEFAULT_MAX_LIFE_ORB})
     return coverage, rows
 
 
@@ -3567,6 +3647,105 @@ def _bring4_mega_caption(bring4_row):
            f"(VGC: only one Mega per side).")
 
 
+def _win_conditions_df(bring4_row):
+    """"I want to be able to identify win conditions -- perhaps Metagross
+    + Hydreigon is the only pair that beats Golisopod, or Hydreigon is
+    the only pokemon that beats Golisopod. I need to see what pokemon I
+    need to preserve to guarantee a win against certain pokemon in an
+    endgame." -- one row per enemy this bring-4 was raced against, reading
+    `bring4_win_conditions` (already computed, no new racing) into a plain
+    "what do I need alive" table. One safe MEMBER (regardless of partner)
+    is reported ahead of a specific safe PAIR, since it's the more useful,
+    less fragile answer when both are available; a genuinely uncovered
+    enemy (no pair beats every one of its pairings) is called out
+    directly rather than left blank.
+
+    "avoiding enemy tailwind and trick room may be key for a matchup
+    swinging from a win to a clear loss" -- a "Caveats" column reads
+    `tailwind_risk`/`protect_risk` (Tailwind and a turn-1 Protect scout
+    are always real, replayed hypotheses this module races) and `trick_
+    room_risk` (only present when the underlying search opted into
+    `check_trick_room` -- an extra-cost replay, not run by default) so a
+    win condition that LOOKS solid but actually flips against any of them
+    doesn't read as a plain, unconditional guarantee."""
+    from counter_finder import bring4_win_conditions
+    wc = bring4_win_conditions(bring4_row)
+    rows = []
+    for enemy in sorted(wc):
+        info = wc[enemy]
+        if info["uncovered"]:
+            preserve = "⚠️ none -- no pair here beats it every way it could show up"
+        elif info["safe_members"]:
+            preserve = " or ".join(info["safe_members"]) + " (any partner)"
+        else:
+            preserve = " or ".join(f"{n1} + {n2}" for n1, n2 in info["safe_pairs"])
+        caveats = []
+        if info["tailwind_risk"]:
+            caveats.append("breaks if enemy sets Tailwind")
+        if info["protect_risk"]:
+            caveats.append("Protect-timed 50/50")
+        if info["trick_room_risk"]:
+            caveats.append("breaks if enemy sets Trick Room")
+        rows.append({"Enemy": enemy, "Preserve": preserve,
+                    "Caveats": "; ".join(caveats)})
+    return pd.DataFrame(rows)
+
+
+def _render_win_conditions(bring4_row):
+    """Renders `_win_conditions_df` under a labelled section, skipped
+    entirely when the bring-4 was never actually raced against anything
+    (nothing to report)."""
+    df = _win_conditions_df(bring4_row)
+    if df.empty:
+        return
+    st.markdown("**Win conditions** -- what to preserve for a guaranteed answer")
+    st.caption("Per enemy: the bring-4 member(s) that beat EVERY way that "
+              "enemy could be paired with a teammate -- what you actually "
+              "need alive in an endgame to still guarantee beating it.")
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
+# "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
+# own recorded Choice Scarf usage % must be, AND be that member's single
+# TOP item, before it's worth flagging as a suggestion. A judgment call,
+# not a real rule: high enough that Scarf is clearly the headline set for
+# that member (not a rare tech pick), low enough to still catch a real
+# usage split (e.g. Basculegion's own ~37% Scarf share, its own top item).
+HIGH_SCARF_USAGE_THRESHOLD = 20.0
+
+
+def _known_scarf_enemy(vs_roster, vs_sets):
+    """The first enemy in `vs_roster` whose REAL, KNOWN set (a real pasted
+    team or a saved team's own recorded sets -- `vs_sets`, never mbsmogon.
+    xlsx's usage-derived guess) actually holds a Choice Scarf -- "should
+    use the actual set if it comes from a paste or an existing team (which
+    specifies the items, such as Basculegion has the choice scarf)".
+    `None` if nothing in `vs_sets` says so (an under-specified roster, or
+    one with no Scarf holder at all)."""
+    return next((n for n in vs_roster
+                if (vs_sets.get(n) or {}).get("item") == "Choice Scarf"), None)
+
+
+def _suggested_scarf_enemy(vs_roster, merged, threshold=HIGH_SCARF_USAGE_THRESHOLD):
+    """"otherwise ... give a suggestion if a member(s) has high choice
+    scarf usage" -- among `vs_roster`, whichever member's OWN top-recorded
+    item is Choice Scarf at at least `threshold`% usage (the highest such
+    member if more than one qualifies), or `None` if nobody clears the
+    bar. A suggestion, not an assumption: unlike `_known_scarf_enemy`
+    (a real, known fact), this is a usage-based guess that's still wrong
+    most of the time even at 20%+ usage, so it's surfaced as a caption for
+    the user to act on, never auto-selected."""
+    best = None
+    for n in vs_roster:
+        items = (merged.get(n) or {}).get("items_usage") or []
+        if not items:
+            continue
+        top_item, pct = items[0]
+        if top_item == "Choice Scarf" and pct >= threshold and (best is None or pct > best[1]):
+            best = (n, pct)
+    return best
+
+
 def _mega_evolution_caption(core, dive):
     """"I'm not sure enemy pokemon or my pokemon are mega evolving in
     Counter Table in the streamlit app" -- every turn log always prints a
@@ -3661,7 +3840,8 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                            excluded_items, key_prefix, item_overrides=None,
                            move_overrides=None, evs_overrides=None,
                            nature_overrides=None, ability_overrides=None,
-                           enemy_item_overrides=None, enemy_move_overrides=None):
+                           enemy_item_overrides=None, enemy_move_overrides=None,
+                           item_resolution_enemies=None):
     """"I want to be able to choose a specific team to deep dive into" --
     an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
     (any bring-4, or a multi-bring4 core), the app-side counterpart to the
@@ -3718,6 +3898,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
              "already done for the enemy's Mega-evolve choice. Real cost: "
              "roughly squares the per-turn search on top of the engine's "
              "own 2-turn lookahead.")
+    check_trick_room = st.checkbox(
+        "Also check enemy Trick Room", key=f"{key_prefix}_check_tr",
+        help="\"avoiding enemy tailwind and trick room may be key for a "
+             "matchup swinging from a win to a clear loss\" -- opt-in "
+             "(real extra cost, a whole second replay per enemy pair): "
+             "when a named enemy really runs Trick Room, also test it "
+             "actually casting it turn 1 and see if that flips the "
+             "outcome, feeding the Win conditions table's own Trick Room "
+             "caveat below. Off leaves every result exactly as before.")
     if st.button(f"Deep dive: {' / '.join(core)}", key=f"{key_prefix}_go"):
         with st.spinner("Racing every pair against every named enemy..."):
             try:
@@ -3729,7 +3918,9 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                     ability_overrides=ability_overrides,
                     enemy_item_overrides=enemy_item_overrides,
-                    enemy_move_overrides=enemy_move_overrides)
+                    enemy_move_overrides=enemy_move_overrides,
+                    check_trick_room=check_trick_room,
+                    item_resolution_enemies=item_resolution_enemies)
             except ValueError as e:
                 st.error(str(e))
                 dive = None
@@ -3770,6 +3961,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     hide_index=True)
         st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                     width='stretch', hide_index=True)
+        _render_win_conditions(bring4_rows[0])
         st.markdown("**Deep dive: just the winning bring-4's own pairs**")
         st.caption("\"When all pairs are deep dived and the best bring4 is "
                   "found, then have a section which only shows the deep "
@@ -3783,6 +3975,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                              f"{row['pairs_total']} beaten"):
                 _render_pair_matchup_detail(n1, n2, row["detail"], only_losses)
         st.markdown("**Every pair in the core**")
+    elif len(target_name_lists) == 1:
+        # `core` is already AT the bring size (a "deep dive a specific
+        # bring-4" call, not the "all of Our 6" case above) -- its own
+        # C(len(core),2) pairs already ARE the bring's own pairs, no
+        # narrowing-down step needed first.
+        core_bring4_row = {"bring4": tuple(core), "pair_rows": [
+            {"pair": pair_key, "detail": pair["per_enemy"][0]["detail"]}
+            for pair_key, pair in dive["per_pair"].items()]}
+        _render_win_conditions(core_bring4_row)
     for (n1, n2), pair in dive["per_pair"].items():
         pt = pair["total"]
         with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"
@@ -4035,6 +4236,16 @@ with tab_counter:
             else:
                 our6 = list(teams[ct_our_source])
                 our_sets = team_meta.get(ct_our_source, {}).get("sets") or {}
+            # A single-opponent deep dive must fix `our6`'s item/moveset
+            # against the SAME enemy population as the "vs ALL saved teams"
+            # dive does, not just whichever one roster that particular dive
+            # is racing/showing -- otherwise it independently re-optimises
+            # against just that one team ("if I knew I only faced this
+            # team"), making it look artificially better than the identical
+            # core's own multi-enemy dive shows for it. `core_deep_dive`'s
+            # own `item_resolution_enemies` param exists for exactly this.
+            item_resolution_enemies = (sorted({n for t in teams.values() for n in t})
+                                       or vs_roster)
             # "In the CLI the bring4 beat 55/90, but the streamlit counter
             # table was 27/90. They must mirror rather than contradict." --
             # an already-decided team's own pinned item/moveset must be
@@ -4070,22 +4281,43 @@ with tab_counter:
                                     if s.get("item")}
             enemy_move_overrides = {n: s["moves"] for n, s in vs_sets.items()
                                     if s.get("moves")}
+            # A fresh widget (hence a freshly-computed default) whenever the
+            # ENEMY ROSTER ITSELF changes -- `ct_vs_name` alone can't tell
+            # two different pastes apart (both share the same "Paste a
+            # pokepaste" sentinel value), so the key is fingerprinted on
+            # the roster's own contents instead. Sticky within the SAME
+            # roster (a manual pick/un-pick survives an unrelated rerun),
+            # reset only when the roster changes.
+            scarf_key = f"ct_b4_enemy_scarf_{hash(tuple(vs_roster))}"
+            known_scarf_enemy = _known_scarf_enemy(vs_roster, vs_sets)
+            st.session_state.setdefault(scarf_key, known_scarf_enemy or "(none)")
             ct_b4_scarf = st.selectbox(
                 "Enemy Choice Scarf holder", ["(none)"] + vs_roster,
-                key="ct_b4_enemy_scarf",
-                help="\"select an enemy as a choice scarf user (and hence "
-                     "will have 4 attacks)\" -- pins that one enemy's item "
-                     "to Choice Scarf and its moveset to its own top 4 "
+                key=scarf_key,
+                help="\"should use the actual set if it comes from a "
+                     "paste or an existing team\" -- defaults to whichever "
+                     "enemy a real known set already says holds one; "
+                     "otherwise defaults to none. Pins that enemy's item "
+                     "to Choice Scarf and (only if its real moveset isn't "
+                     "already known) its moveset to its own top 4 "
                      "non-status (attacking) moves by usage, since a "
                      "Choice item locks you into the first move used, "
                      "making Protect (or any other status move) a dead "
                      "slot no real Scarf set would carry.")
+            if known_scarf_enemy is None:
+                suggestion = _suggested_scarf_enemy(vs_roster, merged)
+                if suggestion:
+                    st.caption(f"Note: {suggestion[0]} commonly runs Choice "
+                              f"Scarf ({suggestion[1]:.0f}% usage) -- pick "
+                              f"it above if you don't have a more specific "
+                              f"set for it.")
             if ct_b4_scarf != "(none)":
                 enemy_item_overrides = dict(enemy_item_overrides)
                 enemy_item_overrides[ct_b4_scarf] = "Choice Scarf"
-                enemy_move_overrides = dict(enemy_move_overrides)
-                enemy_move_overrides[ct_b4_scarf] = choice_scarf_enemy_moveset(
-                    ct_b4_scarf, merged, moves)
+                if not (vs_sets.get(ct_b4_scarf) or {}).get("moves"):
+                    enemy_move_overrides = dict(enemy_move_overrides)
+                    enemy_move_overrides[ct_b4_scarf] = choice_scarf_enemy_moveset(
+                        ct_b4_scarf, merged, moves)
             if not (3 <= len(our6) <= 6):
                 st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
                            "a pokepaste, or choose a preset above) -- 3 or 4 skips "
@@ -4095,6 +4327,16 @@ with tab_counter:
                 st.warning("Provide an enemy roster (pick a saved team, or paste a "
                            "valid pokepaste) first.")
             else:
+                ct_check_tr = st.checkbox(
+                    "Also check enemy Trick Room", key="ct_b4_check_tr",
+                    help="\"avoiding enemy tailwind and trick room may be "
+                         "key for a matchup swinging from a win to a clear "
+                         "loss\" -- opt-in (real extra cost, a whole second "
+                         "replay per enemy pair): when a named enemy really "
+                         "runs Trick Room, also test it actually casting it "
+                         "turn 1 and see if that flips the outcome, feeding "
+                         "the Win conditions table's own Trick Room caveat "
+                         "below. Off leaves every result exactly as before.")
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
@@ -4108,7 +4350,8 @@ with tab_counter:
                                 nature_overrides=nature_overrides,
                                 ability_overrides=ability_overrides,
                                 enemy_item_overrides=enemy_item_overrides,
-                                enemy_move_overrides=enemy_move_overrides)
+                                enemy_move_overrides=enemy_move_overrides,
+                                check_trick_room=ct_check_tr)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -4138,6 +4381,7 @@ with tab_counter:
                         st.caption(mega_cap)
                     st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                                 width='stretch', hide_index=True)
+                    _render_win_conditions(bring4_rows[0])
                     b4_only_losses = st.checkbox(
                         "Only show enemy pairs each pair loses to",
                         key="ct_b4_best_onlyloss")
@@ -4160,7 +4404,8 @@ with tab_counter:
                         evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                         ability_overrides=ability_overrides,
                         enemy_item_overrides=enemy_item_overrides,
-                        enemy_move_overrides=enemy_move_overrides)
+                        enemy_move_overrides=enemy_move_overrides,
+                        item_resolution_enemies=item_resolution_enemies)
 
                 st.markdown("**Full deep dive: all of `Our 6`, every configuration**")
                 st.caption("Every C(6,2) pair `our6` can form -- covers every "
@@ -4174,7 +4419,8 @@ with tab_counter:
                     evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                     ability_overrides=ability_overrides,
                     enemy_item_overrides=enemy_item_overrides,
-                    enemy_move_overrides=enemy_move_overrides)
+                    enemy_move_overrides=enemy_move_overrides,
+                    item_resolution_enemies=item_resolution_enemies)
                 allteams_worst_case = st.checkbox(
                     "Worst-case enemy targeting",
                     key="ctb4_dd_all6_allteams_worst_case",
@@ -4224,6 +4470,7 @@ with tab_counter:
                                 item_overrides=item_overrides,
                                 move_overrides=move_overrides,
                                 worst_case_targeting=allteams_worst_case,
+                                item_resolution_enemies=item_resolution_enemies,
                                 evs_overrides=allteams_evs_overrides,
                                 nature_overrides=allteams_nature_overrides,
                                 ability_overrides=allteams_ability_overrides,
@@ -6420,10 +6667,15 @@ with tab_sim:
             if battle.p2.bench:
                 st.caption("Bench: " + "; ".join(_sim_mon_line(c) for c in battle.p2.bench))
 
+        from engine import TERRAIN_NAMES, WEATHER_NAMES
         fld = battle.field
         field_bits = []
         if fld.weather:
-            field_bits.append(f"Weather: {fld.weather} ({fld.weather_turns_left} left)")
+            field_bits.append(f"Weather: {WEATHER_NAMES.get(fld.weather, fld.weather)} "
+                              f"({fld.weather_turns_left} left)")
+        if fld.terrain:
+            field_bits.append(f"{TERRAIN_NAMES.get(fld.terrain, fld.terrain)} "
+                              f"({fld.terrain_turns_left} left)")
         if fld.trick_room:
             field_bits.append(f"Trick Room ({fld.trick_room_turns_left} left)")
         if fld.tailwind_p1:

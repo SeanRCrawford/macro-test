@@ -3,10 +3,11 @@
     "Find a way to make the golden baseline much faster - it takes far too
     long, especially for small changes."
 
-`build_merged_dataset()` (parses mbsmogon.xlsx/roster.csv) is the real cost
-in `load_world()` -- `_dataset_only()` caches its result to disk, keyed by
-a cheap `os.stat`-based fingerprint of those two files, so a repeat call (or
-a repeat PROCESS, e.g. `golden_baseline.py` run again right after an
+`build_merged_dataset()` (parses mbsmogon.xlsx/roster.csv, plus applying
+data/default_sets.txt's overrides if present) is the real cost in
+`load_world()` -- `_dataset_only()` caches its result to disk, keyed by a
+cheap `os.stat`-based fingerprint of those three files, so a repeat call
+(or a repeat PROCESS, e.g. `golden_baseline.py` run again right after an
 unrelated source-code edit) with unchanged data skips the parse entirely.
 
 `load_teams()` is deliberately NOT part of this cache -- its own
@@ -81,10 +82,14 @@ class TestFingerprintInvalidation(unittest.TestCase):
         if os.path.exists(_harness._CACHE_PATH):
             os.unlink(_harness._CACHE_PATH)
 
-    def test_fingerprint_covers_exactly_the_two_dataset_files(self):
+    def test_fingerprint_covers_exactly_the_dataset_files(self):
+        """default_sets.txt joined mbsmogon.xlsx/roster.csv here once the
+        "default set" feature could change build_merged_dataset()'s own
+        output without touching either of those two -- otherwise editing
+        it would silently serve a stale cached `merged`."""
         fp = _harness._fingerprint()
         paths = {os.path.basename(p) for p, *_ in fp}
-        self.assertEqual(paths, {"mbsmogon.xlsx", "roster.csv"})
+        self.assertEqual(paths, {"mbsmogon.xlsx", "roster.csv", "default_sets.txt"})
 
     def test_fingerprint_changes_are_detected_and_content_still_matches(self):
         w1 = _harness._dataset_only()

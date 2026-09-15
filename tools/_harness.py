@@ -47,12 +47,15 @@ _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
 
 def _fingerprint():
-    """[(path, mtime_ns, size), ...] for mbsmogon.xlsx/roster.csv -- the
-    only two files `_dataset_only()` reads. Pure `os.stat`, no parsing, no
-    pandas. A missing path's `st_size`/`mtime_ns` come back as `None`,
-    distinct from any real stat result."""
+    """[(path, mtime_ns, size), ...] for mbsmogon.xlsx/roster.csv/
+    default_sets.txt -- the only files `_dataset_only()`'s own call to
+    `build_merged_dataset()` reads. Pure `os.stat`, no parsing, no pandas.
+    A missing path's `st_size`/`mtime_ns` come back as `None`, distinct
+    from any real stat result -- default_sets.txt is expected to be
+    missing on a fresh checkout (the feature is opt-in), which must still
+    invalidate the cache correctly once the file is later created."""
     out = []
-    for name in ("mbsmogon.xlsx", "roster.csv"):
+    for name in ("mbsmogon.xlsx", "roster.csv", "default_sets.txt"):
         p = os.path.join(_DATA_DIR, name)
         try:
             st = os.stat(p)
