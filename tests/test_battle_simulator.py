@@ -249,11 +249,24 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
         tab = sim_tab(at)
         target_names = {"Kingambit", "Basculegion"}
         target_sbs = [sb for sb in tab.selectbox if sb.label == "Target"]
-        found_both_targets = any(target_names.issubset(set(sb.options))
-                                 for sb in target_sbs)
+        # Options now carry a "~NN%" damage estimate suffix, so match by prefix.
+        found_both_targets = any(
+            all(any(opt.startswith(n) for opt in sb.options) for n in target_names)
+            for sb in target_sbs)
         self.assertTrue(found_both_targets, "at least one default move's "
                                             "target dropdown must offer both "
                                             "enemy leads, not just one")
+
+    def test_turn_log_shows_percent_damage_alongside_raw_damage(self):
+        """"When showing move damage in the log, show % damage as well" --
+        the damage line now carries both, e.g. "92 dmg (46%) (1.0x eff)"."""
+        import re
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        at = submit_turn(at)
+        log_text = "\n".join(at.session_state["sim_turn_log"])
+        m = re.search(r"(\d+) dmg \((\d+)%\) \([\d.]+x eff\)", log_text)
+        self.assertIsNotNone(m, f"no percent-annotated damage line found in:\n{log_text}")
 
 
 class TestFieldStatusShowsTerrainDuration(unittest.TestCase):
@@ -769,6 +782,40 @@ class TestBattleMenu(unittest.TestCase):
         battle = at.session_state["sim_battle"]
         self.assertEqual(battle.p1.active[0].name, "Hydreigon")
         self.assertNotEqual(battle.p1.active[0].name, "Garchomp")
+
+
+class TestMoveSelectionShowsDamagePercent(unittest.TestCase):
+    """"When showing move damage in the log, show % damage as well. In
+    move selection let me see the % damage the potential moves will do."
+    The Move dropdown carries a "~NN%" suffix whenever a move only has one
+    legal opt (the common case -- one live foe, or a self/status move with
+    nothing to estimate), and the Target dropdown carries it per-target
+    when a move offers a real choice."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_a_damaging_move_carries_a_percent_estimate(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        move_sbs = [sb for sb in tab.selectbox if sb.label in ("Move", "Target")]
+        all_options = [opt for sb in move_sbs for opt in sb.options]
+        self.assertTrue(any("(~" in opt and "%)" in opt for opt in all_options),
+                        f"expected a ~NN%% estimate somewhere in: {all_options}")
+
+    def test_a_pure_status_move_carries_no_percent_estimate(self):
+        """Protect (always legal, always offered) must never get a damage
+        estimate -- it can't damage anything."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        move_sbs = [sb for sb in tab.selectbox if sb.label == "Move"]
+        protect_opts = [opt for sb in move_sbs for opt in sb.options
+                        if opt.startswith("Protect")]
+        self.assertTrue(protect_opts, "Protect must always be offered")
+        for opt in protect_opts:
+            self.assertEqual(opt, "Protect", "Protect must never carry a % estimate")
 
 
 class TestSuggestedAction(unittest.TestCase):

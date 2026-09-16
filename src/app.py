@@ -1322,7 +1322,30 @@ def sim_legal_actions(c, side_name, allies, foes, moveset, terrain=None):
     return out
 
 
-def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
+def _sim_move_damage_pcts(battle, c, action):
+    """`~NN%` estimates for each of `action`'s targets, via the same
+    real-engine estimator (`solver.quick_damage_estimate`) `sim_suggest_
+    action`/`sim_hit_count_matrix` already use -- None for a Status move,
+    Protect, or a switch (nothing to estimate). One percentage per target,
+    since a spread move can hit two foes for two different fractions of
+    their (possibly different) max HP."""
+    if action.move is None or action.move.category == "Status" or not action.targets:
+        return None
+    from solver import quick_damage_estimate
+    from projection import projected_field, mega_view
+    field = projected_field(battle)
+    attacker_view = mega_view(battle, c)
+    pcts = []
+    for tgt in action.targets:
+        if tgt.max_hp() <= 0:
+            continue
+        dmg = quick_damage_estimate(attacker_view, tgt, action.move, battle.typechart,
+                                    field, battle=battle)
+        pcts.append(dmg / tgt.max_hp() * 100)
+    return pcts or None
+
+
+def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None, battle=None):
     """`sim_legal_actions`, grouped by move name -- [(move_name,
     [(target_label, Action), ...]), ...], move order preserved.
 
@@ -1332,6 +1355,15 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
     buttons. Target labels are read off each Action's own `.targets`
     (never re-parsed from a display string), so this can't drift from what
     `sim_legal_actions` actually built.
+
+    `battle`: optional -- when passed, appends a `~NN%` damage estimate.
+    A move with exactly one legal target/opt has nothing else displayed
+    for it (the Target dropdown only appears when there's a real choice),
+    so that estimate is appended to the MOVE name itself; a move offering
+    several targets appends it to each target's own label instead, since
+    the percentage differs per target. Either way the returned move name
+    is still exactly what the caller looks the group back up by (`dict
+    (groups)[move_name]`), since both come from this same list.
     """
     groups, order = {}, []
     for _label, action in sim_legal_actions(c, side_name, allies, foes, moveset, terrain=terrain):
@@ -1346,7 +1378,26 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
         else:
             tgt_label = mv_name
         groups[mv_name].append((tgt_label, action))
-    return [(name, groups[name]) for name in order]
+
+    def _pct_suffix(pcts):
+        return f" (~{'/'.join(f'{p:.0f}' for p in pcts)}%)"
+
+    out = []
+    for name in order:
+        opts = groups[name]
+        if battle is not None and len(opts) == 1:
+            pcts = _sim_move_damage_pcts(battle, c, opts[0][1])
+            display_name = name + (_pct_suffix(pcts) if pcts else "")
+            out.append((display_name, opts))
+        elif battle is not None:
+            annotated = []
+            for tgt_label, action in opts:
+                pcts = _sim_move_damage_pcts(battle, c, action)
+                annotated.append((tgt_label + (_pct_suffix(pcts) if pcts else ""), action))
+            out.append((name, annotated))
+        else:
+            out.append((name, opts))
+    return out
 
 
 def sim_suggest_action(battle, c, side, opp_side, movesets, turn_num):
@@ -7227,7 +7278,8 @@ with tab_sim:
                     chosen_action = None
                     if menu == "Attack":
                         groups = sim_grouped_actions(c, "p1", battle.p1.active, battle.p2.active,
-                                                     movesets[c.name], terrain=battle.field.terrain)
+                                                     movesets[c.name], terrain=battle.field.terrain,
+                                                     battle=battle)
                         if groups:
                             move_key = f"sim_move_{i}_{battle.turn_num}"
                             move_name = st.selectbox(
@@ -7303,7 +7355,8 @@ with tab_sim:
                         if menu == "Attack":
                             groups = sim_grouped_actions(
                                 c, "p2", battle.p2.active, battle.p1.active,
-                                movesets[c.name], terrain=battle.field.terrain)
+                                movesets[c.name], terrain=battle.field.terrain,
+                                battle=battle)
                             if groups:
                                 move_key = f"sim_enemy_move_{i}_{battle.turn_num}"
                                 move_name = st.selectbox(

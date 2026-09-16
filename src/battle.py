@@ -945,8 +945,9 @@ class Battle:
                     self.log.add(f"{self.tag(target)}'s {self._fmt_boosts(changed)} (Stamina)")
                     self._emit(event="stat_change", side=self.side_of(target).name,
                                actor=target.name, detail=self._fmt_boosts(changed), source="Stamina")
+            dmg_pct = dmg / target.max_hp() * 100 if target.max_hp() else 0.0
             self.log.add(f"{self.tag(attacker)} uses {move.name} on {self.tag(target)}: "
-                          f"{dmg:.0f} dmg ({eff}x eff) -> {self.tag(target)} at "
+                          f"{dmg:.0f} dmg ({dmg_pct:.0f}%) ({eff}x eff) -> {self.tag(target)} at "
                           f"{target.current_hp}/{target.max_hp()} HP"
                           f"{' [FAINTED]' if target.fainted else ''}")
             if sashed:
