@@ -1661,9 +1661,12 @@ _STAGE_MULT = {-1: 2 / 3, 1: 1.5}
 
 # Abilities that block Intimidate outright (Clear Body/White Smoke/Full
 # Metal Body block ANY opponent-inflicted stat drop; Hyper Cutter blocks
-# Attack drops specifically; Inner Focus blocks Intimidate specifically).
+# Attack drops specifically; Inner Focus/Own Tempo/Oblivious/Scrappy block
+# Intimidate specifically -- matches `damage.apply_intimidate`'s own real-
+# engine immunity list exactly, this one was missing the last three).
 INTIMIDATE_BLOCKED = frozenset({"Clear Body", "White Smoke", "Full Metal Body",
-                                "Hyper Cutter", "Inner Focus"})
+                                "Hyper Cutter", "Inner Focus", "Own Tempo",
+                                "Oblivious", "Scrappy"})
 
 
 def _priority_blocked(attacker, mv, defending_side, terrain=None, target=None):
@@ -2944,6 +2947,19 @@ def _helping_hand_move_for(combatant):
     return MoveInfo("Helping Hand", 0, "Normal", "Status", "adjacentAlly", priority=5)
 
 
+def _follow_me_move_for(combatant, move_name="Follow Me"):
+    """A no-op stand-in for "this role used Follow Me/Rage Powder this
+    turn" -- same role `_tailwind_move_for` plays, except this one is
+    substituted EVERY turn the role is alive (see `_resolve_turn`'s own
+    `redirect_role`), not just turn 1 -- real Follow Me/Rage Powder only
+    redirects for the turn it's used, so keeping the partner safe means
+    re-casting it every turn, unlike Tailwind's "cast once, lasts several
+    turns" shape. Both real moves share the same priority (+2, +3 under
+    Prankster) and `target: "self"`."""
+    priority = 3 if combatant.ability == "Prankster" else 2
+    return MoveInfo(move_name, 0, "Normal", "Status", "self", priority=priority)
+
+
 def _choose_action(attacker, moves, live_targets, typechart, weather=None,
                    hinted_target=None, attacker_hp_frac=None,
                    target_hp_fracs=None, auras=None, terrain=None,
@@ -3632,7 +3648,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
                   half_damage_roles=frozenset(), own_speed_mult=1.0,
                   def_mult_by_role=None, enemy_hints=None,
                   helping_hand_setter_role=None, trick_room=False,
-                  trick_room_setter_role=None):
+                  trick_room_setter_role=None, redirect_role=None,
+                  redirect_move_name="Follow Me"):
     """One turn, given OUR target hints ({role: enemy_role_or_None}) -- by
     default the enemy side chooses independently and greedily (`_choose_
     action` with no hint), same "no coordination" behaviour `_sequential_
@@ -3704,6 +3721,27 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     role` for Trick Room -- casts it THIS turn (`_trick_room_move_for`)
     instead of attacking, same pattern, checked in both loops below.
 
+    `redirect_role`/`redirect_move_name`: one role ("E1"/"E2" for the
+    enemy-redirect check, or "C"/"P" for a future own-side mirror) that
+    uses Follow Me/Rage Powder THIS turn (`_follow_me_move_for`) instead
+    of attacking -- same "still a real action, lands no hit" substitution
+    pattern as `tailwind_setter_role`, but UNLIKE it, has no turn-1-only
+    gate anywhere in this module: real Follow Me/Rage Powder only
+    redirects for the turn it's used, so a caller wanting "this role
+    redirects every turn it's alive" (the only hypothesis worth testing --
+    a one-turn redirect proves little) simply passes the SAME role on
+    every turn, which is exactly what `_joint_race` does. The OPPOSING
+    side's own `_choose_action` calls get `hinted_target` forced to
+    `redirect_role` (via `their_redirect_live`/`our_redirect_live`,
+    computed once above from `theirs_live`/`ours_live`) instead of
+    `our_hints`/`enemy_hints` -- reusing `hinted_target`'s own existing
+    "ignored by a spread move, honoured by a single-target one" rule gets
+    "Follow Me/Rage Powder don't redirect spread moves" for free, no
+    separate targeting logic needed. A dead redirector (not in `theirs_
+    live`/`ours_live`) makes both variables `None`, a pure no-op -- normal
+    hinting/targeting applies exactly as if `redirect_role` had never been
+    passed.
+
     `helping_hand_setter_role`: one role -- "C"/"P"/"E1"/"E2" -- that casts
     Helping Hand THIS turn instead of attacking, `_helping_hand_move_for`
     substituted directly (same "still a real action, lands no hit" pattern
@@ -3761,6 +3799,13 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
 
     plan = {}
     helping_hand_target = _ALLY_OF.get(helping_hand_setter_role)
+    # `redirect_role` is on exactly one side (or dead/None) -- whichever it
+    # is, the OPPOSING side's single-target moves get forced onto it (a
+    # spread move ignores `hinted_target` entirely, so this never touches
+    # "Follow Me/Rage Powder don't redirect spread moves"). Computed once,
+    # not per-role: only actually live roles ever match.
+    their_redirect_live = redirect_role if redirect_role in theirs_live else None
+    our_redirect_live = redirect_role if redirect_role in ours_live else None
     for role, c in ours_live.items():
         if role in recharging_roles:
             plan[role] = ({}, None)
@@ -3770,10 +3815,13 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = ({}, _trick_room_move_for(c))
         elif role == helping_hand_setter_role:
             plan[role] = ({}, _helping_hand_move_for(c))
+        elif role == redirect_role:
+            plan[role] = ({}, _follow_me_move_for(c, redirect_move_name))
         else:
             plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
                                         typechart, weather=weather,
-                                        hinted_target=our_hints.get(role),
+                                        hinted_target=(their_redirect_live
+                                                      or our_hints.get(role)),
                                         attacker_hp_frac=hp[role],
                                         target_hp_fracs=hp, auras=auras,
                                         terrain=terrain, attacker_role=role,
@@ -3790,12 +3838,15 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = ({}, _trick_room_move_for(c))
         elif role == helping_hand_setter_role:
             plan[role] = ({}, _helping_hand_move_for(c))
+        elif role == redirect_role:
+            plan[role] = ({}, _follow_me_move_for(c, redirect_move_name))
         elif role in protected_roles:
             plan[role] = ({}, _PROTECT_MOVE)
         else:
             plan[role] = _choose_action(c, moves_by_role[role], ours_live,
                                         typechart, weather=weather,
-                                        hinted_target=(enemy_hints or {}).get(role),
+                                        hinted_target=(our_redirect_live
+                                                      or (enemy_hints or {}).get(role)),
                                         attacker_hp_frac=hp[role],
                                         target_hp_fracs=hp, auras=auras,
                                         terrain=terrain, attacker_role=role,
@@ -3941,7 +3992,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
               half_damage_roles=frozenset(), own_speed_mult=1.0,
               def_mult_by_role=None, lookahead=1, worst_case_targeting=False,
               helping_hand_setter_role=None, trick_room=False,
-              trick_room_setter_role=None):
+              trick_room_setter_role=None, redirect_role=None,
+              redirect_move_name="Follow Me"):
     """Try every combination of OUR target hints for this turn -- the same
     "exhaustive over permutations, the better outcome is kept" `pair_search`
     already promises, generalised from one candidate (plus an optional
@@ -3959,7 +4011,12 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
     recursive call below, same as `tailwind_setter_role`/`protected_roles`
     already aren't -- both are turn-scoped hypotheses a caller supplies for
     THIS turn, not state this cheap 2-turn-deep ranking aid re-derives for
-    an imagined next turn.
+    an imagined next turn. `redirect_role`/`redirect_move_name` are the
+    one exception: UNLIKE those, they ARE re-passed into the recursive
+    call (matching `trick_room`'s own persisting-boolean treatment, not
+    `trick_room_setter_role`'s turn-scoped one) -- a real Follow Me/Rage
+    Powder redirector keeps redirecting every turn it's alive, not just
+    the turn a caller happens to be asking about.
 
     Ranked by (enemies KO'd, -ours KO'd, net fractional damage) -- "best FOR
     US", matching every other joint search in this module ranking on the
@@ -4074,7 +4131,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
                 own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role,
                 helping_hand_setter_role=helping_hand_setter_role,
-                trick_room=trick_room, trick_room_setter_role=trick_room_setter_role)
+                trick_room=trick_room, trick_room_setter_role=trick_room_setter_role,
+                redirect_role=redirect_role, redirect_move_name=redirect_move_name)
         else:
             new_hp, log, enemy_acted, wiped, recharging_next = _resolve_turn(
                 combatants, moves_by_role, hp, typechart, weather, hints,
@@ -4084,7 +4142,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 dmg_mult_by_role=dmg_mult_by_role, half_damage_roles=half_damage_roles,
                 own_speed_mult=own_speed_mult, def_mult_by_role=def_mult_by_role,
                 helping_hand_setter_role=helping_hand_setter_role,
-                trick_room=trick_room, trick_room_setter_role=trick_room_setter_role)
+                trick_room=trick_room, trick_room_setter_role=trick_room_setter_role,
+                redirect_role=redirect_role, redirect_move_name=redirect_move_name)
         final_hp = new_hp
         both_sides_still_live = (wiped is None
                                  and any(new_hp[r] > 0 for r in ("C", "P"))
@@ -4100,7 +4159,8 @@ def _best_turn(combatants, moves_by_role, hp, typechart, weather,
                 terrain=terrain, dmg_mult_by_role=next_dmg_mult,
                 half_damage_roles=next_half_damage, own_speed_mult=own_speed_mult,
                 def_mult_by_role=next_def_mult, lookahead=lookahead - 1,
-                worst_case_targeting=worst_case_targeting, trick_room=trick_room)
+                worst_case_targeting=worst_case_targeting, trick_room=trick_room,
+                redirect_role=redirect_role, redirect_move_name=redirect_move_name)
         enemies_ko = sum(1 for r in ("E1", "E2") if hp[r] > 0 and final_hp[r] <= 0)
         ours_ko = sum(1 for r in ("C", "P") if hp[r] > 0 and final_hp[r] <= 0)
         dmg_dealt = sum(hp[r] - final_hp[r] for r in ("E1", "E2"))
@@ -4118,7 +4178,8 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
                 first_turn_protected_role=None, first_turn_tailwind_role=None,
                 terrain=None, own_speed_mult=1.0, worst_case_targeting=False,
                 first_turn_helping_hand_role=None,
-                first_turn_trick_room_role=None):
+                first_turn_trick_room_role=None, redirect_role=None,
+                redirect_move_name="Follow Me"):
     """`turns` turns (or fewer, once a side is fully fainted), returns
     (outcome, turns_used, hp, log) -- outcome is "sweep" (both enemies
     fainted before either of them ever got to act), "out_trade" (both
@@ -4206,6 +4267,17 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
     (the plain boolean `_apply_plan` reads) is simply on for every role,
     both sides alike, starting turn 2, same "not until the caster's own
     action resolves" timing as Tailwind.
+
+    `redirect_role`/`redirect_move_name`: UNLIKE every `first_turn_*_role`
+    above, this is not turn-1-only -- passed straight through to EVERY
+    turn's `_best_turn` call unchanged, no `turn_i == 0` gate anywhere in
+    this loop. Real Follow Me/Rage Powder only redirects for the turn
+    it's used, so a caller testing "this role keeps redirecting for its
+    partner the whole race" (the only hypothesis worth testing -- a
+    single-turn redirect proves little about a matchup) just names the
+    same role here for the whole call, not a one-shot "first turn" hint.
+    See `_resolve_turn`'s own docstring for how the substitution and the
+    opposing side's forced targeting actually work.
 
     RECHARGE (Hyper Beam, Giga Impact, ...): `_best_turn`'s own
     `recharging_next` return is carried forward as the NEXT call's
@@ -4310,7 +4382,8 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
             def_mult_by_role=def_mult_by_role, worst_case_targeting=worst_case_targeting,
             helping_hand_setter_role=helping_hand_role_this_turn,
             trick_room=trick_room_active_this_turn,
-            trick_room_setter_role=trick_room_role_this_turn)
+            trick_room_setter_role=trick_room_role_this_turn,
+            redirect_role=redirect_role, redirect_move_name=redirect_move_name)
         full_log.append(turn_log)
         any_enemy_acted = any_enemy_acted or enemy_acted
         turns_used = turn_i + 1
@@ -4492,6 +4565,8 @@ def _pruned_entry():
         "own_tailwind_is_real_threat": False, "own_tailwind_used": False,
         "own_tailwind_outcome": None,
         "protect_outcomes": {"E1": "loss", "E2": "loss"}, "protect_safe": False,
+        "follow_me_is_real_threat": False, "follow_me_forced": False,
+        "follow_me_outcome": None, "follow_me_safe": False,
         "log": [], "_pruned": True,
         "our_hp": {"C": 0.0, "P": 0.0}, "clean_win_value": 0.0,
         "our_damage_output": 0.0,
@@ -4648,6 +4723,24 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     used for `tailwind_safe`/`protect_safe` elsewhere) sees the opted-out
     state as "no known issue," never a false "unsafe."
 
+    REDIRECT (`follow_me_safe` -- ALWAYS ON, no flag, unlike `check_trick_
+    room`): "let me select a mode ... where the enemy always uses its
+    redirection moves ... beating these styles is crucial ... include in
+    the overall score" -- when a real Follow Me/Rage Powder user is on the
+    enemy pair (usage-data check, `_has_follow_me`), the race is replayed
+    once per real redirector with that role re-casting it EVERY turn (not
+    just turn 1 -- real Follow Me/Rage Powder has to be re-clicked to keep
+    protecting the partner, unlike Tailwind/Trick Room's "cast once, lasts
+    several turns" shape; see `_joint_race`'s own `redirect_role` docstring
+    paragraph), worst-for-us kept, chained AFTER Trick Room against
+    `chosen_outcome`. `follow_me_is_real_threat`/`follow_me_forced`/
+    `follow_me_outcome`/`follow_me_safe` mirror `tailwind_safe`'s own
+    ALWAYS-PRESENT shape (not `trick_room_safe`'s opt-in one) -- present and
+    `True` even when no redirector exists, exactly like `protect_safe`.
+    `pairs_follow_me_safe` (the summary's own count) and `follow_me_risk`
+    (`bring4_win_conditions`'s own caveat) read this the same way their
+    Tailwind/Protect namesakes already do.
+
     `prune_below`: optional fraction (e.g. `good_threshold`) -- once it is
     MATHEMATICALLY CERTAIN this pair cannot reach that share of
     `target_names`'s enemy pairs beaten (even if every remaining, not-yet-
@@ -4743,6 +4836,18 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                                    if check_trick_room else [])
         real_trick_room_threat = bool(trick_room_setter_roles)
 
+        def _has_follow_me(name):
+            if merged is None:
+                return None
+            known = {mv for mv, _pct in merged.get(name, {}).get("moves_usage", [])}
+            for mv in ("Follow Me", "Rage Powder"):
+                if mv in known:
+                    return mv
+            return None
+        follow_me_setter_roles = [(role, mv) for role, name in (("E1", e1_name), ("E2", e2_name))
+                                  for mv in [_has_follow_me(name)] if mv]
+        real_follow_me_threat = bool(follow_me_setter_roles)
+
         best = None
         for _our_mt, (c1, c2) in _resolve_forms((n1, n2), our_built,
                                                 forced_base_names=forced_base_names):
@@ -4827,6 +4932,25 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     if trick_room_forced:
                         chosen_outcome, chosen_hp = tr_outcome, tr_hp
                         chosen_turns_used, chosen_log = tr_turns_used, tr_log
+                # FOLLOW ME / RAGE POWDER (see docstring) -- chained AFTER
+                # Trick Room, same pessimistic `max`-by-rank shape, always-on
+                # (no `check_follow_me` flag -- unlike Trick Room, beating a
+                # real redirector is treated as mandatory, not opt-in).
+                if follow_me_setter_roles:
+                    fm_outcome, fm_turns_used, fm_hp, fm_log = max(
+                        (_joint_race(combatants, moves_by_role, typechart, weather,
+                                    turns, redirect_role=role, redirect_move_name=mv,
+                                    terrain=terrain,
+                                    worst_case_targeting=worst_case_targeting)
+                         for role, mv in follow_me_setter_roles),
+                        key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                    follow_me_forced = (_JOINT_OUTCOME_RANK[fm_outcome] >
+                                        _JOINT_OUTCOME_RANK[chosen_outcome])
+                    if follow_me_forced:
+                        chosen_outcome, chosen_hp = fm_outcome, fm_hp
+                        chosen_turns_used, chosen_log = fm_turns_used, fm_log
+                else:
+                    fm_outcome, follow_me_forced = None, False
                 # Retained HP is only a meaningful QUALITY signal for an
                 # actual win -- for loss/no_ko the outcome bucket alone
                 # already says "bad", and `hp` can go slightly negative on
@@ -4868,6 +4992,11 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     "protect_outcomes": protect_outcomes,
                     "protect_safe": all(o in ("sweep", "out_trade")
                                         for o in protect_outcomes.values()),
+                    "follow_me_is_real_threat": real_follow_me_threat,
+                    "follow_me_forced": follow_me_forced,
+                    "follow_me_outcome": fm_outcome,
+                    "follow_me_safe": (fm_outcome in ("sweep", "out_trade")
+                                       if follow_me_setter_roles else True),
                     "log": chosen_log,
                     "our_hp": our_hp,
                     "clean_win_value": our_hp["C"] + our_hp["P"],
@@ -4912,6 +5041,7 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         "pairs_own_tailwind_used": sum(1 for d in detail.values()
                                        if d["own_tailwind_used"]),
         "pairs_protect_safe": sum(1 for d in detail.values() if d["protect_safe"]),
+        "pairs_follow_me_safe": sum(1 for d in detail.values() if d["follow_me_safe"]),
         "pairs_clean_win_total": sum(d["clean_win_value"] for d in detail.values()),
         "pairs_damage_output_total": sum(d["our_damage_output"] for d in detail.values()),
         "pairs_total": len(detail),
@@ -4978,14 +5108,21 @@ def joint_pair_search(pool, target_names, partner_name, merged, moves_db,
     `out_trade`, i.e. neither enemy has a turn-1 scouting Protect that turns
     this pair's win into a loss or stall.
 
+    REDIRECT ROBUSTNESS: every enemy pair with a real Follow Me/Rage Powder
+    user is also raced with that role re-casting it every turn -- see
+    `_pair_vs_targets`'s own docstring ("REDIRECT" paragraph). `follow_me_
+    safe` is ALWAYS present (like `tailwind_safe`/`protect_safe`, unlike
+    `check_trick_room`'s opt-in fields) and True whenever no real redirector
+    exists on the enemy side.
+
     Returns rows: {name, item, pairs_swept, pairs_traded, pairs_lost,
-    pairs_no_ko, pairs_tailwind_safe, pairs_protect_safe, pairs_total,
-    detail} -- `detail` is `_pair_vs_targets`'s own shape, damage log
-    included. Ranked by (swept + traded) first, then protect_safe count,
-    then tailwind_safe count -- mirrors `pair_search`'s existing
-    `(clean+trade, -pinned)` sort, with protect_safe weighted ahead of
-    tailwind_safe since a live Protect 50/50 is a more concrete risk than a
-    hypothetical Tailwind.
+    pairs_no_ko, pairs_tailwind_safe, pairs_protect_safe, pairs_follow_me_
+    safe, pairs_total, detail} -- `detail` is `_pair_vs_targets`'s own
+    shape, damage log included. Ranked by (swept + traded) first, then
+    protect_safe count, then tailwind_safe count, then follow_me_safe count
+    -- mirrors `pair_search`'s existing `(clean+trade, -pinned)` sort, with
+    protect_safe weighted ahead of tailwind_safe since a live Protect 50/50
+    is a more concrete risk than a hypothetical Tailwind.
     """
     partner_item, partner_move_names, _partner_weather = best_answer(
         partner_name, merged, moves_db, natures, typechart, target_names,
@@ -5083,7 +5220,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
 
     Returns rows: {pair: (name1, name2), item1, item2, pairs_swept,
     pairs_traded, pairs_lost, pairs_no_ko, pairs_tailwind_safe,
-    pairs_protect_safe, pairs_total, detail, forced_base} -- `detail` is
+    pairs_protect_safe, pairs_follow_me_safe, pairs_total, detail,
+    forced_base} -- `detail` is
     `_pair_vs_targets`'s own shape (damage log included), ranked the same
     way `joint_pair_search` ranks. `forced_base` is `None` for every row
     except the `extra_forced_base` extras described above -- a caller that
@@ -5157,7 +5295,7 @@ def _pair_beaten_frac(row):
 
 
 DEFAULT_WORST_CASE_FLOOR = 0.5
-_CORE_BLEND_WEIGHTS = (0.5, 0.25, 0.25)  # (wins, tailwind-safe, protect-safe)
+_CORE_BLEND_WEIGHTS = (0.4, 0.2, 0.2, 0.2)  # (wins, tailwind-safe, protect-safe, follow_me-safe)
 
 
 def _rate_per_90(count, n_pairs, pairs_total):
@@ -5218,10 +5356,13 @@ def _pair_sort_key(row):
     enemy composition is still worse than one that wins everywhere, however
     messily), strictly before tailwind-safe count (a real Tailwind-boosted
     loss is a more concrete, binary risk than an average-case quality
-    difference). Tailwind-safe count is the fourth and final criterion.
+    difference). Tailwind-safe count is the fourth criterion, and
+    follow_me-safe count (beating a real Follow Me/Rage Powder redirector,
+    same always-on treatment as tailwind-safe) is the fifth and final one.
     """
     return (-row["pairs_protect_safe"], -(row["pairs_swept"] + row["pairs_traded"]),
-           -row["pairs_clean_win_total"], -row["pairs_tailwind_safe"])
+           -row["pairs_clean_win_total"], -row["pairs_tailwind_safe"],
+           -row["pairs_follow_me_safe"])
 
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
@@ -5487,7 +5628,8 @@ def bring4_pair_depth(bring4_row):
     int|None, "beaten_worst": int|None, "pairs_total": int (the shared
     per-pair enemy-pairs-total, e.g. 1 for a single named enemy pair),
     "tailwind_safe_total": int, "protect_safe_total": int,
-    "clean_win_total": float} -- the four "beaten_*" fields and the three
+    "follow_me_safe_total": int,
+    "clean_win_total": float} -- the four "beaten_*" fields and the four
     "*_total" fields are all summed/read across the SAME `n_pairs` =
     `len(bring4_row["pair_rows"])` pairs (6 for a bring of 4, the common
     case, but only 3 for a 3-Pokemon core -- "I would like to output the
@@ -5502,11 +5644,13 @@ def bring4_pair_depth(bring4_row):
     than raising an IndexError).
 
     ALSO returns the BEST/3RD-BEST breakdown (same `_pair_sort_key` order,
-    same `None`-if-too-few-pairs rule as `beaten_3rd`/`beaten_4th`) for two
-    more per-pair fields, plus a whole-bring SUM to match: "best and third
-    best pair under tailwind and under enemy protect" --
+    same `None`-if-too-few-pairs rule as `beaten_3rd`/`beaten_4th`) for
+    three more per-pair fields, plus a whole-bring SUM to match: "best and
+    third best pair under tailwind and under enemy protect" --
     "tailwind_safe_best"/"tailwind_safe_3rd", "protect_safe_best"/
-    "protect_safe_3rd". And "best and third best number of pairs beaten
+    "protect_safe_3rd", and the same for beating a real Follow Me/Rage
+    Powder redirector -- "follow_me_safe_best"/"follow_me_safe_3rd". And
+    "best and third best number of pairs beaten
     without having either of own pair faint" -- a discrete, stricter cousin
     of `clean_win_total`'s continuous HP-retained score (0.0-2.0 per enemy
     pair): `no_faint_total`/`no_faint_best`/`no_faint_3rd`, from
@@ -5519,6 +5663,7 @@ def bring4_pair_depth(bring4_row):
     beaten = [r["pairs_swept"] + r["pairs_traded"] for r in pairs]
     tw = [r["pairs_tailwind_safe"] for r in pairs]
     pr = [r["pairs_protect_safe"] for r in pairs]
+    fm = [r["pairs_follow_me_safe"] for r in pairs]
     no_faint = [_pairs_beaten_without_fainting(r) for r in pairs]
     return {
         "beaten_total": sum(beaten),
@@ -5532,6 +5677,9 @@ def bring4_pair_depth(bring4_row):
         "protect_safe_total": sum(pr),
         "protect_safe_best": pr[0] if pr else None,
         "protect_safe_3rd": pr[2] if len(pr) > 2 else None,
+        "follow_me_safe_total": sum(fm),
+        "follow_me_safe_best": fm[0] if fm else None,
+        "follow_me_safe_3rd": fm[2] if len(fm) > 2 else None,
         "clean_win_total": sum(r["pairs_clean_win_total"] for r in pairs),
         "no_faint_total": sum(no_faint),
         "no_faint_best": no_faint[0] if no_faint else None,
@@ -5615,9 +5763,17 @@ def bring4_win_conditions(bring4_row):
     function can read off already-computed `detail` the way the three
     above can.
 
+    `follow_me_risk` is the same idea again, always available (unlike
+    `trick_room_risk`, `follow_me_safe` is an unconditional, always-on field
+    on every `detail` entry -- see `_pair_vs_targets`'s own docstring) --
+    "breaks if the enemy just redirects with Follow Me/Rage Powder": True
+    only when `safe_pairs` is non-empty but none of its own entries stay
+    safe against a real enemy redirector.
+
     Returns {enemy_name: {"safe_pairs": [(n1, n2), ...], "safe_members":
     [name, ...], "uncovered": bool, "tailwind_risk": bool, "protect_risk":
-    bool, "trick_room_risk": bool}}, one entry per enemy actually raced.
+    bool, "trick_room_risk": bool, "follow_me_risk": bool}}, one entry per
+    enemy actually raced.
     `uncovered` is True exactly when `safe_pairs` is empty -- no pair in
     this bring-4 beats every one of E's own pairings, a genuine blind spot
     this bring-4 has no guaranteed answer for at all (distinct from, and a
@@ -5632,7 +5788,8 @@ def bring4_win_conditions(bring4_row):
     partners_of = {n: [m for m in bring4 if m != n] for n in bring4}
     out = {}
     for enemy in enemies:
-        safe_pairs, tailwind_robust, protect_robust, trick_room_robust = [], [], [], []
+        (safe_pairs, tailwind_robust, protect_robust, trick_room_robust,
+         follow_me_robust) = [], [], [], [], []
         for pr in pair_rows:
             enemy_pairings = [d for pair, d in pr["detail"].items() if enemy in pair]
             if not enemy_pairings:
@@ -5645,6 +5802,8 @@ def bring4_win_conditions(bring4_row):
                     protect_robust.append(pr["pair"])
                 if all(d.get("trick_room_safe", True) for d in enemy_pairings):
                     trick_room_robust.append(pr["pair"])
+                if all(d.get("follow_me_safe", True) for d in enemy_pairings):
+                    follow_me_robust.append(pr["pair"])
         safe_pair_sets = [frozenset(p) for p in safe_pairs]
         safe_members = [n for n in bring4
                         if partners_of[n]
@@ -5653,6 +5812,7 @@ def bring4_win_conditions(bring4_row):
                      "tailwind_risk": bool(safe_pairs) and not tailwind_robust,
                      "protect_risk": bool(safe_pairs) and not protect_robust,
                      "trick_room_risk": bool(safe_pairs) and not trick_room_robust,
+                     "follow_me_risk": bool(safe_pairs) and not follow_me_robust,
                      "uncovered": not safe_pairs}
     return out
 
@@ -6249,12 +6409,14 @@ def _core_row(core, pair_by_key_list, target_name_lists, good_threshold=1.0,
         rates.append((
             _rate_per_90(depth["beaten_total"], n_pairs, depth["pairs_total"]),
             _rate_per_90(depth["tailwind_safe_total"], n_pairs, depth["pairs_total"]),
-            _rate_per_90(depth["protect_safe_total"], n_pairs, depth["pairs_total"])))
-    w_win, w_tw, w_pr = _CORE_BLEND_WEIGHTS
+            _rate_per_90(depth["protect_safe_total"], n_pairs, depth["pairs_total"]),
+            _rate_per_90(depth["follow_me_safe_total"], n_pairs, depth["pairs_total"])))
+    w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
     blended_avg_wins = (
         w_win * (sum(r[0] for r in rates) / len(rates)) +
         w_tw * (sum(r[1] for r in rates) / len(rates)) +
-        w_pr * (sum(r[2] for r in rates) / len(rates))) if rates else 0.0
+        w_pr * (sum(r[2] for r in rates) / len(rates)) +
+        w_fm * (sum(r[3] for r in rates) / len(rates))) if rates else 0.0
     worst_case_floor_penalty = max(
         0.0, worst_case_floor - (_worst_pair_beaten_frac(per_enemy[worst_idx])
                                  if worst_idx is not None else 1.0))
@@ -6927,7 +7089,7 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
 
 
 _ROW_TOTAL_FIELDS = ("pairs_swept", "pairs_traded", "pairs_lost", "pairs_no_ko",
-                     "pairs_tailwind_safe", "pairs_protect_safe",
+                     "pairs_tailwind_safe", "pairs_protect_safe", "pairs_follow_me_safe",
                      "pairs_clean_win_total", "pairs_total")
 
 

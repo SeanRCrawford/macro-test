@@ -174,5 +174,35 @@ class TestTheRealSearchSeesTheChange(unittest.TestCase):
             f"crippling {victim} changed neither the record nor the bring")
 
 
+class TestBattleSimulatorDefaultsToASavedTeam(unittest.TestCase):
+    """"When I play a team in the Battle Simulator, it doesn't seem to
+    actually use the sets defined in the team.txt" -- traced to the
+    shared "Our side" picker (`our_side_pool`) silently defaulting to "My
+    loaded team" (whatever the Team Builder tab currently holds) whenever
+    any team is loaded there, rather than "A saved team" -- easy to end
+    up battling with the wrong sets without noticing. The Battle
+    Simulator's own point is playing against a specific NAMED team, so it
+    now passes `default_source="A saved team"`; every OTHER caller of
+    this shared helper is unaffected (see the sibling test below)."""
+
+    SIM_TAB_INDEX = 6  # Team Builder, Generate, Lead/Back, Counter Table, Battle Viewer, Vs Team, Battle Simulator
+    BATTLE_VIEWER_TAB_INDEX = 4
+
+    def test_our_side_defaults_to_a_saved_team_when_one_exists(self):
+        at = app(team=TEAM)
+        tab = at.tabs[self.SIM_TAB_INDEX]
+        src_radio = next(r for r in tab.radio if r.label == "Our side")
+        self.assertEqual(src_radio.value, "A saved team")
+
+    def test_other_views_still_default_to_my_loaded_team(self):
+        """Regression guard: `default_source` is opt-in -- every OTHER
+        caller of `our_side_pool` (Battle Viewer, Vs Team, deep dive) must
+        keep the old default unchanged."""
+        at = app(team=TEAM)
+        tab = at.tabs[self.BATTLE_VIEWER_TAB_INDEX]
+        src_radio = next(r for r in tab.radio if r.label == "Our side")
+        self.assertEqual(src_radio.value, "My loaded team")
+
+
 if __name__ == "__main__":
     unittest.main()

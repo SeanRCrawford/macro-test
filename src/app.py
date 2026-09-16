@@ -314,7 +314,8 @@ def _load_team_text(text, merged):
     return pool, sets, None
 
 
-def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
+def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None,
+                  default_source=None):
     """Where OUR six come from, offered the same way everywhere.
 
     Every view that puts our team against someone else's needs this, and each
@@ -330,10 +331,24 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     Team Builder's -- correct for the loaded team and simply wrong for the
     other sources, where it applied one team's items, moves and abilities to
     a different team's Pokemon.
+
+    `default_source`: which of `options` a caller wants preselected, when a
+    real choice actually exists -- `None` (every caller except the Battle
+    Simulator) keeps the old "My loaded team" default whenever the Team
+    Builder tab has anything loaded. "When I play a team in the Battle
+    Simulator, it doesn't seem to actually use the sets defined in
+    team.txt" turned out to be exactly this default: the Simulator's whole
+    point is playing against a specific NAMED team, not whatever the Team
+    Builder tab happens to currently hold, so it passes "A saved team"
+    here -- but only actually changes the preselection when a saved team
+    exists to pick (falls back to the old logic otherwise, so "no saved
+    teams yet" still lands somewhere useful rather than an empty list).
     """
     loaded = get_state_team()
     options = ["My loaded team", "A saved team", "Paste a pokepaste", "Any Pokemon"]
     default = 0 if loaded else 1
+    if default_source is not None and default_source in options and teams:
+        default = options.index(default_source)
     source = st.radio("Our side", options, index=default, horizontal=True,
                       key=f"{key_prefix}_side_source",
                       help="'My loaded team' is whatever the Team Builder tab "
@@ -1332,6 +1347,38 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
             tgt_label = mv_name
         groups[mv_name].append((tgt_label, action))
     return [(name, groups[name]) for name in order]
+
+
+def sim_force_redirect_actions(actions, movesets):
+    """"Let me select a mode in the battle simulator where the enemy always
+    uses its redirection moves" -- overrides `greedy_opponent_joint_action`'s
+    own per-mon choice (which already VALUES Follow Me/Rage Powder, see
+    `solver.greedy_opponent_joint_action`'s own `action_value` docstring
+    comment, but only picks it when the heuristic judges it worthwhile) so
+    every alive, redirect-capable actor in `actions` clicks it UNCONDITIONALLY
+    instead -- a deliberately pessimistic "can this specific play be
+    punished even by the worst-case redirect spam" testing mode, not a
+    realistic AI policy.
+
+    Only touches an actor's OWN action -- a fainted-replacement switch
+    Action (built for a DIFFERENT, already-fainted slot) is left alone, and
+    a mon that doesn't know Follow Me/Rage Powder at all keeps whatever
+    `greedy_opponent_joint_action` already chose for it.
+    """
+    from engine import Action
+    out = []
+    for a in actions:
+        c = a.combatant
+        if a.kind == "move" and not c.fainted:
+            for mv, _pct in movesets.get(c.name, []):
+                if mv.volatile_status in ("followme", "ragepowder"):
+                    out.append(Action(c, a.side, "move", mv, [c]))
+                    break
+            else:
+                out.append(a)
+        else:
+            out.append(a)
+    return out
 
 
 def sim_predict_faint_replacements(battle, p1_actions, p2_actions, mega_decisions):
@@ -3489,7 +3536,8 @@ def _pair_rows_df(pair_rows, include_total=False):
          "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
          "Clean win": f"{r['pairs_clean_win_total']:.1f}/{2 * total}",
          "Tailwind-safe": r["pairs_tailwind_safe"],
-         "Protect-safe": r["pairs_protect_safe"]}
+         "Protect-safe": r["pairs_protect_safe"],
+         "Redirect-safe": r["pairs_follow_me_safe"]}
         for r in pair_rows]
     if include_total and pair_rows:
         n = len(pair_rows)
@@ -3500,13 +3548,15 @@ def _pair_rows_df(pair_rows, include_total=False):
         clean = sum(r["pairs_clean_win_total"] for r in pair_rows)
         tw_safe = sum(r["pairs_tailwind_safe"] for r in pair_rows)
         pr_safe = sum(r["pairs_protect_safe"] for r in pair_rows)
+        fm_safe = sum(r["pairs_follow_me_safe"] for r in pair_rows)
         rows.append({
             "Pair": f"TOTAL ({n} pairs)",
             "Beaten": f"{swept + traded}/{n * total}",
             "Swept": swept, "Traded": traded, "Lost": lost, "No KO": no_ko,
             "Clean win": f"{clean:.1f}/{2 * n * total}",
             "Tailwind-safe": tw_safe,
-            "Protect-safe": pr_safe})
+            "Protect-safe": pr_safe,
+            "Redirect-safe": fm_safe})
     return pd.DataFrame(rows)
 
 
@@ -3573,6 +3623,9 @@ def _all_teams_summary_df(team_names, target_lists, our6, dive):
             "Protect-safe total": f"{depth['protect_safe_total']}/{n_pairs * pt}",
             "Protect-safe best": _frac(depth, "protect_safe_best", pt),
             "Protect-safe 3rd best": _frac(depth, "protect_safe_3rd", pt),
+            "Redirect-safe total": f"{depth['follow_me_safe_total']}/{n_pairs * pt}",
+            "Redirect-safe best": _frac(depth, "follow_me_safe_best", pt),
+            "Redirect-safe 3rd best": _frac(depth, "follow_me_safe_3rd", pt),
             "Clean win total": f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
             "No-faint best": _frac(depth, "no_faint_best", pt),
             "No-faint 3rd best": _frac(depth, "no_faint_3rd", pt),
@@ -3662,12 +3715,13 @@ def _win_conditions_df(bring4_row):
 
     "avoiding enemy tailwind and trick room may be key for a matchup
     swinging from a win to a clear loss" -- a "Caveats" column reads
-    `tailwind_risk`/`protect_risk` (Tailwind and a turn-1 Protect scout
-    are always real, replayed hypotheses this module races) and `trick_
-    room_risk` (only present when the underlying search opted into
-    `check_trick_room` -- an extra-cost replay, not run by default) so a
-    win condition that LOOKS solid but actually flips against any of them
-    doesn't read as a plain, unconditional guarantee."""
+    `tailwind_risk`/`protect_risk`/`follow_me_risk` (Tailwind, a turn-1
+    Protect scout, and a real Follow Me/Rage Powder redirector are always
+    real, replayed hypotheses this module races) and `trick_room_risk`
+    (only present when the underlying search opted into `check_trick_room`
+    -- an extra-cost replay, not run by default) so a win condition that
+    LOOKS solid but actually flips against any of them doesn't read as a
+    plain, unconditional guarantee."""
     from counter_finder import bring4_win_conditions
     wc = bring4_win_conditions(bring4_row)
     rows = []
@@ -3686,6 +3740,8 @@ def _win_conditions_df(bring4_row):
             caveats.append("Protect-timed 50/50")
         if info["trick_room_risk"]:
             caveats.append("breaks if enemy sets Trick Room")
+        if info["follow_me_risk"]:
+            caveats.append("breaks if enemy redirects with Follow Me/Rage Powder")
         rows.append({"Enemy": enemy, "Preserve": preserve,
                     "Caveats": "; ".join(caveats)})
     return pd.DataFrame(rows)
@@ -3793,8 +3849,9 @@ def _render_pair_matchup_detail(n1, n2, detail, only_losses):
         pr = "" if d["protect_safe"] else (
             f"  [protect: {e1}->{d['protect_outcomes']['E1']}, "
             f"{e2}->{d['protect_outcomes']['E2']}]")
+        fm = "" if d["follow_me_safe"] else f"  [redirect: {d['follow_me_outcome']}]"
         st.markdown(f"- **{e1} + {e2}**: {d['outcome']} "
-                  f"(turn {d['turns_used']}){tw}{pr}")
+                  f"(turn {d['turns_used']}){tw}{pr}{fm}")
         lines = []
         for turn_i, turn_hits in enumerate(d["log"], 1):
             for role, tgt_role, h in turn_hits:
@@ -3941,6 +3998,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
               f"{ov['pairs_lost']} lost, {ov['pairs_no_ko']} no-KO), "
               f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
               f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
+              f"{ov['pairs_follow_me_safe']}/{ov_total} redirect-safe, "
               f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} clean win")
     only_losses = st.checkbox(
         "Only show enemy pairs each pair loses to", key=f"{key_prefix}_onlyloss",
@@ -4504,6 +4562,7 @@ with tab_counter:
                         f"{ov['pairs_no_ko']} no-KO), "
                         f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
                         f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
+                        f"{ov['pairs_follow_me_safe']}/{ov_total} redirect-safe, "
                         f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} "
                         f"clean win")
                     st.markdown("**Summary: best bring-4 vs each enemy team**")
@@ -4692,7 +4751,8 @@ with tab_counter:
                  "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
                  "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
                  "Tailwind-safe": r["pairs_tailwind_safe"],
-                 "Protect-safe": r["pairs_protect_safe"]}
+                 "Protect-safe": r["pairs_protect_safe"],
+                 "Redirect-safe": r["pairs_follow_me_safe"]}
                 for r in rows[:top_n2]]), width='stretch', hide_index=True)
 
         st.divider()
@@ -6524,7 +6584,8 @@ with tab_sim:
         with sc1:
             st.markdown("**Our side**")
             sim_our_pool, sim_our_sets = our_side_pool("sim", teams, all_names, team_meta,
-                                                        merged=merged)
+                                                        merged=merged,
+                                                        default_source="A saved team")
             sim_our_pool = sim_our_pool or list(all_names)
             if "sim_our_lead" in st.session_state:
                 st.session_state["sim_our_lead"] = [n for n in st.session_state["sim_our_lead"]
@@ -6782,6 +6843,21 @@ with tab_sim:
                 st.rerun()
         else:
             st.markdown(f"**Turn {battle.turn_num + 1} — your move**")
+            # "Let me select a mode in the battle simulator where the enemy
+            # always uses its redirection moves. Also, maybe give me a mode
+            # where I can manually select the enemies moves too, to see if a
+            # specific play can really be punished." -- two independent
+            # per-turn toggles, checked fresh every turn (`st.checkbox`'s
+            # own `key` makes it persist as a per-session choice, not a
+            # one-shot). Manual mode, when on, takes priority in EFFECT
+            # (the human is choosing everything for the enemy, including
+            # whether to redirect) -- see where `sim_manual_enemy` is read
+            # below, near the "Submit turn" button.
+            sim_force_redirect = st.checkbox(
+                "Enemy always redirects (Follow Me/Rage Powder) when able",
+                key="sim_force_redirect")
+            sim_manual_enemy = st.checkbox(
+                "I'll pick the enemy's moves too", key="sim_manual_enemy")
             pending = st.session_state.get("sim_pending_turn")
 
             if pending is not None:
@@ -6924,11 +7000,96 @@ with tab_sim:
                         p1_actions.append(chosen_action)
                     st.divider()
 
-                if st.button("Submit turn", type="primary",
-                            disabled=len(p1_actions) != slots_needing_action):
-                    from solver import greedy_opponent_joint_action
-                    p2_actions = greedy_opponent_joint_action(
-                        battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
+                # "give me a mode where I can manually select the enemies
+                # moves too, to see if a specific play can really be
+                # punished" -- the SAME Attack/Switch menu built for our own
+                # side above (`sim_grouped_actions`), applied to `battle.p2.
+                # active` instead, gated behind `sim_manual_enemy`. Takes
+                # priority over `sim_force_redirect` in EFFECT (see the
+                # "Submit turn" handler below) -- the human is choosing
+                # everything for the enemy here, including whether to
+                # redirect.
+                p2_manual_actions = []
+                p2_slots_needing_action = 0
+                if sim_manual_enemy:
+                    st.markdown("**Enemy's moves (manual mode)**")
+                    for i, c in enumerate(battle.p2.active):
+                        if c.fainted:
+                            alive_bench = [b for b in battle.p2.bench if not b.fainted]
+                            if not alive_bench:
+                                st.caption(f"{c.name}: fainted, no bench left to "
+                                          "replace it -- no action needed")
+                                continue
+                            st.caption(f"{c.name}: fainted, no bench left to replace it")
+                            options = [(f"Switch in {b.name}",
+                                       Action(c, "p2", "switch", None, [b]))
+                                      for b in alive_bench]
+                            p2_slots_needing_action += 1
+                            labels = [lbl for lbl, _a in options]
+                            pick = st.selectbox(
+                                "Action", labels,
+                                key=f"sim_enemy_action_{i}_{battle.turn_num}",
+                                label_visibility="collapsed")
+                            p2_manual_actions.append(next(a for lbl, a in options
+                                                          if lbl == pick))
+                            continue
+                        if c.volatile.get("must_recharge"):
+                            st.markdown(f"**{c.name}** — must recharge (forced this turn)")
+                            p2_slots_needing_action += 1
+                            p2_manual_actions.append(Action(c, "p2", "protect", None, [c]))
+                            st.divider()
+                            continue
+                        st.markdown(f"**{c.name}**")
+                        alive_bench = [b for b in battle.p2.bench if not b.fainted]
+                        menu_key = f"sim_enemy_menu_{i}_{battle.turn_num}"
+                        menu_options = ["Attack", "Switch"] if alive_bench else ["Attack"]
+                        menu = st.selectbox("Action type", menu_options, key=menu_key,
+                                            label_visibility="collapsed")
+                        chosen_enemy_action = None
+                        if menu == "Attack":
+                            groups = sim_grouped_actions(
+                                c, "p2", battle.p2.active, battle.p1.active,
+                                movesets[c.name], terrain=battle.field.terrain)
+                            if groups:
+                                move_key = f"sim_enemy_move_{i}_{battle.turn_num}"
+                                move_name = st.selectbox(
+                                    "Move", [name for name, _opts in groups], key=move_key)
+                                opts = dict(groups)[move_name]
+                                if len(opts) > 1:
+                                    target_key = (f"sim_enemy_target_{i}_"
+                                                  f"{battle.turn_num}_{move_name}")
+                                    tgt_label = st.selectbox(
+                                        "Target", [lbl for lbl, _a in opts], key=target_key)
+                                    chosen_enemy_action = next(a for lbl, a in opts
+                                                               if lbl == tgt_label)
+                                else:
+                                    chosen_enemy_action = opts[0][1]
+                        else:
+                            switch_key = f"sim_enemy_switch_{i}_{battle.turn_num}"
+                            bench_name = st.selectbox(
+                                "Switch to", [b.name for b in alive_bench], key=switch_key)
+                            bench_mon = next(b for b in alive_bench if b.name == bench_name)
+                            chosen_enemy_action = Action(c, "p2", "switch", None, [bench_mon])
+                        p2_slots_needing_action += 1
+                        if chosen_enemy_action is None:
+                            st.warning(f"No legal action for {c.name} this turn.")
+                        else:
+                            p2_manual_actions.append(chosen_enemy_action)
+                        st.divider()
+
+                submit_disabled = len(p1_actions) != slots_needing_action
+                if sim_manual_enemy:
+                    submit_disabled = (submit_disabled or
+                                       len(p2_manual_actions) != p2_slots_needing_action)
+                if st.button("Submit turn", type="primary", disabled=submit_disabled):
+                    if sim_manual_enemy:
+                        p2_actions = p2_manual_actions
+                    else:
+                        from solver import greedy_opponent_joint_action
+                        p2_actions = greedy_opponent_joint_action(
+                            battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
+                        if sim_force_redirect:
+                            p2_actions = sim_force_redirect_actions(p2_actions, movesets)
                     mega_decisions = {id(c): True for c in battle.p2.active if c is not None}
                     mega_decisions.update(our_mega_decisions)
                     fainted = sim_predict_faint_replacements(

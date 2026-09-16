@@ -1334,5 +1334,74 @@ class TestFollowMeRealEngineAiChoice(unittest.TestCase):
         self.assertEqual(action.move.name, "Psychic")
 
 
+class TestResistBerryConsumedAfterOneTrigger(unittest.TestCase):
+    """"Colbur (dark type resist berry) reduces damage before being
+    knocked off - it halves damage, but knock off still does 1.5x" -- and
+    more generally, ANY resist berry (not just via Knock Off) must be
+    consumed the first time it actually triggers, so it can never halve a
+    second qualifying hit. `damage_roll` (src/damage.py) computes the
+    halving but is deliberately pure and never mutates state (its own
+    comment says so); consumption belongs in `battle.py`'s own move
+    resolution, the same place Knock Off's and Sitrus's own consumption
+    already live."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_resist_berry_only_halves_the_first_qualifying_hit(self):
+        """Reads the LOGGED damage number, not the HP delta -- Gholdengo's
+        own remaining HP caps how much a fainting hit can actually remove,
+        which would silently mask the very doubling this test checks for."""
+        import re
+        b = battle(["Kingambit", "Incineroar"], ["Gholdengo", "Milotic"])
+        gholdengo = b.p2.active[0]
+        gholdengo.item = "Colbur Berry"
+        kowtow_cleave = b.make_move("kowtowcleave")
+        shadow_ball = b.make_move("shadowball")
+        protect = b.make_move("protect")
+
+        def hit_gholdengo():
+            before_len = len(b.log.dump())
+            b.run_turn(
+                [Action(b.p1.active[0], "p1", "move", kowtow_cleave, [gholdengo]),
+                 Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+                [Action(gholdengo, "p2", "move", shadow_ball, [b.p1.active[1]]),
+                 Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+            new_log = b.log.dump()[before_len:]
+            m = re.search(r"Kowtow Cleave on Gholdengo: (\d+) dmg", new_log)
+            self.assertIsNotNone(m, new_log)
+            return int(m.group(1))
+
+        dmg_with_berry = hit_gholdengo()
+        self.assertGreater(dmg_with_berry, 0, "fixture must actually connect")
+        self.assertEqual(gholdengo.item, "", "Colbur must be consumed after triggering")
+        dmg_without_berry = hit_gholdengo()
+        # No halving the second time -- roughly double the first hit's
+        # LOGGED damage (small delta from `damage.py`'s own aura/ability
+        # checks staying otherwise identical turn to turn).
+        self.assertAlmostEqual(dmg_without_berry / dmg_with_berry, 2.0, delta=0.15)
+
+    def test_knock_off_still_only_logs_the_item_loss_once(self):
+        """Knock Off both benefits from AND removes a resist berry on the
+        SAME hit -- must produce exactly one "lost its ... to Knock Off"
+        line, not a second, contradictory resist-berry-consumed line for
+        an item that's already gone."""
+        b = battle(["Kingambit", "Incineroar"], ["Gholdengo", "Milotic"])
+        gholdengo = b.p2.active[0]
+        gholdengo.item = "Colbur Berry"
+        knock_off = b.make_move("knockoff")
+        shadow_ball = b.make_move("shadowball")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [gholdengo]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(gholdengo, "p2", "move", shadow_ball, [b.p1.active[1]]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        self.assertEqual(gholdengo.item, "")
+        log = b.log.dump()
+        self.assertEqual(log.count("to Knock Off!"), 1)
+        self.assertNotIn("weakened the hit and was used up", log)
+
+
 if __name__ == "__main__":
     unittest.main()

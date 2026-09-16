@@ -922,11 +922,15 @@ class TestJointPairSearch(unittest.TestCase):
         return rows[0]
 
     def test_a_dominant_fast_pair_sweeps_a_weak_slow_pair(self):
-        """Mega Gengar + Mega Alakazam vs Sableye + Ariados: both dead before
-        either of them ever gets to act."""
-        row = self._search("Mega Gengar", ["Sableye", "Ariados"],
+        """Mega Gengar + Mega Alakazam vs Sableye + Hatterene: both dead
+        before either of them ever gets to act. (Not Ariados -- a real
+        Rage Powder user per usage data -- since the whole point here is an
+        UNCONDITIONAL sweep; see `TestFollowMeAsAnAlwaysOnHypothesis` for
+        why a real redirector on the enemy side can turn what looks like a
+        sweep into a mere out_trade.)"""
+        row = self._search("Mega Gengar", ["Sableye", "Hatterene"],
                            "Mega Alakazam")
-        d = row["detail"][("Sableye", "Ariados")]
+        d = row["detail"][("Sableye", "Hatterene")]
         self.assertEqual(d["outcome"], "sweep")
         self.assertTrue(d["tailwind_safe"])
         self.assertEqual(d["tailwind_outcome"], "sweep")
@@ -1072,10 +1076,13 @@ class TestWinQualityScoring(unittest.TestCase):
     def test_a_clean_sweep_scores_the_maximum_2_point_0(self):
         """A sweep is BY DEFINITION zero damage taken (both enemies die
         before either ever acts) -- `clean_win_value` must be exactly 2.0,
-        not just "high"."""
-        row = self._search("Mega Gengar", ["Sableye", "Ariados"],
+        not just "high". Hatterene, not Ariados -- see the sibling note in
+        `TestJointPairSearch.test_a_dominant_fast_pair_sweeps_a_weak_slow_
+        pair` for why a real Rage Powder user isn't a clean-sweep fixture
+        any more."""
+        row = self._search("Mega Gengar", ["Sableye", "Hatterene"],
                            "Mega Alakazam")
-        d = row["detail"][("Sableye", "Ariados")]
+        d = row["detail"][("Sableye", "Hatterene")]
         self.assertEqual(d["outcome"], "sweep")
         self.assertEqual(d["clean_win_value"], 2.0)
         self.assertEqual(d["our_hp"], {"C": 1.0, "P": 1.0})
@@ -1556,6 +1563,100 @@ class TestTrickRoomAsAnOptionalThreat(unittest.TestCase):
             enemy_built, self.W["typechart"], turns=3, merged=self.W["merged"],
             check_trick_room=True)
         d = detail[("Hatterene", "Kingambit")]
+        self.assertGreaterEqual(cf._JOINT_OUTCOME_RANK[d["outcome"]],
+                                cf._JOINT_OUTCOME_RANK[d["outcome_without_tailwind"]])
+
+
+class TestFollowMeAsAnAlwaysOnHypothesis(unittest.TestCase):
+    """"Let me select a mode in the battle simulator where the enemy always
+    uses its redirection moves" -- `bring4`/the cheap 2v2 model didn't beat
+    Follow Me/Rage Powder resilience into its own SCORE at all before this
+    existed (every Status move was simply skipped). Per the user: "beating
+    these styles is crucial ... include in the overall score" -- so unlike
+    `check_trick_room`, `follow_me_safe` is ALWAYS present on every `detail`
+    entry, no opt-in flag, mirroring `tailwind_safe`/`protect_safe`'s own
+    always-on shape exactly. Real fixture: Indeedee-F and Clefable are both
+    real, usage-verified Follow Me users (`merged` usage data, not a made-up
+    moveset)."""
+
+    def setUp(self):
+        self.W = world()
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        self.our_names = ["Incineroar", "Corviknight"]
+        self.our_built = cf._build_forms(self.our_names, merged, natures, moves)
+        self.our_built["Incineroar"]["moves"] = cf._move_infos(
+            "Incineroar", merged, moves, ["Flare Blitz"])
+        self.our_built["Corviknight"]["moves"] = cf._move_infos(
+            "Corviknight", merged, moves, ["Iron Head"])
+
+    def test_present_unconditionally_no_flag_needed(self):
+        """Unlike `trick_room_safe` (which needs `check_trick_room=True` to
+        even appear), `follow_me_safe` and its siblings are on EVERY entry
+        by default -- confirmed here with an enemy pair that doesn't even
+        carry a redirector, so this can't be mistaken for the "a real
+        threat exists" case below."""
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        enemy_names = ["Sylveon", "Kingambit"]
+        enemy_built = cf._build_forms(enemy_names, merged, natures, moves)
+        enemy_built["Sylveon"]["moves"] = cf._move_infos(
+            "Sylveon", merged, moves, ["Moonblast"])
+        enemy_built["Kingambit"]["moves"] = cf._move_infos(
+            "Kingambit", merged, moves, ["Iron Head"])
+        detail, summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", self.our_built, enemy_names,
+            enemy_built, self.W["typechart"], turns=3, merged=merged)
+        d = detail[("Sylveon", "Kingambit")]
+        for key in ("follow_me_is_real_threat", "follow_me_forced",
+                   "follow_me_outcome", "follow_me_safe"):
+            self.assertIn(key, d)
+        self.assertFalse(d["follow_me_is_real_threat"])
+        self.assertTrue(d["follow_me_safe"])
+        self.assertIn("pairs_follow_me_safe", summary)
+
+    def test_a_real_redirector_can_flip_a_win_into_unsafe(self):
+        """Indeedee-F (a real Follow Me user) keeps Kingambit alive behind
+        it turn after turn -- a pair that would otherwise trade/sweep
+        (`outcome_without_tailwind`) can come back `follow_me_safe=False`
+        once the redirect hypothesis is actually raced and forced."""
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        enemy_names = ["Indeedee-F", "Kingambit"]
+        enemy_built = cf._build_forms(enemy_names, merged, natures, moves)
+        enemy_built["Indeedee-F"]["moves"] = cf._move_infos(
+            "Indeedee-F", merged, moves, ["Follow Me"])
+        enemy_built["Kingambit"]["moves"] = cf._move_infos(
+            "Kingambit", merged, moves, ["Iron Head"])
+        detail, summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", self.our_built, enemy_names,
+            enemy_built, self.W["typechart"], turns=3, merged=merged)
+        d = detail[("Indeedee-F", "Kingambit")]
+        self.assertTrue(d["follow_me_is_real_threat"])
+        self.assertTrue(d["follow_me_forced"],
+                        "the redirect hypothesis must actually be worse "
+                        "than the baseline here to prove it was raced, not "
+                        "just labelled a threat")
+        self.assertFalse(d["follow_me_safe"])
+        self.assertEqual(d["outcome"], d["follow_me_outcome"])
+        self.assertEqual(summary["pairs_follow_me_safe"], 0)
+
+    def test_never_makes_a_pair_look_better_than_its_own_baseline(self):
+        """Same one-directional guarantee `tailwind_forced`/`trick_room_
+        forced` each already give -- chained last, `follow_me_forced` can
+        only match or WORSEN `chosen_outcome`, never improve it."""
+        merged, moves, natures = (self.W["merged"], self.W["moves"],
+                                  self.W["natures"])
+        enemy_names = ["Indeedee-F", "Kingambit"]
+        enemy_built = cf._build_forms(enemy_names, merged, natures, moves)
+        enemy_built["Indeedee-F"]["moves"] = cf._move_infos(
+            "Indeedee-F", merged, moves, ["Follow Me"])
+        enemy_built["Kingambit"]["moves"] = cf._move_infos(
+            "Kingambit", merged, moves, ["Iron Head"])
+        detail, _summary = cf._pair_vs_targets(
+            "Incineroar", "Corviknight", self.our_built, enemy_names,
+            enemy_built, self.W["typechart"], turns=3, merged=merged)
+        d = detail[("Indeedee-F", "Kingambit")]
         self.assertGreaterEqual(cf._JOINT_OUTCOME_RANK[d["outcome"]],
                                 cf._JOINT_OUTCOME_RANK[d["outcome_without_tailwind"]])
 
@@ -2648,13 +2749,16 @@ class TestJointDamageLog(unittest.TestCase):
 
     def test_a_sweep_only_logs_our_own_hits(self):
         """If the enemy never got to act (a real sweep), the log must not
-        contain an E1/E2 entry -- that's what "swept" means."""
+        contain an E1/E2 entry -- that's what "swept" means. Hatterene, not
+        Ariados -- see the sibling note in `TestJointPairSearch.test_a_
+        dominant_fast_pair_sweeps_a_weak_slow_pair` for why a real Rage
+        Powder user isn't a clean-sweep fixture any more."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
-        rows = cf.joint_pair_search(["Mega Gengar"], ["Sableye", "Ariados"],
+        rows = cf.joint_pair_search(["Mega Gengar"], ["Sableye", "Hatterene"],
                                     "Mega Alakazam", merged, moves, natures,
                                     typechart)
-        d = rows[0]["detail"][("Sableye", "Ariados")]
+        d = rows[0]["detail"][("Sableye", "Hatterene")]
         self.assertEqual(d["outcome"], "sweep")
         actors = {role for turn in d["log"] for role, _tgt, _h in turn}
         self.assertEqual(actors, {"C", "P"})
@@ -2711,11 +2815,13 @@ class TestPairSortKeyRanksProtectSafeFirst(unittest.TestCase):
     def test_more_protect_safe_wins_beats_more_raw_wins(self):
         fewer_wins_more_protect_safe = {
             "pairs_swept": 0, "pairs_traded": 3, "pairs_protect_safe": 3,
-            "pairs_tailwind_safe": 3, "pairs_clean_win_total": 3.0,
+            "pairs_tailwind_safe": 3, "pairs_follow_me_safe": 3,
+            "pairs_clean_win_total": 3.0,
         }
         more_wins_fewer_protect_safe = {
             "pairs_swept": 0, "pairs_traded": 5, "pairs_protect_safe": 1,
-            "pairs_tailwind_safe": 5, "pairs_clean_win_total": 5.0,
+            "pairs_tailwind_safe": 5, "pairs_follow_me_safe": 5,
+            "pairs_clean_win_total": 5.0,
         }
         self.assertLess(cf._pair_sort_key(fewer_wins_more_protect_safe),
                         cf._pair_sort_key(more_wins_fewer_protect_safe),
@@ -2725,11 +2831,13 @@ class TestPairSortKeyRanksProtectSafeFirst(unittest.TestCase):
     def test_beaten_count_is_the_tiebreak_when_protect_safe_ties(self):
         tied_protect_safe_fewer_wins = {
             "pairs_swept": 0, "pairs_traded": 2, "pairs_protect_safe": 2,
-            "pairs_tailwind_safe": 2, "pairs_clean_win_total": 2.0,
+            "pairs_tailwind_safe": 2, "pairs_follow_me_safe": 2,
+            "pairs_clean_win_total": 2.0,
         }
         tied_protect_safe_more_wins = {
             "pairs_swept": 0, "pairs_traded": 4, "pairs_protect_safe": 2,
-            "pairs_tailwind_safe": 4, "pairs_clean_win_total": 4.0,
+            "pairs_tailwind_safe": 4, "pairs_follow_me_safe": 4,
+            "pairs_clean_win_total": 4.0,
         }
         self.assertLess(cf._pair_sort_key(tied_protect_safe_more_wins),
                         cf._pair_sort_key(tied_protect_safe_fewer_wins))
@@ -2742,11 +2850,13 @@ class TestPairSortKeyRanksProtectSafeFirst(unittest.TestCase):
         rank ahead, strictly before tailwind-safe count decides anything."""
         messy_wins = {
             "pairs_swept": 0, "pairs_traded": 3, "pairs_protect_safe": 3,
-            "pairs_tailwind_safe": 3, "pairs_clean_win_total": 1.5,
+            "pairs_tailwind_safe": 3, "pairs_follow_me_safe": 3,
+            "pairs_clean_win_total": 1.5,
         }
         clean_wins = {
             "pairs_swept": 3, "pairs_traded": 0, "pairs_protect_safe": 3,
-            "pairs_tailwind_safe": 0, "pairs_clean_win_total": 6.0,
+            "pairs_tailwind_safe": 0, "pairs_follow_me_safe": 0,
+            "pairs_clean_win_total": 6.0,
         }
         self.assertLess(cf._pair_sort_key(clean_wins),
                         cf._pair_sort_key(messy_wins),
@@ -5694,6 +5804,7 @@ def _fake_pair_row(pair, beats, target_names):
         won = ep in beats
         detail[ep] = {"outcome": "out_trade" if won else "loss",
                       "tailwind_safe": won, "protect_safe": won,
+                      "follow_me_safe": won,
                       # `bring4_pair_depth`/`_pairs_beaten_without_fainting`
                       # read this on every row -- a real loss carries
                       # {"C": 0.0, "P": 0.0} already, matching
@@ -5704,6 +5815,7 @@ def _fake_pair_row(pair, beats, target_names):
            "pairs_swept": 0, "pairs_traded": n_win,
            "pairs_lost": len(enemy_pairs) - n_win, "pairs_no_ko": 0,
            "pairs_tailwind_safe": n_win, "pairs_protect_safe": n_win,
+           "pairs_follow_me_safe": n_win,
            # Every out_trade win here is "worth" the same 2.0 clean-win
            # value -- keeps `_pair_sort_key` tied whenever `n_win` matches,
            # same as every other field here, so this fixture's whole point

@@ -730,6 +730,109 @@ class TestBattleMenu(unittest.TestCase):
         self.assertNotEqual(battle.p1.active[0].name, "Garchomp")
 
 
+class TestForceRedirectMode(unittest.TestCase):
+    """"Let me select a mode in the battle simulator where the enemy always
+    uses its redirection moves" -- a checkbox that overrides `greedy_
+    opponent_joint_action`'s own (already Follow-Me-aware, but merely
+    HEURISTIC) per-mon choice, forcing every alive, redirect-capable enemy
+    to click Follow Me/Rage Powder EVERY turn regardless of whether the
+    greedy AI judges it worthwhile -- a deliberately pessimistic
+    "can this specific play really be punished" testing mode."""
+
+    OUR4 = ["Garchomp", "Hydreigon"]
+    THEIR4 = ["Indeedee-F", "Kingambit"]  # Indeedee-F: real Follow Me user
+
+    def test_checkbox_present_and_off_by_default(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox
+                  if "always redirects" in c.label)
+        self.assertFalse(cb.value)
+
+    def test_enabling_it_makes_the_redirector_click_follow_me(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "always redirects" in c.label)
+        at = cb.set_value(True).run()
+        at = submit_turn(at)
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        indeedee = next(c for c in battle.p2.roster if c.name == "Indeedee-F")
+        self.assertIs(battle.p2.follow_me_target, indeedee,
+                      "Indeedee-F must have actually clicked Follow Me this turn "
+                      "(regardless of whether it then took a KO for it)")
+
+    def test_left_off_the_ai_keeps_its_own_normal_heuristic_choice(self):
+        """Regression guard: the toggle must not change anything when OFF --
+        `greedy_opponent_joint_action`'s own choice (whatever it is) goes
+        through unmodified."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        at = submit_turn(at)
+        self.assertEqual(len(at.exception), 0)
+
+
+class TestManualEnemyMode(unittest.TestCase):
+    """"Give me a mode where I can manually select the enemies moves too, to
+    see if a specific play can really be punished." -- the SAME Attack/
+    Switch dropdown menu built for our own side, rendered a second time for
+    `battle.p2.active`, entirely replacing `greedy_opponent_joint_action`
+    for the turn."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_checkbox_present_and_off_by_default(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "pick the enemy" in c.label)
+        self.assertFalse(cb.value)
+
+    def test_enabling_it_renders_a_move_menu_for_the_enemy_side(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "pick the enemy" in c.label)
+        at = cb.set_value(True).run()
+        tab = sim_tab(at)
+        menu_sbs = [sb for sb in tab.selectbox if sb.label == "Action type"]
+        # 2 for our own side + 2 for the enemy side, now that manual mode is on.
+        self.assertEqual(len(menu_sbs), 4)
+
+    def test_a_human_chosen_enemy_move_actually_gets_submitted(self):
+        """Pick a specific enemy move that the greedy AI would not
+        necessarily choose on its own (a non-damaging status move), submit,
+        and confirm it's the one that actually landed -- proves the manual
+        pick reaches `Battle.run_turn`, not just the AI's own default."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "pick the enemy" in c.label)
+        at = cb.set_value(True).run()
+
+        tab = sim_tab(at)
+        enemy_move_sbs = [sb for sb in tab.selectbox if sb.label == "Move"
+                          and sb.key and sb.key.startswith("sim_enemy_move_")]
+        # "Protect" over any damaging option -- the greedy AI's own
+        # `action_value` scores Protect at -1 (see `solver.py`'s own
+        # comment: "opponent modeled as not bothering to Protect"), so this
+        # is a move the AI would never pick on its own, making it a clean
+        # signal that the HUMAN pick, not the AI's, actually landed.
+        protect_sb = next(sb for sb in enemy_move_sbs if "Protect" in sb.options)
+        target_move = "Protect"
+        at = protect_sb.set_value(target_move).run()
+        self.assertEqual(len(at.exception), 0)
+
+        at = submit_turn(at)
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        log = "\n".join(battle.log.lines)
+        self.assertIn("protects itself", log)
+
+
 def seed_movesets(name):
     """The real usage moveset for `name`, for a fixture to check button
     labels against without hand-listing moves that could drift."""

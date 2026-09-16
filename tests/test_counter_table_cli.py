@@ -769,9 +769,17 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
         # very-high-Score additions started crowding the top of the
         # candidate pool -- widened per the tool's own suggested remedy
         # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
+        # Hatterene, not Sinistcha -- a real Rage Powder user per usage data
+        # (see `TestFollowMeAsAnAlwaysOnHypothesis` in test_counter_finder.py)
+        # genuinely zeroes out every candidate at this fixture's default
+        # good_threshold=1.0 (no exhaustive core here can guarantee beating a
+        # real redirector in literally every matchup) -- a correct
+        # consequence of that always-on scoring, not a bug, same reasoning
+        # as the pool-widening note above. Every sibling class below sharing
+        # this exact enemy-2 roster swaps the same name for the same reason.
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_runs_clean_and_shows_a_core_with_synergy_and_teamsheet(self):
@@ -861,7 +869,7 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
         # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_deep_dive_core_prints_the_aggregate_and_gameplans(self):
@@ -1040,7 +1048,7 @@ class TestAutoDeepDiveEndToEnd(unittest.TestCase):
     def setUpClass(cls):
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_an_unreachable_score_bar_skips_every_one_of_the_top_n(self):
@@ -1091,7 +1099,7 @@ class TestDiveSheetsFormatting(unittest.TestCase):
     def setUpClass(cls):
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_gameplans_has_a_blank_row_between_matches(self):
@@ -1805,7 +1813,7 @@ class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
         msg, out = run_main(
             ["--multi-bring4", "--vs-team",
              "Kingambit,Basculegion,Garchomp,Whimsicott", "--vs-team",
-             "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf", "--pool-size",
+             "Sylveon,Mega Charizard Y,Hatterene,Farigiraf", "--pool-size",
              "12", "--good-threshold", "30", "--top", "1"])
         self.assertIsNone(msg, out)
         self.assertIn("Kingambit", out)

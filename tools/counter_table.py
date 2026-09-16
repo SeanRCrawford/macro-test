@@ -1581,9 +1581,10 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               "Weaknesses by type", "Types with 2+ net weakness",
               "Net weaknesses by type", "Average Score",
               "Avg Wins/90", "Avg Wins under Tailwind/90",
-              "Avg Wins under Protect/90", "Clean wins/90",
+              "Avg Wins under Protect/90", "Avg Wins under Redirect/90", "Clean wins/90",
               "Sum 3rd Best Pairs Beaten", "Sum 3rd Best Tailwind-Safe",
-              "Sum 3rd Best Protect-Safe", "Sum 3rd Best No-Faint",
+              "Sum 3rd Best Protect-Safe", "Sum 3rd Best Redirect-Safe",
+              "Sum 3rd Best No-Faint",
               "Total Damage Output"]
     for i in range(len(target_name_lists)):
         header += [f"Enemy {i + 1}", f"Enemy {i + 1} best bring-4",
@@ -1602,6 +1603,9 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"Enemy {i + 1} pairs protect-safe total",
                    f"Enemy {i + 1} pairs protect-safe best",
                    f"Enemy {i + 1} pairs protect-safe 3rd best",
+                   f"Enemy {i + 1} pairs redirect-safe total",
+                   f"Enemy {i + 1} pairs redirect-safe best",
+                   f"Enemy {i + 1} pairs redirect-safe 3rd best",
                    f"Enemy {i + 1} pairs clean win total",
                    f"Enemy {i + 1} pairs beaten without fainting best",
                    f"Enemy {i + 1} pairs beaten without fainting 3rd best",
@@ -1625,7 +1629,7 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
         # right -- never re-derived.
         per_enemy_depths = [(pe, bring4_pair_depth(pe["best_bring4_row"]))
                             for pe in r["per_enemy"]]
-        avg_wins = avg_wins_tw = avg_wins_pr = avg_clean = 0.0
+        avg_wins = avg_wins_tw = avg_wins_pr = avg_wins_fm = avg_clean = 0.0
         if per_enemy_depths:
             rates = [
                 (_per_90(d["beaten_total"], len(pe["best_bring4_row"]["pair_rows"]),
@@ -1634,13 +1638,16 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                         d["pairs_total"]),
                  _per_90(d["protect_safe_total"], len(pe["best_bring4_row"]["pair_rows"]),
                         d["pairs_total"]),
+                 _per_90(d["follow_me_safe_total"], len(pe["best_bring4_row"]["pair_rows"]),
+                        d["pairs_total"]),
                  _per_90(d["no_faint_total"], len(pe["best_bring4_row"]["pair_rows"]),
                         d["pairs_total"]))
                 for pe, d in per_enemy_depths]
             avg_wins = sum(x[0] for x in rates) / len(rates)
             avg_wins_tw = sum(x[1] for x in rates) / len(rates)
             avg_wins_pr = sum(x[2] for x in rates) / len(rates)
-            avg_clean = sum(x[3] for x in rates) / len(rates)
+            avg_wins_fm = sum(x[3] for x in rates) / len(rates)
+            avg_clean = sum(x[4] for x in rates) / len(rates)
         avg_score = _avg_score(core, merged)
         # "sum-of 3rd best pair for each of the relevant metrics across
         # every enemy team" -- unlike the "Avg .../90" columns above (which
@@ -1653,6 +1660,7 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
         sum_3rd_beaten = sum((d["beaten_3rd"] or 0) for _pe, d in per_enemy_depths)
         sum_3rd_tw = sum((d["tailwind_safe_3rd"] or 0) for _pe, d in per_enemy_depths)
         sum_3rd_pr = sum((d["protect_safe_3rd"] or 0) for _pe, d in per_enemy_depths)
+        sum_3rd_fm = sum((d["follow_me_safe_3rd"] or 0) for _pe, d in per_enemy_depths)
         sum_3rd_nf = sum((d["no_faint_3rd"] or 0) for _pe, d in per_enemy_depths)
         dead_mega_note = ", ".join(f"{old} -> {new}" for old, new in
                                    r.get("dead_mega_rebuilt", {}).items())
@@ -1680,8 +1688,8 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
               net_types_2plus, ", ".join(f"{t} {v}" for t, v in net_by_type),
               round(avg_score, 1) if avg_score is not None else "",
               round(avg_wins, 1), round(avg_wins_tw, 1),
-              round(avg_wins_pr, 1), round(avg_clean, 1),
-              sum_3rd_beaten, sum_3rd_tw, sum_3rd_pr, sum_3rd_nf,
+              round(avg_wins_pr, 1), round(avg_wins_fm, 1), round(avg_clean, 1),
+              sum_3rd_beaten, sum_3rd_tw, sum_3rd_pr, sum_3rd_fm, sum_3rd_nf,
               round(core_damage_output(r), 2)]
         for pe, depth in per_enemy_depths:
             wr = pe["best_bring4_row"]["worst_pair_row"]
@@ -1704,6 +1712,9 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                    f"{depth['protect_safe_total']}/{n_pairs * pt}",
                    f"{depth['protect_safe_best']}/{pt}",
                    f"{depth['protect_safe_3rd']}/{pt}",
+                   f"{depth['follow_me_safe_total']}/{n_pairs * pt}",
+                   f"{depth['follow_me_safe_best']}/{pt}",
+                   f"{depth['follow_me_safe_3rd']}/{pt}",
                    f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
                    f"{depth['no_faint_best']}/{pt}",
                    f"{depth['no_faint_3rd']}/{pt}",
@@ -1780,13 +1791,15 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
               "Pairs total", "Worst pair", "Worst pair beaten",
               "Worst pair total", "Average Score",
               "Avg Wins/90", "Avg Wins under Tailwind/90",
-              "Avg Wins under Protect/90", "Clean wins/90",
+              "Avg Wins under Protect/90", "Avg Wins under Redirect/90", "Clean wins/90",
               "pairs beaten total",
               "pairs beaten 3rd best", "pairs beaten 4th best",
               "pairs beaten worst", "Enemy has real Tailwind",
               "pairs Tailwind-safe total", "pairs Tailwind-safe best",
               "pairs Tailwind-safe 3rd best", "pairs protect-safe total",
               "pairs protect-safe best", "pairs protect-safe 3rd best",
+              "pairs redirect-safe total", "pairs redirect-safe best",
+              "pairs redirect-safe 3rd best",
               "pairs clean win total",
               "pairs beaten without fainting best",
               "pairs beaten without fainting 3rd best", "6 pairs",
@@ -1809,6 +1822,7 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
                   round(_per_90(depth["beaten_total"], n_pairs, pt), 1),
                   round(_per_90(depth["tailwind_safe_total"], n_pairs, pt), 1),
                   round(_per_90(depth["protect_safe_total"], n_pairs, pt), 1),
+                  round(_per_90(depth["follow_me_safe_total"], n_pairs, pt), 1),
                   round(_per_90(depth["no_faint_total"], n_pairs, pt), 1),
                   f"{depth['beaten_total']}/{n_pairs * pt}",
                   f"{depth['beaten_3rd']}/{pt}", f"{depth['beaten_4th']}/{pt}",
@@ -1819,6 +1833,9 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
                   f"{depth['protect_safe_total']}/{n_pairs * pt}",
                   f"{depth['protect_safe_best']}/{pt}",
                   f"{depth['protect_safe_3rd']}/{pt}",
+                  f"{depth['follow_me_safe_total']}/{n_pairs * pt}",
+                  f"{depth['follow_me_safe_best']}/{pt}",
+                  f"{depth['follow_me_safe_3rd']}/{pt}",
                   f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
                   f"{depth['no_faint_best']}/{pt}",
                   f"{depth['no_faint_3rd']}/{pt}",

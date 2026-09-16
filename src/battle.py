@@ -25,7 +25,8 @@ import copy
 from dataclasses import dataclass, field
 import random
 
-from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
+from damage import (BERRY_RESIST_TYPE, Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move,
+                    damage_roll, apply_intimidate,
                     defensive_stat, move_from_showdown,
                      apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
                      WEIGHT_BASED_POWER, weight_based_power, DEFENDER_HP_BASED_POWER,
@@ -973,6 +974,22 @@ class Battle:
                     self.log.add(f"{self.tag(target)} lost its {knocked} to Knock Off!")
                     self._emit(event="knock_off", side=self.side_of(target).name,
                                actor=target.name, item=knocked)
+
+            # Type-resist berries (Colbur, Occa, ...) trigger once and are then
+            # consumed -- damage_roll already applied the halving (this mirrors
+            # its own trigger condition exactly); that function is deliberately
+            # pure and doesn't mutate state itself, so consumption happens here,
+            # the same place Knock Off's own removal (just above) does. If Knock
+            # Off already stripped this same item this hit, target.item is
+            # already "" and this is a silent no-op -- one log line, not two.
+            berry_type = BERRY_RESIST_TYPE.get(target.item)
+            if (berry_type and berry_type == move.move_type
+                    and (eff > 1.0 or berry_type == "Normal") and dmg_applied > 0):
+                eaten = target.item
+                target.item = ""
+                self.log.add(f"{self.tag(target)}'s {eaten} weakened the hit and was used up!")
+                self._emit(event="resist_berry", side=self.side_of(target).name,
+                           actor=target.name, item=eaten)
 
             self._emit(event="move_damage", side=action.side, actor=attacker.name, move=move.name,
                        target=target.name, target_side=self.side_of(target).name, damage=round(dmg),
