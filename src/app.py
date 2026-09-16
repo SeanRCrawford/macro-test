@@ -1349,6 +1349,100 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
     return [(name, groups[name]) for name in order]
 
 
+def sim_suggest_action(battle, c, side, opp_side, movesets, turn_num):
+    """"Provide the suggested move or suggested switch after a faint" --
+    the single highest-scoring action for `c` this turn, by the exact same
+    greedy one-ply valuation `greedy_opponent_joint_action` uses to play
+    the OPPONENT side (`solver._action_value`), not a second, drifting
+    heuristic. `value_protect=True` since a human player sometimes
+    legitimately wants to Protect (scouting, stalling a turn), unlike the
+    opponent AI's own always-attacking model.
+
+    A display-only suggestion, never auto-selected -- the caller shows it
+    as a caption next to the human's own Attack/Switch menu, which stays
+    exactly as manual as before. Returns a human-readable label ("Flare
+    Blitz -> Kingambit", "Protect", ...) or None if `c` has no legal
+    action worth suggesting this turn (e.g. it must recharge).
+    """
+    from solver import candidate_actions, _action_value
+    from projection import projected_field, mega_view
+    if c.volatile.get("must_recharge"):
+        return None
+    decision_field = projected_field(battle)
+    cands = candidate_actions(c, side.name, side.active, opp_side.active,
+                              movesets[c.name], battle.typechart, decision_field,
+                              turn_num, self_view=mega_view(battle, c))
+    if not cands:
+        return None
+    best = max(cands, key=lambda a: _action_value(
+        battle, c, side, opp_side, a, decision_field, turn_num, movesets,
+        value_protect=True))
+    if best.kind == "protect":
+        return "Protect"
+    if best.kind == "switch":
+        return f"Switch to {best.targets[0].name}"
+    if len(best.targets) > 1:
+        return f"{best.move.name} (hits {'/'.join(t.name for t in best.targets)})"
+    if best.targets and best.targets[0] is not c:
+        return f"{best.move.name} -> {best.targets[0].name}"
+    return best.move.name
+
+
+def sim_hit_count_matrix(battle, movesets):
+    """The Battle Simulator's LIVE in-battle counterpart to `counter_
+    finder.prematch_win_conditions`'s own 1v1 hit-count matrix -- "a live
+    tracker in a battle simulator match ... I can afford to risk Metagross
+    this turn and attack if I trade it for the enemy Staraptor, because my
+    Scizor beats the rest." Scoped to whichever mons are CURRENTLY ALIVE
+    on both sides, using each mon's REAL CURRENT HP (not full team-preview
+    HP) -- per the user's own "live recompute, full knowledge" choice, no
+    fog-of-war/reveal-tracking: the app already knows the enemy's full six
+    from team preview.
+
+    Uses the SAME real-engine damage estimator (`solver.quick_damage_
+    estimate`) the Battle Simulator's own `sim_suggest_action` already
+    scores candidate moves with -- not `counter_finder.py`'s parallel
+    Combatant-building convention, which doesn't apply to the REAL,
+    already-live Combatants this battle actually has.
+
+    Returns {(our_name, their_name): {"our_hits_to_ko", "their_hits_to_
+    ko"}} for every (alive ours, alive theirs) pair, "hits to KO" = `ceil
+    (current_hp / best_single_hit_damage)`, `None` when nothing in that
+    mon's own moveset can ever damage the target at all (e.g. a hard type
+    immunity).
+    """
+    import math
+    from solver import quick_damage_estimate
+    from projection import projected_field, mega_view
+    field = projected_field(battle)
+    our_alive = [c for c in battle.p1.roster if not c.fainted]
+    their_alive = [c for c in battle.p2.roster if not c.fainted]
+
+    def _best_dmg(attacker, attacker_view, defender):
+        best = 0.0
+        for mv, _pct in movesets.get(attacker.name, []):
+            if mv.category == "Status":
+                continue
+            dmg = quick_damage_estimate(attacker_view, defender, mv, battle.typechart,
+                                        field, battle=battle)
+            best = max(best, dmg)
+        return best
+
+    matrix = {}
+    for our_c in our_alive:
+        our_view = mega_view(battle, our_c)
+        for their_c in their_alive:
+            their_view = mega_view(battle, their_c)
+            our_dmg = _best_dmg(our_c, our_view, their_c)
+            their_dmg = _best_dmg(their_c, their_view, our_c)
+            matrix[(our_c.name, their_c.name)] = {
+                "our_hits_to_ko": (math.ceil(their_c.current_hp / our_dmg)
+                                  if our_dmg > 0 else None),
+                "their_hits_to_ko": (math.ceil(our_c.current_hp / their_dmg)
+                                    if their_dmg > 0 else None)}
+    return matrix
+
+
 def sim_force_redirect_actions(actions, movesets):
     """"Let me select a mode in the battle simulator where the enemy always
     uses its redirection moves" -- overrides `greedy_opponent_joint_action`'s
@@ -3782,6 +3876,83 @@ def _render_win_conditions(bring4_row):
     st.dataframe(df, width='stretch', hide_index=True)
 
 
+def _hit_count_matrix_df(matrix, bring4, enemies):
+    """`prematch_win_conditions`'s own 1v1 `matrix` -> a plain "who 2HKOs
+    whom, and gets 2HKO'd back by whom" table -- "Scizor easily beats X in
+    endgame given it 2HKOs enemy but takes 5HKOs from enemy" read directly
+    off one row. `None` (no hit at all, e.g. a hard type immunity) shows as
+    "-- ", never a crashing format call."""
+    def _fmt(hits):
+        return f"{hits}HKO" if hits is not None else "--"
+    rows = []
+    for our_name in bring4:
+        row = {"Ours": our_name}
+        for enemy in enemies:
+            cell = matrix.get((our_name, enemy))
+            if cell is None:
+                row[enemy] = "?"
+            else:
+                row[enemy] = f"{_fmt(cell['our_hits_to_ko'])} / {_fmt(cell['their_hits_to_ko'])}"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _render_hit_count_matrix(bring4_row, dive, target_names, merged, moves,
+                             natures, typechart, enemy_item_overrides=None,
+                             enemy_move_overrides=None):
+    """"I can see wins in 2v2s from optimal plays ... it would be good to
+    see if I also have a similar 'best' play ... i also want to be able to
+    see win conditions" -- the 1v1 half of `prematch_win_conditions`
+    (`bring4_win_conditions`'s own "safe pairs/members" is already shown
+    by `_render_win_conditions` right above this): "Scizor 2HKOs enemy but
+    takes a 5HKO from enemy" read directly off one cell, "our HKO / their
+    HKO" per (our bring-4 member, named enemy)."""
+    from counter_finder import prematch_win_conditions_for_dive
+    result = prematch_win_conditions_for_dive(
+        bring4_row, dive, target_names, merged, moves, natures, typechart,
+        enemy_item_overrides=enemy_item_overrides,
+        enemy_move_overrides=enemy_move_overrides)
+    df = _hit_count_matrix_df(result["matrix"], bring4_row["bring4"], sorted(result["safe"]))
+    if df.empty:
+        return
+    st.markdown("**1v1 hit-count matrix** -- \"our HKO / their HKO\"")
+    st.caption("Average-roll hits to KO from full HP, each direction, "
+              "every bring-4 member against every named enemy -- e.g. "
+              "\"2HKO / 5HKO\" means we finish them in 2 hits, they need 5 "
+              "to finish us. \"--\" means that move can never KO at all "
+              "(a hard type immunity or similar).")
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
+def _render_hit_count_matrix_for_bring4_search(bring4_row, target_names, merged,
+                                               moves, natures, typechart,
+                                               item_overrides=None, move_overrides=None,
+                                               enemy_item_overrides=None,
+                                               enemy_move_overrides=None,
+                                               evs_overrides=None, nature_overrides=None,
+                                               ability_overrides=None):
+    """`_render_hit_count_matrix`'s own sibling for a fresh `bring4_search`
+    result (no `core_deep_dive` on hand) -- see `prematch_win_conditions_
+    for_bring4`'s own docstring."""
+    from counter_finder import prematch_win_conditions_for_bring4
+    result = prematch_win_conditions_for_bring4(
+        bring4_row, target_names, merged, moves, natures, typechart,
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        enemy_item_overrides=enemy_item_overrides,
+        enemy_move_overrides=enemy_move_overrides, evs_overrides=evs_overrides,
+        nature_overrides=nature_overrides, ability_overrides=ability_overrides)
+    df = _hit_count_matrix_df(result["matrix"], bring4_row["bring4"], sorted(result["safe"]))
+    if df.empty:
+        return
+    st.markdown("**1v1 hit-count matrix** -- \"our HKO / their HKO\"")
+    st.caption("Average-roll hits to KO from full HP, each direction, "
+              "every bring-4 member against every named enemy -- e.g. "
+              "\"2HKO / 5HKO\" means we finish them in 2 hits, they need 5 "
+              "to finish us. \"--\" means that move can never KO at all "
+              "(a hard type immunity or similar).")
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
 # "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
 # own recorded Choice Scarf usage % must be, AND be that member's single
 # TOP item, before it's worth flagging as a suggestion. A judgment call,
@@ -4041,6 +4212,10 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
         st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                     width='stretch', hide_index=True)
         _render_win_conditions(bring4_rows[0])
+        _render_hit_count_matrix(bring4_rows[0], dive, target_name_lists[0],
+                                 merged, moves, natures, typechart,
+                                 enemy_item_overrides=enemy_item_overrides,
+                                 enemy_move_overrides=enemy_move_overrides)
         st.markdown("**Deep dive: just the winning bring-4's own pairs**")
         st.caption("\"When all pairs are deep dived and the best bring4 is "
                   "found, then have a section which only shows the deep "
@@ -4059,10 +4234,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
         # bring-4" call, not the "all of Our 6" case above) -- its own
         # C(len(core),2) pairs already ARE the bring's own pairs, no
         # narrowing-down step needed first.
-        core_bring4_row = {"bring4": tuple(core), "pair_rows": [
+        core_bring4_row = {"bring4": tuple(core), "mega_used": dive.get("mega_used"),
+                          "pair_rows": [
             {"pair": pair_key, "detail": pair["per_enemy"][0]["detail"]}
             for pair_key, pair in dive["per_pair"].items()]}
         _render_win_conditions(core_bring4_row)
+        _render_hit_count_matrix(core_bring4_row, dive, target_name_lists[0],
+                                 merged, moves, natures, typechart,
+                                 enemy_item_overrides=enemy_item_overrides,
+                                 enemy_move_overrides=enemy_move_overrides)
     for (n1, n2), pair in dive["per_pair"].items():
         pt = pair["total"]
         with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"
@@ -4461,6 +4641,13 @@ with tab_counter:
                     st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                                 width='stretch', hide_index=True)
                     _render_win_conditions(bring4_rows[0])
+                    _render_hit_count_matrix_for_bring4_search(
+                        bring4_rows[0], vs_roster, merged, moves, natures, typechart,
+                        item_overrides=item_overrides, move_overrides=move_overrides,
+                        enemy_item_overrides=enemy_item_overrides,
+                        enemy_move_overrides=enemy_move_overrides,
+                        evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                        ability_overrides=ability_overrides)
                     b4_only_losses = st.checkbox(
                         "Only show enemy pairs each pair loses to",
                         key="ct_b4_best_onlyloss")
@@ -6767,6 +6954,23 @@ with tab_sim:
         if field_bits:
             st.caption(" | ".join(field_bits))
 
+        with st.expander("Win conditions (live, current HP)"):
+            st.caption("\"A live tracker in a battle simulator match ... I "
+                      "can afford to risk Metagross this turn and attack "
+                      "if I trade it for the enemy Staraptor, because my "
+                      "Scizor beats the rest.\" 1v1 hits-to-KO, both "
+                      "directions, every mon CURRENTLY ALIVE on both "
+                      "sides, off each one's REAL current HP.")
+            live_matrix = sim_hit_count_matrix(battle, movesets)
+            our_alive_names = [c.name for c in battle.p1.roster if not c.fainted]
+            their_alive_names = [c.name for c in battle.p2.roster if not c.fainted]
+            if our_alive_names and their_alive_names:
+                st.dataframe(
+                    _hit_count_matrix_df(live_matrix, our_alive_names, their_alive_names),
+                    width='stretch', hide_index=True)
+            else:
+                st.caption("Nothing left alive on one side to compare.")
+
         winner = "p1" if battle.p2.has_lost() else ("p2" if battle.p1.has_lost() else None)
         if winner:
             st.success(f"Battle over — {'YOU WIN' if winner == 'p1' else 'YOU LOSE'} "
@@ -6820,15 +7024,31 @@ with tab_sim:
                     losses = [e for e in summary_list if e["result"] == "loss"]
                     if losses:
                         st.markdown("**Lost to:**")
-                        for e in losses:
+                        for loss_i, e in enumerate(losses):
                             contributors = sorted(
                                 (m for m in e["theirs"] if m["kos"] or m["damage_pct"] > 0),
                                 key=lambda m: (-m["kos"], -m["damage_pct"]))
                             top = ", ".join(
                                 f"{m['name']} ({m['kos']} KO, {m['damage_pct']:.0f}% dmg)"
                                 for m in contributors[:2])
-                            st.write(f"- vs {' + '.join(e['their4'])} "
-                                    f"(turn {e['turns']}): {top or '-'}")
+                            lc1, lc2 = st.columns([5, 1])
+                            with lc1:
+                                st.write(f"- vs {' + '.join(e['their4'])} "
+                                        f"(turn {e['turns']}): {top or '-'}")
+                            with lc2:
+                                if st.button("Replay", key=f"replay_loss_{loss_i}"):
+                                    our4 = st.session_state["sim_our4"]
+                                    battle2, movesets2 = sim_build_battle(
+                                        our4, e["their4"], merged, moves, natures, typechart,
+                                        our_sets=st.session_state.get("sim_our_sets"),
+                                        enemy_sets=st.session_state.get("sim_their_sets"),
+                                        our_mega=st.session_state.get("sim_our_mega"))
+                                    st.session_state["sim_battle"] = battle2
+                                    st.session_state["sim_movesets"] = movesets2
+                                    st.session_state["sim_their4"] = e["their4"]
+                                    st.session_state["sim_mode"] = "I choose their bring"
+                                    st.session_state["sim_turn_log"] = []
+                                    st.rerun()
                     else:
                         st.write("No losses across all 15 leads.")
 
@@ -6949,6 +7169,15 @@ with tab_sim:
                                       "-- no action needed")
                             continue
                         st.caption(f"{c.name}: fainted, no bench left to replace it")
+                        # "Provide the suggested move or suggested switch
+                        # after a faint" -- the SAME strategic pick
+                        # `Battle._replace_fainted` already uses for the
+                        # opponent's own auto-replacement (type matchup +
+                        # offensive threat + health, not just highest HP),
+                        # shown here as a caption only -- the human still
+                        # picks from the dropdown below.
+                        suggested = battle._best_replacement(alive_bench, battle.p2.active)
+                        st.caption(f"Suggested: Switch in {suggested.name}")
                         options = [(f"Switch in {b.name}", Action(c, "p1", "switch", None, [b]))
                                   for b in alive_bench]
                         slots_needing_action += 1
@@ -6970,6 +7199,10 @@ with tab_sim:
                         continue
 
                     st.markdown(f"**{c.name}**")
+                    suggested = sim_suggest_action(battle, c, battle.p1, battle.p2,
+                                                   movesets, battle.turn_num + 1)
+                    if suggested:
+                        st.caption(f"Suggested: {suggested}")
                     # "I need to choose during the battle which of my brings
                     # mega evolves, not before, and choose at the start of
                     # the turn on which I wish to mega evolve." -- a real

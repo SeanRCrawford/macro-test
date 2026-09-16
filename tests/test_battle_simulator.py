@@ -528,6 +528,47 @@ class TestStepThroughSummary(unittest.TestCase):
         new_battle_btn.click().run()
         self.assertNotIn("sim_leads_summary", at.session_state)
 
+    def test_replay_button_on_a_lost_lead_restarts_against_it(self):
+        """"After losing a match and after running the 15 pair step through
+        in battle simulator, give me an option to replay the losing
+        match(es)." Each loss row in the final step-through summary gets
+        its own "Replay" button that rebuilds the battle against exactly
+        that lead's `their4`."""
+        our4 = ["Garchomp", "Incineroar"]
+        their4 = ["Kingambit", "Basculegion"]
+        battle, movesets = self._finished_battle(our4, their4, our_loses=True)
+
+        at = fresh_app()
+        at.session_state["sim_battle"] = battle
+        at.session_state["sim_movesets"] = movesets
+        at.session_state["sim_our4"] = our4
+        at.session_state["sim_our_sets"] = {}
+        at.session_state["sim_their4"] = their4
+        at.session_state["sim_their_sets"] = {}
+        at.session_state["sim_our_mega"] = None
+        at.session_state["sim_mode"] = "Step through all 15 leads"
+        at.session_state["sim_leads"] = [(0.0, their4, None)]
+        at.session_state["sim_lead_idx"] = 0
+        at.session_state["sim_turn_log"] = []
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        replay_buttons = [b for b in tab.button if b.label == "Replay"]
+        self.assertEqual(len(replay_buttons), 1,
+                         "exactly one loss row -- exactly one Replay button")
+        replay_buttons[0].click().run()
+
+        tab = sim_tab(at)
+        self.assertEqual(len(tab.exception), 0)
+        new_battle = at.session_state["sim_battle"]
+        self.assertEqual(sorted(c.name for c in new_battle.p2.roster), sorted(their4))
+        self.assertFalse(new_battle.p1.has_lost(), "a freshly rebuilt battle "
+                                                    "must start un-fainted")
+        self.assertEqual(at.session_state["sim_their4"], their4)
+        self.assertEqual(at.session_state["sim_mode"], "I choose their bring")
+        self.assertEqual(at.session_state["sim_turn_log"], [])
+
 
 class TestBattleSimulatorOnlyOneMegaInLiveBattle(unittest.TestCase):
     """The actual Combatants built for the interactive battle honour "only
@@ -728,6 +769,112 @@ class TestBattleMenu(unittest.TestCase):
         battle = at.session_state["sim_battle"]
         self.assertEqual(battle.p1.active[0].name, "Hydreigon")
         self.assertNotEqual(battle.p1.active[0].name, "Garchomp")
+
+
+class TestSuggestedAction(unittest.TestCase):
+    """"Also in the battle simulator, provide the suggested move or
+    suggested switch after a faint" -- a "Suggested: ..." caption next to
+    each of our own mon's action menu, scored by the exact same greedy
+    one-ply valuation (`solver._action_value`) that plays the OPPONENT
+    side, so it can never drift from what the AI itself would call best.
+    Display-only -- the dropdowns below it stay exactly as manual as
+    before."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_a_suggested_caption_appears_and_matches_the_scorer(self):
+        from app import sim_suggest_action
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        suggestion_captions = [c.value for c in tab.caption
+                               if c.value and c.value.startswith("Suggested: ")]
+        self.assertEqual(len(suggestion_captions), 2,
+                         "one suggestion per one of our own two active mons")
+
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        expected = [f"Suggested: {sim_suggest_action(battle, c, battle.p1, battle.p2, movesets, battle.turn_num + 1)}"
+                   for c in battle.p1.active]
+        self.assertEqual(suggestion_captions, expected)
+
+    def test_a_suggested_replacement_caption_appears_after_a_faint(self):
+        """The fainted-replacement dropdown gets its own "Suggested: Switch
+        in ..." caption, off `Battle._best_replacement` -- the SAME
+        strategic pick the opponent's own auto-replacement already uses,
+        not a second heuristic."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.p1.active[0].fainted = True
+        battle.p1.active[0].current_hp = 0
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        expected = battle._best_replacement(
+            [b for b in battle.p1.bench if not b.fainted], battle.p2.active)
+        self.assertTrue(any(c.value == f"Suggested: Switch in {expected.name}"
+                            for c in tab.caption))
+
+
+class TestLiveWinConditionsPanel(unittest.TestCase):
+    """"A live tracker in a battle simulator match (while holding the
+    enemy backs as unconfirmed until revealed) -- for instance, I can
+    afford to risk Metagross this turn and attack if I trade it for the
+    enemy Staraptor, because my Scizor beats the rest." Per the user's own
+    "live recompute, full knowledge" choice: no fog-of-war/reveal-tracking
+    state, just a live 1v1 hit-count matrix scoped to whichever mons are
+    CURRENTLY ALIVE, off each one's REAL current HP."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_panel_appears_with_one_matrix_cell_per_alive_pair(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        self.assertTrue(any("Win conditions (live" in e.label for e in tab.expander))
+        matrix_dfs = [d.value for d in tab.dataframe if list(d.value.columns[:1]) == ["Ours"]]
+        self.assertTrue(matrix_dfs, "expected an Ours/<enemy...> live matrix table")
+        self.assertEqual(set(matrix_dfs[0]["Ours"]), set(self.OUR4),
+                         "the whole alive roster (bench included), not just actives")
+        self.assertEqual(set(matrix_dfs[0].columns[1:]), set(self.THEIR4))
+
+    def test_matrix_shrinks_once_a_mon_faints(self):
+        """A fainted mon (on either side) drops out of the live matrix --
+        "scoped to whichever mons are CURRENTLY ALIVE"."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.p2.active[0].fainted = True
+        battle.p2.active[0].current_hp = 0
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+        tab = sim_tab(at)
+        matrix_dfs = [d.value for d in tab.dataframe if list(d.value.columns[:1]) == ["Ours"]]
+        self.assertTrue(matrix_dfs)
+        self.assertNotIn(battle.p2.active[0].name, matrix_dfs[0].columns)
+
+    def test_sim_hit_count_matrix_reflects_real_current_hp_not_full(self):
+        """Halving a target's current HP can only shrink (never grow) our
+        own hits-to-KO on it -- the whole point of using REAL current HP
+        instead of full team-preview HP."""
+        from app import sim_hit_count_matrix
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        full = sim_hit_count_matrix(battle, movesets)
+        target = battle.p2.active[0]
+        our_attacker = battle.p1.active[0]
+        target.current_hp = target.current_hp // 2
+        halved = sim_hit_count_matrix(battle, movesets)
+        cell_full = full[(our_attacker.name, target.name)]
+        cell_half = halved[(our_attacker.name, target.name)]
+        if cell_full["our_hits_to_ko"] is not None:
+            self.assertLessEqual(cell_half["our_hits_to_ko"], cell_full["our_hits_to_ko"])
 
 
 class TestForceRedirectMode(unittest.TestCase):

@@ -1790,6 +1790,103 @@ class TestOwnTailwindAsAMatchingAnswer(unittest.TestCase):
                                    "this single matchup's own figure")
 
 
+class TestOwnProtectAsAMatchingAnswer(unittest.TestCase):
+    """The Protect mirror of `TestOwnTailwindAsAMatchingAnswer`: the exact
+    same "pessimistic enemy check already exists (`protect_outcomes`/
+    `protect_safe`), now add the OPTIMISTIC own-side mirror" shape, applied
+    to Protect instead of Tailwind. Unlike Tailwind, no "does a real setter
+    exist" gate is needed -- every pair can always try Protecting one of
+    itself turn 1, so `_pair_vs_targets` always races both `first_turn_
+    protected_role="C"` and `="P"` and keeps whichever (optimistic `min` by
+    `_JOINT_OUTCOME_RANK`) beats the baseline.
+
+    Real, verified fixture, found by search (not hand-derived) over real
+    usage-default sets: Alakazam (Focus Sash, Protect/Psychic/Speed Swap/
+    Dazzling Gleam) + Espeon (Colbur Berry, Protect/Trick Room/Detect/
+    Psyshock) against Tyranitar (Sitrus Berry, Protect/Rock Slide/Knock
+    Off/Low Kick) + Garchomp (Sitrus Berry, Protect/Dragon Claw/Rock
+    Slide/Earthquake). The normal race is a clean LOSS -- both fragile
+    attackers go down before finishing off the bulkier, harder-hitting
+    enemy pair. Racing with Alakazam Protecting turn 1 (the better of the
+    two own-Protect replays) turns it into an out-trade win: Alakazam
+    survives what would have been its own fatal turn-1 hit, and the extra
+    turn of it still being alive is enough for the pair to out-trade
+    Tyranitar + Garchomp instead of losing outright.
+    """
+
+    def _race(self):
+        W = world()
+        merged, moves, natures = W["merged"], W["moves"], W["natures"]
+        typechart = W["typechart"]
+        _i1, _i2, detail, summary = cf.deep_dive(
+            "Alakazam", "Espeon", ["Tyranitar", "Garchomp"], merged, moves,
+            natures, typechart, turns=2)
+        return detail[("Tyranitar", "Garchomp")], summary
+
+    def test_the_normal_race_alone_is_a_loss(self):
+        d, _summary = self._race()
+        self.assertEqual(d["outcome_without_tailwind"], "loss")
+
+    def test_own_protect_is_always_a_real_threat_no_setter_gate_needed(self):
+        d, _summary = self._race()
+        self.assertTrue(d["own_protect_is_real_threat"])
+
+    def test_own_protect_turns_the_loss_into_an_out_trade_win(self):
+        d, summary = self._race()
+        self.assertTrue(d["own_protect_used"])
+        self.assertEqual(d["own_protect_outcome"], "out_trade")
+        self.assertEqual(d["outcome"], "out_trade")
+        self.assertEqual(summary["pairs_own_protect_used"], 1)
+
+    def test_never_makes_a_pair_look_worse_than_its_baseline(self):
+        """Same invariant as `TestOwnTailwindAsAMatchingAnswer`'s own
+        version: an optimistic own-side hypothesis must never replace a
+        chosen outcome with a WORSE one."""
+        d, _summary = self._race()
+        self.assertLessEqual(cf._JOINT_OUTCOME_RANK[d["outcome"]],
+                             cf._JOINT_OUTCOME_RANK[d["outcome_without_tailwind"]])
+
+    def test_protected_role_takes_no_damage_on_the_turn_it_protects(self):
+        """Direct mechanical check on `_joint_race` itself, mirroring
+        `TestJointProtectRobustness`'s own enemy-side version: with our OWN
+        "C" role forced to Protect turn 1, no hit in that turn's log should
+        ever target "C"."""
+        W = world()
+        merged, moves, natures = W["merged"], W["moves"], W["natures"]
+        typechart = W["typechart"]
+        item1, mvs1, _w1 = cf._answer_for(
+            "Alakazam", merged, moves, natures, typechart,
+            ["Tyranitar", "Garchomp"])
+        c1 = cf._build("Alakazam", merged, natures, item=item1)
+        c1_moves = cf._move_infos("Alakazam", merged, moves, mvs1)
+        item2, mvs2, _w2 = cf._answer_for(
+            "Espeon", merged, moves, natures, typechart,
+            ["Tyranitar", "Garchomp"])
+        c2 = cf._build("Espeon", merged, natures, item=item2)
+        c2_moves = cf._move_infos("Espeon", merged, moves, mvs2)
+        eitem1, emvs1, _ = cf._answer_for(
+            "Tyranitar", merged, moves, natures, typechart,
+            ["Alakazam", "Espeon"])
+        eitem2, emvs2, _ = cf._answer_for(
+            "Garchomp", merged, moves, natures, typechart,
+            ["Alakazam", "Espeon"])
+        combatants = {"C": c1, "P": c2,
+                     "E1": cf._build("Tyranitar", merged, natures, item=eitem1),
+                     "E2": cf._build("Garchomp", merged, natures, item=eitem2)}
+        moves_by_role = {
+            "C": c1_moves, "P": c2_moves,
+            "E1": cf._move_infos("Tyranitar", merged, moves, emvs1),
+            "E2": cf._move_infos("Garchomp", merged, moves, emvs2),
+        }
+        weather = cf._field_weather(combatants)
+        _outcome, _t, _hp, log = cf._joint_race(
+            combatants, moves_by_role, typechart, weather, 2,
+            first_turn_protected_role="C")
+        turn1 = log[0]
+        targets_hit = {tgt for _role, tgt, _h in turn1}
+        self.assertNotIn("C", targets_hit)
+
+
 class TestTailwindFocusPool(unittest.TestCase):
     """`tailwind_focus_pool` -- the pool-curation half of `--tailwind-focus`
     (`counter_table.py`): "checks for teams by running tailwind setter
@@ -3981,14 +4078,23 @@ class TestItemCapBenefitBasedTopRows(unittest.TestCase):
         self.assertTrue(table, "expected a real per-enemy pair table back")
 
     def test_never_picks_a_keeper_that_leaves_an_enemy_pair_uncovered(self):
-        """Gengar keeping Focus Sash (instead of Aegislash or Excadrill)
-        is confirmed strictly worse -- it leaves an enemy pair uncovered
-        (`total_uncovered` > 0) where the other two choices don't. A
-        benefit-based re-race must never choose it."""
+        """Gengar keeping Focus Sash (instead of Aegislash or Excadrill) is
+        confirmed strictly worse by `worst_enemy_score_key` -- a benefit-
+        based re-race must never choose it.
+
+        The own-Protect mirror (`TestOwnProtectAsAMatchingAnswer`) can now
+        salvage what used to be a fully-uncovered enemy pair into a no_ko
+        stalemate for SOME core/item combination here, so `total_uncovered`
+        (the score key's own first, most decisive component) no longer
+        reliably differs between the Gengar-forced and resolved item
+        assignments the way it always used to -- the comparison below reads
+        the full tuple (which still keeps `blended_avg_wins`, weighted
+        lower) rather than assuming the difference always shows up in that
+        first component specifically."""
         coverage, core = self._coverage()
         ctx = cf._item_cap_context_from_coverage(coverage)
         item_caps = {"Focus Sash": 1}
-        _pbk, resolved = cf._core_item_cap_pair_by_key(
+        pbk, resolved = cf._core_item_cap_pair_by_key(
             core, coverage["target_name_lists"], ctx, item_caps)
         self.assertNotEqual(resolved.get("Gengar"), "Focus Sash")
 
@@ -4014,11 +4120,17 @@ class TestItemCapBenefitBasedTopRows(unittest.TestCase):
         pair_by_key_list = [gengar_rows[tuple(t)] for t in coverage["target_name_lists"]]
         gengar_row = cf._core_row(core, pair_by_key_list, coverage["target_name_lists"],
                                   1.0, pool_fixed_items=forced, item_caps=item_caps)
-        self.assertGreater(gengar_row["worst_enemy_score_key"][0], 0,
-                           "expected forcing Gengar to keep Focus Sash to "
-                           "leave an enemy pair uncovered -- if it doesn't "
-                           "anymore, this fixture no longer demonstrates a "
-                           "real choice among contesters")
+
+        resolved_pair_by_key_list = [pbk[tuple(t)] for t in coverage["target_name_lists"]]
+        resolved_row = cf._core_row(core, resolved_pair_by_key_list,
+                                    coverage["target_name_lists"], 1.0,
+                                    pool_fixed_items=resolved, item_caps=item_caps)
+        self.assertLess(resolved_row["worst_enemy_score_key"],
+                        gengar_row["worst_enemy_score_key"],
+                        "expected forcing Gengar to keep Focus Sash to score "
+                        "strictly worse than the resolved assignment -- if it "
+                        "doesn't anymore, this fixture no longer demonstrates "
+                        "a real choice among contesters")
 
     def test_apply_item_caps_to_top_rows_wires_it_in(self):
         coverage, core = self._coverage()
@@ -6176,11 +6288,28 @@ class TestDeepDive(unittest.TestCase):
         self.assertEqual(self.summary["pairs_total"], 15)
 
     def test_scizor_always_loses_when_zard_y_is_in_the_pair(self):
-        """The acceptance test named directly in the request."""
+        """The acceptance test named directly in the request: at the raw
+        race level (no own-side hypothesis applied), Mega Charizard Y's
+        OHKO means this pair always loses outright whenever it's in the
+        enemy pair."""
         for (e1, e2), d in self.detail.items():
             if "Mega Charizard Y" in (e1, e2):
-                self.assertEqual(d["outcome"], "loss",
-                                 f"expected a loss vs {e1}+{e2}")
+                self.assertEqual(d["outcome_without_tailwind"], "loss",
+                                 f"expected a raw-race loss vs {e1}+{e2}")
+
+    def test_scizor_never_actually_wins_when_zard_y_is_in_the_pair(self):
+        """Refines the raw-race claim above for the own-Protect mirror
+        (`TestOwnProtectAsAMatchingAnswer`): Protecting the about-to-be-
+        OHKO'd member turn 1 can still salvage an outright loss into a
+        no_ko stalemate against some enemy pairs (Mega Charizard Y +
+        Mega Floette, +Garchomp -- neither also finishes the race outright
+        regardless of who Protects), but this pair can never come away
+        with an actual WIN while Zard Y is in the enemy pair -- "would not
+        be a good bring" holds either way."""
+        for (e1, e2), d in self.detail.items():
+            if "Mega Charizard Y" in (e1, e2):
+                self.assertNotIn(d["outcome"], ("sweep", "out_trade"),
+                                 f"expected no win vs {e1}+{e2}")
 
     def test_zard_y_is_flagged_as_an_ohko_risk_on_scizor(self):
         d = self.detail[("Basculegion", "Mega Charizard Y")]
@@ -10386,3 +10515,185 @@ class TestNarrowCoveragePoolNames(unittest.TestCase):
         narrowed = cf.narrow_coverage_pool_names(
             rows, ["A", "B"], 2, must_include=["Nonexistent"])
         self.assertEqual(set(narrowed), {"A", "B"})
+
+
+class TestPrematchWinConditions(unittest.TestCase):
+    """"A prematch view of my win conditions vs theirs (i.e., once Arcanine
+    is gone, Scizor easily beats X in endgame given it 2HKOs enemy but
+    takes 5HKOs from enemy and so on, or Metagross is my only answer to
+    Staraptor)." Combines `bring4_win_conditions` (unchanged) with a NEW
+    1v1 hit-count matrix (`_best_hit`, both directions).
+
+    Real, verified fixture, found by search (not hand-derived): Garchomp +
+    Kingambit + Whimsicott + Incineroar's own best `--bring4` result
+    against Arcanine-Hisui + Toxapex. Garchomp is the sole `safe_member`
+    against both enemies (every one of its own pairings within this
+    bring-4 beats them outright), and against Arcanine-Hisui specifically
+    it OHKOs (1 hit) while taking a real 2HKO back -- Ground STAB into a
+    4x weakness (Fire/Rock) explains the one-sidedness.
+    """
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        our6 = ["Garchomp", "Kingambit", "Whimsicott", "Incineroar"]
+        self.targets = ["Arcanine-Hisui", "Toxapex"]
+        _pair_rows, bring4_rows = cf.bring4_search(
+            our6, self.targets, merged, moves, natures, typechart, turns=2)
+        self.row = bring4_rows[0]
+        self.our_built = cf._build_forms(self.row["bring4"], merged, natures, moves)
+        for n in self.row["bring4"]:
+            item, mvs, _w = cf._answer_for(
+                n, merged, moves, natures, typechart, self.targets)
+            self.our_built[n]["mega"] = cf._build(n, merged, natures, item=item)
+            self.our_built[n]["base"] = self.our_built[n]["mega"]
+            self.our_built[n]["moves"] = cf._move_infos(n, merged, moves, mvs)
+        self.enemy_built = cf._build_forms(self.targets, merged, natures, moves)
+        for n in self.targets:
+            item, mvs, _w = cf._answer_for(
+                n, merged, moves, natures, typechart, self.row["bring4"])
+            self.enemy_built[n]["mega"] = cf._build(n, merged, natures, item=item)
+            self.enemy_built[n]["moves"] = cf._move_infos(n, merged, moves, mvs)
+
+    def test_fixture_precondition_bring4_is_all_four(self):
+        self.assertEqual(set(self.row["bring4"]),
+                         {"Garchomp", "Kingambit", "Whimsicott", "Incineroar"})
+
+    def test_garchomp_is_the_safe_member_against_both_enemies(self):
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        for enemy in self.targets:
+            self.assertIn("Garchomp", result["safe"][enemy]["safe_members"], enemy)
+
+    def test_garchomp_ohkoes_arcanine_hisui_but_takes_a_2hko_back(self):
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        cell = result["matrix"][("Garchomp", "Arcanine-Hisui")]
+        self.assertEqual(cell["our_hits_to_ko"], 1)
+        self.assertEqual(cell["their_hits_to_ko"], 2)
+
+    def test_matrix_has_one_entry_per_bring4_member_times_enemy(self):
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        self.assertEqual(len(result["matrix"]),
+                         len(self.row["bring4"]) * len(self.targets))
+
+    def test_for_dive_wrapper_builds_a_real_matrix_off_the_dive_own_sets(self):
+        """`prematch_win_conditions_for_dive` (built from an already-
+        computed `core_deep_dive` result) reuses OUR OWN side's real,
+        already-fixed set from `dive["sets"]` -- Garchomp still OHKOes
+        Arcanine-Hisui (its own real STAB into a 4x weakness doesn't
+        depend on the enemy's own item), and the safe-member read still
+        matches `bring4_win_conditions`'s own unchanged answer. The
+        INCOMING hit count isn't asserted here -- unlike the direct-call
+        fixture above (which pins the enemy's own set via `_answer_for`),
+        `core_deep_dive`'s own enemy-building step (no `enemy_item_
+        overrides` given) is a plainer usage-default build, so it need not
+        match that explicitly-optimised figure exactly."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        dive = cf.core_deep_dive(list(self.row["bring4"]), [self.targets],
+                                 merged, moves, natures, typechart, turns=2)
+        bring4_rows = cf.bring4_from_deep_dive(
+            list(self.row["bring4"]), dive, self.targets)
+        result = cf.prematch_win_conditions_for_dive(
+            bring4_rows[0], dive, self.targets, merged, moves, natures, typechart)
+        cell = result["matrix"][("Garchomp", "Arcanine-Hisui")]
+        self.assertEqual(cell["our_hits_to_ko"], 1)
+        self.assertIsNotNone(cell["their_hits_to_ko"])
+        self.assertGreater(cell["their_hits_to_ko"], 0)
+        self.assertIn("Garchomp", result["safe"]["Arcanine-Hisui"]["safe_members"])
+
+    def test_current_hp_overrides_can_only_make_a_ko_take_as_many_or_more_hits(self):
+        """Halving the defender's remaining HP can only shrink (never
+        grow) the number of hits needed to finish it off -- the live
+        in-battle tracker's whole point."""
+        full = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        half_hp = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"],
+            defender_hp_frac={"Arcanine-Hisui": 0.5})
+        self.assertLessEqual(
+            half_hp["matrix"][("Garchomp", "Arcanine-Hisui")]["our_hits_to_ko"],
+            full["matrix"][("Garchomp", "Arcanine-Hisui")]["our_hits_to_ko"])
+
+
+class TestEvolveFromTeam(unittest.TestCase):
+    """"If I define one high-performing team ... then try to see if any
+    improvements can be made" -- a LOCAL, greedy search around one fixed
+    starting core: move swaps on existing members, one substitution at a
+    time, scored by `_evolve_dive_score` (the SAME `_CORE_BLEND_WEIGHTS`-
+    weighted per-90 yardstick `_core_row`'s own "Avg Wins/90" blend uses).
+
+    Real, verified, deliberately-suboptimal fixture: Garchomp forced onto
+    Poison Jab (a real, usage-backed move, just a clearly worse pick here)
+    instead of its real STAB Earthquake, on a 3-member core (Garchomp +
+    Kingambit + Whimsicott) against Arcanine-Hisui (Fire/Rock -- 4x weak to
+    Ground) + Toxapex. Verified directly: at `turns=2` the raw race for
+    BOTH of Garchomp's own pairs flips from "no_ko" to "out_trade" once
+    Earthquake replaces Poison Jab, taking the blended score from 18.0 to
+    60.0 -- a real, sizeable improvement, not a rounding artifact.
+    """
+
+    def setUp(self):
+        self.W = world()
+        self.core = ["Garchomp", "Kingambit", "Whimsicott"]
+        self.targets = [["Arcanine-Hisui", "Toxapex"]]
+        # Deliberately worse than real usage's own top pick (Earthquake) --
+        # Poison Jab is still a real, usage-backed move (so the "try each
+        # OTHER real usage move" search can legally offer Earthquake back
+        # as a candidate), just clearly the wrong choice here.
+        self.suboptimal_moves = {
+            "Garchomp": ["Poison Jab", "Dragon Claw", "Rock Slide", "Protect"]}
+
+    def _evolve(self, swap_pool=()):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        return cf.evolve_from_team(
+            self.core, self.targets, merged, moves, natures, typechart,
+            turns=2, move_overrides=self.suboptimal_moves,
+            swap_pool=list(swap_pool))
+
+    def test_earthquake_surfaces_as_the_top_move_swap_with_a_positive_delta(self):
+        results = self._evolve()
+        self.assertTrue(results, "expected at least one genuine improvement")
+        top = results[0]
+        self.assertEqual(top["kind"], "move")
+        self.assertEqual(top["member"], "Garchomp")
+        self.assertEqual(top["added"], "Earthquake")
+        self.assertGreater(top["delta"], 0.0)
+        self.assertAlmostEqual(top["new_score"] - top["baseline_score"], top["delta"])
+
+    def test_every_returned_swap_is_a_genuine_improvement(self):
+        """The whole point of only surfacing `delta > 0` entries -- never a
+        neutral or worse swap, "not an exhaustive dump of every swap
+        tried."""
+        results = self._evolve()
+        for r in results:
+            self.assertGreater(r["delta"], 0.0, r)
+
+    def test_results_are_sorted_by_delta_descending(self):
+        results = self._evolve()
+        deltas = [r["delta"] for r in results]
+        self.assertEqual(deltas, sorted(deltas, reverse=True))
+
+    def test_baseline_score_is_the_same_across_every_returned_entry(self):
+        """Every candidate swap is compared against the SAME fixed
+        baseline (the ONE starting team), not a moving target."""
+        results = self._evolve()
+        baselines = {r["baseline_score"] for r in results}
+        self.assertEqual(len(baselines), 1)
+
+    def test_member_swap_mechanics_run_and_stay_shaped_like_a_move_swap(self):
+        """A whole-member swap (a tiny explicit `swap_pool`, not the whole
+        roster -- kept fast) returns entries in the SAME shape as a move
+        swap, tagged "kind": "member", with "removed"/"added" naming the
+        departing/arriving Pokemon rather than moves."""
+        results = self._evolve(swap_pool=["Hydreigon"])
+        member_results = [r for r in results if r["kind"] == "member"]
+        for r in member_results:
+            self.assertIn(r["member"], self.core)
+            self.assertEqual(r["added"], "Hydreigon")
+            self.assertEqual(r["removed"], r["member"])
+            self.assertGreater(r["delta"], 0.0)

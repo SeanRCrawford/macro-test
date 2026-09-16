@@ -150,6 +150,7 @@ weather-setting usage rather than a shared 2v2 field -- there is no single
 """
 import copy
 import itertools
+import math
 from dataclasses import dataclass
 
 from combatants import make_combatant
@@ -3687,16 +3688,20 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
     `engine.effective_speed`'s real `tailwind_p2 *= 2.0` rule) -- applied only
     to the turn-ORDER comparison, the same thing a real Tailwind changes.
 
-    `protected_roles`: enemy roles ("E1"/"E2") that use Protect THIS turn
-    instead of whatever `_choose_action` would have picked -- `_PROTECT_MOVE`
-    is substituted directly (still a real action, at priority 4, so it still
-    goes first in `speed_key` and still counts toward `enemy_acted`) and any
-    hit aimed at that role this turn is dropped rather than applied, exactly
-    like a real Protect block. This is what lets `_best_turn`'s existing
-    exhaustive hint search learn -- with no change to ITS own logic -- not to
-    waste an attack on a protected enemy: a hint combo that targets a
-    protected role simply scores no KO and no damage for that hit, so a combo
-    that targets the other, unprotected enemy naturally ranks higher.
+    `protected_roles`: roles ("E1"/"E2" for the enemy-protect check, or
+    "C"/"P" for `_pair_vs_targets`'s own-protect mirror) that use Protect
+    THIS turn instead of whatever `_choose_action` would have picked --
+    `_PROTECT_MOVE` is substituted directly (still a real action, at
+    priority 4, so it still goes first in `speed_key` and still counts
+    toward `enemy_acted`) and any hit aimed at that role this turn is
+    dropped rather than applied, exactly like a real Protect block --
+    checked in BOTH the `ours_live` and `theirs_live` loops below, same
+    "a role string can only ever match one side" pattern `tailwind_setter_
+    role` uses. This is what lets `_best_turn`'s existing exhaustive hint
+    search learn -- with no change to ITS own logic -- not to waste an
+    attack on a protected enemy: a hint combo that targets a protected
+    role simply scores no KO and no damage for that hit, so a combo that
+    targets the other, unprotected enemy naturally ranks higher.
 
     `tailwind_setter_role`: one role -- "E1"/"E2" for the enemy-tailwind
     check, or "C"/"P" for `_pair_vs_targets`'s own-tailwind mirror -- that
@@ -3817,6 +3822,8 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan[role] = ({}, _helping_hand_move_for(c))
         elif role == redirect_role:
             plan[role] = ({}, _follow_me_move_for(c, redirect_move_name))
+        elif role in protected_roles:
+            plan[role] = ({}, _PROTECT_MOVE)
         else:
             plan[role] = _choose_action(c, moves_by_role[role], theirs_live,
                                         typechart, weather=weather,
@@ -4571,6 +4578,8 @@ def _pruned_entry():
         "turns_used": 0, "tailwind_outcome": "loss", "tailwind_safe": False,
         "own_tailwind_is_real_threat": False, "own_tailwind_used": False,
         "own_tailwind_outcome": None,
+        "own_protect_is_real_threat": True, "own_protect_used": False,
+        "own_protect_outcome": "loss",
         "protect_outcomes": {"E1": "loss", "E2": "loss"}, "protect_safe": False,
         "follow_me_is_real_threat": False, "follow_me_forced": False,
         "follow_me_outcome": None, "follow_me_safe": False,
@@ -4919,6 +4928,33 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 if own_tailwind_used:
                     chosen_outcome, chosen_hp = own_tw_outcome, own_tw_hp
                     chosen_turns_used, chosen_log = own_tw_turns_used, own_tw_log
+                # OUR OWN PROTECT AS A MATCHING ANSWER (see docstring) --
+                # the exact same "pessimistic enemy check already exists
+                # (`protect_outcomes`/`protect_safe` above), now add the
+                # OPTIMISTIC own-side mirror" shape `own_tailwind_used`
+                # already established for Tailwind: does protecting ONE of
+                # OUR OWN two turn 1 turn a loss into a win? Unlike
+                # Tailwind, no "does a real setter exist" gate is needed --
+                # every pair can always try Protecting one of itself, so
+                # this always races both roles, optimistic `min` by rank.
+                own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log = _joint_race(
+                    combatants, moves_by_role, typechart, weather, turns,
+                    first_turn_protected_role="C", terrain=terrain,
+                    worst_case_targeting=worst_case_targeting)
+                own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log = _joint_race(
+                    combatants, moves_by_role, typechart, weather, turns,
+                    first_turn_protected_role="P", terrain=terrain,
+                    worst_case_targeting=worst_case_targeting)
+                (own_protect_outcome, own_protect_turns_used,
+                 own_protect_hp, own_protect_log) = min(
+                    ((own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log),
+                     (own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log)),
+                    key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                own_protect_used = (_JOINT_OUTCOME_RANK[own_protect_outcome] <
+                                    _JOINT_OUTCOME_RANK[chosen_outcome])
+                if own_protect_used:
+                    chosen_outcome, chosen_hp = own_protect_outcome, own_protect_hp
+                    chosen_turns_used, chosen_log = own_protect_turns_used, own_protect_log
                 # TRICK ROOM (see docstring) -- chained AFTER both Tailwind
                 # checks, same pessimistic `max`-by-rank shape as the
                 # enemy-Tailwind check above, but against `chosen_outcome`
@@ -4996,6 +5032,9 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     "own_tailwind_is_real_threat": own_real_tailwind_threat,
                     "own_tailwind_used": own_tailwind_used,
                     "own_tailwind_outcome": own_tw_outcome,
+                    "own_protect_is_real_threat": True,
+                    "own_protect_used": own_protect_used,
+                    "own_protect_outcome": own_protect_outcome,
                     "protect_outcomes": protect_outcomes,
                     "protect_safe": all(o in ("sweep", "out_trade")
                                         for o in protect_outcomes.values()),
@@ -5047,6 +5086,8 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
         "pairs_tailwind_safe": sum(1 for d in detail.values() if d["tailwind_safe"]),
         "pairs_own_tailwind_used": sum(1 for d in detail.values()
                                        if d["own_tailwind_used"]),
+        "pairs_own_protect_used": sum(1 for d in detail.values()
+                                      if d["own_protect_used"]),
         "pairs_protect_safe": sum(1 for d in detail.values() if d["protect_safe"]),
         "pairs_follow_me_safe": sum(1 for d in detail.values() if d["follow_me_safe"]),
         "pairs_clean_win_total": sum(d["clean_win_value"] for d in detail.values()),
@@ -5822,6 +5863,155 @@ def bring4_win_conditions(bring4_row):
                      "follow_me_risk": bool(safe_pairs) and not follow_me_robust,
                      "uncovered": not safe_pairs}
     return out
+
+
+def _hits_to_ko(hit):
+    """`ceil(1/hit.frac)` -- how many of this exact hit it takes to KO from
+    full HP, or `None` when `hit.frac` is 0 (this move can never KO the
+    target at all, e.g. a hard type immunity)."""
+    return math.ceil(1.0 / hit.frac) if hit.frac > 0 else None
+
+
+def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
+                            attacker_hp_frac=None, defender_hp_frac=None):
+    """"A prematch view of my win conditions vs theirs (i.e., once Arcanine
+    is gone, Scizor easily beats X in endgame given it 2HKOs enemy but
+    takes 5HKOs from enemy and so on, or Metagross is my only answer to
+    Staraptor)." Combines two already-cheap pieces, per the user's own
+    chosen scope ("1v1 matrix + existing safe-pairs", not a full
+    sequential-elimination tree):
+
+    - `safe`: `bring4_win_conditions(bring4_row)`, UNCHANGED -- "Metagross
+      is my only answer to Staraptor" reads directly off its own
+      `safe_members`/`safe_pairs`.
+    - `matrix`: a NEW {(our_name, enemy_name): {"our_hits_to_ko",
+      "their_hits_to_ko"}} 1v1 hit-count table, one entry per (bring-4
+      member, enemy) pair `safe` already names -- `_best_hit` (cheap,
+      single-attacker-vs-single-defender, worst-roll) run BOTH directions,
+      hits-to-KO = `ceil(1/hit.frac)`. This is exactly the "2HKOs enemy but
+      takes a 5HKO" reading, with no new damage-calc code.
+
+    `our_built`/`enemy_built`: `_build_forms` dicts (mega/base Combatant +
+    moves per name) -- the SAME shape `_pair_vs_targets`/`deep_dive`
+    already build their board from, so this never re-derives a set.
+
+    `attacker_hp_frac`/`defender_hp_frac`: optional {name: fraction}
+    overrides passed straight through to the underlying `_raw_hit` calls
+    (via `_best_hit`'s own `attacker`/`defender` Combatants -- see below)
+    -- the Battle Simulator's LIVE in-battle tracker uses these to score
+    hits-to-KO off each mon's ACTUAL CURRENT HP, not full team-preview HP.
+    `None` (the default) means full HP for everyone, same as a prematch
+    view where nothing has happened yet.
+
+    Which of a name's "mega"/"base" forms is used: `bring4_row["mega_used"]`
+    decides for OUR OWN side exactly the way the race itself was resolved
+    (a stone-holder NOT chosen to transform is forced to its own base form,
+    the same "BRING-4-CONSISTENT MEGA CHOICE" rule `core_deep_dive`/
+    `bring4_search` already apply) -- there is no equivalent per-enemy
+    signal carried on `bring4_row`, so an enemy's own mega-stone name (e.g.
+    "Mega Charizard Y") always reads its "mega" form, matching how every
+    enemy name already appears literally in `target_names` elsewhere in
+    this module.
+    """
+    safe = bring4_win_conditions(bring4_row)
+    bring4 = bring4_row["bring4"]
+    mega_used = bring4_row.get("mega_used")
+    enemies = sorted(safe)
+
+    def _hp_frac(overrides, name):
+        return (overrides or {}).get(name)
+
+    def _best_hit_at_hp(attacker, moves, defender, attacker_hp, defender_hp):
+        """`_best_hit`'s own "best `Hit` among `moves`" search, but on the
+        average roll (matching this module's own console-display
+        convention elsewhere) and with real current-HP overrides, for the
+        live in-battle tracker's use -- `_best_hit` itself is always
+        worst-roll/full-HP, so this can't just call it."""
+        best = NO_HIT
+        for mv in moves:
+            got = _raw_hit(attacker, mv, defender, typechart, roll="avg",
+                           attacker_hp_frac=attacker_hp, defender_hp_frac=defender_hp)
+            if got.frac > best.frac:
+                best = got
+        return best
+
+    matrix = {}
+    for our_name in bring4:
+        forced_base = our_name.startswith("Mega ") and our_name != mega_used
+        our_c = our_built[our_name]["base" if forced_base else "mega"]
+        our_moves = our_built[our_name]["moves"]
+        our_hp = _hp_frac(attacker_hp_frac, our_name)
+        our_def_hp = _hp_frac(defender_hp_frac, our_name)
+        for enemy_name in enemies:
+            enemy_c = enemy_built[enemy_name]["mega"]
+            enemy_moves = enemy_built[enemy_name]["moves"]
+            enemy_hp = _hp_frac(attacker_hp_frac, enemy_name)
+            enemy_def_hp = _hp_frac(defender_hp_frac, enemy_name)
+            our_hit = _best_hit_at_hp(our_c, our_moves, enemy_c, our_hp, enemy_def_hp)
+            their_hit = _best_hit_at_hp(enemy_c, enemy_moves, our_c, enemy_hp, our_def_hp)
+            matrix[(our_name, enemy_name)] = {
+                "our_hits_to_ko": _hits_to_ko(our_hit),
+                "their_hits_to_ko": _hits_to_ko(their_hit)}
+    return {"safe": safe, "matrix": matrix}
+
+
+def prematch_win_conditions_for_dive(bring4_row, dive, target_names, merged,
+                                     moves_db, natures, typechart,
+                                     enemy_item_overrides=None,
+                                     enemy_move_overrides=None,
+                                     attacker_hp_frac=None, defender_hp_frac=None):
+    """`prematch_win_conditions`, built straight from an already-computed
+    `core_deep_dive` result (`dive`) -- for a Streamlit render function
+    that already has `dive` on hand (the "Best bring-4 (from this deep
+    dive)" section) and shouldn't have to reconstruct OUR OWN side's real,
+    already-fixed item/moveset a second time.
+
+    Our own side: `dive["sets"]` (already fixed for the whole dive, "a
+    real team's set is fixed for the whole event") feeds `_build_forms`
+    directly -- no new search.
+
+    Enemy side: `_build_forms(target_names, ...)`, the SAME call
+    `core_deep_dive` itself already makes per enemy roster (`enemy_item_
+    overrides`/`enemy_move_overrides` respected exactly the same way, a
+    real known set winning over mbsmogon.xlsx's own usage-default
+    otherwise) -- consistent with how `dive` itself treated this same
+    enemy roster, not a second, differently-built board.
+    """
+    our_sets = dive["sets"]
+    our_built = _build_forms(
+        bring4_row["bring4"], merged, natures, moves_db,
+        items={n: s["item"] for n, s in our_sets.items() if s.get("item")},
+        move_overrides={n: s["moves"] for n, s in our_sets.items() if s.get("moves")})
+    enemy_built = _build_forms(
+        target_names, merged, natures, moves_db,
+        items=enemy_item_overrides, move_overrides=enemy_move_overrides)
+    return prematch_win_conditions(
+        bring4_row, our_built, enemy_built, typechart,
+        attacker_hp_frac=attacker_hp_frac, defender_hp_frac=defender_hp_frac)
+
+
+def prematch_win_conditions_for_bring4(bring4_row, target_names, merged, moves_db,
+                                       natures, typechart, item_overrides=None,
+                                       move_overrides=None, enemy_item_overrides=None,
+                                       enemy_move_overrides=None, evs_overrides=None,
+                                       nature_overrides=None, ability_overrides=None):
+    """`prematch_win_conditions`, built straight from a fresh `bring4_
+    search` result (no `core_deep_dive` on hand) -- the SAME `_build_
+    forms` item/move override handling `bring4_search` itself used for
+    this exact race, so the 1v1 matrix can't show a DIFFERENT set than
+    what the race actually used. See `prematch_win_conditions_for_dive`
+    for the equivalent built off an already-computed deep dive instead.
+    """
+    bring4 = bring4_row["bring4"]
+    our_built = _build_forms(
+        bring4, merged, natures, moves_db, items=item_overrides,
+        move_overrides=move_overrides, evs_overrides=evs_overrides,
+        nature_overrides=nature_overrides, ability_overrides=ability_overrides)
+    enemy_built = _build_forms(
+        target_names, merged, natures, moves_db, items=enemy_item_overrides,
+        move_overrides=enemy_move_overrides, evs_overrides=evs_overrides,
+        nature_overrides=nature_overrides, ability_overrides=ability_overrides)
+    return prematch_win_conditions(bring4_row, our_built, enemy_built, typechart)
 
 
 def _pairs_beaten_without_fainting(row):
@@ -7362,6 +7552,171 @@ def bring4_from_deep_dive(core, dive, target_names, good_threshold=1.0):
     for row in bring4_rows:
         row["mega_used"] = dive_mega if dive_mega in row["bring4"] else None
     return bring4_rows
+
+
+def _evolve_dive_score(dive, target_name_lists, good_threshold=1.0):
+    """A single blended score for an ALREADY-COMPUTED `core_deep_dive`
+    result, in the SAME `_CORE_BLEND_WEIGHTS`-weighted per-90 shape
+    `_core_row`'s own "Avg Wins/90"-style blend uses -- reusing `bring4_
+    from_deep_dive` + `bring4_pair_depth`, the exact two building blocks
+    `_core_row`'s per-enemy pipeline already runs on, so "meaningfully
+    improve performance" is judged by the SAME yardstick the rest of the
+    tool ranks cores by, not a second metric.
+
+    `evolve_from_team`'s own use case is a single fixed core compared
+    against itself over time (one swap at a time), not a pool of many
+    candidate cores -- so `_core_row`'s own item-cap/worst-case-floor/
+    megas-choice machinery (built for ranking a whole SEARCH) isn't needed
+    here; the blended /90 rate alone is the whole comparison.
+    """
+    core = dive["core"]
+    rates = []
+    for target_names in target_name_lists:
+        bring4_rows = bring4_from_deep_dive(core, dive, target_names, good_threshold)
+        best = bring4_rows[0]
+        depth = bring4_pair_depth(best)
+        n_pairs = len(best["pair_rows"])
+        pt = depth["pairs_total"]
+        rates.append((
+            _rate_per_90(depth["beaten_total"], n_pairs, pt),
+            _rate_per_90(depth["tailwind_safe_total"], n_pairs, pt),
+            _rate_per_90(depth["protect_safe_total"], n_pairs, pt),
+            _rate_per_90(depth["follow_me_safe_total"], n_pairs, pt)))
+    if not rates:
+        return 0.0
+    w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
+    return (w_win * (sum(r[0] for r in rates) / len(rates)) +
+           w_tw * (sum(r[1] for r in rates) / len(rates)) +
+           w_pr * (sum(r[2] for r in rates) / len(rates)) +
+           w_fm * (sum(r[3] for r in rates) / len(rates)))
+
+
+def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typechart,
+                     turns=2, good_threshold=1.0, swap_pool=None,
+                     item_overrides=None, move_overrides=None,
+                     excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                     evs_overrides=None, nature_overrides=None, ability_overrides=None,
+                     max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
+                     max_life_orb=DEFAULT_MAX_LIFE_ORB):
+    """"If I define one high-performing team ... then try to see if any
+    improvements can be made" -- a LOCAL, greedy search around a fixed
+    starting core (`core`, 4-6 already-decided Pokemon -- from a pasted
+    team or plain names), NOT a fresh from-scratch search: one substitution
+    at a time from the given start, keeping everything else fixed, scored
+    against `target_name_lists` (the caller's own judged enemy population,
+    e.g. every saved team) via `_evolve_dive_score` -- the SAME blended
+    yardstick `_core_row`'s "Avg Wins/90" already ranks cores by.
+
+    Two swap kinds, per the user's own answer (both):
+
+    - MOVE SWAPS: for each existing member, for each of its OTHER real,
+      usage-backed moves (`merged[name]["moves_usage"]`) not already in its
+      baseline 4, try it in place of each currently-held move, ONE
+      substitution at a time -- that member's other 3 moves, and every
+      OTHER member's own set, held fixed at the BASELINE dive's own real
+      answer (`core_deep_dive`'s "EVERY MEMBER'S SET IS FIXED" rule,
+      applied here to keep the rest of the team a stable comparison point
+      rather than independently re-optimising around the one change).
+    - WHOLE-MEMBER SWAPS: for each member, for each candidate in
+      `swap_pool` (not already in `core`), try replacing it entirely --
+      the trial core's OWN set is searched fresh (a new member needs its
+      own real item/moveset, not the departed member's), same as any other
+      `core_deep_dive` call.
+
+    Only genuine improvements (`delta > 0`) are returned, sorted by delta
+    descending -- not an exhaustive dump of every swap tried.
+
+    `swap_pool`: candidate replacement names for whole-member swaps.
+    `None` (the default) searches every name in `merged` not already in
+    `core` -- a caller wanting the search bounded to realistic options
+    should pass `team_search.build_candidate_pool`'s own pool instead (the
+    SAME pool `--multi-bring4` draws from, per the user's own "the usual
+    search pool" answer).
+
+    Returns [{"kind": "move" or "member", "member": <the member changed>,
+    "removed": <what left>, "added": <what replaced it>,
+    "baseline_score": float, "new_score": float, "delta": float}, ...].
+    """
+    core = list(dict.fromkeys(core))
+    baseline_dive = core_deep_dive(
+        core, target_name_lists, merged, moves_db, natures, typechart,
+        turns=turns, item_overrides=item_overrides, move_overrides=move_overrides,
+        excluded_items=excluded_items, evs_overrides=evs_overrides,
+        nature_overrides=nature_overrides, ability_overrides=ability_overrides,
+        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+    baseline_score = _evolve_dive_score(baseline_dive, target_name_lists, good_threshold)
+    baseline_sets = baseline_dive["sets"]
+
+    results = []
+
+    # MOVE SWAPS -- move_overrides forces a member's FULL 4-move list, so
+    # holding "the rest of the team fixed" means pinning every OTHER
+    # member's own baseline moves/item too, not leaving them to
+    # independently re-optimise around the one change.
+    for member in core:
+        base_moves = baseline_sets[member]["moves"]
+        usage_moves = [mv for mv, _pct in merged[member].get("moves_usage", [])]
+        for slot in range(len(base_moves)):
+            for candidate_move in usage_moves:
+                if candidate_move in base_moves:
+                    continue
+                trial_moves = list(base_moves)
+                trial_moves[slot] = candidate_move
+                trial_move_overrides = {n: s["moves"] for n, s in baseline_sets.items()}
+                trial_move_overrides.update(move_overrides or {})
+                trial_move_overrides[member] = trial_moves
+                trial_item_overrides = {n: s["item"] for n, s in baseline_sets.items()}
+                trial_item_overrides.update(item_overrides or {})
+                try:
+                    trial_dive = core_deep_dive(
+                        core, target_name_lists, merged, moves_db, natures, typechart,
+                        turns=turns, item_overrides=trial_item_overrides,
+                        move_overrides=trial_move_overrides,
+                        excluded_items=excluded_items, evs_overrides=evs_overrides,
+                        nature_overrides=nature_overrides,
+                        ability_overrides=ability_overrides,
+                        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+                except ValueError:
+                    continue  # candidate move has no legal use in this core -- skip
+                trial_score = _evolve_dive_score(trial_dive, target_name_lists, good_threshold)
+                delta = trial_score - baseline_score
+                if delta > 0:
+                    results.append({
+                        "kind": "move", "member": member,
+                        "removed": base_moves[slot], "added": candidate_move,
+                        "baseline_score": baseline_score, "new_score": trial_score,
+                        "delta": delta})
+
+    # WHOLE-MEMBER SWAPS -- the trial core's own set is searched fresh
+    # (`core_deep_dive`'s own item/moveset resolution), never re-uses the
+    # departed member's set.
+    pool = swap_pool if swap_pool is not None else [n for n in merged if n not in core]
+    for member in core:
+        for candidate in pool:
+            if candidate in core or candidate == member:
+                continue
+            trial_core = [candidate if n == member else n for n in core]
+            try:
+                trial_dive = core_deep_dive(
+                    trial_core, target_name_lists, merged, moves_db, natures, typechart,
+                    turns=turns, item_overrides=item_overrides,
+                    move_overrides=move_overrides,
+                    excluded_items=excluded_items, evs_overrides=evs_overrides,
+                    nature_overrides=nature_overrides, ability_overrides=ability_overrides,
+                    max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+            except ValueError:
+                continue  # candidate has no legal set against these enemies -- skip
+            trial_score = _evolve_dive_score(trial_dive, target_name_lists, good_threshold)
+            delta = trial_score - baseline_score
+            if delta > 0:
+                results.append({
+                    "kind": "member", "member": member,
+                    "removed": member, "added": candidate,
+                    "baseline_score": baseline_score, "new_score": trial_score,
+                    "delta": delta})
+
+    results.sort(key=lambda r: -r["delta"])
+    return results
 
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,

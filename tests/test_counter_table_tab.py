@@ -1147,6 +1147,57 @@ class TestWinConditionsSection(unittest.TestCase):
         self.assertFalse(any("Win conditions" in m.value for m in at.markdown))
 
 
+class TestHitCountMatrixSection(unittest.TestCase):
+    """"A prematch view of my win conditions vs theirs (i.e., once Arcanine
+    is gone, Scizor easily beats X in endgame given it 2HKOs enemy but
+    takes 5HKOs from enemy and so on)" -- a "1v1 hit-count matrix" table
+    (`prematch_win_conditions`'s own 1v1 half) rendered right alongside
+    the existing "Win conditions" table, wherever a specific bring-4 vs
+    one enemy roster is already shown."""
+
+    def _matrix_dfs(self, at):
+        return [d.value for d in at.dataframe if list(d.value.columns[:1]) == ["Ours"]]
+
+    def test_stage2_best_bring4_shows_the_hit_count_matrix(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("1v1 hit-count matrix" in m.value for m in at.markdown))
+        dfs = self._matrix_dfs(at)
+        self.assertTrue(dfs, "expected an Ours/<enemy...> hit-count table")
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+        self.assertEqual(set(dfs[0]["Ours"]), set(bring4_rows[0]["bring4"]))
+        for cell in dfs[0].iloc[0, 1:]:
+            self.assertRegex(str(cell), r"^(\d+HKO|--) / (\d+HKO|--)$")
+
+    def test_picked_bring4_deep_dive_shows_the_hit_count_matrix(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("1v1 hit-count matrix" in m.value for m in at.markdown))
+        self.assertTrue(self._matrix_dfs(at))
+
+    def test_all6_one_team_deep_dive_shows_the_hit_count_matrix(self):
+        at = app()  # default TEAM has 6 members
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = self._matrix_dfs(at)
+        self.assertTrue(dfs)
+
+    def test_the_vs_all_enemy_teams_dive_shows_no_hit_count_matrix(self):
+        """Same rule as the Win conditions table -- only makes sense
+        against ONE known enemy roster."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any("1v1 hit-count matrix" in m.value for m in at.markdown))
+
+
 class TestTrickRoomOptIn(unittest.TestCase):
     """"avoiding enemy tailwind and trick room may be key for a matchup
     swinging from a win to a clear loss ... Add it now as an option" --

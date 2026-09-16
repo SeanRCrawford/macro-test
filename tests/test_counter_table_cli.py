@@ -21,6 +21,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 
@@ -1862,6 +1863,128 @@ class TestVsAllTeamsFlag(unittest.TestCase):
         self.assertIn("requires --multi-bring4", msg)
 
 
+class TestBenchmarkTeamsFlag(unittest.TestCase):
+    """--benchmark-teams: "always add all of the saved teams in data/
+    my_teams and data/teams as potential own teams, with the sets intact
+    ... these will be very helpful for benchmarking performance." Runs the
+    SAME --bring4 search once per saved team, each using that team's own
+    roster/sets instead of a single --our."""
+
+    def test_requires_bring4(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-all-teams", "--pool-size", "8",
+             "--top", "1", "--benchmark-teams"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--benchmark-teams requires --bring4", msg)
+
+    def test_mutually_exclusive_with_our(self):
+        msg, _out = run_main(
+            ["--bring4", "--our", "Garchomp,Hydreigon,Kingambit,Whimsicott",
+             "--vs", "Kingambit,Basculegion", "--benchmark-teams",
+             "--no-prompt"])
+        self.assertIsNotNone(msg)
+        self.assertIn("derives --our from each saved team", msg)
+
+    def test_bring4_still_requires_our_or_benchmark_teams(self):
+        msg, _out = run_main(["--bring4", "--vs", "Kingambit,Basculegion"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--benchmark-teams instead", msg)
+
+    def test_one_source_team_header_per_saved_team_with_real_roster_and_sets(self):
+        """Spot-checks the "Sand" team's own real roster (Mega Tyranitar,
+        not Tyranitar -- the mega-stone-holder rename this session's Team
+        Builder dropdown fix already relies on) and one of its known real
+        moves (Knock Off) survive into the race, confirming "with the sets
+        intact" -- not a fresh, independently re-optimised search."""
+        from _harness import load_world
+        W = load_world()
+        msg, out = run_main(
+            ["--bring4", "--benchmark-teams", "--vs", "Kingambit,Basculegion",
+             "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertEqual(out.count("=== Source team:"), len(W["teams"]),
+                         "one benchmark block per saved team")
+        self.assertIn("=== Source team: Sand ===", out)
+        sand_idx = out.index("=== Source team: Sand ===")
+        next_idx = out.find("=== Source team:", sand_idx + 1)
+        sand_block = out[sand_idx:next_idx if next_idx != -1 else len(out)]
+        self.assertIn("Mega Tyranitar", sand_block)
+
+    def test_xlsx_has_a_benchmark_sheet_with_a_source_team_column(self):
+        from _harness import load_world
+        from openpyxl import load_workbook
+        W = load_world()
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                path = f.name
+            msg, out = run_main(
+                ["--bring4", "--benchmark-teams", "--vs",
+                 "Kingambit,Basculegion", "--no-prompt", "--top", "1",
+                 "--xlsx", path])
+            self.assertIsNone(msg, out)
+            wb = load_workbook(path)
+            self.assertIn("Benchmark", wb.sheetnames)
+            ws = wb["Benchmark"]
+            header = [c.value for c in ws[1]]
+            self.assertEqual(header[0], "Source team")
+            team_col = [row[0] for row in ws.iter_rows(min_row=2, values_only=True)]
+            self.assertEqual(set(team_col), set(W["teams"]))
+        finally:
+            if path and os.path.exists(path):
+                os.unlink(path)
+
+    def test_deep_dive_core_not_supported_with_benchmark_teams(self):
+        msg, _out = run_main(
+            ["--bring4", "--benchmark-teams", "--vs", "Kingambit,Basculegion",
+             "--deep-dive-core", "1", "--no-prompt"])
+        self.assertIsNotNone(msg)
+        self.assertIn("aren't supported together with --benchmark-teams", msg)
+
+
+class TestEvolveFromTeamFlag(unittest.TestCase):
+    """--evolve-from-team: "if I define one high-performing team ... then
+    try to see if any improvements can be made" -- a local search around a
+    fixed starting core (--our), reporting move/whole-member swaps that
+    genuinely improve on the baseline."""
+
+    def test_requires_our(self):
+        msg, _out = run_main(["--evolve-from-team"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--evolve-from-team requires --our", msg)
+
+    def test_our_needs_2_to_6_names(self):
+        msg, _out = run_main(["--evolve-from-team", "--our", "Garchomp"])
+        self.assertIsNotNone(msg)
+        self.assertIn("needs 2-6 distinct Pokemon", msg)
+
+    def test_surfaces_the_known_earthquake_improvement(self):
+        """Mirrors `TestEvolveFromTeam`'s own library-level fixture
+        (`tests/test_counter_finder.py`): Garchomp forced onto Poison Jab
+        instead of Earthquake, vs an enemy pair 4x weak to Ground."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Garchomp", out)
+        self.assertIn("Poison Jab -> Earthquake", out)
+
+    def test_no_improvement_case_says_so_plainly(self):
+        """An empty `swap_pool` and no move-swap headroom (a single-member
+        `--our` has no OTHER member to swap into, and pinning its own
+        moves to its own real usage top-4 leaves nothing better to try)
+        must not crash -- it reports plainly that nothing improved."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit",
+             "--vs-team", "Kingambit,Basculegion", "--evolve-pool-size", "0",
+             "--turns", "1"])
+        self.assertIsNone(msg, out)
+        self.assertTrue(
+            "No improvement found" in out or "genuine improvement(s)" in out)
+
+
 class TestTurnsAppliesToMultiBring4(unittest.TestCase):
     """`multi_bring4_coverage` already accepted and threaded a `turns`
     parameter (default 2) -- the CLI's own validation was the only thing
@@ -2342,6 +2465,18 @@ class TestXlsxSum3rdBestAndLeadBackupColumns(unittest.TestCase):
              "--no-prompt", "--top", "2"])
         self.assertIsNone(msg, out)
         self.assertIn("own-tw", out)
+
+    def test_bring4_stage1_table_shows_an_own_pr_column(self):
+        """Mirrors `test_bring4_stage1_table_shows_an_own_tw_column` for
+        the own-Protect mirror (`pairs_own_protect_used`) -- same "always
+        add a console column when a new pair-level mirror metric is added"
+        convention as own-Tailwind."""
+        msg, out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                      "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+             "--no-prompt", "--top", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("own-pr", out)
 
 
 class TestXlsxBottleneckWorstPairColumns(unittest.TestCase):

@@ -216,7 +216,8 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, DEFAULT_MAX_FOCUS_SASH,  # n
                             _item_clause_context_from_coverage, _pair_sort_key,
                             bring4_damage_output, bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, core_damage_output,
-                            deep_dive, enemy_has_real_tailwind, find_pair_cores,
+                            deep_dive, enemy_has_real_tailwind, evolve_from_team,
+                            find_pair_cores,
                             joint_pair_search,
                             joint_pool_search, member_weakness_summary,
                             multi_bring4_beam, multi_bring4_coverage,
@@ -847,7 +848,7 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
          f"{len(our6)}:")
     header = (f"  {'#':>3} {'Pair':34s} {'beaten':>7s} {'swept':>6s} "
              f"{'traded':>7s} {'lost':>5s} {'no KO':>6s} {'tw-safe':>8s} "
-             f"{'pr-safe':>8s} {'own-tw':>7s}")
+             f"{'pr-safe':>8s} {'own-tw':>7s} {'own-pr':>7s}")
     print(header)
     print("  " + "-" * (len(header) - 2))
     for i, r in enumerate(pair_rows, start=1):
@@ -858,7 +859,8 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
              f"{r['pairs_lost']:>2d}/{total:<2d} {r['pairs_no_ko']:>3d}/{total:<2d} "
              f"{r['pairs_tailwind_safe']:>5d}/{total:<2d} "
              f"{r['pairs_protect_safe']:>5d}/{total:<2d} "
-             f"{r['pairs_own_tailwind_used']:>4d}/{total:<2d}")
+             f"{r['pairs_own_tailwind_used']:>4d}/{total:<2d} "
+             f"{r['pairs_own_protect_used']:>4d}/{total:<2d}")
 
     n_pairs = bring4_rows[0]["pairs_total"] if bring4_rows else 6
     print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked by "
@@ -1747,6 +1749,72 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     return path
 
 
+def _bring4_xlsx_row_values(rank, b, merged, enemy_tw):
+    """One `bring4_rows` entry's own row of cell values for the "Bring-4s"
+    sheet layout ("#", "Bring-4", ... through "Total Damage Output") --
+    factored out of `_write_bring4_xlsx`'s own per-row loop so a caller
+    building a DIFFERENT sheet with the same columns (e.g. one row per
+    source team, `--benchmark-teams`'s own xlsx output) never has to keep
+    a second copy of this in sync."""
+    wr = b["worst_pair_row"]
+    depth = bring4_pair_depth(b)
+    pt = depth["pairs_total"]
+    n_pairs = len(b["pair_rows"])
+    avg_score = _avg_score(b["bring4"], merged)
+    lead_backup = recommended_lead(b)
+    return [rank, " / ".join(b["bring4"]), b.get("mega_used") or "",
+           " + ".join(lead_backup["lead"]), " + ".join(lead_backup["backup"]),
+           ", ".join(f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
+           b["pairs_good"], b["pairs_total"], " + ".join(b["worst_pair"]),
+           f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
+           wr["pairs_total"],
+           round(avg_score, 1) if avg_score is not None else "",
+           round(_per_90(depth["beaten_total"], n_pairs, pt), 1),
+           round(_per_90(depth["tailwind_safe_total"], n_pairs, pt), 1),
+           round(_per_90(depth["protect_safe_total"], n_pairs, pt), 1),
+           round(_per_90(depth["follow_me_safe_total"], n_pairs, pt), 1),
+           round(_per_90(depth["no_faint_total"], n_pairs, pt), 1),
+           f"{depth['beaten_total']}/{n_pairs * pt}",
+           f"{depth['beaten_3rd']}/{pt}", f"{depth['beaten_4th']}/{pt}",
+           f"{depth['beaten_worst']}/{pt}", enemy_tw,
+           f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
+           f"{depth['tailwind_safe_best']}/{pt}",
+           f"{depth['tailwind_safe_3rd']}/{pt}",
+           f"{depth['protect_safe_total']}/{n_pairs * pt}",
+           f"{depth['protect_safe_best']}/{pt}",
+           f"{depth['protect_safe_3rd']}/{pt}",
+           f"{depth['follow_me_safe_total']}/{n_pairs * pt}",
+           f"{depth['follow_me_safe_best']}/{pt}",
+           f"{depth['follow_me_safe_3rd']}/{pt}",
+           f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
+           f"{depth['no_faint_best']}/{pt}",
+           f"{depth['no_faint_3rd']}/{pt}",
+           _pairs_note(b["pair_rows"]),
+           round(bring4_damage_output(b), 2)]
+
+
+_BRING4_XLSX_COLUMNS = [
+    "#", "Bring-4", "Mega used", "Lead", "Backup",
+    "Uncovered enemy pairs", "Pairs good",
+    "Pairs total", "Worst pair", "Worst pair beaten",
+    "Worst pair total", "Average Score",
+    "Avg Wins/90", "Avg Wins under Tailwind/90",
+    "Avg Wins under Protect/90", "Avg Wins under Redirect/90", "Clean wins/90",
+    "pairs beaten total",
+    "pairs beaten 3rd best", "pairs beaten 4th best",
+    "pairs beaten worst", "Enemy has real Tailwind",
+    "pairs Tailwind-safe total", "pairs Tailwind-safe best",
+    "pairs Tailwind-safe 3rd best", "pairs protect-safe total",
+    "pairs protect-safe best", "pairs protect-safe 3rd best",
+    "pairs redirect-safe total", "pairs redirect-safe best",
+    "pairs redirect-safe 3rd best",
+    "pairs clean win total",
+    "pairs beaten without fainting best",
+    "pairs beaten without fainting 3rd best", "6 pairs",
+    "Total Damage Output",
+]
+
+
 def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
                        moves_db, natures, typechart, item_overrides,
                        move_overrides, excluded_items, core_dives,
@@ -1786,61 +1854,10 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
     enemy_tw = enemy_has_real_tailwind(targets, merged)
     ws = wb.active
     ws.title = "Bring-4s"
-    ws.append(["#", "Bring-4", "Mega used", "Lead", "Backup",
-              "Uncovered enemy pairs", "Pairs good",
-              "Pairs total", "Worst pair", "Worst pair beaten",
-              "Worst pair total", "Average Score",
-              "Avg Wins/90", "Avg Wins under Tailwind/90",
-              "Avg Wins under Protect/90", "Avg Wins under Redirect/90", "Clean wins/90",
-              "pairs beaten total",
-              "pairs beaten 3rd best", "pairs beaten 4th best",
-              "pairs beaten worst", "Enemy has real Tailwind",
-              "pairs Tailwind-safe total", "pairs Tailwind-safe best",
-              "pairs Tailwind-safe 3rd best", "pairs protect-safe total",
-              "pairs protect-safe best", "pairs protect-safe 3rd best",
-              "pairs redirect-safe total", "pairs redirect-safe best",
-              "pairs redirect-safe 3rd best",
-              "pairs clean win total",
-              "pairs beaten without fainting best",
-              "pairs beaten without fainting 3rd best", "6 pairs",
-              "Total Damage Output"])
+    ws.append(list(_BRING4_XLSX_COLUMNS))
     _style_header(ws)
     for rank, b in enumerate(bring4_rows, start=1):
-        wr = b["worst_pair_row"]
-        depth = bring4_pair_depth(b)
-        pt = depth["pairs_total"]
-        n_pairs = len(b["pair_rows"])
-        avg_score = _avg_score(b["bring4"], merged)
-        lead_backup = recommended_lead(b)
-        ws.append([rank, " / ".join(b["bring4"]), b.get("mega_used") or "",
-                  " + ".join(lead_backup["lead"]), " + ".join(lead_backup["backup"]),
-                  ", ".join(f"{e1}+{e2}" for e1, e2 in b["uncovered_enemy_pairs"]),
-                  b["pairs_good"], b["pairs_total"], " + ".join(b["worst_pair"]),
-                  f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}",
-                  wr["pairs_total"],
-                  round(avg_score, 1) if avg_score is not None else "",
-                  round(_per_90(depth["beaten_total"], n_pairs, pt), 1),
-                  round(_per_90(depth["tailwind_safe_total"], n_pairs, pt), 1),
-                  round(_per_90(depth["protect_safe_total"], n_pairs, pt), 1),
-                  round(_per_90(depth["follow_me_safe_total"], n_pairs, pt), 1),
-                  round(_per_90(depth["no_faint_total"], n_pairs, pt), 1),
-                  f"{depth['beaten_total']}/{n_pairs * pt}",
-                  f"{depth['beaten_3rd']}/{pt}", f"{depth['beaten_4th']}/{pt}",
-                  f"{depth['beaten_worst']}/{pt}", enemy_tw,
-                  f"{depth['tailwind_safe_total']}/{n_pairs * pt}",
-                  f"{depth['tailwind_safe_best']}/{pt}",
-                  f"{depth['tailwind_safe_3rd']}/{pt}",
-                  f"{depth['protect_safe_total']}/{n_pairs * pt}",
-                  f"{depth['protect_safe_best']}/{pt}",
-                  f"{depth['protect_safe_3rd']}/{pt}",
-                  f"{depth['follow_me_safe_total']}/{n_pairs * pt}",
-                  f"{depth['follow_me_safe_best']}/{pt}",
-                  f"{depth['follow_me_safe_3rd']}/{pt}",
-                  f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
-                  f"{depth['no_faint_best']}/{pt}",
-                  f"{depth['no_faint_3rd']}/{pt}",
-                  _pairs_note(b["pair_rows"]),
-                  round(bring4_damage_output(b), 2)])
+        ws.append(_bring4_xlsx_row_values(rank, b, merged, enemy_tw))
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
@@ -1862,6 +1879,36 @@ def _write_bring4_xlsx(path, bring4_rows, our6, targets, merged,
     if core_dives:
         _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosize)
 
+    wb.save(path)
+    return path
+
+
+def _write_benchmark_teams_xlsx(path, team_top_rows, targets, merged):
+    """`--benchmark-teams`'s own xlsx output -- one row per saved team's
+    OWN top-ranked bring-4 (`bring4_search`'s own Stage 2 winner, using
+    that team's real sets, not re-optimised), tagged with a "Source team"
+    column so every team's own best result stays comparable in one sheet.
+    Reuses `_bring4_xlsx_row_values`/`_BRING4_XLSX_COLUMNS` -- the SAME per-
+    row column layout `--bring4`'s own single-team "Bring-4s" sheet uses --
+    so a benchmark row is never a second, drifting format.
+
+    `team_top_rows`: [(team_name, bring4_row), ...], already filtered to
+    only teams that produced a real bring-4 (a team below 3 usable members
+    never reaches this).
+    """
+    from openpyxl import Workbook
+    from export_excel import _autosize, _style_header
+    wb = Workbook()
+    enemy_tw = enemy_has_real_tailwind(targets, merged)
+    ws = wb.active
+    ws.title = "Benchmark"
+    ws.append(["Source team"] + _BRING4_XLSX_COLUMNS)
+    _style_header(ws)
+    for rank, (team_name, b) in enumerate(team_top_rows, start=1):
+        ws.append([team_name] + _bring4_xlsx_row_values(rank, b, merged, enemy_tw))
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    _autosize(ws)
     wb.save(path)
     return path
 
@@ -1971,6 +2018,65 @@ def _print_two_two_two(pair_rows, team_rows, top_pairs, max_net_weakness=None):
              f"total_net_weakness={r['total_net_weakness']}")
 
 
+def _run_evolve_from_team(args):
+    """--evolve-from-team's own standalone execution path -- handled
+    entirely separately from `main()`'s big --bring4/--multi-bring4/--two-
+    two-two validation cascade (which assumes exactly one of those modes
+    and reads targets/pool in ways that don't apply here), rather than
+    threading a fourth mode through that web of mutual-exclusion checks.
+    """
+    if not args.our:
+        raise SystemExit("--evolve-from-team requires --our \"Pokemon,Pokemon,...\" "
+                         "(the already-decided starting team, 2-6 names)")
+    core = list(dict.fromkeys(n.strip() for n in args.our.split(",") if n.strip()))
+    if not (2 <= len(core) <= 6):
+        raise SystemExit(f"--evolve-from-team needs 2-6 distinct Pokemon in "
+                         f"--our (got {len(core)}: {core})")
+    from _harness import load_world
+    W = load_world()
+    merged, moves, natures, typechart = (W["merged"], W["moves"], W["natures"],
+                                         W["typechart"])
+    unknown_our = [n for n in core if n not in merged]
+    if unknown_our:
+        raise SystemExit(f"unknown Pokemon: {', '.join(unknown_our)}")
+    if args.vs_team:
+        target_name_lists = [_resolve_vs_team(raw, W["teams"], merged)
+                             for raw in args.vs_team]
+    else:
+        target_name_lists = list(W["teams"].values())
+    excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
+    max_life_orb = None if args.max_life_orb < 0 else args.max_life_orb
+    item_overrides = _parse_item_overrides(args.item)
+    move_overrides = _parse_move_overrides(args.moves)
+
+    from team_search import build_candidate_pool
+    swap_pool = [n for n in build_candidate_pool(merged, top_n=args.evolve_pool_size)
+                if n not in core]
+
+    print(f"Evolving from: {' / '.join(core)} vs {len(target_name_lists)} "
+         f"saved team(s), {len(swap_pool)}-Pokemon whole-member swap pool\n")
+    results = evolve_from_team(
+        core, target_name_lists, merged, moves, natures, typechart,
+        turns=args.turns, good_threshold=args.good_threshold / 100.0,
+        swap_pool=swap_pool, item_overrides=item_overrides,
+        move_overrides=move_overrides, excluded_items=excluded_items,
+        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+    if not results:
+        print("No improvement found -- every move/whole-member swap tried "
+             "scored no better than the starting team.")
+        return
+    print(f"{len(results)} genuine improvement(s), best first:\n")
+    header = f"  {'#':>3} {'Kind':7s} {'Member':16s} {'Change':38s} {'Score':>7s} -> {'New':>7s}  {'Delta':>6s}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for i, r in enumerate(results[:args.top], start=1):
+        change = f"{r['removed']} -> {r['added']}"
+        print(f"  {i:>3} {r['kind']:7s} {r['member']:16s} {change[:38]:38s} "
+             f"{r['baseline_score']:>7.1f} -> {r['new_score']:>7.1f}  "
+             f"{r['delta']:>+6.1f}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--vs", default="",
@@ -2049,6 +2155,37 @@ def main():
                     help="--bring4/--multi-bring4 only: a pair counts as "
                          "'good' once it beats at least PCT%% of the named "
                          "enemy pairs (default 100 -- must beat ALL of them)")
+    ap.add_argument("--evolve-from-team", action="store_true",
+                    help="local search for improvements around one already-"
+                         "decided team (--our, 2-6 names): tries each real "
+                         "usage-backed move swap on each existing member "
+                         "(one substitution at a time) and each whole-"
+                         "member swap (one member replaced by a candidate "
+                         "from the usual search pool, --evolve-pool-size of "
+                         "them), keeping everything else fixed, and reports "
+                         "only genuine improvements (by the same blended "
+                         "score --multi-bring4 ranks cores by) sorted by "
+                         "how much they help. Judged against --vs-team "
+                         "(repeated) or, by default, every saved team")
+    ap.add_argument("--evolve-pool-size", type=int, default=20, metavar="N",
+                    help="--evolve-from-team only: how many top-Score "
+                         "candidates (from the same pool --multi-bring4 "
+                         "draws from) to try as a whole-member replacement "
+                         "for each existing member (default 20 -- this "
+                         "search is O(members x N), so raising it costs "
+                         "roughly linearly more time)")
+    ap.add_argument("--benchmark-teams", action="store_true",
+                    help="--bring4 only: instead of one --our team, run the "
+                         "SAME --bring4 search once independently per every "
+                         "team saved in data/teams and data/my_teams, each "
+                         "using its OWN roster and its OWN sets (item, "
+                         "moves, EVs, nature, ability -- following overrides "
+                         "then default_sets.txt/mbsmogon.xlsx the same as "
+                         "everywhere else), not re-optimised -- 'add all of "
+                         "the saved teams in data/my_teams and data/teams as "
+                         "potential own teams, with the sets intact ... very "
+                         "helpful for benchmarking performance.' --our is "
+                         "not used in this mode")
     ap.add_argument("--multi-bring4", action="store_true",
                     help="find the best team-of-6 (drawn from the pool) "
                          "across SEVERAL enemy rosters at once (--vs-team, "
@@ -2469,6 +2606,10 @@ def main():
                          "that wants the search results only")
     args = ap.parse_args()
 
+    if args.evolve_from_team:
+        _run_evolve_from_team(args)
+        return
+
     if bool(args.chip_from) != bool(args.chip_move):
         raise SystemExit("--chip-from and --chip-move must be given together")
     if args.partner_item and not (args.chip_from or args.partner):
@@ -2571,11 +2712,21 @@ def main():
         raise SystemExit("--turns only applies to --joint/--deep/--bring4/--multi-bring4")
     if args.deep and not args.our:
         raise SystemExit("--deep requires --our \"Pokemon,Pokemon\"")
-    if args.bring4 and not args.our:
+    if args.bring4 and not args.our and not args.benchmark_teams:
         raise SystemExit("--bring4 requires --our \"Pokemon,Pokemon,...\" "
-                         "(exactly 6 names)")
+                         "(exactly 6 names), or --benchmark-teams instead")
     if args.our and not (args.deep or args.bring4):
         raise SystemExit("--our requires --deep or --bring4")
+    if args.benchmark_teams and not args.bring4:
+        raise SystemExit("--benchmark-teams requires --bring4")
+    if args.benchmark_teams and args.our:
+        raise SystemExit("--benchmark-teams derives --our from each saved "
+                         "team -- don't pass --our too")
+    if args.benchmark_teams and (args.deep_dive_core or args.teamsheet_json):
+        raise SystemExit("--deep-dive-core/--teamsheet-json aren't supported "
+                         "together with --benchmark-teams (many teams, no "
+                         "single core to dive into) -- run --bring4 with "
+                         "--our for one team's own deep dive instead")
     if args.deep and (args.partner or args.partner_item):
         raise SystemExit("--partner/--partner-item don't apply to --deep -- "
                          "--our already names both of the pair")
@@ -2613,7 +2764,7 @@ def main():
         unknown_our = [n for n in our_pair if n not in merged]
         if unknown_our:
             raise SystemExit(f"unknown Pokemon: {', '.join(unknown_our)}")
-    if args.bring4:
+    if args.bring4 and not args.benchmark_teams:
         our6 = list(dict.fromkeys(our_pair))
         if not (3 <= len(our6) <= 6):
             raise SystemExit(f"--bring4 needs 3, 4, 5, or 6 distinct Pokemon "
@@ -2696,6 +2847,9 @@ def main():
 
     if args.deep:
         print(f"Deep dive: {' + '.join(our_pair)} vs {', '.join(targets)}\n")
+    elif args.bring4 and args.benchmark_teams:
+        print(f"Benchmark: {len(W['teams'])} saved team(s) vs "
+             f"{', '.join(targets)}\n")
     elif args.bring4:
         print(f"Bring-4 search: {' / '.join(our6)} vs {', '.join(targets)}\n")
     elif args.multi_bring4:
@@ -2757,6 +2911,52 @@ def main():
                     excluded_items=excluded_items)
                 switch_results[(e1, e2)] = (s_rows, s_tried)
             _print_switches(switch_results, len(bench_names))
+    elif args.bring4 and args.benchmark_teams:
+        # "Always add all of the saved teams in data/my_teams and
+        # data/teams as potential own teams, with the sets intact ...
+        # these will be very helpful for benchmarking performance" --
+        # once per saved team, each an independent --bring4 search using
+        # that team's OWN roster/sets (never re-optimised against these
+        # `targets` the way a fresh pool search would), tagged with its
+        # own name so the reports stay comparable across teams.
+        good_threshold = args.good_threshold / 100.0
+        team_top_rows = []
+        for team_name in sorted(W["teams"]):
+            team_our6 = list(dict.fromkeys(W["teams"][team_name]))
+            if not (3 <= len(team_our6) <= 6):
+                continue  # not a legal --bring4 size -- skip, don't crash the batch
+            team_sets = (W["meta"].get(team_name) or {}).get("sets") or {}
+            team_item_overrides = {n: s["item"] for n, s in team_sets.items()
+                                   if s.get("item")}
+            team_move_overrides = {n: s["moves"] for n, s in team_sets.items()
+                                   if s.get("moves")}
+            team_evs_overrides = {n: s["evs"] for n, s in team_sets.items()
+                                  if s.get("evs")}
+            team_nature_overrides = {n: s["nature"] for n, s in team_sets.items()
+                                     if s.get("nature")}
+            team_ability_overrides = {n: s["ability"] for n, s in team_sets.items()
+                                      if s.get("ability")}
+            team_pair_rows, team_bring4_rows = bring4_search(
+                team_our6, targets, merged, moves, natures, typechart,
+                turns=args.turns, good_threshold=good_threshold,
+                item_overrides=team_item_overrides,
+                move_overrides=team_move_overrides,
+                excluded_items=excluded_items,
+                enforce_item_clause=args.unique_items,
+                worst_case_targeting=args.worst_case_targeting,
+                evs_overrides=team_evs_overrides,
+                nature_overrides=team_nature_overrides,
+                ability_overrides=team_ability_overrides,
+                max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+            print(f"=== Source team: {team_name} ===")
+            _print_bring4(team_pair_rows, team_bring4_rows, team_our6, targets,
+                         args.top, args.turns, good_threshold)
+            print()
+            if team_bring4_rows:
+                team_top_rows.append((team_name, team_bring4_rows[0]))
+        if args.xlsx:
+            path = _write_benchmark_teams_xlsx(args.xlsx, team_top_rows, targets, merged)
+            print(f"Excel workbook: {os.path.abspath(path)}")
     elif args.bring4:
         good_threshold = args.good_threshold / 100.0
         pair_rows, bring4_rows = bring4_search(
