@@ -309,32 +309,34 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                     own_tailwind_up = (battle.field.tailwind_p1 if a.side == "p1"
                                        else battle.field.tailwind_p2) > 0
                     if a.move.name == "Trick Room":
-                        same_already, opposite_up = battle.field.trick_room, own_tailwind_up
+                        same_already = battle.field.trick_room
                     else:
-                        same_already, opposite_up = own_tailwind_up, battle.field.trick_room
+                        same_already = own_tailwind_up
                     if same_already:
                         return -20
-                    if opposite_up:
-                        # "an enemy should never counteract their own speed
-                        # control, by using tailwind while trick room is
-                        # active ... or using trick room while tailwind is
-                        # active -- though it may be a good idea if it
-                        # would lead to favourable speed order the next
-                        # turn." Only block it if casting anyway would
-                        # actually leave OUR side moving first LESS often
-                        # than the status quo -- the two together can
-                        # still net a favourable order.
-                        hyp_field = copy.deepcopy(battle.field)
-                        if a.move.name == "Trick Room":
-                            hyp_field.trick_room = True
-                        elif a.side == "p1":
-                            hyp_field.tailwind_p1 = 4
-                        else:
-                            hyp_field.tailwind_p2 = 4
-                        before = _speed_control_score(battle, side, opp_side)
-                        after = _speed_control_score(battle, side, opp_side, field=hyp_field)
-                        if after <= before:
-                            return -20
+                    # "An enemy should not use tailwind or trick room if the
+                    # speed order is already in their favour; it's a waste."
+                    # Generalizes the self-cancellation check that used to
+                    # only run when the OPPOSITE speed control was already
+                    # up: ANY case where casting wouldn't actually improve
+                    # how many of our actives it moves before -- whether
+                    # that's because the opposite control is already up, or
+                    # simply because raw current speed already favours it
+                    # with no speed control active on either side at all --
+                    # is equally a waste, so this now always checks
+                    # before-vs-after rather than only in the opposite-up
+                    # case.
+                    hyp_field = copy.deepcopy(battle.field)
+                    if a.move.name == "Trick Room":
+                        hyp_field.trick_room = True
+                    elif a.side == "p1":
+                        hyp_field.tailwind_p1 = 4
+                    else:
+                        hyp_field.tailwind_p2 = 4
+                    before = _speed_control_score(battle, side, opp_side)
+                    after = _speed_control_score(battle, side, opp_side, field=hyp_field)
+                    if after <= before:
+                        return -20
                     return 90 if c.ability in ("Prankster", "Gale Wings") else 75
                 if a.move.volatile_status in ("followme", "ragepowder"):
                     # "vs pokemon like Indeedee-F it is necessary that a

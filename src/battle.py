@@ -795,15 +795,6 @@ class Battle:
             self.log.add(f"{attacker.name} uses {move.name}")
             return
 
-        # Recharge moves (Hyper Beam, Giga Impact, the other "Blast Burn"-
-        # family signatures): using one -- landing, missing, or blocked by
-        # Protect makes no difference, only having a real target to use it
-        # against does -- locks the user out of any action next turn (see
-        # the "must_recharge" filter in run_turn, which fires this whether
-        # or not the hit actually connected).
-        if move.flags and move.flags.get("recharge"):
-            attacker.volatile["must_recharge"] = True
-
         num_hit = 0
         # Follow Me / Rage Powder redirection: a single-target move aimed at the
         # opposing side gets pulled onto the redirector instead. Spread moves are
@@ -844,6 +835,16 @@ class Battle:
         blocked = [t for t in live_targets if t not in hit_targets]
         for t in blocked:
             self.log.add(f"{self.tag(attacker)}'s {move.name} was blocked by {self.tag(t)}'s guard!")
+        # Recharge moves (Hyper Beam, Giga Impact, the other "Blast Burn"-
+        # family signatures): the recharge lockout is a consequence of the
+        # move actually connecting, not of merely being selected -- a Hyper
+        # Beam entirely blocked by Protect does NOT force a recharge next
+        # turn (real mechanic). Landing on at least one real, unprotected
+        # target is what triggers it, whether it's a miss on that target or
+        # not (accuracy isn't rolled in this engine, so "landing" here just
+        # means "had a live, unprotected target").
+        if move.flags and move.flags.get("recharge") and hit_targets:
+            attacker.volatile["must_recharge"] = True
         num_hit = (len(hit_targets)
                   if is_spread_move(effective_move_target(move, attacker, self.field.terrain))
                   else min(1, len(hit_targets)))

@@ -3896,9 +3896,16 @@ def _resolve_turn(combatants, moves_by_role, hp, typechart, weather, our_hints,
             plan, combatants, hp, protected_roles, enemy_speed_mult, field,
             own_speed_mult=own_speed_mult, trick_room=trick_room)
         final_doomed = doomed
+    # Real mechanic: the recharge lockout follows from the move actually
+    # connecting, not from merely being selected -- a Hyper Beam entirely
+    # blocked by Protect does NOT force a recharge next turn. `_hits` holds
+    # every target the move was AIMED at (fixed at plan-build time, see
+    # `_apply_plan`'s own docstring); it only counts as "connected" if at
+    # least one of those targets is not in `protected_roles`.
     recharging_next = {role for role, (_hits, mv) in plan.items()
                        if role not in final_doomed and mv is not None
-                       and mv.flags and mv.flags.get("recharge")}
+                       and mv.flags and mv.flags.get("recharge")
+                       and any(tgt_role not in protected_roles for tgt_role in _hits)}
     return hp2, log, enemy_acted, wiped, recharging_next
 
 

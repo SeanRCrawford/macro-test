@@ -58,51 +58,51 @@
     ],
     "turns": [
       {
-        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Throat Chop->Farigiraf",
+        "chosen": "Farigiraf:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Farigiraf",
         "eval": 78.9231,
         "eval_p2": -78.9231,
         "n_our_actions": 23,
-        "score": 113.4685,
+        "score": 159.0425,
         "turn": 1
       },
       {
         "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Throat Chop->Farigiraf",
-        "eval": 44.3776,
-        "eval_p2": -44.3776,
+        "eval": 53.4685,
+        "eval_p2": -53.4685,
         "n_our_actions": 18,
-        "score": 78.9231,
+        "score": 88.014,
         "turn": 2
       },
       {
-        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Throat Chop->Farigiraf",
-        "eval": 51.3758,
-        "eval_p2": -51.3758,
+        "chosen": "Farigiraf:switch:switch->Hydreigon | Incineroar:switch:switch->Gallade",
+        "eval": -106.4424,
+        "eval_p2": 106.4424,
         "n_our_actions": 18,
-        "score": 60.9213,
+        "score": 96.1316,
         "turn": 3
       },
       {
-        "chosen": "Farigiraf:switch:switch->Hydreigon | Incineroar:move:Throat Chop->Farigiraf",
-        "eval": -117.626,
-        "eval_p2": 117.626,
-        "n_our_actions": 18,
-        "score": 40.4934,
+        "chosen": "Hydreigon:move:Snarl->Incineroar | Incineroar:move:Throat Chop->Farigiraf",
+        "eval": -134.9896,
+        "eval_p2": 134.9896,
+        "n_our_actions": 14,
+        "score": 82.6195,
         "turn": 4
       },
       {
-        "chosen": "Hydreigon:move:Snarl->Incineroar | Incineroar:move:Throat Chop->Farigiraf",
-        "eval": -166.446,
-        "eval_p2": 166.446,
-        "n_our_actions": 14,
-        "score": 1.7086,
+        "chosen": "Hydreigon:move:Dark Pulse->Mega Mawile | Incineroar:move:Flare Blitz->Mega Mawile",
+        "eval": 76.1145,
+        "eval_p2": -76.1145,
+        "n_our_actions": 5,
+        "score": -10.8338,
         "turn": 5
       },
       {
-        "chosen": "Hydreigon:move:Dark Pulse->Mega Mawile | Incineroar:move:Flare Blitz->Mega Mawile",
-        "eval": -23.1132,
-        "eval_p2": 23.1132,
-        "n_our_actions": 5,
-        "score": -289.5801,
+        "chosen": "Gallade:move:Sacred Sword->Incineroar | Incineroar:move:Flare Blitz->Mega Mawile",
+        "eval": -10.8338,
+        "eval_p2": 10.8338,
+        "n_our_actions": 12,
+        "score": 306.8005,
         "turn": 6
       }
     ]
@@ -178,47 +178,47 @@
         "eval": -47.0769,
         "eval_p2": 47.0769,
         "n_our_actions": 23,
-        "score": 65.5709,
+        "score": 13.0687,
         "turn": 1
       },
       {
-        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:move:Throat Chop->Mega Aerodactyl",
-        "eval": 34.5503,
-        "eval_p2": -34.5503,
+        "chosen": "Farigiraf:move:Psychic->Mega Charizard Y | Incineroar:move:Throat Chop->Mega Aerodactyl",
+        "eval": -17.952,
+        "eval_p2": 17.952,
         "n_our_actions": 18,
-        "score": 36.4895,
+        "score": 20.9721,
         "turn": 2
       },
       {
-        "chosen": "Farigiraf:move:Trick Room->Farigiraf | Incineroar:switch:switch->Hydreigon",
-        "eval": -108.9233,
-        "eval_p2": 108.9233,
+        "chosen": "Farigiraf:protect:Protect->Farigiraf | Incineroar:switch:switch->Hydreigon",
+        "eval": -136.4255,
+        "eval_p2": 136.4255,
         "n_our_actions": 18,
-        "score": -66.4822,
+        "score": -134.822,
         "turn": 3
       },
       {
-        "chosen": "Farigiraf:move:Psychic->Mega Aerodactyl | Incineroar:switch:switch->Gallade",
-        "eval": -134.9185,
-        "eval_p2": 134.9185,
-        "n_our_actions": 22,
-        "score": 82.9899,
+        "chosen": "Farigiraf:switch:switch->Gallade | Hydreigon:move:Draco Meteor->Mega Aerodactyl",
+        "eval": -424.8904,
+        "eval_p2": 424.8904,
+        "n_our_actions": 23,
+        "score": -166.2304,
         "turn": 4
       },
       {
-        "chosen": "Gallade:move:Sacred Sword->Mega Aerodactyl | Hydreigon:move:Draco Meteor->Mega Charizard Y",
-        "eval": -329.553,
-        "eval_p2": 329.553,
-        "n_our_actions": 24,
-        "score": -75.809,
+        "chosen": "Gallade:move:Sacred Sword->Mega Aerodactyl | Hydreigon:move:Dark Pulse->Mega Charizard Y",
+        "eval": -563.841,
+        "eval_p2": 563.841,
+        "n_our_actions": 6,
+        "score": -56.1285,
         "turn": 5
       },
       {
-        "chosen": "Gallade:move:Sacred Sword->Mega Charizard Y | Hydreigon:move:Dark Pulse->Garchomp",
-        "eval": -244.5841,
-        "eval_p2": 244.5841,
-        "n_our_actions": 12,
-        "score": -299.9846,
+        "chosen": "Gallade:move:Sacred Sword->Garchomp | Hydreigon:move:Dark Pulse->Farigiraf",
+        "eval": -56.1285,
+        "eval_p2": 56.1285,
+        "n_our_actions": 4,
+        "score": -128.0864,
         "turn": 6
       }
     ]

@@ -2016,6 +2016,33 @@ class TestHyperBeamRecharge(unittest.TestCase):
             {}, recharging_roles={"C"})
         self.assertFalse(any(role == "C" for role, _tgt, _h in log))
 
+    def test_no_recharge_when_the_intended_target_protects(self):
+        """"If hyper beam is blocked by protect, it does not need to
+        recharge (the move was not used)" -- `protected_roles` (a real,
+        explicit hypothesis this module already races elsewhere, e.g. the
+        first-turn-Protect check in `_pair_vs_targets`) is what actually
+        blocks a hit here, not merely a role's move happening to be named
+        "Protect" (that alone does nothing to `protected_roles` in a
+        normal, non-hypothesis race -- see `test_hyper_beam_only_fires_
+        every_other_turn` above, where the enemy's own Protect move never
+        blocks anything precisely because `protected_roles` stays empty)."""
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        _hp2, _log, _ea, _wiped, recharging_next = cf._resolve_turn(
+            self.combatants, self.moves_by_role, hp, self.typechart, None,
+            {"C": "E1"}, protected_roles={"E1"})
+        self.assertEqual(recharging_next, set(),
+                         "Hyper Beam's only intended target Protected, so "
+                         "the whole hit was blocked -- no recharge")
+
+    def test_still_recharges_when_an_unrelated_role_protects(self):
+        """Regression guard: an unrelated role Protecting (not Hyper Beam's
+        own target) must not suppress the recharge."""
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        _hp2, _log, _ea, _wiped, recharging_next = cf._resolve_turn(
+            self.combatants, self.moves_by_role, hp, self.typechart, None,
+            {"C": "E1"}, protected_roles={"E2"})
+        self.assertEqual(recharging_next, {"C"})
+
 
 class TestJointFocusSashAndSturdy(unittest.TestCase):
     """"The focus sash item also does not seem to work." The joint race

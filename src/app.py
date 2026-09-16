@@ -1534,16 +1534,37 @@ with tab_build:
     with c2:
         st.markdown("**Load / save**")
         from team_sheet import load_team, save_team, load_analysis
+        # "The saved teams dropdown from the teambuilder should also load
+        # teams from my_teams" -- `teams`/`team_meta` (module-level,
+        # `load_teams_csv` above) already union data/teams/*.txt AND
+        # data/my_teams/*.txt pokepastes; only the Team Builder's OWN save
+        # format (`*.json` at the project root, via `team_sheet.save_team`)
+        # was ever offered here. A "(saved team) " prefix keeps the two
+        # namespaces visually and functionally distinct in one dropdown --
+        # `team_meta[name]["sets"]` already carries that team's own parsed
+        # per-mon spec (item/ability/nature/evs/moves), no re-parsing needed.
         saved = sorted(p.name for p in ROOT.glob("*.json"))
-        pick = st.selectbox("Saved teams", saved or ["(none)"], key="load_pick")
-        if st.button("Load", width='stretch', disabled=not saved):
-            pool, sets = load_team(ROOT / pick)
-            st.session_state["team"] = pool
-            st.session_state["sets"] = sets
-            st.session_state["team_analysis"] = load_analysis(ROOT / pick)
-            _bump_builder_gen()  # a loaded team can reuse a name with a
-            # different set -- see _bump_builder_gen's own docstring.
-            st.success(f"Loaded {len(pool)} Pokemon from {pick}")
+        pokepaste_options = [f"(saved team) {name}" for name in sorted(teams)]
+        load_options = saved + pokepaste_options
+        pick = st.selectbox("Saved teams", load_options or ["(none)"], key="load_pick")
+        if st.button("Load", width='stretch', disabled=not load_options):
+            if pick.startswith("(saved team) "):
+                name = pick[len("(saved team) "):]
+                pool = list(teams[name])
+                sets = dict((team_meta.get(name) or {}).get("sets") or {})
+                st.session_state["team"] = pool
+                st.session_state["sets"] = sets
+                st.session_state["team_analysis"] = None
+                _bump_builder_gen()
+                st.success(f"Loaded {len(pool)} Pokemon from {name}")
+            else:
+                pool, sets = load_team(ROOT / pick)
+                st.session_state["team"] = pool
+                st.session_state["sets"] = sets
+                st.session_state["team_analysis"] = load_analysis(ROOT / pick)
+                _bump_builder_gen()  # a loaded team can reuse a name with a
+                # different set -- see _bump_builder_gen's own docstring.
+                st.success(f"Loaded {len(pool)} Pokemon from {pick}")
         up = st.file_uploader("...or upload a team .json/.txt", type=["json", "txt"],
                               key="up_team")
         if up is not None:

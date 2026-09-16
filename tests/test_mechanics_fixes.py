@@ -1233,23 +1233,28 @@ class TestSpeedControlSelfCancellation(unittest.TestCase):
         self.assertEqual(blocked.kind, "protect")
 
     def test_trick_room_blocked_while_own_tailwind_leaves_it_worse_off(self):
-        """The reverse: Hydreigon+Gholdengo (fast) already moving first
-        under their own Tailwind vs Torkoal+Kingambit (slow) -- casting
-        Trick Room on top would flip that Tailwind-inflated speed
-        advantage into a Trick-Room-reversed disadvantage, a net loss --
-        confirmed not blocked when Tailwind isn't up at all."""
+        """The reverse: Whimsicott+Sylveon, naturally slower than
+        Hydreigon+Gholdengo, genuinely gain from Trick Room at baseline --
+        but with their OWN Tailwind already up their speed is already
+        inflated past the foe's, so Trick Room's reversal on top would
+        flip that Tailwind-won advantage into a Trick-Room-reversed
+        disadvantage, a net loss -- confirmed not blocked when Tailwind
+        isn't up at all (verified directly via `_speed_control_score`:
+        before/after go from 12/36 with no Tailwind, i.e. genuinely
+        helps, to 36/12 with the side's own Tailwind up, i.e. genuinely
+        hurts)."""
         from solver import greedy_opponent_joint_action
         merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
 
         def run(tailwind):
-            b = battle(["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"])
+            b = battle(["Whimsicott", "Sylveon"], ["Hydreigon", "Gholdengo"])
             if tailwind:
                 b.field.tailwind_p1 = 4
             movesets = self._movesets(
-                moves, merged, ["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"],
-                {"Gholdengo": ["Trick Room", "Protect"]})
+                moves, merged, ["Whimsicott", "Sylveon"], ["Hydreigon", "Gholdengo"],
+                {"Sylveon": ["Trick Room", "Protect"]})
             joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
-            return next(a for a in joint if a.combatant.name == "Gholdengo")
+            return next(a for a in joint if a.combatant.name == "Sylveon")
 
         self.assertEqual(run(False).move.name, "Trick Room")
         blocked = run(True)
@@ -1271,6 +1276,27 @@ class TestSpeedControlSelfCancellation(unittest.TestCase):
         joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
         action = next(a for a in joint if a.combatant.name == "Kingambit")
         self.assertEqual(action.move.name, "Trick Room")
+
+    def test_not_cast_when_already_faster_with_no_speed_control_up_at_all(self):
+        """"An enemy should not use tailwind or trick room if the speed
+        order is already in their favour; it's a waste." Distinct from the
+        self-cancellation cases above (which only fired when the OPPOSITE
+        speed control was already active) -- here NEITHER side has any
+        speed control up at all, and Hydreigon+Gholdengo (fast) already
+        move before Torkoal+Kingambit (slow) on raw speed alone, so
+        casting Tailwind on top gains nothing: every pair it could help is
+        already moving first."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"])
+        movesets = self._movesets(
+            moves, merged, ["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"],
+            {"Gholdengo": ["Tailwind", "Protect"]})
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Gholdengo")
+        self.assertEqual(action.kind, "protect",
+                         f"already moving first, so casting Tailwind is a "
+                         f"waste -- got {action.kind}:{action.move and action.move.name}")
 
 
 class TestFollowMeRealEngineAiChoice(unittest.TestCase):
