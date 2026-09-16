@@ -958,12 +958,12 @@ class Battle:
                 self._emit(event="focus_sash", side=self.side_of(target).name,
                            actor=target.name, target_hp_after=target.current_hp,
                            target_max_hp=target.max_hp())
-            self._check_berry(target)   # pinch berries trigger right after the hit lands
-            self._check_berry(target)   # after the damage line, so the log reads in order
-
             # Knock Off strips a removable item on hit (the matching 1.5x power boost
             # is in damage_roll) -- not a Mega Stone the target needs this battle, and
             # Sticky Hold blocks the removal outright (the 1.5x power still applies).
+            # This must run BEFORE any berry check: real Knock Off strips the item as
+            # part of resolving the hit, so a Sitrus holder knocked below half loses
+            # the berry outright and never gets to eat it on this same hit.
             if move.name == "Knock Off" and target.item and target.ability != "Sticky Hold" \
                     and dmg_applied > 0 and not target.fainted:
                 low = target.item.lower()
@@ -975,6 +975,9 @@ class Battle:
                     self.log.add(f"{self.tag(target)} lost its {knocked} to Knock Off!")
                     self._emit(event="knock_off", side=self.side_of(target).name,
                                actor=target.name, item=knocked)
+
+            self._check_berry(target)   # pinch berries trigger right after the hit lands
+            # (a no-op if Knock Off just cleared target.item above)
 
             # Type-resist berries (Colbur, Occa, ...) trigger once and are then
             # consumed -- damage_roll already applied the halving (this mirrors

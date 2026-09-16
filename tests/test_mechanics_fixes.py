@@ -1429,5 +1429,94 @@ class TestResistBerryConsumedAfterOneTrigger(unittest.TestCase):
         self.assertNotIn("weakened the hit and was used up", log)
 
 
+class TestKnockOffStripsSitrusBeforeItCanTrigger(unittest.TestCase):
+    """"Knock off still doesnt seem to remove sitrus berry" -- a Sitrus
+    holder knocked below half HP by Knock Off itself must lose the berry
+    outright and never get to eat it: Knock Off's item removal is part of
+    resolving the SAME hit that dropped it below half, and real Knock Off
+    strips the item before any berry gets a chance to trigger off that
+    hit. `_check_berry` used to run before the Knock Off removal block in
+    `battle.py`'s move resolution, so the berry ate first and Knock Off's
+    own removal became a silent no-op on an already-empty `item` field."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_knock_off_below_half_strips_sitrus_with_no_heal(self):
+        b = battle(["Tyranitar", "Incineroar"], ["Milotic", "Gholdengo"])
+        milotic = b.p2.active[0]
+        milotic.item = "Sitrus Berry"
+        milotic.current_hp = milotic.max_hp()  # full HP; Knock Off alone must drop it below half
+        knock_off = b.make_move("knockoff")
+        recover = b.make_move("recover")  # a no-op action that does NOT block the incoming hit
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("Knock Off", log)  # fixture sanity: the move actually ran
+        hp_after_knock_off = milotic.current_hp
+        self.assertLess(hp_after_knock_off, milotic.max_hp() // 2,
+                        "fixture must actually drop the target below half HP")
+        self.assertEqual(milotic.item, "", "Knock Off must strip the berry")
+        self.assertIn("lost its Sitrus Berry to Knock Off!", log)
+        self.assertNotIn("ate its berry", log)
+
+        # A later hit against the now-itemless Milotic must not heal it (Tyranitar is
+        # Choice-locked into Knock Off already, so reuse it -- item's already gone,
+        # so this is just an ordinary hit with no further item-removal message).
+        before_len = len(b.log.dump())
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        self.assertNotIn("ate its berry", b.log.dump()[before_len:],
+                         "no berry left to heal it on a later hit")
+
+    def test_non_knock_off_hit_below_half_still_heals_from_sitrus(self):
+        """Regression guard: only Knock Off's own removal should pre-empt the
+        berry -- any other move dropping the same mon below half must still
+        let Sitrus trigger normally."""
+        b = battle(["Tyranitar", "Incineroar"], ["Milotic", "Gholdengo"])
+        milotic = b.p2.active[0]
+        milotic.item = "Sitrus Berry"
+        milotic.current_hp = milotic.max_hp() // 2 + 30  # just above half; Rock Slide must drop it below
+        rock_slide = b.make_move("rockslide")
+        recover = b.make_move("recover")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", rock_slide, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("ate its berry", log,
+                      "fixture must actually drop the target below half HP and trigger Sitrus")
+        self.assertEqual(milotic.item, "")
+
+    def test_sticky_hold_still_eats_the_berry_knock_off_cannot_remove(self):
+        b = battle(["Tyranitar", "Incineroar"], ["Milotic", "Gholdengo"])
+        milotic = b.p2.active[0]
+        milotic.item = "Sitrus Berry"
+        milotic.ability = "Sticky Hold"
+        milotic.current_hp = milotic.max_hp()
+        knock_off = b.make_move("knockoff")
+        recover = b.make_move("recover")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("ate its berry", log,
+                      "fixture must actually drop the target below half HP and trigger Sitrus")
+        self.assertEqual(milotic.item, "", "consumed by eating, not Knock Off (Sticky Hold blocks removal)")
+        self.assertNotIn("to Knock Off!", log)
+
+
 if __name__ == "__main__":
     unittest.main()
