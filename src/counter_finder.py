@@ -3366,24 +3366,35 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
                 continue
             if got.num_targets_hit > 1 and not any(
                     other != tgt_role and hp.get(other, 0.0) > 0
-                    and other not in protected_roles
                     for other in hits):
                 # `hits`/`num_targets_hit` were fixed at PLAN-BUILD time,
-                # before this turn's own speed order (and Protect calls)
-                # actually played out -- a move that WAS a real 2 (or 3,
-                # with an ally-splash EQ-family hit) target spread when the
-                # plan was built can turn out effectively single-target by
-                # the time it resolves, either because every OTHER
-                # originally-intended target already fainted earlier this
-                # SAME turn to a faster attacker, or because Protect just
-                # blocked it (checked via `protected_roles` above, same as
-                # the `continue` a few lines up). Real doubles decides the
-                # 0.75x multi-target penalty at the moment of use, not at
-                # team-preview, so undo it here rather than deal a stale,
-                # needlessly weakened hit to the one target still standing
-                # -- the penalty is a flat 0.75x regardless of whether the
+                # before this turn's own speed order actually played out --
+                # a move that WAS a real 2 (or 3, with an ally-splash EQ-
+                # family hit) target spread when the plan was built can
+                # turn out effectively single-target by the time it
+                # resolves, because every OTHER originally-intended target
+                # already fainted earlier this SAME turn to a faster
+                # attacker. Real doubles recomputes the 0.75x multi-target
+                # penalty at the moment of use, not at team-preview, so
+                # undo it here rather than deal a stale, needlessly
+                # weakened hit to the one target still standing -- the
+                # penalty is a flat 0.75x regardless of whether the
                 # original count was 2 or 3, so the undo divisor is always
                 # exactly that, unconditionally.
+                #
+                # Protect does NOT trigger this undo, deliberately: a
+                # target that Protected was still a VALID target when the
+                # move was used (it's live, just blocking), so the move
+                # stays a genuine multi-target use and the survivor still
+                # only takes 0.75x -- confirmed real mechanic, not a bug.
+                # `hp.get(other, 0.0) > 0` alone (no `protected_roles`
+                # check) already gets this right: a protected other-target
+                # is still "alive" and so still counts toward "any other
+                # live target", keeping the reduction. Do not add a
+                # protected_roles exclusion here again -- that was tried
+                # and reverted; it made a spread move deal FULL (1.0x)
+                # damage to the survivor whenever the other target merely
+                # Protected, which is wrong.
                 got = Hit(move_name=got.move_name, frac=got.frac / 0.75,
                          lo=got.lo / 0.75, avg=got.avg / 0.75,
                          hi=got.hi / 0.75, eff=got.eff, num_targets_hit=1)

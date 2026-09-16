@@ -7570,20 +7570,23 @@ class TestSpreadHitRecomputedIfATargetAlreadyFaintedThisTurn(unittest.TestCase):
         self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3, places=6)
 
 
-class TestSpreadHitRecomputedIfATargetProtects(unittest.TestCase):
-    """Regression: "when one pokemon protects against an enemy spread
-    attack, the attack still only does 0.75x to the non-protecting
-    pokemon, not full single target damage" -- the SAME stale-count bug as
-    the already-fixed faint case above, just for Protect instead of a
-    faint: `hits`/`num_targets_hit` are fixed at PLAN-BUILD time, before
-    Protect is known, so a spread move that ends up hitting only ONE live,
-    non-Protecting target must be rescaled up to full (1.0x) damage, not
-    left at the stale 0.75x."""
+class TestSpreadHitKeepsThePenaltyWhenATargetProtects(unittest.TestCase):
+    """Regression (this one caught by the user, a previous "fix" here had
+    it backwards): "a spread move still does 0.75x even if one enemy
+    protects -- it was doing full 1.0x single target damage if one of the
+    enemies protected before." Unlike the FAINT case above (a target that
+    is genuinely gone by the time the move resolves really does get
+    recomputed as single-target, full damage), a target that Protects was
+    still a VALID target when the move was used -- it's live, just
+    blocking its own hit -- so the move stays a genuine multi-target use
+    and the survivor still only takes the flat 0.75x. Do not re-add a
+    `protected_roles` exclusion to `_apply_plan`'s undo check -- that was
+    tried once already and gave the wrong (full-damage) answer."""
 
     def setUp(self):
         self.W = world()
 
-    def test_the_survivors_hit_is_rescaled_up_when_the_other_target_protects(self):
+    def test_the_survivor_keeps_the_075x_penalty_when_the_other_target_protects(self):
         from damage import MoveInfo
         from engine import FieldState
         merged, natures = self.W["merged"], self.W["natures"]
@@ -7601,22 +7604,23 @@ class TestSpreadHitRecomputedIfATargetProtects(unittest.TestCase):
         new_hp, log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
             plan, combatants, hp, frozenset({"E1"}), 1.0, FieldState())
         self.assertEqual(new_hp["E1"], 1.0, "E1 Protected -- untouched")
-        self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3 / 0.75, places=6,
-                               msg="E2 should take the UNDONE-0.75x hit, "
-                                   "since E1 blocked its own share with "
-                                   "Protect")
+        self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3, places=6,
+                               msg="E2 must still take the ORIGINAL 0.75x-"
+                                   "reduced hit -- E1 Protecting does not "
+                                   "turn this into a full-damage single "
+                                   "target hit, it was still a live, "
+                                   "valid spread target when Heat Wave "
+                                   "was used")
         logged = next(h for role, tgt, h in log if role == "C" and tgt == "E2")
-        self.assertAlmostEqual(logged.frac, 0.3 / 0.75, places=6,
+        self.assertAlmostEqual(logged.frac, 0.3, places=6,
                                msg="the LOGGED gameplan hit must match what "
-                                   "was actually applied, not the stale "
-                                   "spread frac")
-        self.assertEqual(logged.num_targets_hit, 1)
+                                   "was actually applied")
+        self.assertEqual(logged.num_targets_hit, 2)
 
     def test_neither_protects_keeps_the_spread_penalty(self):
         """Precondition/contrast: with no Protect at all, both hits stay
-        exactly as computed -- confirms the rescale only fires when a real
-        target is actually gone (fainted or Protecting), not on every
-        multi-target hit."""
+        exactly as computed -- confirms Protect never rescales a spread
+        hit, matching the "both alive" no-op case."""
         from damage import MoveInfo
         from engine import FieldState
         merged, natures = self.W["merged"], self.W["natures"]
@@ -7635,6 +7639,28 @@ class TestSpreadHitRecomputedIfATargetProtects(unittest.TestCase):
             plan, combatants, hp, frozenset(), 1.0, FieldState())
         self.assertAlmostEqual(new_hp["E1"], 1.0 - 0.3, places=6)
         self.assertAlmostEqual(new_hp["E2"], 1.0 - 0.3, places=6)
+
+    def test_both_protect_neither_gets_hit(self):
+        """Both targets blocking leaves nothing to rescale -- no crash, no
+        divide-by-zero, both stay untouched."""
+        from damage import MoveInfo
+        from engine import FieldState
+        merged, natures = self.W["merged"], self.W["natures"]
+        spreader = cf._build("Mega Staraptor", merged, natures)
+        e1 = cf._build("Milotic", merged, natures)
+        e2 = cf._build("Milotic", merged, natures)
+        combatants = {"C": spreader, "P": spreader, "E1": e1, "E2": e2}
+        heat_wave = MoveInfo("Heat Wave", 95, "Fire", "Special",
+                             "allAdjacentFoes", priority=0)
+        spread_hit = cf.Hit(move_name="Heat Wave", frac=0.3, lo=0.3, avg=0.3,
+                           hi=0.3, eff=1.0, num_targets_hit=2)
+        plan = {"C": ({"E1": spread_hit, "E2": spread_hit}, heat_wave),
+               "P": ({}, None), "E1": ({}, None), "E2": ({}, None)}
+        hp = {"C": 1.0, "P": 1.0, "E1": 1.0, "E2": 1.0}
+        new_hp, _log, _ea, _wiped, _doomed, _spw = cf._apply_plan(
+            plan, combatants, hp, frozenset({"E1", "E2"}), 1.0, FieldState())
+        self.assertEqual(new_hp["E1"], 1.0)
+        self.assertEqual(new_hp["E2"], 1.0)
 
 
 class TestRecoilCappedAtTargetsActualHp(unittest.TestCase):
