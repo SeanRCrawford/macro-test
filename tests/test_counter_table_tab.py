@@ -33,7 +33,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_five_modes_are_offered(self):
+    def test_the_six_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
@@ -42,7 +42,8 @@ class TestCounterTableTabExists(unittest.TestCase):
                           "Multi-bring4 (several enemy rosters)",
                           "Joint pair search",
                           "2-2-2 teambuilding",
-                          "Coverage groups"})
+                          "Coverage groups",
+                          "Round-robin (saved teams only)"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
         at = app()
@@ -1168,7 +1169,7 @@ class TestHitCountMatrixSection(unittest.TestCase):
         bring4_rows = at.session_state["ct_b4_bring4_rows"]
         self.assertEqual(set(dfs[0]["Ours"]), set(bring4_rows[0]["bring4"]))
         for cell in dfs[0].iloc[0, 1:]:
-            self.assertRegex(str(cell), r"^(\d+HKO|--) / (\d+HKO|--)$")
+            self.assertRegex(str(cell), r"^(\d+HKO|--) / (\d+HKO|--) [✅❌➖]$")
 
     def test_picked_bring4_deep_dive_shows_the_hit_count_matrix(self):
         at = app()
@@ -1196,6 +1197,109 @@ class TestHitCountMatrixSection(unittest.TestCase):
              if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertFalse(any("1v1 hit-count matrix" in m.value for m in at.markdown))
+
+    def test_stage2_best_bring4_can_show_a_crucial_to_preserve_table(self):
+        """"Individual pokemon can be crucial win conditions to preserve
+        for a given match" -- a "Crucial to preserve" table with a
+        Preserve/Sole answer to shape, rendered exactly when the tab's own
+        bring-4 result actually has a must_preserve member (never rendered
+        empty, never silently skipped when there's something to show)."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        crucial_dfs = [d.value for d in at.dataframe
+                      if list(d.value.columns) == ["Preserve", "Sole answer to"]]
+        has_crucial_markdown = any("Crucial to preserve" in m.value for m in at.markdown)
+        self.assertEqual(bool(crucial_dfs), has_crucial_markdown)
+        for df in crucial_dfs:
+            self.assertFalse(df.empty, "a rendered crucial table must not be empty")
+
+
+class TestGameplanCache(unittest.TestCase):
+    """"If a counter table analysis has been loaded, show what the 2v2
+    calculator saw as the optimal play sequence" -- a bring-4 search
+    caches every pair's own already-raced `detail[(e1, e2)]` (log/outcome/
+    turns_used) into `st.session_state["ct_gameplans"]`, keyed by
+    `(frozenset(our_pair), frozenset(enemy_pair))` so the Battle Simulator
+    can look it up later regardless of role order."""
+
+    def test_bring4_search_populates_the_gameplan_cache(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        self.assertIn("ct_gameplans", at.session_state)
+        cache = at.session_state["ct_gameplans"]
+        self.assertTrue(cache, "expected at least one cached gameplan")
+        first_pr = pair_rows[0]
+        (e1, e2), d = next(iter(first_pr["detail"].items()))
+        key = (frozenset(first_pr["pair"]), frozenset((e1, e2)))
+        self.assertIn(key, cache)
+        entry = cache[key]
+        self.assertEqual(entry["outcome"], d["outcome"])
+        self.assertEqual(entry["log"], d["log"])
+        self.assertEqual(entry["source"], "Bring-4 search")
+
+
+class TestRoundRobinMode(unittest.TestCase):
+    """"Give me an option in the streamlit app counter table ... to only
+    run all the saved teams vs the other teams (including themself),
+    rather than creating teams" -- a "Round-robin (saved teams only)" mode:
+    a team multiselect (default all saved teams), a Run button, and a
+    sequential per-matchup render (mirrors included, no reversed
+    duplicate) once run."""
+
+    def test_mode_shows_team_multiselect_and_run_button(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Round-robin (saved teams only)").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(m.key == "ct_rr_teams" for m in at.multiselect))
+        self.assertTrue(any(b.key == "ct_rr_go" for b in at.button))
+
+    def test_running_it_on_two_teams_renders_all_three_matchups(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Round-robin (saved teams only)").run()
+        [s for s in at.slider if s.key == "ct_turns"][0].set_value(1).run()
+        [m for m in at.multiselect if m.key == "ct_rr_teams"][0].set_value(
+            two_names).run()
+        at = [b for b in at.button if b.key == "ct_rr_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        a, b = two_names
+        headings = {m.value for m in at.markdown if m.value.startswith("### ")}
+        self.assertIn(f"### {a} vs {a}", headings)
+        self.assertIn(f"### {a} vs {b}", headings)
+        self.assertIn(f"### {b} vs {b}", headings)
+        self.assertNotIn(f"### {b} vs {a}", headings)
+        results = at.session_state["ct_rr_results"]
+        self.assertEqual(len(results), 3)
+
+    def test_running_it_also_populates_the_gameplan_cache(self):
+        """The same `_cache_gameplans` hook every other Counter Table
+        search wires in -- a round-robin result should feed the Battle
+        Simulator's "gameplan" panel too, tagged with its own source
+        label."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Round-robin (saved teams only)").run()
+        [s for s in at.slider if s.key == "ct_turns"][0].set_value(1).run()
+        [m for m in at.multiselect if m.key == "ct_rr_teams"][0].set_value(
+            two_names).run()
+        at = [b for b in at.button if b.key == "ct_rr_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertIn("ct_gameplans", at.session_state)
+        cache = at.session_state["ct_gameplans"]
+        self.assertTrue(any(v["source"].startswith("Round-robin:")
+                            for v in cache.values()))
 
 
 class TestTrickRoomOptIn(unittest.TestCase):

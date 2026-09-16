@@ -10645,6 +10645,36 @@ class TestPrematchWinConditions(unittest.TestCase):
             half_hp["matrix"][("Garchomp", "Arcanine-Hisui")]["our_hits_to_ko"],
             full["matrix"][("Garchomp", "Arcanine-Hisui")]["our_hits_to_ko"])
 
+    def test_garchomp_verdict_against_arcanine_hisui_is_a_win(self):
+        """1 hit to KO vs taking 2 -- an outright win on hit count alone,
+        no speed tiebreak needed."""
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        self.assertEqual(
+            result["matrix"][("Garchomp", "Arcanine-Hisui")]["verdict"], "win")
+
+    def test_garchomp_is_flagged_must_preserve_for_both_enemies(self):
+        """Garchomp is the SOLE `safe_members` entry for both Arcanine-Hisui
+        and Toxapex (per the fixture's own docstring) -- `crucial` must
+        name both as `sole_answer_to`, and `must_preserve` must be True."""
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        info = result["crucial"]["Garchomp"]
+        self.assertTrue(info["must_preserve"])
+        self.assertEqual(set(info["sole_answer_to"]), set(self.targets))
+
+    def test_a_member_with_no_sole_answer_is_not_must_preserve(self):
+        """Some OTHER bring-4 member (not a sole safe_members entry
+        anywhere) must NOT be flagged must_preserve -- the crucial rollup
+        isn't a blanket "everyone is essential" list."""
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        non_garchomp = [n for n in self.row["bring4"] if n != "Garchomp"]
+        self.assertTrue(any(not result["crucial"][n]["must_preserve"]
+                            for n in non_garchomp),
+                        "expected at least one non-Garchomp member with no "
+                        "sole answer, given the fixture's own docstring")
+
 
 class TestEvolveFromTeam(unittest.TestCase):
     """"If I define one high-performing team ... then try to see if any
@@ -10724,3 +10754,87 @@ class TestEvolveFromTeam(unittest.TestCase):
             self.assertEqual(r["added"], "Hydreigon")
             self.assertEqual(r["removed"], r["member"])
             self.assertGreater(r["delta"], 0.0)
+
+
+class TestRoundRobinSavedTeams(unittest.TestCase):
+    """"Give me an option ... to only run all the saved teams vs the other
+    teams (including themself), rather than creating teams" -- every saved
+    team raced against every OTHER saved team (mirrors included), both
+    sides' own real sets intact, no `--answer_for` search on either side.
+
+    Real, small fixture: two 3-Pokemon teams that don't share a species
+    name -- Garchomp+Kingambit+Whimsicott ("A") vs Incineroar+Toxapex+
+    Arcanine-Hisui ("B") -- plus a distinctive item override on A's own
+    Kingambit to confirm a saved team's own set survives into the race on
+    its own side, matching this session's `--benchmark-teams` "with the
+    sets intact" contract, now extended to the ENEMY side too."""
+
+    def setUp(self):
+        self.W = world()
+        self.teams = {"A": ["Garchomp", "Kingambit", "Whimsicott"],
+                      "B": ["Incineroar", "Toxapex", "Arcanine-Hisui"]}
+        self.meta = {"A": {"sets": {"Kingambit": {"item": "Chople Berry"}}},
+                    "B": {"sets": None}}
+
+    def _run(self, **kwargs):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        return list(cf.round_robin_saved_teams(
+            self.teams, self.meta, merged, moves, natures, typechart,
+            turns=1, **kwargs))
+
+    def test_mirror_included_and_reverse_pair_not_duplicated(self):
+        results = self._run()
+        pairs = [(a, b) for a, b, _pr, _br in results]
+        self.assertEqual(pairs, [("A", "A"), ("A", "B"), ("B", "B")])
+
+    def test_a_teams_own_item_override_survives_on_its_own_side_every_time(self):
+        """Kingambit only exists on team A -- its "Chople Berry" override
+        must show up in `item1`/`item2` (OUR side's own field) whenever A
+        is racing, whichever side of the matchup it's on."""
+        for team_a, team_b, pair_rows, _br in self._run():
+            if "A" not in (team_a, team_b):
+                continue
+            for r in pair_rows:
+                if "Kingambit" not in r["pair"]:
+                    continue
+                idx = r["pair"].index("Kingambit")
+                item = r["item1"] if idx == 0 else r["item2"]
+                self.assertEqual(item, "Chople Berry", (team_a, team_b, r["pair"]))
+
+    def test_team_names_narrows_the_grid(self):
+        results = self._run(team_names=["A"])
+        self.assertEqual([(a, b) for a, b, _pr, _br in results], [("A", "A")])
+
+    def test_a_team_with_an_illegal_roster_size_is_skipped_not_crashed(self):
+        teams = dict(self.teams)
+        teams["Tiny"] = ["Garchomp", "Kingambit"]  # only 2 -- below bring4_search's 3-6 range
+        meta = dict(self.meta)
+        meta["Tiny"] = {"sets": None}
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        results = list(cf.round_robin_saved_teams(
+            teams, meta, merged, moves, natures, typechart, turns=1))
+        names = {n for a, b, _pr, _br in results for n in (a, b)}
+        self.assertNotIn("Tiny", names)
+
+
+class TestTeamSideOverrides(unittest.TestCase):
+    """`_team_side_overrides`, the pure helper `round_robin_saved_teams`
+    uses to turn a saved team's `meta[...]["sets"]` into the five
+    `bring4_search` override dicts -- skips any field a member's own set
+    doesn't carry, and tolerates `None` (a plain usage-derived team)."""
+
+    def test_none_sets_gives_five_empty_dicts(self):
+        out = cf._team_side_overrides(None)
+        self.assertEqual(out, ({}, {}, {}, {}, {}))
+
+    def test_only_populated_fields_appear_per_member(self):
+        sets = {"Kingambit": {"item": "Chople Berry", "moves": ["Sucker Punch"]},
+                "Garchomp": {"evs": {"hp": 4}, "nature": "Jolly"}}
+        item, moves, evs, nature, ability = cf._team_side_overrides(sets)
+        self.assertEqual(item, {"Kingambit": "Chople Berry"})
+        self.assertEqual(moves, {"Kingambit": ["Sucker Punch"]})
+        self.assertEqual(evs, {"Garchomp": {"hp": 4}})
+        self.assertEqual(nature, {"Garchomp": "Jolly"})
+        self.assertEqual(ability, {})

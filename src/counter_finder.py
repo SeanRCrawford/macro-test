@@ -5240,6 +5240,8 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
                       worst_case_targeting=False, evs_overrides=None,
                       nature_overrides=None, ability_overrides=None,
                       enemy_item_overrides=None, enemy_move_overrides=None,
+                      enemy_evs_overrides=None, enemy_nature_overrides=None,
+                      enemy_ability_overrides=None,
                       enemy_pairs=None, check_trick_room=False):
     """GENERATE the pair, not just search a second member for a named
     partner: every legal pair drawn from `pool`, both members' item/moveset
@@ -5270,6 +5272,17 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
     `prune_below`: passed straight through to `_pair_vs_targets` -- see its
     own docstring. `None` (the default) races every enemy pair for every
     our-pair, exactly as before this existed.
+
+    `enemy_evs_overrides`/`enemy_nature_overrides`/`enemy_ability_overrides`:
+    same idea as `enemy_item_overrides`/`enemy_move_overrides` -- a genuine
+    per-side split for a real known enemy set, rather than sharing OUR OWN
+    `evs_overrides`/`nature_overrides`/`ability_overrides`. `None` (the
+    default) falls back to the shared dict, exactly the old behaviour --
+    two DIFFERENT known teams that happen to carry the same species name
+    with different EVs/nature/ability would otherwise silently clobber
+    each other (a real case for `round_robin_saved_teams`, where both
+    sides are genuinely different saved teams, unlike every other caller
+    here where both sides are usually the same team or share no names).
 
     `extra_forced_base`: for each name in it, EVERY pair containing that name
     is raced a SECOND time with `forced_base_names={that name}` (locking it
@@ -5308,12 +5321,14 @@ def joint_pool_search(pool, target_names, merged, moves_db, natures,
         entry["moves"] = _move_infos(name, merged, moves_db, move_names)
         entry["item"] = item
         built[name] = entry
-    enemy_built = _build_forms(target_names, merged, natures, moves_db,
-                               items=enemy_item_overrides,
-                               move_overrides=enemy_move_overrides,
-                               evs_overrides=evs_overrides,
-                               nature_overrides=nature_overrides,
-                               ability_overrides=ability_overrides)
+    enemy_built = _build_forms(
+        target_names, merged, natures, moves_db,
+        items=enemy_item_overrides, move_overrides=enemy_move_overrides,
+        evs_overrides=evs_overrides if enemy_evs_overrides is None else enemy_evs_overrides,
+        nature_overrides=(nature_overrides if enemy_nature_overrides is None
+                          else enemy_nature_overrides),
+        ability_overrides=(ability_overrides if enemy_ability_overrides is None
+                           else enemy_ability_overrides))
 
     rows = []
     for n1, n2 in itertools.combinations(built, 2):
@@ -5436,6 +5451,8 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   enforce_item_clause=False, worst_case_targeting=False,
                   evs_overrides=None, nature_overrides=None, ability_overrides=None,
                   enemy_item_overrides=None, enemy_move_overrides=None,
+                  enemy_evs_overrides=None, enemy_nature_overrides=None,
+                  enemy_ability_overrides=None,
                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
                   max_life_orb=DEFAULT_MAX_LIFE_ORB, check_trick_room=False):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
@@ -5509,6 +5526,12 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     any racing (default 1; 0 bans it outright; `None` opts out of this
     check entirely, restoring the old unconstrained behaviour).
 
+    `enemy_evs_overrides`/`enemy_nature_overrides`/`enemy_ability_overrides`:
+    forwarded straight through to `joint_pool_search` -- see its own
+    docstring. `None` (the default) falls back to the shared `evs_
+    overrides`/`nature_overrides`/`ability_overrides`, unchanged from
+    before these existed.
+
     Returns (pair_rows, bring4_rows):
       pair_rows -- `joint_pool_search`'s own row-per-pair output (its
         `forced_base` bookkeeping field stripped back out -- this stays
@@ -5548,6 +5571,9 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                              ability_overrides=ability_overrides,
                              enemy_item_overrides=enemy_item_overrides,
                              enemy_move_overrides=enemy_move_overrides,
+                             enemy_evs_overrides=enemy_evs_overrides,
+                             enemy_nature_overrides=enemy_nature_overrides,
+                             enemy_ability_overrides=enemy_ability_overrides,
                              check_trick_room=check_trick_room)
     pair_lookup_forced_base = None
     if extra_forced_base:
@@ -5902,11 +5928,28 @@ def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
       is my only answer to Staraptor" reads directly off its own
       `safe_members`/`safe_pairs`.
     - `matrix`: a NEW {(our_name, enemy_name): {"our_hits_to_ko",
-      "their_hits_to_ko"}} 1v1 hit-count table, one entry per (bring-4
-      member, enemy) pair `safe` already names -- `_best_hit` (cheap,
-      single-attacker-vs-single-defender, worst-roll) run BOTH directions,
-      hits-to-KO = `ceil(1/hit.frac)`. This is exactly the "2HKOs enemy but
-      takes a 5HKO" reading, with no new damage-calc code.
+      "their_hits_to_ko", "verdict"}} 1v1 hit-count table, one entry per
+      (bring-4 member, enemy) pair `safe` already names -- `_best_hit`
+      (cheap, single-attacker-vs-single-defender, worst-roll) run BOTH
+      directions, hits-to-KO = `ceil(1/hit.frac)`. This is exactly the
+      "2HKOs enemy but takes a 5HKO" reading, with no new damage-calc
+      code. `verdict` is `"win"`/`"lose"`/`"stall"` (neither side can ever
+      KO the other) -- fewer hits-to-KO wins outright; a tie on hits is
+      broken by which side is faster (plain `effective_speed`, no field
+      manipulation modeled here -- Tailwind/Trick Room risk already has
+      its own caveat via `safe`'s own `tailwind_risk`/`trick_room_risk`).
+
+    - `crucial`: "Individual pokemon can be crucial win conditions to
+      preserve for a given match" -- a rollup keyed by OUR OWN mon,
+      `{our_name: {"sole_answer_to": [enemy, ...], "beats_1v1":
+      [enemy, ...], "must_preserve": bool}}`. `sole_answer_to` reads
+      `safe`'s own `safe_members`/`safe_pairs`: an enemy where this mon IS
+      the (only) `safe_members` entry, or -- when no member alone clears
+      it -- an enemy whose every `safe_pairs` entry still needs this mon
+      specifically. `must_preserve` is just `bool(sole_answer_to)`: this
+      mon is the one guaranteed answer to at least one enemy still in the
+      match, so losing it would open a genuine hole `safe` shows nothing
+      else fills.
 
     `our_built`/`enemy_built`: `_build_forms` dicts (mega/base Combatant +
     moves per name) -- the SAME shape `_pair_vs_targets`/`deep_dive`
@@ -5952,6 +5995,21 @@ def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
                 best = got
         return best
 
+    def _verdict(our_hits, their_hits, our_c, enemy_c):
+        if our_hits is None and their_hits is None:
+            return "stall"
+        if our_hits is None:
+            return "lose"
+        if their_hits is None:
+            return "win"
+        if our_hits < their_hits:
+            return "win"
+        if our_hits > their_hits:
+            return "lose"
+        our_faster = (effective_speed(our_c, FieldState(), "p1")
+                     > effective_speed(enemy_c, FieldState(), "p2"))
+        return "win" if our_faster else "lose"
+
     matrix = {}
     for our_name in bring4:
         forced_base = our_name.startswith("Mega ") and our_name != mega_used
@@ -5966,10 +6024,28 @@ def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
             enemy_def_hp = _hp_frac(defender_hp_frac, enemy_name)
             our_hit = _best_hit_at_hp(our_c, our_moves, enemy_c, our_hp, enemy_def_hp)
             their_hit = _best_hit_at_hp(enemy_c, enemy_moves, our_c, enemy_hp, our_def_hp)
+            our_hits = _hits_to_ko(our_hit)
+            their_hits = _hits_to_ko(their_hit)
             matrix[(our_name, enemy_name)] = {
-                "our_hits_to_ko": _hits_to_ko(our_hit),
-                "their_hits_to_ko": _hits_to_ko(their_hit)}
-    return {"safe": safe, "matrix": matrix}
+                "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
+                "verdict": _verdict(our_hits, their_hits, our_c, enemy_c)}
+
+    crucial = {}
+    for our_name in bring4:
+        sole_answer_to = []
+        for enemy_name in enemies:
+            info = safe[enemy_name]
+            if info["safe_members"]:
+                if info["safe_members"] == [our_name]:
+                    sole_answer_to.append(enemy_name)
+            elif info["safe_pairs"] and all(our_name in pair for pair in info["safe_pairs"]):
+                sole_answer_to.append(enemy_name)
+        beats_1v1 = [enemy_name for enemy_name in enemies
+                    if matrix[(our_name, enemy_name)]["verdict"] == "win"]
+        crucial[our_name] = {"sole_answer_to": sole_answer_to, "beats_1v1": beats_1v1,
+                            "must_preserve": bool(sole_answer_to)}
+
+    return {"safe": safe, "matrix": matrix, "crucial": crucial}
 
 
 def prematch_win_conditions_for_dive(bring4_row, dive, target_names, merged,
@@ -7606,6 +7682,76 @@ def _evolve_dive_score(dive, target_name_lists, good_threshold=1.0):
            w_tw * (sum(r[1] for r in rates) / len(rates)) +
            w_pr * (sum(r[2] for r in rates) / len(rates)) +
            w_fm * (sum(r[3] for r in rates) / len(rates)))
+
+
+def _team_side_overrides(sets):
+    """A saved team's `meta[name]["sets"]` (`{poke_name: {"item", "moves",
+    "evs", "nature", "ability"}}`, `None` for a plain usage-derived
+    `teams.csv` row) -> the five `bring4_search`/`joint_pool_search`
+    override dicts (item/move/evs/nature/ability), skipping any field a
+    given member's own set doesn't carry -- the exact pattern `--
+    benchmark-teams` already uses to race a saved team with its OWN real
+    sets intact, no fresh `--answer_for` search involved."""
+    sets = sets or {}
+    return (
+        {n: s["item"] for n, s in sets.items() if s.get("item")},
+        {n: s["moves"] for n, s in sets.items() if s.get("moves")},
+        {n: s["evs"] for n, s in sets.items() if s.get("evs")},
+        {n: s["nature"] for n, s in sets.items() if s.get("nature")},
+        {n: s["ability"] for n, s in sets.items() if s.get("ability")})
+
+
+def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
+                            team_names=None, turns=2, good_threshold=1.0,
+                            excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                            max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
+                            max_life_orb=DEFAULT_MAX_LIFE_ORB):
+    """"Give me an option ... to only run all the saved teams vs the other
+    teams (including themself), rather than creating teams" -- every saved
+    team (`teams`/`meta`, `species_data.load_teams(with_meta=True)`'s own
+    shape, already the union of `data/teams` + `data/my_teams`) raced
+    against every OTHER saved team, using BOTH sides' own real, already-
+    decided sets -- no `--answer_for` search on either side, the same
+    "with the sets intact" contract `--benchmark-teams` already keeps for
+    its own single fixed `--vs-team`/`--vs` target, just with the enemy
+    side ALSO drawn from a saved team instead of a fixed roster.
+
+    `team_names`: optional subset to narrow the grid (`None` races every
+    saved team against every other one, including itself as a mirror
+    match -- `itertools.combinations_with_replacement`, so A-vs-B is never
+    ALSO raced as the separate, redundant B-vs-A). A team whose own roster
+    isn't a legal `bring4_search` size (3-6 distinct Pokemon) is skipped,
+    the same "don't crash the whole batch over one bad row" rule `--
+    benchmark-teams` already applies.
+
+    A round-robin over N teams is C(N+1,2) = N(N+1)/2 matchups (mirrors
+    included), each a full `bring4_search` -- genuinely expensive for a
+    large `teams` (8 saved teams is 36 matchups), hence `team_names`
+    narrowing here and the caller's own progress reporting (this is a
+    plain generator, so a caller can update a progress bar between
+    `yield`s without this function needing to know about Streamlit).
+
+    Yields (team_a, team_b, pair_rows, bring4_rows) -- `bring4_search`'s
+    own two return values, unchanged, one pair per matchup actually raced.
+    """
+    names = sorted(team_names) if team_names is not None else sorted(teams)
+    legal = [n for n in names if n in teams and 3 <= len(list(dict.fromkeys(teams[n]))) <= 6]
+    for team_a, team_b in itertools.combinations_with_replacement(legal, 2):
+        a_item, a_moves, a_evs, a_nat, a_abil = _team_side_overrides(
+            (meta.get(team_a) or {}).get("sets"))
+        b_item, b_moves, b_evs, b_nat, b_abil = _team_side_overrides(
+            (meta.get(team_b) or {}).get("sets"))
+        pair_rows, bring4_rows = bring4_search(
+            teams[team_a], teams[team_b], merged, moves_db, natures, typechart,
+            turns=turns, good_threshold=good_threshold,
+            item_overrides=a_item, move_overrides=a_moves,
+            evs_overrides=a_evs, nature_overrides=a_nat, ability_overrides=a_abil,
+            enemy_item_overrides=b_item, enemy_move_overrides=b_moves,
+            enemy_evs_overrides=b_evs, enemy_nature_overrides=b_nat,
+            enemy_ability_overrides=b_abil,
+            excluded_items=excluded_items, max_focus_sash=max_focus_sash,
+            max_life_orb=max_life_orb)
+        yield team_a, team_b, pair_rows, bring4_rows
 
 
 def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typechart,

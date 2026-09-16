@@ -455,6 +455,35 @@ class TestMaxFocusSashFlag(unittest.TestCase):
         self.assertEqual(line.count("Focus Sash"), 2, line)
 
 
+class TestWinConditionsCliOutput(unittest.TestCase):
+    """"Individual pokemon can be crucial win conditions to preserve for a
+    given match" -- `--bring4` now also prints a "Win conditions" block
+    (safe members/pairs per enemy) plus an optional "Crucial:" line naming
+    any bring-4 member that's the sole answer to at least one enemy."""
+
+    OUR6 = "Excadrill,Aegislash,Gengar,Mega Alakazam"
+
+    def test_bring4_prints_a_win_conditions_block(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Win conditions", out)
+        self.assertIn("Garchomp:", out)
+        self.assertIn("Incineroar:", out)
+
+    def test_a_crucial_line_when_present_names_a_real_bring4_member(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        crucial_lines = [ln for ln in out.splitlines() if ln.startswith("Crucial:")]
+        if crucial_lines:
+            names = {n.strip() for n in self.OUR6.split(",")}
+            self.assertTrue(any(n in crucial_lines[0] for n in names), crucial_lines[0])
+            self.assertIn("sole answer to:", crucial_lines[0])
+
+
 class TestItemCapsScopedToTopRowsOnly(unittest.TestCase):
     """Same top-N-only scoping as `TestUniqueItemsScopedToTopRowsOnly`,
     but for the DEFAULT-ON Focus-Sash/Life-Orb caps -- the exhaustive/beam
@@ -1940,6 +1969,65 @@ class TestBenchmarkTeamsFlag(unittest.TestCase):
              "--deep-dive-core", "1", "--no-prompt"])
         self.assertIsNotNone(msg)
         self.assertIn("aren't supported together with --benchmark-teams", msg)
+
+
+class TestRoundRobinFlag(unittest.TestCase):
+    """--round-robin: "give me an option ... to only run all the saved
+    teams vs the other teams (including themself), rather than creating
+    teams" -- every saved team raced against every OTHER saved team
+    (mirrors included), one --bring4-style report per matchup, printed
+    sequentially. `--round-robin-teams` narrows the grid so a full test
+    run doesn't have to race the entire saved-team library."""
+
+    def test_unknown_round_robin_team_errors(self):
+        msg, _out = run_main(
+            ["--round-robin", "--round-robin-teams", "NotARealTeam",
+             "--no-prompt", "--turns", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("unknown saved team", msg)
+
+    def test_narrowed_grid_produces_exactly_the_expected_matchup_headers(self):
+        """Two named teams -> C(2+1,2)=3 matchups: A-A, A-B, B-B (sorted
+        alphabetically, mirrors included, no duplicated reverse pairing)."""
+        from _harness import load_world
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        msg, out = run_main(
+            ["--round-robin", "--round-robin-teams", ",".join(two_names),
+             "--no-prompt", "--top", "1", "--turns", "1"])
+        self.assertIsNone(msg, out)
+        a, b = two_names
+        self.assertIn(f"=== {a} vs {a} ===", out)
+        self.assertIn(f"=== {a} vs {b} ===", out)
+        self.assertIn(f"=== {b} vs {b} ===", out)
+        self.assertNotIn(f"=== {b} vs {a} ===", out)
+        header_lines = [ln for ln in out.splitlines() if ln.startswith("=== ")]
+        self.assertEqual(len(header_lines), 3, header_lines)
+
+    def test_xlsx_has_a_round_robin_sheet_with_team_a_and_team_b_columns(self):
+        from _harness import load_world
+        from openpyxl import load_workbook
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                path = f.name
+            msg, out = run_main(
+                ["--round-robin", "--round-robin-teams", ",".join(two_names),
+                 "--no-prompt", "--top", "1", "--turns", "1", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            wb = load_workbook(path)
+            self.assertIn("Round-robin", wb.sheetnames)
+            ws = wb["Round-robin"]
+            header = [c.value for c in ws[1]]
+            self.assertEqual(header[:2], ["Team A", "Team B"])
+            rows = [(row[0], row[1]) for row in ws.iter_rows(min_row=2, values_only=True)]
+            a, b = two_names
+            self.assertEqual(set(rows), {(a, a), (a, b), (b, b)})
+        finally:
+            if path and os.path.exists(path):
+                os.unlink(path)
 
 
 class TestEvolveFromTeamFlag(unittest.TestCase):

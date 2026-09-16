@@ -1457,13 +1457,17 @@ def sim_hit_count_matrix(battle, movesets):
     already-live Combatants this battle actually has.
 
     Returns {(our_name, their_name): {"our_hits_to_ko", "their_hits_to_
-    ko"}} for every (alive ours, alive theirs) pair, "hits to KO" = `ceil
-    (current_hp / best_single_hit_damage)`, `None` when nothing in that
-    mon's own moveset can ever damage the target at all (e.g. a hard type
-    immunity).
+    ko", "verdict"}} for every (alive ours, alive theirs) pair, "hits to
+    KO" = `ceil(current_hp / best_single_hit_damage)`, `None` when nothing
+    in that mon's own moveset can ever damage the target at all (e.g. a
+    hard type immunity). `verdict` is `"win"`/`"lose"`/`"stall"` -- fewer
+    hits-to-KO wins outright; a tie is broken by who actually moves first
+    THIS field (`solver._moves_first`, the real Trick Room/Tailwind-aware
+    check, not a plain stat comparison -- this is the live tracker, so the
+    actual field state is already known, unlike the prematch version).
     """
     import math
-    from solver import quick_damage_estimate
+    from solver import quick_damage_estimate, _moves_first
     from projection import projected_field, mega_view
     field = projected_field(battle)
     our_alive = [c for c in battle.p1.roster if not c.fainted]
@@ -1479,6 +1483,20 @@ def sim_hit_count_matrix(battle, movesets):
             best = max(best, dmg)
         return best
 
+    def _verdict(our_hits, their_hits, our_c, their_c):
+        if our_hits is None and their_hits is None:
+            return "stall"
+        if our_hits is None:
+            return "lose"
+        if their_hits is None:
+            return "win"
+        if our_hits < their_hits:
+            return "win"
+        if our_hits > their_hits:
+            return "lose"
+        our_first = _moves_first(our_c, their_c, field, "p1", "p2")
+        return "win" if our_first else "lose"
+
     matrix = {}
     for our_c in our_alive:
         our_view = mega_view(battle, our_c)
@@ -1486,43 +1504,169 @@ def sim_hit_count_matrix(battle, movesets):
             their_view = mega_view(battle, their_c)
             our_dmg = _best_dmg(our_c, our_view, their_c)
             their_dmg = _best_dmg(their_c, their_view, our_c)
+            our_hits = math.ceil(their_c.current_hp / our_dmg) if our_dmg > 0 else None
+            their_hits = math.ceil(our_c.current_hp / their_dmg) if their_dmg > 0 else None
             matrix[(our_c.name, their_c.name)] = {
-                "our_hits_to_ko": (math.ceil(their_c.current_hp / our_dmg)
-                                  if our_dmg > 0 else None),
-                "their_hits_to_ko": (math.ceil(our_c.current_hp / their_dmg)
-                                    if their_dmg > 0 else None)}
+                "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
+                "verdict": _verdict(our_hits, their_hits, our_c, their_c)}
     return matrix
 
 
-def sim_force_redirect_actions(actions, movesets):
-    """"Let me select a mode in the battle simulator where the enemy always
-    uses its redirection moves" -- overrides `greedy_opponent_joint_action`'s
-    own per-mon choice (which already VALUES Follow Me/Rage Powder, see
-    `solver.greedy_opponent_joint_action`'s own `action_value` docstring
-    comment, but only picks it when the heuristic judges it worthwhile) so
-    every alive, redirect-capable actor in `actions` clicks it UNCONDITIONALLY
-    instead -- a deliberately pessimistic "can this specific play be
-    punished even by the worst-case redirect spam" testing mode, not a
-    realistic AI policy.
+def sim_crucial_members(matrix, our_alive_names, their_alive_names):
+    """`sim_hit_count_matrix`'s own live analog to `counter_finder.
+    prematch_win_conditions`'s `crucial` rollup -- scoped to whoever's
+    CURRENTLY ALIVE, since there's no pair-safety data to read live (no
+    2v2 race runs during an actual battle). A mon is the "sole answer" to
+    an enemy when it's the ONLY currently-alive mon on our side whose 1v1
+    `verdict` against that enemy is "win" -- lose it and nothing else
+    alive answers that enemy at all.
+
+    Returns {our_name: {"sole_answer_to": [enemy, ...], "must_preserve":
+    bool}}.
+    """
+    out = {}
+    for our_name in our_alive_names:
+        sole_answer_to = []
+        for enemy_name in their_alive_names:
+            winners = [n for n in our_alive_names
+                      if matrix.get((n, enemy_name), {}).get("verdict") == "win"]
+            if winners == [our_name]:
+                sole_answer_to.append(enemy_name)
+        out[our_name] = {"sole_answer_to": sole_answer_to,
+                         "must_preserve": bool(sole_answer_to)}
+    return out
+
+
+SIM_SPEED_CONTROL_SELF_MOVE_NAMES = ("Tailwind", "Trick Room")
+SIM_SPEED_DROP_ATTACK_NAMES = ("Icy Wind", "Electroweb", "Bulldoze", "Rock Tomb")
+
+
+def _sim_pair_speed_favorable(side, opp_side, field):
+    """True when EVERY alive active on `side` already moves before EVERY
+    alive active on `opp_side`, under `field` -- "once a pair are faster
+    than their opponents, they can move to optimal moves.\""""
+    from solver import _moves_first
+    side_alive = [c for c in side.active if c is not None and not c.fainted]
+    opp_alive = [c for c in opp_side.active if c is not None and not c.fainted]
+    if not side_alive or not opp_alive:
+        return True
+    return all(_moves_first(mine, theirs, field, side.name, opp_side.name)
+              for mine in side_alive for theirs in opp_alive)
+
+
+def _sim_speed_control_candidate(c, side, opp_side, field, movesets):
+    """The first move in `c`'s own moveset that would flip the pair from
+    NOT speed-favorable to favorable this turn, or None. Tailwind/Trick
+    Room are tested via a hypothetical field (mirrors `solver._action_
+    value`'s own before/after self-cancellation check); a speed-drop
+    attack (Icy Wind, Electroweb, Bulldoze, Rock Tomb) is tested by
+    temporarily applying its own Speed-stage drop to the opposing actives
+    it would hit, then restoring them -- these lower the OPPONENT's speed
+    rather than raising the caster's own, so a field hypothesis can't
+    model them the same way."""
+    import copy
+    for mv, _pct in movesets.get(c.name, []):
+        if mv.name in SIM_SPEED_CONTROL_SELF_MOVE_NAMES:
+            hyp_field = copy.deepcopy(field)
+            if mv.name == "Trick Room":
+                hyp_field.trick_room = True
+            elif side.name == "p1":
+                hyp_field.tailwind_p1 = 4
+            else:
+                hyp_field.tailwind_p2 = 4
+            if _sim_pair_speed_favorable(side, opp_side, hyp_field):
+                return mv
+        elif mv.name in SIM_SPEED_DROP_ATTACK_NAMES and mv.secondary:
+            drop = mv.secondary.get("boosts", {}).get("spe")
+            targets = [f for f in opp_side.active if f is not None and not f.fainted]
+            if not drop or drop >= 0 or not targets:
+                continue
+            saved = {id(f): f.stages.get("spe", 0) for f in targets}
+            try:
+                for f in targets:
+                    f.stages["spe"] = max(-6, saved[id(f)] + drop)
+                if _sim_pair_speed_favorable(side, opp_side, field):
+                    return mv
+            finally:
+                for f in targets:
+                    f.stages["spe"] = saved[id(f)]
+    return None
+
+
+def sim_force_support_actions(battle, actions, movesets):
+    """"Let me select a mode in the battle simulator where the enemy plays
+    its support game optimally" -- merges the existing redirect-forcing
+    mode with a new speed-control mode: "in a similar way as the
+    redirection mode, there should be a speed control mode -- such as
+    enemy Milotic using icy wind to allow its partner Gholdengo to
+    outspeed and OHKO Metagross, if it protected turn 1 -- so merging the
+    protect and speed control mode." Overrides `greedy_opponent_joint_
+    action`'s own per-mon choice (which already VALUES all three of these,
+    but only picks one when the heuristic judges it worthwhile), so a
+    testing mode exists for "can this specific play be punished even by
+    the worst-case optimal support play." Per alive actor, in order:
+
+    1. Knows Follow Me/Rage Powder -> force it UNCONDITIONALLY (unchanged
+       from the old redirect-only mode).
+    2. Else, if the pair isn't ALREADY speed-favorable (see `_sim_pair_
+       speed_favorable`) and this actor knows a real speed-control move
+       that would flip it (`_sim_speed_control_candidate`) -> force that
+       move instead of whatever the greedy AI picked.
+    3. The speed-control caster's OWN partner, only on the turn #2 fired,
+       when the partner would otherwise take a KO-threatening hit
+       (`solver._max_incoming`, the SAME worst-case estimate the redirect
+       valuation itself already uses) -> force Protect on the partner
+       instead of its own greedy pick.
+    4. Once the pair IS speed-favorable, every action is left exactly as
+       `greedy_opponent_joint_action` chose it -- "once a pair are faster
+       than their opponents, they can move to optimal moves."
 
     Only touches an actor's OWN action -- a fainted-replacement switch
-    Action (built for a DIFFERENT, already-fainted slot) is left alone, and
-    a mon that doesn't know Follow Me/Rage Powder at all keeps whatever
-    `greedy_opponent_joint_action` already chose for it.
+    Action (built for a DIFFERENT, already-fainted slot) is left alone.
     """
     from engine import Action
+    from battle import PROTECT_MOVES
+    from projection import projected_field
+    from solver import _max_incoming
+    field = projected_field(battle)
     out = []
+    speed_control_actor = None
     for a in actions:
         c = a.combatant
-        if a.kind == "move" and not c.fainted:
-            for mv, _pct in movesets.get(c.name, []):
-                if mv.volatile_status in ("followme", "ragepowder"):
-                    out.append(Action(c, a.side, "move", mv, [c]))
-                    break
-            else:
-                out.append(a)
+        if a.kind != "move" or c.fainted:
+            out.append(a)
+            continue
+        side = battle.p1 if a.side == "p1" else battle.p2
+        opp_side = battle.p2 if a.side == "p1" else battle.p1
+        redirect_move = next((mv for mv, _pct in movesets.get(c.name, [])
+                              if mv.volatile_status in ("followme", "ragepowder")), None)
+        if redirect_move is not None:
+            out.append(Action(c, a.side, "move", redirect_move, [c]))
+            continue
+        sc_move = None
+        if not _sim_pair_speed_favorable(side, opp_side, field):
+            sc_move = _sim_speed_control_candidate(c, side, opp_side, field, movesets)
+        if sc_move is not None:
+            targets = ([c] if sc_move.name in SIM_SPEED_CONTROL_SELF_MOVE_NAMES
+                      else [f for f in opp_side.active if f is not None and not f.fainted])
+            out.append(Action(c, a.side, "move", sc_move, targets))
+            speed_control_actor = c
         else:
             out.append(a)
+
+    if speed_control_actor is not None:
+        side = battle.side_of(speed_control_actor)
+        opp_side = battle.p2 if side is battle.p1 else battle.p1
+        partner = next((m for m in side.active if m is not None
+                        and m is not speed_control_actor and not m.fainted), None)
+        if partner is not None and not partner.protected_last_turn:
+            protect_mv = next((mv for mv, _pct in movesets.get(partner.name, [])
+                               if mv.name in PROTECT_MOVES), None)
+            if protect_mv is not None:
+                worst = _max_incoming(battle, partner, side, opp_side, field, movesets)
+                if worst >= 100.0 * partner.current_hp / partner.max_hp():
+                    out = [Action(partner, side.name, "protect", protect_mv, [partner])
+                          if a2.combatant is partner else a2 for a2 in out]
     return out
 
 
@@ -3927,12 +4071,17 @@ def _render_win_conditions(bring4_row):
     st.dataframe(df, width='stretch', hide_index=True)
 
 
+_VERDICT_ICON = {"win": "✅", "lose": "❌", "stall": "➖"}
+
+
 def _hit_count_matrix_df(matrix, bring4, enemies):
     """`prematch_win_conditions`'s own 1v1 `matrix` -> a plain "who 2HKOs
     whom, and gets 2HKO'd back by whom" table -- "Scizor easily beats X in
     endgame given it 2HKOs enemy but takes 5HKOs from enemy" read directly
     off one row. `None` (no hit at all, e.g. a hard type immunity) shows as
-    "-- ", never a crashing format call."""
+    "-- ", never a crashing format call. Each cell also carries the pure
+    1v1 verdict (fewer hits wins; a tie is broken by speed) as a trailing
+    icon -- "who actually wins the 1v1", not just the raw hit counts."""
     def _fmt(hits):
         return f"{hits}HKO" if hits is not None else "--"
     rows = []
@@ -3943,9 +4092,36 @@ def _hit_count_matrix_df(matrix, bring4, enemies):
             if cell is None:
                 row[enemy] = "?"
             else:
-                row[enemy] = f"{_fmt(cell['our_hits_to_ko'])} / {_fmt(cell['their_hits_to_ko'])}"
+                icon = _VERDICT_ICON.get(cell.get("verdict"), "")
+                row[enemy] = (f"{_fmt(cell['our_hits_to_ko'])} / "
+                              f"{_fmt(cell['their_hits_to_ko'])} {icon}").rstrip()
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _crucial_members_df(crucial):
+    """`prematch_win_conditions`'s own `crucial` rollup -> "which of my own
+    Pokemon do I need to keep alive" -- "Individual pokemon can be crucial
+    win conditions to preserve for a given match." Only lists a mon at all
+    when it's a genuine `must_preserve` case; an empty result means no
+    single member of this bring-4 is irreplaceable against anything raced
+    here (every enemy has more than one answer)."""
+    rows = [{"Preserve": name, "Sole answer to": ", ".join(info["sole_answer_to"])}
+           for name, info in crucial.items() if info["must_preserve"]]
+    return pd.DataFrame(rows)
+
+
+def _render_crucial_members(crucial):
+    """Renders `_crucial_members_df` right under the hit-count matrix,
+    skipped entirely when nothing in this bring-4 is a sole answer to
+    anything (nothing to warn about)."""
+    df = _crucial_members_df(crucial)
+    if df.empty:
+        return
+    st.markdown("**Crucial to preserve** -- the only member that beats a given enemy")
+    st.caption("Losing one of these opens a hole nothing else in this bring-4 fills, "
+              "per the enemies listed next to it.")
+    st.dataframe(df, width='stretch', hide_index=True)
 
 
 def _render_hit_count_matrix(bring4_row, dive, target_names, merged, moves,
@@ -3969,10 +4145,11 @@ def _render_hit_count_matrix(bring4_row, dive, target_names, merged, moves,
     st.markdown("**1v1 hit-count matrix** -- \"our HKO / their HKO\"")
     st.caption("Average-roll hits to KO from full HP, each direction, "
               "every bring-4 member against every named enemy -- e.g. "
-              "\"2HKO / 5HKO\" means we finish them in 2 hits, they need 5 "
-              "to finish us. \"--\" means that move can never KO at all "
-              "(a hard type immunity or similar).")
+              "\"2HKO / 5HKO ✅\" means we finish them in 2 hits, they need "
+              "5 to finish us, and we win the 1v1. \"--\" means that move "
+              "can never KO at all (a hard type immunity or similar).")
     st.dataframe(df, width='stretch', hide_index=True)
+    _render_crucial_members(result["crucial"])
 
 
 def _render_hit_count_matrix_for_bring4_search(bring4_row, target_names, merged,
@@ -3998,10 +4175,11 @@ def _render_hit_count_matrix_for_bring4_search(bring4_row, target_names, merged,
     st.markdown("**1v1 hit-count matrix** -- \"our HKO / their HKO\"")
     st.caption("Average-roll hits to KO from full HP, each direction, "
               "every bring-4 member against every named enemy -- e.g. "
-              "\"2HKO / 5HKO\" means we finish them in 2 hits, they need 5 "
-              "to finish us. \"--\" means that move can never KO at all "
-              "(a hard type immunity or similar).")
+              "\"2HKO / 5HKO ✅\" means we finish them in 2 hits, they need "
+              "5 to finish us, and we win the 1v1. \"--\" means that move "
+              "can never KO at all (a hard type immunity or similar).")
     st.dataframe(df, width='stretch', hide_index=True)
+    _render_crucial_members(result["crucial"])
 
 
 # "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
@@ -4108,6 +4286,35 @@ def _render_pair_matchup_detail(n1, n2, detail, only_losses):
             st.code("\n".join(lines), language=None)
     if only_losses and shown == 0:
         st.caption("No losses.")
+
+
+def _cache_gameplans(pair_rows, source_label):
+    """"If a counter table analysis has been loaded, show what the 2v2
+    calculator saw as the optimal play sequence" alongside the live
+    Battle Simulator match -- caches every pair's own already-computed
+    `detail[(e1, e2)]` (`_pair_vs_targets`'s per-turn `log`, `outcome`,
+    `turns_used` -- the SAME data `_render_pair_matchup_detail` already
+    renders) into `st.session_state["ct_gameplans"]`, keyed by BOTH sides'
+    names as `frozenset`s so a later lookup by "whoever is currently
+    active" doesn't care about role order (`_pair_vs_targets` itself
+    always assigns C/P/E1/E2 by internal search convention, not by
+    whichever order the human happens to send them out in).
+
+    Called everywhere a Counter Table search stores a real result, so the
+    Battle Simulator can later show "what the calculator predicted" for
+    the SAME (our pair, their pair) the human is actually playing, without
+    re-racing anything. `source_label`: a short string naming which search
+    produced this ("Bring-4 search", "Deep dive", ...), shown alongside
+    the cached gameplan so it's clear which analysis it came from.
+    """
+    cache = st.session_state.setdefault("ct_gameplans", {})
+    for pr in pair_rows:
+        our_pair = pr["pair"]
+        for (e1, e2), d in pr["detail"].items():
+            key = (frozenset(our_pair), frozenset((e1, e2)))
+            cache[key] = {"our_pair": tuple(our_pair), "enemy_pair": (e1, e2),
+                         "log": d["log"], "outcome": d["outcome"],
+                         "turns_used": d.get("turns_used"), "source": source_label}
 
 
 def _render_teamsheet_export(core, sets, key_prefix):
@@ -4250,6 +4457,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
              "below to just the unconditional losses.")
     if len(core) > 4 and len(target_name_lists) == 1:
         bring4_rows = bring4_from_deep_dive(core, dive, target_name_lists[0])
+        _cache_gameplans(bring4_rows[0]["pair_rows"], "Deep dive")
         st.markdown("**Best bring-4 (from this deep dive)**")
         st.caption(" / ".join(bring4_rows[0]["bring4"]))
         mega_cap = _bring4_mega_caption(bring4_rows[0])
@@ -4289,6 +4497,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                           "pair_rows": [
             {"pair": pair_key, "detail": pair["per_enemy"][0]["detail"]}
             for pair_key, pair in dive["per_pair"].items()]}
+        _cache_gameplans(core_bring4_row["pair_rows"], "Deep dive")
         _render_win_conditions(core_bring4_row)
         _render_hit_count_matrix(core_bring4_row, dive, target_name_lists[0],
                                  merged, moves, natures, typechart,
@@ -4376,7 +4585,8 @@ with tab_counter:
 
     ct_mode = st.radio(
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
-                 "Joint pair search", "2-2-2 teambuilding", "Coverage groups"],
+                 "Joint pair search", "2-2-2 teambuilding", "Coverage groups",
+                 "Round-robin (saved teams only)"],
         key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
@@ -4667,6 +4877,7 @@ with tab_counter:
                     else:
                         st.session_state["ct_b4_pair_rows"] = pair_rows
                         st.session_state["ct_b4_bring4_rows"] = bring4_rows
+                        _cache_gameplans(pair_rows, "Bring-4 search")
                         st.session_state["ct_b4_our6"] = our6
                         st.session_state["ct_b4_vs_name"] = ct_vs_name
 
@@ -5257,7 +5468,7 @@ with tab_counter:
             st.info("No 3-disjoint-pair team could be formed from the top "
                     "pairs shown -- raise 'Top pairs to show'.")
 
-    else:  # Coverage groups
+    elif ct_mode == "Coverage groups":
         st.caption("\"Coverage group finder\": every legal group of the "
                    "sizes below drawn from the pool, ranked by how "
                    "completely its OWN internal pairs -- every one of the "
@@ -5576,6 +5787,56 @@ with tab_counter:
                             st.session_state["ct_b4_our"] = _PASTE_OUR_LABEL
                             st.session_state["ct_b4_our_paste"] = "\n\n".join(row["group"])
                             st.rerun()
+
+    else:  # Round-robin (saved teams only)
+        st.caption("\"Give me an option ... to only run all the saved teams "
+                   "vs the other teams (including themself), rather than "
+                   "creating teams\" -- every saved team raced against "
+                   "every OTHER saved team, mirrors included, each side's "
+                   "own real sets intact -- no pool/candidate search on "
+                   "either side. A round-robin over N teams is N(N+1)/2 "
+                   "matchups, each a full bring-4 search -- narrow the "
+                   "grid below if the full library is too slow.")
+        from counter_finder import round_robin_saved_teams
+        ct_rr_teams = st.multiselect(
+            "Teams to include", sorted(teams), default=sorted(teams), key="ct_rr_teams")
+        if ct_rr_teams:
+            n = len(ct_rr_teams)
+            st.caption(f"{n} team(s) -> {n * (n + 1) // 2} matchup(s).")
+        if st.button("Run round-robin", type="primary", key="ct_rr_go",
+                     disabled=not ct_rr_teams):
+            progress = st.progress(0.0)
+            n = len(ct_rr_teams)
+            total_matchups = n * (n + 1) // 2
+            results = []
+            done = 0
+            for team_a, team_b, pair_rows, bring4_rows in round_robin_saved_teams(
+                    teams, team_meta, merged, moves, natures, typechart,
+                    team_names=ct_rr_teams, turns=ct_turns):
+                results.append((team_a, team_b, pair_rows, bring4_rows))
+                if bring4_rows:
+                    _cache_gameplans(bring4_rows[0]["pair_rows"],
+                                     f"Round-robin: {team_a} vs {team_b}")
+                done += 1
+                progress.progress(min(1.0, done / total_matchups))
+            st.session_state["ct_rr_results"] = results
+        rr_results = st.session_state.get("ct_rr_results")
+        if rr_results:
+            for team_a, team_b, pair_rows, bring4_rows in rr_results:
+                st.markdown(f"### {team_a} vs {team_b}")
+                total = pair_rows[0]["pairs_total"] if pair_rows else 0
+                st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
+                if bring4_rows:
+                    st.dataframe(_bring4_rows_df(bring4_rows, total),
+                                width='stretch', hide_index=True)
+                    st.caption("Best bring-4: " + " / ".join(bring4_rows[0]["bring4"]))
+                    mega_cap = _bring4_mega_caption(bring4_rows[0])
+                    if mega_cap:
+                        st.caption(mega_cap)
+                    _render_win_conditions(bring4_rows[0])
+                    _render_hit_count_matrix_for_bring4_search(
+                        bring4_rows[0], teams[team_b], merged, moves, natures, typechart)
+                st.divider()
 
 
 # ------------------------------------------------------------------ battle
@@ -7019,8 +7280,47 @@ with tab_sim:
                 st.dataframe(
                     _hit_count_matrix_df(live_matrix, our_alive_names, their_alive_names),
                     width='stretch', hide_index=True)
+                live_crucial = sim_crucial_members(live_matrix, our_alive_names,
+                                                   their_alive_names)
+                _render_crucial_members(live_crucial)
             else:
                 st.caption("Nothing left alive on one side to compare.")
+
+        with st.expander("Counter Table gameplan (if this exact matchup was analyzed)"):
+            st.caption("\"If the counter table analysis has been loaded, it "
+                      "would be good to see what the 2v2 calculator saw as "
+                      "the optimal play sequence\" -- the stored turn-by-"
+                      "turn plan from whichever Counter Table search "
+                      "already raced these exact two active pairs against "
+                      "each other, if any.")
+            our_active_names = [c.name for c in battle.p1.active
+                                if c is not None and not c.fainted]
+            their_active_names = [c.name for c in battle.p2.active
+                                  if c is not None and not c.fainted]
+            gameplans = st.session_state.get("ct_gameplans", {})
+            cached = None
+            if len(our_active_names) == 2 and len(their_active_names) == 2:
+                cached = gameplans.get(
+                    (frozenset(our_active_names), frozenset(their_active_names)))
+            if cached is None:
+                st.caption("No Counter Table analysis covers this exact pair yet.")
+            else:
+                n1, n2 = cached["our_pair"]
+                e1, e2 = cached["enemy_pair"]
+                role_name = {"C": n1, "P": n2, "E1": e1, "E2": e2}
+                st.caption(f"From: {cached['source']} -- predicted outcome: "
+                          f"{cached['outcome']} (turn {cached['turns_used']})")
+                lines = []
+                for turn_i, turn_hits in enumerate(cached["log"], 1):
+                    for role, tgt_role, h in turn_hits:
+                        spread = " (spread)" if h.num_targets_hit > 1 else ""
+                        lines.append(
+                            f"T{turn_i} {role_name[role]} -> "
+                            f"{role_name[tgt_role]}: {h.move_name or '-'} "
+                            f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-"
+                            f"{h.hi * 100:.0f}%{spread}")
+                if lines:
+                    st.code("\n".join(lines), language=None)
 
         winner = "p1" if battle.p2.has_lost() else ("p2" if battle.p1.has_lost() else None)
         if winner:
@@ -7146,8 +7446,16 @@ with tab_sim:
             # whether to redirect) -- see where `sim_manual_enemy` is read
             # below, near the "Submit turn" button.
             sim_force_redirect = st.checkbox(
-                "Enemy always redirects (Follow Me/Rage Powder) when able",
-                key="sim_force_redirect")
+                "Enemy plays optimal support (redirect / speed control + Protect)",
+                key="sim_force_redirect",
+                help="Redirect: always clicks Follow Me/Rage Powder when able. "
+                     "Speed control: if the pair isn't already faster than both "
+                     "of your actives, forces a real speed-control move "
+                     "(Tailwind, Trick Room, Icy Wind, Electroweb, Bulldoze, "
+                     "Rock Tomb) when one would flip the order, and Protects "
+                     "the partner that turn if it would otherwise take a "
+                     "KO-threatening hit. Once the pair IS faster, plays "
+                     "normally again.")
             sim_manual_enemy = st.checkbox(
                 "I'll pick the enemy's moves too", key="sim_manual_enemy")
             pending = st.session_state.get("sim_pending_turn")
@@ -7396,7 +7704,7 @@ with tab_sim:
                         p2_actions = greedy_opponent_joint_action(
                             battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
                         if sim_force_redirect:
-                            p2_actions = sim_force_redirect_actions(p2_actions, movesets)
+                            p2_actions = sim_force_support_actions(battle, p2_actions, movesets)
                     mega_decisions = {id(c): True for c in battle.p2.active if c is not None}
                     mega_decisions.update(our_mega_decisions)
                     fainted = sim_predict_faint_replacements(

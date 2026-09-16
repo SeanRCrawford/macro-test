@@ -224,7 +224,8 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, DEFAULT_MAX_FOCUS_SASH,  # n
                             multi_bring4_exhaustive, net_weak_type_breadth,
                             net_weakness_by_type,
                             own_pair_has_real_tailwind,
-                            pair_search, recommended_lead, speed_tiers,
+                            pair_search, prematch_win_conditions_for_bring4,
+                            recommended_lead, round_robin_saved_teams, speed_tiers,
                             switch_in_search, tailwind_focus_pool, threshold_search,
                             two_two_two_teams)
 
@@ -912,6 +913,39 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
     print("           board state. Ranked on THIS, not the average: a")
     print("           bring-4 with one great pair and one awful one loses to")
     print("           a bring-4 that's merely good everywhere.")
+
+
+def _print_win_conditions(bring4_row, targets, merged, moves_db, natures, typechart,
+                          item_overrides=None, move_overrides=None):
+    """Console counterpart to `app.py`'s "Win conditions" section --
+    `prematch_win_conditions_for_bring4`'s own `safe` (pair/member
+    preserve-to-guarantee-a-win reading) plus a "Crucial:" line naming any
+    bring-4 member that's the SOLE answer to at least one enemy still in
+    the match ("Individual pokemon can be crucial win conditions to
+    preserve for a given match")."""
+    result = prematch_win_conditions_for_bring4(
+        bring4_row, targets, merged, moves_db, natures, typechart,
+        item_overrides=item_overrides, move_overrides=move_overrides)
+    safe = result["safe"]
+    if not safe:
+        return
+    print("\nWin conditions -- what to preserve for a guaranteed answer:")
+    for enemy in sorted(safe):
+        info = safe[enemy]
+        if info["uncovered"]:
+            preserve = "none -- no pair here beats it every way it could show up"
+        elif info["safe_members"]:
+            preserve = " or ".join(info["safe_members"]) + " (any partner)"
+        else:
+            preserve = " or ".join(f"{n1}+{n2}" for n1, n2 in info["safe_pairs"])
+        print(f"  {enemy}: {preserve}")
+    crucial_names = [name for name, info in result["crucial"].items()
+                     if info["must_preserve"]]
+    if crucial_names:
+        parts = [f"{name} (sole answer to: "
+                f"{', '.join(result['crucial'][name]['sole_answer_to'])})"
+                for name in crucial_names]
+        print("Crucial: " + "; ".join(parts))
 
 
 def _print_pair_summary(coverage, top=10):
@@ -1913,6 +1947,75 @@ def _write_benchmark_teams_xlsx(path, team_top_rows, targets, merged):
     return path
 
 
+def _write_round_robin_xlsx(path, matchup_top_rows, merged):
+    """`--round-robin`'s own xlsx output -- one row per matchup's OWN top-
+    ranked bring-4, tagged with "Team A"/"Team B" columns (mirrors A-vs-A
+    included, so those two columns are equal on that row). Same reuse of
+    `_bring4_xlsx_row_values`/`_BRING4_XLSX_COLUMNS` as `--benchmark-
+    teams`'s own sheet -- see its docstring.
+
+    `matchup_top_rows`: [(team_a, team_b, targets, bring4_row), ...] --
+    `targets` is `team_b`'s own roster (`enemy_has_real_tailwind` needs
+    the SPECIFIC enemy roster this matchup raced, not a fixed one shared
+    across every row the way `--benchmark-teams` has).
+    """
+    from openpyxl import Workbook
+    from export_excel import _autosize, _style_header
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Round-robin"
+    ws.append(["Team A", "Team B"] + _BRING4_XLSX_COLUMNS)
+    _style_header(ws)
+    for rank, (team_a, team_b, targets, b) in enumerate(matchup_top_rows, start=1):
+        enemy_tw = enemy_has_real_tailwind(targets, merged)
+        ws.append([team_a, team_b] + _bring4_xlsx_row_values(rank, b, merged, enemy_tw))
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    _autosize(ws)
+    wb.save(path)
+    return path
+
+
+def _run_round_robin(args):
+    """--round-robin's own standalone execution path -- same reasoning as
+    `_run_evolve_from_team`: handled entirely separately from `main()`'s
+    big --bring4/--multi-bring4/--two-two-two validation cascade, which
+    assumes exactly one of those modes and a single fixed `--vs`/--vs-
+    team target, neither of which applies here (both sides vary, one
+    saved team at a time)."""
+    from _harness import load_world
+    W = load_world()
+    merged, moves, natures, typechart = (W["merged"], W["moves"], W["natures"],
+                                         W["typechart"])
+    team_names = None
+    if args.round_robin_teams:
+        team_names = [n.strip() for n in args.round_robin_teams.split(",") if n.strip()]
+        unknown = [n for n in team_names if n not in W["teams"]]
+        if unknown:
+            raise SystemExit(f"unknown saved team(s): {', '.join(unknown)}")
+    good_threshold = args.good_threshold / 100.0
+    matchup_top_rows = []
+    n = 0
+    for team_a, team_b, pair_rows, bring4_rows in round_robin_saved_teams(
+            W["teams"], W["meta"], merged, moves, natures, typechart,
+            team_names=team_names, turns=args.turns, good_threshold=good_threshold):
+        n += 1
+        print(f"=== {team_a} vs {team_b} ===")
+        _print_bring4(pair_rows, bring4_rows, W["teams"][team_a], W["teams"][team_b],
+                     args.top, args.turns, good_threshold)
+        if bring4_rows:
+            _print_win_conditions(bring4_rows[0], W["teams"][team_b], merged, moves,
+                                  natures, typechart)
+            matchup_top_rows.append((team_a, team_b, W["teams"][team_b], bring4_rows[0]))
+        print()
+    if n == 0:
+        print("No legal saved teams (3-6 distinct Pokemon each) to race.")
+        return
+    if args.xlsx:
+        path = _write_round_robin_xlsx(args.xlsx, matchup_top_rows, merged)
+        print(f"Excel workbook: {os.path.abspath(path)}")
+
+
 def _print_switches(switch_results, bench_size):
     """`switch_results`: {(e1, e2): (rows, tried)} -- `switch_in_search`'s
     own return shape, one entry per LOSING enemy pair from the --deep report
@@ -2186,6 +2289,20 @@ def main():
                          "potential own teams, with the sets intact ... very "
                          "helpful for benchmarking performance.' --our is "
                          "not used in this mode")
+    ap.add_argument("--round-robin", action="store_true",
+                    help="run every saved team (data/teams + data/my_teams) "
+                         "against every OTHER saved team, mirrors included "
+                         "(A vs A), each side's own real sets intact -- no "
+                         "pool/candidate search on either side. One --"
+                         "bring4-style report per matchup, printed "
+                         "sequentially. Narrow the grid with --round-robin-"
+                         "teams; --our/--vs/--vs-team are not used in this "
+                         "mode. A round-robin over N teams is N(N+1)/2 "
+                         "matchups, each a full --bring4 search")
+    ap.add_argument("--round-robin-teams", default="", metavar="NAME,NAME,...",
+                    help="--round-robin only: comma-separated saved team "
+                         "names to narrow the grid to (default: every saved "
+                         "team)")
     ap.add_argument("--multi-bring4", action="store_true",
                     help="find the best team-of-6 (drawn from the pool) "
                          "across SEVERAL enemy rosters at once (--vs-team, "
@@ -2610,6 +2727,10 @@ def main():
         _run_evolve_from_team(args)
         return
 
+    if args.round_robin:
+        _run_round_robin(args)
+        return
+
     if bool(args.chip_from) != bool(args.chip_move):
         raise SystemExit("--chip-from and --chip-move must be given together")
     if args.partner_item and not (args.chip_from or args.partner):
@@ -2951,6 +3072,11 @@ def main():
             print(f"=== Source team: {team_name} ===")
             _print_bring4(team_pair_rows, team_bring4_rows, team_our6, targets,
                          args.top, args.turns, good_threshold)
+            if team_bring4_rows:
+                _print_win_conditions(team_bring4_rows[0], targets, merged, moves,
+                                      natures, typechart,
+                                      item_overrides=team_item_overrides,
+                                      move_overrides=team_move_overrides)
             print()
             if team_bring4_rows:
                 team_top_rows.append((team_name, team_bring4_rows[0]))
@@ -2969,6 +3095,10 @@ def main():
             max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
                      args.turns, good_threshold)
+        if bring4_rows:
+            _print_win_conditions(bring4_rows[0], targets, merged, moves, natures,
+                                  typechart, item_overrides=item_overrides,
+                                  move_overrides=move_overrides)
         ranks = _parse_deep_dive_core(args.deep_dive_core)
         if not ranks:
             ranks = _prompt_deep_dive_ranks(len(bring4_rows), args.no_prompt)

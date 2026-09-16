@@ -923,15 +923,99 @@ class TestLiveWinConditionsPanel(unittest.TestCase):
         if cell_full["our_hits_to_ko"] is not None:
             self.assertLessEqual(cell_half["our_hits_to_ko"], cell_full["our_hits_to_ko"])
 
+    def test_every_matrix_cell_carries_a_verdict(self):
+        from app import sim_hit_count_matrix
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        matrix = sim_hit_count_matrix(battle, movesets)
+        self.assertTrue(matrix)
+        for cell in matrix.values():
+            self.assertIn(cell["verdict"], ("win", "lose", "stall"))
+
+    def test_crucial_members_rollup_is_internally_consistent(self):
+        """A mon named as `sole_answer_to` an enemy must be the ONLY alive
+        mon on our side whose verdict against that enemy is "win"."""
+        from app import sim_hit_count_matrix, sim_crucial_members
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        matrix = sim_hit_count_matrix(battle, movesets)
+        our_names = [c.name for c in battle.p1.roster if not c.fainted]
+        their_names = [c.name for c in battle.p2.roster if not c.fainted]
+        crucial = sim_crucial_members(matrix, our_names, their_names)
+        for name, info in crucial.items():
+            for enemy in info["sole_answer_to"]:
+                winners = [n for n in our_names
+                          if matrix[(n, enemy)]["verdict"] == "win"]
+                self.assertEqual(winners, [name])
+            self.assertEqual(info["must_preserve"], bool(info["sole_answer_to"]))
+
+    def test_panel_can_show_a_crucial_to_preserve_table(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        crucial_dfs = [d.value for d in tab.dataframe
+                      if list(d.value.columns) == ["Preserve", "Sole answer to"]]
+        has_crucial_markdown = any("Crucial to preserve" in m.value for m in tab.markdown)
+        self.assertEqual(bool(crucial_dfs), has_crucial_markdown)
+
+
+class TestCachedGameplanPanel(unittest.TestCase):
+    """"If a counter table analysis has been loaded, it would be good to
+    see what the 2v2 calculator saw as the optimal play sequence" -- a new
+    expander that looks up `st.session_state["ct_gameplans"]` (populated
+    by the Counter Table tab, see `TestGameplanCache` in test_counter_
+    table_tab.py) by the CURRENT two active pairs and renders the cached
+    turn-by-turn plan when one exists for this exact matchup."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_no_analysis_caption_when_nothing_is_cached(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        self.assertTrue(any("Counter Table gameplan" in e.label for e in tab.expander))
+        self.assertTrue(any("No Counter Table analysis covers this exact pair"
+                            in c.value for c in tab.caption))
+
+    def test_shows_the_cached_gameplan_when_the_actives_match(self):
+        from counter_finder import Hit
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        our_pair = tuple(c.name for c in battle.p1.active)
+        enemy_pair = tuple(c.name for c in battle.p2.active)
+        h = Hit(move_name="Earthquake", frac=0.5, lo=0.45, avg=0.5, hi=0.55,
+               eff=1.0, num_targets_hit=1)
+        at.session_state["ct_gameplans"] = {
+            (frozenset(our_pair), frozenset(enemy_pair)): {
+                "our_pair": our_pair, "enemy_pair": enemy_pair,
+                "log": [[("C", "E1", h)]], "outcome": "out_trade",
+                "turns_used": 1, "source": "Bring-4 search"}}
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+        tab = sim_tab(at)
+        self.assertTrue(any("From: Bring-4 search" in c.value
+                            and "out_trade" in c.value for c in tab.caption))
+        self.assertTrue(any(f"{our_pair[0]} -> {enemy_pair[0]}" in c.value
+                            for c in tab.code))
+
 
 class TestForceRedirectMode(unittest.TestCase):
     """"Let me select a mode in the battle simulator where the enemy always
-    uses its redirection moves" -- a checkbox that overrides `greedy_
-    opponent_joint_action`'s own (already Follow-Me-aware, but merely
-    HEURISTIC) per-mon choice, forcing every alive, redirect-capable enemy
-    to click Follow Me/Rage Powder EVERY turn regardless of whether the
-    greedy AI judges it worthwhile -- a deliberately pessimistic
-    "can this specific play really be punished" testing mode."""
+    uses its redirection moves" -- a checkbox (now merged with the speed-
+    control mode, see `TestForceSpeedControlMode` below, but STILL keyed
+    "sim_force_redirect" and STILL forcing redirection unconditionally as
+    its first-priority behavior) that overrides `greedy_opponent_joint_
+    action`'s own (already Follow-Me-aware, but merely HEURISTIC) per-mon
+    choice, forcing every alive, redirect-capable enemy to click Follow
+    Me/Rage Powder EVERY turn regardless of whether the greedy AI judges
+    it worthwhile -- a deliberately pessimistic "can this specific play
+    really be punished" testing mode."""
 
     OUR4 = ["Garchomp", "Hydreigon"]
     THEIR4 = ["Indeedee-F", "Kingambit"]  # Indeedee-F: real Follow Me user
@@ -941,14 +1025,14 @@ class TestForceRedirectMode(unittest.TestCase):
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
         cb = next(c for c in tab.checkbox
-                  if "always redirects" in c.label)
+                  if "optimal support" in c.label)
         self.assertFalse(cb.value)
 
     def test_enabling_it_makes_the_redirector_click_follow_me(self):
         at = fresh_app()
         at = seed_battle(at, self.OUR4, self.THEIR4)
         tab = sim_tab(at)
-        cb = next(c for c in tab.checkbox if "always redirects" in c.label)
+        cb = next(c for c in tab.checkbox if "optimal support" in c.label)
         at = cb.set_value(True).run()
         at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
@@ -966,6 +1050,92 @@ class TestForceRedirectMode(unittest.TestCase):
         at = seed_battle(at, self.OUR4, self.THEIR4)
         at = submit_turn(at)
         self.assertEqual(len(at.exception), 0)
+
+
+class TestForceSpeedControlMode(unittest.TestCase):
+    """"In a similar way as the redirection mode, there should be a speed
+    control mode -- such as enemy Milotic using icy wind to allow its
+    partner Gholdengo to outspeed and OHKO Metagross, if it protected
+    turn 1 -- so merging the protect and speed control mode. Once a pair
+    are faster than their opponents, they can move to optimal moves."
+    Direct, non-AppTest unit tests against `app.sim_force_support_actions`
+    -- builds a real `Battle`/moveset board by hand (same convention
+    `test_mechanics_fixes.py` uses) so the exact starting speeds can be
+    controlled precisely."""
+
+    def _board(self, our_spe):
+        from _harness import load_world
+        from combatants import make_team
+        from battle import Battle
+        from solver import build_moveset
+        w = load_world()
+        oc = make_team(["Metagross", "Incineroar"], w["merged"], w["natures"])
+        ec = make_team(["Milotic", "Gholdengo"], w["merged"], w["natures"])
+        for c in oc:
+            c.stats["spe"] = our_spe
+        battle = Battle(oc, ec, w["typechart"], w["moves"])
+        movesets = {
+            "Metagross": build_moveset(w["merged"]["Metagross"], w["moves"]),
+            "Incineroar": build_moveset(w["merged"]["Incineroar"], w["moves"]),
+            "Milotic": build_moveset(w["merged"]["Milotic"], w["moves"],
+                                     only_moves=["Icy Wind", "Muddy Water"]),
+            "Gholdengo": build_moveset(w["merged"]["Gholdengo"], w["moves"],
+                                       only_moves=["Shadow Ball", "Make It Rain", "Protect"])}
+        return battle, movesets
+
+    def test_icy_wind_forced_when_the_pair_is_not_yet_faster(self):
+        """Metagross/Incineroar(150) currently outspeed BOTH Milotic(103)
+        and Gholdengo(136) -- not favorable for the enemy pair -- but
+        Icy Wind's own -1 Speed stage (a ~33% cut) drops 150 to ~100,
+        below both, so it WOULD flip the order. Milotic (the only one of
+        the two who knows a real speed-control move here) must be forced
+        onto it instead of whatever the greedy AI picked for it."""
+        from app import sim_force_support_actions, _sim_pair_speed_favorable
+        from solver import greedy_opponent_joint_action
+        from projection import projected_field
+        battle, movesets = self._board(our_spe=150)
+        self.assertFalse(_sim_pair_speed_favorable(
+            battle.p2, battle.p1, projected_field(battle)))
+        baseline = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets, 1)
+        forced = sim_force_support_actions(battle, baseline, movesets)
+        milotic_action = next(a for a in forced if a.combatant.name == "Milotic")
+        self.assertEqual(milotic_action.move.name, "Icy Wind")
+        self.assertTrue(all(t.name in ("Metagross", "Incineroar")
+                            for t in milotic_action.targets))
+
+    def test_partner_protects_exactly_when_the_estimate_says_its_threatened(self):
+        from app import sim_force_support_actions
+        from solver import greedy_opponent_joint_action, _max_incoming
+        from projection import projected_field
+        battle, movesets = self._board(our_spe=150)
+        baseline = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets, 1)
+        forced = sim_force_support_actions(battle, baseline, movesets)
+        gholdengo = next(c for c in battle.p2.active if c.name == "Gholdengo")
+        gholdengo_action = next(a for a in forced if a.combatant.name == "Gholdengo")
+        field = projected_field(battle)
+        worst = _max_incoming(battle, gholdengo, battle.p2, battle.p1, field, movesets)
+        threatened = worst >= 100.0 * gholdengo.current_hp / gholdengo.max_hp()
+        if threatened:
+            self.assertEqual(gholdengo_action.kind, "protect")
+        else:
+            self.assertNotEqual(gholdengo_action.kind, "protect")
+
+    def test_no_speed_control_forced_once_already_favorable(self):
+        """Metagross(50) is already SLOWER than both Milotic(103) and
+        Gholdengo(136) -- already favorable -- so Milotic must keep
+        whatever the greedy AI already chose for it, not get overridden
+        onto Icy Wind."""
+        from app import sim_force_support_actions, _sim_pair_speed_favorable
+        from solver import greedy_opponent_joint_action
+        from projection import projected_field
+        battle, movesets = self._board(our_spe=50)
+        self.assertTrue(_sim_pair_speed_favorable(
+            battle.p2, battle.p1, projected_field(battle)))
+        baseline = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets, 1)
+        forced = sim_force_support_actions(battle, baseline, movesets)
+        baseline_milotic = next(a for a in baseline if a.combatant.name == "Milotic")
+        forced_milotic = next(a for a in forced if a.combatant.name == "Milotic")
+        self.assertEqual(forced_milotic.move.name, baseline_milotic.move.name)
 
 
 class TestManualEnemyMode(unittest.TestCase):

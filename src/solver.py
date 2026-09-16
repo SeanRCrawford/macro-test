@@ -278,6 +278,37 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
     return actions
 
 
+def _max_incoming(battle: Battle, target, side: Side, opp_side: Side,
+                  decision_field, movesets: dict) -> float:
+    """The worst single-hit % of `target`'s max HP any live opposing
+    active could land on it THIS turn, off `target`'s own current HP --
+    "how threatened is this specific mon right now." Extracted to module
+    level from `_action_value`'s own Follow-Me/Rage-Powder valuation
+    (unchanged there) so the Battle Simulator's speed-control support mode
+    (`app.sim_force_support_actions`) can reuse the exact same worst-case
+    incoming-hit estimate for its own "does the partner need Protect this
+    turn" decision, rather than a second, drifting heuristic.
+    """
+    worst = 0.0
+    for foe in opp_side.active:
+        if foe.fainted:
+            continue
+        for mv, _pct in movesets.get(foe.name, []):
+            if mv.category == "Status" or is_spread_move(mv.target):
+                continue
+            if priority_blocked_by_side(
+                    foe.ability, mv, side.active,
+                    terrain=decision_field.terrain, target=target):
+                continue
+            dmg = quick_damage_estimate(
+                mega_view(battle, foe), target, mv, battle.typechart,
+                decision_field, battle=battle)
+            pct = (100.0 * min(dmg, target.current_hp) / target.max_hp()
+                  if target.max_hp() else 0.0)
+            worst = max(worst, pct)
+    return worst
+
+
 def _action_value(battle: Battle, c, side: Side, opp_side: Side, a: Action,
                   decision_field, turn_num: int, movesets: dict,
                   value_protect: bool = False):
@@ -354,28 +385,10 @@ def _action_value(battle: Battle, c, side: Side, opp_side: Side, a: Action,
             if partner is None:
                 return 5 if turn_num == 1 else -5
 
-            def _max_incoming(target):
-                worst = 0.0
-                for foe in opp_side.active:
-                    if foe.fainted:
-                        continue
-                    for mv, _pct in movesets.get(foe.name, []):
-                        if mv.category == "Status" or is_spread_move(mv.target):
-                            continue
-                        if priority_blocked_by_side(
-                                foe.ability, mv, side.active,
-                                terrain=decision_field.terrain, target=target):
-                            continue
-                        dmg = quick_damage_estimate(
-                            mega_view(battle, foe), target, mv, battle.typechart,
-                            decision_field, battle=battle)
-                        pct = (100.0 * min(dmg, target.current_hp) / target.max_hp()
-                              if target.max_hp() else 0.0)
-                        worst = max(worst, pct)
-                return worst
-
-            worst_on_partner = _max_incoming(partner)
-            worst_on_self = _max_incoming(c)
+            worst_on_partner = _max_incoming(battle, partner, side, opp_side,
+                                             decision_field, movesets)
+            worst_on_self = _max_incoming(battle, c, side, opp_side,
+                                          decision_field, movesets)
             value = (worst_on_partner - worst_on_self) * 0.8
             if worst_on_partner >= 100.0 * partner.current_hp / partner.max_hp():
                 value += 40.0  # would otherwise have KO'd the partner
