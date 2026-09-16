@@ -4933,28 +4933,45 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                 # (`protect_outcomes`/`protect_safe` above), now add the
                 # OPTIMISTIC own-side mirror" shape `own_tailwind_used`
                 # already established for Tailwind: does protecting ONE of
-                # OUR OWN two turn 1 turn a loss into a win? Unlike
-                # Tailwind, no "does a real setter exist" gate is needed --
-                # every pair can always try Protecting one of itself, so
-                # this always races both roles, optimistic `min` by rank.
-                own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log = _joint_race(
-                    combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="C", terrain=terrain,
-                    worst_case_targeting=worst_case_targeting)
-                own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log = _joint_race(
-                    combatants, moves_by_role, typechart, weather, turns,
-                    first_turn_protected_role="P", terrain=terrain,
-                    worst_case_targeting=worst_case_targeting)
-                (own_protect_outcome, own_protect_turns_used,
-                 own_protect_hp, own_protect_log) = min(
-                    ((own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log),
-                     (own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log)),
-                    key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
-                own_protect_used = (_JOINT_OUTCOME_RANK[own_protect_outcome] <
-                                    _JOINT_OUTCOME_RANK[chosen_outcome])
-                if own_protect_used:
-                    chosen_outcome, chosen_hp = own_protect_outcome, own_protect_hp
-                    chosen_turns_used, chosen_log = own_protect_turns_used, own_protect_log
+                # OUR OWN two turn 1 turn a LOSS into a win -- "in the
+                # preserving win condition logic, it would also be good to
+                # have wins in 2v2s from optimal plays protects", the
+                # user's own example is specifically a LOSS being saved.
+                # Unlike Tailwind, no "does a real setter exist" gate is
+                # needed -- every pair can always try Protecting one of
+                # itself -- but UNLIKE the original always-races-every-pair
+                # design, this is scoped to `chosen_outcome == "loss"`
+                # specifically: `_JOINT_OUTCOME_RANK`'s own floor means a
+                # "sweep" baseline can never be improved on at all, and
+                # measured directly (a real --pool-size 16 search went from
+                # ~220s to timing out past 250s once this was added
+                # unconditionally) two more full `_joint_race` calls on
+                # EVERY pair -- own-Tailwind's setter gate makes IT a no-op
+                # for most pairs, this had no equivalent gate at all -- is
+                # real, unaffordable cost for a "no_ko"/"out_trade" pair
+                # that isn't the loss this feature exists to catch.
+                if chosen_outcome != "loss":
+                    own_protect_used = False
+                    own_protect_outcome = chosen_outcome
+                else:
+                    own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log = _joint_race(
+                        combatants, moves_by_role, typechart, weather, turns,
+                        first_turn_protected_role="C", terrain=terrain,
+                        worst_case_targeting=worst_case_targeting)
+                    own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log = _joint_race(
+                        combatants, moves_by_role, typechart, weather, turns,
+                        first_turn_protected_role="P", terrain=terrain,
+                        worst_case_targeting=worst_case_targeting)
+                    (own_protect_outcome, own_protect_turns_used,
+                     own_protect_hp, own_protect_log) = min(
+                        ((own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log),
+                         (own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log)),
+                        key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                    own_protect_used = (_JOINT_OUTCOME_RANK[own_protect_outcome] <
+                                        _JOINT_OUTCOME_RANK[chosen_outcome])
+                    if own_protect_used:
+                        chosen_outcome, chosen_hp = own_protect_outcome, own_protect_hp
+                        chosen_turns_used, chosen_log = own_protect_turns_used, own_protect_log
                 # TRICK ROOM (see docstring) -- chained AFTER both Tailwind
                 # checks, same pessimistic `max`-by-rank shape as the
                 # enemy-Tailwind check above, but against `chosen_outcome`

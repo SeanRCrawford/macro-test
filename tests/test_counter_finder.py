@@ -1796,9 +1796,15 @@ class TestOwnProtectAsAMatchingAnswer(unittest.TestCase):
     `protect_safe`), now add the OPTIMISTIC own-side mirror" shape, applied
     to Protect instead of Tailwind. Unlike Tailwind, no "does a real setter
     exist" gate is needed -- every pair can always try Protecting one of
-    itself turn 1, so `_pair_vs_targets` always races both `first_turn_
-    protected_role="C"` and `="P"` and keeps whichever (optimistic `min` by
-    `_JOINT_OUTCOME_RANK`) beats the baseline.
+    itself turn 1 -- but scoped to a raw "loss" baseline specifically
+    ("does protecting turn a LOSS into a win", the user's own example),
+    not run unconditionally on every pair the way it first shipped: two
+    more full `_joint_race` calls per pair with no setter-existence gate
+    to make it a no-op most of the time (own-Tailwind's own gate does)
+    measurably pushed a real large pool search over its wall-clock budget.
+    `_pair_vs_targets` races both `first_turn_protected_role="C"` and
+    `="P"` only when the baseline is a raw "loss", and keeps whichever
+    (optimistic `min` by `_JOINT_OUTCOME_RANK`) beats it.
 
     Real, verified fixture, found by search (not hand-derived) over real
     usage-default sets: Alakazam (Focus Sash, Protect/Psychic/Speed Swap/
@@ -1885,6 +1891,27 @@ class TestOwnProtectAsAMatchingAnswer(unittest.TestCase):
         turn1 = log[0]
         targets_hit = {tgt for _role, tgt, _h in turn1}
         self.assertNotIn("C", targets_hit)
+
+    def test_scoped_to_a_loss_baseline_not_run_on_a_no_ko_or_better_pair(self):
+        """The performance-driven narrowing: `own_protect_outcome` must
+        equal `chosen_outcome` untouched (never re-raced) whenever the
+        baseline isn't a raw "loss" -- reuses `TestOwnTailwindAsAMatching
+        Answer`'s own real, verified "no_ko" fixture (Talonflame + Kingambit
+        vs Sableye + Arcanine-Hisui, `test_our_own_tailwind_is_not_forced_
+        when_the_baseline_is_already_fine`'s own confirmed no_ko outcome)."""
+        W = world()
+        merged, moves, natures = W["merged"], W["moves"], W["natures"]
+        typechart = W["typechart"]
+        _i1, _i2, detail, _summary = cf.deep_dive(
+            "Talonflame", "Kingambit", ["Sableye", "Arcanine-Hisui"], merged,
+            moves, natures, typechart, turns=2,
+            item_overrides={"Talonflame": "Focus Sash", "Kingambit": "Life Orb"},
+            move_overrides={"Talonflame": ["Tailwind", "Brave Bird"],
+                           "Kingambit": ["Kowtow Cleave", "Sucker Punch"]})
+        d = detail[("Sableye", "Arcanine-Hisui")]
+        self.assertEqual(d["outcome"], "no_ko")
+        self.assertFalse(d["own_protect_used"])
+        self.assertEqual(d["own_protect_outcome"], d["outcome"])
 
 
 class TestTailwindFocusPool(unittest.TestCase):
