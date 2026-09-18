@@ -8682,6 +8682,46 @@ class TestIntimidateInTheJointRace(unittest.TestCase):
                      "E2": cf._build("Sinistcha", merged, natures)}
         self.assertEqual(cf._intimidate_mult_by_role(combatants), {})
 
+    def test_a_mega_that_only_has_intimidate_pre_evolution_still_intimidates(self):
+        """"Mega Salamence has intimidate in base form, so it intimidates
+        before mega evolving" -- base Salamence is Intimidate, Mega
+        Salamence is Aerilate, but real Intimidate fires at switch-in,
+        before that turn's own Mega Evolution. `_build`'s mega-projection
+        already fast-forwards straight to Aerilate for everything else
+        this module computes, but the opposing side must still take the
+        real -1 Atk drop from Salamence's own (pre-evolution) Intimidate."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        salamence = cf._build("Mega Salamence", merged, natures)
+        self.assertEqual(salamence.ability, "Aerilate")
+        self.assertEqual(salamence.pre_mega_ability, "Intimidate")
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)  # ordinary ability
+        e2 = cf._build("Sinistcha", merged, natures)
+        mult = cf._intimidate_mult_by_role(
+            {"C": salamence, "P": partner, "E1": e1, "E2": e2})
+        self.assertEqual(mult.get("E1"), {"physical": 2 / 3})
+        self.assertEqual(mult.get("E2"), {"physical": 2 / 3})
+
+    def test_a_mega_that_only_gains_contrary_on_evolving_still_takes_the_real_drop(self):
+        """"Staraptor only gains contrary after mega evolving, so enemy
+        intimidate reduces its attack before it mega evolves" -- base
+        Staraptor is Intimidate, Mega Staraptor is Contrary. An opposing
+        Intimidate holder's stat drop resolves before OUR OWN Mega
+        Evolution too, so a Staraptor this module has already fast-
+        forwarded to its mega form must still take the real -1 Atk drop,
+        not have it inverted into a Contrary +1 boost."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        staraptor = cf._build("Mega Staraptor", merged, natures)
+        self.assertEqual(staraptor.ability, "Contrary")
+        self.assertEqual(staraptor.pre_mega_ability, "Intimidate")
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)
+        e1.ability = "Intimidate"
+        e2 = cf._build("Sinistcha", merged, natures)
+        mult = cf._intimidate_mult_by_role(
+            {"C": staraptor, "P": partner, "E1": e1, "E2": e2})
+        self.assertEqual(mult.get("C"), {"physical": 2 / 3})
+
 
 class TestContraryDefenseBoostInTheJointRace(unittest.TestCase):
     """"Mega Staraptor's Contrary meaning Close Combat boosts its def and
@@ -9551,28 +9591,41 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
         point (the numbers matched the user's stale usage-default bug
         report -- Close Combat 142-155-167% -- proving the OLD behaviour
         really was usage-default stats, not the user's real ones) is now
-        structurally moot: Kingambit and Mega Staraptor are both real
-        default_sets.txt-pinned species, so their own real EVs/Nature/item
-        already supply the DEFAULT (`_build_forms`' own baseline) with no
-        explicit override needed at all -- there is no usage-default
-        fallback left for this "no overrides" call to fall back to. Its
-        real current number (verified directly by running this exact dive)
-        is now close to `test_with_overrides_uses_the_real_stats`' own
-        real-stat range, not the old stale one -- confirming the NEW
-        current reality (default_sets.txt supplies real stats even with no
-        caller-given override) rather than the old bug."""
+        structurally moot twice over: Kingambit and Mega Staraptor are both
+        real default_sets.txt-pinned species, so their own real EVs/Nature/
+        item already supply the DEFAULT (`_build_forms`' own baseline) with
+        no explicit override needed -- AND, since the Intimidate/mega-
+        evolution-timing fix (a real opening-turn Intimidate now correctly
+        resolves against a combatant's PRE-mega ability, not this module's
+        own upfront mega projection -- see `_ability_at_switch_in`), Mega
+        Metagross's Clear Body correctly shields it from Mega Staraptor's
+        own real Intimidate, so Mega Metagross's already-available Psychic
+        Fangs is now a genuine guaranteed KO on turn 1 -- making "Hydreigon
+        Protects while Metagross finishes Staraptor" a real, strictly
+        better-scoring line than trading hits. Mega Staraptor now dies
+        before ever landing Close Combat, so this test checks Psychic
+        Fangs (the move that DOES appear turn 1) instead."""
         log = self._first_log(self._dive())
         t1 = log[0]
-        close_combat = next(h for _r, _t, h in t1 if h.move_name == "Close Combat")
-        self.assertAlmostEqual(close_combat.lo, 1.20, delta=0.02)
-        self.assertAlmostEqual(close_combat.hi, 1.41, delta=0.02)
+        psychic_fangs = next(h for _r, _t, h in t1 if h.move_name == "Psychic Fangs")
+        self.assertAlmostEqual(psychic_fangs.lo, 1.11, delta=0.02)
+        self.assertAlmostEqual(psychic_fangs.hi, 1.31, delta=0.02)
 
     def test_with_overrides_uses_the_real_stats(self):
         """Full overrides given: the damage numbers change to match the
         REAL EVs/Nature (independently computed via `_build_form`'s own
         stat formula, same as `TestBuildFormsRespectsCustomSets`), and
         Kingambit's actual Low Kick (never in its usage-derived top 4)
-        is now a real, available option."""
+        is now a real, available option.
+
+        Mega Staraptor no longer survives to use Close Combat at all (see
+        `test_without_overrides_reproduces_the_stale_bug_report`'s own
+        updated docstring for why) -- Psychic Fangs, the move that DOES
+        land turn 1, still shows the override taking effect: Metagross's
+        own real Adamant/32 Atk spread hits noticeably HARDER than the
+        usage-default one, outweighing Mega Staraptor's real bulk (29 HP/
+        4 SpD) -- confirmed against the no-overrides case's own real,
+        verified range above."""
         dive = self._dive(evs_overrides=self.evs_overrides,
                           nature_overrides=self.nature_overrides,
                           ability_overrides=self.ability_overrides,
@@ -9580,11 +9633,9 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
                           enemy_move_overrides=self.enemy_move_overrides)
         log = self._first_log(dive)
         t1 = log[0]
-        close_combat = next(h for _r, _t, h in t1 if h.move_name == "Close Combat")
-        # Real Mega Staraptor (29 HP/1 Atk/4 SpD/32 Spe Jolly) hits noticeably
-        # softer than the usage-default spread the stale test above used.
-        self.assertLess(close_combat.hi, 1.5)
-        self.assertGreater(close_combat.hi, 1.35)
+        psychic_fangs = next(h for _r, _t, h in t1 if h.move_name == "Psychic Fangs")
+        self.assertAlmostEqual(psychic_fangs.lo, 1.20, delta=0.02)
+        self.assertAlmostEqual(psychic_fangs.hi, 1.41, delta=0.02)
         kingambit_moves = dive["sets"]  # our own sets only carry item/moves
         # Kingambit is the enemy, not in `sets` -- confirm via the built
         # enemy forms directly instead.
