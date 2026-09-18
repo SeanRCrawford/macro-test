@@ -21,7 +21,7 @@ TEAM = ["Arcanine-Hisui", "Hydreigon", "Gallade", "Gholdengo",
 
 def app(team=None, sets=None):
     from streamlit.testing.v1 import AppTest
-    at = AppTest.from_file(APP, default_timeout=250)
+    at = AppTest.from_file(APP, default_timeout=500)
     at.session_state["team"] = list(team if team is not None else TEAM)
     at.session_state["sets"] = dict(sets) if sets is not None else {}
     return at.run()
@@ -33,7 +33,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_five_modes_are_offered(self):
+    def test_the_six_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
@@ -42,7 +42,8 @@ class TestCounterTableTabExists(unittest.TestCase):
                           "Multi-bring4 (several enemy rosters)",
                           "Joint pair search",
                           "2-2-2 teambuilding",
-                          "Coverage groups"})
+                          "Coverage groups",
+                          "Round-robin (saved teams only)"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
         at = app()
@@ -265,7 +266,7 @@ class TestForceIncludeAcrossViews(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any(m.key == "ct_b4_include" for m in at.multiselect))
         vs_sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
-        vs_sb.set_value("Rain").run()
+        vs_sb.set_value("Golisopod Rain").run()
         # A real, low-Score species that a small top-Score pool would
         # otherwise never include.
         forced_name = "Ariados"
@@ -285,7 +286,7 @@ class TestForceIncludeAcrossViews(unittest.TestCase):
         at = [m for m in at.multiselect if m.key == "ct_mb4_include"][0].set_value(
             [forced_name]).run()
         at = [m for m in at.multiselect if m.key == "ct_mb4_vs"][0].set_value(
-            ["Rain"]).run()
+            ["Golisopod Rain"]).run()
         at = [b for b in at.button if b.key == "ct_mb4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
 
@@ -932,6 +933,29 @@ class TestFullDeepDiveAllOfOur6VsOneEnemy(unittest.TestCase):
         caption = next(c.value for c in at.caption if c.value.startswith("Set:"))
         self.assertIn("Rocky Helmet", caption)
 
+    def test_its_sets_match_the_same_teams_row_in_the_vs_all_teams_dive(self):
+        """Regression: without `item_resolution_enemies`, this single-
+        enemy dive independently re-searched `our6`'s item/moveset against
+        JUST the one selected enemy roster, while the "vs ALL saved teams"
+        dive (below) searches the same `our6` against the union of every
+        saved team -- two different optimisation targets producing two
+        different sets, making the single-team dive look artificially
+        better than the identical core's own multi-enemy dive shows for
+        it. Both dives must now agree on `our6`'s `sets` for the SAME
+        selected enemy team."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        one_sets = at.session_state["ctb4_dd_all6_one_dive"]["sets"]
+
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        all_sets = at.session_state["ctb4_dd_all6_allteams_dive"]["sets"]
+
+        self.assertEqual(one_sets, all_sets)
+
 
 class TestFullDeepDiveAllOfOur6VsAllEnemyTeams(unittest.TestCase):
     """"and also full deep dive versus all enemy teams with my loaded
@@ -1041,6 +1065,292 @@ class TestBestBring4FromDeepDive(unittest.TestCase):
         expected_caption = (f"Lead: {' + '.join(lb['lead'])}  |  "
                             f"Back: {' + '.join(lb['backup'])}")
         self.assertTrue(any(c.value == expected_caption for c in at.caption))
+
+
+class TestWinConditionsSection(unittest.TestCase):
+    """"In bring4, I want to be able to identify win conditions -- perhaps
+    Metagross + Hydreigon is the only pair that beats Golisopod, or
+    Hydreigon is the only pokemon that beats Golisopod. I need to see
+    what pokemon I need to preserve to guarantee a win against certain
+    pokemon in an endgame." -- `bring4_win_conditions`, surfaced as a
+    "Win conditions" table wherever a specific bring-4 vs one enemy
+    roster is already shown."""
+
+    def _win_conditions_dfs(self, at):
+        return [d.value for d in at.dataframe
+               if list(d.value.columns) == ["Enemy", "Preserve", "Caveats"]]
+
+    def test_stage2_best_bring4_shows_win_conditions(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Win conditions" in m.value for m in at.markdown))
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from counter_finder import bring4_win_conditions
+        expected = bring4_win_conditions(bring4_rows[0])
+        dfs = self._win_conditions_dfs(at)
+        self.assertTrue(dfs, "expected an Enemy/Preserve win-conditions table")
+        shown = dict(zip(dfs[0]["Enemy"], dfs[0]["Preserve"]))
+        shown_caveats = dict(zip(dfs[0]["Enemy"], dfs[0]["Caveats"]))
+        self.assertEqual(set(shown), set(expected))
+        for enemy, info in expected.items():
+            if info["uncovered"]:
+                self.assertIn("none", shown[enemy])
+            elif info["safe_members"]:
+                for m in info["safe_members"]:
+                    self.assertIn(m, shown[enemy])
+            else:
+                for n1, n2 in info["safe_pairs"]:
+                    self.assertIn(n1, shown[enemy])
+                    self.assertIn(n2, shown[enemy])
+            self.assertEqual("Tailwind" in shown_caveats[enemy], info["tailwind_risk"])
+            self.assertEqual("Protect" in shown_caveats[enemy], info["protect_risk"])
+
+    def test_picked_bring4_deep_dive_shows_win_conditions(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Win conditions" in m.value for m in at.markdown))
+        self.assertTrue(self._win_conditions_dfs(at))
+
+    def test_all6_one_team_deep_dive_shows_win_conditions_for_its_best_bring4(self):
+        at = app()  # default TEAM has 6 members
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dive = at.session_state["ctb4_dd_all6_one_dive"]
+        vs_name = [s for s in at.selectbox if s.key == "ct_b4_vs"][0].value
+
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import bring4_from_deep_dive, bring4_win_conditions
+        W = load_world()
+        vs_roster = list(W["teams"][vs_name])
+        best = bring4_from_deep_dive(TEAM, dive, vs_roster)[0]
+        expected = bring4_win_conditions(best)
+        dfs = self._win_conditions_dfs(at)
+        self.assertTrue(dfs)
+        self.assertEqual(set(dfs[-1]["Enemy"]), set(expected))
+
+    def test_the_vs_all_enemy_teams_dive_shows_no_win_conditions_table(self):
+        """Win conditions only make sense against ONE known enemy roster
+        -- `_render_core_deep_dive`'s multi-roster branch (`target_name_
+        lists` with more than one entry) must not attempt it."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any("Win conditions" in m.value for m in at.markdown))
+
+
+class TestHitCountMatrixSection(unittest.TestCase):
+    """"A prematch view of my win conditions vs theirs (i.e., once Arcanine
+    is gone, Scizor easily beats X in endgame given it 2HKOs enemy but
+    takes 5HKOs from enemy and so on)" -- a "1v1 hit-count matrix" table
+    (`prematch_win_conditions`'s own 1v1 half) rendered right alongside
+    the existing "Win conditions" table, wherever a specific bring-4 vs
+    one enemy roster is already shown."""
+
+    def _matrix_dfs(self, at):
+        return [d.value for d in at.dataframe if list(d.value.columns[:1]) == ["Ours"]]
+
+    def test_stage2_best_bring4_shows_the_hit_count_matrix(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("1v1 hit-count matrix" in m.value for m in at.markdown))
+        dfs = self._matrix_dfs(at)
+        self.assertTrue(dfs, "expected an Ours/<enemy...> hit-count table")
+        bring4_rows = at.session_state["ct_b4_bring4_rows"]
+        self.assertEqual(set(dfs[0]["Ours"]), set(bring4_rows[0]["bring4"]))
+        for cell in dfs[0].iloc[0, 1:]:
+            self.assertRegex(str(cell),
+                             r"^(\d+HKO|--) / (\d+HKO|--) [✅❌➖]( \(chip \d+%\))?$")
+
+    def test_picked_bring4_deep_dive_shows_the_hit_count_matrix(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4_dd_")
+                     and b.key.endswith("_go") and "all6" not in b.key]
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("1v1 hit-count matrix" in m.value for m in at.markdown))
+        self.assertTrue(self._matrix_dfs(at))
+
+    def test_all6_one_team_deep_dive_shows_the_hit_count_matrix(self):
+        at = app()  # default TEAM has 6 members
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_one_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = self._matrix_dfs(at)
+        self.assertTrue(dfs)
+
+    def test_the_vs_all_enemy_teams_dive_shows_no_hit_count_matrix(self):
+        """Same rule as the Win conditions table -- only makes sense
+        against ONE known enemy roster."""
+        at = app()
+        at = [b for b in at.button
+             if b.key == "ctb4_dd_all6_allteams_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertFalse(any("1v1 hit-count matrix" in m.value for m in at.markdown))
+
+    def test_stage2_best_bring4_can_show_a_crucial_to_preserve_table(self):
+        """"Individual pokemon can be crucial win conditions to preserve
+        for a given match" -- a "Crucial to preserve" table with a
+        Preserve/Sole answer to shape, rendered exactly when the tab's own
+        bring-4 result actually has a must_preserve member (never rendered
+        empty, never silently skipped when there's something to show)."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        crucial_dfs = [d.value for d in at.dataframe
+                      if list(d.value.columns) == ["Preserve", "Sole answer to"]]
+        has_crucial_markdown = any("Crucial to preserve" in m.value for m in at.markdown)
+        self.assertEqual(bool(crucial_dfs), has_crucial_markdown)
+        for df in crucial_dfs:
+            self.assertFalse(df.empty, "a rendered crucial table must not be empty")
+
+
+class TestGameplanCache(unittest.TestCase):
+    """"If a counter table analysis has been loaded, show what the 2v2
+    calculator saw as the optimal play sequence" -- a bring-4 search
+    caches every pair's own already-raced `detail[(e1, e2)]` (log/outcome/
+    turns_used) into `st.session_state["ct_gameplans"]`, keyed by
+    `(frozenset(our_pair), frozenset(enemy_pair))` so the Battle Simulator
+    can look it up later regardless of role order."""
+
+    def test_bring4_search_populates_the_gameplan_cache(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        self.assertIn("ct_gameplans", at.session_state)
+        cache = at.session_state["ct_gameplans"]
+        self.assertTrue(cache, "expected at least one cached gameplan")
+        first_pr = pair_rows[0]
+        (e1, e2), d = next(iter(first_pr["detail"].items()))
+        key = (frozenset(first_pr["pair"]), frozenset((e1, e2)))
+        self.assertIn(key, cache)
+        entry = cache[key]
+        self.assertEqual(entry["outcome"], d["outcome"])
+        self.assertEqual(entry["log"], d["log"])
+        self.assertEqual(entry["source"], "Bring-4 search")
+
+
+class TestRoundRobinMode(unittest.TestCase):
+    """"Give me an option in the streamlit app counter table ... to only
+    run all the saved teams vs the other teams (including themself),
+    rather than creating teams" -- a "Round-robin (saved teams only)" mode:
+    a team multiselect (default all saved teams), a Run button, and a
+    sequential per-matchup render (mirrors included, no reversed
+    duplicate) once run."""
+
+    def test_mode_shows_team_multiselect_and_run_button(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Round-robin (saved teams only)").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(m.key == "ct_rr_teams" for m in at.multiselect))
+        self.assertTrue(any(b.key == "ct_rr_go" for b in at.button))
+
+    def test_running_it_on_two_teams_renders_all_five_matchups(self):
+        """Two teams: the mirrors A-A/B-B (one direction each), the non-
+        mirror pair raced BOTH directions (A-B and B-A -- "race both
+        directions" so every team's own summary reflects its own real
+        performance), plus the "best4 vs best4" head-to-head layer for
+        that same non-mirror pair, rendered in its own section below."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Round-robin (saved teams only)").run()
+        [s for s in at.slider if s.key == "ct_turns"][0].set_value(1).run()
+        [m for m in at.multiselect if m.key == "ct_rr_teams"][0].set_value(
+            two_names).run()
+        at = [b for b in at.button if b.key == "ct_rr_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        a, b = two_names
+        headings = {m.value for m in at.markdown if m.value.startswith("### ")}
+        self.assertIn(f"### {a} vs {a}", headings)
+        self.assertIn(f"### {a} vs {b}", headings)
+        self.assertIn(f"### {b} vs {a}", headings)
+        self.assertIn(f"### {a} best-4 vs {b} best-4", headings)
+        self.assertIn(f"### {b} vs {b}", headings)
+        results = at.session_state["ct_rr_results"]
+        self.assertEqual(len(results), 5)
+
+    def test_running_it_also_populates_the_gameplan_cache(self):
+        """The same `_cache_gameplans` hook every other Counter Table
+        search wires in -- a round-robin result should feed the Battle
+        Simulator's "gameplan" panel too, tagged with its own source
+        label."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Round-robin (saved teams only)").run()
+        [s for s in at.slider if s.key == "ct_turns"][0].set_value(1).run()
+        [m for m in at.multiselect if m.key == "ct_rr_teams"][0].set_value(
+            two_names).run()
+        at = [b for b in at.button if b.key == "ct_rr_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertIn("ct_gameplans", at.session_state)
+        cache = at.session_state["ct_gameplans"]
+        self.assertTrue(any(v["source"].startswith("Round-robin:")
+                            for v in cache.values()))
+
+
+class TestTrickRoomOptIn(unittest.TestCase):
+    """"avoiding enemy tailwind and trick room may be key for a matchup
+    swinging from a win to a clear loss ... Add it now as an option" --
+    a new opt-in "Also check enemy Trick Room" checkbox, unchecked by
+    default (no behavior change unless a user explicitly turns it on),
+    threaded into `bring4_search`/`core_deep_dive` as `check_trick_room`
+    and read back out via `bring4_win_conditions`'s own `trick_room_risk`
+    into the Win conditions table's Caveats column."""
+
+    def test_stage2_offers_the_checkbox_unchecked_by_default(self):
+        at = app()
+        cb = [c for c in at.checkbox if c.key == "ct_b4_check_tr"]
+        self.assertTrue(cb, "expected the Trick Room opt-in checkbox in "
+                        "Bring-4 (one enemy roster) mode")
+        self.assertFalse(cb[0].value)
+
+    def test_checking_it_threads_check_trick_room_into_the_search(self):
+        at = app()
+        [c for c in at.checkbox if c.key == "ct_b4_check_tr"][0].set_value(True).run()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        self.assertTrue(pair_rows)
+        first_detail = list(pair_rows[0]["detail"].values())[0]
+        self.assertIn("trick_room_safe", first_detail)
+
+    def test_leaving_it_unchecked_never_adds_trick_room_fields(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        first_detail = list(pair_rows[0]["detail"].values())[0]
+        self.assertNotIn("trick_room_safe", first_detail)
+
+    def test_picked_bring4_deep_dive_offers_the_checkbox_too(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        dd_checks = [c for c in at.checkbox if c.key and c.key.startswith("ctb4_dd_")
+                    and c.key.endswith("_check_tr") and "all6" not in c.key]
+        self.assertTrue(dd_checks, "expected the Trick Room opt-in checkbox "
+                        "on the picked bring-4's own deep dive")
+        self.assertFalse(dd_checks[0].value)
 
 
 class TestPairRowsDfTotalsRow(unittest.TestCase):
@@ -1724,7 +2034,7 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
 
     def test_dropdown_defaults_to_none_with_the_enemy_roster_as_options(self):
         at = app()
-        sb = [s for s in at.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        sb = [s for s in at.selectbox if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
         self.assertEqual(sb.value, "(none)")
         _vs_name, vs_roster = self._vs_roster(at)
         self.assertEqual(sb.options, ["(none)"] + vs_roster)
@@ -1733,7 +2043,7 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
         at = app()
         _vs_name, vs_roster = self._vs_roster(at)
         scarfed = vs_roster[0]
-        sb = [s for s in at.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        sb = [s for s in at.selectbox if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
         at = sb.set_value(scarfed).run()
         self.assertFalse(at.exception, list(at.exception))
         at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
@@ -1770,7 +2080,7 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
         baseline = at.session_state["ct_b4_pair_rows"]
 
         at2 = app()
-        sb = [s for s in at2.selectbox if s.key == "ct_b4_enemy_scarf"][0]
+        sb = [s for s in at2.selectbox if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
         at2 = sb.set_value("(none)").run()
         at2 = [b for b in at2.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at2.exception, list(at2.exception))
@@ -1778,6 +2088,137 @@ class TestEnemyChoiceScarfDropdown(unittest.TestCase):
         self.assertEqual([r["pairs_total"] for r in baseline],
                          [r["pairs_total"] for r in touched])
         self.assertEqual([r["pair"] for r in baseline], [r["pair"] for r in touched])
+
+
+class TestEnemyChoiceScarfDropdownRealSets(unittest.TestCase):
+    """"The enemy choice scarf holder dropdown should use the actual set if
+    it comes from a paste or an existing team (which specifies the items,
+    such as Basculegion has the choice scarf), otherwise it should default
+    to none, or give a suggestion if a member(s) has high choice scarf
+    usage." -- refines the plain dropdown above: auto-select a REAL known
+    Scarf holder, suggest a high-usage one only when no real holder is
+    known, and never clobber a real known moveset with the derived one."""
+
+    PASTE_WITH_REAL_SCARF = (
+        "Basculegion @ Choice Scarf\nAbility: Adaptability\n"
+        "EVs: 4 HP / 252 Atk / 252 Spe\nJolly Nature\n"
+        "- Last Respects\n- Aqua Jet\n- Wave Crash\n- Flip Turn\n"
+        "\n"
+        "Whimsicott @ Focus Sash\nAbility: Prankster\n"
+        "EVs: 4 HP / 252 SpA / 252 Spe\nTimid Nature\n"
+        "- Tailwind\n- Moonblast\n- Encore\n- Protect")
+
+    # Basculegion no longer works for this: data/default_sets.txt now pins
+    # its real default set (Life Orb, no Choice Scarf), so its own top
+    # recorded item is no longer Choice Scarf at all. Staraptor's BASE row
+    # is untouched by that file (its pinned entry lists item "Staraptite",
+    # a Mega stone, so `apply_default_sets` bakes it onto the "Mega
+    # Staraptor" row instead -- see that function's own "Item/nature/EVs/
+    # moves apply directly to whichever row `name` resolves to" comment) --
+    # it still shows its real, very high (~99%) Choice Scarf usage here.
+    PLAIN_SPECIES_LIST = "Staraptor / Whimsicott"
+
+    def _to_paste_mode(self, at):
+        vs = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        at = vs.set_value("\U0001f4cb Paste a pokepaste").run()
+        return at
+
+    def _paste(self, at, text):
+        ta = [t for t in at.text_area if t.key == "ct_b4_vs_paste"][0]
+        at = ta.set_value(text).run()
+        return at
+
+    def _scarf_selectbox(self, at):
+        return [s for s in at.selectbox
+                if s.key and s.key.startswith("ct_b4_enemy_scarf_")][0]
+
+    def test_a_real_known_scarf_holder_is_auto_selected(self):
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PASTE_WITH_REAL_SCARF)
+        self.assertFalse(at.exception, list(at.exception))
+        sb = self._scarf_selectbox(at)
+        self.assertEqual(sb.value, "Basculegion")
+
+    def test_a_real_known_moveset_is_never_overwritten_by_the_derived_one(self):
+        """Basculegion's real recorded 4th move here is Flip Turn (not the
+        Protect its real set actually would carry, and not whatever
+        `choice_scarf_enemy_moveset` would derive) -- if the derived
+        moveset silently replaced the real one, Flip Turn would never show
+        up in any race log for Basculegion's role."""
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PASTE_WITH_REAL_SCARF)
+        self.assertFalse(at.exception, list(at.exception))
+        sb = self._scarf_selectbox(at)
+        self.assertEqual(sb.value, "Basculegion")
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_rows = at.session_state["ct_b4_pair_rows"]
+        self.assertTrue(pair_rows)
+        seen_flip_turn = False
+        for row in pair_rows:
+            for (e1, e2), d in row["detail"].items():
+                scarfed_role = ("E1" if e1 == "Basculegion" else
+                               "E2" if e2 == "Basculegion" else None)
+                if scarfed_role is None:
+                    continue
+                for turn_hits in d["log"]:
+                    for role, _tgt, h in turn_hits:
+                        if role == scarfed_role and h.move_name == "Flip Turn":
+                            seen_flip_turn = True
+        self.assertTrue(seen_flip_turn, "Basculegion's real moveset (with "
+                        "Flip Turn) was never observed -- looks like it "
+                        "got overwritten by the derived usage-based one")
+
+    def test_no_suggestion_when_a_known_scarf_holder_already_exists(self):
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PASTE_WITH_REAL_SCARF)
+        self.assertFalse(at.exception, list(at.exception))
+        captions = [c.value for c in at.caption]
+        self.assertFalse(any("commonly runs Choice Scarf" in c for c in captions))
+
+    def test_a_suggestion_is_shown_when_no_known_set_but_high_scarf_usage(self):
+        at = app()
+        at = self._to_paste_mode(at)
+        at = self._paste(at, self.PLAIN_SPECIES_LIST)
+        self.assertFalse(at.exception, list(at.exception))
+        sb = self._scarf_selectbox(at)
+        self.assertEqual(sb.value, "(none)")
+        captions = [c.value for c in at.caption]
+        matches = [c for c in captions
+                  if "Staraptor" in c and "commonly runs Choice Scarf" in c]
+        self.assertTrue(matches, f"expected a Staraptor Choice Scarf "
+                        f"suggestion caption, got: {captions}")
+
+
+class TestItemCapsWiredIntoPoolSearches(unittest.TestCase):
+    """"so `src/app.py` can call the SAME function on whatever it
+    displays" -- `_run_multi_bring4_search` (shared by Bring-4's own
+    "search a pool" mode, Multi-bring4, and Joint Pair Search's "search
+    best team") must correct its rows through the exact same
+    `counter_finder._apply_item_caps_to_top_rows` the CLI's --multi-bring4
+    uses, not a separate, drifting copy -- and BY DEFAULT, no flag needed,
+    same as the CLI."""
+
+    def test_bring4_pool_search_applies_the_default_item_caps(self):
+        import unittest.mock as mock
+        import counter_finder as cf
+        with mock.patch.object(cf, "_apply_item_caps_to_top_rows",
+                              wraps=cf._apply_item_caps_to_top_rows) as spy:
+            at = app(team=[])
+            sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+            at = sb.set_value("\U0001f50d Search a pool for the best team").run()
+            at = [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(10).run()
+            at = [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+            at = [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+            at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.kwargs.get("item_caps"),
+                         {"Focus Sash": cf.DEFAULT_MAX_FOCUS_SASH,
+                          "Life Orb": cf.DEFAULT_MAX_LIFE_ORB})
 
 
 if __name__ == "__main__":

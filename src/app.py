@@ -46,7 +46,8 @@ def _data_fingerprint():
     to bump the fingerprint, since `load_teams_csv` below is cached on this
     tuple and adding a new file does not change any of the four sheet paths.
     """
-    files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv"]
+    files = ["mbsmogon.xlsx", "roster.csv", "teams.csv", "preferences.csv",
+             "default_sets.txt"]
     out = []
     for f in files:
         p = species_data.DATA_DIR / f
@@ -67,7 +68,9 @@ def load_all(fingerprint):
     combatants._TEMPLATE_CACHE.clear()
     merged, unresolved, moves, natures, typechart = build_merged_dataset()
     dups = getattr(build_merged_dataset, "last_duplicates", {}) or {}
-    return merged, unresolved, moves, natures, typechart, dups
+    default_set_issues = getattr(build_merged_dataset, "last_default_set_issues",
+                                 ([], [])) or ([], [])
+    return merged, unresolved, moves, natures, typechart, dups, default_set_issues
 
 
 @st.cache_data
@@ -77,7 +80,9 @@ def load_teams_csv(fingerprint=None, _merged=None):
     return t, meta
 
 
-merged, unresolved, moves, natures, typechart, dups = load_all(_data_fingerprint())
+(merged, unresolved, moves, natures, typechart, dups,
+ default_set_issues) = load_all(_data_fingerprint())
+default_set_incomplete, default_set_unrecognised = default_set_issues
 teams, team_meta = load_teams_csv(_data_fingerprint(), _merged=merged)
 prefs = load_preferences()
 all_names = sorted(merged.keys())
@@ -120,6 +125,15 @@ if hdr2.button("Reload data", help="Re-read mbsmogon.xlsx / roster.csv / teams.c
 if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
+if default_set_incomplete:
+    st.caption(f"Note: data/default_sets.txt has an incomplete set for "
+              f"{', '.join(default_set_incomplete)} (needs item, ability, "
+              f"nature, EVs, AND 4 moves to become that species' new "
+              f"default) -- ignored.")
+if default_set_unrecognised:
+    st.caption(f"Note: data/default_sets.txt names "
+              f"{', '.join(default_set_unrecognised)}, not a species in "
+              f"this dataset -- ignored.")
 
 tab_build, tab_gen, tab_search, tab_counter, tab_battle, tab_vs, tab_sim = st.tabs(
     ["Team Builder", "Generate Team", "Lead / Back Search", "Counter Table",
@@ -300,7 +314,26 @@ def _load_team_text(text, merged):
     return pool, sets, None
 
 
-def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
+def _is_raw_pokepaste_text(text):
+    """True unless `text` is one of `_load_team_text`'s other two formats
+    (a base64 teamsheet TOKEN or team .json) -- `_save_pasted_team` writes
+    its argument verbatim to a data/my_teams/*.txt file that `species_data.
+    load_teams` only ever re-parses as raw Showdown-export pokepaste text,
+    so a caller offering "Save to My Teams" needs to know which format it
+    actually has before offering a save that wouldn't load back."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    from team_sheet import TEAMSHEET_TOKEN_PREFIX
+    if text.startswith(TEAMSHEET_TOKEN_PREFIX):
+        return False
+    if text[0] in "{[":
+        return False
+    return True
+
+
+def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None,
+                  default_source=None):
     """Where OUR six come from, offered the same way everywhere.
 
     Every view that puts our team against someone else's needs this, and each
@@ -316,20 +349,36 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
     Team Builder's -- correct for the loaded team and simply wrong for the
     other sources, where it applied one team's items, moves and abilities to
     a different team's Pokemon.
+
+    `default_source`: which of `options` a caller wants preselected, when a
+    real choice actually exists -- `None` (every caller except the Battle
+    Simulator) keeps the old "My loaded team" default whenever the Team
+    Builder tab has anything loaded. "When I play a team in the Battle
+    Simulator, it doesn't seem to actually use the sets defined in
+    team.txt" turned out to be exactly this default: the Simulator's whole
+    point is playing against a specific NAMED team, not whatever the Team
+    Builder tab happens to currently hold, so it passes "A saved team"
+    here -- but only actually changes the preselection when a saved team
+    exists to pick (falls back to the old logic otherwise, so "no saved
+    teams yet" still lands somewhere useful rather than an empty list).
     """
     loaded = get_state_team()
     options = ["My loaded team", "A saved team", "Paste a pokepaste", "Any Pokemon"]
     default = 0 if loaded else 1
+    if default_source is not None and default_source in options and teams:
+        default = options.index(default_source)
     source = st.radio("Our side", options, index=default, horizontal=True,
                       key=f"{key_prefix}_side_source",
                       help="'My loaded team' is whatever the Team Builder tab "
                            "currently holds, WITH the items, moves, abilities "
                            "and stat points you set there. 'A saved team' is "
                            "anything in data/teams or data/my_teams. 'Paste a "
-                           "pokepaste' reads a Showdown export straight from "
-                           "the clipboard, and can save it to data/my_teams "
-                           "for next time. 'Any Pokemon' opens the whole "
-                           "dataset for a one-off matchup.")
+                           "pokepaste' also reads a search's own generated "
+                           "teamsheet (base64 token or .json, from the xlsx "
+                           "export or --teamsheet-json), not just a raw "
+                           "Showdown export -- and can save either to data/"
+                           "my_teams for next time. 'Any Pokemon' opens the "
+                           "whole dataset for a one-off matchup.")
     if source == "My loaded team":
         if not loaded:
             st.warning("No team loaded — pick six in the Team Builder tab, "
@@ -343,19 +392,14 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
         return list(teams[pick]), dict((team_meta or {}).get(pick, {}).get("sets") or {})
     if source == "Paste a pokepaste":
         paste = st.text_area(
-            "Paste Showdown export text here (blank line between each Pokemon)",
+            "Paste a Showdown export, a teamsheet token, or team .json here",
             height=200, key=f"{key_prefix}_our_paste")
         if not paste.strip():
             return [], {}
-        from species_data import custom_team_from_export
-        roster, sets = custom_team_from_export(paste, merged or {})
-        unknown = [n for n in roster if n not in (merged or {})]
-        if unknown:
-            st.error(f"Unrecognised species (check spelling against "
-                     f"mbsmogon.xlsx): {unknown}")
-            return [], {}
-        if not roster:
-            st.error("Couldn't parse any Pokemon out of that paste.")
+        try:
+            roster, sets, _analysis = _load_team_text(paste, merged or {})
+        except ValueError as e:
+            st.error(str(e))
             return [], {}
         st.success(f"Parsed: {', '.join(roster)}")
         with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
@@ -416,37 +460,38 @@ def their_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
         return st.multiselect("Their six", all_names, max_selections=6,
                               key=f"{key_prefix}_foe_manual"), {}
     paste = st.text_area(
-        "Paste Showdown export text here (blank line between each Pokemon)",
+        "Paste a Showdown export, a teamsheet token, or team .json here",
         height=200, key=f"{key_prefix}_foe_paste")
     if not paste.strip():
         return [], {}
-    from species_data import custom_team_from_export
-    roster, sets = custom_team_from_export(paste, merged or {})
-    unknown = [n for n in roster if n not in (merged or {})]
-    if unknown:
-        st.error(f"Unrecognised species (check spelling against "
-                 f"mbsmogon.xlsx): {unknown}")
-        return [], {}
-    if not roster:
-        st.error("Couldn't parse any Pokemon out of that paste.")
+    try:
+        roster, sets, _analysis = _load_team_text(paste, merged or {})
+    except ValueError as e:
+        st.error(str(e))
         return [], {}
     st.success(f"Parsed: {', '.join(roster)}")
     with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
         st.json(sets)
-    save_col, name_col = st.columns([1, 3])
-    team_name = name_col.text_input(
-        "Save as (data/my_teams/<name>.txt)", key=f"{key_prefix}_foe_save_name",
-        label_visibility="collapsed", placeholder="Save as (data/my_teams/<name>.txt)")
-    if save_col.button("Save to My Teams", key=f"{key_prefix}_foe_save_btn"):
-        try:
-            path = _save_pasted_team(paste, team_name or "My Team")
-        except ValueError as e:
-            st.error(str(e))
-        else:
-            st.success(f"Saved to {path.relative_to(species_data.DATA_DIR.parent)} "
-                      f"— pick it from 'A saved team' from now on.")
-            st.cache_data.clear()
-            st.rerun()
+    if _is_raw_pokepaste_text(paste):
+        # data/my_teams/*.txt is only ever re-parsed as raw pokepaste text
+        # (species_data.load_teams -> _load_pasted_teams) -- saving a
+        # teamsheet token or team .json verbatim here would write a file
+        # that fails to load back next time, so the save controls only
+        # offer themselves for the format that round-trips.
+        save_col, name_col = st.columns([1, 3])
+        team_name = name_col.text_input(
+            "Save as (data/my_teams/<name>.txt)", key=f"{key_prefix}_foe_save_name",
+            label_visibility="collapsed", placeholder="Save as (data/my_teams/<name>.txt)")
+        if save_col.button("Save to My Teams", key=f"{key_prefix}_foe_save_btn"):
+            try:
+                path = _save_pasted_team(paste, team_name or "My Team")
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.success(f"Saved to {path.relative_to(species_data.DATA_DIR.parent)} "
+                          f"— pick it from 'A saved team' from now on.")
+                st.cache_data.clear()
+                st.rerun()
     return list(roster), sets
 
 
@@ -492,16 +537,14 @@ def enemy_side_input(key_prefix, teams, team_meta, all_names, merged,
         return list(roster), {}, {}
 
     paste = st.text_area(
-        "Paste Showdown export text here (blank line between each Pokemon)",
+        "Paste a Showdown export, a teamsheet token, or team .json here",
         height=200, key=f"{key_prefix}_foe_paste")
     if not paste.strip():
         return [], {}, {}
-    from species_data import custom_team_from_export
-    roster, sets = custom_team_from_export(paste, merged)
-    unknown = [n for n in roster if n not in merged]
-    if unknown:
-        st.error(f"Unrecognised species (check spelling against "
-                 f"mbsmogon.xlsx): {unknown}")
+    try:
+        roster, sets, _analysis = _load_team_text(paste, merged)
+    except ValueError as e:
+        st.error(str(e))
         return [], {}, {}
     if len(roster) != 6:
         st.error(f"Parsed {len(roster)} Pokemon, need exactly 6.")
@@ -1293,7 +1336,30 @@ def sim_legal_actions(c, side_name, allies, foes, moveset, terrain=None):
     return out
 
 
-def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
+def _sim_move_damage_pcts(battle, c, action):
+    """`~NN%` estimates for each of `action`'s targets, via the same
+    real-engine estimator (`solver.quick_damage_estimate`) `sim_suggest_
+    action`/`sim_hit_count_matrix` already use -- None for a Status move,
+    Protect, or a switch (nothing to estimate). One percentage per target,
+    since a spread move can hit two foes for two different fractions of
+    their (possibly different) max HP."""
+    if action.move is None or action.move.category == "Status" or not action.targets:
+        return None
+    from solver import quick_damage_estimate
+    from projection import projected_field, mega_view
+    field = projected_field(battle)
+    attacker_view = mega_view(battle, c)
+    pcts = []
+    for tgt in action.targets:
+        if tgt.max_hp() <= 0:
+            continue
+        dmg = quick_damage_estimate(attacker_view, tgt, action.move, battle.typechart,
+                                    field, battle=battle)
+        pcts.append(dmg / tgt.max_hp() * 100)
+    return pcts or None
+
+
+def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None, battle=None):
     """`sim_legal_actions`, grouped by move name -- [(move_name,
     [(target_label, Action), ...]), ...], move order preserved.
 
@@ -1303,6 +1369,15 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
     buttons. Target labels are read off each Action's own `.targets`
     (never re-parsed from a display string), so this can't drift from what
     `sim_legal_actions` actually built.
+
+    `battle`: optional -- when passed, appends a `~NN%` damage estimate.
+    A move with exactly one legal target/opt has nothing else displayed
+    for it (the Target dropdown only appears when there's a real choice),
+    so that estimate is appended to the MOVE name itself; a move offering
+    several targets appends it to each target's own label instead, since
+    the percentage differs per target. Either way the returned move name
+    is still exactly what the caller looks the group back up by (`dict
+    (groups)[move_name]`), since both come from this same list.
     """
     groups, order = {}, []
     for _label, action in sim_legal_actions(c, side_name, allies, foes, moveset, terrain=terrain):
@@ -1317,7 +1392,296 @@ def sim_grouped_actions(c, side_name, allies, foes, moveset, terrain=None):
         else:
             tgt_label = mv_name
         groups[mv_name].append((tgt_label, action))
-    return [(name, groups[name]) for name in order]
+
+    def _pct_suffix(pcts):
+        return f" (~{'/'.join(f'{p:.0f}' for p in pcts)}%)"
+
+    out = []
+    for name in order:
+        opts = groups[name]
+        if battle is not None and len(opts) == 1:
+            pcts = _sim_move_damage_pcts(battle, c, opts[0][1])
+            display_name = name + (_pct_suffix(pcts) if pcts else "")
+            out.append((display_name, opts))
+        elif battle is not None:
+            annotated = []
+            for tgt_label, action in opts:
+                pcts = _sim_move_damage_pcts(battle, c, action)
+                annotated.append((tgt_label + (_pct_suffix(pcts) if pcts else ""), action))
+            out.append((name, annotated))
+        else:
+            out.append((name, opts))
+    return out
+
+
+def sim_suggest_action(battle, c, side, opp_side, movesets, turn_num):
+    """"Provide the suggested move or suggested switch after a faint" --
+    the single highest-scoring action for `c` this turn, by the exact same
+    greedy one-ply valuation `greedy_opponent_joint_action` uses to play
+    the OPPONENT side (`solver._action_value`), not a second, drifting
+    heuristic. `value_protect=True` since a human player sometimes
+    legitimately wants to Protect (scouting, stalling a turn), unlike the
+    opponent AI's own always-attacking model.
+
+    A display-only suggestion, never auto-selected -- the caller shows it
+    as a caption next to the human's own Attack/Switch menu, which stays
+    exactly as manual as before. Returns a human-readable label ("Flare
+    Blitz -> Kingambit", "Protect", ...) or None if `c` has no legal
+    action worth suggesting this turn (e.g. it must recharge).
+    """
+    from solver import candidate_actions, _action_value
+    from projection import projected_field, mega_view
+    if c.volatile.get("must_recharge"):
+        return None
+    decision_field = projected_field(battle)
+    cands = candidate_actions(c, side.name, side.active, opp_side.active,
+                              movesets[c.name], battle.typechart, decision_field,
+                              turn_num, self_view=mega_view(battle, c))
+    if not cands:
+        return None
+    best = max(cands, key=lambda a: _action_value(
+        battle, c, side, opp_side, a, decision_field, turn_num, movesets,
+        value_protect=True))
+    if best.kind == "protect":
+        return "Protect"
+    if best.kind == "switch":
+        return f"Switch to {best.targets[0].name}"
+    if len(best.targets) > 1:
+        return f"{best.move.name} (hits {'/'.join(t.name for t in best.targets)})"
+    if best.targets and best.targets[0] is not c:
+        return f"{best.move.name} -> {best.targets[0].name}"
+    return best.move.name
+
+
+def sim_hit_count_matrix(battle, movesets):
+    """The Battle Simulator's LIVE in-battle counterpart to `counter_
+    finder.prematch_win_conditions`'s own 1v1 hit-count matrix -- "a live
+    tracker in a battle simulator match ... I can afford to risk Metagross
+    this turn and attack if I trade it for the enemy Staraptor, because my
+    Scizor beats the rest." Scoped to whichever mons are CURRENTLY ALIVE
+    on both sides, using each mon's REAL CURRENT HP (not full team-preview
+    HP) -- per the user's own "live recompute, full knowledge" choice, no
+    fog-of-war/reveal-tracking: the app already knows the enemy's full six
+    from team preview.
+
+    Uses the SAME real-engine damage estimator (`solver.quick_damage_
+    estimate`) the Battle Simulator's own `sim_suggest_action` already
+    scores candidate moves with -- not `counter_finder.py`'s parallel
+    Combatant-building convention, which doesn't apply to the REAL,
+    already-live Combatants this battle actually has.
+
+    Returns {(our_name, their_name): {"our_hits_to_ko", "their_hits_to_
+    ko", "verdict"}} for every (alive ours, alive theirs) pair, "hits to
+    KO" = `ceil(current_hp / best_single_hit_damage)`, `None` when nothing
+    in that mon's own moveset can ever damage the target at all (e.g. a
+    hard type immunity). `verdict` is `"win"`/`"lose"`/`"stall"` -- fewer
+    hits-to-KO wins outright; a tie is broken by who actually moves first
+    THIS field (`solver._moves_first`, the real Trick Room/Tailwind-aware
+    check, not a plain stat comparison -- this is the live tracker, so the
+    actual field state is already known, unlike the prematch version).
+    """
+    import math
+    from solver import quick_damage_estimate, _moves_first
+    from projection import projected_field, mega_view
+    field = projected_field(battle)
+    our_alive = [c for c in battle.p1.roster if not c.fainted]
+    their_alive = [c for c in battle.p2.roster if not c.fainted]
+
+    def _best_dmg(attacker, attacker_view, defender):
+        best = 0.0
+        for mv, _pct in movesets.get(attacker.name, []):
+            if mv.category == "Status":
+                continue
+            dmg = quick_damage_estimate(attacker_view, defender, mv, battle.typechart,
+                                        field, battle=battle)
+            best = max(best, dmg)
+        return best
+
+    def _verdict(our_hits, their_hits, our_c, their_c):
+        if our_hits is None and their_hits is None:
+            return "stall"
+        if our_hits is None:
+            return "lose"
+        if their_hits is None:
+            return "win"
+        if our_hits < their_hits:
+            return "win"
+        if our_hits > their_hits:
+            return "lose"
+        our_first = _moves_first(our_c, their_c, field, "p1", "p2")
+        return "win" if our_first else "lose"
+
+    matrix = {}
+    for our_c in our_alive:
+        our_view = mega_view(battle, our_c)
+        for their_c in their_alive:
+            their_view = mega_view(battle, their_c)
+            our_dmg = _best_dmg(our_c, our_view, their_c)
+            their_dmg = _best_dmg(their_c, their_view, our_c)
+            our_hits = math.ceil(their_c.current_hp / our_dmg) if our_dmg > 0 else None
+            their_hits = math.ceil(our_c.current_hp / their_dmg) if their_dmg > 0 else None
+            matrix[(our_c.name, their_c.name)] = {
+                "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
+                "verdict": _verdict(our_hits, their_hits, our_c, their_c)}
+    return matrix
+
+
+def sim_crucial_members(matrix, our_alive_names, their_alive_names):
+    """`sim_hit_count_matrix`'s own live analog to `counter_finder.
+    prematch_win_conditions`'s `crucial` rollup -- scoped to whoever's
+    CURRENTLY ALIVE, since there's no pair-safety data to read live (no
+    2v2 race runs during an actual battle). A mon is the "sole answer" to
+    an enemy when it's the ONLY currently-alive mon on our side whose 1v1
+    `verdict` against that enemy is "win" -- lose it and nothing else
+    alive answers that enemy at all.
+
+    Returns {our_name: {"sole_answer_to": [enemy, ...], "must_preserve":
+    bool}}.
+    """
+    out = {}
+    for our_name in our_alive_names:
+        sole_answer_to = []
+        for enemy_name in their_alive_names:
+            winners = [n for n in our_alive_names
+                      if matrix.get((n, enemy_name), {}).get("verdict") == "win"]
+            if winners == [our_name]:
+                sole_answer_to.append(enemy_name)
+        out[our_name] = {"sole_answer_to": sole_answer_to,
+                         "must_preserve": bool(sole_answer_to)}
+    return out
+
+
+SIM_SPEED_CONTROL_SELF_MOVE_NAMES = ("Tailwind", "Trick Room")
+SIM_SPEED_DROP_ATTACK_NAMES = ("Icy Wind", "Electroweb", "Bulldoze", "Rock Tomb")
+
+
+def _sim_pair_speed_favorable(side, opp_side, field):
+    """True when EVERY alive active on `side` already moves before EVERY
+    alive active on `opp_side`, under `field` -- "once a pair are faster
+    than their opponents, they can move to optimal moves.\""""
+    from solver import _moves_first
+    side_alive = [c for c in side.active if c is not None and not c.fainted]
+    opp_alive = [c for c in opp_side.active if c is not None and not c.fainted]
+    if not side_alive or not opp_alive:
+        return True
+    return all(_moves_first(mine, theirs, field, side.name, opp_side.name)
+              for mine in side_alive for theirs in opp_alive)
+
+
+def _sim_speed_control_candidate(c, side, opp_side, field, movesets):
+    """The first move in `c`'s own moveset that would flip the pair from
+    NOT speed-favorable to favorable this turn, or None. Tailwind/Trick
+    Room are tested via a hypothetical field (mirrors `solver._action_
+    value`'s own before/after self-cancellation check); a speed-drop
+    attack (Icy Wind, Electroweb, Bulldoze, Rock Tomb) is tested by
+    temporarily applying its own Speed-stage drop to the opposing actives
+    it would hit, then restoring them -- these lower the OPPONENT's speed
+    rather than raising the caster's own, so a field hypothesis can't
+    model them the same way."""
+    import copy
+    for mv, _pct in movesets.get(c.name, []):
+        if mv.name in SIM_SPEED_CONTROL_SELF_MOVE_NAMES:
+            hyp_field = copy.deepcopy(field)
+            if mv.name == "Trick Room":
+                hyp_field.trick_room = True
+            elif side.name == "p1":
+                hyp_field.tailwind_p1 = 4
+            else:
+                hyp_field.tailwind_p2 = 4
+            if _sim_pair_speed_favorable(side, opp_side, hyp_field):
+                return mv
+        elif mv.name in SIM_SPEED_DROP_ATTACK_NAMES and mv.secondary:
+            drop = mv.secondary.get("boosts", {}).get("spe")
+            targets = [f for f in opp_side.active if f is not None and not f.fainted]
+            if not drop or drop >= 0 or not targets:
+                continue
+            saved = {id(f): f.stages.get("spe", 0) for f in targets}
+            try:
+                for f in targets:
+                    f.stages["spe"] = max(-6, saved[id(f)] + drop)
+                if _sim_pair_speed_favorable(side, opp_side, field):
+                    return mv
+            finally:
+                for f in targets:
+                    f.stages["spe"] = saved[id(f)]
+    return None
+
+
+def sim_force_support_actions(battle, actions, movesets):
+    """"Let me select a mode in the battle simulator where the enemy plays
+    its support game optimally" -- merges the existing redirect-forcing
+    mode with a new speed-control mode: "in a similar way as the
+    redirection mode, there should be a speed control mode -- such as
+    enemy Milotic using icy wind to allow its partner Gholdengo to
+    outspeed and OHKO Metagross, if it protected turn 1 -- so merging the
+    protect and speed control mode." Overrides `greedy_opponent_joint_
+    action`'s own per-mon choice (which already VALUES all three of these,
+    but only picks one when the heuristic judges it worthwhile), so a
+    testing mode exists for "can this specific play be punished even by
+    the worst-case optimal support play." Per alive actor, in order:
+
+    1. Knows Follow Me/Rage Powder -> force it UNCONDITIONALLY (unchanged
+       from the old redirect-only mode).
+    2. Else, if the pair isn't ALREADY speed-favorable (see `_sim_pair_
+       speed_favorable`) and this actor knows a real speed-control move
+       that would flip it (`_sim_speed_control_candidate`) -> force that
+       move instead of whatever the greedy AI picked.
+    3. The speed-control caster's OWN partner, only on the turn #2 fired,
+       when the partner would otherwise take a KO-threatening hit
+       (`solver._max_incoming`, the SAME worst-case estimate the redirect
+       valuation itself already uses) -> force Protect on the partner
+       instead of its own greedy pick.
+    4. Once the pair IS speed-favorable, every action is left exactly as
+       `greedy_opponent_joint_action` chose it -- "once a pair are faster
+       than their opponents, they can move to optimal moves."
+
+    Only touches an actor's OWN action -- a fainted-replacement switch
+    Action (built for a DIFFERENT, already-fainted slot) is left alone.
+    """
+    from engine import Action
+    from battle import PROTECT_MOVES
+    from projection import projected_field
+    from solver import _max_incoming
+    field = projected_field(battle)
+    out = []
+    speed_control_actor = None
+    for a in actions:
+        c = a.combatant
+        if a.kind != "move" or c.fainted:
+            out.append(a)
+            continue
+        side = battle.p1 if a.side == "p1" else battle.p2
+        opp_side = battle.p2 if a.side == "p1" else battle.p1
+        redirect_move = next((mv for mv, _pct in movesets.get(c.name, [])
+                              if mv.volatile_status in ("followme", "ragepowder")), None)
+        if redirect_move is not None:
+            out.append(Action(c, a.side, "move", redirect_move, [c]))
+            continue
+        sc_move = None
+        if not _sim_pair_speed_favorable(side, opp_side, field):
+            sc_move = _sim_speed_control_candidate(c, side, opp_side, field, movesets)
+        if sc_move is not None:
+            targets = ([c] if sc_move.name in SIM_SPEED_CONTROL_SELF_MOVE_NAMES
+                      else [f for f in opp_side.active if f is not None and not f.fainted])
+            out.append(Action(c, a.side, "move", sc_move, targets))
+            speed_control_actor = c
+        else:
+            out.append(a)
+
+    if speed_control_actor is not None:
+        side = battle.side_of(speed_control_actor)
+        opp_side = battle.p2 if side is battle.p1 else battle.p1
+        partner = next((m for m in side.active if m is not None
+                        and m is not speed_control_actor and not m.fainted), None)
+        if partner is not None and not partner.protected_last_turn:
+            protect_mv = next((mv for mv, _pct in movesets.get(partner.name, [])
+                               if mv.name in PROTECT_MOVES), None)
+            if protect_mv is not None:
+                worst = _max_incoming(battle, partner, side, opp_side, field, movesets)
+                if worst >= 100.0 * partner.current_hp / partner.max_hp():
+                    out = [Action(partner, side.name, "protect", protect_mv, [partner])
+                          if a2.combatant is partner else a2 for a2 in out]
+    return out
 
 
 def sim_predict_faint_replacements(battle, p1_actions, p2_actions, mega_decisions):
@@ -1473,16 +1837,37 @@ with tab_build:
     with c2:
         st.markdown("**Load / save**")
         from team_sheet import load_team, save_team, load_analysis
+        # "The saved teams dropdown from the teambuilder should also load
+        # teams from my_teams" -- `teams`/`team_meta` (module-level,
+        # `load_teams_csv` above) already union data/teams/*.txt AND
+        # data/my_teams/*.txt pokepastes; only the Team Builder's OWN save
+        # format (`*.json` at the project root, via `team_sheet.save_team`)
+        # was ever offered here. A "(saved team) " prefix keeps the two
+        # namespaces visually and functionally distinct in one dropdown --
+        # `team_meta[name]["sets"]` already carries that team's own parsed
+        # per-mon spec (item/ability/nature/evs/moves), no re-parsing needed.
         saved = sorted(p.name for p in ROOT.glob("*.json"))
-        pick = st.selectbox("Saved teams", saved or ["(none)"], key="load_pick")
-        if st.button("Load", width='stretch', disabled=not saved):
-            pool, sets = load_team(ROOT / pick)
-            st.session_state["team"] = pool
-            st.session_state["sets"] = sets
-            st.session_state["team_analysis"] = load_analysis(ROOT / pick)
-            _bump_builder_gen()  # a loaded team can reuse a name with a
-            # different set -- see _bump_builder_gen's own docstring.
-            st.success(f"Loaded {len(pool)} Pokemon from {pick}")
+        pokepaste_options = [f"(saved team) {name}" for name in sorted(teams)]
+        load_options = saved + pokepaste_options
+        pick = st.selectbox("Saved teams", load_options or ["(none)"], key="load_pick")
+        if st.button("Load", width='stretch', disabled=not load_options):
+            if pick.startswith("(saved team) "):
+                name = pick[len("(saved team) "):]
+                pool = list(teams[name])
+                sets = dict((team_meta.get(name) or {}).get("sets") or {})
+                st.session_state["team"] = pool
+                st.session_state["sets"] = sets
+                st.session_state["team_analysis"] = None
+                _bump_builder_gen()
+                st.success(f"Loaded {len(pool)} Pokemon from {name}")
+            else:
+                pool, sets = load_team(ROOT / pick)
+                st.session_state["team"] = pool
+                st.session_state["sets"] = sets
+                st.session_state["team_analysis"] = load_analysis(ROOT / pick)
+                _bump_builder_gen()  # a loaded team can reuse a name with a
+                # different set -- see _bump_builder_gen's own docstring.
+                st.success(f"Loaded {len(pool)} Pokemon from {pick}")
         up = st.file_uploader("...or upload a team .json/.txt", type=["json", "txt"],
                               key="up_team")
         if up is not None:
@@ -1522,6 +1907,55 @@ with tab_build:
                     st.session_state["team_analysis"] = analysis
                     _bump_builder_gen()
                     st.success(f"Loaded {len(pool)} Pokemon from pasted text")
+        with st.expander("Default sets (used when no team-specific set is given)"):
+            st.caption(
+                "\"let me create a 'default set' txt where I paste "
+                "pokepastes for individual pokemon, and for enemies this "
+                "should be the actual sets used by default\" -- one or "
+                "more COMPLETE Showdown exports (item, ability, nature, "
+                "EVs, AND 4 moves all specified), saved to "
+                "data/default_sets.txt. Once saved, that species' set "
+                "becomes THE default everywhere -- both our own side and "
+                "an enemy -- whenever no more specific set is already "
+                "pinned (a real known team, a paste, an explicit "
+                "override), replacing mbsmogon.xlsx's own usage-derived "
+                "pick. A paste missing any of the 5 fields is rejected "
+                "rather than half-applied.")
+            from species_data import (custom_team_from_export, load_default_sets,
+                                      team_to_showdown_export, DEFAULT_SETS_FIELDS)
+            existing_defaults, _incomplete = load_default_sets(merged)
+            if existing_defaults:
+                st.caption("Currently set: " + ", ".join(sorted(existing_defaults)))
+                if st.button("Clear all default sets", key="default_sets_clear"):
+                    (species_data.DATA_DIR / "default_sets.txt").unlink(missing_ok=True)
+                    st.cache_resource.clear(); st.cache_data.clear()
+                    st.rerun()
+            default_sets_paste = st.text_area(
+                "Paste one or more complete Showdown exports",
+                key="default_sets_paste", height=150)
+            if st.button("Save default set(s)", key="default_sets_save"):
+                if not default_sets_paste.strip():
+                    st.warning("Paste at least one Pokemon's full export first.")
+                else:
+                    names, sets = custom_team_from_export(default_sets_paste, merged)
+                    unknown = [n for n in names if n not in merged]
+                    incomplete = [n for n in names if n not in unknown
+                                 and not all(k in sets.get(n, {}) for k in DEFAULT_SETS_FIELDS)]
+                    if unknown:
+                        st.error(f"Unrecognised species: {', '.join(unknown)}")
+                    elif incomplete:
+                        st.error(f"Needs item, ability, nature, EVs, AND 4 "
+                                f"moves all specified: {', '.join(incomplete)}")
+                    else:
+                        merged_defaults = dict(existing_defaults)
+                        merged_defaults.update(sets)
+                        text = team_to_showdown_export(
+                            list(merged_defaults), merged_defaults, merged)
+                        (species_data.DATA_DIR / "default_sets.txt").write_text(
+                            text, encoding="utf-8")
+                        st.cache_resource.clear(); st.cache_data.clear()
+                        st.success(f"Saved default set(s) for {', '.join(names)}")
+                        st.rerun()
         if st.button("Use default 6", width='stretch'):
             st.session_state["team"] = ["Incineroar", "Farigiraf", "Gallade", "Hydreigon",
                                          "Mega Skarmory", "Gholdengo"]
@@ -3335,7 +3769,9 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     rejected it) or `[]` if it ran and found nothing; either case has
     already shown the user an `st.error` explaining why.
     """
-    from counter_finder import multi_bring4_beam, multi_bring4_coverage, multi_bring4_exhaustive
+    from counter_finder import (DEFAULT_MAX_FOCUS_SASH, DEFAULT_MAX_LIFE_ORB,
+                                _apply_item_caps_to_top_rows, multi_bring4_beam,
+                                multi_bring4_coverage, multi_bring4_exhaustive)
     from team_search import build_candidate_pool
     pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
     if always_include:
@@ -3372,6 +3808,21 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
         st.error("No core (4, 5, or 6 Pokemon) found -- widen the pool, "
                  "lower the good-pair bar/min-enemies, relax max-weak, "
                  "or try Beam.")
+    elif rows:
+        # BY DEFAULT, same as the CLI's --multi-bring4 -- "this must apply
+        # to every single team". Every "Show top N" slider fed by this
+        # search DEFAULTS to 5-10 (their max runs to 20-30, but that's an
+        # edge the user has to deliberately drag to) -- correcting a top-
+        # 10 slice up front covers the common case for whatever the user
+        # later slides to, without re-running the search, while keeping
+        # the interactive UI's own real-race cost bounded (unlike the CLI,
+        # which has no click-and-wait budget to respect). See counter_
+        # finder._apply_item_caps_to_top_rows's own docstring for the
+        # top-N-only scoping/accepted tradeoff this shares with the CLI.
+        rows = _apply_item_caps_to_top_rows(
+            rows, 10, coverage, good_threshold,
+            item_caps={"Focus Sash": DEFAULT_MAX_FOCUS_SASH,
+                      "Life Orb": DEFAULT_MAX_LIFE_ORB})
     return coverage, rows
 
 
@@ -3409,7 +3860,8 @@ def _pair_rows_df(pair_rows, include_total=False):
          "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
          "Clean win": f"{r['pairs_clean_win_total']:.1f}/{2 * total}",
          "Tailwind-safe": r["pairs_tailwind_safe"],
-         "Protect-safe": r["pairs_protect_safe"]}
+         "Protect-safe": r["pairs_protect_safe"],
+         "Redirect-safe": r["pairs_follow_me_safe"]}
         for r in pair_rows]
     if include_total and pair_rows:
         n = len(pair_rows)
@@ -3420,13 +3872,15 @@ def _pair_rows_df(pair_rows, include_total=False):
         clean = sum(r["pairs_clean_win_total"] for r in pair_rows)
         tw_safe = sum(r["pairs_tailwind_safe"] for r in pair_rows)
         pr_safe = sum(r["pairs_protect_safe"] for r in pair_rows)
+        fm_safe = sum(r["pairs_follow_me_safe"] for r in pair_rows)
         rows.append({
             "Pair": f"TOTAL ({n} pairs)",
             "Beaten": f"{swept + traded}/{n * total}",
             "Swept": swept, "Traded": traded, "Lost": lost, "No KO": no_ko,
             "Clean win": f"{clean:.1f}/{2 * n * total}",
             "Tailwind-safe": tw_safe,
-            "Protect-safe": pr_safe})
+            "Protect-safe": pr_safe,
+            "Redirect-safe": fm_safe})
     return pd.DataFrame(rows)
 
 
@@ -3493,6 +3947,9 @@ def _all_teams_summary_df(team_names, target_lists, our6, dive):
             "Protect-safe total": f"{depth['protect_safe_total']}/{n_pairs * pt}",
             "Protect-safe best": _frac(depth, "protect_safe_best", pt),
             "Protect-safe 3rd best": _frac(depth, "protect_safe_3rd", pt),
+            "Redirect-safe total": f"{depth['follow_me_safe_total']}/{n_pairs * pt}",
+            "Redirect-safe best": _frac(depth, "follow_me_safe_best", pt),
+            "Redirect-safe 3rd best": _frac(depth, "follow_me_safe_3rd", pt),
             "Clean win total": f"{depth['clean_win_total']:.1f}/{n_pairs * pt * 2:.0f}",
             "No-faint best": _frac(depth, "no_faint_best", pt),
             "No-faint 3rd best": _frac(depth, "no_faint_3rd", pt),
@@ -3567,6 +4024,231 @@ def _bring4_mega_caption(bring4_row):
            f"(VGC: only one Mega per side).")
 
 
+def _win_conditions_df(bring4_row):
+    """"I want to be able to identify win conditions -- perhaps Metagross
+    + Hydreigon is the only pair that beats Golisopod, or Hydreigon is
+    the only pokemon that beats Golisopod. I need to see what pokemon I
+    need to preserve to guarantee a win against certain pokemon in an
+    endgame." -- one row per enemy this bring-4 was raced against, reading
+    `bring4_win_conditions` (already computed, no new racing) into a plain
+    "what do I need alive" table. One safe MEMBER (regardless of partner)
+    is reported ahead of a specific safe PAIR, since it's the more useful,
+    less fragile answer when both are available; a genuinely uncovered
+    enemy (no pair beats every one of its pairings) is called out
+    directly rather than left blank.
+
+    "avoiding enemy tailwind and trick room may be key for a matchup
+    swinging from a win to a clear loss" -- a "Caveats" column reads
+    `tailwind_risk`/`protect_risk`/`follow_me_risk` (Tailwind, a turn-1
+    Protect scout, and a real Follow Me/Rage Powder redirector are always
+    real, replayed hypotheses this module races) and `trick_room_risk`
+    (only present when the underlying search opted into `check_trick_room`
+    -- an extra-cost replay, not run by default) so a win condition that
+    LOOKS solid but actually flips against any of them doesn't read as a
+    plain, unconditional guarantee."""
+    from counter_finder import bring4_win_conditions
+    wc = bring4_win_conditions(bring4_row)
+    rows = []
+    for enemy in sorted(wc):
+        info = wc[enemy]
+        if info["uncovered"]:
+            preserve = "⚠️ none -- no pair here beats it every way it could show up"
+        elif info["safe_members"]:
+            preserve = " or ".join(info["safe_members"]) + " (any partner)"
+        else:
+            preserve = " or ".join(f"{n1} + {n2}" for n1, n2 in info["safe_pairs"])
+        caveats = []
+        if info["tailwind_risk"]:
+            caveats.append("breaks if enemy sets Tailwind")
+        if info["protect_risk"]:
+            caveats.append("Protect-timed 50/50")
+        if info["trick_room_risk"]:
+            caveats.append("breaks if enemy sets Trick Room")
+        if info["follow_me_risk"]:
+            caveats.append("breaks if enemy redirects with Follow Me/Rage Powder")
+        rows.append({"Enemy": enemy, "Preserve": preserve,
+                    "Caveats": "; ".join(caveats)})
+    return pd.DataFrame(rows)
+
+
+def _render_win_conditions(bring4_row):
+    """Renders `_win_conditions_df` under a labelled section, skipped
+    entirely when the bring-4 was never actually raced against anything
+    (nothing to report)."""
+    df = _win_conditions_df(bring4_row)
+    if df.empty:
+        return
+    st.markdown("**Win conditions** -- what to preserve for a guaranteed answer")
+    st.caption("Per enemy: the bring-4 member(s) that beat EVERY way that "
+              "enemy could be paired with a teammate -- what you actually "
+              "need alive in an endgame to still guarantee beating it.")
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
+_VERDICT_ICON = {"win": "✅", "lose": "❌", "stall": "➖"}
+
+
+def _hit_count_matrix_df(matrix, bring4, enemies):
+    """`prematch_win_conditions`'s own 1v1 `matrix` -> a plain "who 2HKOs
+    whom, and gets 2HKO'd back by whom" table -- "Scizor easily beats X in
+    endgame given it 2HKOs enemy but takes 5HKOs from enemy" read directly
+    off one row. `None` (no hit at all, e.g. a hard type immunity) shows as
+    "-- ", never a crashing format call. Each cell also carries the pure
+    1v1 verdict (fewer hits wins; a tie is broken by speed) as a trailing
+    icon -- "who actually wins the 1v1", not just the raw hit counts.
+
+    A currently-losing cell also shows "chip NN%" -- "how chipped the
+    enemy has to be for certain pokemon to be an answer" --
+    `chip_needed_frac`'s own reading as a whole percent of the ENEMY's max
+    HP that has to already be gone (from a partner's earlier hit, hazards,
+    anything) before this 1v1 flips to a win. Omitted when `None` (chip
+    can never help here -- a hard immunity, or a stall neither side can
+    ever resolve)."""
+    def _fmt(hits):
+        return f"{hits}HKO" if hits is not None else "--"
+    rows = []
+    for our_name in bring4:
+        row = {"Ours": our_name}
+        for enemy in enemies:
+            cell = matrix.get((our_name, enemy))
+            if cell is None:
+                row[enemy] = "?"
+            else:
+                icon = _VERDICT_ICON.get(cell.get("verdict"), "")
+                text = (f"{_fmt(cell['our_hits_to_ko'])} / "
+                       f"{_fmt(cell['their_hits_to_ko'])} {icon}")
+                chip = cell.get("chip_needed_frac")
+                if cell.get("verdict") == "lose" and chip is not None:
+                    text += f" (chip {chip * 100:.0f}%)"
+                row[enemy] = text.rstrip()
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _crucial_members_df(crucial):
+    """`prematch_win_conditions`'s own `crucial` rollup -> "which of my own
+    Pokemon do I need to keep alive" -- "Individual pokemon can be crucial
+    win conditions to preserve for a given match." Only lists a mon at all
+    when it's a genuine `must_preserve` case; an empty result means no
+    single member of this bring-4 is irreplaceable against anything raced
+    here (every enemy has more than one answer)."""
+    rows = [{"Preserve": name, "Sole answer to": ", ".join(info["sole_answer_to"])}
+           for name, info in crucial.items() if info["must_preserve"]]
+    return pd.DataFrame(rows)
+
+
+def _render_crucial_members(crucial):
+    """Renders `_crucial_members_df` right under the hit-count matrix,
+    skipped entirely when nothing in this bring-4 is a sole answer to
+    anything (nothing to warn about)."""
+    df = _crucial_members_df(crucial)
+    if df.empty:
+        return
+    st.markdown("**Crucial to preserve** -- the only member that beats a given enemy")
+    st.caption("Losing one of these opens a hole nothing else in this bring-4 fills, "
+              "per the enemies listed next to it.")
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
+def _render_hit_count_matrix(bring4_row, dive, target_names, merged, moves,
+                             natures, typechart, enemy_item_overrides=None,
+                             enemy_move_overrides=None):
+    """"I can see wins in 2v2s from optimal plays ... it would be good to
+    see if I also have a similar 'best' play ... i also want to be able to
+    see win conditions" -- the 1v1 half of `prematch_win_conditions`
+    (`bring4_win_conditions`'s own "safe pairs/members" is already shown
+    by `_render_win_conditions` right above this): "Scizor 2HKOs enemy but
+    takes a 5HKO from enemy" read directly off one cell, "our HKO / their
+    HKO" per (our bring-4 member, named enemy)."""
+    from counter_finder import prematch_win_conditions_for_dive
+    result = prematch_win_conditions_for_dive(
+        bring4_row, dive, target_names, merged, moves, natures, typechart,
+        enemy_item_overrides=enemy_item_overrides,
+        enemy_move_overrides=enemy_move_overrides)
+    df = _hit_count_matrix_df(result["matrix"], bring4_row["bring4"], sorted(result["safe"]))
+    if df.empty:
+        return
+    st.markdown("**1v1 hit-count matrix** -- \"our HKO / their HKO\"")
+    st.caption("Average-roll hits to KO from full HP, each direction, "
+              "every bring-4 member against every named enemy -- e.g. "
+              "\"2HKO / 5HKO ✅\" means we finish them in 2 hits, they need "
+              "5 to finish us, and we win the 1v1. \"--\" means that move "
+              "can never KO at all (a hard type immunity or similar).")
+    st.dataframe(df, width='stretch', hide_index=True)
+    _render_crucial_members(result["crucial"])
+
+
+def _render_hit_count_matrix_for_bring4_search(bring4_row, target_names, merged,
+                                               moves, natures, typechart,
+                                               item_overrides=None, move_overrides=None,
+                                               enemy_item_overrides=None,
+                                               enemy_move_overrides=None,
+                                               evs_overrides=None, nature_overrides=None,
+                                               ability_overrides=None):
+    """`_render_hit_count_matrix`'s own sibling for a fresh `bring4_search`
+    result (no `core_deep_dive` on hand) -- see `prematch_win_conditions_
+    for_bring4`'s own docstring."""
+    from counter_finder import prematch_win_conditions_for_bring4
+    result = prematch_win_conditions_for_bring4(
+        bring4_row, target_names, merged, moves, natures, typechart,
+        item_overrides=item_overrides, move_overrides=move_overrides,
+        enemy_item_overrides=enemy_item_overrides,
+        enemy_move_overrides=enemy_move_overrides, evs_overrides=evs_overrides,
+        nature_overrides=nature_overrides, ability_overrides=ability_overrides)
+    df = _hit_count_matrix_df(result["matrix"], bring4_row["bring4"], sorted(result["safe"]))
+    if df.empty:
+        return
+    st.markdown("**1v1 hit-count matrix** -- \"our HKO / their HKO\"")
+    st.caption("Average-roll hits to KO from full HP, each direction, "
+              "every bring-4 member against every named enemy -- e.g. "
+              "\"2HKO / 5HKO ✅\" means we finish them in 2 hits, they need "
+              "5 to finish us, and we win the 1v1. \"--\" means that move "
+              "can never KO at all (a hard type immunity or similar).")
+    st.dataframe(df, width='stretch', hide_index=True)
+    _render_crucial_members(result["crucial"])
+
+
+# "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
+# own recorded Choice Scarf usage % must be, AND be that member's single
+# TOP item, before it's worth flagging as a suggestion. A judgment call,
+# not a real rule: high enough that Scarf is clearly the headline set for
+# that member (not a rare tech pick), low enough to still catch a real
+# usage split (e.g. Basculegion's own ~37% Scarf share, its own top item).
+HIGH_SCARF_USAGE_THRESHOLD = 20.0
+
+
+def _known_scarf_enemy(vs_roster, vs_sets):
+    """The first enemy in `vs_roster` whose REAL, KNOWN set (a real pasted
+    team or a saved team's own recorded sets -- `vs_sets`, never mbsmogon.
+    xlsx's usage-derived guess) actually holds a Choice Scarf -- "should
+    use the actual set if it comes from a paste or an existing team (which
+    specifies the items, such as Basculegion has the choice scarf)".
+    `None` if nothing in `vs_sets` says so (an under-specified roster, or
+    one with no Scarf holder at all)."""
+    return next((n for n in vs_roster
+                if (vs_sets.get(n) or {}).get("item") == "Choice Scarf"), None)
+
+
+def _suggested_scarf_enemy(vs_roster, merged, threshold=HIGH_SCARF_USAGE_THRESHOLD):
+    """"otherwise ... give a suggestion if a member(s) has high choice
+    scarf usage" -- among `vs_roster`, whichever member's OWN top-recorded
+    item is Choice Scarf at at least `threshold`% usage (the highest such
+    member if more than one qualifies), or `None` if nobody clears the
+    bar. A suggestion, not an assumption: unlike `_known_scarf_enemy`
+    (a real, known fact), this is a usage-based guess that's still wrong
+    most of the time even at 20%+ usage, so it's surfaced as a caption for
+    the user to act on, never auto-selected."""
+    best = None
+    for n in vs_roster:
+        items = (merged.get(n) or {}).get("items_usage") or []
+        if not items:
+            continue
+        top_item, pct = items[0]
+        if top_item == "Choice Scarf" and pct >= threshold and (best is None or pct > best[1]):
+            best = (n, pct)
+    return best
+
+
 def _mega_evolution_caption(core, dive):
     """"I'm not sure enemy pokemon or my pokemon are mega evolving in
     Counter Table in the streamlit app" -- every turn log always prints a
@@ -3614,8 +4296,9 @@ def _render_pair_matchup_detail(n1, n2, detail, only_losses):
         pr = "" if d["protect_safe"] else (
             f"  [protect: {e1}->{d['protect_outcomes']['E1']}, "
             f"{e2}->{d['protect_outcomes']['E2']}]")
+        fm = "" if d["follow_me_safe"] else f"  [redirect: {d['follow_me_outcome']}]"
         st.markdown(f"- **{e1} + {e2}**: {d['outcome']} "
-                  f"(turn {d['turns_used']}){tw}{pr}")
+                  f"(turn {d['turns_used']}){tw}{pr}{fm}")
         lines = []
         for turn_i, turn_hits in enumerate(d["log"], 1):
             for role, tgt_role, h in turn_hits:
@@ -3629,6 +4312,35 @@ def _render_pair_matchup_detail(n1, n2, detail, only_losses):
             st.code("\n".join(lines), language=None)
     if only_losses and shown == 0:
         st.caption("No losses.")
+
+
+def _cache_gameplans(pair_rows, source_label):
+    """"If a counter table analysis has been loaded, show what the 2v2
+    calculator saw as the optimal play sequence" alongside the live
+    Battle Simulator match -- caches every pair's own already-computed
+    `detail[(e1, e2)]` (`_pair_vs_targets`'s per-turn `log`, `outcome`,
+    `turns_used` -- the SAME data `_render_pair_matchup_detail` already
+    renders) into `st.session_state["ct_gameplans"]`, keyed by BOTH sides'
+    names as `frozenset`s so a later lookup by "whoever is currently
+    active" doesn't care about role order (`_pair_vs_targets` itself
+    always assigns C/P/E1/E2 by internal search convention, not by
+    whichever order the human happens to send them out in).
+
+    Called everywhere a Counter Table search stores a real result, so the
+    Battle Simulator can later show "what the calculator predicted" for
+    the SAME (our pair, their pair) the human is actually playing, without
+    re-racing anything. `source_label`: a short string naming which search
+    produced this ("Bring-4 search", "Deep dive", ...), shown alongside
+    the cached gameplan so it's clear which analysis it came from.
+    """
+    cache = st.session_state.setdefault("ct_gameplans", {})
+    for pr in pair_rows:
+        our_pair = pr["pair"]
+        for (e1, e2), d in pr["detail"].items():
+            key = (frozenset(our_pair), frozenset((e1, e2)))
+            cache[key] = {"our_pair": tuple(our_pair), "enemy_pair": (e1, e2),
+                         "log": d["log"], "outcome": d["outcome"],
+                         "turns_used": d.get("turns_used"), "source": source_label}
 
 
 def _render_teamsheet_export(core, sets, key_prefix):
@@ -3661,7 +4373,8 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                            excluded_items, key_prefix, item_overrides=None,
                            move_overrides=None, evs_overrides=None,
                            nature_overrides=None, ability_overrides=None,
-                           enemy_item_overrides=None, enemy_move_overrides=None):
+                           enemy_item_overrides=None, enemy_move_overrides=None,
+                           item_resolution_enemies=None):
     """"I want to be able to choose a specific team to deep dive into" --
     an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
     (any bring-4, or a multi-bring4 core), the app-side counterpart to the
@@ -3718,6 +4431,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
              "already done for the enemy's Mega-evolve choice. Real cost: "
              "roughly squares the per-turn search on top of the engine's "
              "own 2-turn lookahead.")
+    check_trick_room = st.checkbox(
+        "Also check enemy Trick Room", key=f"{key_prefix}_check_tr",
+        help="\"avoiding enemy tailwind and trick room may be key for a "
+             "matchup swinging from a win to a clear loss\" -- opt-in "
+             "(real extra cost, a whole second replay per enemy pair): "
+             "when a named enemy really runs Trick Room, also test it "
+             "actually casting it turn 1 and see if that flips the "
+             "outcome, feeding the Win conditions table's own Trick Room "
+             "caveat below. Off leaves every result exactly as before.")
     if st.button(f"Deep dive: {' / '.join(core)}", key=f"{key_prefix}_go"):
         with st.spinner("Racing every pair against every named enemy..."):
             try:
@@ -3729,7 +4451,9 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                     ability_overrides=ability_overrides,
                     enemy_item_overrides=enemy_item_overrides,
-                    enemy_move_overrides=enemy_move_overrides)
+                    enemy_move_overrides=enemy_move_overrides,
+                    check_trick_room=check_trick_room,
+                    item_resolution_enemies=item_resolution_enemies)
             except ValueError as e:
                 st.error(str(e))
                 dive = None
@@ -3750,6 +4474,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
               f"{ov['pairs_lost']} lost, {ov['pairs_no_ko']} no-KO), "
               f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
               f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
+              f"{ov['pairs_follow_me_safe']}/{ov_total} redirect-safe, "
               f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} clean win")
     only_losses = st.checkbox(
         "Only show enemy pairs each pair loses to", key=f"{key_prefix}_onlyloss",
@@ -3758,6 +4483,7 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
              "below to just the unconditional losses.")
     if len(core) > 4 and len(target_name_lists) == 1:
         bring4_rows = bring4_from_deep_dive(core, dive, target_name_lists[0])
+        _cache_gameplans(bring4_rows[0]["pair_rows"], "Deep dive")
         st.markdown("**Best bring-4 (from this deep dive)**")
         st.caption(" / ".join(bring4_rows[0]["bring4"]))
         mega_cap = _bring4_mega_caption(bring4_rows[0])
@@ -3770,6 +4496,11 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                     hide_index=True)
         st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                     width='stretch', hide_index=True)
+        _render_win_conditions(bring4_rows[0])
+        _render_hit_count_matrix(bring4_rows[0], dive, target_name_lists[0],
+                                 merged, moves, natures, typechart,
+                                 enemy_item_overrides=enemy_item_overrides,
+                                 enemy_move_overrides=enemy_move_overrides)
         st.markdown("**Deep dive: just the winning bring-4's own pairs**")
         st.caption("\"When all pairs are deep dived and the best bring4 is "
                   "found, then have a section which only shows the deep "
@@ -3783,6 +4514,21 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                              f"{row['pairs_total']} beaten"):
                 _render_pair_matchup_detail(n1, n2, row["detail"], only_losses)
         st.markdown("**Every pair in the core**")
+    elif len(target_name_lists) == 1:
+        # `core` is already AT the bring size (a "deep dive a specific
+        # bring-4" call, not the "all of Our 6" case above) -- its own
+        # C(len(core),2) pairs already ARE the bring's own pairs, no
+        # narrowing-down step needed first.
+        core_bring4_row = {"bring4": tuple(core), "mega_used": dive.get("mega_used"),
+                          "pair_rows": [
+            {"pair": pair_key, "detail": pair["per_enemy"][0]["detail"]}
+            for pair_key, pair in dive["per_pair"].items()]}
+        _cache_gameplans(core_bring4_row["pair_rows"], "Deep dive")
+        _render_win_conditions(core_bring4_row)
+        _render_hit_count_matrix(core_bring4_row, dive, target_name_lists[0],
+                                 merged, moves, natures, typechart,
+                                 enemy_item_overrides=enemy_item_overrides,
+                                 enemy_move_overrides=enemy_move_overrides)
     for (n1, n2), pair in dive["per_pair"].items():
         pt = pair["total"]
         with st.expander(f"{n1} + {n2} -- {pt['pairs_swept'] + pt['pairs_traded']}/"
@@ -3865,7 +4611,8 @@ with tab_counter:
 
     ct_mode = st.radio(
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
-                 "Joint pair search", "2-2-2 teambuilding", "Coverage groups"],
+                 "Joint pair search", "2-2-2 teambuilding", "Coverage groups",
+                 "Round-robin (saved teams only)"],
         key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
@@ -3939,14 +4686,16 @@ with tab_counter:
                 else:
                     vs_roster = []
             else:
-                vs_roster, vs_sets = species_data.custom_team_from_export(
-                    vs_paste, merged) if vs_paste.strip() else ([], {})
-                unknown_vs = [n for n in vs_roster if n not in merged]
-                if unknown_vs:
-                    st.error(f"Unrecognised species: {', '.join(unknown_vs)}")
-                    vs_roster = []
-                elif vs_roster:
-                    st.success(f"Parsed: {', '.join(vs_roster)}")
+                if vs_paste.strip():
+                    try:
+                        vs_roster, vs_sets, _analysis = _load_team_text(vs_paste, merged)
+                    except ValueError as e:
+                        st.error(str(e))
+                        vs_roster, vs_sets = [], {}
+                    else:
+                        st.success(f"Parsed: {', '.join(vs_roster)}")
+                else:
+                    vs_roster, vs_sets = [], {}
         else:
             vs_roster = list(teams[ct_vs_name])
             vs_sets = team_meta.get(ct_vs_name, {}).get("sets") or {}
@@ -3961,16 +4710,18 @@ with tab_counter:
                  "requiring one in hand.")
         if ct_our_source == PASTE_OUR:
             our_paste = st.text_area(
-                "Paste Showdown export text (blank line between each Pokemon)",
+                "Paste a Showdown export, a teamsheet token, or team .json",
                 height=160, key="ct_b4_our_paste")
-            our_pasted, our_pasted_sets = species_data.custom_team_from_export(
-                our_paste, merged) if our_paste.strip() else ([], {})
-            unknown_our = [n for n in our_pasted if n not in merged]
-            if unknown_our:
-                st.error(f"Unrecognised species: {', '.join(unknown_our)}")
-                our_pasted = []
-            elif our_pasted:
-                st.success(f"Parsed: {', '.join(our_pasted)}")
+            if our_paste.strip():
+                try:
+                    our_pasted, our_pasted_sets, _analysis = _load_team_text(our_paste, merged)
+                except ValueError as e:
+                    st.error(str(e))
+                    our_pasted, our_pasted_sets = [], {}
+                else:
+                    st.success(f"Parsed: {', '.join(our_pasted)}")
+            else:
+                our_pasted, our_pasted_sets = [], {}
         ct_good = st.slider("Good-pair bar (%)", 0, 100, 100, key="ct_b4_good",
                             help="A pair 'clears the bar' if it beats at least this "
                                  "share of the enemy roster's own C(len,2) pairs.")
@@ -4035,6 +4786,16 @@ with tab_counter:
             else:
                 our6 = list(teams[ct_our_source])
                 our_sets = team_meta.get(ct_our_source, {}).get("sets") or {}
+            # A single-opponent deep dive must fix `our6`'s item/moveset
+            # against the SAME enemy population as the "vs ALL saved teams"
+            # dive does, not just whichever one roster that particular dive
+            # is racing/showing -- otherwise it independently re-optimises
+            # against just that one team ("if I knew I only faced this
+            # team"), making it look artificially better than the identical
+            # core's own multi-enemy dive shows for it. `core_deep_dive`'s
+            # own `item_resolution_enemies` param exists for exactly this.
+            item_resolution_enemies = (sorted({n for t in teams.values() for n in t})
+                                       or vs_roster)
             # "In the CLI the bring4 beat 55/90, but the streamlit counter
             # table was 27/90. They must mirror rather than contradict." --
             # an already-decided team's own pinned item/moveset must be
@@ -4070,22 +4831,43 @@ with tab_counter:
                                     if s.get("item")}
             enemy_move_overrides = {n: s["moves"] for n, s in vs_sets.items()
                                     if s.get("moves")}
+            # A fresh widget (hence a freshly-computed default) whenever the
+            # ENEMY ROSTER ITSELF changes -- `ct_vs_name` alone can't tell
+            # two different pastes apart (both share the same "Paste a
+            # pokepaste" sentinel value), so the key is fingerprinted on
+            # the roster's own contents instead. Sticky within the SAME
+            # roster (a manual pick/un-pick survives an unrelated rerun),
+            # reset only when the roster changes.
+            scarf_key = f"ct_b4_enemy_scarf_{hash(tuple(vs_roster))}"
+            known_scarf_enemy = _known_scarf_enemy(vs_roster, vs_sets)
+            st.session_state.setdefault(scarf_key, known_scarf_enemy or "(none)")
             ct_b4_scarf = st.selectbox(
                 "Enemy Choice Scarf holder", ["(none)"] + vs_roster,
-                key="ct_b4_enemy_scarf",
-                help="\"select an enemy as a choice scarf user (and hence "
-                     "will have 4 attacks)\" -- pins that one enemy's item "
-                     "to Choice Scarf and its moveset to its own top 4 "
+                key=scarf_key,
+                help="\"should use the actual set if it comes from a "
+                     "paste or an existing team\" -- defaults to whichever "
+                     "enemy a real known set already says holds one; "
+                     "otherwise defaults to none. Pins that enemy's item "
+                     "to Choice Scarf and (only if its real moveset isn't "
+                     "already known) its moveset to its own top 4 "
                      "non-status (attacking) moves by usage, since a "
                      "Choice item locks you into the first move used, "
                      "making Protect (or any other status move) a dead "
                      "slot no real Scarf set would carry.")
+            if known_scarf_enemy is None:
+                suggestion = _suggested_scarf_enemy(vs_roster, merged)
+                if suggestion:
+                    st.caption(f"Note: {suggestion[0]} commonly runs Choice "
+                              f"Scarf ({suggestion[1]:.0f}% usage) -- pick "
+                              f"it above if you don't have a more specific "
+                              f"set for it.")
             if ct_b4_scarf != "(none)":
                 enemy_item_overrides = dict(enemy_item_overrides)
                 enemy_item_overrides[ct_b4_scarf] = "Choice Scarf"
-                enemy_move_overrides = dict(enemy_move_overrides)
-                enemy_move_overrides[ct_b4_scarf] = choice_scarf_enemy_moveset(
-                    ct_b4_scarf, merged, moves)
+                if not (vs_sets.get(ct_b4_scarf) or {}).get("moves"):
+                    enemy_move_overrides = dict(enemy_move_overrides)
+                    enemy_move_overrides[ct_b4_scarf] = choice_scarf_enemy_moveset(
+                        ct_b4_scarf, merged, moves)
             if not (3 <= len(our6) <= 6):
                 st.warning("Pick 3, 4, 5, or 6 (load a team in Team Builder, paste "
                            "a pokepaste, or choose a preset above) -- 3 or 4 skips "
@@ -4095,6 +4877,16 @@ with tab_counter:
                 st.warning("Provide an enemy roster (pick a saved team, or paste a "
                            "valid pokepaste) first.")
             else:
+                ct_check_tr = st.checkbox(
+                    "Also check enemy Trick Room", key="ct_b4_check_tr",
+                    help="\"avoiding enemy tailwind and trick room may be "
+                         "key for a matchup swinging from a win to a clear "
+                         "loss\" -- opt-in (real extra cost, a whole second "
+                         "replay per enemy pair): when a named enemy really "
+                         "runs Trick Room, also test it actually casting it "
+                         "turn 1 and see if that flips the outcome, feeding "
+                         "the Win conditions table's own Trick Room caveat "
+                         "below. Off leaves every result exactly as before.")
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
@@ -4108,12 +4900,14 @@ with tab_counter:
                                 nature_overrides=nature_overrides,
                                 ability_overrides=ability_overrides,
                                 enemy_item_overrides=enemy_item_overrides,
-                                enemy_move_overrides=enemy_move_overrides)
+                                enemy_move_overrides=enemy_move_overrides,
+                                check_trick_room=ct_check_tr)
                     except ValueError as e:
                         st.error(str(e))
                     else:
                         st.session_state["ct_b4_pair_rows"] = pair_rows
                         st.session_state["ct_b4_bring4_rows"] = bring4_rows
+                        _cache_gameplans(pair_rows, "Bring-4 search")
                         st.session_state["ct_b4_our6"] = our6
                         st.session_state["ct_b4_vs_name"] = ct_vs_name
 
@@ -4138,6 +4932,14 @@ with tab_counter:
                         st.caption(mega_cap)
                     st.dataframe(_pair_rows_df(bring4_rows[0]["pair_rows"], include_total=True),
                                 width='stretch', hide_index=True)
+                    _render_win_conditions(bring4_rows[0])
+                    _render_hit_count_matrix_for_bring4_search(
+                        bring4_rows[0], vs_roster, merged, moves, natures, typechart,
+                        item_overrides=item_overrides, move_overrides=move_overrides,
+                        enemy_item_overrides=enemy_item_overrides,
+                        enemy_move_overrides=enemy_move_overrides,
+                        evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                        ability_overrides=ability_overrides)
                     b4_only_losses = st.checkbox(
                         "Only show enemy pairs each pair loses to",
                         key="ct_b4_best_onlyloss")
@@ -4160,7 +4962,8 @@ with tab_counter:
                         evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                         ability_overrides=ability_overrides,
                         enemy_item_overrides=enemy_item_overrides,
-                        enemy_move_overrides=enemy_move_overrides)
+                        enemy_move_overrides=enemy_move_overrides,
+                        item_resolution_enemies=item_resolution_enemies)
 
                 st.markdown("**Full deep dive: all of `Our 6`, every configuration**")
                 st.caption("Every C(6,2) pair `our6` can form -- covers every "
@@ -4174,7 +4977,8 @@ with tab_counter:
                     evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                     ability_overrides=ability_overrides,
                     enemy_item_overrides=enemy_item_overrides,
-                    enemy_move_overrides=enemy_move_overrides)
+                    enemy_move_overrides=enemy_move_overrides,
+                    item_resolution_enemies=item_resolution_enemies)
                 allteams_worst_case = st.checkbox(
                     "Worst-case enemy targeting",
                     key="ctb4_dd_all6_allteams_worst_case",
@@ -4224,6 +5028,7 @@ with tab_counter:
                                 item_overrides=item_overrides,
                                 move_overrides=move_overrides,
                                 worst_case_targeting=allteams_worst_case,
+                                item_resolution_enemies=item_resolution_enemies,
                                 evs_overrides=allteams_evs_overrides,
                                 nature_overrides=allteams_nature_overrides,
                                 ability_overrides=allteams_ability_overrides,
@@ -4257,6 +5062,7 @@ with tab_counter:
                         f"{ov['pairs_no_ko']} no-KO), "
                         f"{ov['pairs_tailwind_safe']}/{ov_total} tailwind-safe, "
                         f"{ov['pairs_protect_safe']}/{ov_total} protect-safe, "
+                        f"{ov['pairs_follow_me_safe']}/{ov_total} redirect-safe, "
                         f"{ov['pairs_clean_win_total']:.1f}/{ov_total * 2} "
                         f"clean win")
                     st.markdown("**Summary: best bring-4 vs each enemy team**")
@@ -4445,7 +5251,8 @@ with tab_counter:
                  "Swept": r["pairs_swept"], "Traded": r["pairs_traded"],
                  "Lost": r["pairs_lost"], "No KO": r["pairs_no_ko"],
                  "Tailwind-safe": r["pairs_tailwind_safe"],
-                 "Protect-safe": r["pairs_protect_safe"]}
+                 "Protect-safe": r["pairs_protect_safe"],
+                 "Redirect-safe": r["pairs_follow_me_safe"]}
                 for r in rows[:top_n2]]), width='stretch', hide_index=True)
 
         st.divider()
@@ -4691,7 +5498,7 @@ with tab_counter:
             st.info("No 3-disjoint-pair team could be formed from the top "
                     "pairs shown -- raise 'Top pairs to show'.")
 
-    else:  # Coverage groups
+    elif ct_mode == "Coverage groups":
         st.caption("\"Coverage group finder\": every legal group of the "
                    "sizes below drawn from the pool, ranked by how "
                    "completely its OWN internal pairs -- every one of the "
@@ -5010,6 +5817,83 @@ with tab_counter:
                             st.session_state["ct_b4_our"] = _PASTE_OUR_LABEL
                             st.session_state["ct_b4_our_paste"] = "\n\n".join(row["group"])
                             st.rerun()
+
+    else:  # Round-robin (saved teams only)
+        st.caption("\"Give me an option ... to only run all the saved teams "
+                   "vs the other teams (including themself), rather than "
+                   "creating teams\" -- every saved team raced against "
+                   "every OTHER saved team, mirrors included, each side's "
+                   "own real sets intact -- no pool/candidate search on "
+                   "either side. A round-robin over N teams is N(N+1)/2 "
+                   "matchups, each a full bring-4 search -- narrow the "
+                   "grid below if the full library is too slow.")
+        from counter_finder import round_robin_saved_teams
+        ct_rr_teams = st.multiselect(
+            "Teams to include", sorted(teams), default=sorted(teams), key="ct_rr_teams")
+        if ct_rr_teams:
+            n = len(ct_rr_teams)
+            st.caption(f"{n} team(s) -> {n * (n + 1) // 2} matchup(s).")
+        if st.button("Run round-robin", type="primary", key="ct_rr_go",
+                     disabled=not ct_rr_teams):
+            progress = st.progress(0.0)
+            n = len(ct_rr_teams)
+            total_matchups = n * (n + 1) // 2
+            results = []
+            done = 0
+            for team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster in round_robin_saved_teams(
+                    teams, team_meta, merged, moves, natures, typechart,
+                    team_names=ct_rr_teams, turns=ct_turns):
+                results.append((team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster))
+                if bring4_rows:
+                    label = (f"Round-robin: {team_a} vs {team_b}" if layer == "vs_full"
+                            else f"Round-robin: {team_a} best-4 vs {team_b} best-4")
+                    _cache_gameplans(bring4_rows[0]["pair_rows"], label)
+                done += 1
+                progress.progress(min(1.0, done / total_matchups))
+            st.session_state["ct_rr_results"] = results
+        rr_results = st.session_state.get("ct_rr_results")
+        if rr_results:
+            # "race both directions" means every non-mirror pair now yields
+            # up to 3 rows -- team_a's own best-4 vs team_b's full roster,
+            # team_b's own best-4 vs team_a's full roster, and a third
+            # "best4 vs best4" head-to-head -- rendered as separate sections
+            # so the two different enemy rosters ("everything team_b could
+            # bring" vs "team_b's own actual best-4") are never conflated.
+            vs_full = [r for r in rr_results if r[4] == "vs_full"]
+            h2h = [r for r in rr_results if r[4] == "best4_vs_best4"]
+            for team_a, team_b, pair_rows, bring4_rows, _layer, enemy_roster in vs_full:
+                st.markdown(f"### {team_a} vs {team_b}")
+                total = pair_rows[0]["pairs_total"] if pair_rows else 0
+                st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
+                if bring4_rows:
+                    st.dataframe(_bring4_rows_df(bring4_rows, total),
+                                width='stretch', hide_index=True)
+                    st.caption("Best bring-4: " + " / ".join(bring4_rows[0]["bring4"]))
+                    mega_cap = _bring4_mega_caption(bring4_rows[0])
+                    if mega_cap:
+                        st.caption(mega_cap)
+                    _render_win_conditions(bring4_rows[0])
+                    _render_hit_count_matrix_for_bring4_search(
+                        bring4_rows[0], enemy_roster, merged, moves, natures, typechart)
+                st.divider()
+            if h2h:
+                st.markdown("## Best-4 vs best-4 (head to head)")
+                st.caption("Both sides narrowed down to their OWN best bring-4 "
+                          "(from the rows above), raced directly against each "
+                          "other -- a narrower, more realistic matchup than "
+                          "\"best-4 vs everything the enemy's full roster could "
+                          "bring\" above.")
+                for team_a, team_b, pair_rows, bring4_rows, _layer, enemy_roster in h2h:
+                    st.markdown(f"### {team_a} best-4 vs {team_b} best-4")
+                    total = pair_rows[0]["pairs_total"] if pair_rows else 0
+                    st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
+                    if bring4_rows:
+                        st.dataframe(_bring4_rows_df(bring4_rows, total),
+                                    width='stretch', hide_index=True)
+                        _render_win_conditions(bring4_rows[0])
+                        _render_hit_count_matrix_for_bring4_search(
+                            bring4_rows[0], enemy_roster, merged, moves, natures, typechart)
+                    st.divider()
 
 
 # ------------------------------------------------------------------ battle
@@ -6277,7 +7161,8 @@ with tab_sim:
         with sc1:
             st.markdown("**Our side**")
             sim_our_pool, sim_our_sets = our_side_pool("sim", teams, all_names, team_meta,
-                                                        merged=merged)
+                                                        merged=merged,
+                                                        default_source="A saved team")
             sim_our_pool = sim_our_pool or list(all_names)
             if "sim_our_lead" in st.session_state:
                 st.session_state["sim_our_lead"] = [n for n in st.session_state["sim_our_lead"]
@@ -6420,10 +7305,15 @@ with tab_sim:
             if battle.p2.bench:
                 st.caption("Bench: " + "; ".join(_sim_mon_line(c) for c in battle.p2.bench))
 
+        from engine import TERRAIN_NAMES, WEATHER_NAMES
         fld = battle.field
         field_bits = []
         if fld.weather:
-            field_bits.append(f"Weather: {fld.weather} ({fld.weather_turns_left} left)")
+            field_bits.append(f"Weather: {WEATHER_NAMES.get(fld.weather, fld.weather)} "
+                              f"({fld.weather_turns_left} left)")
+        if fld.terrain:
+            field_bits.append(f"{TERRAIN_NAMES.get(fld.terrain, fld.terrain)} "
+                              f"({fld.terrain_turns_left} left)")
         if fld.trick_room:
             field_bits.append(f"Trick Room ({fld.trick_room_turns_left} left)")
         if fld.tailwind_p1:
@@ -6432,6 +7322,62 @@ with tab_sim:
             field_bits.append(f"Their Tailwind ({fld.tailwind_p2} left)")
         if field_bits:
             st.caption(" | ".join(field_bits))
+
+        with st.expander("Win conditions (live, current HP)"):
+            st.caption("\"A live tracker in a battle simulator match ... I "
+                      "can afford to risk Metagross this turn and attack "
+                      "if I trade it for the enemy Staraptor, because my "
+                      "Scizor beats the rest.\" 1v1 hits-to-KO, both "
+                      "directions, every mon CURRENTLY ALIVE on both "
+                      "sides, off each one's REAL current HP.")
+            live_matrix = sim_hit_count_matrix(battle, movesets)
+            our_alive_names = [c.name for c in battle.p1.roster if not c.fainted]
+            their_alive_names = [c.name for c in battle.p2.roster if not c.fainted]
+            if our_alive_names and their_alive_names:
+                st.dataframe(
+                    _hit_count_matrix_df(live_matrix, our_alive_names, their_alive_names),
+                    width='stretch', hide_index=True)
+                live_crucial = sim_crucial_members(live_matrix, our_alive_names,
+                                                   their_alive_names)
+                _render_crucial_members(live_crucial)
+            else:
+                st.caption("Nothing left alive on one side to compare.")
+
+        with st.expander("Counter Table gameplan (if this exact matchup was analyzed)"):
+            st.caption("\"If the counter table analysis has been loaded, it "
+                      "would be good to see what the 2v2 calculator saw as "
+                      "the optimal play sequence\" -- the stored turn-by-"
+                      "turn plan from whichever Counter Table search "
+                      "already raced these exact two active pairs against "
+                      "each other, if any.")
+            our_active_names = [c.name for c in battle.p1.active
+                                if c is not None and not c.fainted]
+            their_active_names = [c.name for c in battle.p2.active
+                                  if c is not None and not c.fainted]
+            gameplans = st.session_state.get("ct_gameplans", {})
+            cached = None
+            if len(our_active_names) == 2 and len(their_active_names) == 2:
+                cached = gameplans.get(
+                    (frozenset(our_active_names), frozenset(their_active_names)))
+            if cached is None:
+                st.caption("No Counter Table analysis covers this exact pair yet.")
+            else:
+                n1, n2 = cached["our_pair"]
+                e1, e2 = cached["enemy_pair"]
+                role_name = {"C": n1, "P": n2, "E1": e1, "E2": e2}
+                st.caption(f"From: {cached['source']} -- predicted outcome: "
+                          f"{cached['outcome']} (turn {cached['turns_used']})")
+                lines = []
+                for turn_i, turn_hits in enumerate(cached["log"], 1):
+                    for role, tgt_role, h in turn_hits:
+                        spread = " (spread)" if h.num_targets_hit > 1 else ""
+                        lines.append(
+                            f"T{turn_i} {role_name[role]} -> "
+                            f"{role_name[tgt_role]}: {h.move_name or '-'} "
+                            f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-"
+                            f"{h.hi * 100:.0f}%{spread}")
+                if lines:
+                    st.code("\n".join(lines), language=None)
 
         winner = "p1" if battle.p2.has_lost() else ("p2" if battle.p1.has_lost() else None)
         if winner:
@@ -6486,15 +7432,31 @@ with tab_sim:
                     losses = [e for e in summary_list if e["result"] == "loss"]
                     if losses:
                         st.markdown("**Lost to:**")
-                        for e in losses:
+                        for loss_i, e in enumerate(losses):
                             contributors = sorted(
                                 (m for m in e["theirs"] if m["kos"] or m["damage_pct"] > 0),
                                 key=lambda m: (-m["kos"], -m["damage_pct"]))
                             top = ", ".join(
                                 f"{m['name']} ({m['kos']} KO, {m['damage_pct']:.0f}% dmg)"
                                 for m in contributors[:2])
-                            st.write(f"- vs {' + '.join(e['their4'])} "
-                                    f"(turn {e['turns']}): {top or '-'}")
+                            lc1, lc2 = st.columns([5, 1])
+                            with lc1:
+                                st.write(f"- vs {' + '.join(e['their4'])} "
+                                        f"(turn {e['turns']}): {top or '-'}")
+                            with lc2:
+                                if st.button("Replay", key=f"replay_loss_{loss_i}"):
+                                    our4 = st.session_state["sim_our4"]
+                                    battle2, movesets2 = sim_build_battle(
+                                        our4, e["their4"], merged, moves, natures, typechart,
+                                        our_sets=st.session_state.get("sim_our_sets"),
+                                        enemy_sets=st.session_state.get("sim_their_sets"),
+                                        our_mega=st.session_state.get("sim_our_mega"))
+                                    st.session_state["sim_battle"] = battle2
+                                    st.session_state["sim_movesets"] = movesets2
+                                    st.session_state["sim_their4"] = e["their4"]
+                                    st.session_state["sim_mode"] = "I choose their bring"
+                                    st.session_state["sim_turn_log"] = []
+                                    st.rerun()
                     else:
                         st.write("No losses across all 15 leads.")
 
@@ -6530,6 +7492,29 @@ with tab_sim:
                 st.rerun()
         else:
             st.markdown(f"**Turn {battle.turn_num + 1} — your move**")
+            # "Let me select a mode in the battle simulator where the enemy
+            # always uses its redirection moves. Also, maybe give me a mode
+            # where I can manually select the enemies moves too, to see if a
+            # specific play can really be punished." -- two independent
+            # per-turn toggles, checked fresh every turn (`st.checkbox`'s
+            # own `key` makes it persist as a per-session choice, not a
+            # one-shot). Manual mode, when on, takes priority in EFFECT
+            # (the human is choosing everything for the enemy, including
+            # whether to redirect) -- see where `sim_manual_enemy` is read
+            # below, near the "Submit turn" button.
+            sim_force_redirect = st.checkbox(
+                "Enemy plays optimal support (redirect / speed control + Protect)",
+                key="sim_force_redirect",
+                help="Redirect: always clicks Follow Me/Rage Powder when able. "
+                     "Speed control: if the pair isn't already faster than both "
+                     "of your actives, forces a real speed-control move "
+                     "(Tailwind, Trick Room, Icy Wind, Electroweb, Bulldoze, "
+                     "Rock Tomb) when one would flip the order, and Protects "
+                     "the partner that turn if it would otherwise take a "
+                     "KO-threatening hit. Once the pair IS faster, plays "
+                     "normally again.")
+            sim_manual_enemy = st.checkbox(
+                "I'll pick the enemy's moves too", key="sim_manual_enemy")
             pending = st.session_state.get("sim_pending_turn")
 
             if pending is not None:
@@ -6600,6 +7585,15 @@ with tab_sim:
                                       "-- no action needed")
                             continue
                         st.caption(f"{c.name}: fainted, no bench left to replace it")
+                        # "Provide the suggested move or suggested switch
+                        # after a faint" -- the SAME strategic pick
+                        # `Battle._replace_fainted` already uses for the
+                        # opponent's own auto-replacement (type matchup +
+                        # offensive threat + health, not just highest HP),
+                        # shown here as a caption only -- the human still
+                        # picks from the dropdown below.
+                        suggested = battle._best_replacement(alive_bench, battle.p2.active)
+                        st.caption(f"Suggested: Switch in {suggested.name}")
                         options = [(f"Switch in {b.name}", Action(c, "p1", "switch", None, [b]))
                                   for b in alive_bench]
                         slots_needing_action += 1
@@ -6621,6 +7615,10 @@ with tab_sim:
                         continue
 
                     st.markdown(f"**{c.name}**")
+                    suggested = sim_suggest_action(battle, c, battle.p1, battle.p2,
+                                                   movesets, battle.turn_num + 1)
+                    if suggested:
+                        st.caption(f"Suggested: {suggested}")
                     # "I need to choose during the battle which of my brings
                     # mega evolves, not before, and choose at the start of
                     # the turn on which I wish to mega evolve." -- a real
@@ -6645,7 +7643,8 @@ with tab_sim:
                     chosen_action = None
                     if menu == "Attack":
                         groups = sim_grouped_actions(c, "p1", battle.p1.active, battle.p2.active,
-                                                     movesets[c.name], terrain=battle.field.terrain)
+                                                     movesets[c.name], terrain=battle.field.terrain,
+                                                     battle=battle)
                         if groups:
                             move_key = f"sim_move_{i}_{battle.turn_num}"
                             move_name = st.selectbox(
@@ -6672,11 +7671,97 @@ with tab_sim:
                         p1_actions.append(chosen_action)
                     st.divider()
 
-                if st.button("Submit turn", type="primary",
-                            disabled=len(p1_actions) != slots_needing_action):
-                    from solver import greedy_opponent_joint_action
-                    p2_actions = greedy_opponent_joint_action(
-                        battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
+                # "give me a mode where I can manually select the enemies
+                # moves too, to see if a specific play can really be
+                # punished" -- the SAME Attack/Switch menu built for our own
+                # side above (`sim_grouped_actions`), applied to `battle.p2.
+                # active` instead, gated behind `sim_manual_enemy`. Takes
+                # priority over `sim_force_redirect` in EFFECT (see the
+                # "Submit turn" handler below) -- the human is choosing
+                # everything for the enemy here, including whether to
+                # redirect.
+                p2_manual_actions = []
+                p2_slots_needing_action = 0
+                if sim_manual_enemy:
+                    st.markdown("**Enemy's moves (manual mode)**")
+                    for i, c in enumerate(battle.p2.active):
+                        if c.fainted:
+                            alive_bench = [b for b in battle.p2.bench if not b.fainted]
+                            if not alive_bench:
+                                st.caption(f"{c.name}: fainted, no bench left to "
+                                          "replace it -- no action needed")
+                                continue
+                            st.caption(f"{c.name}: fainted, no bench left to replace it")
+                            options = [(f"Switch in {b.name}",
+                                       Action(c, "p2", "switch", None, [b]))
+                                      for b in alive_bench]
+                            p2_slots_needing_action += 1
+                            labels = [lbl for lbl, _a in options]
+                            pick = st.selectbox(
+                                "Action", labels,
+                                key=f"sim_enemy_action_{i}_{battle.turn_num}",
+                                label_visibility="collapsed")
+                            p2_manual_actions.append(next(a for lbl, a in options
+                                                          if lbl == pick))
+                            continue
+                        if c.volatile.get("must_recharge"):
+                            st.markdown(f"**{c.name}** — must recharge (forced this turn)")
+                            p2_slots_needing_action += 1
+                            p2_manual_actions.append(Action(c, "p2", "protect", None, [c]))
+                            st.divider()
+                            continue
+                        st.markdown(f"**{c.name}**")
+                        alive_bench = [b for b in battle.p2.bench if not b.fainted]
+                        menu_key = f"sim_enemy_menu_{i}_{battle.turn_num}"
+                        menu_options = ["Attack", "Switch"] if alive_bench else ["Attack"]
+                        menu = st.selectbox("Action type", menu_options, key=menu_key,
+                                            label_visibility="collapsed")
+                        chosen_enemy_action = None
+                        if menu == "Attack":
+                            groups = sim_grouped_actions(
+                                c, "p2", battle.p2.active, battle.p1.active,
+                                movesets[c.name], terrain=battle.field.terrain,
+                                battle=battle)
+                            if groups:
+                                move_key = f"sim_enemy_move_{i}_{battle.turn_num}"
+                                move_name = st.selectbox(
+                                    "Move", [name for name, _opts in groups], key=move_key)
+                                opts = dict(groups)[move_name]
+                                if len(opts) > 1:
+                                    target_key = (f"sim_enemy_target_{i}_"
+                                                  f"{battle.turn_num}_{move_name}")
+                                    tgt_label = st.selectbox(
+                                        "Target", [lbl for lbl, _a in opts], key=target_key)
+                                    chosen_enemy_action = next(a for lbl, a in opts
+                                                               if lbl == tgt_label)
+                                else:
+                                    chosen_enemy_action = opts[0][1]
+                        else:
+                            switch_key = f"sim_enemy_switch_{i}_{battle.turn_num}"
+                            bench_name = st.selectbox(
+                                "Switch to", [b.name for b in alive_bench], key=switch_key)
+                            bench_mon = next(b for b in alive_bench if b.name == bench_name)
+                            chosen_enemy_action = Action(c, "p2", "switch", None, [bench_mon])
+                        p2_slots_needing_action += 1
+                        if chosen_enemy_action is None:
+                            st.warning(f"No legal action for {c.name} this turn.")
+                        else:
+                            p2_manual_actions.append(chosen_enemy_action)
+                        st.divider()
+
+                submit_disabled = len(p1_actions) != slots_needing_action
+                if sim_manual_enemy:
+                    submit_disabled = (submit_disabled or
+                                       len(p2_manual_actions) != p2_slots_needing_action)
+                if st.button("Submit turn", type="primary", disabled=submit_disabled):
+                    if sim_manual_enemy:
+                        p2_actions = p2_manual_actions
+                    else:
+                        from solver import greedy_opponent_joint_action
+                        p2_actions = greedy_opponent_joint_action(
+                            battle, battle.p2, battle.p1, movesets, battle.turn_num + 1)
+                        if sim_force_redirect:
+                            p2_actions = sim_force_support_actions(battle, p2_actions, movesets)
                     mega_decisions = {id(c): True for c in battle.p2.active if c is not None}
                     mega_decisions.update(our_mega_decisions)
                     fainted = sim_predict_faint_replacements(

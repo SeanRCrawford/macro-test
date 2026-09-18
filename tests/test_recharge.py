@@ -141,6 +141,38 @@ class TestRecharge(unittest.TestCase):
             any("cannot switch out" in line for line in self.battle.log.lines),
             "\n".join(self.battle.log.lines))
 
+    def test_fully_blocked_by_protect_does_not_force_a_recharge(self):
+        """"If hyper beam is blocked by protect, it does not need to
+        recharge (the move was not used)" -- the recharge lockout follows
+        from the move actually connecting, not from merely being selected.
+        Garchomp Protects, so Hyper Beam never lands on anyone."""
+        protect = build_moveset(
+            self.W["merged"]["Garchomp"], self.W["moves"], only_moves=["Protect"])[0][0]
+        p1 = [Action(self.snorlax, "p1", "move", self.hyper_beam, [self.garchomp]),
+             self._incineroar_action()]
+        p2 = [Action(self.garchomp, "p2", "protect", protect, [self.garchomp]),
+             Action(self.kingambit, "p2", "move", self.kingambit_move, [self.incineroar])]
+        self.battle.run_turn(p1, p2)
+        self.assertFalse(
+            self.snorlax.volatile.get("must_recharge"),
+            "a fully Protect-blocked Hyper Beam must not force a recharge")
+
+    def test_still_recharges_when_an_unrelated_mon_protects(self):
+        """Regression guard against an overly-broad fix: Kingambit
+        Protecting (nothing to do with Snorlax's own target) must not
+        suppress Snorlax's recharge -- only Hyper Beam's OWN intended
+        target(s) being fully blocked should."""
+        p1 = [Action(self.snorlax, "p1", "move", self.hyper_beam, [self.garchomp]),
+             self._incineroar_action()]
+        protect = build_moveset(
+            self.W["merged"]["Kingambit"], self.W["moves"], only_moves=["Protect"])[0][0]
+        p2 = [Action(self.garchomp, "p2", "move", self.garchomp_move, [self.snorlax]),
+             Action(self.kingambit, "p2", "protect", protect, [self.kingambit])]
+        self.battle.run_turn(p1, p2)
+        self.assertTrue(self.snorlax.volatile.get("must_recharge"),
+                        "Hyper Beam connected with its real target (Garchomp "
+                        "never protected), so the recharge must still fire")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 
@@ -147,9 +148,15 @@ class TestStrictWeakTypesShorthand(unittest.TestCase):
     def test_end_to_end_no_printed_core_has_two_weak_to_a_named_type(self):
         """A real --multi-bring4 run with an explicit --strict-weak-types
         list: every printed core's own weaknesses-by-type line must never
-        show 2+ for Fire (the only named type here)."""
+        show 2+ for Fire (the only named type here).
+
+        pool-size 16 stopped reliably finding any qualifying core once the
+        default-sets data swap changed the candidate pool's composition --
+        widened to 20 (verified by direct reproduction to still produce
+        several real, Fire<=1 cores), same remedy as
+        TestDeepDiveCoreAndXlsxExport's own pool-size widening."""
         msg, out = run_main(
-            ["--pool-size", "16", "--multi-bring4", "--vs-team",
+            ["--pool-size", "20", "--multi-bring4", "--vs-team",
              "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
              "--good-threshold", "0", "--min-enemies", "1",
              "--strict-weak-types", "Fire", "--top", "30"])
@@ -252,19 +259,23 @@ class TestUniqueItemsFlag(unittest.TestCase):
     """"make the item uniqueness an option, but by default items will
     remain non-unique to reduce search time" -- `--unique-items` threads
     into `enforce_item_clause` on `bring4_search`/`core_deep_dive`. Off by
-    default: a known real collision (Ninetales-Alola and Rampardos both
-    independently pick Life Orb against this fixture -- see
-    TestResolveUniqueItems in test_counter_finder.py) shows up in the
-    printed deep-dive "set: ..." line unless the flag is passed."""
+    default: a known real collision (Garchomp and Incineroar both
+    independently pick Sitrus Berry against this fixture) shows up in the
+    printed deep-dive "set: ..." line unless the flag is passed.
+
+    Deliberately an UNCAPPED item (not Focus Sash/Life Orb) -- those are
+    now capped by DEFAULT (see TestFocusSashCapScopedToTopRowsOnly-style
+    tests), which would resolve a Sash/Orb collision even with
+    --unique-items off and prove nothing about Item Clause specifically."""
 
     # Exactly 4 names (not the padded-to-6 list this used to be) -- with
     # only one possible bring-4 to rank, both colliding members are
     # GUARANTEED to show up in the deep dive regardless of how any other
     # mechanic changes shift bring-4 ranking; a padded-to-6 list left this
     # fixture fragile to exactly that (a bring-4 search entirely avoiding
-    # Ninetales-Alola/Rampardos once other mechanics made a different
-    # 4-of-6 rank #1, silently no longer exercising the collision at all).
-    OUR6 = "Mega Gengar,Mega Alakazam,Ninetales-Alola,Rampardos"
+    # Garchomp/Incineroar once other mechanics made a different 4-of-6
+    # rank #1, silently no longer exercising the collision at all).
+    OUR6 = "Mega Gengar,Mega Alakazam,Garchomp,Incineroar"
 
     def _set_line(self, out):
         idx = out.find("set: ")
@@ -277,8 +288,8 @@ class TestUniqueItemsFlag(unittest.TestCase):
              "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
         self.assertIsNone(msg, out)
         line = self._set_line(out)
-        self.assertIn("Ninetales-Alola @ Life Orb", line)
-        self.assertIn("Rampardos @ Life Orb", line)
+        self.assertIn("Garchomp @ Sitrus Berry", line)
+        self.assertIn("Incineroar @ Sitrus Berry", line)
 
     def test_resolves_the_collision_in_bring4_deep_dive(self):
         msg, out = run_main(
@@ -287,8 +298,8 @@ class TestUniqueItemsFlag(unittest.TestCase):
              "--unique-items"])
         self.assertIsNone(msg, out)
         line = self._set_line(out)
-        self.assertIn("Ninetales-Alola @ Life Orb", line)
-        self.assertNotIn("Rampardos @ Life Orb", line)
+        self.assertIn("Garchomp @ Sitrus Berry", line)
+        self.assertNotIn("Incineroar @ Sitrus Berry", line)
 
     def test_resolves_the_collision_in_multi_bring4_deep_dive_core(self):
         argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
@@ -399,7 +410,7 @@ class TestMaxFocusSashFlag(unittest.TestCase):
     """"the focus sash is just too broken and is warping matchup
     assessment... this must apply to every single team" -- UNLIKE
     --unique-items, --max-focus-sash needs NO flag to take effect: a known
-    real Focus-Sash collision (Excadrill and Gengar both independently
+    real Focus-Sash collision (Aegislash and Gengar both independently
     pick Focus Sash against this fixture) is resolved with no flags at
     all, and only reappears when explicitly disabled."""
 
@@ -428,17 +439,18 @@ class TestMaxFocusSashFlag(unittest.TestCase):
         self.assertNotIn("Focus Sash", line)
 
     def test_negative_disables_the_check_restoring_the_collision(self):
-        # All three of Excadrill/Aegislash/Gengar independently want it
-        # against this fixture -- confirmed via the default-on test above
-        # capping it to exactly 1, and the cap=2 test below capping it to
-        # exactly 2; disabling the check entirely restores all 3.
+        # Aegislash and Gengar independently want it against this fixture --
+        # confirmed via the default-on test above capping it to exactly 1,
+        # and the cap=2 test below capping it to exactly 2; disabling the
+        # check entirely restores both (Excadrill's own real best item
+        # here, Expert Belt, doesn't involve Focus Sash at all).
         msg, out = run_main(
             ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
              "--no-prompt", "--top", "1", "--deep-dive-core", "1",
              "--max-focus-sash", "-1"])
         self.assertIsNone(msg, out)
         line = self._set_line(out)
-        self.assertEqual(line.count("Focus Sash"), 3, line)
+        self.assertEqual(line.count("Focus Sash"), 2, line)
 
     def test_a_higher_cap_allows_more_than_one(self):
         msg, out = run_main(
@@ -450,10 +462,58 @@ class TestMaxFocusSashFlag(unittest.TestCase):
         self.assertEqual(line.count("Focus Sash"), 2, line)
 
 
-class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
+class TestWinConditionsCliOutput(unittest.TestCase):
+    """"Individual pokemon can be crucial win conditions to preserve for a
+    given match" -- `--bring4` now also prints a "Win conditions" block
+    (safe members/pairs per enemy) plus an optional "Crucial:" line naming
+    any bring-4 member that's the sole answer to at least one enemy."""
+
+    OUR6 = "Excadrill,Aegislash,Gengar,Mega Alakazam"
+
+    def test_bring4_prints_a_win_conditions_block(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Win conditions", out)
+        self.assertIn("Garchomp:", out)
+        self.assertIn("Incineroar:", out)
+
+    def test_a_crucial_line_when_present_names_a_real_bring4_member(self):
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        crucial_lines = [ln for ln in out.splitlines() if ln.startswith("Crucial:")]
+        if crucial_lines:
+            names = {n.strip() for n in self.OUR6.split(",")}
+            self.assertTrue(any(n in crucial_lines[0] for n in names), crucial_lines[0])
+            self.assertIn("sole answer to:", crucial_lines[0])
+
+    def test_chip_line_when_present_names_a_real_member_and_a_percent(self):
+        """"how chipped the enemy has to be for certain pokemon to be an
+        answer" -- a "How chipped..." block, when any enemy has a losing
+        1v1 that chip could still flip, names a real bring-4 member and a
+        whole-percent chip figure."""
+        msg, out = run_main(
+            ["--our", self.OUR6, "--bring4", "--vs", "Garchomp,Incineroar",
+             "--no-prompt", "--top", "1", "--deep-dive-core", "1"])
+        self.assertIsNone(msg, out)
+        if "How chipped the enemy has to be" not in out:
+            self.skipTest("no losing-but-chippable 1v1 in this fixture right now")
+        chip_lines = [ln for ln in out.splitlines() if "needs it chipped" in ln]
+        self.assertTrue(chip_lines)
+        names = {n.strip() for n in self.OUR6.split(",")}
+        for ln in chip_lines:
+            self.assertTrue(any(n in ln for n in names), ln)
+            self.assertRegex(ln, r"\d+%\+")
+
+
+class TestItemCapsScopedToTopRowsOnly(unittest.TestCase):
     """Same top-N-only scoping as `TestUniqueItemsScopedToTopRowsOnly`,
-    but for the DEFAULT-ON Focus-Sash cap -- the exhaustive/beam sweep
-    itself never sees it; `_apply_focus_sash_cap_to_top_rows` applies it
+    but for the DEFAULT-ON Focus-Sash/Life-Orb caps -- the exhaustive/beam
+    sweep itself never sees the real re-race; `_apply_item_caps_to_top_rows`
+    (shared with `src/app.py`, imported from `counter_finder`) applies it
     afterward, scoped to `--top`, unconditionally (no flag needed)."""
 
     FOUR = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam"]
@@ -475,16 +535,17 @@ class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
         self.assertIsNone(self.rows[0]["item_clause_resolved_items"])
 
     def test_top_n_rows_get_capped(self):
-        corrected = ct._apply_focus_sash_cap_to_top_rows(
-            self.rows, 1, self.coverage, good_threshold=0.0)
+        corrected = ct._apply_item_caps_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0,
+            item_caps={"Focus Sash": 1})
         resolved = corrected[0]["item_clause_resolved_items"]
         self.assertIsNotNone(resolved)
         self.assertLessEqual(
             sum(1 for v in resolved.values() if v == "Focus Sash"), 1)
 
-    def test_max_focus_sash_none_is_a_no_op(self):
-        corrected = ct._apply_focus_sash_cap_to_top_rows(
-            self.rows, 1, self.coverage, good_threshold=0.0, max_focus_sash=None)
+    def test_falsy_item_caps_is_a_no_op(self):
+        corrected = ct._apply_item_caps_to_top_rows(
+            self.rows, 1, self.coverage, good_threshold=0.0, item_caps=None)
         self.assertEqual(corrected, self.rows)
 
     def test_wired_into_the_cli_with_the_right_top_n_and_no_flag_needed(self):
@@ -493,25 +554,44 @@ class TestFocusSashCapScopedToTopRowsOnly(unittest.TestCase):
                "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
                "--good-threshold", "0", "--min-enemies", "1",
                "--top", "3", "--no-prompt"]
-        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
-                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+        with patch.object(ct, "_apply_item_caps_to_top_rows",
+                         wraps=ct._apply_item_caps_to_top_rows) as spy:
             msg, out = run_main(argv)
         self.assertIsNone(msg, out)
         spy.assert_called_once()
         self.assertEqual(spy.call_args.args[1], 3)
+        self.assertEqual(spy.call_args.kwargs.get("item_caps"),
+                         {"Focus Sash": ct.DEFAULT_MAX_FOCUS_SASH,
+                          "Life Orb": ct.DEFAULT_MAX_LIFE_ORB})
 
-    def test_max_focus_sash_negative_one_skips_the_call(self):
+    def test_max_focus_sash_negative_one_drops_it_from_item_caps(self):
         from unittest.mock import patch
         argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
                "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
                "--good-threshold", "0", "--min-enemies", "1",
                "--top", "3", "--no-prompt", "--max-focus-sash", "-1"]
-        with patch.object(ct, "_apply_focus_sash_cap_to_top_rows",
-                         wraps=ct._apply_focus_sash_cap_to_top_rows) as spy:
+        with patch.object(ct, "_apply_item_caps_to_top_rows",
+                         wraps=ct._apply_item_caps_to_top_rows) as spy:
             msg, out = run_main(argv)
         self.assertIsNone(msg, out)
         spy.assert_called_once()
-        self.assertIsNone(spy.call_args.kwargs.get("max_focus_sash"))
+        item_caps = spy.call_args.kwargs.get("item_caps")
+        self.assertNotIn("Focus Sash", item_caps)
+        self.assertEqual(item_caps.get("Life Orb"), ct.DEFAULT_MAX_LIFE_ORB)
+
+    def test_both_caps_negative_one_calls_with_an_empty_item_caps(self):
+        from unittest.mock import patch
+        argv = ["--pool-size", "16", "--multi-bring4", "--vs-team",
+               "Kingambit,Sableye", "--vs-team", "Ariados,Basculegion",
+               "--good-threshold", "0", "--min-enemies", "1",
+               "--top", "3", "--no-prompt", "--max-focus-sash", "-1",
+               "--max-life-orb", "-1"]
+        with patch.object(ct, "_apply_item_caps_to_top_rows",
+                         wraps=ct._apply_item_caps_to_top_rows) as spy:
+            msg, out = run_main(argv)
+        self.assertIsNone(msg, out)
+        spy.assert_called_once()
+        self.assertEqual(spy.call_args.kwargs.get("item_caps"), {})
 
 
 class TestDeadMegaRebuildScopedToTopRowsOnly(unittest.TestCase):
@@ -744,9 +824,17 @@ class TestMultiBring4EndToEnd(unittest.TestCase):
         # very-high-Score additions started crowding the top of the
         # candidate pool -- widened per the tool's own suggested remedy
         # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
+        # Hatterene, not Sinistcha -- a real Rage Powder user per usage data
+        # (see `TestFollowMeAsAnAlwaysOnHypothesis` in test_counter_finder.py)
+        # genuinely zeroes out every candidate at this fixture's default
+        # good_threshold=1.0 (no exhaustive core here can guarantee beating a
+        # real redirector in literally every matchup) -- a correct
+        # consequence of that always-on scoring, not a bug, same reasoning
+        # as the pool-widening note above. Every sibling class below sharing
+        # this exact enemy-2 roster swaps the same name for the same reason.
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_runs_clean_and_shows_a_core_with_synergy_and_teamsheet(self):
@@ -836,7 +924,7 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
         # ("widen the pool"), same fix as TestMultiBring4SixPairExportColumns.
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_deep_dive_core_prints_the_aggregate_and_gameplans(self):
@@ -852,7 +940,10 @@ class TestDeepDiveCoreAndXlsxExport(unittest.TestCase):
         self.assertRegex(out, r"T\d .+ -> .+: .+ \d+-\d+-\d+%")
 
     def test_deep_dive_core_out_of_range_is_rejected(self):
-        msg, _out = run_main(self.argv + ["--deep-dive-core", "999"])
+        # A large candidate pool can legitimately produce thousands of
+        # exhaustive-search cores, so the out-of-range rank must be far
+        # beyond any plausible core count, not just "big".
+        msg, _out = run_main(self.argv + ["--deep-dive-core", "99999999"])
         self.assertIsNotNone(msg)
         self.assertIn("--deep-dive-core", msg)
 
@@ -1015,7 +1106,7 @@ class TestAutoDeepDiveEndToEnd(unittest.TestCase):
     def setUpClass(cls):
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_an_unreachable_score_bar_skips_every_one_of_the_top_n(self):
@@ -1066,7 +1157,7 @@ class TestDiveSheetsFormatting(unittest.TestCase):
     def setUpClass(cls):
         cls.argv = ["--pool-size", "30", "--multi-bring4",
                    "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
-                   "--vs-team", "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf",
+                   "--vs-team", "Sylveon,Mega Charizard Y,Hatterene,Farigiraf",
                    "--top", "3"]
 
     def test_gameplans_has_a_blank_row_between_matches(self):
@@ -1762,13 +1853,13 @@ class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
     def test_a_known_team_name_resolves_to_its_full_roster(self):
         from _harness import load_world
         W = load_world()
-        self.assertIn("Rain", W["teams"])
+        self.assertIn("Golisopod Rain", W["teams"])
         self.assertIn("Big 6", W["teams"])
         msg, out = run_main(
-            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+            ["--multi-bring4", "--vs-team", "Golisopod Rain", "--vs-team", "Big 6",
              "--pool-size", "12", "--good-threshold", "30", "--top", "1"])
         self.assertIsNone(msg, out)
-        for name in W["teams"]["Rain"]:
+        for name in W["teams"]["Golisopod Rain"]:
             self.assertIn(name, out)
         for name in W["teams"]["Big 6"]:
             self.assertIn(name, out)
@@ -1780,7 +1871,7 @@ class TestVsTeamAcceptsANamedTeam(unittest.TestCase):
         msg, out = run_main(
             ["--multi-bring4", "--vs-team",
              "Kingambit,Basculegion,Garchomp,Whimsicott", "--vs-team",
-             "Sylveon,Mega Charizard Y,Sinistcha,Farigiraf", "--pool-size",
+             "Sylveon,Mega Charizard Y,Hatterene,Farigiraf", "--pool-size",
              "12", "--good-threshold", "30", "--top", "1"])
         self.assertIsNone(msg, out)
         self.assertIn("Kingambit", out)
@@ -1817,7 +1908,7 @@ class TestVsAllTeamsFlag(unittest.TestCase):
 
     def test_mutually_exclusive_with_vs_team(self):
         msg, _out = run_main(
-            ["--multi-bring4", "--vs-all-teams", "--vs-team", "Rain"])
+            ["--multi-bring4", "--vs-all-teams", "--vs-team", "Golisopod Rain"])
         self.assertIsNotNone(msg)
         self.assertIn("can't be combined with --vs-team", msg)
 
@@ -1827,6 +1918,322 @@ class TestVsAllTeamsFlag(unittest.TestCase):
              "--vs-all-teams"])
         self.assertIsNotNone(msg)
         self.assertIn("requires --multi-bring4", msg)
+
+
+class TestBenchmarkTeamsFlag(unittest.TestCase):
+    """--benchmark-teams: "always add all of the saved teams in data/
+    my_teams and data/teams as potential own teams, with the sets intact
+    ... these will be very helpful for benchmarking performance." Runs the
+    SAME --bring4 search once per saved team, each using that team's own
+    roster/sets instead of a single --our."""
+
+    def test_requires_bring4(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-all-teams", "--pool-size", "8",
+             "--top", "1", "--benchmark-teams"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--benchmark-teams requires --bring4", msg)
+
+    def test_mutually_exclusive_with_our(self):
+        msg, _out = run_main(
+            ["--bring4", "--our", "Garchomp,Hydreigon,Kingambit,Whimsicott",
+             "--vs", "Kingambit,Basculegion", "--benchmark-teams",
+             "--no-prompt"])
+        self.assertIsNotNone(msg)
+        self.assertIn("derives --our from each saved team", msg)
+
+    def test_bring4_still_requires_our_or_benchmark_teams(self):
+        msg, _out = run_main(["--bring4", "--vs", "Kingambit,Basculegion"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--benchmark-teams instead", msg)
+
+    def test_one_source_team_header_per_saved_team_with_real_roster_and_sets(self):
+        """Spot-checks the "Sand" team's own real roster (Mega Tyranitar,
+        not Tyranitar -- the mega-stone-holder rename this session's Team
+        Builder dropdown fix already relies on) and one of its known real
+        moves (Knock Off) survive into the race, confirming "with the sets
+        intact" -- not a fresh, independently re-optimised search."""
+        from _harness import load_world
+        W = load_world()
+        msg, out = run_main(
+            ["--bring4", "--benchmark-teams", "--vs", "Kingambit,Basculegion",
+             "--no-prompt", "--top", "1"])
+        self.assertIsNone(msg, out)
+        self.assertEqual(out.count("=== Source team:"), len(W["teams"]),
+                         "one benchmark block per saved team")
+        self.assertIn("=== Source team: Sand ===", out)
+        sand_idx = out.index("=== Source team: Sand ===")
+        next_idx = out.find("=== Source team:", sand_idx + 1)
+        sand_block = out[sand_idx:next_idx if next_idx != -1 else len(out)]
+        self.assertIn("Mega Tyranitar", sand_block)
+
+    def test_xlsx_has_a_benchmark_sheet_with_a_source_team_column(self):
+        from _harness import load_world
+        from openpyxl import load_workbook
+        W = load_world()
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                path = f.name
+            msg, out = run_main(
+                ["--bring4", "--benchmark-teams", "--vs",
+                 "Kingambit,Basculegion", "--no-prompt", "--top", "1",
+                 "--xlsx", path])
+            self.assertIsNone(msg, out)
+            wb = load_workbook(path)
+            self.assertIn("Benchmark", wb.sheetnames)
+            ws = wb["Benchmark"]
+            header = [c.value for c in ws[1]]
+            self.assertEqual(header[0], "Source team")
+            team_col = [row[0] for row in ws.iter_rows(min_row=2, values_only=True)]
+            self.assertEqual(set(team_col), set(W["teams"]))
+        finally:
+            if path and os.path.exists(path):
+                os.unlink(path)
+
+    def test_deep_dive_core_not_supported_with_benchmark_teams(self):
+        msg, _out = run_main(
+            ["--bring4", "--benchmark-teams", "--vs", "Kingambit,Basculegion",
+             "--deep-dive-core", "1", "--no-prompt"])
+        self.assertIsNotNone(msg)
+        self.assertIn("aren't supported together with --benchmark-teams", msg)
+
+
+class TestRoundRobinFlag(unittest.TestCase):
+    """--round-robin: "give me an option ... to only run all the saved
+    teams vs the other teams (including themself), rather than creating
+    teams" -- every saved team raced against every OTHER saved team
+    (mirrors included), one --bring4-style report per matchup, printed
+    sequentially. `--round-robin-teams` narrows the grid so a full test
+    run doesn't have to race the entire saved-team library."""
+
+    def test_unknown_round_robin_team_errors(self):
+        msg, _out = run_main(
+            ["--round-robin", "--round-robin-teams", "NotARealTeam",
+             "--no-prompt", "--turns", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("unknown saved team", msg)
+
+    def test_narrowed_grid_produces_exactly_the_expected_matchup_headers(self):
+        """Two named teams -> the mirrors A-A/B-B (one direction each, "race
+        both directions" doesn't apply to a mirror), the non-mirror pair
+        raced BOTH directions (A-B and B-A), plus the "best4 vs best4" head-
+        to-head layer for that same non-mirror pair -- 5 matchup headers
+        total, sorted alphabetically by team."""
+        from _harness import load_world
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        msg, out = run_main(
+            ["--round-robin", "--round-robin-teams", ",".join(two_names),
+             "--no-prompt", "--top", "1", "--turns", "1"])
+        self.assertIsNone(msg, out)
+        a, b = two_names
+        self.assertIn(f"=== {a} vs {a} ===", out)
+        self.assertIn(f"=== {a} vs {b} ===", out)
+        self.assertIn(f"=== {b} vs {a} ===", out)
+        self.assertIn(f"=== {a} best-4 vs {b} best-4 ===", out)
+        self.assertIn(f"=== {b} vs {b} ===", out)
+        header_lines = [ln for ln in out.splitlines() if ln.startswith("=== ")]
+        self.assertEqual(len(header_lines), 5, header_lines)
+
+    def test_xlsx_has_round_robin_best4_and_team_summary_sheets(self):
+        from _harness import load_world
+        from openpyxl import load_workbook
+        W = load_world()
+        two_names = sorted(W["teams"])[:2]
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                path = f.name
+            msg, out = run_main(
+                ["--round-robin", "--round-robin-teams", ",".join(two_names),
+                 "--no-prompt", "--top", "1", "--turns", "1", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            wb = load_workbook(path)
+            a, b = two_names
+
+            self.assertIn("Round-robin", wb.sheetnames)
+            ws = wb["Round-robin"]
+            header = [c.value for c in ws[1]]
+            self.assertEqual(header[:2], ["Team A", "Team B"])
+            rows = [(row[0], row[1]) for row in ws.iter_rows(min_row=2, values_only=True)]
+            self.assertEqual(set(rows), {(a, a), (a, b), (b, a), (b, b)})
+
+            self.assertIn("Best4 vs Best4", wb.sheetnames)
+            ws2 = wb["Best4 vs Best4"]
+            header2 = [c.value for c in ws2[1]]
+            self.assertEqual(header2[:2], ["Team A", "Team B"])
+            rows2 = [(row[0], row[1]) for row in ws2.iter_rows(min_row=2, values_only=True)]
+            self.assertEqual(rows2, [(a, b)])
+
+            self.assertIn("Team Summary", wb.sheetnames)
+            ws3 = wb["Team Summary"]
+            self.assertEqual(ws3["A1"].value, "Team")
+            team_col = [row[0] for row in ws3.iter_rows(min_row=2, values_only=True)]
+            self.assertEqual(set(team_col), {a, b})
+        finally:
+            if path and os.path.exists(path):
+                os.unlink(path)
+
+
+class TestEvolveFromTeamFlag(unittest.TestCase):
+    """--evolve-from-team: "if I define one high-performing team ... then
+    try to see if any improvements can be made" -- a local search around a
+    fixed starting core (--our), reporting move/whole-member swaps that
+    genuinely improve on the baseline."""
+
+    def test_requires_our(self):
+        msg, _out = run_main(["--evolve-from-team"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--evolve-from-team requires --our", msg)
+
+    def test_our_needs_2_to_6_names(self):
+        msg, _out = run_main(["--evolve-from-team", "--our", "Garchomp"])
+        self.assertIsNotNone(msg)
+        self.assertIn("needs 2-6 distinct Pokemon", msg)
+
+    def test_surfaces_the_known_earthquake_improvement(self):
+        """Mirrors `TestEvolveFromTeam`'s own library-level fixture
+        (`tests/test_counter_finder.py`): Garchomp forced onto Poison Jab
+        instead of Earthquake, vs an enemy pair 4x weak to Ground."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Garchomp", out)
+        self.assertIn("Poison Jab -> Earthquake", out)
+
+    def test_no_improvement_case_says_so_plainly(self):
+        """An empty `swap_pool` and no move-swap headroom (a single-member
+        `--our` has no OTHER member to swap into, and pinning its own
+        moves to its own real usage top-4 leaves nothing better to try)
+        must not crash -- it reports plainly that nothing improved."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit",
+             "--vs-team", "Kingambit,Basculegion", "--evolve-pool-size", "0",
+             "--turns", "1"])
+        self.assertIsNone(msg, out)
+        self.assertTrue(
+            "No improvement found" in out or "genuine improvement(s)" in out)
+
+    def test_our_accepts_a_named_saved_team(self):
+        """--our can name a saved team (`data/teams`/`data/my_teams`)
+        instead of a raw comma list -- mirrors `--vs-team`'s own name-or-
+        list resolution. The starting core printed must be that team's own
+        real roster, not an error about an unknown "Pokemon" named after
+        the team itself."""
+        from _harness import load_world
+        W = load_world()
+        team_name = sorted(W["teams"])[0]
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", team_name,
+             "--evolve-pool-size", "0", "--turns", "1"])
+        self.assertIsNone(msg, out)
+        core = list(dict.fromkeys(W["teams"][team_name]))
+        self.assertIn(f"Evolving from: {' / '.join(core)}", out)
+
+    def test_our_named_team_applies_its_own_sets(self):
+        """A saved team carrying a real item override on one of its own
+        members must race with that item intact (the same "sets intact"
+        contract `--benchmark-teams`/`--round-robin` already keep) --
+        confirmed here by giving Garchomp a distinctive, otherwise-unused
+        item and checking the baseline dive actually used it (a move-swap
+        candidate for a DIFFERENT member still legal only means the whole
+        team, including Garchomp's pinned item, raced without error)."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--item", "Garchomp=Life Orb",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Garchomp", out)
+
+    def test_our_unknown_name_falls_back_to_comma_list_error(self):
+        """A raw `--our` string that names neither a saved team nor a
+        legal comma list of 2-6 Pokemon still errors clearly, exactly as
+        before this feature -- no silent misinterpretation."""
+        msg, _out = run_main(
+            ["--evolve-from-team", "--our", "NotASavedTeamOrPokemon"])
+        self.assertIsNotNone(msg)
+        self.assertIn("needs 2-6 distinct Pokemon", msg)
+
+    def test_xlsx_export_has_potential_teams_sheet(self):
+        from openpyxl import load_workbook
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                path = f.name
+            msg, out = run_main(
+                ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+                 "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+                 "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+                 "--turns", "2", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            self.assertIn("Excel workbook", out)
+            wb = load_workbook(path)
+            self.assertIn("Potential teams", wb.sheetnames)
+            ws = wb["Potential teams"]
+            header = [c.value for c in ws[1]]
+            self.assertEqual(header[:6],
+                             ["#", "Kind", "Member", "Removed", "Added", "Team"])
+            self.assertIn("Baseline Win Rate/90", header)
+            self.assertIn("New Win Rate/90", header)
+            rows = list(ws.iter_rows(min_row=2, values_only=True))
+            self.assertGreater(len(rows), 0)
+            team_col_idx = header.index("Team")
+            added_col_idx = header.index("Added")
+            removed_col_idx = header.index("Removed")
+            for row in rows:
+                team = row[team_col_idx].split(" / ")
+                self.assertEqual(len(team), 3, row)
+                # a "member" swap's own arriving Pokemon must show up in the
+                # resulting roster (its own row's "Added" is a Pokemon name,
+                # not a move) -- a "move" swap's roster is unchanged from
+                # `--our`, so "Added" (a move name) never appears there.
+                if row[header.index("Kind")] == "member":
+                    self.assertIn(row[added_col_idx], team)
+                    self.assertNotIn(row[removed_col_idx], team)
+        finally:
+            if path and os.path.exists(path):
+                os.unlink(path)
+
+    def test_no_xlsx_flag_means_no_workbook_mentioned(self):
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit",
+             "--vs-team", "Kingambit,Basculegion", "--evolve-pool-size", "0",
+             "--turns", "1"])
+        self.assertIsNone(msg, out)
+        self.assertNotIn("Excel workbook", out)
+
+    def test_jobs_is_accepted_and_shows_a_workers_line(self):
+        """A real run left `--jobs 120` running for >8 hours with only one
+        process visible and no progress -- `--jobs` was silently ignored,
+        since --evolve-from-team's own early-return path never reached
+        main()'s "jobs only applies to --multi-bring4" validation. It must
+        now actually parallelise the trials and say how many workers."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2", "--jobs", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("workers  : 2 of", out)
+        self.assertIn("Poison Jab -> Earthquake", out)
+
+    def test_progress_lines_are_printed(self):
+        """"no way to see the progress or time to completion" -- a run
+        must print at least one "...N/M trials" progress line, not sit
+        silent until it's entirely done."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("trials (100%)", out)
 
 
 class TestTurnsAppliesToMultiBring4(unittest.TestCase):
@@ -1916,12 +2323,12 @@ class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
     def test_a_saved_team_name_resolves_to_its_full_roster(self):
         from _harness import load_world
         W = load_world()
-        self.assertIn("Rain", W["teams"])
+        self.assertIn("Golisopod Rain", W["teams"])
         msg, out = run_main(
-            ["--our", self.OUR, "--bring4", "--vs-team", "Rain",
+            ["--our", self.OUR, "--bring4", "--vs-team", "Golisopod Rain",
              "--no-prompt", "--top", "1"])
         self.assertIsNone(msg, out)
-        for name in W["teams"]["Rain"]:
+        for name in W["teams"]["Golisopod Rain"]:
             self.assertIn(name, out)
 
     def test_a_raw_comma_list_still_works_as_a_single_vs_team(self):
@@ -1936,7 +2343,7 @@ class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
     def test_vs_and_vs_team_together_is_rejected(self):
         msg, _out = run_main(
             ["--our", self.OUR, "--bring4", "--vs", "Kingambit,Basculegion",
-             "--vs-team", "Rain"])
+             "--vs-team", "Golisopod Rain"])
         self.assertIsNotNone(msg)
         self.assertIn("--vs-team", msg)
 
@@ -1946,7 +2353,7 @@ class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
 
     def test_more_than_one_vs_team_is_rejected(self):
         msg, _out = run_main(
-            ["--our", self.OUR, "--bring4", "--vs-team", "Rain", "--vs-team",
+            ["--our", self.OUR, "--bring4", "--vs-team", "Golisopod Rain", "--vs-team",
              "Big 6"])
         self.assertIsNotNone(msg)
         self.assertIn("at most one --vs-team", msg)
@@ -1958,7 +2365,7 @@ class TestBring4AcceptsASingleNamedVsTeam(unittest.TestCase):
         os.unlink(path)
         try:
             msg, _out = run_main(
-                ["--our", self.OUR, "--bring4", "--vs-team", "Rain",
+                ["--our", self.OUR, "--bring4", "--vs-team", "Golisopod Rain",
                  "--no-prompt", "--xlsx", path, "--top", "2"])
             self.assertIsNone(msg)
             from openpyxl import load_workbook
@@ -2005,7 +2412,7 @@ class TestXlsxNewSummaryColumns(unittest.TestCase):
         try:
             msg, out = run_main(
                 ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
-                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                          "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
                  "--no-prompt", "--xlsx", path, "--top", "2"])
             self.assertIsNone(msg, out)
             from openpyxl import load_workbook
@@ -2062,7 +2469,7 @@ class TestXlsxNewSummaryColumns(unittest.TestCase):
         try:
             msg, out = run_main(
                 ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
-                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                          "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
                  "--no-prompt", "--xlsx", path, "--top", "1"])
             self.assertIsNone(msg, out)
             from openpyxl import load_workbook
@@ -2076,7 +2483,7 @@ class TestXlsxNewSummaryColumns(unittest.TestCase):
             natures, typechart = W["natures"], W["typechart"]
             our6 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
                    "Whimsicott", "Mega Alakazam"]
-            targets = list(W["teams"]["Rain"])
+            targets = list(W["teams"]["Golisopod Rain"])
             _pair_rows, bring4_rows = bring4_search(
                 our6, targets, merged, moves, natures, typechart, good_threshold=0.0)
             depth = bring4_pair_depth(bring4_rows[0])
@@ -2105,7 +2512,7 @@ class TestXlsxMegaUsedAndSixPairsColumns(unittest.TestCase):
         try:
             msg, out = run_main(
                 ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
-                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                          "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
                  "--no-prompt", "--xlsx", path, "--top", "2"])
             self.assertIsNone(msg, out)
             from openpyxl import load_workbook
@@ -2154,7 +2561,7 @@ class TestXlsxMegaUsedAndSixPairsColumns(unittest.TestCase):
         try:
             msg, out = run_main(
                 ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
-                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                          "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
                  "--no-prompt", "--xlsx", path, "--top", "1",
                  "--deep-dive-core", "1"])
             self.assertIsNone(msg, out)
@@ -2256,7 +2663,7 @@ class TestXlsxSum3rdBestAndLeadBackupColumns(unittest.TestCase):
         try:
             msg, out = run_main(
                 ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
-                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                          "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
                  "--no-prompt", "--xlsx", path, "--top", "2"])
             self.assertIsNone(msg, out)
             from openpyxl import load_workbook
@@ -2305,10 +2712,114 @@ class TestXlsxSum3rdBestAndLeadBackupColumns(unittest.TestCase):
     def test_bring4_stage1_table_shows_an_own_tw_column(self):
         msg, out = run_main(
             ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
-                      "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                      "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
              "--no-prompt", "--top", "2"])
         self.assertIsNone(msg, out)
         self.assertIn("own-tw", out)
+
+    def test_bring4_stage1_table_shows_an_own_pr_column(self):
+        """Mirrors `test_bring4_stage1_table_shows_an_own_tw_column` for
+        the own-Protect mirror (`pairs_own_protect_used`) -- same "always
+        add a console column when a new pair-level mirror metric is added"
+        convention as own-Tailwind."""
+        msg, out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                      "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
+             "--no-prompt", "--top", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("own-pr", out)
+
+
+class TestXlsxBottleneckWorstPairColumns(unittest.TestCase):
+    """"Is this correct? ... the order does not seem to be sorted by
+    protect-safe win count" -- turned out the xlsx never showed the
+    numbers `worst_enemy_score_key` actually sorts on (the SINGLE worst of
+    the bottleneck enemy's best bring-4's 6 pairs), only aggregate per-
+    enemy totals. "Make sure to display worst result vs worst team so I
+    can sort it myself" -- new "Bottleneck Worst Pair ..." columns on the
+    'Cores' sheet expose exactly those numbers."""
+
+    COLUMNS = ("Bottleneck Worst Pair", "Bottleneck Worst Pair Uncovered Enemy Pairs",
+              "Bottleneck Worst Pair Beaten", "Bottleneck Worst Pair Protect-Safe",
+              "Bottleneck Worst Pair Tailwind-Safe", "Bottleneck Worst Pair Clean Win")
+
+    def test_columns_present_and_populated(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "2", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertGreater(wb["Cores"].max_row, 1, "no core rows were found")
+            header = [c.value for c in wb["Cores"][1]]
+            for col in self.COLUMNS:
+                self.assertIn(col, header)
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            self.assertIn("+", row2["Bottleneck Worst Pair"])
+            self.assertIsInstance(row2["Bottleneck Worst Pair Uncovered Enemy Pairs"], int)
+            for col in ("Bottleneck Worst Pair Beaten", "Bottleneck Worst Pair Protect-Safe",
+                       "Bottleneck Worst Pair Tailwind-Safe",
+                       "Bottleneck Worst Pair Clean Win"):
+                self.assertIn("/", row2[col])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_matches_the_row_used_by_worst_enemy_score_key(self):
+        """The exact `worst_pair_row` `_core_row` picked for this core's
+        own bottleneck enemy must be what the new columns show -- not a
+        re-derivation, a direct read of the same object the ranking used."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--top", "1", "--no-prompt", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            from counter_finder import multi_bring4_coverage, multi_bring4_exhaustive
+            wb = load_workbook(path)
+            header = [c.value for c in wb["Cores"][1]]
+            row2 = {h: c.value for h, c in zip(header, wb["Cores"][2])}
+            from _harness import load_world
+            W = load_world()
+            merged, moves = W["merged"], W["moves"]
+            natures, typechart = W["natures"], W["typechart"]
+            core = row2["Core"].split(" / ")
+            targets = [["Kingambit", "Basculegion"], ["Garchomp", "Incineroar"]]
+            coverage = multi_bring4_coverage(
+                core, targets, merged, moves, natures, typechart,
+                good_threshold=0.0, min_enemies=1)
+            rows = multi_bring4_exhaustive(coverage, good_threshold=0.0,
+                                           core_sizes=(len(core),))
+            self.assertEqual(len(rows), 1)
+            r = rows[0]
+            wr = r["per_enemy"][r["worst_enemy_idx"]]["best_bring4_row"]["worst_pair_row"]
+            self.assertEqual(set(row2["Bottleneck Worst Pair"].split(" + ")),
+                             set(wr["pair"]))
+            self.assertEqual(
+                row2["Bottleneck Worst Pair Beaten"],
+                f"{wr['pairs_swept'] + wr['pairs_traded']}/{wr['pairs_total']}")
+            self.assertEqual(
+                row2["Bottleneck Worst Pair Protect-Safe"],
+                f"{wr['pairs_protect_safe']}/{wr['pairs_total']}")
+            self.assertEqual(
+                row2["Bottleneck Worst Pair Tailwind-Safe"],
+                f"{wr['pairs_tailwind_safe']}/{wr['pairs_total']}")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 class TestTailwindFocusFlag(unittest.TestCase):
@@ -2380,7 +2891,7 @@ class TestTailwindFocusFlag(unittest.TestCase):
         try:
             msg, out = run_main(
                 ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
-                          "Mega Alakazam", "--bring4", "--vs-team", "Rain",
+                          "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
                  "--no-prompt", "--xlsx", path, "--top", "2"])
             self.assertIsNone(msg, out)
             from openpyxl import load_workbook
@@ -2406,7 +2917,7 @@ class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
 
     def test_a_too_large_candidate_pool_falls_back_instead_of_exiting(self):
         msg, out = run_main(
-            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+            ["--multi-bring4", "--vs-team", "Golisopod Rain", "--vs-team", "Big 6",
              "--pool-size", "12", "--good-threshold", "30",
              "--min-enemies", "1", "--top", "5", "--max-candidates", "3"])
         self.assertIsNone(msg, out)
@@ -2416,7 +2927,7 @@ class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
 
     def test_the_pair_summary_prints_even_on_the_fallback_path(self):
         _msg, out = run_main(
-            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+            ["--multi-bring4", "--vs-team", "Golisopod Rain", "--vs-team", "Big 6",
              "--pool-size", "12", "--good-threshold", "30",
              "--min-enemies", "1", "--top", "5", "--max-candidates", "3"])
         self.assertIn("top pairs:", out)
@@ -2426,7 +2937,7 @@ class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
     def test_the_pair_summary_prints_on_the_normal_exhaustive_path_too(self):
         """Not just a fallback-only feature -- always shown."""
         _msg, out = run_main(
-            ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
+            ["--multi-bring4", "--vs-team", "Golisopod Rain", "--vs-team", "Big 6",
              "--pool-size", "12", "--good-threshold", "30",
              "--min-enemies", "1", "--top", "5"])
         self.assertNotIn("too many for an exhaustive sweep", out)
@@ -2439,9 +2950,14 @@ class TestMultiBring4NeverComesBackEmpty(unittest.TestCase):
                 suffix=".csv", delete=False, mode="w") as f:
             path = f.name
         try:
+            # pool-size 20, not 12 -- with the current saved-team library,
+            # 12 leaves too narrow a pool for the beam fallback to find ANY
+            # legal core against this pair of enemies (still exercises the
+            # exhaustive-ceiling fallback either way, just with real rows
+            # to actually write this time).
             msg, _out = run_main(
-                ["--multi-bring4", "--vs-team", "Rain", "--vs-team", "Big 6",
-                 "--pool-size", "12", "--good-threshold", "30",
+                ["--multi-bring4", "--vs-team", "Golisopod Rain", "--vs-team", "Big 6",
+                 "--pool-size", "20", "--good-threshold", "30",
                  "--min-enemies", "1", "--top", "5", "--max-candidates", "3",
                  "--csv", path])
             self.assertIsNone(msg)
@@ -2557,7 +3073,7 @@ class TestDeepDiveWorstCaseTargetingFlag(unittest.TestCase):
 
     def test_multi_bring4_deep_dive_core_defaults_to_true(self):
         from unittest.mock import patch
-        argv = ["--multi-bring4", "--pool-size", "12", "--vs-team",
+        argv = ["--multi-bring4", "--pool-size", "30", "--vs-team",
                "Sableye,Ariados,Basculegion,Sinistcha", "--good-threshold", "30",
                "--min-enemies", "1", "--deep-dive-core", "1"]
         with patch.object(ct, "core_deep_dive", wraps=ct.core_deep_dive) as spy:
@@ -2568,7 +3084,7 @@ class TestDeepDiveWorstCaseTargetingFlag(unittest.TestCase):
 
     def test_multi_bring4_no_deep_dive_worst_case_targeting_turns_it_off(self):
         from unittest.mock import patch
-        argv = ["--multi-bring4", "--pool-size", "12", "--vs-team",
+        argv = ["--multi-bring4", "--pool-size", "30", "--vs-team",
                "Sableye,Ariados,Basculegion,Sinistcha", "--good-threshold", "30",
                "--min-enemies", "1", "--deep-dive-core", "1",
                "--no-deep-dive-worst-case-targeting"]
@@ -2612,7 +3128,7 @@ class TestTwoTwoTwoFlag(unittest.TestCase):
         actually called (not just that validation passes) and produces
         the expected console markers."""
         from unittest.mock import patch
-        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Golisopod Rain",
                "--top-pairs", "5", "--top-teams", "3"]
         with patch.object(ct, "find_pair_cores", wraps=ct.find_pair_cores) as fp_spy, \
              patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as tt_spy:
@@ -2649,7 +3165,7 @@ class TestTwoTwoTwoFlag(unittest.TestCase):
         flag actually threads through to `two_two_two_teams`, not just
         past validation."""
         from unittest.mock import patch
-        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Golisopod Rain",
                "--top-pairs", "5", "--top-teams", "3", "--max-net-weakness", "2"]
         with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
             msg, out = run_main(argv)
@@ -2659,7 +3175,7 @@ class TestTwoTwoTwoFlag(unittest.TestCase):
 
     def test_max_net_weakness_defaults_to_none(self):
         from unittest.mock import patch
-        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Golisopod Rain",
                "--top-pairs", "5", "--top-teams", "3"]
         with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
             msg, out = run_main(argv)
@@ -2672,7 +3188,7 @@ class TestTwoTwoTwoFlag(unittest.TestCase):
         (already an existing --multi-bring4 flag) now also threads
         through to --two-two-two's own two_two_two_teams call."""
         from unittest.mock import patch
-        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Golisopod Rain",
                "--top-pairs", "5", "--top-teams", "3", "--max-megas", "1"]
         with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
             msg, out = run_main(argv)
@@ -2682,7 +3198,7 @@ class TestTwoTwoTwoFlag(unittest.TestCase):
 
     def test_max_megas_defaults_to_two(self):
         from unittest.mock import patch
-        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Rain",
+        argv = ["--two-two-two", "--pool-size", "15", "--vs-team", "Golisopod Rain",
                "--top-pairs", "5", "--top-teams", "3"]
         with patch.object(ct, "two_two_two_teams", wraps=ct.two_two_two_teams) as spy:
             msg, out = run_main(argv)
@@ -2691,7 +3207,7 @@ class TestTwoTwoTwoFlag(unittest.TestCase):
         self.assertEqual(spy.call_args.kwargs.get("max_megas"), 2)
 
     def test_offensive_pin_section_appears_when_a_real_pin_is_found(self):
-        argv = ["--two-two-two", "--pool-size", "30", "--vs-team", "Rain",
+        argv = ["--two-two-two", "--pool-size", "30", "--vs-team", "Golisopod Rain",
                "--top-pairs", "15", "--top-teams", "3"]
         msg, out = run_main(argv)
         self.assertIsNone(msg, out)

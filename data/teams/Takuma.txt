@@ -1,0 +1,53 @@
+Floette-Eternal @ Floettite
+Ability: Flower Veil
+Level: 50
+Nature: Timid
+- Moonblast
+- Dazzling Gleam
+- Light of Ruin
+- Protect
+
+Basculegion @ Life Orb
+Ability: Adaptability
+Level: 50
+Nature: Adamant
+- Wave Crash
+- Last Respects
+- Aqua Jet
+- Protect
+
+Kingambit @ Chople Berry
+Ability: Defiant
+Level: 50
+Nature: Adamant
+- Sucker Punch
+- Kowtow Cleave
+- Low Kick
+- Iron Head
+
+Dragonite @ Dragoninite
+Ability: Multiscale
+Level: 50
+Nature: Modest
+- Dragon Pulse
+- Heat Wave
+- Extreme Speed
+- Protect
+
+Garchomp @ Choice Scarf
+Ability: Rough Skin
+Level: 50
+Nature: Adamant
+- Dragon Claw
+- Stomping Tantrum
+- Earthquake
+- Rock Slide
+
+Sneasler @ Focus Sash
+Ability: Poison Touch
+Level: 50
+Nature: Jolly
+- Close Combat
+- Dire Claw
+- Fake Out
+- Feint

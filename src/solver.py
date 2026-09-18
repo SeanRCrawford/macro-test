@@ -278,6 +278,182 @@ def candidate_actions(combatant: Combatant, side_key: str, allies: list, foes: l
     return actions
 
 
+def _max_incoming(battle: Battle, target, side: Side, opp_side: Side,
+                  decision_field, movesets: dict) -> float:
+    """The worst single-hit % of `target`'s max HP any live opposing
+    active could land on it THIS turn, off `target`'s own current HP --
+    "how threatened is this specific mon right now." Extracted to module
+    level from `_action_value`'s own Follow-Me/Rage-Powder valuation
+    (unchanged there) so the Battle Simulator's speed-control support mode
+    (`app.sim_force_support_actions`) can reuse the exact same worst-case
+    incoming-hit estimate for its own "does the partner need Protect this
+    turn" decision, rather than a second, drifting heuristic.
+    """
+    worst = 0.0
+    for foe in opp_side.active:
+        if foe.fainted:
+            continue
+        for mv, _pct in movesets.get(foe.name, []):
+            if mv.category == "Status" or is_spread_move(mv.target):
+                continue
+            if priority_blocked_by_side(
+                    foe.ability, mv, side.active,
+                    terrain=decision_field.terrain, target=target):
+                continue
+            dmg = quick_damage_estimate(
+                mega_view(battle, foe), target, mv, battle.typechart,
+                decision_field, battle=battle)
+            pct = (100.0 * min(dmg, target.current_hp) / target.max_hp()
+                  if target.max_hp() else 0.0)
+            worst = max(worst, pct)
+    return worst
+
+
+def _action_value(battle: Battle, c, side: Side, opp_side: Side, a: Action,
+                  decision_field, turn_num: int, movesets: dict,
+                  value_protect: bool = False):
+    """How good `a` (one candidate `Action` for `c`) looks this turn --
+    the greedy one-ply valuation `greedy_opponent_joint_action` maxes over
+    per mon. Extracted to module level so a human player's own suggested-
+    action UI (Battle Simulator) can reuse the exact same scoring the
+    opponent AI uses, rather than a second, drifting heuristic.
+
+    `value_protect`: the opponent AI models itself as never bothering to
+    Protect (`-1`, a deliberate simplification); a human player sometimes
+    DOES want to Protect (scouting, stalling a status/weather turn, saving
+    a mon for a needed follow-up), so a caller building a suggestion for a
+    human passes `True` to let Protect be valued like any other action
+    instead of being hard-excluded.
+    """
+    if a.kind == "protect" and not value_protect:
+        return -1
+    if a.move.category == "Status":
+        # Speed control (Tailwind / Trick Room) is a genuine board-state swing --
+        # a Whimsicott or Talonflame will take it whenever it isn't already up,
+        # not just on turn 1, and Prankster/Gale Wings makes it better still.
+        if a.move.name in ("Tailwind", "Trick Room"):
+            own_tailwind_up = (battle.field.tailwind_p1 if a.side == "p1"
+                               else battle.field.tailwind_p2) > 0
+            if a.move.name == "Trick Room":
+                same_already = battle.field.trick_room
+            else:
+                same_already = own_tailwind_up
+            if same_already:
+                return -20
+            # "An enemy should not use tailwind or trick room if the
+            # speed order is already in their favour; it's a waste."
+            # Generalizes the self-cancellation check that used to
+            # only run when the OPPOSITE speed control was already
+            # up: ANY case where casting wouldn't actually improve
+            # how many of our actives it moves before -- whether
+            # that's because the opposite control is already up, or
+            # simply because raw current speed already favours it
+            # with no speed control active on either side at all --
+            # is equally a waste, so this now always checks
+            # before-vs-after rather than only in the opposite-up
+            # case.
+            hyp_field = copy.deepcopy(battle.field)
+            if a.move.name == "Trick Room":
+                hyp_field.trick_room = True
+            elif a.side == "p1":
+                hyp_field.tailwind_p1 = 4
+            else:
+                hyp_field.tailwind_p2 = 4
+            before = _speed_control_score(battle, side, opp_side)
+            after = _speed_control_score(battle, side, opp_side, field=hyp_field)
+            if after <= before:
+                return -20
+            return 90 if c.ability in ("Prankster", "Gale Wings") else 75
+        if a.move.volatile_status in ("followme", "ragepowder"):
+            # "vs pokemon like Indeedee-F it is necessary that a
+            # team is resilient to a fixed plan where the enemy
+            # just keeps clicking follow me ... this is often a
+            # better strategy in the battle simulator too -- have
+            # the enemy use it if it leads to a better state than
+            # the simple 2v2 attack." A bounded, single-hit
+            # heuristic, matching how every other candidate here is
+            # valued (this whole function is a GREEDY one-ply
+            # model, not a searcher): value redirecting by how much
+            # damage it saves the partner from the hardest hit our
+            # side could land on them this turn, net of the risk
+            # the redirector takes on eating that hit instead -- a
+            # KO'd redirector that saved nothing is a bad trade,
+            # not "resilience". Follow Me/Rage Powder never
+            # redirects a SPREAD move (real VGC mechanic), so those
+            # are excluded from the incoming-damage estimate.
+            partner = next((m for m in side.active if m is not c and not m.fainted), None)
+            if partner is None:
+                return 5 if turn_num == 1 else -5
+
+            worst_on_partner = _max_incoming(battle, partner, side, opp_side,
+                                             decision_field, movesets)
+            worst_on_self = _max_incoming(battle, c, side, opp_side,
+                                          decision_field, movesets)
+            value = (worst_on_partner - worst_on_self) * 0.8
+            if worst_on_partner >= 100.0 * partner.current_hp / partner.max_hp():
+                value += 40.0  # would otherwise have KO'd the partner
+            if worst_on_self >= 100.0 * c.current_hp / c.max_hp():
+                value -= 40.0  # redirecting draws a KO onto us instead
+            return max(value, 5.0 if turn_num == 1 else -5.0)
+        return 5 if turn_num == 1 else -5
+    # Damage must be NORMALISED to the same 0-100 scale the status values use.
+    # Previously this returned raw HP damage, so any attack (~150) always beat
+    # any status move (<=90) -- which meant Prankster Tailwind, Trick Room,
+    # redirection and Protect were effectively never chosen. Value = percentage
+    # of the target's remaining HP removed, plus a bonus for actually securing
+    # the KO.
+    total = 0.0
+    own_side = battle.side_of(c)
+    total_dealt = 0.0
+    for t in a.targets:
+        # Queenly Majesty / Dazzling / Armor Tail on the target's side,
+        # or Psychic Terrain against a grounded target, block this
+        # outright if it's priority -- the AI must see that BEFORE
+        # valuing the move, not just have `battle.py`'s real
+        # resolution zero it out after the fact ("the enemy trying to
+        # click priority moves anyway" against one of these).
+        if priority_blocked_by_side(c.ability, a.move, battle.side_of(t).active,
+                                    terrain=decision_field.terrain, target=t):
+            dmg = 0.0
+        else:
+            dmg = quick_damage_estimate(mega_view(battle, c), t, a.move,
+                                         battle.typechart, decision_field,
+                                         num_hit=len(a.targets) if is_spread_move(a.move.target) else 1,
+                                         battle=battle)
+        pct = 100.0 * min(dmg, t.current_hp) / t.max_hp() if t.max_hp() else 0.0
+        # An allAdjacent move (Earthquake, Surf, Discharge) also hits our own
+        # partner -- that damage counts AGAINST the move, not for it.
+        if battle.side_of(t) is own_side:
+            total -= pct * 1.2
+            if dmg >= t.current_hp:
+                total -= 50.0
+        else:
+            total += pct
+            total_dealt += min(dmg, t.current_hp)
+            if dmg >= t.current_hp:
+                total += 40.0
+                # A KO secured with priority cannot be pre-empted, so it is
+                # strictly better than the same KO in the normal bracket.
+                if a.move.priority > 0:
+                    total += 15.0 * a.move.priority
+    # Recoil moves (Flare Blitz, Head Smash, Light of Ruin, ...) cost the user
+    # HP for the same damage dealt -- a non-recoil move doing the same job
+    # (e.g. Light of Ruin vs Moonblast on an equally-lethal hit) should win the
+    # tie. Rock Head / Magic Guard negate real recoil, so they're exempt here too.
+    if a.move.recoil and c.ability not in ("Rock Head", "Magic Guard") and c.max_hp():
+        num, den = a.move.recoil
+        recoil_dmg = total_dealt * num / den
+        total -= 100.0 * recoil_dmg / c.max_hp()
+    # Tiny tie-break, far below any real damage/KO difference: when two moves
+    # are otherwise equally good (e.g. two ways to secure the same KO), prefer
+    # the more reliable one. No accuracy roll is modeled in battle resolution
+    # (moves always hit here), so this only ever matters as a tie-break, never
+    # as a real expected-value discount.
+    acc = 100.0 if a.move.accuracy is True else a.move.accuracy
+    total += acc * 0.001
+    return total
+
+
 def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, movesets: dict,
                                   turn_num: int):
     joint = []
@@ -298,78 +474,8 @@ def greedy_opponent_joint_action(battle: Battle, side: Side, opp_side: Side, mov
                                    self_view=mega_view(battle, c))
         # Greedy: prefer a status/setup move on turn 1 only if it's their known signature
         # (Trick Room / Tailwind), else take the highest total estimated damage option.
-        def action_value(a: Action):
-            if a.kind == "protect":
-                return -1  # opponent modeled as not bothering to Protect (simplification)
-            if a.move.category == "Status":
-                # Speed control (Tailwind / Trick Room) is a genuine board-state swing --
-                # a Whimsicott or Talonflame will take it whenever it isn't already up,
-                # not just on turn 1, and Prankster/Gale Wings makes it better still.
-                if a.move.name in ("Tailwind", "Trick Room"):
-                    already = (battle.field.trick_room if a.move.name == "Trick Room"
-                               else (battle.field.tailwind_p1 if a.side == "p1"
-                                     else battle.field.tailwind_p2) > 0)
-                    if already:
-                        return -20
-                    return 90 if c.ability in ("Prankster", "Gale Wings") else 75
-                return 5 if turn_num == 1 else -5
-            # Damage must be NORMALISED to the same 0-100 scale the status values use.
-            # Previously this returned raw HP damage, so any attack (~150) always beat
-            # any status move (<=90) -- which meant Prankster Tailwind, Trick Room,
-            # redirection and Protect were effectively never chosen. Value = percentage
-            # of the target's remaining HP removed, plus a bonus for actually securing
-            # the KO.
-            total = 0.0
-            own_side = battle.side_of(c)
-            total_dealt = 0.0
-            for t in a.targets:
-                # Queenly Majesty / Dazzling / Armor Tail on the target's side,
-                # or Psychic Terrain against a grounded target, block this
-                # outright if it's priority -- the AI must see that BEFORE
-                # valuing the move, not just have `battle.py`'s real
-                # resolution zero it out after the fact ("the enemy trying to
-                # click priority moves anyway" against one of these).
-                if priority_blocked_by_side(c.ability, a.move, battle.side_of(t).active,
-                                            terrain=decision_field.terrain, target=t):
-                    dmg = 0.0
-                else:
-                    dmg = quick_damage_estimate(mega_view(battle, c), t, a.move,
-                                                 battle.typechart, decision_field,
-                                                 num_hit=len(a.targets) if is_spread_move(a.move.target) else 1,
-                                                 battle=battle)
-                pct = 100.0 * min(dmg, t.current_hp) / t.max_hp() if t.max_hp() else 0.0
-                # An allAdjacent move (Earthquake, Surf, Discharge) also hits our own
-                # partner -- that damage counts AGAINST the move, not for it.
-                if battle.side_of(t) is own_side:
-                    total -= pct * 1.2
-                    if dmg >= t.current_hp:
-                        total -= 50.0
-                else:
-                    total += pct
-                    total_dealt += min(dmg, t.current_hp)
-                    if dmg >= t.current_hp:
-                        total += 40.0
-                        # A KO secured with priority cannot be pre-empted, so it is
-                        # strictly better than the same KO in the normal bracket.
-                        if a.move.priority > 0:
-                            total += 15.0 * a.move.priority
-            # Recoil moves (Flare Blitz, Head Smash, Light of Ruin, ...) cost the user
-            # HP for the same damage dealt -- a non-recoil move doing the same job
-            # (e.g. Light of Ruin vs Moonblast on an equally-lethal hit) should win the
-            # tie. Rock Head / Magic Guard negate real recoil, so they're exempt here too.
-            if a.move.recoil and c.ability not in ("Rock Head", "Magic Guard") and c.max_hp():
-                num, den = a.move.recoil
-                recoil_dmg = total_dealt * num / den
-                total -= 100.0 * recoil_dmg / c.max_hp()
-            # Tiny tie-break, far below any real damage/KO difference: when two moves
-            # are otherwise equally good (e.g. two ways to secure the same KO), prefer
-            # the more reliable one. No accuracy roll is modeled in battle resolution
-            # (moves always hit here), so this only ever matters as a tie-break, never
-            # as a real expected-value discount.
-            acc = 100.0 if a.move.accuracy is True else a.move.accuracy
-            total += acc * 0.001
-            return total
-        best = max(cands, key=action_value) if cands else None
+        best = max(cands, key=lambda a: _action_value(
+            battle, c, side, opp_side, a, decision_field, turn_num, movesets)) if cands else None
         if best:
             joint.append(best)
     return joint
@@ -778,8 +884,16 @@ def _moves_first(mine, theirs, field, my_side, their_side) -> bool:
     return mine_spe > theirs_spe
 
 
-def _speed_control_score(battle, side, foe_side) -> float:
-    """SPEED_CONTROL_WEIGHT per opposing active that `side` moves before."""
+def _speed_control_score(battle, side, foe_side, field=None) -> float:
+    """SPEED_CONTROL_WEIGHT per opposing active that `side` moves before.
+
+    `field`: score against a HYPOTHETICAL field instead of `battle.field`
+    -- lets a caller ask "would casting this speed-control move actually
+    help?" without mutating the real battle state (see
+    `greedy_opponent_joint_action`'s own Tailwind-vs-Trick-Room self-
+    cancellation check)."""
+    if field is None:
+        field = battle.field
     ahead = 0
     for c in side.active:
         if c is None or c.fainted:
@@ -787,7 +901,7 @@ def _speed_control_score(battle, side, foe_side) -> float:
         for f in foe_side.active:
             if f is None or f.fainted:
                 continue
-            if _moves_first(c, f, battle.field, side.name, foe_side.name):
+            if _moves_first(c, f, field, side.name, foe_side.name):
                 ahead += 1
     return SPEED_CONTROL_WEIGHT * ahead
 

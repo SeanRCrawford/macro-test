@@ -1189,5 +1189,334 @@ class TestSandSnowDefensiveBoostAppliedOnce(unittest.TestCase):
         self.assertAlmostEqual(avg, avg2, places=5)
 
 
+class TestSpeedControlSelfCancellation(unittest.TestCase):
+    """"an enemy should never counteract their own speed control, by using
+    tailwind while trick room is active for several more turns or using
+    trick room while tailwind is active -- though it may be a good idea if
+    it would lead to favourable speed order the next turn." Real-engine
+    `greedy_opponent_joint_action` (`solver.py`'s `action_value`)."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _movesets(self, moves, merged, p1_names, p2_names, extra):
+        from solver import build_moveset
+        movesets = {}
+        for n in p1_names + p2_names:
+            only = extra.get(n)
+            movesets[n] = build_moveset(merged[n], moves, only_moves=only) \
+                if only else build_moveset(merged[n], moves)
+        return movesets
+
+    def test_tailwind_blocked_while_trick_room_leaves_it_worse_off(self):
+        """Torkoal+Kingambit (slow) already moving first under Trick Room
+        vs Hydreigon+Gholdengo (fast) -- doubling their own speed with
+        Tailwind on top would flip Kingambit to moving AFTER both foes
+        once Trick Room reverses the (now higher) speed comparison, a net
+        loss -- confirmed not blocked when Trick Room isn't up at all."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+
+        def run(trick_room):
+            b = battle(["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"])
+            if trick_room:
+                b.field.trick_room = True
+                b.field.trick_room_turns_left = 5
+            movesets = self._movesets(
+                moves, merged, ["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"],
+                {"Kingambit": ["Tailwind", "Protect"]})
+            joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+            return next(a for a in joint if a.combatant.name == "Kingambit")
+
+        self.assertEqual(run(False).move.name, "Tailwind")
+        blocked = run(True)
+        self.assertEqual(blocked.kind, "protect")
+
+    def test_trick_room_blocked_while_own_tailwind_leaves_it_worse_off(self):
+        """The reverse: Whimsicott+Sylveon, naturally slower than
+        Hydreigon+Gholdengo, genuinely gain from Trick Room at baseline --
+        but with their OWN Tailwind already up their speed is already
+        inflated past the foe's, so Trick Room's reversal on top would
+        flip that Tailwind-won advantage into a Trick-Room-reversed
+        disadvantage, a net loss -- confirmed not blocked when Tailwind
+        isn't up at all (verified directly via `_speed_control_score`:
+        before/after go from 12/36 with no Tailwind, i.e. genuinely
+        helps, to 36/12 with the side's own Tailwind up, i.e. genuinely
+        hurts)."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+
+        def run(tailwind):
+            b = battle(["Whimsicott", "Sylveon"], ["Hydreigon", "Gholdengo"])
+            if tailwind:
+                b.field.tailwind_p1 = 4
+            movesets = self._movesets(
+                moves, merged, ["Whimsicott", "Sylveon"], ["Hydreigon", "Gholdengo"],
+                {"Sylveon": ["Trick Room", "Protect"]})
+            joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+            return next(a for a in joint if a.combatant.name == "Sylveon")
+
+        self.assertEqual(run(False).move.name, "Trick Room")
+        blocked = run(True)
+        self.assertEqual(blocked.kind, "protect")
+
+    def test_stacking_it_anyway_is_allowed_when_it_actually_helps(self):
+        """Not a blanket ban -- Torkoal+Kingambit (slow) with their own
+        Tailwind already up ALSO gains from Trick Room on top here (the
+        fast Torkoal Tailwind boost still doesn't out-speed the enemy, so
+        TR's reversal only adds Torkoal to the "moves first" side without
+        costing Kingambit anything): must NOT be blocked."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"])
+        b.field.tailwind_p1 = 4
+        movesets = self._movesets(
+            moves, merged, ["Torkoal", "Kingambit"], ["Hydreigon", "Gholdengo"],
+            {"Kingambit": ["Trick Room", "Protect"]})
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Kingambit")
+        self.assertEqual(action.move.name, "Trick Room")
+
+    def test_not_cast_when_already_faster_with_no_speed_control_up_at_all(self):
+        """"An enemy should not use tailwind or trick room if the speed
+        order is already in their favour; it's a waste." Distinct from the
+        self-cancellation cases above (which only fired when the OPPOSITE
+        speed control was already active) -- here NEITHER side has any
+        speed control up at all, and Hydreigon+Gholdengo (fast) already
+        move before Torkoal+Kingambit (slow) on raw speed alone, so
+        casting Tailwind on top gains nothing: every pair it could help is
+        already moving first."""
+        from solver import greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"])
+        movesets = self._movesets(
+            moves, merged, ["Hydreigon", "Gholdengo"], ["Torkoal", "Kingambit"],
+            {"Gholdengo": ["Tailwind", "Protect"]})
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Gholdengo")
+        self.assertEqual(action.kind, "protect",
+                         f"already moving first, so casting Tailwind is a "
+                         f"waste -- got {action.kind}:{action.move and action.move.name}")
+
+
+class TestFollowMeRealEngineAiChoice(unittest.TestCase):
+    """"vs pokemon like Indeedee-F it is necessary that a team is resilient
+    to a fixed plan where the enemy just keeps clicking follow me ...
+    this is often a better strategy in the battle simulator too -- have
+    the enemy use it if it leads to a better state than the simple 2v2
+    attack." Real-engine `greedy_opponent_joint_action` must actually
+    VALUE Follow Me/Rage Powder by how much damage it saves the partner,
+    not the flat 5/-5 every other non-signature status move gets."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_redirects_a_hit_that_would_otherwise_hammer_the_frail_partner(self):
+        """Moonblast is 2x on Sableye (Dark/Ghost) but neutral on
+        Indeedee-F (Psychic/Normal) -- redirecting genuinely protects the
+        frailer partner without costing Indeedee-F much."""
+        from solver import build_moveset, greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Indeedee-F", "Sableye"], ["Ninetales-Alola", "Torkoal"])
+        movesets = {
+            "Indeedee-F": build_moveset(merged["Indeedee-F"], moves,
+                                        only_moves=["Follow Me", "Psychic"]),
+            "Sableye": build_moveset(merged["Sableye"], moves),
+            "Ninetales-Alola": build_moveset(merged["Ninetales-Alola"], moves,
+                                             only_moves=["Moonblast"]),
+            "Torkoal": build_moveset(merged["Torkoal"], moves)}
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Indeedee-F")
+        self.assertEqual(action.move.name, "Follow Me")
+
+    def test_rage_powder_also_gets_the_same_valuation(self):
+        from solver import build_moveset, greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Indeedee-F", "Sableye"], ["Ninetales-Alola", "Torkoal"])
+        movesets = {
+            "Indeedee-F": build_moveset(merged["Indeedee-F"], moves,
+                                        only_moves=["Rage Powder", "Psychic"]),
+            "Sableye": build_moveset(merged["Sableye"], moves),
+            "Ninetales-Alola": build_moveset(merged["Ninetales-Alola"], moves,
+                                             only_moves=["Moonblast"]),
+            "Torkoal": build_moveset(merged["Torkoal"], moves)}
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Indeedee-F")
+        self.assertEqual(action.move.name, "Rage Powder")
+
+    def test_not_worth_it_when_nobody_is_actually_threatened(self):
+        """Not a blanket preference -- with nothing dangerous incoming,
+        Indeedee-F's own attack must win over reflexively redirecting."""
+        from solver import build_moveset, greedy_opponent_joint_action
+        merged, natures, moves = self.W["merged"], self.W["natures"], self.W["moves"]
+        b = battle(["Indeedee-F", "Sableye"], ["Torkoal", "Torkoal"])
+        movesets = {
+            "Indeedee-F": build_moveset(merged["Indeedee-F"], moves,
+                                        only_moves=["Follow Me", "Psychic"]),
+            "Sableye": build_moveset(merged["Sableye"], moves),
+            "Torkoal": build_moveset(merged["Torkoal"], moves, only_moves=["Body Press"])}
+        joint = greedy_opponent_joint_action(b, b.p1, b.p2, movesets, 1)
+        action = next(a for a in joint if a.combatant.name == "Indeedee-F")
+        self.assertEqual(action.move.name, "Psychic")
+
+
+class TestResistBerryConsumedAfterOneTrigger(unittest.TestCase):
+    """"Colbur (dark type resist berry) reduces damage before being
+    knocked off - it halves damage, but knock off still does 1.5x" -- and
+    more generally, ANY resist berry (not just via Knock Off) must be
+    consumed the first time it actually triggers, so it can never halve a
+    second qualifying hit. `damage_roll` (src/damage.py) computes the
+    halving but is deliberately pure and never mutates state (its own
+    comment says so); consumption belongs in `battle.py`'s own move
+    resolution, the same place Knock Off's and Sitrus's own consumption
+    already live."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_a_resist_berry_only_halves_the_first_qualifying_hit(self):
+        """Reads the LOGGED damage number, not the HP delta -- Gholdengo's
+        own remaining HP caps how much a fainting hit can actually remove,
+        which would silently mask the very doubling this test checks for."""
+        import re
+        b = battle(["Kingambit", "Incineroar"], ["Gholdengo", "Milotic"])
+        gholdengo = b.p2.active[0]
+        gholdengo.item = "Colbur Berry"
+        kowtow_cleave = b.make_move("kowtowcleave")
+        shadow_ball = b.make_move("shadowball")
+        protect = b.make_move("protect")
+
+        def hit_gholdengo():
+            before_len = len(b.log.dump())
+            b.run_turn(
+                [Action(b.p1.active[0], "p1", "move", kowtow_cleave, [gholdengo]),
+                 Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+                [Action(gholdengo, "p2", "move", shadow_ball, [b.p1.active[1]]),
+                 Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+            new_log = b.log.dump()[before_len:]
+            m = re.search(r"Kowtow Cleave on Gholdengo: (\d+) dmg", new_log)
+            self.assertIsNotNone(m, new_log)
+            return int(m.group(1))
+
+        dmg_with_berry = hit_gholdengo()
+        self.assertGreater(dmg_with_berry, 0, "fixture must actually connect")
+        self.assertEqual(gholdengo.item, "", "Colbur must be consumed after triggering")
+        dmg_without_berry = hit_gholdengo()
+        # No halving the second time -- roughly double the first hit's
+        # LOGGED damage (small delta from `damage.py`'s own aura/ability
+        # checks staying otherwise identical turn to turn).
+        self.assertAlmostEqual(dmg_without_berry / dmg_with_berry, 2.0, delta=0.15)
+
+    def test_knock_off_still_only_logs_the_item_loss_once(self):
+        """Knock Off both benefits from AND removes a resist berry on the
+        SAME hit -- must produce exactly one "lost its ... to Knock Off"
+        line, not a second, contradictory resist-berry-consumed line for
+        an item that's already gone."""
+        b = battle(["Kingambit", "Incineroar"], ["Gholdengo", "Milotic"])
+        gholdengo = b.p2.active[0]
+        gholdengo.item = "Colbur Berry"
+        knock_off = b.make_move("knockoff")
+        shadow_ball = b.make_move("shadowball")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [gholdengo]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(gholdengo, "p2", "move", shadow_ball, [b.p1.active[1]]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        self.assertEqual(gholdengo.item, "")
+        log = b.log.dump()
+        self.assertEqual(log.count("to Knock Off!"), 1)
+        self.assertNotIn("weakened the hit and was used up", log)
+
+
+class TestKnockOffStripsSitrusBeforeItCanTrigger(unittest.TestCase):
+    """"Knock off still doesnt seem to remove sitrus berry" -- a Sitrus
+    holder knocked below half HP by Knock Off itself must lose the berry
+    outright and never get to eat it: Knock Off's item removal is part of
+    resolving the SAME hit that dropped it below half, and real Knock Off
+    strips the item before any berry gets a chance to trigger off that
+    hit. `_check_berry` used to run before the Knock Off removal block in
+    `battle.py`'s move resolution, so the berry ate first and Knock Off's
+    own removal became a silent no-op on an already-empty `item` field."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_knock_off_below_half_strips_sitrus_with_no_heal(self):
+        b = battle(["Tyranitar", "Incineroar"], ["Milotic", "Gholdengo"])
+        milotic = b.p2.active[0]
+        milotic.item = "Sitrus Berry"
+        milotic.current_hp = milotic.max_hp()  # full HP; Knock Off alone must drop it below half
+        knock_off = b.make_move("knockoff")
+        recover = b.make_move("recover")  # a no-op action that does NOT block the incoming hit
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("Knock Off", log)  # fixture sanity: the move actually ran
+        hp_after_knock_off = milotic.current_hp
+        self.assertLess(hp_after_knock_off, milotic.max_hp() // 2,
+                        "fixture must actually drop the target below half HP")
+        self.assertEqual(milotic.item, "", "Knock Off must strip the berry")
+        self.assertIn("lost its Sitrus Berry to Knock Off!", log)
+        self.assertNotIn("ate its berry", log)
+
+        # A later hit against the now-itemless Milotic must not heal it (Tyranitar is
+        # Choice-locked into Knock Off already, so reuse it -- item's already gone,
+        # so this is just an ordinary hit with no further item-removal message).
+        before_len = len(b.log.dump())
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        self.assertNotIn("ate its berry", b.log.dump()[before_len:],
+                         "no berry left to heal it on a later hit")
+
+    def test_non_knock_off_hit_below_half_still_heals_from_sitrus(self):
+        """Regression guard: only Knock Off's own removal should pre-empt the
+        berry -- any other move dropping the same mon below half must still
+        let Sitrus trigger normally."""
+        b = battle(["Tyranitar", "Incineroar"], ["Milotic", "Gholdengo"])
+        milotic = b.p2.active[0]
+        milotic.item = "Sitrus Berry"
+        milotic.current_hp = milotic.max_hp() // 2 + 30  # just above half; Rock Slide must drop it below
+        rock_slide = b.make_move("rockslide")
+        recover = b.make_move("recover")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", rock_slide, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("ate its berry", log,
+                      "fixture must actually drop the target below half HP and trigger Sitrus")
+        self.assertEqual(milotic.item, "")
+
+    def test_sticky_hold_still_eats_the_berry_knock_off_cannot_remove(self):
+        b = battle(["Tyranitar", "Incineroar"], ["Milotic", "Gholdengo"])
+        milotic = b.p2.active[0]
+        milotic.item = "Sitrus Berry"
+        milotic.ability = "Sticky Hold"
+        milotic.current_hp = milotic.max_hp()
+        knock_off = b.make_move("knockoff")
+        recover = b.make_move("recover")
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(b.p1.active[0], "p1", "move", knock_off, [milotic]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(milotic, "p2", "move", recover, [milotic]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        log = b.log.dump()
+        self.assertIn("ate its berry", log,
+                      "fixture must actually drop the target below half HP and trigger Sitrus")
+        self.assertEqual(milotic.item, "", "consumed by eating, not Knock Off (Sticky Hold blocks removal)")
+        self.assertNotIn("to Knock Off!", log)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,53 @@
+Kingambit @ Chople Berry
+Ability: Defiant
+Level: 50
+Nature: Adamant
+- Kowtow Cleave
+- Sucker Punch
+- Iron Head
+- Low Kick
+
+Basculegion @ Life Orb
+Ability: Adaptability
+Level: 50
+Nature: Adamant
+- Wave Crash
+- Last Respects
+- Aqua Jet
+- Protect
+
+Garchomp @ Sitrus Berry
+Ability: Rough Skin
+Level: 50
+Nature: Jolly
+- Dragon Claw
+- Earthquake
+- Rock Slide
+- Protect
+
+Charizard @ Charizardite Y
+Ability: Blaze
+Level: 50
+Nature: Timid
+- Heat Wave
+- Weather Ball
+- Ancient Power
+- Protect
+
+Whimsicott @ Focus Sash
+Ability: Prankster
+Level: 50
+Nature: Timid
+- Moonblast
+- Tailwind
+- Encore
+- Protect
+
+Floette-Eternal @ Floettite
+Ability: Flower Veil
+Level: 50
+Nature: Modest
+- Moonblast
+- Dazzling Gleam
+- Light of Ruin
+- Protect

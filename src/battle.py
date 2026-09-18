@@ -25,7 +25,8 @@ import copy
 from dataclasses import dataclass, field
 import random
 
-from damage import (Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move, damage_roll, apply_intimidate,
+from damage import (BERRY_RESIST_TYPE, Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move,
+                    damage_roll, apply_intimidate,
                     defensive_stat, move_from_showdown,
                      apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
                      WEIGHT_BASED_POWER, weight_based_power, DEFENDER_HP_BASED_POWER,
@@ -794,15 +795,6 @@ class Battle:
             self.log.add(f"{attacker.name} uses {move.name}")
             return
 
-        # Recharge moves (Hyper Beam, Giga Impact, the other "Blast Burn"-
-        # family signatures): using one -- landing, missing, or blocked by
-        # Protect makes no difference, only having a real target to use it
-        # against does -- locks the user out of any action next turn (see
-        # the "must_recharge" filter in run_turn, which fires this whether
-        # or not the hit actually connected).
-        if move.flags and move.flags.get("recharge"):
-            attacker.volatile["must_recharge"] = True
-
         num_hit = 0
         # Follow Me / Rage Powder redirection: a single-target move aimed at the
         # opposing side gets pulled onto the redirector instead. Spread moves are
@@ -843,6 +835,16 @@ class Battle:
         blocked = [t for t in live_targets if t not in hit_targets]
         for t in blocked:
             self.log.add(f"{self.tag(attacker)}'s {move.name} was blocked by {self.tag(t)}'s guard!")
+        # Recharge moves (Hyper Beam, Giga Impact, the other "Blast Burn"-
+        # family signatures): the recharge lockout is a consequence of the
+        # move actually connecting, not of merely being selected -- a Hyper
+        # Beam entirely blocked by Protect does NOT force a recharge next
+        # turn (real mechanic). Landing on at least one real, unprotected
+        # target is what triggers it, whether it's a miss on that target or
+        # not (accuracy isn't rolled in this engine, so "landing" here just
+        # means "had a live, unprotected target").
+        if move.flags and move.flags.get("recharge") and hit_targets:
+            attacker.volatile["must_recharge"] = True
         num_hit = (len(hit_targets)
                   if is_spread_move(effective_move_target(move, attacker, self.field.terrain))
                   else min(1, len(hit_targets)))
@@ -943,8 +945,9 @@ class Battle:
                     self.log.add(f"{self.tag(target)}'s {self._fmt_boosts(changed)} (Stamina)")
                     self._emit(event="stat_change", side=self.side_of(target).name,
                                actor=target.name, detail=self._fmt_boosts(changed), source="Stamina")
+            dmg_pct = dmg / target.max_hp() * 100 if target.max_hp() else 0.0
             self.log.add(f"{self.tag(attacker)} uses {move.name} on {self.tag(target)}: "
-                          f"{dmg:.0f} dmg ({eff}x eff) -> {self.tag(target)} at "
+                          f"{dmg:.0f} dmg ({dmg_pct:.0f}%) ({eff}x eff) -> {self.tag(target)} at "
                           f"{target.current_hp}/{target.max_hp()} HP"
                           f"{' [FAINTED]' if target.fainted else ''}")
             if sashed:
@@ -956,12 +959,12 @@ class Battle:
                 self._emit(event="focus_sash", side=self.side_of(target).name,
                            actor=target.name, target_hp_after=target.current_hp,
                            target_max_hp=target.max_hp())
-            self._check_berry(target)   # pinch berries trigger right after the hit lands
-            self._check_berry(target)   # after the damage line, so the log reads in order
-
             # Knock Off strips a removable item on hit (the matching 1.5x power boost
             # is in damage_roll) -- not a Mega Stone the target needs this battle, and
             # Sticky Hold blocks the removal outright (the 1.5x power still applies).
+            # This must run BEFORE any berry check: real Knock Off strips the item as
+            # part of resolving the hit, so a Sitrus holder knocked below half loses
+            # the berry outright and never gets to eat it on this same hit.
             if move.name == "Knock Off" and target.item and target.ability != "Sticky Hold" \
                     and dmg_applied > 0 and not target.fainted:
                 low = target.item.lower()
@@ -973,6 +976,25 @@ class Battle:
                     self.log.add(f"{self.tag(target)} lost its {knocked} to Knock Off!")
                     self._emit(event="knock_off", side=self.side_of(target).name,
                                actor=target.name, item=knocked)
+
+            self._check_berry(target)   # pinch berries trigger right after the hit lands
+            # (a no-op if Knock Off just cleared target.item above)
+
+            # Type-resist berries (Colbur, Occa, ...) trigger once and are then
+            # consumed -- damage_roll already applied the halving (this mirrors
+            # its own trigger condition exactly); that function is deliberately
+            # pure and doesn't mutate state itself, so consumption happens here,
+            # the same place Knock Off's own removal (just above) does. If Knock
+            # Off already stripped this same item this hit, target.item is
+            # already "" and this is a silent no-op -- one log line, not two.
+            berry_type = BERRY_RESIST_TYPE.get(target.item)
+            if (berry_type and berry_type == move.move_type
+                    and (eff > 1.0 or berry_type == "Normal") and dmg_applied > 0):
+                eaten = target.item
+                target.item = ""
+                self.log.add(f"{self.tag(target)}'s {eaten} weakened the hit and was used up!")
+                self._emit(event="resist_berry", side=self.side_of(target).name,
+                           actor=target.name, item=eaten)
 
             self._emit(event="move_damage", side=action.side, actor=attacker.name, move=move.name,
                        target=target.name, target_side=self.side_of(target).name, damage=round(dmg),

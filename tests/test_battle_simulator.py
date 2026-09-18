@@ -215,6 +215,67 @@ class TestTheirSideAcceptsAPokepaste(unittest.TestCase):
         self.assertIsNotNone(at.session_state["sim_battle"])
 
 
+class TestPasteAcceptsATeamsheetTokenOrJson(unittest.TestCase):
+    """"the teamsheets don't seem to be used in the battle simulator ... one
+    pokemon has a Focus Sash, but no focus sash was present in the battle
+    simulator" -- `our_side_pool`/`their_side_pool`'s own "Paste a
+    pokepaste" box used to call `species_data.custom_team_from_export`
+    directly, which only understands raw Showdown-export text -- a
+    generated teamsheet (the xlsx export's own base64 token, or
+    `--teamsheet-json`'s printed JSON) pasted in there failed to parse (or
+    parsed garbage), silently dropping real item pins like a Focus Sash.
+    Both boxes now use `_load_team_text`, the same general sniffer the
+    Team Builder tab's own paste box already used, so a teamsheet token's
+    real items round-trip all the way into the actual battle Combatants
+    here too -- confirmed directly against `sim_battle`, not just the
+    "Parsed: ..." success message."""
+
+    SIX = ["Garchomp", "Incineroar", "Gallade", "Hydreigon", "Sinistcha", "Kingambit"]
+
+    def _token(self):
+        from team_sheet import encode_teamsheet
+        sets = {"Garchomp": {"item": "Focus Sash",
+                             "moves": ["Dragon Claw", "Earthquake", "Rock Slide", "Protect"]}}
+        return encode_teamsheet(self.SIX, sets)
+
+    def test_their_side_paste_accepts_a_teamsheet_token_with_the_real_item_intact(self):
+        at = fresh_app()
+        tab = sim_tab(at)
+        our_radio = next(r for r in tab.radio if r.label == "Our side")
+        at = our_radio.set_value("Any Pokemon").run()
+        tab = sim_tab(at)
+        lead_ms = next(m for m in tab.multiselect if m.label == "Our lead (2)")
+        at = lead_ms.set_value(["Milotic", "Excadrill"]).run()
+        tab = sim_tab(at)
+        back_ms = next(m for m in tab.multiselect if m.label == "Our back (2)")
+        at = back_ms.set_value(["Aegislash", "Tyranitar"]).run()
+        tab = sim_tab(at)
+        their_radio = next(r for r in tab.radio if r.label == "Their side")
+        at = their_radio.set_value("Paste a pokepaste").run()
+        tab = sim_tab(at)
+        ta = next(t for t in tab.text_area if t.key and t.key.endswith("_foe_paste"))
+        at = ta.set_value(self._token()).run()
+        self.assertFalse(at.exception, list(at.exception))
+        tab = sim_tab(at)
+        self.assertTrue(any("Garchomp" in s.value for s in tab.success),
+                        "expected the teamsheet token to parse, not error out")
+        mode_radio = next(r for r in tab.radio if r.label == "Their bring")
+        at = mode_radio.set_value("I choose their bring").run()
+        tab = sim_tab(at)
+        their_lead = next(m for m in tab.multiselect if m.label == "Their lead (2)")
+        at = their_lead.set_value(["Garchomp", "Incineroar"]).run()
+        tab = sim_tab(at)
+        their_back = next(m for m in tab.multiselect if m.label == "Their back (2)")
+        at = their_back.set_value(["Gallade", "Hydreigon"]).run()
+        tab = sim_tab(at)
+        start = next(b for b in tab.button if b.label == "Start Battle")
+        at = start.click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        battle = at.session_state["sim_battle"]
+        garchomp = next(c for c in battle.p2.roster if c.name == "Garchomp")
+        self.assertEqual(garchomp.item, "Focus Sash")
+
+
 class TestBattleSimulatorTurnLoop(unittest.TestCase):
     """Once a battle exists, the human's own action picker and Submit
     button drive a real `Battle.run_turn` -- no second engine."""
@@ -249,11 +310,66 @@ class TestBattleSimulatorTurnLoop(unittest.TestCase):
         tab = sim_tab(at)
         target_names = {"Kingambit", "Basculegion"}
         target_sbs = [sb for sb in tab.selectbox if sb.label == "Target"]
-        found_both_targets = any(target_names.issubset(set(sb.options))
-                                 for sb in target_sbs)
+        # Options now carry a "~NN%" damage estimate suffix, so match by prefix.
+        found_both_targets = any(
+            all(any(opt.startswith(n) for opt in sb.options) for n in target_names)
+            for sb in target_sbs)
         self.assertTrue(found_both_targets, "at least one default move's "
                                             "target dropdown must offer both "
                                             "enemy leads, not just one")
+
+    def test_turn_log_shows_percent_damage_alongside_raw_damage(self):
+        """"When showing move damage in the log, show % damage as well" --
+        the damage line now carries both, e.g. "92 dmg (46%) (1.0x eff)"."""
+        import re
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        at = submit_turn(at)
+        log_text = "\n".join(at.session_state["sim_turn_log"])
+        m = re.search(r"(\d+) dmg \((\d+)%\) \([\d.]+x eff\)", log_text)
+        self.assertIsNotNone(m, f"no percent-annotated damage line found in:\n{log_text}")
+
+
+class TestFieldStatusShowsTerrainDuration(unittest.TestCase):
+    """"display the remaining duration of field effects like psychic
+    terrain and grassy terrain, along with the trick room/tailwind
+    timers" -- Trick Room/Tailwind were already shown; terrain (fully
+    tracked by `FieldState.terrain`/`terrain_turns_left` already) was the
+    one field-status line never rendered."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_grassy_terrain_shows_its_pretty_name_and_remaining_turns(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.field.terrain = "grassy"
+        battle.field.terrain_turns_left = 4
+        at.session_state["sim_battle"] = battle
+        at = at.run()
+        tab = sim_tab(at)
+        self.assertTrue(any("Grassy Terrain (4 left)" in c.value
+                            for c in tab.caption))
+
+    def test_no_terrain_shows_no_terrain_bit(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        self.assertFalse(any("Terrain" in c.value for c in tab.caption))
+
+    def test_weather_shows_its_pretty_name_not_the_raw_key(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.field.weather = "rain"
+        battle.field.weather_turns_left = 3
+        at.session_state["sim_battle"] = battle
+        at = at.run()
+        tab = sim_tab(at)
+        self.assertTrue(any("a rainstorm (3 left)" in c.value
+                            for c in tab.caption))
+        self.assertFalse(any("Weather: rain " in c.value for c in tab.caption))
 
     def test_switching_the_selected_move_changes_the_target_row(self):
         """The Move dropdown acts as a real menu -- picking a DIFFERENT
@@ -486,6 +602,47 @@ class TestStepThroughSummary(unittest.TestCase):
         new_battle_btn.click().run()
         self.assertNotIn("sim_leads_summary", at.session_state)
 
+    def test_replay_button_on_a_lost_lead_restarts_against_it(self):
+        """"After losing a match and after running the 15 pair step through
+        in battle simulator, give me an option to replay the losing
+        match(es)." Each loss row in the final step-through summary gets
+        its own "Replay" button that rebuilds the battle against exactly
+        that lead's `their4`."""
+        our4 = ["Garchomp", "Incineroar"]
+        their4 = ["Kingambit", "Basculegion"]
+        battle, movesets = self._finished_battle(our4, their4, our_loses=True)
+
+        at = fresh_app()
+        at.session_state["sim_battle"] = battle
+        at.session_state["sim_movesets"] = movesets
+        at.session_state["sim_our4"] = our4
+        at.session_state["sim_our_sets"] = {}
+        at.session_state["sim_their4"] = their4
+        at.session_state["sim_their_sets"] = {}
+        at.session_state["sim_our_mega"] = None
+        at.session_state["sim_mode"] = "Step through all 15 leads"
+        at.session_state["sim_leads"] = [(0.0, their4, None)]
+        at.session_state["sim_lead_idx"] = 0
+        at.session_state["sim_turn_log"] = []
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        replay_buttons = [b for b in tab.button if b.label == "Replay"]
+        self.assertEqual(len(replay_buttons), 1,
+                         "exactly one loss row -- exactly one Replay button")
+        replay_buttons[0].click().run()
+
+        tab = sim_tab(at)
+        self.assertEqual(len(tab.exception), 0)
+        new_battle = at.session_state["sim_battle"]
+        self.assertEqual(sorted(c.name for c in new_battle.p2.roster), sorted(their4))
+        self.assertFalse(new_battle.p1.has_lost(), "a freshly rebuilt battle "
+                                                    "must start un-fainted")
+        self.assertEqual(at.session_state["sim_their4"], their4)
+        self.assertEqual(at.session_state["sim_mode"], "I choose their bring")
+        self.assertEqual(at.session_state["sim_turn_log"], [])
+
 
 class TestBattleSimulatorOnlyOneMegaInLiveBattle(unittest.TestCase):
     """The actual Combatants built for the interactive battle honour "only
@@ -686,6 +843,419 @@ class TestBattleMenu(unittest.TestCase):
         battle = at.session_state["sim_battle"]
         self.assertEqual(battle.p1.active[0].name, "Hydreigon")
         self.assertNotEqual(battle.p1.active[0].name, "Garchomp")
+
+
+class TestMoveSelectionShowsDamagePercent(unittest.TestCase):
+    """"When showing move damage in the log, show % damage as well. In
+    move selection let me see the % damage the potential moves will do."
+    The Move dropdown carries a "~NN%" suffix whenever a move only has one
+    legal opt (the common case -- one live foe, or a self/status move with
+    nothing to estimate), and the Target dropdown carries it per-target
+    when a move offers a real choice."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_a_damaging_move_carries_a_percent_estimate(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        move_sbs = [sb for sb in tab.selectbox if sb.label in ("Move", "Target")]
+        all_options = [opt for sb in move_sbs for opt in sb.options]
+        self.assertTrue(any("(~" in opt and "%)" in opt for opt in all_options),
+                        f"expected a ~NN%% estimate somewhere in: {all_options}")
+
+    def test_a_pure_status_move_carries_no_percent_estimate(self):
+        """Protect (always legal, always offered) must never get a damage
+        estimate -- it can't damage anything."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        move_sbs = [sb for sb in tab.selectbox if sb.label == "Move"]
+        protect_opts = [opt for sb in move_sbs for opt in sb.options
+                        if opt.startswith("Protect")]
+        self.assertTrue(protect_opts, "Protect must always be offered")
+        for opt in protect_opts:
+            self.assertEqual(opt, "Protect", "Protect must never carry a % estimate")
+
+
+class TestSuggestedAction(unittest.TestCase):
+    """"Also in the battle simulator, provide the suggested move or
+    suggested switch after a faint" -- a "Suggested: ..." caption next to
+    each of our own mon's action menu, scored by the exact same greedy
+    one-ply valuation (`solver._action_value`) that plays the OPPONENT
+    side, so it can never drift from what the AI itself would call best.
+    Display-only -- the dropdowns below it stay exactly as manual as
+    before."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_a_suggested_caption_appears_and_matches_the_scorer(self):
+        from app import sim_suggest_action
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        suggestion_captions = [c.value for c in tab.caption
+                               if c.value and c.value.startswith("Suggested: ")]
+        self.assertEqual(len(suggestion_captions), 2,
+                         "one suggestion per one of our own two active mons")
+
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        expected = [f"Suggested: {sim_suggest_action(battle, c, battle.p1, battle.p2, movesets, battle.turn_num + 1)}"
+                   for c in battle.p1.active]
+        self.assertEqual(suggestion_captions, expected)
+
+    def test_a_suggested_replacement_caption_appears_after_a_faint(self):
+        """The fainted-replacement dropdown gets its own "Suggested: Switch
+        in ..." caption, off `Battle._best_replacement` -- the SAME
+        strategic pick the opponent's own auto-replacement already uses,
+        not a second heuristic."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.p1.active[0].fainted = True
+        battle.p1.active[0].current_hp = 0
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+
+        tab = sim_tab(at)
+        expected = battle._best_replacement(
+            [b for b in battle.p1.bench if not b.fainted], battle.p2.active)
+        self.assertTrue(any(c.value == f"Suggested: Switch in {expected.name}"
+                            for c in tab.caption))
+
+
+class TestLiveWinConditionsPanel(unittest.TestCase):
+    """"A live tracker in a battle simulator match (while holding the
+    enemy backs as unconfirmed until revealed) -- for instance, I can
+    afford to risk Metagross this turn and attack if I trade it for the
+    enemy Staraptor, because my Scizor beats the rest." Per the user's own
+    "live recompute, full knowledge" choice: no fog-of-war/reveal-tracking
+    state, just a live 1v1 hit-count matrix scoped to whichever mons are
+    CURRENTLY ALIVE, off each one's REAL current HP."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_panel_appears_with_one_matrix_cell_per_alive_pair(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        self.assertTrue(any("Win conditions (live" in e.label for e in tab.expander))
+        matrix_dfs = [d.value for d in tab.dataframe if list(d.value.columns[:1]) == ["Ours"]]
+        self.assertTrue(matrix_dfs, "expected an Ours/<enemy...> live matrix table")
+        self.assertEqual(set(matrix_dfs[0]["Ours"]), set(self.OUR4),
+                         "the whole alive roster (bench included), not just actives")
+        self.assertEqual(set(matrix_dfs[0].columns[1:]), set(self.THEIR4))
+
+    def test_matrix_shrinks_once_a_mon_faints(self):
+        """A fainted mon (on either side) drops out of the live matrix --
+        "scoped to whichever mons are CURRENTLY ALIVE"."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        battle.p2.active[0].fainted = True
+        battle.p2.active[0].current_hp = 0
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+        tab = sim_tab(at)
+        matrix_dfs = [d.value for d in tab.dataframe if list(d.value.columns[:1]) == ["Ours"]]
+        self.assertTrue(matrix_dfs)
+        self.assertNotIn(battle.p2.active[0].name, matrix_dfs[0].columns)
+
+    def test_sim_hit_count_matrix_reflects_real_current_hp_not_full(self):
+        """Halving a target's current HP can only shrink (never grow) our
+        own hits-to-KO on it -- the whole point of using REAL current HP
+        instead of full team-preview HP."""
+        from app import sim_hit_count_matrix
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        full = sim_hit_count_matrix(battle, movesets)
+        target = battle.p2.active[0]
+        our_attacker = battle.p1.active[0]
+        target.current_hp = target.current_hp // 2
+        halved = sim_hit_count_matrix(battle, movesets)
+        cell_full = full[(our_attacker.name, target.name)]
+        cell_half = halved[(our_attacker.name, target.name)]
+        if cell_full["our_hits_to_ko"] is not None:
+            self.assertLessEqual(cell_half["our_hits_to_ko"], cell_full["our_hits_to_ko"])
+
+    def test_every_matrix_cell_carries_a_verdict(self):
+        from app import sim_hit_count_matrix
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        matrix = sim_hit_count_matrix(battle, movesets)
+        self.assertTrue(matrix)
+        for cell in matrix.values():
+            self.assertIn(cell["verdict"], ("win", "lose", "stall"))
+
+    def test_crucial_members_rollup_is_internally_consistent(self):
+        """A mon named as `sole_answer_to` an enemy must be the ONLY alive
+        mon on our side whose verdict against that enemy is "win"."""
+        from app import sim_hit_count_matrix, sim_crucial_members
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        movesets = at.session_state["sim_movesets"]
+        matrix = sim_hit_count_matrix(battle, movesets)
+        our_names = [c.name for c in battle.p1.roster if not c.fainted]
+        their_names = [c.name for c in battle.p2.roster if not c.fainted]
+        crucial = sim_crucial_members(matrix, our_names, their_names)
+        for name, info in crucial.items():
+            for enemy in info["sole_answer_to"]:
+                winners = [n for n in our_names
+                          if matrix[(n, enemy)]["verdict"] == "win"]
+                self.assertEqual(winners, [name])
+            self.assertEqual(info["must_preserve"], bool(info["sole_answer_to"]))
+
+    def test_panel_can_show_a_crucial_to_preserve_table(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        crucial_dfs = [d.value for d in tab.dataframe
+                      if list(d.value.columns) == ["Preserve", "Sole answer to"]]
+        has_crucial_markdown = any("Crucial to preserve" in m.value for m in tab.markdown)
+        self.assertEqual(bool(crucial_dfs), has_crucial_markdown)
+
+
+class TestCachedGameplanPanel(unittest.TestCase):
+    """"If a counter table analysis has been loaded, it would be good to
+    see what the 2v2 calculator saw as the optimal play sequence" -- a new
+    expander that looks up `st.session_state["ct_gameplans"]` (populated
+    by the Counter Table tab, see `TestGameplanCache` in test_counter_
+    table_tab.py) by the CURRENT two active pairs and renders the cached
+    turn-by-turn plan when one exists for this exact matchup."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_no_analysis_caption_when_nothing_is_cached(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        self.assertTrue(any("Counter Table gameplan" in e.label for e in tab.expander))
+        self.assertTrue(any("No Counter Table analysis covers this exact pair"
+                            in c.value for c in tab.caption))
+
+    def test_shows_the_cached_gameplan_when_the_actives_match(self):
+        from counter_finder import Hit
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        battle = at.session_state["sim_battle"]
+        our_pair = tuple(c.name for c in battle.p1.active)
+        enemy_pair = tuple(c.name for c in battle.p2.active)
+        h = Hit(move_name="Earthquake", frac=0.5, lo=0.45, avg=0.5, hi=0.55,
+               eff=1.0, num_targets_hit=1)
+        at.session_state["ct_gameplans"] = {
+            (frozenset(our_pair), frozenset(enemy_pair)): {
+                "our_pair": our_pair, "enemy_pair": enemy_pair,
+                "log": [[("C", "E1", h)]], "outcome": "out_trade",
+                "turns_used": 1, "source": "Bring-4 search"}}
+        at = at.run()
+        self.assertEqual(len(at.exception), 0)
+        tab = sim_tab(at)
+        self.assertTrue(any("From: Bring-4 search" in c.value
+                            and "out_trade" in c.value for c in tab.caption))
+        self.assertTrue(any(f"{our_pair[0]} -> {enemy_pair[0]}" in c.value
+                            for c in tab.code))
+
+
+class TestForceRedirectMode(unittest.TestCase):
+    """"Let me select a mode in the battle simulator where the enemy always
+    uses its redirection moves" -- a checkbox (now merged with the speed-
+    control mode, see `TestForceSpeedControlMode` below, but STILL keyed
+    "sim_force_redirect" and STILL forcing redirection unconditionally as
+    its first-priority behavior) that overrides `greedy_opponent_joint_
+    action`'s own (already Follow-Me-aware, but merely HEURISTIC) per-mon
+    choice, forcing every alive, redirect-capable enemy to click Follow
+    Me/Rage Powder EVERY turn regardless of whether the greedy AI judges
+    it worthwhile -- a deliberately pessimistic "can this specific play
+    really be punished" testing mode."""
+
+    OUR4 = ["Garchomp", "Hydreigon"]
+    THEIR4 = ["Indeedee-F", "Kingambit"]  # Indeedee-F: real Follow Me user
+
+    def test_checkbox_present_and_off_by_default(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox
+                  if "optimal support" in c.label)
+        self.assertFalse(cb.value)
+
+    def test_enabling_it_makes_the_redirector_click_follow_me(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "optimal support" in c.label)
+        at = cb.set_value(True).run()
+        at = submit_turn(at)
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        indeedee = next(c for c in battle.p2.roster if c.name == "Indeedee-F")
+        self.assertIs(battle.p2.follow_me_target, indeedee,
+                      "Indeedee-F must have actually clicked Follow Me this turn "
+                      "(regardless of whether it then took a KO for it)")
+
+    def test_left_off_the_ai_keeps_its_own_normal_heuristic_choice(self):
+        """Regression guard: the toggle must not change anything when OFF --
+        `greedy_opponent_joint_action`'s own choice (whatever it is) goes
+        through unmodified."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        at = submit_turn(at)
+        self.assertEqual(len(at.exception), 0)
+
+
+class TestForceSpeedControlMode(unittest.TestCase):
+    """"In a similar way as the redirection mode, there should be a speed
+    control mode -- such as enemy Milotic using icy wind to allow its
+    partner Gholdengo to outspeed and OHKO Metagross, if it protected
+    turn 1 -- so merging the protect and speed control mode. Once a pair
+    are faster than their opponents, they can move to optimal moves."
+    Direct, non-AppTest unit tests against `app.sim_force_support_actions`
+    -- builds a real `Battle`/moveset board by hand (same convention
+    `test_mechanics_fixes.py` uses) so the exact starting speeds can be
+    controlled precisely."""
+
+    def _board(self, our_spe):
+        from _harness import load_world
+        from combatants import make_team
+        from battle import Battle
+        from solver import build_moveset
+        w = load_world()
+        oc = make_team(["Metagross", "Incineroar"], w["merged"], w["natures"])
+        ec = make_team(["Milotic", "Gholdengo"], w["merged"], w["natures"])
+        for c in oc:
+            c.stats["spe"] = our_spe
+        battle = Battle(oc, ec, w["typechart"], w["moves"])
+        movesets = {
+            "Metagross": build_moveset(w["merged"]["Metagross"], w["moves"]),
+            "Incineroar": build_moveset(w["merged"]["Incineroar"], w["moves"]),
+            "Milotic": build_moveset(w["merged"]["Milotic"], w["moves"],
+                                     only_moves=["Icy Wind", "Muddy Water"]),
+            "Gholdengo": build_moveset(w["merged"]["Gholdengo"], w["moves"],
+                                       only_moves=["Shadow Ball", "Make It Rain", "Protect"])}
+        return battle, movesets
+
+    def test_icy_wind_forced_when_the_pair_is_not_yet_faster(self):
+        """Metagross/Incineroar(150) currently outspeed BOTH Milotic(103)
+        and Gholdengo(136) -- not favorable for the enemy pair -- but
+        Icy Wind's own -1 Speed stage (a ~33% cut) drops 150 to ~100,
+        below both, so it WOULD flip the order. Milotic (the only one of
+        the two who knows a real speed-control move here) must be forced
+        onto it instead of whatever the greedy AI picked for it."""
+        from app import sim_force_support_actions, _sim_pair_speed_favorable
+        from solver import greedy_opponent_joint_action
+        from projection import projected_field
+        battle, movesets = self._board(our_spe=150)
+        self.assertFalse(_sim_pair_speed_favorable(
+            battle.p2, battle.p1, projected_field(battle)))
+        baseline = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets, 1)
+        forced = sim_force_support_actions(battle, baseline, movesets)
+        milotic_action = next(a for a in forced if a.combatant.name == "Milotic")
+        self.assertEqual(milotic_action.move.name, "Icy Wind")
+        self.assertTrue(all(t.name in ("Metagross", "Incineroar")
+                            for t in milotic_action.targets))
+
+    def test_partner_protects_exactly_when_the_estimate_says_its_threatened(self):
+        from app import sim_force_support_actions
+        from solver import greedy_opponent_joint_action, _max_incoming
+        from projection import projected_field
+        battle, movesets = self._board(our_spe=150)
+        baseline = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets, 1)
+        forced = sim_force_support_actions(battle, baseline, movesets)
+        gholdengo = next(c for c in battle.p2.active if c.name == "Gholdengo")
+        gholdengo_action = next(a for a in forced if a.combatant.name == "Gholdengo")
+        field = projected_field(battle)
+        worst = _max_incoming(battle, gholdengo, battle.p2, battle.p1, field, movesets)
+        threatened = worst >= 100.0 * gholdengo.current_hp / gholdengo.max_hp()
+        if threatened:
+            self.assertEqual(gholdengo_action.kind, "protect")
+        else:
+            self.assertNotEqual(gholdengo_action.kind, "protect")
+
+    def test_no_speed_control_forced_once_already_favorable(self):
+        """Metagross(50) is already SLOWER than both Milotic(103) and
+        Gholdengo(136) -- already favorable -- so Milotic must keep
+        whatever the greedy AI already chose for it, not get overridden
+        onto Icy Wind."""
+        from app import sim_force_support_actions, _sim_pair_speed_favorable
+        from solver import greedy_opponent_joint_action
+        from projection import projected_field
+        battle, movesets = self._board(our_spe=50)
+        self.assertTrue(_sim_pair_speed_favorable(
+            battle.p2, battle.p1, projected_field(battle)))
+        baseline = greedy_opponent_joint_action(battle, battle.p2, battle.p1, movesets, 1)
+        forced = sim_force_support_actions(battle, baseline, movesets)
+        baseline_milotic = next(a for a in baseline if a.combatant.name == "Milotic")
+        forced_milotic = next(a for a in forced if a.combatant.name == "Milotic")
+        self.assertEqual(forced_milotic.move.name, baseline_milotic.move.name)
+
+
+class TestManualEnemyMode(unittest.TestCase):
+    """"Give me a mode where I can manually select the enemies moves too, to
+    see if a specific play can really be punished." -- the SAME Attack/
+    Switch dropdown menu built for our own side, rendered a second time for
+    `battle.p2.active`, entirely replacing `greedy_opponent_joint_action`
+    for the turn."""
+
+    OUR4 = ["Garchomp", "Incineroar", "Gallade", "Hydreigon"]
+    THEIR4 = ["Kingambit", "Basculegion", "Whimsicott", "Sinistcha"]
+
+    def test_checkbox_present_and_off_by_default(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "pick the enemy" in c.label)
+        self.assertFalse(cb.value)
+
+    def test_enabling_it_renders_a_move_menu_for_the_enemy_side(self):
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "pick the enemy" in c.label)
+        at = cb.set_value(True).run()
+        tab = sim_tab(at)
+        menu_sbs = [sb for sb in tab.selectbox if sb.label == "Action type"]
+        # 2 for our own side + 2 for the enemy side, now that manual mode is on.
+        self.assertEqual(len(menu_sbs), 4)
+
+    def test_a_human_chosen_enemy_move_actually_gets_submitted(self):
+        """Pick a specific enemy move that the greedy AI would not
+        necessarily choose on its own (a non-damaging status move), submit,
+        and confirm it's the one that actually landed -- proves the manual
+        pick reaches `Battle.run_turn`, not just the AI's own default."""
+        at = fresh_app()
+        at = seed_battle(at, self.OUR4, self.THEIR4)
+        tab = sim_tab(at)
+        cb = next(c for c in tab.checkbox if "pick the enemy" in c.label)
+        at = cb.set_value(True).run()
+
+        tab = sim_tab(at)
+        enemy_move_sbs = [sb for sb in tab.selectbox if sb.label == "Move"
+                          and sb.key and sb.key.startswith("sim_enemy_move_")]
+        # "Protect" over any damaging option -- the greedy AI's own
+        # `action_value` scores Protect at -1 (see `solver.py`'s own
+        # comment: "opponent modeled as not bothering to Protect"), so this
+        # is a move the AI would never pick on its own, making it a clean
+        # signal that the HUMAN pick, not the AI's, actually landed.
+        protect_sb = next(sb for sb in enemy_move_sbs if "Protect" in sb.options)
+        target_move = "Protect"
+        at = protect_sb.set_value(target_move).run()
+        self.assertEqual(len(at.exception), 0)
+
+        at = submit_turn(at)
+        self.assertEqual(len(at.exception), 0)
+        battle = at.session_state["sim_battle"]
+        log = "\n".join(battle.log.lines)
+        self.assertIn("protects itself", log)
 
 
 def seed_movesets(name):

@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
 
 APP = os.path.join(os.path.dirname(__file__), "..", "src", "app.py")
+ROOT = os.path.join(os.path.dirname(__file__), "..")
 TEAM = ["Arcanine-Hisui", "Hydreigon", "Gallade", "Gholdengo",
         "Incineroar", "Farigiraf"]
 
@@ -438,6 +439,66 @@ class TestExportTeamsheetTokenAndPokepaste(unittest.TestCase):
         at = at.run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertFalse(any(t.key == "tb_export_token" for t in at.text_area))
+
+
+class TestSavedTeamsDropdownIncludesDataTeams(unittest.TestCase):
+    """"The saved teams dropdown from the teambuilder should also load
+    teams from my_teams" -- traced to the Team Builder's OWN "Saved teams"
+    dropdown only ever globbing `*.json` at the project root (its own
+    save format), with no knowledge of the pokepaste-format teams in
+    data/teams/*.txt / data/my_teams/*.txt that `teams`/`team_meta`
+    (module-level, already unioning both directories) expose everywhere
+    else in the app. "Sand" (data/teams/sand.txt, filename title-cased) is
+    a real, always-present fixture team -- data/my_teams itself ships
+    empty (just a README) in this repo, but is read the exact same way,
+    so this is a faithful test of the shared code path either directory's
+    own team would go through."""
+
+    def test_a_saved_team_name_appears_in_the_dropdown(self):
+        at = app()
+        pick = next(s for s in at.selectbox if s.key == "load_pick")
+        self.assertIn("(saved team) Sand", pick.options)
+
+    def test_loading_it_carries_the_teams_own_roster_and_sets(self):
+        at = app()
+        pick = next(s for s in at.selectbox if s.key == "load_pick")
+        at = pick.set_value("(saved team) Sand").run()
+        load_btn = next(b for b in at.button if b.label == "Load")
+        at = load_btn.click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        # The Tyranitarite holder is renamed "Mega Tyranitar" by the same
+        # mega-stone convention `custom_team_from_export` always applies.
+        self.assertIn("Mega Tyranitar", at.session_state["team"])
+        self.assertIn("Excadrill", at.session_state["team"])
+        # A real pokepaste set (Tyranitarite item, real EVs/moves) must have
+        # actually carried over, not just the bare names.
+        self.assertEqual(at.session_state["sets"]["Mega Tyranitar"]["item"],
+                         "Tyranitarite")
+        self.assertIn("Knock Off",
+                      at.session_state["sets"]["Mega Tyranitar"]["moves"])
+
+    def test_the_teambuilders_own_json_saves_still_work_unchanged(self):
+        """Regression guard: adding the pokepaste-sourced options must not
+        break loading the Team Builder's own `*.json` saves."""
+        import tempfile
+        from team_sheet import save_team
+        at = app()
+        with tempfile.NamedTemporaryFile(
+                suffix=".json", dir=ROOT, delete=False) as f:
+            path = f.name
+        try:
+            save_team(path, ["Gholdengo", "Incineroar"], {})
+            fname = os.path.basename(path)
+            at = at.run()
+            pick = next(s for s in at.selectbox if s.key == "load_pick")
+            self.assertIn(fname, pick.options)
+            at = pick.set_value(fname).run()
+            load_btn = next(b for b in at.button if b.label == "Load")
+            at = load_btn.click().run()
+            self.assertFalse(at.exception, list(at.exception))
+            self.assertEqual(at.session_state["team"], ["Gholdengo", "Incineroar"])
+        finally:
+            os.unlink(path)
 
 
 if __name__ == "__main__":
