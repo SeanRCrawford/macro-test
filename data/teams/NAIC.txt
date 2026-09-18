@@ -1,0 +1,53 @@
+Sylveon @ Fairy Feather
+Ability: Pixilate
+Level: 50
+Nature: Modest
+- Hyper Voice
+- Hyper Beam
+- Quick Attack
+- Protect
+
+Aerodactyl @ Aerodactylite
+Ability: Unnerve
+Level: 50
+Nature: Jolly
+- Rock Slide
+- Dual Wingbeat
+- Tailwind
+- Ice Fang
+
+Farigiraf @ Sitrus Berry
+Ability: Armor Tail
+Level: 50
+Nature: Bold
+- Psychic
+- Thunderbolt
+- Trick Room
+- Protect
+
+Garchomp @ Life Orb
+Ability: Rough Skin
+Level: 50
+Nature: Jolly
+- Earthquake
+- Rock Tomb
+- Dragon Claw
+- Protect
+
+Kingambit @ Focus Sash
+Ability: Defiant
+Level: 50
+Nature: Adamant
+- Kowtow Cleave
+- Sucker Punch
+- Iron Head
+- Low Kick
+
+Charizard @ Charizardite Y
+Ability: Blaze
+Level: 50
+Nature: Modest
+- Heat Wave
+- Weather Ball
+- Solar Beam
+- Protect

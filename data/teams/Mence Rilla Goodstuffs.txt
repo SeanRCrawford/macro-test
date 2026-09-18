@@ -1,0 +1,47 @@
+Salamence @ Salamencite
+Ability: Intimidate
+Naive Nature
+- Hyper Voice
+- Double-Edge
+- Tailwind
+- Protect
+
+Rillaboom @ Sitrus Berry
+Ability: Grassy Surge
+Adamant Nature
+- Wood Hammer
+- Grassy Glide
+- U-turn
+- Fake Out
+
+Sneasler @ Grassy Seed
+Ability: Unburden
+Adamant Nature
+- Dire Claw
+- Close Combat
+- Fake Out
+- Protect
+
+Arcanine-Hisui @ Focus Sash
+Ability: Rock Head
+Jolly Nature
+- Flare Blitz
+- Head Smash
+- Extreme Speed
+- Protect
+
+Kingambit @ Chople Berry
+Ability: Defiant
+Adamant Nature
+- Kowtow Cleave
+- Iron Head
+- Low Kick
+- Sucker Punch
+
+Basculegion @ Mystic Water
+Ability: Adaptability
+Adamant Nature
+- Wave Crash
+- Last Respects
+- Aqua Jet
+- Protect

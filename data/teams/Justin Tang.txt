@@ -1,0 +1,53 @@
+Sneasler @ Focus Sash
+Ability: Poison Touch
+Level: 50
+Nature: Jolly
+- Fake Out
+- Close Combat
+- Poison Jab
+- Quick Guard
+
+Sinistcha @ Colbur Berry
+Ability: Hospitality
+Level: 50
+Nature: Bold
+- Matcha Gotcha
+- Rage Powder
+- Trick Room
+- Protect
+
+Kingambit @ Life Orb
+Ability: Defiant
+Level: 50
+Nature: Adamant
+- Kowtow Cleave
+- Sucker Punch
+- Swords Dance
+- Protect
+
+Blastoise @ Blastoisinite
+Ability: Rain Dish
+Level: 50
+Nature: Modest
+- Water Spout
+- Dark Pulse
+- Shell Smash
+- Protect
+
+Delphox @ Delphoxite
+Ability: Blaze
+Level: 50
+Nature: Timid
+- Heat Wave
+- Psychic
+- Nasty Plot
+- Protect
+
+Incineroar @ Sitrus Berry
+Ability: Intimidate
+Level: 50
+Nature: Careful
+- Parting Shot
+- Flare Blitz
+- Throat Chop
+- Fake Out

@@ -1,0 +1,47 @@
+Indeedee-F @ Rocky Helmet
+Ability: Psychic Surge
+Relaxed Nature
+- Trick Room
+- Helping Hand
+- Follow Me
+- Psychic
+
+Camerupt @ Cameruptite
+Ability: Solid Rock
+Quiet Nature
+- Heat Wave
+- Ancient Power
+- Earth Power
+- Protect
+
+Hatterene @ Life Orb
+Ability: Magic Bounce
+Quiet Nature
+- Expanding Force
+- Dazzling Gleam
+- Trick Room
+- Protect
+
+Armarouge @ Psychic Seed
+Ability: Flash Fire
+Quiet Nature
+- Trick Room
+- Aura Sphere
+- Heat Wave
+- Expanding Force
+
+Gallade @ Sitrus Berry
+Ability: Sharpness
+Brave Nature
+- Trick Room
+- Wide Guard
+- Psycho Cut
+- Sacred Sword
+
+Crabominable @ Crabominite
+Ability: Hyper Cutter
+Brave Nature
+- Ice Hammer
+- Drain Punch
+- Rock Slide
+- Protect

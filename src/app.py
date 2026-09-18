@@ -314,6 +314,24 @@ def _load_team_text(text, merged):
     return pool, sets, None
 
 
+def _is_raw_pokepaste_text(text):
+    """True unless `text` is one of `_load_team_text`'s other two formats
+    (a base64 teamsheet TOKEN or team .json) -- `_save_pasted_team` writes
+    its argument verbatim to a data/my_teams/*.txt file that `species_data.
+    load_teams` only ever re-parses as raw Showdown-export pokepaste text,
+    so a caller offering "Save to My Teams" needs to know which format it
+    actually has before offering a save that wouldn't load back."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    from team_sheet import TEAMSHEET_TOKEN_PREFIX
+    if text.startswith(TEAMSHEET_TOKEN_PREFIX):
+        return False
+    if text[0] in "{[":
+        return False
+    return True
+
+
 def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None,
                   default_source=None):
     """Where OUR six come from, offered the same way everywhere.
@@ -355,10 +373,12 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None,
                            "currently holds, WITH the items, moves, abilities "
                            "and stat points you set there. 'A saved team' is "
                            "anything in data/teams or data/my_teams. 'Paste a "
-                           "pokepaste' reads a Showdown export straight from "
-                           "the clipboard, and can save it to data/my_teams "
-                           "for next time. 'Any Pokemon' opens the whole "
-                           "dataset for a one-off matchup.")
+                           "pokepaste' also reads a search's own generated "
+                           "teamsheet (base64 token or .json, from the xlsx "
+                           "export or --teamsheet-json), not just a raw "
+                           "Showdown export -- and can save either to data/"
+                           "my_teams for next time. 'Any Pokemon' opens the "
+                           "whole dataset for a one-off matchup.")
     if source == "My loaded team":
         if not loaded:
             st.warning("No team loaded — pick six in the Team Builder tab, "
@@ -372,19 +392,14 @@ def our_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None,
         return list(teams[pick]), dict((team_meta or {}).get(pick, {}).get("sets") or {})
     if source == "Paste a pokepaste":
         paste = st.text_area(
-            "Paste Showdown export text here (blank line between each Pokemon)",
+            "Paste a Showdown export, a teamsheet token, or team .json here",
             height=200, key=f"{key_prefix}_our_paste")
         if not paste.strip():
             return [], {}
-        from species_data import custom_team_from_export
-        roster, sets = custom_team_from_export(paste, merged or {})
-        unknown = [n for n in roster if n not in (merged or {})]
-        if unknown:
-            st.error(f"Unrecognised species (check spelling against "
-                     f"mbsmogon.xlsx): {unknown}")
-            return [], {}
-        if not roster:
-            st.error("Couldn't parse any Pokemon out of that paste.")
+        try:
+            roster, sets, _analysis = _load_team_text(paste, merged or {})
+        except ValueError as e:
+            st.error(str(e))
             return [], {}
         st.success(f"Parsed: {', '.join(roster)}")
         with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
@@ -445,37 +460,38 @@ def their_side_pool(key_prefix, teams, all_names, team_meta=None, merged=None):
         return st.multiselect("Their six", all_names, max_selections=6,
                               key=f"{key_prefix}_foe_manual"), {}
     paste = st.text_area(
-        "Paste Showdown export text here (blank line between each Pokemon)",
+        "Paste a Showdown export, a teamsheet token, or team .json here",
         height=200, key=f"{key_prefix}_foe_paste")
     if not paste.strip():
         return [], {}
-    from species_data import custom_team_from_export
-    roster, sets = custom_team_from_export(paste, merged or {})
-    unknown = [n for n in roster if n not in (merged or {})]
-    if unknown:
-        st.error(f"Unrecognised species (check spelling against "
-                 f"mbsmogon.xlsx): {unknown}")
-        return [], {}
-    if not roster:
-        st.error("Couldn't parse any Pokemon out of that paste.")
+    try:
+        roster, sets, _analysis = _load_team_text(paste, merged or {})
+    except ValueError as e:
+        st.error(str(e))
         return [], {}
     st.success(f"Parsed: {', '.join(roster)}")
     with st.expander("Parsed sets (item/ability/nature/EVs/moves)"):
         st.json(sets)
-    save_col, name_col = st.columns([1, 3])
-    team_name = name_col.text_input(
-        "Save as (data/my_teams/<name>.txt)", key=f"{key_prefix}_foe_save_name",
-        label_visibility="collapsed", placeholder="Save as (data/my_teams/<name>.txt)")
-    if save_col.button("Save to My Teams", key=f"{key_prefix}_foe_save_btn"):
-        try:
-            path = _save_pasted_team(paste, team_name or "My Team")
-        except ValueError as e:
-            st.error(str(e))
-        else:
-            st.success(f"Saved to {path.relative_to(species_data.DATA_DIR.parent)} "
-                      f"— pick it from 'A saved team' from now on.")
-            st.cache_data.clear()
-            st.rerun()
+    if _is_raw_pokepaste_text(paste):
+        # data/my_teams/*.txt is only ever re-parsed as raw pokepaste text
+        # (species_data.load_teams -> _load_pasted_teams) -- saving a
+        # teamsheet token or team .json verbatim here would write a file
+        # that fails to load back next time, so the save controls only
+        # offer themselves for the format that round-trips.
+        save_col, name_col = st.columns([1, 3])
+        team_name = name_col.text_input(
+            "Save as (data/my_teams/<name>.txt)", key=f"{key_prefix}_foe_save_name",
+            label_visibility="collapsed", placeholder="Save as (data/my_teams/<name>.txt)")
+        if save_col.button("Save to My Teams", key=f"{key_prefix}_foe_save_btn"):
+            try:
+                path = _save_pasted_team(paste, team_name or "My Team")
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.success(f"Saved to {path.relative_to(species_data.DATA_DIR.parent)} "
+                          f"— pick it from 'A saved team' from now on.")
+                st.cache_data.clear()
+                st.rerun()
     return list(roster), sets
 
 
@@ -521,16 +537,14 @@ def enemy_side_input(key_prefix, teams, team_meta, all_names, merged,
         return list(roster), {}, {}
 
     paste = st.text_area(
-        "Paste Showdown export text here (blank line between each Pokemon)",
+        "Paste a Showdown export, a teamsheet token, or team .json here",
         height=200, key=f"{key_prefix}_foe_paste")
     if not paste.strip():
         return [], {}, {}
-    from species_data import custom_team_from_export
-    roster, sets = custom_team_from_export(paste, merged)
-    unknown = [n for n in roster if n not in merged]
-    if unknown:
-        st.error(f"Unrecognised species (check spelling against "
-                 f"mbsmogon.xlsx): {unknown}")
+    try:
+        roster, sets, _analysis = _load_team_text(paste, merged)
+    except ValueError as e:
+        st.error(str(e))
         return [], {}, {}
     if len(roster) != 6:
         st.error(f"Parsed {len(roster)} Pokemon, need exactly 6.")
@@ -4081,7 +4095,15 @@ def _hit_count_matrix_df(matrix, bring4, enemies):
     off one row. `None` (no hit at all, e.g. a hard type immunity) shows as
     "-- ", never a crashing format call. Each cell also carries the pure
     1v1 verdict (fewer hits wins; a tie is broken by speed) as a trailing
-    icon -- "who actually wins the 1v1", not just the raw hit counts."""
+    icon -- "who actually wins the 1v1", not just the raw hit counts.
+
+    A currently-losing cell also shows "chip NN%" -- "how chipped the
+    enemy has to be for certain pokemon to be an answer" --
+    `chip_needed_frac`'s own reading as a whole percent of the ENEMY's max
+    HP that has to already be gone (from a partner's earlier hit, hazards,
+    anything) before this 1v1 flips to a win. Omitted when `None` (chip
+    can never help here -- a hard immunity, or a stall neither side can
+    ever resolve)."""
     def _fmt(hits):
         return f"{hits}HKO" if hits is not None else "--"
     rows = []
@@ -4093,8 +4115,12 @@ def _hit_count_matrix_df(matrix, bring4, enemies):
                 row[enemy] = "?"
             else:
                 icon = _VERDICT_ICON.get(cell.get("verdict"), "")
-                row[enemy] = (f"{_fmt(cell['our_hits_to_ko'])} / "
-                              f"{_fmt(cell['their_hits_to_ko'])} {icon}").rstrip()
+                text = (f"{_fmt(cell['our_hits_to_ko'])} / "
+                       f"{_fmt(cell['their_hits_to_ko'])} {icon}")
+                chip = cell.get("chip_needed_frac")
+                if cell.get("verdict") == "lose" and chip is not None:
+                    text += f" (chip {chip * 100:.0f}%)"
+                row[enemy] = text.rstrip()
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -4660,14 +4686,16 @@ with tab_counter:
                 else:
                     vs_roster = []
             else:
-                vs_roster, vs_sets = species_data.custom_team_from_export(
-                    vs_paste, merged) if vs_paste.strip() else ([], {})
-                unknown_vs = [n for n in vs_roster if n not in merged]
-                if unknown_vs:
-                    st.error(f"Unrecognised species: {', '.join(unknown_vs)}")
-                    vs_roster = []
-                elif vs_roster:
-                    st.success(f"Parsed: {', '.join(vs_roster)}")
+                if vs_paste.strip():
+                    try:
+                        vs_roster, vs_sets, _analysis = _load_team_text(vs_paste, merged)
+                    except ValueError as e:
+                        st.error(str(e))
+                        vs_roster, vs_sets = [], {}
+                    else:
+                        st.success(f"Parsed: {', '.join(vs_roster)}")
+                else:
+                    vs_roster, vs_sets = [], {}
         else:
             vs_roster = list(teams[ct_vs_name])
             vs_sets = team_meta.get(ct_vs_name, {}).get("sets") or {}
@@ -4682,16 +4710,18 @@ with tab_counter:
                  "requiring one in hand.")
         if ct_our_source == PASTE_OUR:
             our_paste = st.text_area(
-                "Paste Showdown export text (blank line between each Pokemon)",
+                "Paste a Showdown export, a teamsheet token, or team .json",
                 height=160, key="ct_b4_our_paste")
-            our_pasted, our_pasted_sets = species_data.custom_team_from_export(
-                our_paste, merged) if our_paste.strip() else ([], {})
-            unknown_our = [n for n in our_pasted if n not in merged]
-            if unknown_our:
-                st.error(f"Unrecognised species: {', '.join(unknown_our)}")
-                our_pasted = []
-            elif our_pasted:
-                st.success(f"Parsed: {', '.join(our_pasted)}")
+            if our_paste.strip():
+                try:
+                    our_pasted, our_pasted_sets, _analysis = _load_team_text(our_paste, merged)
+                except ValueError as e:
+                    st.error(str(e))
+                    our_pasted, our_pasted_sets = [], {}
+                else:
+                    st.success(f"Parsed: {', '.join(our_pasted)}")
+            else:
+                our_pasted, our_pasted_sets = [], {}
         ct_good = st.slider("Good-pair bar (%)", 0, 100, 100, key="ct_b4_good",
                             help="A pair 'clears the bar' if it beats at least this "
                                  "share of the enemy roster's own C(len,2) pairs.")
@@ -5810,19 +5840,28 @@ with tab_counter:
             total_matchups = n * (n + 1) // 2
             results = []
             done = 0
-            for team_a, team_b, pair_rows, bring4_rows in round_robin_saved_teams(
+            for team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster in round_robin_saved_teams(
                     teams, team_meta, merged, moves, natures, typechart,
                     team_names=ct_rr_teams, turns=ct_turns):
-                results.append((team_a, team_b, pair_rows, bring4_rows))
+                results.append((team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster))
                 if bring4_rows:
-                    _cache_gameplans(bring4_rows[0]["pair_rows"],
-                                     f"Round-robin: {team_a} vs {team_b}")
+                    label = (f"Round-robin: {team_a} vs {team_b}" if layer == "vs_full"
+                            else f"Round-robin: {team_a} best-4 vs {team_b} best-4")
+                    _cache_gameplans(bring4_rows[0]["pair_rows"], label)
                 done += 1
                 progress.progress(min(1.0, done / total_matchups))
             st.session_state["ct_rr_results"] = results
         rr_results = st.session_state.get("ct_rr_results")
         if rr_results:
-            for team_a, team_b, pair_rows, bring4_rows in rr_results:
+            # "race both directions" means every non-mirror pair now yields
+            # up to 3 rows -- team_a's own best-4 vs team_b's full roster,
+            # team_b's own best-4 vs team_a's full roster, and a third
+            # "best4 vs best4" head-to-head -- rendered as separate sections
+            # so the two different enemy rosters ("everything team_b could
+            # bring" vs "team_b's own actual best-4") are never conflated.
+            vs_full = [r for r in rr_results if r[4] == "vs_full"]
+            h2h = [r for r in rr_results if r[4] == "best4_vs_best4"]
+            for team_a, team_b, pair_rows, bring4_rows, _layer, enemy_roster in vs_full:
                 st.markdown(f"### {team_a} vs {team_b}")
                 total = pair_rows[0]["pairs_total"] if pair_rows else 0
                 st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
@@ -5835,8 +5874,26 @@ with tab_counter:
                         st.caption(mega_cap)
                     _render_win_conditions(bring4_rows[0])
                     _render_hit_count_matrix_for_bring4_search(
-                        bring4_rows[0], teams[team_b], merged, moves, natures, typechart)
+                        bring4_rows[0], enemy_roster, merged, moves, natures, typechart)
                 st.divider()
+            if h2h:
+                st.markdown("## Best-4 vs best-4 (head to head)")
+                st.caption("Both sides narrowed down to their OWN best bring-4 "
+                          "(from the rows above), raced directly against each "
+                          "other -- a narrower, more realistic matchup than "
+                          "\"best-4 vs everything the enemy's full roster could "
+                          "bring\" above.")
+                for team_a, team_b, pair_rows, bring4_rows, _layer, enemy_roster in h2h:
+                    st.markdown(f"### {team_a} best-4 vs {team_b} best-4")
+                    total = pair_rows[0]["pairs_total"] if pair_rows else 0
+                    st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
+                    if bring4_rows:
+                        st.dataframe(_bring4_rows_df(bring4_rows, total),
+                                    width='stretch', hide_index=True)
+                        _render_win_conditions(bring4_rows[0])
+                        _render_hit_count_matrix_for_bring4_search(
+                            bring4_rows[0], enemy_roster, merged, moves, natures, typechart)
+                    st.divider()
 
 
 # ------------------------------------------------------------------ battle

@@ -214,6 +214,7 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, DEFAULT_MAX_FOCUS_SASH,  # n
                             _core_dead_mega_rebuild, _core_row,
                             _fixed_sets_from_pair_rows,
                             _item_clause_context_from_coverage, _pair_sort_key,
+                            _team_side_overrides,
                             bring4_damage_output, bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, core_damage_output,
                             deep_dive, enemy_has_real_tailwind, evolve_from_team,
@@ -946,6 +947,21 @@ def _print_win_conditions(bring4_row, targets, merged, moves_db, natures, typech
                 f"{', '.join(result['crucial'][name]['sole_answer_to'])})"
                 for name in crucial_names]
         print("Crucial: " + "; ".join(parts))
+    matrix = result["matrix"]
+    chip_lines = []
+    for enemy in sorted(safe):
+        candidates = []
+        for our_name in bring4_row["bring4"]:
+            cell = matrix.get((our_name, enemy))
+            if cell and cell["verdict"] == "lose" and cell["chip_needed_frac"] is not None:
+                candidates.append((cell["chip_needed_frac"], our_name))
+        if candidates:
+            chip, our_name = min(candidates)
+            chip_lines.append(f"  {enemy}: {our_name} needs it chipped "
+                              f"{chip * 100:.0f}%+ to be an answer")
+    if chip_lines:
+        print("\nHow chipped the enemy has to be (best option per enemy):")
+        print("\n".join(chip_lines))
 
 
 def _print_pair_summary(coverage, top=10):
@@ -1947,17 +1963,85 @@ def _write_benchmark_teams_xlsx(path, team_top_rows, targets, merged):
     return path
 
 
-def _write_round_robin_xlsx(path, matchup_top_rows, merged):
-    """`--round-robin`'s own xlsx output -- one row per matchup's OWN top-
-    ranked bring-4, tagged with "Team A"/"Team B" columns (mirrors A-vs-A
-    included, so those two columns are equal on that row). Same reuse of
-    `_bring4_xlsx_row_values`/`_BRING4_XLSX_COLUMNS` as `--benchmark-
-    teams`'s own sheet -- see its docstring.
+def _round_robin_team_summary_rows(vs_full_rows, merged):
+    """One row per team's OWN searched performance, aggregated across every
+    "vs_full" matchup where it was the side being searched (`team_a`) --
+    "summarise each potential team ... more in depth/summary info" for
+    `--round-robin`. `vs_full_rows`: [(team_a, team_b, targets, bring4_row),
+    ...], the same shape `_write_round_robin_xlsx`'s "Round-robin" sheet
+    already consumes -- only "vs_full" rows carry a fair, once-per-opponent
+    reading of `team_a`'s own performance (a "best4_vs_best4" row would
+    double-count the same opponent under a different lens).
 
-    `matchup_top_rows`: [(team_a, team_b, targets, bring4_row), ...] --
-    `targets` is `team_b`'s own roster (`enemy_has_real_tailwind` needs
-    the SPECIFIC enemy roster this matchup raced, not a fixed one shared
-    across every row the way `--benchmark-teams` has).
+    Returns rows sorted by mean Avg Wins/90 descending: [{"team", "matches",
+    "avg_wins_90", "tailwind_safe_90", "protect_safe_90", "follow_me_safe_90",
+    "best_opponent", "best_opponent_avg_wins_90", "worst_opponent",
+    "worst_opponent_avg_wins_90", "uncovered_enemy_pairs_total"}, ...].
+    """
+    by_team = {}
+    for team_a, team_b, _targets, b in vs_full_rows:
+        by_team.setdefault(team_a, []).append((team_b, b))
+
+    out = []
+    for team, entries in by_team.items():
+        per_opp = []
+        for opp, b in entries:
+            depth = bring4_pair_depth(b)
+            n_pairs = len(b["pair_rows"])
+            pt = depth["pairs_total"]
+            per_opp.append((
+                opp,
+                _per_90(depth["beaten_total"], n_pairs, pt),
+                _per_90(depth["tailwind_safe_total"], n_pairs, pt),
+                _per_90(depth["protect_safe_total"], n_pairs, pt),
+                _per_90(depth["follow_me_safe_total"], n_pairs, pt),
+                len(b["uncovered_enemy_pairs"])))
+        n = len(per_opp)
+        best = max(per_opp, key=lambda r: r[1])
+        worst = min(per_opp, key=lambda r: r[1])
+        out.append({
+            "team": team, "matches": n,
+            "avg_wins_90": sum(r[1] for r in per_opp) / n,
+            "tailwind_safe_90": sum(r[2] for r in per_opp) / n,
+            "protect_safe_90": sum(r[3] for r in per_opp) / n,
+            "follow_me_safe_90": sum(r[4] for r in per_opp) / n,
+            "best_opponent": best[0], "best_opponent_avg_wins_90": best[1],
+            "worst_opponent": worst[0], "worst_opponent_avg_wins_90": worst[1],
+            "uncovered_enemy_pairs_total": sum(r[5] for r in per_opp)})
+    out.sort(key=lambda r: -r["avg_wins_90"])
+    return out
+
+
+_ROUND_ROBIN_SUMMARY_COLUMNS = [
+    "Team", "Matches", "Mean Avg Wins/90", "Mean Tailwind-safe/90",
+    "Mean Protect-safe/90", "Mean Redirect-safe/90",
+    "Best matchup", "Best matchup Avg Wins/90",
+    "Worst matchup", "Worst matchup Avg Wins/90",
+    "Total uncovered enemy pairs",
+]
+
+
+def _write_round_robin_xlsx(path, vs_full_rows, head_to_head_rows, merged):
+    """`--round-robin`'s own xlsx output -- three sheets:
+
+    "Round-robin" -- one row per "vs_full" matchup's OWN top-ranked bring-4
+      (`vs_full_rows`: [(team_a, team_b, targets, bring4_row), ...], `targets`
+      being `team_b`'s own roster), tagged with "Team A"/"Team B" columns.
+      Both directions of every non-mirror pair are present as separate rows
+      now (`round_robin_saved_teams` races both), so this sheet alone
+      already carries each team's own real performance against every
+      opponent -- "Team Summary" below just aggregates it per team.
+    "Best4 vs Best4" -- one row per non-mirror pair's "best4_vs_best4" layer
+      (`head_to_head_rows`: same shape as `vs_full_rows`, `targets` being
+      the ENEMY's own best-4, not its full roster) -- "the best response 4
+      vs the best response 4 for each team, on top of the two-way A vs B."
+    "Team Summary" -- `_round_robin_team_summary_rows`'s own aggregate, one
+      row per team.
+
+    Reuses `_bring4_xlsx_row_values`/`_BRING4_XLSX_COLUMNS` for both of the
+    first two sheets -- the SAME per-row column layout `--bring4`'s own
+    single-team "Bring-4s" sheet uses, so neither is a second, drifting
+    format.
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _style_header
@@ -1966,12 +2050,38 @@ def _write_round_robin_xlsx(path, matchup_top_rows, merged):
     ws.title = "Round-robin"
     ws.append(["Team A", "Team B"] + _BRING4_XLSX_COLUMNS)
     _style_header(ws)
-    for rank, (team_a, team_b, targets, b) in enumerate(matchup_top_rows, start=1):
+    for rank, (team_a, team_b, targets, b) in enumerate(vs_full_rows, start=1):
         enemy_tw = enemy_has_real_tailwind(targets, merged)
         ws.append([team_a, team_b] + _bring4_xlsx_row_values(rank, b, merged, enemy_tw))
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
+
+    ws2 = wb.create_sheet("Best4 vs Best4")
+    ws2.append(["Team A", "Team B"] + _BRING4_XLSX_COLUMNS)
+    _style_header(ws2)
+    for rank, (team_a, team_b, targets, b) in enumerate(head_to_head_rows, start=1):
+        enemy_tw = enemy_has_real_tailwind(targets, merged)
+        ws2.append([team_a, team_b] + _bring4_xlsx_row_values(rank, b, merged, enemy_tw))
+    ws2.freeze_panes = "A2"
+    ws2.auto_filter.ref = ws2.dimensions
+    _autosize(ws2)
+
+    ws3 = wb.create_sheet("Team Summary")
+    ws3.append(_ROUND_ROBIN_SUMMARY_COLUMNS)
+    _style_header(ws3)
+    for r in _round_robin_team_summary_rows(vs_full_rows, merged):
+        ws3.append([
+            r["team"], r["matches"], round(r["avg_wins_90"], 1),
+            round(r["tailwind_safe_90"], 1), round(r["protect_safe_90"], 1),
+            round(r["follow_me_safe_90"], 1),
+            r["best_opponent"], round(r["best_opponent_avg_wins_90"], 1),
+            r["worst_opponent"], round(r["worst_opponent_avg_wins_90"], 1),
+            r["uncovered_enemy_pairs_total"]])
+    ws3.freeze_panes = "A2"
+    ws3.auto_filter.ref = ws3.dimensions
+    _autosize(ws3)
+
     wb.save(path)
     return path
 
@@ -1994,25 +2104,32 @@ def _run_round_robin(args):
         if unknown:
             raise SystemExit(f"unknown saved team(s): {', '.join(unknown)}")
     good_threshold = args.good_threshold / 100.0
-    matchup_top_rows = []
+    vs_full_rows = []
+    head_to_head_rows = []
     n = 0
-    for team_a, team_b, pair_rows, bring4_rows in round_robin_saved_teams(
+    for team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster in round_robin_saved_teams(
             W["teams"], W["meta"], merged, moves, natures, typechart,
             team_names=team_names, turns=args.turns, good_threshold=good_threshold):
         n += 1
-        print(f"=== {team_a} vs {team_b} ===")
-        _print_bring4(pair_rows, bring4_rows, W["teams"][team_a], W["teams"][team_b],
+        if layer == "vs_full":
+            our6 = W["teams"][team_a]
+            print(f"=== {team_a} vs {team_b} ===")
+        else:
+            our6 = list(bring4_rows[0]["bring4"]) if bring4_rows else W["teams"][team_a]
+            print(f"=== {team_a} best-4 vs {team_b} best-4 ===")
+        _print_bring4(pair_rows, bring4_rows, our6, enemy_roster,
                      args.top, args.turns, good_threshold)
         if bring4_rows:
-            _print_win_conditions(bring4_rows[0], W["teams"][team_b], merged, moves,
+            _print_win_conditions(bring4_rows[0], enemy_roster, merged, moves,
                                   natures, typechart)
-            matchup_top_rows.append((team_a, team_b, W["teams"][team_b], bring4_rows[0]))
+            row = (team_a, team_b, enemy_roster, bring4_rows[0])
+            (vs_full_rows if layer == "vs_full" else head_to_head_rows).append(row)
         print()
     if n == 0:
         print("No legal saved teams (3-6 distinct Pokemon each) to race.")
         return
     if args.xlsx:
-        path = _write_round_robin_xlsx(args.xlsx, matchup_top_rows, merged)
+        path = _write_round_robin_xlsx(args.xlsx, vs_full_rows, head_to_head_rows, merged)
         print(f"Excel workbook: {os.path.abspath(path)}")
 
 
@@ -2121,6 +2238,52 @@ def _print_two_two_two(pair_rows, team_rows, top_pairs, max_net_weakness=None):
              f"total_net_weakness={r['total_net_weakness']}")
 
 
+_EVOLVE_FROM_TEAM_XLSX_COLUMNS = [
+    "#", "Kind", "Member", "Removed", "Added", "Team",
+    "Baseline Score", "New Score", "Delta",
+    "Baseline Win Rate/90", "New Win Rate/90",
+    "Baseline Tailwind-safe Rate/90", "New Tailwind-safe Rate/90",
+    "Baseline Protect-safe Rate/90", "New Protect-safe Rate/90",
+    "Baseline Redirect-safe Rate/90", "New Redirect-safe Rate/90",
+]
+
+
+def _write_evolve_from_team_xlsx(path, results):
+    """--evolve-from-team's own xlsx output -- one row per genuine
+    improvement `evolve_from_team` found, richer than the console table's
+    Score/New/Delta: the resulting FULL team roster (`r["team"]`) and the
+    individual baseline/new breakdown rates (win/tailwind-safe/protect-
+    safe/follow-me-safe, `_evolve_dive_breakdown`'s own per-90 numbers),
+    not just the single blended score -- "summarise each potential team,
+    and give more in depth/summary info."
+    """
+    from openpyxl import Workbook
+    from export_excel import _autosize, _style_header
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Potential teams"
+    ws.append(list(_EVOLVE_FROM_TEAM_XLSX_COLUMNS))
+    _style_header(ws)
+    for rank, r in enumerate(results, start=1):
+        ws.append([
+            rank, r["kind"], r["member"], r["removed"], r["added"],
+            " / ".join(r["team"]),
+            round(r["baseline_score"], 2), round(r["new_score"], 2),
+            round(r["delta"], 2),
+            round(r["baseline_win_rate"], 1), round(r["new_win_rate"], 1),
+            round(r["baseline_tailwind_safe_rate"], 1),
+            round(r["new_tailwind_safe_rate"], 1),
+            round(r["baseline_protect_safe_rate"], 1),
+            round(r["new_protect_safe_rate"], 1),
+            round(r["baseline_follow_me_safe_rate"], 1),
+            round(r["new_follow_me_safe_rate"], 1)])
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    _autosize(ws)
+    wb.save(path)
+    return path
+
+
 def _run_evolve_from_team(args):
     """--evolve-from-team's own standalone execution path -- handled
     entirely separately from `main()`'s big --bring4/--multi-bring4/--two-
@@ -2130,15 +2293,24 @@ def _run_evolve_from_team(args):
     """
     if not args.our:
         raise SystemExit("--evolve-from-team requires --our \"Pokemon,Pokemon,...\" "
-                         "(the already-decided starting team, 2-6 names)")
-    core = list(dict.fromkeys(n.strip() for n in args.our.split(",") if n.strip()))
-    if not (2 <= len(core) <= 6):
-        raise SystemExit(f"--evolve-from-team needs 2-6 distinct Pokemon in "
-                         f"--our (got {len(core)}: {core})")
+                         "(the already-decided starting team, 2-6 names) or "
+                         "the name of a saved team")
     from _harness import load_world
     W = load_world()
     merged, moves, natures, typechart = (W["merged"], W["moves"], W["natures"],
                                          W["typechart"])
+
+    our_name = args.our.strip()
+    team_item, team_moves, team_evs, team_nat, team_abil = ({}, {}, {}, {}, {})
+    if our_name in W["teams"]:
+        core = list(dict.fromkeys(W["teams"][our_name]))
+        team_item, team_moves, team_evs, team_nat, team_abil = _team_side_overrides(
+            (W["meta"].get(our_name) or {}).get("sets"))
+    else:
+        core = list(dict.fromkeys(n.strip() for n in args.our.split(",") if n.strip()))
+    if not (2 <= len(core) <= 6):
+        raise SystemExit(f"--evolve-from-team needs 2-6 distinct Pokemon in "
+                         f"--our (got {len(core)}: {core})")
     unknown_our = [n for n in core if n not in merged]
     if unknown_our:
         raise SystemExit(f"unknown Pokemon: {', '.join(unknown_our)}")
@@ -2150,21 +2322,57 @@ def _run_evolve_from_team(args):
     excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
     max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
     max_life_orb = None if args.max_life_orb < 0 else args.max_life_orb
-    item_overrides = _parse_item_overrides(args.item)
-    move_overrides = _parse_move_overrides(args.moves)
+    # a named team's own sets go in first (the "sets intact" convention
+    # `--benchmark-teams`/`--round-robin` already keep), then --item/--moves
+    # still override on top, per Pokemon.
+    item_overrides = dict(team_item, **(_parse_item_overrides(args.item) or {}))
+    move_overrides = dict(team_moves, **(_parse_move_overrides(args.moves) or {}))
 
     from team_search import build_candidate_pool
     swap_pool = [n for n in build_candidate_pool(merged, top_n=args.evolve_pool_size)
                 if n not in core]
 
+    jobs, jobs_warning = blas_limits.workers_advice(args.jobs)
     print(f"Evolving from: {' / '.join(core)} vs {len(target_name_lists)} "
-         f"saved team(s), {len(swap_pool)}-Pokemon whole-member swap pool\n")
+         f"saved team(s), {len(swap_pool)}-Pokemon whole-member swap pool")
+    if args.jobs != 1:
+        print(f"workers  : {jobs} of {os.cpu_count()} cores")
+        if jobs_warning:
+            print(f"WARNING  : {jobs_warning}")
+    print()
+
+    import time
+    start_time = time.monotonic()
+    last_reported = 0
+
+    def _progress(done, total):
+        # A run at --turns 4 across a real saved team's full library can be
+        # thousands of independent trials, each its own multi-turn race --
+        # "no way to see the progress or time to completion" otherwise
+        # leaves the CLI silent for hours. At most ~20 lines printed
+        # (plus always the final one), not one per trial.
+        nonlocal last_reported
+        step = max(1, total // 20)
+        if done != total and done - last_reported < step:
+            return
+        last_reported = done
+        elapsed = time.monotonic() - start_time
+        rate = done / elapsed if elapsed > 0 else 0
+        eta_min = (total - done) / rate / 60 if rate > 0 else None
+        eta_str = f"~{eta_min:.0f}m remaining" if eta_min is not None else "estimating..."
+        print(f"  ...{done}/{total} trials ({done * 100 // total}%), "
+             f"{elapsed / 60:.1f}m elapsed, {eta_str}", flush=True)
+
     results = evolve_from_team(
         core, target_name_lists, merged, moves, natures, typechart,
         turns=args.turns, good_threshold=args.good_threshold / 100.0,
         swap_pool=swap_pool, item_overrides=item_overrides,
         move_overrides=move_overrides, excluded_items=excluded_items,
-        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+        evs_overrides=team_evs, nature_overrides=team_nat,
+        ability_overrides=team_abil,
+        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
+        jobs=jobs, progress_callback=_progress)
+    print()
     if not results:
         print("No improvement found -- every move/whole-member swap tried "
              "scored no better than the starting team.")
@@ -2178,6 +2386,9 @@ def _run_evolve_from_team(args):
         print(f"  {i:>3} {r['kind']:7s} {r['member']:16s} {change[:38]:38s} "
              f"{r['baseline_score']:>7.1f} -> {r['new_score']:>7.1f}  "
              f"{r['delta']:>+6.1f}")
+    if args.xlsx:
+        path = _write_evolve_from_team_xlsx(args.xlsx, results)
+        print(f"\nExcel workbook: {os.path.abspath(path)}")
 
 
 def main():
@@ -2244,7 +2455,11 @@ def main():
                          "--bring4: your already-decided team (required, 3, "
                          "4, 5, or 6 names -- 3 or 4 skips straight to "
                          "summarising its own internal pairs, since "
-                         "there's only one possible bring)")
+                         "there's only one possible bring). "
+                         "--evolve-from-team: 2-6 names, OR the name of a "
+                         "saved team (data/teams or data/my_teams), whose "
+                         "own real sets are then applied automatically "
+                         "(--item/--moves still override on top)")
     ap.add_argument("--bring4", action="store_true",
                     help="for an ALREADY-DECIDED team (--our, 3-6 names) "
                          "against one enemy roster (--vs): every one of its "
@@ -2293,12 +2508,17 @@ def main():
                     help="run every saved team (data/teams + data/my_teams) "
                          "against every OTHER saved team, mirrors included "
                          "(A vs A), each side's own real sets intact -- no "
-                         "pool/candidate search on either side. One --"
+                         "pool/candidate search on either side. Every non-"
+                         "mirror pair is raced BOTH directions (each team's "
+                         "own best bring-4 vs the other's full roster), plus "
+                         "a third head-to-head layer racing both teams' own "
+                         "best bring-4s directly against each other. One --"
                          "bring4-style report per matchup, printed "
                          "sequentially. Narrow the grid with --round-robin-"
                          "teams; --our/--vs/--vs-team are not used in this "
-                         "mode. A round-robin over N teams is N(N+1)/2 "
-                         "matchups, each a full --bring4 search")
+                         "mode. With --xlsx: \"Round-robin\", \"Best4 vs "
+                         "Best4\", and \"Team Summary\" sheets. A round-robin "
+                         "over N teams is N**2 matchups total")
     ap.add_argument("--round-robin-teams", default="", metavar="NAME,NAME,...",
                     help="--round-robin only: comma-separated saved team "
                          "names to narrow the grid to (default: every saved "

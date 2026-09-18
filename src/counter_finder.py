@@ -5928,16 +5928,24 @@ def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
       is my only answer to Staraptor" reads directly off its own
       `safe_members`/`safe_pairs`.
     - `matrix`: a NEW {(our_name, enemy_name): {"our_hits_to_ko",
-      "their_hits_to_ko", "verdict"}} 1v1 hit-count table, one entry per
-      (bring-4 member, enemy) pair `safe` already names -- `_best_hit`
-      (cheap, single-attacker-vs-single-defender, worst-roll) run BOTH
-      directions, hits-to-KO = `ceil(1/hit.frac)`. This is exactly the
-      "2HKOs enemy but takes a 5HKO" reading, with no new damage-calc
-      code. `verdict` is `"win"`/`"lose"`/`"stall"` (neither side can ever
-      KO the other) -- fewer hits-to-KO wins outright; a tie on hits is
-      broken by which side is faster (plain `effective_speed`, no field
-      manipulation modeled here -- Tailwind/Trick Room risk already has
-      its own caveat via `safe`'s own `tailwind_risk`/`trick_room_risk`).
+      "their_hits_to_ko", "verdict", "chip_needed_frac"}} 1v1 hit-count
+      table, one entry per (bring-4 member, enemy) pair `safe` already
+      names -- `_best_hit` (cheap, single-attacker-vs-single-defender,
+      worst-roll) run BOTH directions, hits-to-KO = `ceil(1/hit.frac)`.
+      This is exactly the "2HKOs enemy but takes a 5HKO" reading, with no
+      new damage-calc code. `verdict` is `"win"`/`"lose"`/`"stall"`
+      (neither side can ever KO the other) -- fewer hits-to-KO wins
+      outright; a tie on hits is broken by which side is faster (plain
+      `effective_speed`, no field manipulation modeled here -- Tailwind/
+      Trick Room risk already has its own caveat via `safe`'s own
+      `tailwind_risk`/`trick_room_risk`). `chip_needed_frac`: "how chipped
+      the enemy has to be for certain pokemon to be an answer" -- for a
+      currently-`"lose"` 1v1, the fraction of the ENEMY's own max HP that
+      must already be gone (a partner's earlier hit, hazards, anything)
+      before this member's own best hit closes the hits-to-KO gap and the
+      matchup flips to a win; `0.0` when already winning, `None` when no
+      amount of chip ever helps (a hard type immunity, or a stall where
+      neither side can KO the other at all).
 
     - `crucial`: "Individual pokemon can be crucial win conditions to
       preserve for a given match" -- a rollup keyed by OUR OWN mon,
@@ -5995,7 +6003,11 @@ def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
                 best = got
         return best
 
-    def _verdict(our_hits, their_hits, our_c, enemy_c):
+    def _our_faster(our_c, enemy_c):
+        return (effective_speed(our_c, FieldState(), "p1")
+                > effective_speed(enemy_c, FieldState(), "p2"))
+
+    def _verdict(our_hits, their_hits, our_faster):
         if our_hits is None and their_hits is None:
             return "stall"
         if our_hits is None:
@@ -6006,9 +6018,33 @@ def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
             return "win"
         if our_hits > their_hits:
             return "lose"
-        our_faster = (effective_speed(our_c, FieldState(), "p1")
-                     > effective_speed(enemy_c, FieldState(), "p2"))
         return "win" if our_faster else "lose"
+
+    def _chip_needed_frac(our_hits, their_hits, our_hit_frac, our_faster):
+        """"How chipped the enemy has to be" for THIS 1v1 to flip from a
+        loss to a win -- the fraction of the enemy's own MAX HP that must
+        already be gone (a partner's earlier hit, hazards, anything) before
+        our own best hit closes the hits-to-KO gap. Reuses the SAME
+        `our_hit_frac`/`their_hits` the matrix cell already computed at
+        full HP -- no new damage-calc call, just the algebra `_hits_to_ko`
+        already implies: `hits_to_ko(r) = ceil(r / our_hit_frac)` for a
+        remaining-HP fraction `r`, so `hits_to_ko(r) <= target` solves to
+        `r <= target * our_hit_frac` (the LARGEST starting HP this many
+        hits of this same fixed per-hit damage still finishes off).
+
+        `None` when no amount of chip can ever help -- `our_hits` is
+        `None` (a hard type immunity/can't-ever-KO, a moveset problem
+        chip doesn't fix) or the match is a stall (their_hits also `None`,
+        so there's no hits-to-KO gap to close in the first place). `0.0`
+        when we already win outright (nothing to chip).
+        """
+        if our_hits is None:
+            return None
+        if their_hits is None or our_hits < their_hits or (
+                our_hits == their_hits and our_faster):
+            return 0.0
+        target = their_hits if our_faster else max(0, their_hits - 1)
+        return max(0.0, min(1.0, 1.0 - target * our_hit_frac))
 
     matrix = {}
     for our_name in bring4:
@@ -6026,9 +6062,12 @@ def prematch_win_conditions(bring4_row, our_built, enemy_built, typechart,
             their_hit = _best_hit_at_hp(enemy_c, enemy_moves, our_c, enemy_hp, our_def_hp)
             our_hits = _hits_to_ko(our_hit)
             their_hits = _hits_to_ko(their_hit)
+            our_faster = _our_faster(our_c, enemy_c)
             matrix[(our_name, enemy_name)] = {
                 "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
-                "verdict": _verdict(our_hits, their_hits, our_c, enemy_c)}
+                "verdict": _verdict(our_hits, their_hits, our_faster),
+                "chip_needed_frac": _chip_needed_frac(
+                    our_hits, their_hits, our_hit.frac, our_faster)}
 
     crucial = {}
     for our_name in bring4:
@@ -7647,20 +7686,29 @@ def bring4_from_deep_dive(core, dive, target_names, good_threshold=1.0):
     return bring4_rows
 
 
-def _evolve_dive_score(dive, target_name_lists, good_threshold=1.0):
-    """A single blended score for an ALREADY-COMPUTED `core_deep_dive`
-    result, in the SAME `_CORE_BLEND_WEIGHTS`-weighted per-90 shape
-    `_core_row`'s own "Avg Wins/90"-style blend uses -- reusing `bring4_
-    from_deep_dive` + `bring4_pair_depth`, the exact two building blocks
-    `_core_row`'s per-enemy pipeline already runs on, so "meaningfully
-    improve performance" is judged by the SAME yardstick the rest of the
-    tool ranks cores by, not a second metric.
+def _evolve_dive_breakdown(dive, target_name_lists, good_threshold=1.0):
+    """The full `_CORE_BLEND_WEIGHTS` breakdown for an ALREADY-COMPUTED
+    `core_deep_dive` result -- the same four per-90 rates `_evolve_dive_
+    score`'s own blend averages together, returned INDIVIDUALLY too, so a
+    caller reporting "why" one candidate beat another isn't limited to the
+    single blended number (a swap can raise the blend while quietly
+    costing Protect-safety, for instance -- worth seeing directly).
+
+    Reuses `bring4_from_deep_dive` + `bring4_pair_depth`, the exact two
+    building blocks `_core_row`'s per-enemy pipeline already runs on, so
+    "meaningfully improve performance" stays judged by the SAME yardstick
+    the rest of the tool ranks cores by, not a second metric.
 
     `evolve_from_team`'s own use case is a single fixed core compared
     against itself over time (one swap at a time), not a pool of many
     candidate cores -- so `_core_row`'s own item-cap/worst-case-floor/
     megas-choice machinery (built for ranking a whole SEARCH) isn't needed
-    here; the blended /90 rate alone is the whole comparison.
+    here; the four per-90 rates (averaged across `target_name_lists`) are
+    the whole comparison.
+
+    Returns {"score": float, "win_rate": float, "tailwind_safe_rate":
+    float, "protect_safe_rate": float, "follow_me_safe_rate": float} --
+    all zero when `target_name_lists` is empty (nothing to average).
     """
     core = dive["core"]
     rates = []
@@ -7676,12 +7724,22 @@ def _evolve_dive_score(dive, target_name_lists, good_threshold=1.0):
             _rate_per_90(depth["protect_safe_total"], n_pairs, pt),
             _rate_per_90(depth["follow_me_safe_total"], n_pairs, pt)))
     if not rates:
-        return 0.0
+        return {"score": 0.0, "win_rate": 0.0, "tailwind_safe_rate": 0.0,
+               "protect_safe_rate": 0.0, "follow_me_safe_rate": 0.0}
+    win_rate = sum(r[0] for r in rates) / len(rates)
+    tw_rate = sum(r[1] for r in rates) / len(rates)
+    pr_rate = sum(r[2] for r in rates) / len(rates)
+    fm_rate = sum(r[3] for r in rates) / len(rates)
     w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
-    return (w_win * (sum(r[0] for r in rates) / len(rates)) +
-           w_tw * (sum(r[1] for r in rates) / len(rates)) +
-           w_pr * (sum(r[2] for r in rates) / len(rates)) +
-           w_fm * (sum(r[3] for r in rates) / len(rates)))
+    score = w_win * win_rate + w_tw * tw_rate + w_pr * pr_rate + w_fm * fm_rate
+    return {"score": score, "win_rate": win_rate, "tailwind_safe_rate": tw_rate,
+           "protect_safe_rate": pr_rate, "follow_me_safe_rate": fm_rate}
+
+
+def _evolve_dive_score(dive, target_name_lists, good_threshold=1.0):
+    """`_evolve_dive_breakdown(...)["score"]` -- kept as its own function
+    since most callers only want the one blended number."""
+    return _evolve_dive_breakdown(dive, target_name_lists, good_threshold)["score"]
 
 
 def _team_side_overrides(sets):
@@ -7718,21 +7776,51 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
 
     `team_names`: optional subset to narrow the grid (`None` races every
     saved team against every other one, including itself as a mirror
-    match -- `itertools.combinations_with_replacement`, so A-vs-B is never
-    ALSO raced as the separate, redundant B-vs-A). A team whose own roster
-    isn't a legal `bring4_search` size (3-6 distinct Pokemon) is skipped,
-    the same "don't crash the whole batch over one bad row" rule `--
-    benchmark-teams` already applies.
+    match). A team whose own roster isn't a legal `bring4_search` size
+    (3-6 distinct Pokemon) is skipped, the same "don't crash the whole
+    batch over one bad row" rule `--benchmark-teams` already applies.
 
-    A round-robin over N teams is C(N+1,2) = N(N+1)/2 matchups (mirrors
-    included), each a full `bring4_search` -- genuinely expensive for a
-    large `teams` (8 saved teams is 36 matchups), hence `team_names`
+    For every NON-mirror pair, races BOTH directions -- team_a's own best
+    bring-4 against team_b's full roster, AND team_b's own best bring-4
+    against team_a's full roster -- so every team's own summary reflects
+    its own real performance, not just whichever side of the pair it
+    happened to land on alphabetically. A third layer then narrows BOTH
+    sides down to their own best bring-4 (each direction's own top
+    `bring4_rows[0]["bring4"]`) and races those two specific 4-man brings
+    directly against each other -- "the best response 4 vs the best
+    response 4" -- since the two directional searches above race a best-4
+    against the OTHER team's full 6-pool (every pair the enemy COULD
+    bring, not just the 4 they actually would), while this layer answers
+    the narrower, more realistic question of what happens when both sides
+    play their own optimal bring-4. A mirror match (`team_a == team_b`)
+    has only the one direction and no separate head-to-head to add -- the
+    team would just be playing its own best-4 against itself again.
+
+    A round-robin over N teams is N mirrors + 2*C(N,2) directional pairs +
+    C(N,2) head-to-heads = N**2 matchups total -- genuinely expensive for
+    a large `teams` (8 saved teams is 64 matchups), hence `team_names`
     narrowing here and the caller's own progress reporting (this is a
     plain generator, so a caller can update a progress bar between
     `yield`s without this function needing to know about Streamlit).
 
-    Yields (team_a, team_b, pair_rows, bring4_rows) -- `bring4_search`'s
-    own two return values, unchanged, one pair per matchup actually raced.
+    Yields (team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster) --
+    `bring4_search`'s own two return values, unchanged, plus `layer`, one
+    of:
+      "vs_full" -- team_a's best bring-4 vs every pair team_b's full
+        roster could bring (the original round-robin sense; team_a is the
+        side being searched, team_b is the fixed enemy for this row).
+        `enemy_roster` is `teams[team_b]`, its full roster.
+      "best4_vs_best4" -- team_a's and team_b's own best bring-4 (each
+        already found from its own "vs_full" rows above) raced directly
+        against each other; team_a is still listed as "ours" for this
+        row's single-entry `bring4_rows` (both sides are already exactly
+        4, so `bring4_search` degenerates to one row). `enemy_roster` is
+        team_b's own best bring-4 (NOT its full roster) -- the actual
+        enemy this row raced against.
+    `enemy_roster` is always returned explicitly (rather than left for a
+    caller to re-derive) since it differs between the two layers and a
+    caller needing it (e.g. `enemy_has_real_tailwind`) shouldn't have to
+    know that distinction itself.
     """
     names = sorted(team_names) if team_names is not None else sorted(teams)
     legal = [n for n in names if n in teams and 3 <= len(list(dict.fromkeys(teams[n]))) <= 6]
@@ -7741,7 +7829,7 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
             (meta.get(team_a) or {}).get("sets"))
         b_item, b_moves, b_evs, b_nat, b_abil = _team_side_overrides(
             (meta.get(team_b) or {}).get("sets"))
-        pair_rows, bring4_rows = bring4_search(
+        pair_rows_ab, bring4_rows_ab = bring4_search(
             teams[team_a], teams[team_b], merged, moves_db, natures, typechart,
             turns=turns, good_threshold=good_threshold,
             item_overrides=a_item, move_overrides=a_moves,
@@ -7751,7 +7839,106 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
             enemy_ability_overrides=b_abil,
             excluded_items=excluded_items, max_focus_sash=max_focus_sash,
             max_life_orb=max_life_orb)
-        yield team_a, team_b, pair_rows, bring4_rows
+        yield team_a, team_b, pair_rows_ab, bring4_rows_ab, "vs_full", teams[team_b]
+
+        if team_a == team_b:
+            continue
+
+        pair_rows_ba, bring4_rows_ba = bring4_search(
+            teams[team_b], teams[team_a], merged, moves_db, natures, typechart,
+            turns=turns, good_threshold=good_threshold,
+            item_overrides=b_item, move_overrides=b_moves,
+            evs_overrides=b_evs, nature_overrides=b_nat, ability_overrides=b_abil,
+            enemy_item_overrides=a_item, enemy_move_overrides=a_moves,
+            enemy_evs_overrides=a_evs, enemy_nature_overrides=a_nat,
+            enemy_ability_overrides=a_abil,
+            excluded_items=excluded_items, max_focus_sash=max_focus_sash,
+            max_life_orb=max_life_orb)
+        yield team_b, team_a, pair_rows_ba, bring4_rows_ba, "vs_full", teams[team_a]
+
+        best4_a = list(bring4_rows_ab[0]["bring4"])
+        best4_b = list(bring4_rows_ba[0]["bring4"])
+        pair_rows_h2h, bring4_rows_h2h = bring4_search(
+            best4_a, best4_b, merged, moves_db, natures, typechart,
+            turns=turns, good_threshold=good_threshold,
+            item_overrides=a_item, move_overrides=a_moves,
+            evs_overrides=a_evs, nature_overrides=a_nat, ability_overrides=a_abil,
+            enemy_item_overrides=b_item, enemy_move_overrides=b_moves,
+            enemy_evs_overrides=b_evs, enemy_nature_overrides=b_nat,
+            enemy_ability_overrides=b_abil,
+            excluded_items=excluded_items, max_focus_sash=max_focus_sash,
+            max_life_orb=max_life_orb)
+        yield team_a, team_b, pair_rows_h2h, bring4_rows_h2h, "best4_vs_best4", best4_b
+
+
+def _evolve_trial_result(kind, member, removed, added, trial_core, target_name_lists,
+                         merged, moves_db, natures, typechart, turns, item_overrides,
+                         move_overrides, excluded_items, evs_overrides, nature_overrides,
+                         ability_overrides, max_focus_sash, max_life_orb, good_threshold):
+    """One MOVE- or MEMBER-swap trial's full `core_deep_dive` + `_evolve_
+    dive_breakdown` result, or `None` when the candidate has no legal set/
+    moveset in this core (`core_deep_dive`'s own `ValueError`, "skip, don't
+    crash the whole search over one bad candidate"). Pure and side-effect-
+    free -- shared by `evolve_from_team`'s serial path and its `jobs`-
+    parallel worker (`_evolve_trial_job` below) so the two can never drift
+    out of sync with each other.
+    """
+    try:
+        trial_dive = core_deep_dive(
+            trial_core, target_name_lists, merged, moves_db, natures, typechart,
+            turns=turns, item_overrides=item_overrides, move_overrides=move_overrides,
+            excluded_items=excluded_items, evs_overrides=evs_overrides,
+            nature_overrides=nature_overrides, ability_overrides=ability_overrides,
+            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+    except ValueError:
+        return None
+    trial_breakdown = _evolve_dive_breakdown(trial_dive, target_name_lists, good_threshold)
+    return {"kind": kind, "member": member, "removed": removed, "added": added,
+           "team": list(trial_core), "new_score": trial_breakdown["score"],
+           "new_win_rate": trial_breakdown["win_rate"],
+           "new_tailwind_safe_rate": trial_breakdown["tailwind_safe_rate"],
+           "new_protect_safe_rate": trial_breakdown["protect_safe_rate"],
+           "new_follow_me_safe_rate": trial_breakdown["follow_me_safe_rate"]}
+
+
+# `evolve_from_team`'s trials (one per move/whole-member swap candidate) are
+# fully independent of each other -- same baseline `merged`/`item_overrides`/
+# `move_overrides` read, nothing written back and forth -- so a `jobs` process
+# pool is a plain map/as_completed over them, same shape as `multi_bring4_
+# coverage`'s own `_multi_bring4_worker_init`/`_multi_bring4_coverage_job`
+# pair: each worker builds its OWN dataset once (~14s) and reuses it for
+# every trial handed to it, rather than pickling the (large) merged/moves/
+# natures/typechart objects through ProcessPoolExecutor on every submit.
+_EVOLVE_WORKER_WORLD = None
+
+
+def _evolve_worker_init():
+    """Build this worker's dataset once, not once per trial."""
+    global _EVOLVE_WORKER_WORLD
+    from species_data import build_merged_dataset
+    merged, _usage, moves, natures, typechart = build_merged_dataset()
+    _EVOLVE_WORKER_WORLD = {"merged": merged, "moves": moves, "natures": natures,
+                            "typechart": typechart}
+
+
+def _evolve_trial_job(job):
+    """One trial, for `evolve_from_team`'s `jobs` > 1 path. Top-level and
+    plain-typed: the pool may use spawn, so both ends of this call cross a
+    pickle boundary."""
+    (kind, member, removed, added, trial_core, target_name_lists, turns,
+     item_overrides, move_overrides, excluded_items, evs_overrides,
+     nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
+     good_threshold) = job
+    global _EVOLVE_WORKER_WORLD
+    if _EVOLVE_WORKER_WORLD is None:
+        _evolve_worker_init()
+    w = _EVOLVE_WORKER_WORLD
+    return _evolve_trial_result(
+        kind, member, removed, added, trial_core, target_name_lists,
+        w["merged"], w["moves"], w["natures"], w["typechart"], turns,
+        item_overrides, move_overrides, excluded_items, evs_overrides,
+        nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
+        good_threshold)
 
 
 def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typechart,
@@ -7760,7 +7947,7 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
                      excluded_items=DEFAULT_EXCLUDED_ITEMS,
                      evs_overrides=None, nature_overrides=None, ability_overrides=None,
                      max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
-                     max_life_orb=DEFAULT_MAX_LIFE_ORB):
+                     max_life_orb=DEFAULT_MAX_LIFE_ORB, jobs=1, progress_callback=None):
     """"If I define one high-performing team ... then try to see if any
     improvements can be made" -- a LOCAL, greedy search around a fixed
     starting core (`core`, 4-6 already-decided Pokemon -- from a pasted
@@ -7796,9 +7983,32 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
     SAME pool `--multi-bring4` draws from, per the user's own "the usual
     search pool" answer).
 
+    `jobs`: run trials (each move/whole-member swap candidate) in parallel
+    worker processes instead of one after another (1, the default: serial,
+    no process pool spun up at all -- see `_evolve_worker_init`/
+    `_evolve_trial_job`'s own docstring for the pool shape). A large core
+    (6 members) with a wide `swap_pool` and several `target_name_lists`
+    entries at a high `turns` can run thousands of independent trials, so
+    this is the same real speedup `--multi-bring4`'s own `--jobs` already
+    gives its per-enemy searches, applied to per-TRIAL parallelism instead.
+
+    `progress_callback`: optional `f(done, total)`, called after every
+    trial finishes (both the serial and `jobs`-parallel paths) -- a caller
+    can use this to print/update a progress line, since a run over
+    thousands of trials at `turns=4` can otherwise sit silent for hours
+    with no way to tell it's still working or how much is left.
+
     Returns [{"kind": "move" or "member", "member": <the member changed>,
-    "removed": <what left>, "added": <what replaced it>,
-    "baseline_score": float, "new_score": float, "delta": float}, ...].
+    "removed": <what left>, "added": <what replaced it>, "team": <the
+    resulting full roster>, "baseline_score": float, "new_score": float,
+    "delta": float, "baseline_win_rate"/"new_win_rate",
+    "baseline_tailwind_safe_rate"/"new_tailwind_safe_rate",
+    "baseline_protect_safe_rate"/"new_protect_safe_rate",
+    "baseline_follow_me_safe_rate"/"new_follow_me_safe_rate": float}, ...] --
+    the four extra rate pairs are `_evolve_dive_breakdown`'s own individual
+    per-90 rates, so a caller can see WHY one candidate beat another rather
+    than only the single blended score (a swap can raise the blend while
+    quietly costing Protect-safety, for instance).
     """
     core = list(dict.fromkeys(core))
     baseline_dive = core_deep_dive(
@@ -7807,10 +8017,15 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
         excluded_items=excluded_items, evs_overrides=evs_overrides,
         nature_overrides=nature_overrides, ability_overrides=ability_overrides,
         max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
-    baseline_score = _evolve_dive_score(baseline_dive, target_name_lists, good_threshold)
+    baseline_breakdown = _evolve_dive_breakdown(baseline_dive, target_name_lists, good_threshold)
+    baseline_score = baseline_breakdown["score"]
     baseline_sets = baseline_dive["sets"]
 
-    results = []
+    # Build every trial's own spec UP FRONT (both swap kinds), instead of
+    # computing each one inline, so serial and `jobs`-parallel execution
+    # below share one job list rather than two independent loops that could
+    # drift out of sync with each other.
+    trial_specs = []
 
     # MOVE SWAPS -- move_overrides forces a member's FULL 4-move list, so
     # holding "the rest of the team fixed" means pinning every OTHER
@@ -7830,25 +8045,8 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
                 trial_move_overrides[member] = trial_moves
                 trial_item_overrides = {n: s["item"] for n, s in baseline_sets.items()}
                 trial_item_overrides.update(item_overrides or {})
-                try:
-                    trial_dive = core_deep_dive(
-                        core, target_name_lists, merged, moves_db, natures, typechart,
-                        turns=turns, item_overrides=trial_item_overrides,
-                        move_overrides=trial_move_overrides,
-                        excluded_items=excluded_items, evs_overrides=evs_overrides,
-                        nature_overrides=nature_overrides,
-                        ability_overrides=ability_overrides,
-                        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
-                except ValueError:
-                    continue  # candidate move has no legal use in this core -- skip
-                trial_score = _evolve_dive_score(trial_dive, target_name_lists, good_threshold)
-                delta = trial_score - baseline_score
-                if delta > 0:
-                    results.append({
-                        "kind": "move", "member": member,
-                        "removed": base_moves[slot], "added": candidate_move,
-                        "baseline_score": baseline_score, "new_score": trial_score,
-                        "delta": delta})
+                trial_specs.append(("move", member, base_moves[slot], candidate_move,
+                                    list(core), trial_item_overrides, trial_move_overrides))
 
     # WHOLE-MEMBER SWAPS -- the trial core's own set is searched fresh
     # (`core_deep_dive`'s own item/moveset resolution), never re-uses the
@@ -7859,24 +8057,56 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
             if candidate in core or candidate == member:
                 continue
             trial_core = [candidate if n == member else n for n in core]
-            try:
-                trial_dive = core_deep_dive(
-                    trial_core, target_name_lists, merged, moves_db, natures, typechart,
-                    turns=turns, item_overrides=item_overrides,
-                    move_overrides=move_overrides,
-                    excluded_items=excluded_items, evs_overrides=evs_overrides,
-                    nature_overrides=nature_overrides, ability_overrides=ability_overrides,
-                    max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
-            except ValueError:
-                continue  # candidate has no legal set against these enemies -- skip
-            trial_score = _evolve_dive_score(trial_dive, target_name_lists, good_threshold)
-            delta = trial_score - baseline_score
-            if delta > 0:
-                results.append({
-                    "kind": "member", "member": member,
-                    "removed": member, "added": candidate,
-                    "baseline_score": baseline_score, "new_score": trial_score,
-                    "delta": delta})
+            trial_specs.append(("member", member, member, candidate,
+                                trial_core, item_overrides, move_overrides))
+
+    total = len(trial_specs)
+    done = 0
+    results = []
+
+    def _finish(r):
+        nonlocal done
+        done += 1
+        if progress_callback is not None:
+            progress_callback(done, total)
+        if r is None:
+            return  # candidate has no legal set/moveset in this core -- skip
+        delta = r["new_score"] - baseline_score
+        if delta > 0:
+            r.update({
+                "baseline_score": baseline_score, "delta": delta,
+                "baseline_win_rate": baseline_breakdown["win_rate"],
+                "baseline_tailwind_safe_rate": baseline_breakdown["tailwind_safe_rate"],
+                "baseline_protect_safe_rate": baseline_breakdown["protect_safe_rate"],
+                "baseline_follow_me_safe_rate": baseline_breakdown["follow_me_safe_rate"]})
+            results.append(r)
+
+    if jobs > 1 and total > 1:
+        import concurrent.futures as cf
+        jobs_list = [
+            (kind, member, removed, added, trial_core, target_name_lists, turns,
+             trial_item_ov, trial_move_ov, excluded_items, evs_overrides,
+             nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
+             good_threshold)
+            for (kind, member, removed, added, trial_core, trial_item_ov, trial_move_ov)
+            in trial_specs]
+        with cf.ProcessPoolExecutor(
+                max_workers=min(jobs, total),
+                initializer=_evolve_worker_init) as ex:
+            # as_completed, not map: progress should tick as trials finish,
+            # not only once every one of them has (map blocks until the
+            # whole batch is done before yielding anything).
+            futures = [ex.submit(_evolve_trial_job, job) for job in jobs_list]
+            for fut in cf.as_completed(futures):
+                _finish(fut.result())
+    else:
+        for (kind, member, removed, added, trial_core, trial_item_ov, trial_move_ov) \
+                in trial_specs:
+            _finish(_evolve_trial_result(
+                kind, member, removed, added, trial_core, target_name_lists,
+                merged, moves_db, natures, typechart, turns, trial_item_ov,
+                trial_move_ov, excluded_items, evs_overrides, nature_overrides,
+                ability_overrides, max_focus_sash, max_life_orb, good_threshold))
 
     results.sort(key=lambda r: -r["delta"])
     return results

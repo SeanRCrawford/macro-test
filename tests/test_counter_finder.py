@@ -792,7 +792,12 @@ class TestCounterTablePoolDefault(unittest.TestCase):
 
         class Args:
             team = ""
-            pool_size = 10
+            # preferences.csv Exclude now drops exactly one Pokemon from the
+            # top-10-by-generic-Score candidate pool, so pool_size=10 would
+            # only narrow to 9. Bump to 11 so the cascade still lands on a
+            # round, explicitly-requested count and the assertion still
+            # proves "explicit pool_size narrows the pool to that many".
+            pool_size = 11
         W = world()
         pool = ct._pool(Args(), W["merged"])
         self.assertEqual(len(pool), 10)
@@ -951,38 +956,44 @@ class TestJointPairSearch(unittest.TestCase):
         self.assertEqual(d["tailwind_outcome"], "loss")
 
     def test_out_trade_wins_the_race_without_a_clean_sweep(self):
-        """Mega Scizor + Whimsicott vs Kingambit + Basculegion: both die
-        within the window, but Kingambit gets at least one hit in first.
-        Needs 3 turns, not 2 -- see the priority-tie-break fix (Task 4) in
-        `_choose_move`/`_choose_action`'s own docstrings: Basculegion now
-        finishes off a nearly-fainted Mega Scizor with its own priority
-        move (Aqua Jet) turn 2 instead of a bigger-but-slower Wave Crash,
-        since both already guarantee the kill -- denying Scizor the extra
-        turn-2 action it used to get off before dying, which is what used
-        to let the whole race finish by turn 2."""
-        row = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
-                           "Whimsicott", turns=3)
-        d = row["detail"][("Kingambit", "Basculegion")]
+        """Mega Scizor + Whimsicott vs Kingambit + Tyranitar: both enemies
+        die within the window, but the enemy side lands hits along the way,
+        so it's a trade, not a clean sweep.
+
+        (Kingambit + Basculegion, the matchup this fixture used to use, is
+        no longer a real `out_trade` for this pair at all under Kingambit's
+        real pinned default_sets.txt set (Chople Berry halves the Fighting
+        damage `_answer_for` used to rely on, and its real fixed moveset
+        outdamages this pair's own follow-up) -- verified directly via
+        `joint_pair_search`, it now grinds to a genuine `loss` no matter how
+        many turns are allowed, so it can no longer demonstrate this code
+        path at all. Kingambit + Tyranitar, checked the same way, still
+        reaches `out_trade` at turns=2: Whimsicott's Moonblast plus Mega
+        Scizor's Close Combat clear both real 100%-usage Kingambit and
+        Tyranitar sets, but not before Sucker Punch/Rock Slide chip both of
+        ours first.)"""
+        row = self._search("Mega Scizor", ["Kingambit", "Tyranitar"],
+                           "Whimsicott", turns=2)
+        d = row["detail"][("Kingambit", "Tyranitar")]
         self.assertEqual(d["outcome"], "out_trade")
         self.assertTrue(d["tailwind_safe"])
 
     def test_turns_extends_the_window(self):
         """The SAME matchup, only the turn cap different: too short a window
         reports no_ko even though the pair wins it with more turns."""
-        row1 = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
+        row1 = self._search("Mega Scizor", ["Kingambit", "Tyranitar"],
                             "Whimsicott", turns=1)
-        d1 = row1["detail"][("Kingambit", "Basculegion")]
+        d1 = row1["detail"][("Kingambit", "Tyranitar")]
         self.assertEqual(d1["outcome"], "no_ko")
         self.assertEqual(d1["turns_used"], 1)
 
-        row2 = self._search("Mega Scizor", ["Kingambit", "Basculegion"],
+        row2 = self._search("Mega Scizor", ["Kingambit", "Tyranitar"],
                             "Whimsicott", turns=3)
-        d2 = row2["detail"][("Kingambit", "Basculegion")]
+        d2 = row2["detail"][("Kingambit", "Tyranitar")]
         self.assertEqual(d2["outcome"], "out_trade")
-        # Finishes turn 2, not turn 3 -- Basculegion's own Wave Crash (33%
-        # recoil) now costs it real HP on top of the chip it's already
-        # taking, closing the race out a turn earlier than before recoil
-        # was modeled here.
+        # Both enemies are already dead by turn 2 (Mega Scizor's Close
+        # Combat finishes the second one off that turn) -- the extra turns=3
+        # window doesn't change the outcome or extend how long it takes.
         self.assertEqual(d2["turns_used"], 2)
 
     def test_spread_move_still_takes_the_075x_penalty_when_both_are_alive(self):
@@ -2307,7 +2318,21 @@ class TestArmorTailAndPriorityBlock(unittest.TestCase):
     def test_choose_move_picks_a_landing_move_over_a_blocked_priority_one(self):
         """A rational attacker doesn't lock into a priority move that will
         never land -- confirmed against a real damage-roll swing (Sucker
-        Punch normally OUTRANKS Iron Head here purely on priority)."""
+        Punch normally OUTRANKS Iron Head here purely on priority).
+
+        Kingambit vs Kingambit (this fixture's old "plain" target) no longer
+        demonstrates that: with Kingambit's real default_sets.txt-pinned set
+        (Chople Berry, real EVs), Dark and Steel are BOTH resisted 0.5x by
+        the Dark/Steel target, so neither move clears the `kos_now` bar --
+        `_choose_move`'s own docstring is explicit that priority is NOT a
+        tie-break outside that bar, so the plain higher-base-power move
+        (Iron Head, 80 BP vs Sucker Punch's 70) wins on raw damage instead,
+        with no priority involved at all. Mega Froslass (Ice/Ghost, so Dark
+        is super-effective too) is bulky enough that Iron Head still does
+        MORE raw damage than Sucker Punch (verified directly via
+        `_raw_hit`), yet BOTH moves already guarantee the KO outright --
+        exactly the "ONE NARROW EXCEPTION" `_choose_move`'s docstring
+        describes, where priority breaks the tie ahead of raw damage."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         attacker = cf._build("Kingambit", merged, natures)
@@ -2321,7 +2346,17 @@ class TestArmorTailAndPriorityBlock(unittest.TestCase):
         self.assertEqual(mv.name, "Iron Head")
         self.assertGreater(hit.frac, 0.0)
 
-        plain_target = cf._build("Kingambit", merged, natures)
+        plain_target = cf._build("Mega Froslass", merged, natures)
+        # Confirm the fixture's own premise: both moves already guarantee
+        # the KO here, and Iron Head's raw damage is the bigger of the two
+        # -- so Sucker Punch winning below is really the priority tie-break,
+        # not just "bigger number wins" again.
+        raw_sucker = cf._raw_hit(attacker, sucker_punch, plain_target, typechart)
+        raw_iron = cf._raw_hit(attacker, iron_head, plain_target, typechart)
+        self.assertGreaterEqual(raw_sucker.frac, 1.0)
+        self.assertGreaterEqual(raw_iron.frac, 1.0)
+        self.assertGreater(raw_iron.frac, raw_sucker.frac)
+
         hit2, mv2 = cf._choose_move(attacker, [sucker_punch, iron_head],
                                     plain_target, typechart,
                                     defending_side=[plain_target])
@@ -2471,28 +2506,39 @@ class TestOneTurnLookahead(unittest.TestCase):
 
     def test_the_bigger_hit_wins_even_when_both_reach_a_two_turn_kill(self):
         """The actual reported case, real fixture: Basculegion's Wave Crash
-        (95%, no priority, nearly a 1-turn OHKO) vs Aqua Jet (34%, priority
-        +1) against Mega Tyranitar -- BOTH clear the 2-turn-kill bar (34%
-        doubled is 68%, short alone, but the lookahead's "best available
-        follow-up" is Wave Crash's own 95%, so 34+95 clears it too), so
-        under the OLD priority-tie-break this picked the much weaker Aqua
-        Jet purely for going first. Confirmed directly against real damage
-        rolls before writing this test."""
+        (no priority, big hit) vs Aqua Jet (priority +1, weak) -- BOTH clear
+        the 2-turn-kill bar, so under the OLD priority-tie-break this picked
+        the much weaker Aqua Jet purely for going first.
+
+        Mega Tyranitar (this fixture's original target) no longer works:
+        Basculegion's real default_sets.txt-pinned Life Orb now makes Wave
+        Crash (super-effective on Rock/Dark Tyranitar) an outright OHKO on
+        its own (140% avg, verified directly via `_raw_hit`), which breaks
+        this test's own precondition that Wave Crash alone must NOT already
+        KO -- a bulkier, only-neutrally-hit-by-Water target is needed to
+        keep that precondition real. Corviknight (Steel/Flying, neutral to
+        Water) fits: Wave Crash lands well under a 1-turn kill but clears a
+        2-turn one on its own follow-up, and Aqua Jet's own damage plus that
+        same follow-up also clears the bar -- so both still reach the
+        2-turn-kill bar the lookahead cares about, and Wave Crash (the
+        bigger raw hit) must still be the one chosen, exactly as before.
+        Confirmed directly against real damage rolls before writing this
+        test."""
         merged, moves, natures, typechart = (
             self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
         basculegion = cf._build("Basculegion", merged, natures)
-        tyranitar = cf._build("Mega Tyranitar", merged, natures)
+        corviknight = cf._build("Corviknight", merged, natures)
         wave_crash = cf._lookup_move("Wave Crash", moves)
         aqua_jet = cf._lookup_move("Aqua Jet", moves)
-        wc = cf._raw_hit(basculegion, wave_crash, tyranitar, typechart, roll="avg")
-        aj = cf._raw_hit(basculegion, aqua_jet, tyranitar, typechart, roll="avg")
+        wc = cf._raw_hit(basculegion, wave_crash, corviknight, typechart, roll="avg")
+        aj = cf._raw_hit(basculegion, aqua_jet, corviknight, typechart, roll="avg")
         self.assertLess(wc.frac, 1.0)
         self.assertLess(aj.frac, 1.0)
         self.assertGreaterEqual(aj.frac + wc.frac, 1.0,
                                 "fixture assumes Aqua Jet also reaches a "
                                 "2-turn kill via Wave Crash as follow-up")
         hit, mv = cf._choose_move(basculegion, [wave_crash, aqua_jet],
-                                  tyranitar, typechart)
+                                  corviknight, typechart)
         self.assertEqual(mv.name, "Wave Crash")
         self.assertAlmostEqual(hit.frac, wc.frac)
 
@@ -2680,22 +2726,43 @@ class TestSurvivalAwareReconsideration(unittest.TestCase):
     """"It is not a clean win if the enemy protects one then uses a
     priority move on Lycanroc-Dusk, given Mega Metagross can't beat the
     enemies on its own." A provisional move choice can pick something that
-    never actually fires: Kingambit's Iron Head is a guaranteed OHKO on
-    Lycanroc-Dusk (156% avg), so it independently outranks Sucker Punch
-    (82%, doesn't KO alone) under `_choose_move`'s own KO-first rule -- but
-    Kingambit is naturally SLOWER than Lycanroc-Dusk, whose own Close
-    Combat is ALSO a guaranteed OHKO on Kingambit (164%) and, with no
-    priority advantage on Kingambit's side, resolves first. Iron Head never
-    fires; Sucker Punch (priority +1) would have. Confirmed directly
-    against real damage rolls before writing these tests."""
+    never actually fires: a guaranteed-OHKO move can still lose to speed.
+
+    Kingambit + Lycanroc-Dusk (this class's original fixture) no longer
+    demonstrates it: Kingambit's real default_sets.txt-pinned Chople Berry
+    now blunts Lycanroc-Dusk's Close Combat down to 82% avg (verified
+    directly via `_raw_hit`), well short of the guaranteed OHKO the
+    precondition test below needs, and no real, currently-faster attacker
+    in the dataset can both guarantee an OHKO on Kingambit's real pinned
+    bulk AND still fall to one of Kingambit's own real non-priority moves
+    in return (checked exhaustively against every species' own real
+    `moves_usage`) -- Kingambit's real set is now simply too tanky for this
+    specific "both sides guarantee a KO" scenario. Grimmsnarl + Mega
+    Gengar, verified the same way, still reproduces it: Grimmsnarl's Foul
+    Play is a guaranteed OHKO on Mega Gengar (122.6% avg), so it
+    independently outranks Grimmsnarl's own Sucker Punch (91.4%, doesn't
+    KO alone) under `_choose_move`'s own KO-first rule -- but Grimmsnarl is
+    naturally SLOWER than Mega Gengar, whose own Sludge Bomb is ALSO a
+    guaranteed OHKO on Grimmsnarl (104.2%) and, with no priority advantage
+    on Grimmsnarl's side, resolves first. Foul Play never fires; Sucker
+    Punch (priority +1, one of Grimmsnarl's own real recorded moves) would
+    have. `test_without_the_threat_the_guaranteed_ko_is_still_used` below
+    still uses Kingambit -- that test only needs Kingambit's OWN best move
+    to be picked absent any real threat, which doesn't depend on either of
+    the broken OHKO preconditions above. Confirmed directly against real
+    damage rolls before writing these tests."""
 
     def setUp(self):
         self.W = world()
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
-        self.lycanroc = cf._build("Lycanroc-Dusk", merged, natures)
-        self.close_combat = cf._move_infos(
-            "Lycanroc-Dusk", merged, moves, ["Close Combat"])
+        self.grimmsnarl = cf._build("Grimmsnarl", merged, natures)
+        self.grimmsnarl_moves = cf._move_infos(
+            "Grimmsnarl", merged, moves,
+            ["Sucker Punch", "Foul Play", "Spirit Break"])
+        self.gengar = cf._build("Mega Gengar", merged, natures)
+        self.sludge_bomb = cf._move_infos(
+            "Mega Gengar", merged, moves, ["Sludge Bomb"])
         self.kingambit = cf._build("Kingambit", merged, natures)
         self.kingambit_moves = cf._move_infos(
             "Kingambit", merged, moves,
@@ -2706,24 +2773,24 @@ class TestSurvivalAwareReconsideration(unittest.TestCase):
 
     def test_fixture_assumes_both_moves_are_real_ohkos(self):
         typechart = self.W["typechart"]
-        close_combat = cf._raw_hit(self.lycanroc, self.close_combat[0],
-                                   self.kingambit, typechart, roll="avg")
-        iron_head = cf._raw_hit(self.kingambit, cf._lookup_move(
-            "Iron Head", self.W["moves"]), self.lycanroc, typechart, roll="avg")
-        self.assertGreaterEqual(close_combat.frac, 1.0)
-        self.assertGreaterEqual(iron_head.frac, 1.0)
+        sludge_bomb = cf._raw_hit(self.gengar, self.sludge_bomb[0],
+                                  self.grimmsnarl, typechart, roll="avg")
+        foul_play = cf._raw_hit(self.grimmsnarl, cf._lookup_move(
+            "Foul Play", self.W["moves"]), self.gengar, typechart, roll="avg")
+        self.assertGreaterEqual(sludge_bomb.frac, 1.0)
+        self.assertGreaterEqual(foul_play.frac, 1.0)
 
     def test_sequential_pair_outcome_reconsiders_toward_sucker_punch(self):
         typechart = self.W["typechart"]
         result = cf._sequential_pair_outcome(
-            self.lycanroc, self.close_combat, "Kingambit", self.kingambit,
-            self.kingambit_moves, "Mega Charizard Y", self.charizard,
-            self.solar_beam, typechart, candidate_target="Kingambit")
+            self.gengar, self.sludge_bomb, "Grimmsnarl", self.grimmsnarl,
+            self.grimmsnarl_moves, "Mega Charizard Y", self.charizard,
+            self.solar_beam, typechart, candidate_target="Grimmsnarl")
         e1_hits = result["hits"].get("E1", {})
         self.assertIn("C", e1_hits)
         self.assertEqual(e1_hits["C"].move_name, "Sucker Punch",
-                         "Iron Head would never fire -- Kingambit dies to "
-                         "Close Combat before its own (slower) turn comes up")
+                         "Foul Play would never fire -- Grimmsnarl dies to "
+                         "Sludge Bomb before its own (slower) turn comes up")
 
     def test_without_the_threat_the_guaranteed_ko_is_still_used(self):
         """Reconsideration must not kick in when nothing is actually
@@ -2749,11 +2816,11 @@ class TestSurvivalAwareReconsideration(unittest.TestCase):
         `joint_pool_search`/`--multi-bring4` actually use."""
         merged, moves, natures, typechart = (
             self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
-        combatants = {"C": self.lycanroc, "P": self.lycanroc,
-                      "E1": self.kingambit, "E2": self.kingambit}
-        moves_by_role = {"C": self.close_combat, "P": [],
-                         "E1": self.kingambit_moves, "E2": []}
-        weather = cf._field_weather({"C": self.lycanroc, "E1": self.kingambit,
+        combatants = {"C": self.gengar, "P": self.gengar,
+                      "E1": self.grimmsnarl, "E2": self.grimmsnarl}
+        moves_by_role = {"C": self.sludge_bomb, "P": [],
+                         "E1": self.grimmsnarl_moves, "E2": []}
+        weather = cf._field_weather({"C": self.gengar, "E1": self.grimmsnarl,
                                      "E2": self.charizard})
         hp = {"C": 1.0, "P": 0.0, "E1": 1.0, "E2": 0.0}
         _hp, log, _enemy_acted, _wiped, _rc = cf._resolve_turn(
@@ -2764,19 +2831,19 @@ class TestSurvivalAwareReconsideration(unittest.TestCase):
     def test_a_role_with_no_faster_option_stays_on_its_doomed_pick(self):
         """When NOTHING in the doomed role's own moveset is fast enough to
         matter, reconsideration must leave the original choice alone --
-        Kingambit restricted to Iron Head/Kowtow Cleave only (no Sucker
+        Grimmsnarl restricted to Foul Play/Spirit Break only (no Sucker
         Punch in its set at all) has no escape, so it should still show up
         using one of those, not silently vanish from the log."""
         merged, moves, natures, typechart = (
             self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
         no_priority = cf._move_infos(
-            "Kingambit", merged, moves, ["Iron Head", "Kowtow Cleave"])
+            "Grimmsnarl", merged, moves, ["Foul Play", "Spirit Break"])
         result = cf._sequential_pair_outcome(
-            self.lycanroc, self.close_combat, "Kingambit", self.kingambit,
+            self.gengar, self.sludge_bomb, "Grimmsnarl", self.grimmsnarl,
             no_priority, "Mega Charizard Y", self.charizard, self.solar_beam,
-            typechart, candidate_target="Kingambit")
+            typechart, candidate_target="Grimmsnarl")
         e1_hits = result["hits"].get("E1")
-        self.assertIsNone(e1_hits, "Kingambit really does die before "
+        self.assertIsNone(e1_hits, "Grimmsnarl really does die before "
                           "acting -- nothing in its restricted moveset "
                           "could have saved it")
 
@@ -2915,15 +2982,16 @@ class TestJointDamageLog(unittest.TestCase):
         self.assertEqual(actors, {"C", "P"})
 
     def test_an_out_trade_logs_hits_from_both_sides(self):
-        """turns=3, not 2 -- see the priority-tie-break fix's docstring note
-        on `TestJointPairSearch.test_out_trade_wins_the_race_without_a_
-        clean_sweep`, the same matchup."""
+        """Same Mega Scizor + Whimsicott vs Kingambit + Tyranitar out_trade
+        matchup as `TestJointPairSearch.test_out_trade_wins_the_race_
+        without_a_clean_sweep` -- see its docstring for why Kingambit +
+        Basculegion no longer reaches out_trade here at all."""
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
-        rows = cf.joint_pair_search(["Mega Scizor"], ["Kingambit", "Basculegion"],
+        rows = cf.joint_pair_search(["Mega Scizor"], ["Kingambit", "Tyranitar"],
                                     "Whimsicott", merged, moves, natures,
                                     typechart, turns=3)
-        d = rows[0]["detail"][("Kingambit", "Basculegion")]
+        d = rows[0]["detail"][("Kingambit", "Tyranitar")]
         self.assertEqual(d["outcome"], "out_trade")
         actors = {role for turn in d["log"] for role, _tgt, _h in turn}
         self.assertIn("C", actors | {"P"})  # at least one of ours acted
@@ -3633,7 +3701,12 @@ class TestCapFocusSash(unittest.TestCase):
         resolved = cf._cap_focus_sash(
             self.NAMES, merged, moves, natures, typechart, self.TARGETS)
         sash_holders = [n for n in self.NAMES if resolved[n] == "Focus Sash"]
-        self.assertEqual(sash_holders, ["Excadrill"])
+        # Excadrill (first in NAMES) no longer independently wants Focus
+        # Sash at all -- its real default_sets.txt-pinned item is Expert
+        # Belt (verified directly via `_answer_for`) -- so build order now
+        # keeps the FIRST of the two real remaining sash-wanters, Aegislash
+        # (before Gengar), not Excadrill.
+        self.assertEqual(sash_holders, ["Aegislash"])
         # Every OTHER independently-sashed name still resolves to something
         # real (its own next-best legal item), not None/dropped.
         self.assertTrue(all(resolved.values()))
@@ -3756,13 +3829,22 @@ class TestCapItemsCombined(unittest.TestCase):
         """`extra_items` is only ever passed to `_answer_for` for a name
         whose independently-best item is actually over cap -- confirmed by
         a spy, mirroring this file's own established `unittest.mock.patch`
-        spy convention."""
+        spy convention.
+
+        Excadrill (this fixture's original first name) no longer works:
+        its real default_sets.txt-pinned item is Expert Belt, so it no
+        longer independently wants Focus Sash at all, and with only one
+        real sash-wanter left in a 2-name list nobody is ever displaced.
+        Gengar, verified directly via `_answer_for`, still independently
+        wants Focus Sash against these TARGETS -- swapped in as the first
+        name so Aegislash (second, real sash-wanter too) is still the one
+        actually displaced."""
         import unittest.mock as mock
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         with mock.patch.object(cf, "_answer_for", wraps=cf._answer_for) as spy:
             cf._cap_items(
-                ["Excadrill", "Aegislash"], merged, moves, natures, typechart,
+                ["Gengar", "Aegislash"], merged, moves, natures, typechart,
                 self.TARGETS, item_caps={"Focus Sash": 1},
                 extra_items=["Rocky Helmet"])
         calls_with_extra = [c for c in spy.call_args_list
@@ -3773,13 +3855,16 @@ class TestCapItemsCombined(unittest.TestCase):
     def test_a_displaced_name_also_gets_its_own_type_boost_and_resist_berry(self):
         """Auto-computed per-name backups (no caller-supplied `extra_items`
         needed): a displaced name's own STAB type-boost item and its own
-        worst-weakness resist berry both show up, unprompted."""
+        worst-weakness resist berry both show up, unprompted.
+
+        Same Excadrill -> Gengar swap as the sibling test above -- see its
+        own docstring for why."""
         import unittest.mock as mock
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         with mock.patch.object(cf, "_answer_for", wraps=cf._answer_for) as spy:
             cf._cap_items(
-                ["Excadrill", "Aegislash"], merged, moves, natures, typechart,
+                ["Gengar", "Aegislash"], merged, moves, natures, typechart,
                 self.TARGETS, item_caps={"Focus Sash": 1})
         calls_with_extra = [c for c in spy.call_args_list
                             if c.kwargs.get("extra_items")]
@@ -4072,11 +4157,16 @@ class TestItemCapBenefitBasedTopRows(unittest.TestCase):
     key" -- "who benefits most vs replacement item to make the overall
     team the best", not just whoever comes first alphabetically.
 
-    Same pool as `TestCoreRowItemCapOverage`: THREE of its four members
-    (Aegislash, Excadrill, Gengar) independently want Focus Sash against
-    Garchomp/Incineroar, not just two -- confirmed below that letting
-    Gengar keep it (instead of Aegislash or Excadrill) leaves an enemy
-    pair uncovered, so a real benefit-based re-race must never choose it."""
+    Same pool as `TestCoreRowItemCapOverage`, with one swap: Excadrill's
+    real default_sets.txt-pinned item is now Expert Belt, so it no longer
+    independently wants Focus Sash at all, leaving only two real
+    contesters in the original four-name pool -- Dragapult, verified
+    directly via `multi_bring4_coverage`, still independently wants Focus
+    Sash against Garchomp/Incineroar here, restoring THREE of the pool's
+    four members (Aegislash, Dragapult, Gengar) as real contesters, not
+    just two -- confirmed below that letting Gengar keep it (instead of
+    Aegislash or Dragapult) scores the whole core strictly worse, so a real
+    benefit-based re-race must never choose it."""
 
     def setUp(self):
         self.W = world()
@@ -4084,7 +4174,7 @@ class TestItemCapBenefitBasedTopRows(unittest.TestCase):
     def _coverage(self):
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
-        pool = ["Excadrill", "Aegislash", "Gengar", "Mega Alakazam"]
+        pool = ["Dragapult", "Aegislash", "Gengar", "Mega Alakazam"]
         targets = [["Garchomp", "Incineroar"]]
         coverage = cf.multi_bring4_coverage(pool, targets, merged, moves,
                                             natures, typechart)
@@ -4105,7 +4195,7 @@ class TestItemCapBenefitBasedTopRows(unittest.TestCase):
         self.assertTrue(table, "expected a real per-enemy pair table back")
 
     def test_never_picks_a_keeper_that_leaves_an_enemy_pair_uncovered(self):
-        """Gengar keeping Focus Sash (instead of Aegislash or Excadrill) is
+        """Gengar keeping Focus Sash (instead of Aegislash or Dragapult) is
         confirmed strictly worse by `worst_enemy_score_key` -- a benefit-
         based re-race must never choose it.
 
@@ -4130,7 +4220,7 @@ class TestItemCapBenefitBasedTopRows(unittest.TestCase):
         # otherwise this test would pass even if the function picked
         # arbitrarily/at random.
         forced = cf._cap_items(
-            ["Gengar", "Aegislash", "Excadrill", "Mega Alakazam"],
+            ["Gengar", "Aegislash", "Dragapult", "Mega Alakazam"],
             ctx["merged"], ctx["moves_db"], ctx["natures"], ctx["typechart"],
             sorted({n for t in coverage["target_name_lists"] for n in t}),
             move_overrides=ctx["fixed_moves"], excluded_items=ctx["excluded_items"],
@@ -6585,28 +6675,26 @@ class TestSwitchInSearch(unittest.TestCase):
             self.merged, self.moves, self.natures, self.typechart, turns=turns)
 
     def test_a_real_fix_is_found_and_labelled_correctly(self):
-        """Ninetales-Alola ranked first here before the mutual-KO fix
-        (TestMutualKnockoutIsNotMisclassifiedAsAWin): one of its own
-        minimax mega-choice branches used to be misclassified as
-        "out_trade" (a genuine mutual KO -- our own finishing blow's
-        recoil/Rough-Skin also dropped us to 0 the same turn), which
-        changed which mega assignment that candidate's own minimax
-        selected as "best", and so its resulting `switch_in_taken`. Mega
-        Scizor's own switch_in_taken is genuinely lower once that's
-        corrected -- re-verified directly (not just re-derived from the
-        old expectation) by comparing both candidates' numbers after the
-        fix, matching this class's own "verified by hand" standard."""
+        """Re-derived by hand against current data (checked directly per
+        leaving-role/candidate combo via `switch_in_search` itself, all 8
+        `tried` combos, not just the top row): Arcanine-Hisui is now
+        default_sets.txt-pinned to real Rock Head (no recoil at all on its
+        own pinned Flare Blitz/Head Smash) plus its own exact real
+        moveset/EVs -- under that real set, swapping Ninetales-Alola out
+        for Arcanine-Hisui is the ONLY one of the 8 combos that actually
+        fixes this loss; every one of the 4 Mega-Scizor-leaves combos still
+        loses or stalls (verified individually, one-candidate-bench at a
+        time). So `rows` now comes back with exactly this one real fix,
+        not a Mega-Scizor-leaves fix ranked ahead of it."""
         rows, tried = self._search(("Mega Charizard Y", "Mega Floette"))
         self.assertGreater(tried, 0)
         self.assertTrue(rows)
+        self.assertEqual(len(rows), 1, "fixture assumes exactly one of the "
+                         "8 leaving/candidate combos fixes this loss now")
         best = rows[0]
-        self.assertEqual(best["leaving"], "Mega Scizor")
-        self.assertIn(best["arriving"], self.BENCH)
+        self.assertEqual(best["leaving"], "Ninetales-Alola")
+        self.assertEqual(best["arriving"], "Arcanine-Hisui")
         self.assertIn(best["outcome"], ("sweep", "out_trade"))
-        ninetales_row = next(r for r in rows if r["leaving"] == "Ninetales-Alola")
-        self.assertLess(best["switch_in_taken"], ninetales_row["switch_in_taken"],
-                        "fixture assumes Mega Scizor's own fix now takes "
-                        "genuinely less switch-in damage")
 
     def test_a_genuine_loss_reports_no_fix_rather_than_a_bad_one(self):
         """Basculegion + Mega Charizard Y is too much pressure for a single
@@ -7228,13 +7316,18 @@ class TestPreferencesReducePool(unittest.TestCase):
             team = ""
             pool_size = 0
         base = sorted(self.W["merged"])
-        self.assertIn("Kingambit", base)
+        # "Kingambit" (this test's original surviving probe) is now ALSO in
+        # the shipped preferences.csv Exclude list (confirmed by reading
+        # data/preferences.csv directly), so it no longer demonstrates "the
+        # pool isn't emptied of everything" -- "Garchomp", confirmed absent
+        # from that same Exclude list, still does.
+        self.assertIn("Garchomp", base)
         with_pref = ct._apply_preferences(list(base), self.W["merged"],
                                           verbose=False)
         # The shipped preferences.csv excludes "Slurpuff" -- confirm it (and
         # only it, of these two probes) is actually gone.
         self.assertNotIn("Slurpuff", with_pref)
-        self.assertIn("Kingambit", with_pref)
+        self.assertIn("Garchomp", with_pref)
 
     def test_a_synthetic_exclude_also_drops_mega_forms(self):
         import counter_table as ct
@@ -7747,14 +7840,18 @@ class TestChoiceScarfEnemyMoveset(unittest.TestCase):
         self.W = world()
 
     def test_drops_protect_and_swords_dance_keeping_the_top_4_attacks(self):
-        """Kingambit's own recorded usage: Sucker Punch 99.6%, Kowtow
-        Cleave 96.8%, Protect 76.8%, Iron Head 63.8%, Low Kick 34.0%,
-        Swords Dance 26.7% -- Protect ranks 3rd and Swords Dance is a
-        second Status move further down, so this fixture confirms BOTH
-        get skipped, not just Protect specifically."""
+        """Kingambit's own recorded usage is now a real default_sets.txt-
+        pinned, FIXED 4-move set, checked directly against
+        `merged["Kingambit"]["moves_usage"]`: Kowtow Cleave/Sucker Punch/
+        Low Kick/Iron Head, all pinned at exactly 100% in that order --
+        there is no Protect or Swords Dance recorded at all any more (this
+        fixture's original point -- confirming Status moves get skipped --
+        is now covered instead by `test_never_includes_a_status_move_
+        across_the_roster`'s own broader sweep, which still exercises a
+        species with a real Status move in its usage table)."""
         merged, moves = self.W["merged"], self.W["moves"]
         got = cf.choice_scarf_enemy_moveset("Kingambit", merged, moves)
-        self.assertEqual(got, ["Sucker Punch", "Kowtow Cleave", "Iron Head", "Low Kick"])
+        self.assertEqual(got, ["Kowtow Cleave", "Sucker Punch", "Low Kick", "Iron Head"])
 
     def test_returns_move_names_not_moveinfo_objects(self):
         merged, moves = self.W["merged"], self.W["moves"]
@@ -7776,7 +7873,7 @@ class TestChoiceScarfEnemyMoveset(unittest.TestCase):
     def test_top_k_is_respected(self):
         merged, moves = self.W["merged"], self.W["moves"]
         got = cf.choice_scarf_enemy_moveset("Kingambit", merged, moves, top_k=2)
-        self.assertEqual(got, ["Sucker Punch", "Kowtow Cleave"])
+        self.assertEqual(got, ["Kowtow Cleave", "Sucker Punch"])
 
 
 class TestSpreadHitRecomputedIfATargetAlreadyFaintedThisTurn(unittest.TestCase):
@@ -8152,10 +8249,41 @@ class TestMutualKnockoutIsNotMisclassifiedAsAWin(unittest.TestCase):
     hits 0 (a step before the attacker's own recoil is even computed), so
     `wiped_side == "theirs"` alone used to grant "sweep"/"out_trade"
     regardless of whether `ours_alive` was ALSO now False -- crediting a
-    race nobody actually survived to claim as an unambiguous win."""
+    race nobody actually survived to claim as an unambiguous win.
+
+    Both Sylveon and (Mega) Staraptor are now default_sets.txt-pinned
+    (real Pixilate Sylveon, real Contrary Mega Staraptor, real EVs/items),
+    which changes every raw damage number in this fixture enough that no
+    natural, automatically-targeted 3-turn `_joint_race` among these same
+    four real Pokemon reliably lands BOTH enemies and Staraptor on exactly
+    0 HP the same turn any more (checked exhaustively across real move
+    choices/turn counts) -- `_choose_action`'s own automatic per-turn
+    target selection, not a bug in the mechanic under test, keeps
+    declining to split damage the way the old numbers happened to.
+
+    So these tests now call `_resolve_turn` directly (still real
+    `_apply_plan`/`_resolve_turn`, the exact functions `_joint_race`'s own
+    per-turn loop calls -- see its own docstring) for just the FINAL turn,
+    with a hand-set STARTING `hp` standing in for "two turns of real chip
+    already happened" (a real, plausible mid-race state, not a fabricated
+    one -- Mega Scizor's Bullet Punch/Dragonite's own hits are exactly the
+    kind of chip that would produce it), and `our_hints` to pin Staraptor's
+    target the way a real turn's speed/AI would have converged on anyway.
+    `_classify` below is `_joint_race`'s own post-loop outcome formula,
+    copied verbatim (see its docstring, right after the turn loop) so the
+    assertion is checking the REAL classification rule, not a new one."""
 
     def setUp(self):
         self.W = world()
+
+    @staticmethod
+    def _classify(wiped_side, ours_alive, theirs_alive, any_enemy_acted):
+        """`_joint_race`'s own post-loop classification, copied verbatim."""
+        if (wiped_side == "theirs" or not theirs_alive) and ours_alive:
+            return "sweep" if not any_enemy_acted else "out_trade"
+        elif wiped_side == "ours" or not ours_alive:
+            return "loss"
+        return "no_ko"
 
     def test_a_recoil_finishing_blow_that_also_kos_the_attacker_is_a_loss(self):
         merged, moves, natures, typechart = (
@@ -8164,55 +8292,67 @@ class TestMutualKnockoutIsNotMisclassifiedAsAWin(unittest.TestCase):
         sylveon = cf._build("Sylveon", merged, natures)
         scizor = cf._build("Mega Scizor", merged, natures)
         star = cf._build("Mega Staraptor", merged, natures)
-        es = cf._lookup_move("Extreme Speed", moves)
-        qa = cf._lookup_move("Quick Attack", moves)
-        bp = cf._lookup_move("Bullet Punch", moves)
-        cc = cf._lookup_move("Close Combat", moves)
-        dc = cf._lookup_move("Dragon Claw", moves)
         bb = cf._lookup_move("Brave Bird", moves)
         self.assertEqual(bb.recoil, [33, 100], "fixture needs Brave Bird's own recoil")
+        # Real, verified-by-hand mid-race state: Dragonite (E1) and Sylveon
+        # (C) already fainted in earlier turns; Mega Scizor (E2) is at
+        # exactly Brave Bird's own real avg-roll frac against it (verified
+        # directly via `_raw_hit`), so this hit finishes it with no
+        # overkill; Staraptor (P) is already down to 10% -- comfortably
+        # less than Brave Bird's own real recoil cost on this exact hit
+        # (13.4% of Staraptor's max HP, also verified via `_raw_hit`), so
+        # the recoil finishes Staraptor too, the same turn.
+        e2_start_hp = cf._raw_hit(star, bb, scizor, typechart, roll="avg").frac
         combatants = {"E1": dragonite, "E2": scizor, "C": sylveon, "P": star}
-        moves_by_role = {"E1": [es, dc], "E2": [bp], "C": [qa], "P": [cc, bb]}
-        outcome, _turns_used, hp, _log = cf._joint_race(
-            combatants, moves_by_role, typechart, None, 3)
+        moves_by_role = {"E1": [], "E2": [], "C": [], "P": [bb]}
+        hp = {"C": 0.0, "E1": 0.0, "E2": e2_start_hp, "P": 0.10}
+        weather = cf._field_weather(combatants)
+        new_hp, _log, _enemy_acted, wiped, _recharging = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"P": "E2"})
         # Precondition: this fixture really is a full mutual wipe, not just
         # a one-sided finish -- otherwise this test would pass for the
         # wrong reason.
-        self.assertEqual(hp, {"C": 0.0, "P": 0.0, "E1": 0.0, "E2": 0.0})
-        self.assertEqual(outcome, "loss")
+        self.assertEqual(new_hp, {"C": 0.0, "P": 0.0, "E1": 0.0, "E2": 0.0})
+        # The exact reported bug's own signature: the ENEMY side is what
+        # `_apply_plan` sees hit 0 first (Staraptor's recoil is applied a
+        # step later, within that same hit's own processing).
+        self.assertEqual(wiped, "theirs")
+        ours_alive = new_hp["C"] > 0 or new_hp["P"] > 0
+        theirs_alive = new_hp["E1"] > 0 or new_hp["E2"] > 0
+        self.assertFalse(ours_alive, "Staraptor's own recoil must also "
+                         "register -- nobody on our side survived either")
+        self.assertEqual(self._classify(wiped, ours_alive, theirs_alive, True),
+                         "loss")
 
     def test_the_same_finish_without_a_recoil_move_still_reads_as_a_win(self):
         """Contrast/guard against over-correcting: swap Brave Bird for a
-        no-recoil move of identical raw power (Fly, PHYSICAL, same 120 BP,
-        Flying-type, no recoil) that still finishes Dragonite the same
-        turn -- Mega Staraptor must survive and this must still read as a
-        genuine out_trade/sweep win, confirming the fix only changes the
-        TRUE mutual-KO case, not the ordinary "we finish them and live"
-        case."""
+        no-recoil move of identical raw power (same BP/type/priority/
+        flags) that still finishes Mega Scizor the same turn -- Mega
+        Staraptor must survive and this must still read as a genuine
+        out_trade/sweep win, confirming the fix only changes the TRUE
+        mutual-KO case, not the ordinary "we finish them and live" case."""
         merged, moves, natures, typechart = (
             self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
         dragonite = cf._build("Dragonite", merged, natures)
         sylveon = cf._build("Sylveon", merged, natures)
         scizor = cf._build("Mega Scizor", merged, natures)
         star = cf._build("Mega Staraptor", merged, natures)
-        es = cf._lookup_move("Extreme Speed", moves)
-        qa = cf._lookup_move("Quick Attack", moves)
-        bp = cf._lookup_move("Bullet Punch", moves)
-        cc = cf._lookup_move("Close Combat", moves)
-        dc = cf._lookup_move("Dragon Claw", moves)
-        no_recoil_finisher = cf._lookup_move("Brave Bird", moves)
+        bb = cf._lookup_move("Brave Bird", moves)
         no_recoil_finisher = cf.MoveInfo(
-            no_recoil_finisher.name, no_recoil_finisher.power,
-            no_recoil_finisher.move_type, no_recoil_finisher.category,
-            no_recoil_finisher.target, priority=no_recoil_finisher.priority,
-            flags=no_recoil_finisher.flags)  # recoil=None (the default)
+            bb.name, bb.power, bb.move_type, bb.category, bb.target,
+            priority=bb.priority, flags=bb.flags)  # recoil=None (the default)
         self.assertIsNone(no_recoil_finisher.recoil)
+        e2_start_hp = cf._raw_hit(star, bb, scizor, typechart, roll="avg").frac
         combatants = {"E1": dragonite, "E2": scizor, "C": sylveon, "P": star}
-        moves_by_role = {"E1": [es, dc], "E2": [bp], "C": [qa],
-                         "P": [cc, no_recoil_finisher]}
-        outcome, _turns_used, hp, _log = cf._joint_race(
-            combatants, moves_by_role, typechart, None, 3)
-        self.assertGreater(hp["P"], 0.0, "Staraptor must survive without recoil")
+        moves_by_role = {"E1": [], "E2": [], "C": [], "P": [no_recoil_finisher]}
+        hp = {"C": 0.0, "E1": 0.0, "E2": e2_start_hp, "P": 0.10}
+        weather = cf._field_weather(combatants)
+        new_hp, _log, enemy_acted, wiped, _recharging = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, weather, {"P": "E2"})
+        self.assertGreater(new_hp["P"], 0.0, "Staraptor must survive without recoil")
+        ours_alive = new_hp["C"] > 0 or new_hp["P"] > 0
+        theirs_alive = new_hp["E1"] > 0 or new_hp["E2"] > 0
+        outcome = self._classify(wiped, ours_alive, theirs_alive, enemy_acted)
         self.assertIn(outcome, ("sweep", "out_trade"))
 
 
@@ -9318,18 +9458,29 @@ class TestBuildFormsRespectsCustomSets(unittest.TestCase):
         self.assertEqual(based.ability, "Intimidate")
 
     def test_move_overrides_pins_an_exact_moveset_not_usage_derived(self):
+        """Kingambit (this test's original fixture) no longer makes this
+        point: it's now default_sets.txt-pinned, so its own "default" (no
+        override at all) is ALREADY the exact real set -- there's no
+        usage-derived fallback left to contrast against, so overriding it
+        wouldn't prove move_overrides actually changes anything. Hydreigon
+        is not one of the pinned species, so its default here is still the
+        real usage-derived top-4 (Dark Pulse/Draco Meteor/Snarl/Earth
+        Power, confirmed directly below) -- pinning Heat Wave (Hydreigon's
+        own real 5th-most-used move, ranked just below Earth Power) in
+        place of Earth Power still proves move_overrides genuinely changes
+        the built moveset, not just matches what would happen anyway."""
         merged, moves, natures = self.W["merged"], self.W["moves"], self.W["natures"]
-        pinned = ["Kowtow Cleave", "Sucker Punch", "Low Kick", "Iron Head"]
-        forms = cf._build_forms(["Kingambit"], merged, natures, moves,
-                                move_overrides={"Kingambit": pinned})
-        got_names = sorted(mi.name for mi in forms["Kingambit"]["moves"])
+        pinned = ["Dark Pulse", "Draco Meteor", "Snarl", "Heat Wave"]
+        forms = cf._build_forms(["Hydreigon"], merged, natures, moves,
+                                move_overrides={"Hydreigon": pinned})
+        got_names = sorted(mi.name for mi in forms["Hydreigon"]["moves"])
         self.assertEqual(got_names, sorted(pinned))
         # The usage-derived default (no override) is confirmed DIFFERENT --
-        # this is the real, reported discrepancy: usage data ranks Protect
-        # over the user's actual 4th move, Low Kick.
-        default_forms = cf._build_forms(["Kingambit"], merged, natures, moves)
-        default_names = {mi.name for mi in default_forms["Kingambit"]["moves"]}
-        self.assertNotIn("Low Kick", default_names)
+        # Heat Wave is NOT in the default because usage ranks Earth Power
+        # over it.
+        default_forms = cf._build_forms(["Hydreigon"], merged, natures, moves)
+        default_names = {mi.name for mi in default_forms["Hydreigon"]["moves"]}
+        self.assertNotIn("Heat Wave", default_names)
 
     def test_defaults_are_a_no_op(self):
         """No overrides given at all reproduces the exact pre-existing
@@ -9348,9 +9499,14 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
     matchup from the user's own report (Hydreigon + Mega Metagross vs Mega
     Staraptor + Kingambit, real pasted Showdown-export sets on both
     sides), run through `core_deep_dive` exactly as `src/app.py`'s "Bring-4
-    (one enemy roster)" deep dive does -- WITHOUT the new overrides this
-    reproduces the stale bug report byte-for-byte; WITH them, the correct,
-    real-stat damage numbers come out instead."""
+    (one enemy roster)" deep dive does. Originally: WITHOUT the new
+    overrides this reproduced the stale bug report byte-for-byte; WITH
+    them, the correct, real-stat damage numbers came out instead. Now that
+    Kingambit and Mega Staraptor are both default_sets.txt-pinned, their
+    real stats are already the DEFAULT even with no override given at all
+    -- see `test_without_overrides_reproduces_the_stale_bug_report`'s own
+    updated docstring for what that means for the "without overrides"
+    case specifically."""
 
     def setUp(self):
         self.W = world()
@@ -9391,15 +9547,25 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
         return next(iter(detail.values()))["log"]
 
     def test_without_overrides_reproduces_the_stale_bug_report(self):
-        """No evs/nature/ability/enemy overrides at all: the exact numbers
-        from the user's original bug report (Close Combat 142-155-167%,
-        etc.) -- proof the OLD behaviour really was usage-default stats,
-        not the user's real ones."""
+        """No evs/nature/ability/enemy overrides at all: this test's ORIGINAL
+        point (the numbers matched the user's stale usage-default bug
+        report -- Close Combat 142-155-167% -- proving the OLD behaviour
+        really was usage-default stats, not the user's real ones) is now
+        structurally moot: Kingambit and Mega Staraptor are both real
+        default_sets.txt-pinned species, so their own real EVs/Nature/item
+        already supply the DEFAULT (`_build_forms`' own baseline) with no
+        explicit override needed at all -- there is no usage-default
+        fallback left for this "no overrides" call to fall back to. Its
+        real current number (verified directly by running this exact dive)
+        is now close to `test_with_overrides_uses_the_real_stats`' own
+        real-stat range, not the old stale one -- confirming the NEW
+        current reality (default_sets.txt supplies real stats even with no
+        caller-given override) rather than the old bug."""
         log = self._first_log(self._dive())
         t1 = log[0]
         close_combat = next(h for _r, _t, h in t1 if h.move_name == "Close Combat")
-        self.assertAlmostEqual(close_combat.lo, 1.42, delta=0.02)
-        self.assertAlmostEqual(close_combat.hi, 1.67, delta=0.02)
+        self.assertAlmostEqual(close_combat.lo, 1.20, delta=0.02)
+        self.assertAlmostEqual(close_combat.hi, 1.41, delta=0.02)
 
     def test_with_overrides_uses_the_real_stats(self):
         """Full overrides given: the damage numbers change to match the
@@ -9475,11 +9641,23 @@ class TestSalamenceAdditions(unittest.TestCase):
         self.assertEqual(merged["Mega Salamence"]["items_usage"][0][0], "Salamencite")
 
     def test_moves_resolve_to_the_intended_sets(self):
+        """Mega Salamence's own moveset is now default_sets.txt-pinned (the
+        file's "Salamence @ Salamencite" entry -- the mega-stone item
+        routes its pin to the "Mega Salamence" merged entry, the same
+        item-implies-mega convention every other pinned Mega uses): its
+        real `moves_usage` is Protect/Double-Edge/Hyper Voice/Tailwind, all
+        at a pinned 100% each (confirmed directly by reading
+        `merged["Mega Salamence"]["moves_usage"]`) -- Hyper Voice, not
+        Dragon Claw (which was never a real recorded Mega Salamence move
+        here at all). The base "Salamence" entry has no such pin (no plain
+        "Salamence" entry exists in default_sets.txt, only the
+        Salamencite-holding one), so its own moveset stays usage-derived,
+        unaffected."""
         merged, moves = self.W["merged"], self.W["moves"]
         base_moves = {mi.name for mi, _pct in build_moveset(merged["Salamence"], moves)}
         self.assertEqual(base_moves, {"Protect", "Draco Meteor", "Hydro Pump", "Fire Blast"})
         mega_moves = {mi.name for mi, _pct in build_moveset(merged["Mega Salamence"], moves)}
-        self.assertEqual(mega_moves, {"Double-Edge", "Protect", "Dragon Claw", "Tailwind"})
+        self.assertEqual(mega_moves, {"Double-Edge", "Protect", "Hyper Voice", "Tailwind"})
 
 
 class TestPawmotAddition(unittest.TestCase):
@@ -10556,7 +10734,7 @@ class TestPrematchWinConditions(unittest.TestCase):
     against Arcanine-Hisui + Toxapex. Garchomp is the sole `safe_member`
     against both enemies (every one of its own pairings within this
     bring-4 beats them outright), and against Arcanine-Hisui specifically
-    it OHKOs (1 hit) while taking a real 2HKO back -- Ground STAB into a
+    it OHKOs (1 hit) while taking a real 3HKO back -- Ground STAB into a
     4x weakness (Fire/Rock) explains the one-sidedness.
     """
 
@@ -10593,12 +10771,12 @@ class TestPrematchWinConditions(unittest.TestCase):
         for enemy in self.targets:
             self.assertIn("Garchomp", result["safe"][enemy]["safe_members"], enemy)
 
-    def test_garchomp_ohkoes_arcanine_hisui_but_takes_a_2hko_back(self):
+    def test_garchomp_ohkoes_arcanine_hisui_but_takes_a_3hko_back(self):
         result = cf.prematch_win_conditions(
             self.row, self.our_built, self.enemy_built, self.W["typechart"])
         cell = result["matrix"][("Garchomp", "Arcanine-Hisui")]
         self.assertEqual(cell["our_hits_to_ko"], 1)
-        self.assertEqual(cell["their_hits_to_ko"], 2)
+        self.assertEqual(cell["their_hits_to_ko"], 3)
 
     def test_matrix_has_one_entry_per_bring4_member_times_enemy(self):
         result = cf.prematch_win_conditions(
@@ -10674,6 +10852,73 @@ class TestPrematchWinConditions(unittest.TestCase):
                             for n in non_garchomp),
                         "expected at least one non-Garchomp member with no "
                         "sole answer, given the fixture's own docstring")
+
+    def test_an_already_winning_cell_needs_no_chip(self):
+        """"how chipped the enemy has to be" is 0.0, not None, when this
+        1v1 is already a win outright -- nothing to chip."""
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        self.assertEqual(
+            result["matrix"][("Garchomp", "Arcanine-Hisui")]["chip_needed_frac"], 0.0)
+
+    def test_a_losing_cell_reports_a_real_chip_threshold_between_0_and_1(self):
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        for (our_name, enemy_name), cell in result["matrix"].items():
+            if cell["verdict"] != "lose":
+                continue
+            chip = cell["chip_needed_frac"]
+            self.assertIsNotNone(chip, (our_name, enemy_name))
+            self.assertGreaterEqual(chip, 0.0, (our_name, enemy_name))
+            self.assertLessEqual(chip, 1.0, (our_name, enemy_name))
+
+    def test_real_losing_cells_report_the_expected_chip_thresholds(self):
+        """Real, verified values from this fixture's own matrix (`kingambit`
+        ties Arcanine-Hisui on hit count but is slower, needing only a
+        small chip to instead win outright on hit count alone; `whimsicott`
+        is a real, sizeable underdog; `incineroar` faces a 1HKO it can
+        never out-hit-count regardless of chip -- not faster, so even
+        chipping Arcanine-Hisui to a sliver of HP still leaves Incineroar
+        needing 0 hits, an impossible target, hence 1.0 (chip alone can
+        never flip this one; only a genuinely different answer can)."""
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        cases = {
+            "Kingambit": (2, 2),
+            "Whimsicott": (5, 1),
+            "Incineroar": (3, 1),
+        }
+        for our_name, (our_hits, their_hits) in cases.items():
+            cell = result["matrix"][(our_name, "Arcanine-Hisui")]
+            self.assertEqual(cell["our_hits_to_ko"], our_hits, our_name)
+            self.assertEqual(cell["their_hits_to_ko"], their_hits, our_name)
+            self.assertEqual(cell["verdict"], "lose", our_name)
+        self.assertEqual(
+            result["matrix"][("Incineroar", "Arcanine-Hisui")]["chip_needed_frac"], 1.0)
+        # Kingambit only ties on hit count (loses purely on speed) -- a far
+        # smaller chip closes that gap than Whimsicott's real 5-vs-1 deficit.
+        self.assertLess(
+            result["matrix"][("Kingambit", "Arcanine-Hisui")]["chip_needed_frac"],
+            result["matrix"][("Whimsicott", "Arcanine-Hisui")]["chip_needed_frac"])
+
+    def test_a_hard_type_immunity_reports_chip_cannot_help(self):
+        """`our_hits_to_ko` of `None` (this move can never KO the target at
+        all, e.g. a hard type immunity) must report `chip_needed_frac` as
+        `None` too -- no amount of chip fixes a moveset problem."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        # Whimsicott (pure Grass/Fairy-neutral attacker here) vs a Ghost --
+        # find any real bring4-member/enemy cell in this fixture's own
+        # matrix with our_hits_to_ko None, or synthesize a known-immune
+        # pair directly if none happens to occur naturally.
+        result = cf.prematch_win_conditions(
+            self.row, self.our_built, self.enemy_built, self.W["typechart"])
+        immune_cells = [(k, v) for k, v in result["matrix"].items()
+                        if v["our_hits_to_ko"] is None]
+        if not immune_cells:
+            self.skipTest("no naturally-immune cell in this fixture's own matrix")
+        for _k, cell in immune_cells:
+            self.assertIsNone(cell["chip_needed_frac"])
 
 
 class TestEvolveFromTeam(unittest.TestCase):
@@ -10755,6 +11000,52 @@ class TestEvolveFromTeam(unittest.TestCase):
             self.assertEqual(r["removed"], r["member"])
             self.assertGreater(r["delta"], 0.0)
 
+    def test_each_result_carries_its_own_resulting_team_and_breakdown_rates(self):
+        """"give more in depth/summary info" -- each result now carries the
+        resulting FULL roster and the individual baseline/new per-90
+        breakdown rates (win/tailwind-safe/protect-safe/follow-me-safe),
+        not just the single blended score."""
+        results = self._evolve(swap_pool=["Hydreigon"])
+        self.assertTrue(results)
+        for r in results:
+            self.assertIn(len(r["team"]), (3,))
+            self.assertEqual(set(r["team"]) - {r["added"]}, set(self.core) - {r["removed"]})
+            for key in ("win_rate", "tailwind_safe_rate", "protect_safe_rate",
+                       "follow_me_safe_rate"):
+                self.assertIn(f"baseline_{key}", r)
+                self.assertIn(f"new_{key}", r)
+
+    def test_jobs_2_produces_the_same_results_as_serial(self):
+        """`jobs` is purely a speed knob -- the same trials, same scores,
+        just farmed out to worker processes instead of run one after
+        another."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        serial = cf.evolve_from_team(
+            self.core, self.targets, merged, moves, natures, typechart,
+            turns=2, move_overrides=self.suboptimal_moves,
+            swap_pool=["Hydreigon"])
+        parallel = cf.evolve_from_team(
+            self.core, self.targets, merged, moves, natures, typechart,
+            turns=2, move_overrides=self.suboptimal_moves,
+            swap_pool=["Hydreigon"], jobs=2)
+        key = lambda r: (r["kind"], r["member"], r["removed"], r["added"])  # noqa: E731
+        self.assertEqual(sorted(serial, key=key), sorted(parallel, key=key))
+
+    def test_progress_callback_reaches_done_equals_total_exactly_once(self):
+        calls = []
+        self._evolve(swap_pool=["Hydreigon"])
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        cf.evolve_from_team(
+            self.core, self.targets, merged, moves, natures, typechart,
+            turns=2, move_overrides=self.suboptimal_moves,
+            swap_pool=["Hydreigon"], progress_callback=lambda d, t: calls.append((d, t)))
+        self.assertTrue(calls)
+        total = calls[0][1]
+        self.assertTrue(all(t == total for _d, t in calls))
+        self.assertEqual([d for d, _t in calls], list(range(1, total + 1)))
+
 
 class TestRoundRobinSavedTeams(unittest.TestCase):
     """"Give me an option ... to only run all the saved teams vs the other
@@ -10783,16 +11074,28 @@ class TestRoundRobinSavedTeams(unittest.TestCase):
             self.teams, self.meta, merged, moves, natures, typechart,
             turns=1, **kwargs))
 
-    def test_mirror_included_and_reverse_pair_not_duplicated(self):
+    def test_mirror_included_both_directions_raced_plus_head_to_head(self):
+        """Two teams A/B: the mirror A-A and B-B each race once (there is
+        only one direction against yourself), but the non-mirror A/B pair
+        races BOTH directions (A's own best-4 vs B's full roster, then B's
+        own best-4 vs A's full roster) plus a third "best4_vs_best4" layer
+        racing each side's own best-4 directly against the other's --
+        "race both directions" so every team's own summary reflects its
+        own real performance, not just whichever side it landed on."""
         results = self._run()
-        pairs = [(a, b) for a, b, _pr, _br in results]
-        self.assertEqual(pairs, [("A", "A"), ("A", "B"), ("B", "B")])
+        rows = [(a, b, layer) for a, b, _pr, _br, layer, _er in results]
+        self.assertEqual(rows, [
+            ("A", "A", "vs_full"),
+            ("A", "B", "vs_full"),
+            ("B", "A", "vs_full"),
+            ("A", "B", "best4_vs_best4"),
+            ("B", "B", "vs_full")])
 
     def test_a_teams_own_item_override_survives_on_its_own_side_every_time(self):
         """Kingambit only exists on team A -- its "Chople Berry" override
         must show up in `item1`/`item2` (OUR side's own field) whenever A
         is racing, whichever side of the matchup it's on."""
-        for team_a, team_b, pair_rows, _br in self._run():
+        for team_a, team_b, pair_rows, _br, _layer, _er in self._run():
             if "A" not in (team_a, team_b):
                 continue
             for r in pair_rows:
@@ -10802,9 +11105,24 @@ class TestRoundRobinSavedTeams(unittest.TestCase):
                 item = r["item1"] if idx == 0 else r["item2"]
                 self.assertEqual(item, "Chople Berry", (team_a, team_b, r["pair"]))
 
+    def test_best4_vs_best4_enemy_roster_is_the_enemys_best4_not_its_full_roster(self):
+        """The `enemy_roster` returned alongside the "best4_vs_best4" layer
+        is the enemy's OWN best bring-4 (its "vs_full" row's `bring4`), not
+        its full saved roster -- the whole point of this third layer being
+        a narrower, more realistic head-to-head than "vs_full"."""
+        results = self._run()
+        vs_full_by_pair = {(a, b): br for a, b, _pr, br, layer, _er in results
+                           if layer == "vs_full"}
+        for a, b, _pr, _br, layer, enemy_roster in results:
+            if layer != "best4_vs_best4":
+                continue
+            expected = list(vs_full_by_pair[(b, a)][0]["bring4"])
+            self.assertEqual(sorted(enemy_roster), sorted(expected))
+
     def test_team_names_narrows_the_grid(self):
         results = self._run(team_names=["A"])
-        self.assertEqual([(a, b) for a, b, _pr, _br in results], [("A", "A")])
+        self.assertEqual([(a, b) for a, b, _pr, _br, _layer, _er in results],
+                         [("A", "A")])
 
     def test_a_team_with_an_illegal_roster_size_is_skipped_not_crashed(self):
         teams = dict(self.teams)
@@ -10815,7 +11133,7 @@ class TestRoundRobinSavedTeams(unittest.TestCase):
         natures, typechart = self.W["natures"], self.W["typechart"]
         results = list(cf.round_robin_saved_teams(
             teams, meta, merged, moves, natures, typechart, turns=1))
-        names = {n for a, b, _pr, _br in results for n in (a, b)}
+        names = {n for a, b, _pr, _br, _layer, _er in results for n in (a, b)}
         self.assertNotIn("Tiny", names)
 
 

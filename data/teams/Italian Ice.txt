@@ -1,0 +1,53 @@
+Froslass @ Froslassite
+Ability: Cursed Body
+Level: 50
+Nature: Timid
+- Blizzard
+- Shadow Ball
+- Aurora Veil
+- Protect
+
+Kingambit @ Black Glasses
+Ability: Defiant
+Level: 50
+Nature: Adamant
+- Kowtow Cleave
+- Sucker Punch
+- Swords Dance
+- Protect
+
+Sneasler @ White Herb
+Ability: Unburden
+Level: 50
+Nature: Adamant
+- Fake Out
+- Close Combat
+- Dire Claw
+- Protect
+
+Lycanroc-Dusk @ Focus Sash
+Ability: Tough Claws
+Level: 50
+Nature: Adamant
+- Accelerock
+- Close Combat
+- Rock Slide
+- Protect
+
+Basculegion @ Life Orb
+Ability: Adaptability
+Level: 50
+Nature: Adamant
+- Wave Crash
+- Last Respects
+- Aqua Jet
+- Protect
+
+Scovillain @ Scovillainite
+Ability: Moody
+Level: 50
+Nature: Bold
+- Overheat
+- Giga Drain
+- Rage Powder
+- Protect

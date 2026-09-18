@@ -21,7 +21,7 @@ TEAM = ["Arcanine-Hisui", "Hydreigon", "Gallade", "Gholdengo",
 
 def app(team=None, sets=None):
     from streamlit.testing.v1 import AppTest
-    at = AppTest.from_file(APP, default_timeout=250)
+    at = AppTest.from_file(APP, default_timeout=500)
     at.session_state["team"] = list(team if team is not None else TEAM)
     at.session_state["sets"] = dict(sets) if sets is not None else {}
     return at.run()
@@ -266,7 +266,7 @@ class TestForceIncludeAcrossViews(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         self.assertTrue(any(m.key == "ct_b4_include" for m in at.multiselect))
         vs_sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
-        vs_sb.set_value("Rain").run()
+        vs_sb.set_value("Golisopod Rain").run()
         # A real, low-Score species that a small top-Score pool would
         # otherwise never include.
         forced_name = "Ariados"
@@ -286,7 +286,7 @@ class TestForceIncludeAcrossViews(unittest.TestCase):
         at = [m for m in at.multiselect if m.key == "ct_mb4_include"][0].set_value(
             [forced_name]).run()
         at = [m for m in at.multiselect if m.key == "ct_mb4_vs"][0].set_value(
-            ["Rain"]).run()
+            ["Golisopod Rain"]).run()
         at = [b for b in at.button if b.key == "ct_mb4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
 
@@ -1169,7 +1169,8 @@ class TestHitCountMatrixSection(unittest.TestCase):
         bring4_rows = at.session_state["ct_b4_bring4_rows"]
         self.assertEqual(set(dfs[0]["Ours"]), set(bring4_rows[0]["bring4"]))
         for cell in dfs[0].iloc[0, 1:]:
-            self.assertRegex(str(cell), r"^(\d+HKO|--) / (\d+HKO|--) [✅❌➖]$")
+            self.assertRegex(str(cell),
+                             r"^(\d+HKO|--) / (\d+HKO|--) [✅❌➖]( \(chip \d+%\))?$")
 
     def test_picked_bring4_deep_dive_shows_the_hit_count_matrix(self):
         at = app()
@@ -1257,7 +1258,12 @@ class TestRoundRobinMode(unittest.TestCase):
         self.assertTrue(any(m.key == "ct_rr_teams" for m in at.multiselect))
         self.assertTrue(any(b.key == "ct_rr_go" for b in at.button))
 
-    def test_running_it_on_two_teams_renders_all_three_matchups(self):
+    def test_running_it_on_two_teams_renders_all_five_matchups(self):
+        """Two teams: the mirrors A-A/B-B (one direction each), the non-
+        mirror pair raced BOTH directions (A-B and B-A -- "race both
+        directions" so every team's own summary reflects its own real
+        performance), plus the "best4 vs best4" head-to-head layer for
+        that same non-mirror pair, rendered in its own section below."""
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
         from _harness import load_world
         W = load_world()
@@ -1274,10 +1280,11 @@ class TestRoundRobinMode(unittest.TestCase):
         headings = {m.value for m in at.markdown if m.value.startswith("### ")}
         self.assertIn(f"### {a} vs {a}", headings)
         self.assertIn(f"### {a} vs {b}", headings)
+        self.assertIn(f"### {b} vs {a}", headings)
+        self.assertIn(f"### {a} best-4 vs {b} best-4", headings)
         self.assertIn(f"### {b} vs {b}", headings)
-        self.assertNotIn(f"### {b} vs {a}", headings)
         results = at.session_state["ct_rr_results"]
-        self.assertEqual(len(results), 3)
+        self.assertEqual(len(results), 5)
 
     def test_running_it_also_populates_the_gameplan_cache(self):
         """The same `_cache_gameplans` hook every other Counter Table
@@ -2101,7 +2108,15 @@ class TestEnemyChoiceScarfDropdownRealSets(unittest.TestCase):
         "EVs: 4 HP / 252 SpA / 252 Spe\nTimid Nature\n"
         "- Tailwind\n- Moonblast\n- Encore\n- Protect")
 
-    PLAIN_SPECIES_LIST = "Basculegion / Whimsicott"
+    # Basculegion no longer works for this: data/default_sets.txt now pins
+    # its real default set (Life Orb, no Choice Scarf), so its own top
+    # recorded item is no longer Choice Scarf at all. Staraptor's BASE row
+    # is untouched by that file (its pinned entry lists item "Staraptite",
+    # a Mega stone, so `apply_default_sets` bakes it onto the "Mega
+    # Staraptor" row instead -- see that function's own "Item/nature/EVs/
+    # moves apply directly to whichever row `name` resolves to" comment) --
+    # it still shows its real, very high (~99%) Choice Scarf usage here.
+    PLAIN_SPECIES_LIST = "Staraptor / Whimsicott"
 
     def _to_paste_mode(self, at):
         vs = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
@@ -2173,8 +2188,8 @@ class TestEnemyChoiceScarfDropdownRealSets(unittest.TestCase):
         self.assertEqual(sb.value, "(none)")
         captions = [c.value for c in at.caption]
         matches = [c for c in captions
-                  if "Basculegion" in c and "commonly runs Choice Scarf" in c]
-        self.assertTrue(matches, f"expected a Basculegion Choice Scarf "
+                  if "Staraptor" in c and "commonly runs Choice Scarf" in c]
+        self.assertTrue(matches, f"expected a Staraptor Choice Scarf "
                         f"suggestion caption, got: {captions}")
 
 

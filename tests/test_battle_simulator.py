@@ -215,6 +215,67 @@ class TestTheirSideAcceptsAPokepaste(unittest.TestCase):
         self.assertIsNotNone(at.session_state["sim_battle"])
 
 
+class TestPasteAcceptsATeamsheetTokenOrJson(unittest.TestCase):
+    """"the teamsheets don't seem to be used in the battle simulator ... one
+    pokemon has a Focus Sash, but no focus sash was present in the battle
+    simulator" -- `our_side_pool`/`their_side_pool`'s own "Paste a
+    pokepaste" box used to call `species_data.custom_team_from_export`
+    directly, which only understands raw Showdown-export text -- a
+    generated teamsheet (the xlsx export's own base64 token, or
+    `--teamsheet-json`'s printed JSON) pasted in there failed to parse (or
+    parsed garbage), silently dropping real item pins like a Focus Sash.
+    Both boxes now use `_load_team_text`, the same general sniffer the
+    Team Builder tab's own paste box already used, so a teamsheet token's
+    real items round-trip all the way into the actual battle Combatants
+    here too -- confirmed directly against `sim_battle`, not just the
+    "Parsed: ..." success message."""
+
+    SIX = ["Garchomp", "Incineroar", "Gallade", "Hydreigon", "Sinistcha", "Kingambit"]
+
+    def _token(self):
+        from team_sheet import encode_teamsheet
+        sets = {"Garchomp": {"item": "Focus Sash",
+                             "moves": ["Dragon Claw", "Earthquake", "Rock Slide", "Protect"]}}
+        return encode_teamsheet(self.SIX, sets)
+
+    def test_their_side_paste_accepts_a_teamsheet_token_with_the_real_item_intact(self):
+        at = fresh_app()
+        tab = sim_tab(at)
+        our_radio = next(r for r in tab.radio if r.label == "Our side")
+        at = our_radio.set_value("Any Pokemon").run()
+        tab = sim_tab(at)
+        lead_ms = next(m for m in tab.multiselect if m.label == "Our lead (2)")
+        at = lead_ms.set_value(["Milotic", "Excadrill"]).run()
+        tab = sim_tab(at)
+        back_ms = next(m for m in tab.multiselect if m.label == "Our back (2)")
+        at = back_ms.set_value(["Aegislash", "Tyranitar"]).run()
+        tab = sim_tab(at)
+        their_radio = next(r for r in tab.radio if r.label == "Their side")
+        at = their_radio.set_value("Paste a pokepaste").run()
+        tab = sim_tab(at)
+        ta = next(t for t in tab.text_area if t.key and t.key.endswith("_foe_paste"))
+        at = ta.set_value(self._token()).run()
+        self.assertFalse(at.exception, list(at.exception))
+        tab = sim_tab(at)
+        self.assertTrue(any("Garchomp" in s.value for s in tab.success),
+                        "expected the teamsheet token to parse, not error out")
+        mode_radio = next(r for r in tab.radio if r.label == "Their bring")
+        at = mode_radio.set_value("I choose their bring").run()
+        tab = sim_tab(at)
+        their_lead = next(m for m in tab.multiselect if m.label == "Their lead (2)")
+        at = their_lead.set_value(["Garchomp", "Incineroar"]).run()
+        tab = sim_tab(at)
+        their_back = next(m for m in tab.multiselect if m.label == "Their back (2)")
+        at = their_back.set_value(["Gallade", "Hydreigon"]).run()
+        tab = sim_tab(at)
+        start = next(b for b in tab.button if b.label == "Start Battle")
+        at = start.click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        battle = at.session_state["sim_battle"]
+        garchomp = next(c for c in battle.p2.roster if c.name == "Garchomp")
+        self.assertEqual(garchomp.item, "Focus Sash")
+
+
 class TestBattleSimulatorTurnLoop(unittest.TestCase):
     """Once a battle exists, the human's own action picker and Submit
     button drive a real `Battle.run_turn` -- no second engine."""
