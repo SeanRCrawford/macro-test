@@ -176,6 +176,15 @@ def _mega_project(c):
     at all means asking about the mega form. Applied unconditionally, unlike
     `projection.mega_view` (which checks whether a combatant is currently
     ACTIVE in a real `Battle` -- there is no such battle here).
+
+    Stashes the pre-transform ability into `pre_mega_ability` before
+    overwriting `ability` with the mega one -- fast-forwarding straight to
+    the mega form is right for everything the rest of this module computes
+    (damage, speed, typing), but a real opening-turn Intimidate resolves
+    BEFORE any Mega Evolution (`battle.py`'s own switch-in ordering), so
+    `_intimidate_mult_by_role` still needs to know what ability was active
+    at that exact moment, not just the form this module otherwise treats as
+    already active from turn 1.
     """
     if not getattr(c, "is_mega_pick", False) or not c.mega_stats:
         return c
@@ -183,6 +192,7 @@ def _mega_project(c):
     view.stats = dict(c.mega_stats)
     view.types = list(c.mega_types) if c.mega_types else c.types
     if c.mega_ability:
+        view.pre_mega_ability = c.ability
         view.ability = c.mega_ability
     if c.mega_weight_kg is not None:
         view.weight_kg = c.mega_weight_kg
@@ -2148,6 +2158,30 @@ _SIDE_OF = {"C": ("C", "P"), "P": ("C", "P"), "E1": ("E1", "E2"), "E2": ("E1", "
 _OPPOSING_OF = {"C": ("E1", "E2"), "P": ("E1", "E2"), "E1": ("C", "P"), "E2": ("C", "P")}
 
 
+def _has_intimidate(c):
+    """Does `c` ever have Intimidate active this battle -- its current
+    (possibly already mega-projected) ability, OR its `pre_mega_ability`
+    (see `_mega_project`) if this module fast-forwarded it straight to a
+    mega form whose OWN Intimidate only exists pre-transform (Mega
+    Salamence: base Salamence is Intimidate, Aerilate once mega). Real
+    Intimidate fires at switch-in, before that turn's Mega Evolution, so a
+    Pokemon that starts the battle with it counts even though this cheap
+    model already treats it as mega-evolved for everything else."""
+    return c.ability == "Intimidate" or getattr(c, "pre_mega_ability", None) == "Intimidate"
+
+
+def _ability_at_switch_in(c):
+    """The ability active at the moment an opening-turn Intimidate resolves
+    -- `pre_mega_ability` (the base-form ability, see `_mega_project`) when
+    set, else `c.ability` unchanged. Real Mega Evolution happens later in
+    turn resolution than switch-in triggers like Intimidate (`battle.py`'s
+    own ordering), so a combatant this module has already fast-forwarded to
+    its mega form must still be judged by its BASE ability (Contrary,
+    Defiant, Competitive, or an Intimidate-blocking ability included) for
+    this one check -- everything else about it stays the mega projection."""
+    return getattr(c, "pre_mega_ability", None) or c.ability
+
+
 def _intimidate_mult_by_role(combatants):
     """{role: {"physical": mult}} or {role: {"special": mult}} for every
     role whose OPPOSING side has a live Intimidate holder -- computed ONCE
@@ -2164,6 +2198,16 @@ def _intimidate_mult_by_role(combatants):
     -1 magnitude into a +1 (x1.5), not a +2 -- it flips direction, not size
     (mirrors `damage.apply_intimidate`'s own Contrary branch).
 
+    Both the holder's OWN Intimidate check and the receiving side's
+    blocked/Defiant/Competitive/Contrary check read the ability active at
+    switch-in, not necessarily this module's own mega-projected `ability`
+    -- see `_has_intimidate`/`_ability_at_switch_in`. A Mega Staraptor
+    (Contrary only once mega-evolved) still takes a real Attack drop from
+    an opposing Intimidate holder, since that Intimidate resolves before
+    ITS mega evolution; a Mega Salamence (Intimidate only pre-evolution)
+    still intimidates the opposing side, since ITS OWN intimidate resolves
+    before ITS mega evolution too.
+
     A role with no entry here means "unaffected" (multiplier 1.0), matching
     every other optional per-role map in this module's convention.
     """
@@ -2171,16 +2215,17 @@ def _intimidate_mult_by_role(combatants):
     for role, c in combatants.items():
         if c is None:
             continue
-        if not any(combatants[r] is not None and combatants[r].ability == "Intimidate"
+        if not any(combatants[r] is not None and _has_intimidate(combatants[r])
                    for r in _OPPOSING_OF[role]):
             continue
-        if c.ability in INTIMIDATE_BLOCKED:
+        ability = _ability_at_switch_in(c)
+        if ability in INTIMIDATE_BLOCKED:
             continue
-        if c.ability == "Defiant":
+        if ability == "Defiant":
             out[role] = {"physical": 2.0}
-        elif c.ability == "Competitive":
+        elif ability == "Competitive":
             out[role] = {"special": 2.0}
-        elif c.ability == "Contrary":
+        elif ability == "Contrary":
             out[role] = {"physical": 1.5}
         else:
             out[role] = {"physical": 2 / 3}
