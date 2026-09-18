@@ -9063,11 +9063,15 @@ class TestBring4FromDeepDive(unittest.TestCase):
         self.assertTrue(checked_any, "fixture never actually produced a "
                         "bring4 carrying both stone holders -- test is vacuous")
 
-    def test_mega_used_is_none_for_a_bring4_that_excludes_the_dives_mega(self):
-        """A bring4 that leaves out `dive`'s own chosen mega (but still
-        carries the OTHER, non-transforming stone holder) never claims a
-        mega -- that member just never transformed in this dive, whichever
-        bring you look at."""
+    def test_the_other_mega_still_transforms_when_brought_alone(self):
+        """"in the bring4 full deep dive only one pokemon can mega across
+        all matches, even when only the other mega is brought -- the one
+        mega rule should only apply per match" -- a bring4 that leaves out
+        `dive`'s own whole-core-chosen mega, but still carries the OTHER
+        stone holder, has nothing that Pokemon could be inconsistent with
+        (its rival mega isn't even in this bring): it must transform, not
+        sit in base form just because a DIFFERENT bring4 (or the core as a
+        whole) preferred the other one."""
         rows = cf.bring4_from_deep_dive(self.CORE, self.dive, self.TARGETS)
         other_mega = next(m for m in ("Mega Gengar", "Mega Alakazam")
                           if m != self.dive["mega_used"])
@@ -9076,7 +9080,7 @@ class TestBring4FromDeepDive(unittest.TestCase):
             if (self.dive["mega_used"] not in row["bring4"]
                     and other_mega in row["bring4"]):
                 checked_any = True
-                self.assertIsNone(row["mega_used"])
+                self.assertEqual(row["mega_used"], other_mega)
         self.assertTrue(checked_any, "fixture never produced a bring4 "
                         "excluding the dive's mega while keeping the other "
                         "stone holder -- test is vacuous")
@@ -10974,10 +10978,19 @@ class TestPrematchWinConditions(unittest.TestCase):
 
 class TestEvolveFromTeam(unittest.TestCase):
     """"If I define one high-performing team ... then try to see if any
-    improvements can be made" -- a LOCAL, greedy search around one fixed
-    starting core: move swaps on existing members, one substitution at a
-    time, scored by `_evolve_dive_score` (the SAME `_CORE_BLEND_WEIGHTS`-
+    improvements can be made" -- "the --evolve-from-team should iterate for
+    multiple improvements (and respect the fact that only one of a species
+    can be a team ...) I need to see the best possible joint impact of
+    replacing 1-3 pokemon, or replacing moves, or replacing items, with the
+    aim of maximising these effects jointly."
+
+    GREEDY HILL-CLIMBING, up to `max_changes` rounds (default 3): each
+    round is a LOCAL search around that round's own fixed starting core --
+    move swaps, item swaps, and whole-member swaps, one substitution at a
+    time -- scored by `_evolve_dive_score` (the SAME `_CORE_BLEND_WEIGHTS`-
     weighted per-90 yardstick `_core_row`'s own "Avg Wins/90" blend uses).
+    Round 1's own best pick is APPLIED before round 2 searches, and so on,
+    chaining up to `max_changes` joint changes together.
 
     Real, verified, deliberately-suboptimal fixture: Garchomp forced onto
     Poison Jab (a real, usage-backed move, just a clearly worse pick here)
@@ -10986,7 +10999,11 @@ class TestEvolveFromTeam(unittest.TestCase):
     Ground) + Toxapex. Verified directly: at `turns=2` the raw race for
     BOTH of Garchomp's own pairs flips from "no_ko" to "out_trade" once
     Earthquake replaces Poison Jab, taking the blended score from 18.0 to
-    60.0 -- a real, sizeable improvement, not a rounding artifact.
+    60.0 -- a real, sizeable improvement, not a rounding artifact. A
+    further genuine Sitrus Berry -> Life Orb item improvement (60.0 ->
+    66.0, verified directly the same way) is available on TOP of that
+    move swap, once it's the round-2 baseline -- the "joint impact of
+    replacing ... moves, or ... items" fixture below.
     """
 
     def setUp(self):
@@ -11000,16 +11017,24 @@ class TestEvolveFromTeam(unittest.TestCase):
         self.suboptimal_moves = {
             "Garchomp": ["Poison Jab", "Dragon Claw", "Rock Slide", "Protect"]}
 
-    def _evolve(self, swap_pool=()):
+    def _evolve(self, swap_pool=(), max_changes=1, **extra):
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         return cf.evolve_from_team(
             self.core, self.targets, merged, moves, natures, typechart,
             turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=list(swap_pool))
+            swap_pool=list(swap_pool), max_changes=max_changes, **extra)
+
+    def _round1(self, swap_pool=(), **extra):
+        """Most of this class's own tests are about ONE round's own local
+        search (already covered by `TestEvolveFromTeam`'s pre-iteration
+        assertions) -- `max_changes=1` reproduces that in isolation,
+        `["rounds"][0]` the exact flat, sorted-by-delta-descending list the
+        tool's own original single-pass shape returned."""
+        return self._evolve(swap_pool=swap_pool, max_changes=1, **extra)["rounds"][0]
 
     def test_earthquake_surfaces_as_the_top_move_swap_with_a_positive_delta(self):
-        results = self._evolve()
+        results = self._round1()
         self.assertTrue(results, "expected at least one genuine improvement")
         top = results[0]
         self.assertEqual(top["kind"], "move")
@@ -11022,19 +11047,20 @@ class TestEvolveFromTeam(unittest.TestCase):
         """The whole point of only surfacing `delta > 0` entries -- never a
         neutral or worse swap, "not an exhaustive dump of every swap
         tried."""
-        results = self._evolve()
+        results = self._round1()
         for r in results:
             self.assertGreater(r["delta"], 0.0, r)
 
     def test_results_are_sorted_by_delta_descending(self):
-        results = self._evolve()
+        results = self._round1()
         deltas = [r["delta"] for r in results]
         self.assertEqual(deltas, sorted(deltas, reverse=True))
 
     def test_baseline_score_is_the_same_across_every_returned_entry(self):
-        """Every candidate swap is compared against the SAME fixed
-        baseline (the ONE starting team), not a moving target."""
-        results = self._evolve()
+        """Every candidate swap in the SAME round is compared against the
+        SAME fixed baseline (that round's own ONE starting team), not a
+        moving target."""
+        results = self._round1()
         baselines = {r["baseline_score"] for r in results}
         self.assertEqual(len(baselines), 1)
 
@@ -11043,7 +11069,7 @@ class TestEvolveFromTeam(unittest.TestCase):
         roster -- kept fast) returns entries in the SAME shape as a move
         swap, tagged "kind": "member", with "removed"/"added" naming the
         departing/arriving Pokemon rather than moves."""
-        results = self._evolve(swap_pool=["Hydreigon"])
+        results = self._round1(swap_pool=["Hydreigon"])
         member_results = [r for r in results if r["kind"] == "member"]
         for r in member_results:
             self.assertIn(r["member"], self.core)
@@ -11051,12 +11077,36 @@ class TestEvolveFromTeam(unittest.TestCase):
             self.assertEqual(r["removed"], r["member"])
             self.assertGreater(r["delta"], 0.0)
 
+    def test_item_swap_kind_is_offered_and_never_changes_membership(self):
+        """New third swap kind alongside move/member: try each OTHER legal
+        item on an existing member (`optimize_sets.legal_items`), holding
+        moves and everyone else fixed -- "or replacing items". Uses the
+        REAL (non-suboptimal-moves) core directly -- with Garchomp already
+        on Earthquake, Sitrus Berry is itself the genuinely improvable
+        pick (verified directly: Life Orb/Soft Sand both score +6.0 over
+        it here); `self.suboptimal_moves`' own Poison-Jab fixture has no
+        real item improvement available until ITS OWN move swap has
+        already happened first (see
+        test_iterating_chains_a_move_swap_then_an_item_swap)."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        results = cf.evolve_from_team(
+            self.core, self.targets, merged, moves, natures, typechart,
+            turns=2, swap_pool=["Hydreigon"], max_changes=1)["rounds"][0]
+        item_results = [r for r in results if r["kind"] == "item"]
+        self.assertTrue(item_results, "expected at least one genuine item improvement")
+        for r in item_results:
+            self.assertIn(r["member"], self.core)
+            self.assertNotEqual(r["removed"], r["added"])
+            self.assertEqual(r["team"], self.core)
+            self.assertGreater(r["delta"], 0.0)
+
     def test_each_result_carries_its_own_resulting_team_and_breakdown_rates(self):
         """"give more in depth/summary info" -- each result now carries the
         resulting FULL roster and the individual baseline/new per-90
         breakdown rates (win/tailwind-safe/protect-safe/follow-me-safe),
         not just the single blended score."""
-        results = self._evolve(swap_pool=["Hydreigon"])
+        results = self._round1(swap_pool=["Hydreigon"])
         self.assertTrue(results)
         for r in results:
             self.assertIn(len(r["team"]), (3,))
@@ -11066,36 +11116,115 @@ class TestEvolveFromTeam(unittest.TestCase):
                 self.assertIn(f"baseline_{key}", r)
                 self.assertIn(f"new_{key}", r)
 
+    def test_each_result_carries_its_full_resulting_sets(self):
+        """"I need to see the details, what are the movesets of the new
+        pokemon, what are the move/item changes, and so on" -- every
+        result's own "sets" is the FULL resulting team's per-member item +
+        4-move list, not just the one changed member's new name."""
+        results = self._round1(swap_pool=["Hydreigon"])
+        self.assertTrue(results)
+        for r in results:
+            self.assertEqual(set(r["sets"]), set(r["team"]))
+            for s in r["sets"].values():
+                self.assertIn("item", s)
+                self.assertEqual(len(s["moves"]), 4)
+
     def test_jobs_2_produces_the_same_results_as_serial(self):
         """`jobs` is purely a speed knob -- the same trials, same scores,
         just farmed out to worker processes instead of run one after
         another."""
-        merged, moves = self.W["merged"], self.W["moves"]
-        natures, typechart = self.W["natures"], self.W["typechart"]
-        serial = cf.evolve_from_team(
-            self.core, self.targets, merged, moves, natures, typechart,
-            turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=["Hydreigon"])
-        parallel = cf.evolve_from_team(
-            self.core, self.targets, merged, moves, natures, typechart,
-            turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=["Hydreigon"], jobs=2)
+        serial = self._round1(swap_pool=["Hydreigon"])
+        parallel = self._evolve(swap_pool=["Hydreigon"], jobs=2)["rounds"][0]
         key = lambda r: (r["kind"], r["member"], r["removed"], r["added"])  # noqa: E731
         self.assertEqual(sorted(serial, key=key), sorted(parallel, key=key))
 
     def test_progress_callback_reaches_done_equals_total_exactly_once(self):
         calls = []
-        self._evolve(swap_pool=["Hydreigon"])
-        merged, moves = self.W["merged"], self.W["moves"]
-        natures, typechart = self.W["natures"], self.W["typechart"]
-        cf.evolve_from_team(
-            self.core, self.targets, merged, moves, natures, typechart,
-            turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=["Hydreigon"], progress_callback=lambda d, t: calls.append((d, t)))
+        self._evolve(swap_pool=["Hydreigon"],
+                     progress_callback=lambda d, t, rnd: calls.append((d, t, rnd)))
         self.assertTrue(calls)
         total = calls[0][1]
-        self.assertTrue(all(t == total for _d, t in calls))
-        self.assertEqual([d for d, _t in calls], list(range(1, total + 1)))
+        self.assertTrue(all(t == total and rnd == 1 for _d, t, rnd in calls))
+        self.assertEqual([d for d, _t, _rnd in calls], list(range(1, total + 1)))
+
+    def test_iterating_chains_a_move_swap_then_an_item_swap(self):
+        """"I need to see the best possible joint impact of replacing ...
+        moves, or replacing items ... maximising these effects jointly" --
+        round 1's own best move swap (Poison Jab -> Earthquake) is chained
+        into round 2's own search around the now-improved team, which finds
+        a further genuine item improvement (Sitrus Berry -> Life Orb) on
+        top of it -- a real joint result neither round alone would show."""
+        evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=2)
+        self.assertEqual(len(evolved["chain"]), 2)
+        step1, step2 = evolved["chain"]
+        self.assertEqual(step1["kind"], "move")
+        self.assertEqual(step1["member"], "Garchomp")
+        self.assertEqual(step1["added"], "Earthquake")
+        self.assertEqual(step2["kind"], "item")
+        self.assertEqual(step2["member"], "Garchomp")
+        self.assertEqual(step2["added"], "Life Orb")
+        # Round 2's own baseline is round 1's OWN new score, a moving
+        # target ACROSS rounds -- unlike within one round (see
+        # test_baseline_score_is_the_same_across_every_returned_entry).
+        self.assertAlmostEqual(step2["baseline_score"], step1["new_score"])
+        self.assertAlmostEqual(evolved["final_score"], step2["new_score"])
+        self.assertGreater(evolved["final_score"], evolved["baseline_score"])
+        self.assertEqual(evolved["final_team"], step2["team"])
+        self.assertEqual(evolved["final_sets"], step2["sets"])
+        self.assertEqual(len(evolved["rounds"]), 2)
+
+    def test_max_changes_1_runs_only_one_round(self):
+        """`max_changes=1` reproduces the tool's original one-pass
+        behaviour -- `chain` still names the single best pick (so a caller
+        always knows what WOULD be applied first), but no second round
+        ever runs to chain onto it."""
+        evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=1)
+        self.assertEqual(len(evolved["rounds"]), 1)
+        self.assertEqual(len(evolved["chain"]), 1)
+        self.assertEqual(evolved["chain"][0], evolved["rounds"][0][0])
+
+    def test_iteration_stops_early_once_a_round_finds_no_improvement(self):
+        """Asking for more rounds than there turn out to be genuine
+        improvements for doesn't pad `rounds`/`chain` with empty or
+        worse-than-baseline entries -- it just stops."""
+        evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=10)
+        self.assertLess(len(evolved["chain"]), 10)
+        self.assertEqual(len(evolved["rounds"]), len(evolved["chain"]) + 1)
+        self.assertEqual(evolved["rounds"][-1], [])
+
+    def test_no_improvement_at_all_returns_an_empty_chain_and_the_original_team(self):
+        """`evolve_from_team`'s own outer orchestration, isolated from
+        needing a real fixture with provably zero improvements anywhere
+        (every real team this search tries tends to have SOME marginal
+        item swap available) -- forcing round 1 itself to come back empty
+        confirms `chain`/`final_team`/`final_score`/`final_sets` all
+        correctly fall back to "nothing changed", not an error."""
+        from unittest import mock
+        baseline_breakdown = {"score": 42.0, "win_rate": 1.0, "tailwind_safe_rate": 1.0,
+                              "protect_safe_rate": 1.0, "follow_me_safe_rate": 1.0}
+        with mock.patch.object(cf, "_evolve_run_one_round",
+                               return_value=(baseline_breakdown, [])):
+            evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=3)
+        self.assertEqual(evolved["chain"], [])
+        self.assertEqual(evolved["rounds"], [[]])
+        self.assertEqual(evolved["final_team"], self.core)
+        self.assertEqual(evolved["final_score"], 42.0)
+        self.assertIsNone(evolved["final_sets"])
+
+    def test_a_mega_is_never_offered_as_a_whole_member_swap_alongside_its_own_base_form(self):
+        """"respect the fact that only one of a species can be a team, I
+        see it adding a Mega version of a base form already on the team" --
+        a whole-member-swap candidate that would put a Mega and its own
+        base form on the team together is never offered, even when it's
+        explicitly in `swap_pool`."""
+        core = ["Dragonite", "Kingambit", "Whimsicott"]
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        results = cf.evolve_from_team(
+            core, self.targets, merged, moves, natures, typechart, turns=2,
+            swap_pool=["Mega Dragonite", "Hydreigon"], max_changes=1)["rounds"][0]
+        offered = {r["added"] for r in results if r["kind"] == "member"}
+        self.assertNotIn("Mega Dragonite", offered)
 
 
 class TestRoundRobinSavedTeams(unittest.TestCase):

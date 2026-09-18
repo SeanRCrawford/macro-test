@@ -5,10 +5,15 @@
      used by default (if no set or EVs specified)"
 
 Confirmed with the user: data/default_sets.txt (editable via the app,
-same Showdown-export-per-Pokemon format as data/teams/*.txt), a WHOLE
-set only (item/ability/nature/EVs/moves all specified or the paste is
-rejected), applying to BOTH our own side and enemies (baked directly
-into the shared `merged` dataset -- see species_data.apply_default_sets).
+same Showdown-export-per-Pokemon format as data/teams/*.txt), applying
+to BOTH our own side and enemies (baked directly into the shared
+`merged` dataset -- see species_data.apply_default_sets). The FILE
+itself now applies per-field (a hand-edited entry missing e.g. EVs
+still overrides item/ability/nature/moves; only the missing field falls
+back to mbsmogon usage) -- but the "Save default set(s)" button in this
+tab still requires a WHOLE set (item/ability/nature/EVs/moves all
+specified or the paste is rejected), since that's the one path meant to
+be a full, deliberate statement of what a Pokemon runs.
 
 These tests WRITE to the real data/default_sets.txt (the same file the
 app itself reads/writes -- there is no test-only path to redirect it

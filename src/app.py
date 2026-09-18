@@ -69,7 +69,7 @@ def load_all(fingerprint):
     merged, unresolved, moves, natures, typechart = build_merged_dataset()
     dups = getattr(build_merged_dataset, "last_duplicates", {}) or {}
     default_set_issues = getattr(build_merged_dataset, "last_default_set_issues",
-                                 ([], [])) or ([], [])
+                                 ({}, [])) or ({}, [])
     return merged, unresolved, moves, natures, typechart, dups, default_set_issues
 
 
@@ -126,10 +126,12 @@ if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
 if default_set_incomplete:
-    st.caption(f"Note: data/default_sets.txt has an incomplete set for "
-              f"{', '.join(default_set_incomplete)} (needs item, ability, "
-              f"nature, EVs, AND 4 moves to become that species' new "
-              f"default) -- ignored.")
+    parts = [f"{name} (missing {', '.join(missing)})"
+             for name, missing in default_set_incomplete.items()]
+    st.caption(f"Note: data/default_sets.txt has a partial set for "
+              f"{'; '.join(parts)} -- the fields it DOES specify are still "
+              f"applied as that species' new default; only the missing "
+              f"field(s) keep falling back to mbsmogon usage.")
 if default_set_unrecognised:
     st.caption(f"Note: data/default_sets.txt names "
               f"{', '.join(default_set_unrecognised)}, not a species in "
@@ -1912,15 +1914,18 @@ with tab_build:
                 "\"let me create a 'default set' txt where I paste "
                 "pokepastes for individual pokemon, and for enemies this "
                 "should be the actual sets used by default\" -- one or "
-                "more COMPLETE Showdown exports (item, ability, nature, "
-                "EVs, AND 4 moves all specified), saved to "
-                "data/default_sets.txt. Once saved, that species' set "
-                "becomes THE default everywhere -- both our own side and "
-                "an enemy -- whenever no more specific set is already "
-                "pinned (a real known team, a paste, an explicit "
-                "override), replacing mbsmogon.xlsx's own usage-derived "
-                "pick. A paste missing any of the 5 fields is rejected "
-                "rather than half-applied.")
+                "more Showdown exports, saved to data/default_sets.txt. "
+                "Once saved, each field that species' export specifies "
+                "(item, ability, nature, EVs, moves) becomes THE default "
+                "for that field everywhere -- both our own side and an "
+                "enemy -- whenever no more specific set is already pinned "
+                "(a real known team, a paste, an explicit override), "
+                "replacing mbsmogon.xlsx's own usage-derived pick; any "
+                "field the export leaves out still falls back to "
+                "mbsmogon usage as normal. Saving through this box below "
+                "still requires a COMPLETE export (item, ability, nature, "
+                "EVs, AND 4 moves) -- edit data/default_sets.txt by hand "
+                "for a partial entry.")
             from species_data import (custom_team_from_export, load_default_sets,
                                       team_to_showdown_export, DEFAULT_SETS_FIELDS)
             existing_defaults, _incomplete = load_default_sets(merged)

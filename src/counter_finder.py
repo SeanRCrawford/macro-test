@@ -7582,13 +7582,32 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     BRING-4-CONSISTENT MEGA CHOICE: when `core` carries exactly 2 Mega-stone
     holders, this function (unlike `bring4_search`) doesn't do bring-4
     subsetting -- it reports every one of the core's own C(size,2) pairs
-    directly, so there is no "which subset" question, only "which of the
-    (at most 2) team-wide hypotheses is better for this core as a whole."
-    The whole racing pass runs TWICE, once per hypothesis (`_pair_
-    sort_key`'s existing "lower is better" ranking on each `overall` decides
-    the winner), and only that winning hypothesis is returned. A core with
+    directly, so there is no "which subset" question at THIS level, only
+    "which of the (at most 2) team-wide hypotheses is better for this core
+    as a WHOLE" (`_pair_sort_key`'s existing "lower is better" ranking on
+    each `overall` decides the winner). The whole racing pass runs TWICE,
+    once per hypothesis, and the winning one is returned as this function's
+    own `per_pair`/`overall`/`mega_used` -- unchanged from before, so every
+    existing caller reading just those three fields (xlsx export, console
+    printing, `_evolve_dive_breakdown`, `prematch_win_conditions`, ...)
+    still sees exactly one, already-decided, whole-core answer. A core with
     0 or 1 stone-holders needs no such choice and races once, unconstrained,
-    exactly as before this existed.
+    exactly as before this existed -- `mega_alt` is `None` in that case.
+
+    "in the bring4 full deep dive only one pokemon can mega across all
+    matches, even when only the other mega is brought -- the one mega rule
+    should only apply per match, rather than across all games" -- the
+    WINNING hypothesis above is still exactly right for a bring-4 subset
+    that carries BOTH stone holders (only one of them may transform in a
+    real game, so one whole-core-consistent choice per such bring is
+    correct), but it is WRONG for a bring-4 subset that carries only the
+    LOSING hypothesis's stone holder -- that Pokemon has nothing to be
+    inconsistent with (its rival mega isn't even in the game) and should
+    simply transform. The losing hypothesis's own `per_pair`/`overall`/
+    `mega_used` are kept on the return value as `mega_alt` (`None` when
+    `core` doesn't carry 2 stone holders) purely so `bring4_from_deep_dive`
+    can rebuild a real per-bring-4 choice -- see its own docstring -- from
+    both hypotheses; nothing else needs to read `mega_alt` directly.
 
     Returns {"core": tuple(core), "sets": {name: {"item", "moves"}},
     "per_pair": {(n1, n2): {"per_enemy": [{"target_names", "detail",
@@ -7599,7 +7618,9 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     across EVERY pair and EVERY enemy team>, "mega_used": the single
     Mega-stone holder this dive's winning hypothesis treats as transformed
     (`None` if `core` carries none) -- "note which one is used" once a
-    core's own 2 stone holders needed the consistency choice above}.
+    core's own 2 stone holders needed the consistency choice above,
+    "mega_alt": {"mega_used", "per_pair", "overall"} for the OTHER
+    hypothesis (`None` unless `core` carries exactly 2 stone holders)}.
     """
     core = list(dict.fromkeys(core))
     target_name_lists = [list(t) for t in target_name_lists]
@@ -7650,14 +7671,18 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
             worst_case_targeting=worst_case_targeting,
             check_trick_room=check_trick_room)
         dive_b["mega_used"] = megas[1]
-        return dive_a if (_pair_sort_key(dive_a["overall"])
-                          <= _pair_sort_key(dive_b["overall"])) else dive_b
+        winner, loser = (dive_a, dive_b) if (_pair_sort_key(dive_a["overall"])
+                                             <= _pair_sort_key(dive_b["overall"])) else (dive_b, dive_a)
+        winner["mega_alt"] = {"mega_used": loser["mega_used"],
+                              "per_pair": loser["per_pair"], "overall": loser["overall"]}
+        return winner
     result = _core_deep_dive_race(core, target_name_lists, our_built,
                                   enemy_built_by_team, typechart, turns, merged,
                                   sets, forced_base_names=frozenset(),
                                   worst_case_targeting=worst_case_targeting,
                                   check_trick_room=check_trick_room)
     result["mega_used"] = megas[0] if len(megas) == 1 else None
+    result["mega_alt"] = None
     return result
 
 
@@ -7698,37 +7723,70 @@ def bring4_from_deep_dive(core, dive, target_names, good_threshold=1.0):
     the WINNING bring's own pairs.
 
     "The bring4 team selection is saying do not mega either, but in the
-    battle log it clearly shows one is mega'd" -- `_bring4_candidates`'s
-    own `mega_used` field is built for a FRESH race, free to independently
-    pick which of a bring's (at most 2) stone holders transforms; `dive`
-    already settled that choice ONCE for the whole `core` (`core_deep_
-    dive`'s own "BRING-4-CONSISTENT MEGA CHOICE" paragraph -- every pair's
-    `detail` here was only ever raced under that one fixed hypothesis), so
-    a bring4 subset carrying BOTH of `core`'s stone holders must not
-    recount them as if it could choose again (that's where `mega_used`
-    landed on `None`, "neither", while the real per-pair log it came from
-    still shows the one `dive` actually chose transformed). Overridden
-    below to just read `dive`'s own single, already-decided answer.
+    battle log it clearly shows one is mega'd" was the first report on this
+    -- fixed once by making the label match `dive`'s own single fixed
+    choice. "in the bring4 full deep dive only one pokemon can mega across
+    all matches, even when only the other mega is brought -- the one mega
+    rule should only apply per match" was the deeper report that first fix
+    didn't reach: `dive` only ever raced ONE of `core`'s (at most 2)
+    team-wide mega hypotheses, so a bring-4 subset that happens to carry
+    only the OTHER hypothesis's stone holder had nothing but base-form
+    data to show it with -- its label and its battle log agreed, and were
+    BOTH wrong, since that lone stone holder has no rival mega in the game
+    to be inconsistent with and should simply transform.
+
+    When `dive` carries a `mega_alt` (`core_deep_dive`'s losing hypothesis,
+    kept for exactly this), this rebuilds the SAME `megas`/`pair_lookup_
+    forced_base` machinery `bring4_search`'s own Stage 2 already uses via
+    `_bring4_candidates`: pairs naming only one of the two stone holders
+    read from whichever of `dive`/`mega_alt` actually let it transform, and
+    a bring-4 subset carrying BOTH is decided per-BRING (not re-using
+    `dive`'s whole-core choice) by `_bring4_candidates`'s own existing
+    "try both, keep the better-ranked" logic -- the identical rule
+    `bring4_search` already applies. `mega_used` on each returned row is
+    therefore `_bring4_candidates`'s own per-bring computation, not
+    overridden afterward.
     """
     core = list(dict.fromkeys(core))
-    wanted = set(target_names)
-    pair_lookup = {}
-    for pair, pair_entry in dive["per_pair"].items():
-        match = next((pe for pe in pair_entry["per_enemy"]
-                     if set(pe["target_names"]) == wanted), None)
-        if match is None:
-            raise ValueError(
-                f"dive has no per-enemy entry for {pair} vs {target_names} "
-                f"-- was this dive built with that exact roster?")
-        row = dict(match["summary"])
-        row["pair"] = pair
-        row["detail"] = match["detail"]
-        pair_lookup[frozenset(pair)] = row
-    bring4_rows = _bring4_candidates(core, pair_lookup, target_names, good_threshold)
-    dive_mega = dive.get("mega_used")
-    for row in bring4_rows:
-        row["mega_used"] = dive_mega if dive_mega in row["bring4"] else None
-    return bring4_rows
+
+    def _pair_lookup_from(per_pair):
+        wanted = set(target_names)
+        lookup = {}
+        for pair, pair_entry in per_pair.items():
+            match = next((pe for pe in pair_entry["per_enemy"]
+                         if set(pe["target_names"]) == wanted), None)
+            if match is None:
+                raise ValueError(
+                    f"dive has no per-enemy entry for {pair} vs {target_names} "
+                    f"-- was this dive built with that exact roster?")
+            row = dict(match["summary"])
+            row["pair"] = pair
+            row["detail"] = match["detail"]
+            lookup[frozenset(pair)] = row
+        return lookup
+
+    winner_lookup = _pair_lookup_from(dive["per_pair"])
+    mega_alt = dive.get("mega_alt")
+    if mega_alt is None:
+        return _bring4_candidates(core, winner_lookup, target_names, good_threshold)
+
+    loser_lookup = _pair_lookup_from(mega_alt["per_pair"])
+    winner_mega, loser_mega = dive["mega_used"], mega_alt["mega_used"]
+    # The default lookup must be correct for every bring carrying AT MOST
+    # ONE of the two stone holders -- `winner_lookup` already is, except for
+    # a pair naming ONLY `loser_mega` (never `winner_mega`), which `dive`'s
+    # own fixed hypothesis forced to base for no reason (its rival mega
+    # isn't even in that pair) -- `loser_lookup` is unconstrained/correct
+    # there instead, since ITS forced-base name (`winner_mega`) is likewise
+    # absent from that pair.
+    pair_lookup = dict(winner_lookup)
+    for pair_key, row in loser_lookup.items():
+        if loser_mega in pair_key and winner_mega not in pair_key:
+            pair_lookup[pair_key] = row
+    pair_lookup_forced_base = {winner_mega: loser_lookup, loser_mega: winner_lookup}
+    return _bring4_candidates(core, pair_lookup, target_names, good_threshold,
+                              megas=[winner_mega, loser_mega],
+                              pair_lookup_forced_base=pair_lookup_forced_base)
 
 
 def _evolve_dive_breakdown(dive, target_name_lists, good_threshold=1.0):
@@ -7920,13 +7978,13 @@ def _evolve_trial_result(kind, member, removed, added, trial_core, target_name_l
                          merged, moves_db, natures, typechart, turns, item_overrides,
                          move_overrides, excluded_items, evs_overrides, nature_overrides,
                          ability_overrides, max_focus_sash, max_life_orb, good_threshold):
-    """One MOVE- or MEMBER-swap trial's full `core_deep_dive` + `_evolve_
-    dive_breakdown` result, or `None` when the candidate has no legal set/
-    moveset in this core (`core_deep_dive`'s own `ValueError`, "skip, don't
-    crash the whole search over one bad candidate"). Pure and side-effect-
-    free -- shared by `evolve_from_team`'s serial path and its `jobs`-
-    parallel worker (`_evolve_trial_job` below) so the two can never drift
-    out of sync with each other.
+    """One MOVE-, ITEM-, or MEMBER-swap trial's full `core_deep_dive` +
+    `_evolve_dive_breakdown` result, or `None` when the candidate has no
+    legal set/moveset in this core (`core_deep_dive`'s own `ValueError`,
+    "skip, don't crash the whole search over one bad candidate"). Pure and
+    side-effect-free -- shared by `evolve_from_team`'s serial path and its
+    `jobs`-parallel worker (`_evolve_trial_job` below) so the two can never
+    drift out of sync with each other.
     """
     try:
         trial_dive = core_deep_dive(
@@ -7939,7 +7997,8 @@ def _evolve_trial_result(kind, member, removed, added, trial_core, target_name_l
         return None
     trial_breakdown = _evolve_dive_breakdown(trial_dive, target_name_lists, good_threshold)
     return {"kind": kind, "member": member, "removed": removed, "added": added,
-           "team": list(trial_core), "new_score": trial_breakdown["score"],
+           "team": list(trial_core), "sets": trial_dive["sets"],
+           "new_score": trial_breakdown["score"],
            "new_win_rate": trial_breakdown["win_rate"],
            "new_tailwind_safe_rate": trial_breakdown["tailwind_safe_rate"],
            "new_protect_safe_rate": trial_breakdown["protect_safe_rate"],
@@ -7986,76 +8045,45 @@ def _evolve_trial_job(job):
         good_threshold)
 
 
-def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typechart,
-                     turns=2, good_threshold=1.0, swap_pool=None,
-                     item_overrides=None, move_overrides=None,
-                     excluded_items=DEFAULT_EXCLUDED_ITEMS,
-                     evs_overrides=None, nature_overrides=None, ability_overrides=None,
-                     max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
-                     max_life_orb=DEFAULT_MAX_LIFE_ORB, jobs=1, progress_callback=None):
-    """"If I define one high-performing team ... then try to see if any
-    improvements can be made" -- a LOCAL, greedy search around a fixed
-    starting core (`core`, 4-6 already-decided Pokemon -- from a pasted
-    team or plain names), NOT a fresh from-scratch search: one substitution
-    at a time from the given start, keeping everything else fixed, scored
-    against `target_name_lists` (the caller's own judged enemy population,
-    e.g. every saved team) via `_evolve_dive_score` -- the SAME blended
-    yardstick `_core_row`'s "Avg Wins/90" already ranks cores by.
+def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, typechart,
+                          turns, swap_pool, item_overrides, move_overrides,
+                          excluded_items, evs_overrides, nature_overrides,
+                          ability_overrides, max_focus_sash, max_life_orb,
+                          good_threshold, jobs, progress_callback, round_num):
+    """One round of `evolve_from_team`'s own greedy hill-climbing: every
+    move/item/whole-member swap trial around `core` AS GIVEN (already-
+    improved by any earlier round, for round 2+), scored against the SAME
+    fixed baseline this one round starts from. Returns (baseline_breakdown,
+    results) -- `results` is every genuine (`delta > 0`) improvement,
+    sorted descending; empty means this round's own baseline can't be beat
+    by any single further change.
 
-    Two swap kinds, per the user's own answer (both):
+    Three swap kinds:
 
     - MOVE SWAPS: for each existing member, for each of its OTHER real,
       usage-backed moves (`merged[name]["moves_usage"]`) not already in its
       baseline 4, try it in place of each currently-held move, ONE
       substitution at a time -- that member's other 3 moves, and every
-      OTHER member's own set, held fixed at the BASELINE dive's own real
-      answer (`core_deep_dive`'s "EVERY MEMBER'S SET IS FIXED" rule,
-      applied here to keep the rest of the team a stable comparison point
-      rather than independently re-optimising around the one change).
+      OTHER member's own set, held fixed at this round's own baseline dive
+      (`core_deep_dive`'s "EVERY MEMBER'S SET IS FIXED" rule, applied here
+      to keep the rest of the team a stable comparison point rather than
+      independently re-optimising around the one change).
+    - ITEM SWAPS: for each existing member, for each of its OTHER legal
+      items (`optimize_sets.legal_items`, respecting `excluded_items` the
+      same way a fresh search would) not already held, try it in place of
+      the current one -- moves and every other member's own set held fixed
+      the same way move swaps are. A no-op for a Mega-stone holder
+      (`legal_items` returns only the stone it's already locked to).
     - WHOLE-MEMBER SWAPS: for each member, for each candidate in
-      `swap_pool` (not already in `core`), try replacing it entirely --
-      the trial core's OWN set is searched fresh (a new member needs its
-      own real item/moveset, not the departed member's), same as any other
+      `swap_pool` (not already on the team IN EITHER MEGA OR BASE FORM --
+      `_mega_base_overlap`, "only one of a species can be on the team" --
+      a bare `candidate in core` check alone misses a Mega/base clash with
+      a DIFFERENT roster entry, e.g. offering "Mega Dragonite" when plain
+      "Dragonite" is already on the team), try replacing it entirely -- the
+      trial core's OWN set is searched fresh (a new member needs its own
+      real item/moveset, not the departed member's), same as any other
       `core_deep_dive` call.
-
-    Only genuine improvements (`delta > 0`) are returned, sorted by delta
-    descending -- not an exhaustive dump of every swap tried.
-
-    `swap_pool`: candidate replacement names for whole-member swaps.
-    `None` (the default) searches every name in `merged` not already in
-    `core` -- a caller wanting the search bounded to realistic options
-    should pass `team_search.build_candidate_pool`'s own pool instead (the
-    SAME pool `--multi-bring4` draws from, per the user's own "the usual
-    search pool" answer).
-
-    `jobs`: run trials (each move/whole-member swap candidate) in parallel
-    worker processes instead of one after another (1, the default: serial,
-    no process pool spun up at all -- see `_evolve_worker_init`/
-    `_evolve_trial_job`'s own docstring for the pool shape). A large core
-    (6 members) with a wide `swap_pool` and several `target_name_lists`
-    entries at a high `turns` can run thousands of independent trials, so
-    this is the same real speedup `--multi-bring4`'s own `--jobs` already
-    gives its per-enemy searches, applied to per-TRIAL parallelism instead.
-
-    `progress_callback`: optional `f(done, total)`, called after every
-    trial finishes (both the serial and `jobs`-parallel paths) -- a caller
-    can use this to print/update a progress line, since a run over
-    thousands of trials at `turns=4` can otherwise sit silent for hours
-    with no way to tell it's still working or how much is left.
-
-    Returns [{"kind": "move" or "member", "member": <the member changed>,
-    "removed": <what left>, "added": <what replaced it>, "team": <the
-    resulting full roster>, "baseline_score": float, "new_score": float,
-    "delta": float, "baseline_win_rate"/"new_win_rate",
-    "baseline_tailwind_safe_rate"/"new_tailwind_safe_rate",
-    "baseline_protect_safe_rate"/"new_protect_safe_rate",
-    "baseline_follow_me_safe_rate"/"new_follow_me_safe_rate": float}, ...] --
-    the four extra rate pairs are `_evolve_dive_breakdown`'s own individual
-    per-90 rates, so a caller can see WHY one candidate beat another rather
-    than only the single blended score (a swap can raise the blend while
-    quietly costing Protect-safety, for instance).
     """
-    core = list(dict.fromkeys(core))
     baseline_dive = core_deep_dive(
         core, target_name_lists, merged, moves_db, natures, typechart,
         turns=turns, item_overrides=item_overrides, move_overrides=move_overrides,
@@ -8066,9 +8094,9 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
     baseline_score = baseline_breakdown["score"]
     baseline_sets = baseline_dive["sets"]
 
-    # Build every trial's own spec UP FRONT (both swap kinds), instead of
-    # computing each one inline, so serial and `jobs`-parallel execution
-    # below share one job list rather than two independent loops that could
+    # Build every trial's own spec UP FRONT (all three swap kinds), instead
+    # of computing each one inline, so serial and `jobs`-parallel execution
+    # below share one job list rather than independent loops that could
     # drift out of sync with each other.
     trial_specs = []
 
@@ -8093,6 +8121,22 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
                 trial_specs.append(("move", member, base_moves[slot], candidate_move,
                                     list(core), trial_item_overrides, trial_move_overrides))
 
+    # ITEM SWAPS -- moves stay pinned at this round's own baseline for
+    # every member (including the one whose item is changing); only that
+    # one member's item override differs from the baseline dict.
+    for member in core:
+        base_item = baseline_sets[member]["item"]
+        for candidate_item in legal_items(member, merged):
+            if candidate_item == base_item or candidate_item in excluded_items:
+                continue
+            trial_item_overrides = {n: s["item"] for n, s in baseline_sets.items()}
+            trial_item_overrides.update(item_overrides or {})
+            trial_item_overrides[member] = candidate_item
+            trial_move_overrides = {n: s["moves"] for n, s in baseline_sets.items()}
+            trial_move_overrides.update(move_overrides or {})
+            trial_specs.append(("item", member, base_item, candidate_item,
+                                list(core), trial_item_overrides, trial_move_overrides))
+
     # WHOLE-MEMBER SWAPS -- the trial core's own set is searched fresh
     # (`core_deep_dive`'s own item/moveset resolution), never re-uses the
     # departed member's set.
@@ -8102,6 +8146,8 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
             if candidate in core or candidate == member:
                 continue
             trial_core = [candidate if n == member else n for n in core]
+            if _mega_base_overlap(trial_core):
+                continue
             trial_specs.append(("member", member, member, candidate,
                                 trial_core, item_overrides, move_overrides))
 
@@ -8113,7 +8159,7 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
         nonlocal done
         done += 1
         if progress_callback is not None:
-            progress_callback(done, total)
+            progress_callback(done, total, round_num)
         if r is None:
             return  # candidate has no legal set/moveset in this core -- skip
         delta = r["new_score"] - baseline_score
@@ -8154,7 +8200,131 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
                 ability_overrides, max_focus_sash, max_life_orb, good_threshold))
 
     results.sort(key=lambda r: -r["delta"])
-    return results
+    return baseline_breakdown, results
+
+
+def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typechart,
+                     turns=2, good_threshold=1.0, swap_pool=None,
+                     item_overrides=None, move_overrides=None,
+                     excluded_items=DEFAULT_EXCLUDED_ITEMS,
+                     evs_overrides=None, nature_overrides=None, ability_overrides=None,
+                     max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
+                     max_life_orb=DEFAULT_MAX_LIFE_ORB, jobs=1, progress_callback=None,
+                     max_changes=3):
+    """"If I define one high-performing team ... then try to see if any
+    improvements can be made" -- "the --evolve-from-team should iterate for
+    multiple improvements ... I need to see the best possible joint impact
+    of replacing 1-3 pokemon, or replacing moves, or replacing items, with
+    the aim of maximising these effects jointly."
+
+    GREEDY HILL-CLIMBING, up to `max_changes` rounds (default 3): round 1
+    is `_evolve_run_one_round` around `core` exactly as given. If it finds
+    no genuine improvement, the search stops there (nothing to chain).
+    Otherwise its own single BEST result (`rounds[0][0]`) is APPLIED --
+    that trial's own `"team"`/`"sets"` become the next round's starting
+    core/pinned item+moves -- and round 2 searches fresh around THAT
+    already-improved team, and so on, until either `max_changes` rounds
+    have been chained or a round finds nothing left to improve. Each
+    round's own full result list stays a stable, independent comparison
+    against THAT round's own fixed starting point (never a moving target
+    mid-round) -- only the STARTING point moves round to round, exactly
+    the same "one substitution at a time, holding the rest of the team
+    fixed" discipline a single round already keeps, just repeated.
+
+    This is deliberately NOT an exhaustive search over every combination of
+    up to `max_changes` swaps (which would be combinatorially enormous --
+    thousands of single-swap trials per round, to the power of 3) -- each
+    round takes the single best-scoring change available at that point,
+    the standard tractable approximation for "best joint effect of several
+    changes" when trying every combination isn't affordable. `max_changes`
+    1 reproduces a single round exactly (today's original one-pass
+    behaviour, before this existed).
+
+    `swap_pool`: candidate replacement names for whole-member swaps, reused
+    unchanged across every round (each round's own "already on the team,
+    in either Mega or base form" exclusion narrows it further as the team
+    itself changes). `None` (the default) searches every name in `merged`
+    not already in `core` -- a caller wanting the search bounded to
+    realistic options should pass `team_search.build_candidate_pool`'s own
+    pool instead (the SAME pool `--multi-bring4` draws from).
+
+    `jobs`: run each round's own trials (move/item/whole-member swap
+    candidates) in parallel worker processes instead of one after another
+    (1, the default: serial, no process pool spun up at all -- see
+    `_evolve_worker_init`/`_evolve_trial_job`'s own docstring for the pool
+    shape). A large core (6 members) with a wide `swap_pool` and several
+    `target_name_lists` entries at a high `turns` can run thousands of
+    independent trials PER ROUND, so this is the same real speedup
+    `--multi-bring4`'s own `--jobs` already gives its per-enemy searches.
+
+    `progress_callback`: optional `f(done, total, round_num)`, called after
+    every trial finishes within a round (both the serial and `jobs`-
+    parallel paths), `round_num` starting at 1 -- a caller can use this to
+    print/update a progress line per round, since a run over thousands of
+    trials at `turns=4` can otherwise sit silent for hours with no way to
+    tell it's still working or how much is left.
+
+    Returns {"baseline_score": float, "baseline_breakdown": <round 1's own
+    `_evolve_dive_breakdown` of the ORIGINAL starting `core`>, "rounds":
+    [<round 1's own full sorted result list>, <round 2's, if round 1 found
+    an improvement>, ...], "chain": [<round 1's own top pick>, <round 2's,
+    if any>, ...] -- the JOINT sequence of changes actually applied, in
+    order, "final_team": the fully-evolved roster (`core` unchanged if
+    `chain` is empty), "final_sets": that team's own full per-member
+    {"item", "moves"} (`None` if `chain` is empty), "final_score": the
+    blended score after every applied change (`baseline_score` if `chain`
+    is empty)}.
+
+    Each entry in `rounds`/`chain` keeps the single-round shape:
+    {"kind": "move"/"item"/"member", "member": <the member changed>,
+    "removed": <what left>, "added": <what replaced it>, "team": <that
+    round's resulting full roster>, "sets": <that team's own full per-
+    member {"item", "moves"}, so a caller can see exactly what the new or
+    changed Pokemon is running, not just its name>, "baseline_score":
+    float (this ROUND's own starting score, not necessarily the very
+    first baseline), "new_score": float, "delta": float,
+    "baseline_win_rate"/"new_win_rate",
+    "baseline_tailwind_safe_rate"/"new_tailwind_safe_rate",
+    "baseline_protect_safe_rate"/"new_protect_safe_rate",
+    "baseline_follow_me_safe_rate"/"new_follow_me_safe_rate": float} --
+    the four extra rate pairs are `_evolve_dive_breakdown`'s own individual
+    per-90 rates, so a caller can see WHY one candidate beat another rather
+    than only the single blended score (a swap can raise the blend while
+    quietly costing Protect-safety, for instance).
+    """
+    core = list(dict.fromkeys(core))
+    cur_core = core
+    cur_item_overrides = item_overrides
+    cur_move_overrides = move_overrides
+    rounds = []
+    chain = []
+    baseline_breakdown = None
+    for round_num in range(1, max(1, max_changes) + 1):
+        round_breakdown, round_results = _evolve_run_one_round(
+            cur_core, target_name_lists, merged, moves_db, natures, typechart,
+            turns, swap_pool, cur_item_overrides, cur_move_overrides, excluded_items,
+            evs_overrides, nature_overrides, ability_overrides, max_focus_sash,
+            max_life_orb, good_threshold, jobs, progress_callback, round_num)
+        if round_num == 1:
+            baseline_breakdown = round_breakdown
+        rounds.append(round_results)
+        if not round_results:
+            break
+        top = round_results[0]
+        chain.append(top)
+        cur_core = list(top["team"])
+        cur_item_overrides = {n: s["item"] for n, s in top["sets"].items()}
+        cur_move_overrides = {n: s["moves"] for n, s in top["sets"].items()}
+
+    return {
+        "baseline_score": baseline_breakdown["score"],
+        "baseline_breakdown": baseline_breakdown,
+        "rounds": rounds,
+        "chain": chain,
+        "final_team": list(chain[-1]["team"]) if chain else list(core),
+        "final_sets": chain[-1]["sets"] if chain else None,
+        "final_score": chain[-1]["new_score"] if chain else baseline_breakdown["score"],
+    }
 
 
 def switch_in_search(name1, name2, enemy_pair, bench, merged, moves_db,

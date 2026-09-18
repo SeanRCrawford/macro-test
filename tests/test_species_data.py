@@ -272,10 +272,11 @@ class TestDefaultSets(unittest.TestCase):
     """"let me create a 'default set' txt where I paste pokepastes for
     individual pokemon, and for enemies this should be the actual sets
     used by default (if no set or EVs specified)" -- data/default_sets.txt,
-    parsed the same way any other pokepaste is, bakes a COMPLETE (all 5
-    fields) override directly into `merged` so it becomes THE default
-    everywhere `merged[name]`'s own usage fields are read, both our own
-    side and an enemy's alike."""
+    parsed the same way any other pokepaste is, bakes each field it
+    specifies directly into `merged` (per field, not all-or-nothing) so
+    it becomes THE default everywhere `merged[name]`'s own usage fields
+    are read, both our own side and an enemy's alike; a field the entry
+    leaves out still falls back to mbsmogon usage as normal."""
 
     def setUp(self):
         import species_data
@@ -310,18 +311,33 @@ class TestDefaultSets(unittest.TestCase):
                          [("Sucker Punch", 100.0), ("Kowtow Cleave", 100.0),
                           ("Iron Head", 100.0), ("Low Kick", 100.0)])
         incomplete, unrecognised = self.species_data.build_merged_dataset.last_default_set_issues
-        self.assertEqual(incomplete, [])
+        self.assertEqual(incomplete, {})
         self.assertEqual(unrecognised, [])
 
-    def test_an_incomplete_set_is_reported_not_applied(self):
-        """No EVs line -- must be dropped, not half-applied."""
+    def test_a_partial_set_still_applies_the_fields_it_has(self):
+        """No EVs line -- item/ability/nature/moves still apply, only EVs
+        keeps falling back to mbsmogon's own usage-derived spread. This is
+        the exact scenario the "EVs must use default sets before mbsmogon"
+        bug report hit: a default_sets.txt entry missing just one field
+        used to be discarded wholesale, silently losing every field it DID
+        specify, not just the missing one."""
         self._write(
             "Kingambit @ Chople Berry\nAbility: Supreme Overlord\n"
             "Adamant Nature\n- Sucker Punch\n- Kowtow Cleave\n- Iron Head\n- Low Kick")
         merged, _u, _m, _n, _t = self.species_data.build_merged_dataset()
-        self.assertNotEqual(merged["Kingambit"]["items_usage"], [("Chople Berry", 100.0)])
+        rec = merged["Kingambit"]
+        self.assertEqual(rec["items_usage"], [("Chople Berry", 100.0)])
+        self.assertEqual(rec["abilities_usage"], [("Supreme Overlord", 100.0)])
+        self.assertEqual(rec["nature"], "Adamant")
+        self.assertEqual(rec["moves_usage"],
+                         [("Sucker Punch", 100.0), ("Kowtow Cleave", 100.0),
+                          ("Iron Head", 100.0), ("Low Kick", 100.0)])
+        # EVs weren't specified -- must still be mbsmogon's own usage EVs,
+        # not left empty and not some zeroed-out spread.
+        self.assertNotEqual(rec["evs"],
+                            {"hp": 0, "atk": 0, "def": 0, "spa": 0, "spd": 0, "spe": 0})
         incomplete, _unrecognised = self.species_data.build_merged_dataset.last_default_set_issues
-        self.assertIn("Kingambit", incomplete)
+        self.assertEqual(incomplete.get("Kingambit"), ("evs",))
 
     def test_a_mega_entrys_ability_targets_the_base_species_not_the_mega_row(self):
         """A paste's own "Ability:" line always means the BASE form's
@@ -355,7 +371,7 @@ class TestDefaultSets(unittest.TestCase):
             self.path.unlink()
         merged, _u, _m, _n, _t = self.species_data.build_merged_dataset()
         incomplete, unrecognised = self.species_data.build_merged_dataset.last_default_set_issues
-        self.assertEqual(incomplete, [])
+        self.assertEqual(incomplete, {})
         self.assertEqual(unrecognised, [])
         # A real recorded default (Kingambit's own usage-derived Defiant)
         # must still come through untouched.

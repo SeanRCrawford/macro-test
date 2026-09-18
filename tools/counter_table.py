@@ -2240,6 +2240,7 @@ def _print_two_two_two(pair_rows, team_rows, top_pairs, max_net_weakness=None):
 
 _EVOLVE_FROM_TEAM_XLSX_COLUMNS = [
     "#", "Kind", "Member", "Removed", "Added", "Team",
+    "Changed Member Item", "Changed Member Moves",
     "Baseline Score", "New Score", "Delta",
     "Baseline Win Rate/90", "New Win Rate/90",
     "Baseline Tailwind-safe Rate/90", "New Tailwind-safe Rate/90",
@@ -2247,27 +2248,40 @@ _EVOLVE_FROM_TEAM_XLSX_COLUMNS = [
     "Baseline Redirect-safe Rate/90", "New Redirect-safe Rate/90",
 ]
 
+_EVOLVE_CHAIN_XLSX_COLUMNS = [
+    "Round", "Kind", "Member", "Removed", "Added",
+    "Score Before", "Score After", "Delta",
+    "Changed Member Item", "Changed Member Moves", "Resulting Team",
+]
 
-def _write_evolve_from_team_xlsx(path, results):
-    """--evolve-from-team's own xlsx output -- one row per genuine
-    improvement `evolve_from_team` found, richer than the console table's
-    Score/New/Delta: the resulting FULL team roster (`r["team"]`) and the
-    individual baseline/new breakdown rates (win/tailwind-safe/protect-
-    safe/follow-me-safe, `_evolve_dive_breakdown`'s own per-90 numbers),
-    not just the single blended score -- "summarise each potential team,
-    and give more in depth/summary info."
-    """
-    from openpyxl import Workbook
+_EVOLVE_FINAL_TEAM_XLSX_COLUMNS = [
+    "Pokemon", "Item", "Move 1", "Move 2", "Move 3", "Move 4",
+]
+
+
+def _evolve_changed_member(r):
+    """The member name whose OWN new set (`r["sets"]`) is worth showing --
+    the arriving species for a whole-member swap (the departing one isn't
+    even on the resulting team anymore), else the one member whose move/
+    item actually changed."""
+    return r["added"] if r["kind"] == "member" else r["member"]
+
+
+def _evolve_write_round_sheet(ws, results):
+    """One `evolve_from_team` round's own full candidate list onto an
+    already-titled worksheet -- shared by the per-round sheets below and
+    (as a single-round workbook) by any caller wanting the plain flat-list
+    shape back."""
     from export_excel import _autosize, _style_header
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Potential teams"
     ws.append(list(_EVOLVE_FROM_TEAM_XLSX_COLUMNS))
     _style_header(ws)
     for rank, r in enumerate(results, start=1):
+        changed = _evolve_changed_member(r)
+        new_set = r["sets"][changed]
         ws.append([
             rank, r["kind"], r["member"], r["removed"], r["added"],
             " / ".join(r["team"]),
+            new_set["item"], ", ".join(new_set["moves"]),
             round(r["baseline_score"], 2), round(r["new_score"], 2),
             round(r["delta"], 2),
             round(r["baseline_win_rate"], 1), round(r["new_win_rate"], 1),
@@ -2280,6 +2294,64 @@ def _write_evolve_from_team_xlsx(path, results):
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     _autosize(ws)
+
+
+def _write_evolve_from_team_xlsx(path, evolved):
+    """--evolve-from-team's own xlsx output, from `evolve_from_team`'s
+    dict result -- "give more in depth/summary info", now including the
+    JOINT chain of changes actually applied and every new/changed
+    Pokemon's own resulting item and full moveset, not just its name
+    ("what are the movesets of the new pokemon, what are the move/item
+    changes"):
+
+    - "Chain": the applied sequence (one row per round actually chained),
+      each with the changed member's own new item/moveset and the running
+      score.
+    - "Final team": the fully-evolved roster's own complete sets (one row
+      per member, item + all 4 moves) -- the single sheet to read for "what
+      does the recommended team actually run."
+    - "Round N" (one per round that ran, at least one): that round's full
+      candidate list -- every genuine improvement considered THAT round,
+      not just the one chained, same shape as the original single-pass
+      export (`_evolve_write_round_sheet`), so a caller can see the
+      runners-up too.
+    """
+    from openpyxl import Workbook
+    from export_excel import _autosize, _style_header
+    wb = Workbook()
+    ws_chain = wb.active
+    ws_chain.title = "Chain"
+    ws_chain.append(list(_EVOLVE_CHAIN_XLSX_COLUMNS))
+    _style_header(ws_chain)
+    for round_num, step in enumerate(evolved["chain"], start=1):
+        changed = _evolve_changed_member(step)
+        new_set = step["sets"][changed]
+        ws_chain.append([
+            round_num, step["kind"], step["member"], step["removed"], step["added"],
+            round(step["baseline_score"], 2), round(step["new_score"], 2),
+            round(step["delta"], 2),
+            new_set["item"], ", ".join(new_set["moves"]),
+            " / ".join(step["team"])])
+    ws_chain.freeze_panes = "A2"
+    ws_chain.auto_filter.ref = ws_chain.dimensions
+    _autosize(ws_chain)
+
+    ws_final = wb.create_sheet("Final team")
+    ws_final.append(list(_EVOLVE_FINAL_TEAM_XLSX_COLUMNS))
+    _style_header(ws_final)
+    if evolved["final_sets"] is not None:
+        for name in evolved["final_team"]:
+            s = evolved["final_sets"][name]
+            moves = list(s["moves"]) + [""] * (4 - len(s["moves"]))
+            ws_final.append([name, s["item"], *moves[:4]])
+    ws_final.freeze_panes = "A2"
+    ws_final.auto_filter.ref = ws_final.dimensions
+    _autosize(ws_final)
+
+    for round_num, round_results in enumerate(evolved["rounds"], start=1):
+        ws = wb.create_sheet(f"Round {round_num}")
+        _evolve_write_round_sheet(ws, round_results)
+
     wb.save(path)
     return path
 
@@ -2344,14 +2416,20 @@ def _run_evolve_from_team(args):
     import time
     start_time = time.monotonic()
     last_reported = 0
+    last_round = 0
 
-    def _progress(done, total):
+    def _progress(done, total, round_num):
         # A run at --turns 4 across a real saved team's full library can be
-        # thousands of independent trials, each its own multi-turn race --
-        # "no way to see the progress or time to completion" otherwise
-        # leaves the CLI silent for hours. At most ~20 lines printed
-        # (plus always the final one), not one per trial.
-        nonlocal last_reported
+        # thousands of independent trials PER ROUND, each its own multi-turn
+        # race -- "no way to see the progress or time to completion"
+        # otherwise leaves the CLI silent for hours. At most ~20 lines
+        # printed per round (plus always the final one), not one per trial.
+        nonlocal last_reported, last_round, start_time
+        if round_num != last_round:
+            print(f"  === Round {round_num} ===")
+            last_round = round_num
+            last_reported = 0
+            start_time = time.monotonic()
         step = max(1, total // 20)
         if done != total and done - last_reported < step:
             return
@@ -2363,7 +2441,7 @@ def _run_evolve_from_team(args):
         print(f"  ...{done}/{total} trials ({done * 100 // total}%), "
              f"{elapsed / 60:.1f}m elapsed, {eta_str}", flush=True)
 
-    results = evolve_from_team(
+    evolved = evolve_from_team(
         core, target_name_lists, merged, moves, natures, typechart,
         turns=args.turns, good_threshold=args.good_threshold / 100.0,
         swap_pool=swap_pool, item_overrides=item_overrides,
@@ -2371,23 +2449,49 @@ def _run_evolve_from_team(args):
         evs_overrides=team_evs, nature_overrides=team_nat,
         ability_overrides=team_abil,
         max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
-        jobs=jobs, progress_callback=_progress)
+        jobs=jobs, progress_callback=_progress,
+        max_changes=args.evolve_max_changes)
     print()
-    if not results:
-        print("No improvement found -- every move/whole-member swap tried "
-             "scored no better than the starting team.")
+    if not evolved["chain"]:
+        print("No improvement found -- every move/item/whole-member swap "
+             "tried scored no better than the starting team.")
         return
-    print(f"{len(results)} genuine improvement(s), best first:\n")
-    header = f"  {'#':>3} {'Kind':7s} {'Member':16s} {'Change':38s} {'Score':>7s} -> {'New':>7s}  {'Delta':>6s}"
+    gain = evolved["final_score"] - evolved["baseline_score"]
+    print(f"Baseline score: {evolved['baseline_score']:.1f}")
+    print(f"Applied {len(evolved['chain'])} joint change(s) -> "
+         f"{evolved['final_score']:.1f} ({gain:+.1f}):\n")
+    header = (f"  {'Rnd':>3} {'Kind':7s} {'Member':16s} {'Change':38s} "
+             f"{'Score':>7s} -> {'New':>7s}  {'Delta':>6s}")
     print(header)
     print("  " + "-" * (len(header) - 2))
-    for i, r in enumerate(results[:args.top], start=1):
-        change = f"{r['removed']} -> {r['added']}"
-        print(f"  {i:>3} {r['kind']:7s} {r['member']:16s} {change[:38]:38s} "
-             f"{r['baseline_score']:>7.1f} -> {r['new_score']:>7.1f}  "
-             f"{r['delta']:>+6.1f}")
+    for round_num, step in enumerate(evolved["chain"], start=1):
+        change = f"{step['removed']} -> {step['added']}"
+        print(f"  {round_num:>3} {step['kind']:7s} {step['member']:16s} {change[:38]:38s} "
+             f"{step['baseline_score']:>7.1f} -> {step['new_score']:>7.1f}  "
+             f"{step['delta']:>+6.1f}")
+        changed = _evolve_changed_member(step)
+        new_set = step["sets"][changed]
+        print(f"        {changed} now: {new_set['item']} / "
+             f"{', '.join(new_set['moves'])}")
+    print(f"\nFinal team: {' / '.join(evolved['final_team'])}")
+    for name in evolved["final_team"]:
+        s = evolved["final_sets"][name]
+        print(f"  {name}: {s['item']} -- {', '.join(s['moves'])}")
+    round1_alternatives = evolved["rounds"][0][1:]
+    if round1_alternatives:
+        print(f"\n{len(round1_alternatives)} other round-1 alternative(s) "
+             f"considered but not chained, best first:\n")
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for i, r in enumerate(round1_alternatives[:args.top], start=1):
+            change = f"{r['removed']} -> {r['added']}"
+            print(f"  {i:>3} {r['kind']:7s} {r['member']:16s} {change[:38]:38s} "
+                 f"{r['baseline_score']:>7.1f} -> {r['new_score']:>7.1f}  "
+                 f"{r['delta']:>+6.1f}")
+        print("  (pass --xlsx for the full per-round breakdown, and each "
+             "one's own resulting item/moveset)")
     if args.xlsx:
-        path = _write_evolve_from_team_xlsx(args.xlsx, results)
+        path = _write_evolve_from_team_xlsx(args.xlsx, evolved)
         print(f"\nExcel workbook: {os.path.abspath(path)}")
 
 
@@ -2474,24 +2578,40 @@ def main():
                          "'good' once it beats at least PCT%% of the named "
                          "enemy pairs (default 100 -- must beat ALL of them)")
     ap.add_argument("--evolve-from-team", action="store_true",
-                    help="local search for improvements around one already-"
-                         "decided team (--our, 2-6 names): tries each real "
-                         "usage-backed move swap on each existing member "
-                         "(one substitution at a time) and each whole-"
-                         "member swap (one member replaced by a candidate "
-                         "from the usual search pool, --evolve-pool-size of "
-                         "them), keeping everything else fixed, and reports "
-                         "only genuine improvements (by the same blended "
-                         "score --multi-bring4 ranks cores by) sorted by "
-                         "how much they help. Judged against --vs-team "
-                         "(repeated) or, by default, every saved team")
+                    help="local, iterative search for the best JOINT effect "
+                         "of up to --evolve-max-changes changes around one "
+                         "already-decided team (--our, 2-6 names): each "
+                         "round tries every real usage-backed move swap, "
+                         "every legal item swap, and every whole-member swap "
+                         "(one member replaced by a candidate from the usual "
+                         "search pool, --evolve-pool-size of them, never a "
+                         "species already on the team in either Mega or base "
+                         "form) against that round's own fixed starting "
+                         "team, applies whichever single change scores best "
+                         "(the same blended score --multi-bring4 ranks cores "
+                         "by), then repeats around the newly-improved team "
+                         "for the next round -- greedy hill-climbing, not an "
+                         "exhaustive combinatorial search. Judged against "
+                         "--vs-team (repeated) or, by default, every saved "
+                         "team. Prints the applied chain of changes plus "
+                         "each new/changed Pokemon's own resulting item and "
+                         "moveset, not just its name")
     ap.add_argument("--evolve-pool-size", type=int, default=20, metavar="N",
                     help="--evolve-from-team only: how many top-Score "
                          "candidates (from the same pool --multi-bring4 "
                          "draws from) to try as a whole-member replacement "
-                         "for each existing member (default 20 -- this "
-                         "search is O(members x N), so raising it costs "
-                         "roughly linearly more time)")
+                         "for each existing member, per round (default 20 "
+                         "-- this search is O(members x N), so raising it "
+                         "costs roughly linearly more time per round)")
+    ap.add_argument("--evolve-max-changes", type=int, default=3, metavar="N",
+                    help="--evolve-from-team only: how many rounds of greedy "
+                         "hill-climbing to chain (default 3) -- each round "
+                         "applies the single best-scoring change found and "
+                         "starts the next round from there, stopping early "
+                         "if a round finds no further improvement. Pass 1 "
+                         "for a single independent pass (every genuine "
+                         "improvement around the ORIGINAL team, none of them "
+                         "applied or chained)")
     ap.add_argument("--benchmark-teams", action="store_true",
                     help="--bring4 only: instead of one --our team, run the "
                          "SAME --bring4 search once independently per every "
