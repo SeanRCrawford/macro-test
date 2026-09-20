@@ -5534,6 +5534,12 @@ with tab_counter:
                  "but forced into every result. A size smaller than the "
                  "number of names picked here can never produce a group at "
                  "all -- that size will show 0 results.")
+        cov_exclude = st.multiselect(
+            "Exclude these Pokemon", all_names, key="ct_cov_exclude",
+            help="A HARD requirement in the other direction: none of these "
+                 "names may ever appear in a returned group, for any size. "
+                 "Naming a Pokemon here AND in 'Always include' is a real "
+                 "conflict -- every size comes back empty.")
         cov_suggested = st.multiselect(
             "Suggested Pokemon", all_names, key="ct_cov_suggested",
             help="A softer quorum: a group only survives if at least the "
@@ -5605,9 +5611,19 @@ with tab_counter:
                 st.slider("Minimum Score", 200, 650, 400, key="ct_cov_min_score")
                 if cov_min_score_on else None)
         cov_cap_on = st.checkbox(
-            "Cap a group's worst net weakness", key="ct_cov_cap_on")
+            "Cap a group's worst net weakness", key="ct_cov_cap_on",
+            help="Net = (members weak to a type) - (members resistant/"
+                 "immune to it) -- three Fire-weak members matter much "
+                 "less if four others resist it.")
         cov_max_net = (st.slider("Max net weakness", 0, 6, 2, key="ct_cov_max_net")
                       if cov_cap_on else None)
+        cov_abs_cap_on = st.checkbox(
+            "Cap a group's worst ABSOLUTE weakness", key="ct_cov_abs_cap_on",
+            help="No credit for how many other members resist that type -- "
+                 "just a raw count of how many are weak to it. Composes "
+                 "with the net cap above; both, either, or neither can be on.")
+        cov_max_weakness = (st.slider("Max absolute weakness", 0, 6, 2, key="ct_cov_max_weak")
+                            if cov_abs_cap_on else None)
         cov_real_wins = st.checkbox(
             "Also assess real pair wins (joint-race engine)", key="ct_cov_real_wins",
             help="\"assess all of the pairs in the counter table\" -- runs "
@@ -5668,11 +5684,13 @@ with tab_counter:
                         max_missing_frac=cov_missing_pct / 100.0,
                         no_duplicate_typing=cov_dup_typing,
                         max_net_weakness=cov_max_net,
+                        max_weakness=cov_max_weakness,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         must_include=cov_include, suggested=cov_suggested,
                         suggested_min=cov_suggested_min,
                         required_cores=cov_required_cores or None,
-                        min_member_score=cov_min_member_score)
+                        min_member_score=cov_min_member_score,
+                        exclude=cov_exclude)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams
@@ -5768,6 +5786,7 @@ with tab_counter:
                                          -(_real_win_rate(row["group"]) or 0.0)))
                 for i, row in enumerate(shown_rows, start=1):
                     exposed = {t: n for t, n in row["net_weakness"].items() if n > 0}
+                    exposed_abs = {t: n for t, n in row["weakness"].items() if n > 0}
                     score_str = f"{row['avg_score']:.1f}" if row["avg_score"] is not None else "-"
                     with st.expander(f"#{i}: {' / '.join(row['group'])}",
                                      expanded=first_shown):
@@ -5790,6 +5809,11 @@ with tab_counter:
                                        f"{t} ({n})" for t, n in exposed.items())
                                       if exposed else ""))
                         st.caption(weak_str)
+                        abs_weak_str = ("Worst absolute weakness: " + str(row["worst_weakness"])
+                                       + ("  |  Weak types: " + ", ".join(
+                                           f"{t} ({n})" for t, n in exposed_abs.items())
+                                          if exposed_abs else ""))
+                        st.caption(abs_weak_str)
                         if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
                             st.caption("Pair performance (this group's own links):")
                             pair_table = []

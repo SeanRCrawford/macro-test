@@ -422,6 +422,23 @@ def net_weakness_by_type(core, merged):
     return out
 
 
+def raw_weakness_by_type(core, merged):
+    """{type: count} for every type -- how many members are weak to it,
+    with no credit for how many others resist it (`net_weakness_by_type`'s
+    own net reading). `weakness_violations`'s own `max_weak` scores this
+    exact same ABSOLUTE count ("most members allowed to be weak to any one
+    type") as `score_team`'s soft synergy term; this is the raw map for a
+    caller applying its own hard threshold directly, same role `net_
+    weakness_by_type` plays for the net reading."""
+    from species_data import TYPES
+    from team_search import _weak_resist
+    out = {}
+    for t in TYPES:
+        weak, _resist = _weak_resist(list(core), merged, t)
+        out[t] = len(weak)
+    return out
+
+
 # --------------------------------------------------------- 2-2-2 team building
 #
 # "2-2-2 teambuilding: using core pairs that work well together to make your
@@ -925,13 +942,13 @@ def narrow_coverage_pool_names(pair_rows, names, max_search_names, must_include=
 def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           pool=None, prefix_limits=(("Mega ", 2),),
                           max_missing_frac=0.4, no_duplicate_typing=True,
-                          max_net_weakness=None, min_avg_score=None,
+                          max_net_weakness=None, max_weakness=None, min_avg_score=None,
                           sort_by="perfect", top_n=40,
                           max_eval=_COVERAGE_GROUP_MAX_EVAL,
                           keep_cap=_COVERAGE_GROUP_KEEP_CAP,
                           max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES,
                           must_include=None, suggested=None, suggested_min=0,
-                          required_cores=None, min_member_score=None):
+                          required_cores=None, min_member_score=None, exclude=None):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -965,22 +982,46 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         as a fraction of the group's own link count -- 0 demands every
         link be a real, scored pair.
 
-    `max_net_weakness`/`min_avg_score` are checked AFTERWARD, only against
+    `max_net_weakness`/`max_weakness`/`min_avg_score` are checked AFTERWARD, only against
     the search's own top few hundred candidates by `sort_by` (`max(top_n *
-    6, 200)` of them) -- `net_weakness_by_type` is a real per-type
-    recomputation (not a cheap lookup like everything above), so, matching
+    6, 200)` of them) -- `net_weakness_by_type`/`raw_weakness_by_type` are real per-type
+    recomputations (not a cheap lookup like everything above), so, matching
     this module's own established "cheap check gates an expensive
     re-race, top-N only" discipline (see `_core_dead_mega_rebuild`'s
-    docstring), it is never computed beyond that buffer. Accepted
+    docstring), neither is ever computed beyond that buffer. Accepted
     tradeoff, stated plainly: a candidate ranked just outside that buffer
-    by the raw link quality, but that would have passed `max_net_weakness`
-    while several buffered candidates don't, is never seen -- exactly the
+    by the raw link quality, but that would have passed `max_net_weakness`/
+    `max_weakness` while several buffered candidates don't, is never seen -- exactly the
     same "the sweep's own ranking is computed first, unaware of the
     later-stage filter" tradeoff Item Clause/Focus-Sash-cap/dead-mega
-    rebuild already accept elsewhere in this module. `net_weakness` is
-    always computed for whatever ends up in the returned rows (a genuine
-    display column, "add type weakness assessment"), not gated behind
-    `max_net_weakness` being set.
+    rebuild already accept elsewhere in this module. `net_weakness`/
+    `weakness` are always computed for whatever ends up in the returned
+    rows (a genuine display column, "add type weakness assessment"), not
+    gated behind `max_net_weakness`/`max_weakness` being set.
+
+    `max_weakness`: like `max_net_weakness`, but on the ABSOLUTE weak
+    count per type (`raw_weakness_by_type`, "cap absolute weaknesses per
+    type too" -- no credit for how many OTHER members resist that type,
+    unlike `max_net_weakness`'s net reading) -- a group is dropped if any
+    type has more than this many members weak to it. The same `team_
+    search.weakness_violations`/`hard_violations` "max_weak" reading
+    Generate Team's own per-type overrides already expose, just applied
+    here as a single scalar across every type (no per-type override --
+    add one if a real need for it shows up). `None` (the default) checks
+    nothing, exactly as before this existed.
+
+    `exclude`: "allow an option to exclude specific pokemon" -- names
+    that may NEVER appear in a returned group, for any size. Applied the
+    same way `min_member_score` is: dropped from the search pool BEFORE
+    the DFS runs (an excluded name is illegal in every group regardless
+    of what else is in it, so removing it from the candidate pool
+    entirely is equivalent and cheaper than a per-group check). Excluding
+    a `must_include` name is a real, visible conflict -- EVERY size comes
+    back empty, same as `min_member_score`'s own conflict case (both are
+    just different ways for a real candidate to be hard-filtered out from
+    under a forced-in requirement). Excluding a `suggested` name is NOT a
+    conflict -- it simply can no longer count toward `suggested_min`.
+    `None` (the default) excludes nothing, exactly as before this existed.
 
     `sort_by`: "perfect" (perfect-link count, most first, then coverage,
     then avg score -- the default), "coverage" (mutual-coverage fraction
@@ -1063,11 +1104,15 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     from the search pool BEFORE the DFS runs (cheaper than a per-group
     check, and equivalent -- a group containing a below-floor name is
     illegal regardless of what else is in it), same narrowing-first
-    discipline `max_search_names` already uses. Applies even to a
-    `must_include`/`suggested` name -- forcing in a name that can't clear
-    the floor is a real, visible conflict (that size's own `"rows"` comes
-    back empty), not a silent exemption. `None` (the default) applies no
-    floor, exactly as before this existed.
+    discipline `max_search_names` already uses. A `must_include` name that
+    fails the floor is a real, visible conflict -- EVERY size's own
+    `"rows"` comes back empty (not just narrowed), since no group is
+    possible at all once a forced-in name is also hard-excluded -- never a
+    silent exemption. A `suggested` name that fails the floor is NOT a
+    conflict (it was only ever a soft quorum candidate): it simply can no
+    longer count toward `suggested_min`, same as if it were never on the
+    list. `None` (the default) applies no floor, exactly as before this
+    existed.
 
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
@@ -1075,16 +1120,32 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     "coverage_pct": float (0-100, missing links count as 0, averaged over
     every POSSIBLE link, not just the measured ones -- same convention the
     standalone tool uses), "avg_score": float or None, "net_weakness":
-    {type: net}, "worst_net_weakness": int}.
+    {type: net}, "worst_net_weakness": int, "weakness": {type: count},
+    "worst_weakness": int}.
     """
     if pool is None:
         names = sorted({n for r in pair_rows for n in r["pair"]})
     else:
         names = list(dict.fromkeys(pool))
+    original_names_set = set(names)
+    if exclude:
+        exclude_set = set(exclude)
+        names = [nm for nm in names if nm not in exclude_set]
     if min_member_score is not None:
         names = [nm for nm in names
                 if (merged.get(nm) or {}).get("score") is not None
                 and merged[nm]["score"] >= min_member_score]
+    # A `must_include` name that WAS a real candidate (present before
+    # `exclude`/`min_member_score` ran) but got hard-filtered out by one of
+    # them is a genuine, visible conflict -- "forced in" and "filtered out"
+    # can't both hold. Distinct from a `must_include` name that was NEVER a
+    # real candidate at all (silently ignored below, unchanged): that one
+    # was never promised, this one was explicitly promised and then denied.
+    # Every size comes back empty, not just narrowed -- there is no
+    # candidate group possible for ANY of them.
+    conflicting_must_include = (original_names_set - set(names)) & set(must_include or ())
+    if conflicting_must_include:
+        return {size: {"rows": [], "seen": 0, "aborted": False} for size in group_sizes}
     protect = list(dict.fromkeys(list(must_include or ()) + list(suggested or ())))
     names = narrow_coverage_pool_names(pair_rows, names, max_search_names,
                                        must_include=protect)
@@ -1173,6 +1234,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 "coverage_pct": (total_frac / E * 100.0) if E else 0.0,
                 "avg_score": (score_sum / score_n) if score_n else None,
                 "net_weakness": None, "worst_net_weakness": None,
+                "weakness": None, "worst_weakness": None,
             }
 
         def keep(row):
@@ -1296,7 +1358,12 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             worst = max(net.values())
             if max_net_weakness is not None and worst > max_net_weakness:
                 continue
-            final.append({**row, "net_weakness": net, "worst_net_weakness": worst})
+            raw = raw_weakness_by_type(row["group"], merged)
+            worst_raw = max(raw.values())
+            if max_weakness is not None and worst_raw > max_weakness:
+                continue
+            final.append({**row, "net_weakness": net, "worst_net_weakness": worst,
+                         "weakness": raw, "worst_weakness": worst_raw})
             if len(final) >= top_n:
                 break
         results[size] = {"rows": final, "seen": seen, "aborted": aborted}

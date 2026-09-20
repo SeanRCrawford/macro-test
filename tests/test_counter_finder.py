@@ -10596,15 +10596,58 @@ class TestCoverageGroupSearchRanking(unittest.TestCase):
 
     def test_min_member_score_excludes_a_must_include_name_that_fails_the_floor(self):
         """Forcing in a name the floor already excluded is a real, visible
-        conflict -- empty results, not a silent exemption."""
+        conflict -- empty results, not a silent exemption. A pool with
+        plenty of OTHER above-floor names (B/C/Mega G/Mega H) rules out
+        the group simply being too small to notice a silently dropped
+        requirement."""
         import itertools as _it
-        names = ["A", "B", "C"]
+        names = ["A", "B", "C", "Mega G", "Mega H"]
         rows = [_fake_coverage_row(p, True, 100.0, 100.0)
                for p in _it.combinations(names, 2)]
         result = cf.coverage_group_search(
             rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
             must_include=["A"], min_member_score=150.0, no_duplicate_typing=False)
         self.assertEqual(result[3]["rows"], [])
+
+    def test_exclude_removes_a_name_from_every_returned_group(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            exclude=["A"], no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertTrue(groups)
+        for g in groups:
+            self.assertNotIn("A", g)
+        self.assertIn({"B", "C", "D"}, groups)
+
+    def test_exclude_conflicting_with_must_include_returns_empty(self):
+        """Naming the same Pokemon in both "Always include" and "Exclude"
+        is a real conflict -- empty results, not a silent tie-break
+        either way. A 5-name pool (still 4 names left after excluding "A")
+        rules out the group simply being too small to notice a silently
+        dropped requirement."""
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
+            must_include=["A"], exclude=["A"], no_duplicate_typing=False)
+        self.assertEqual(result[3]["rows"], [])
+
+    def test_the_conflict_empties_every_requested_size_not_just_one(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3, 4),
+            must_include=["A"], exclude=["A"], no_duplicate_typing=False)
+        self.assertEqual(result[3]["rows"], [])
+        self.assertEqual(result[4]["rows"], [])
 
 
 class TestCoverageGroupSearchRealData(unittest.TestCase):
@@ -10641,6 +10684,21 @@ class TestCoverageGroupSearchRealData(unittest.TestCase):
         for row in result[4]["rows"]:
             self.assertEqual(row["worst_net_weakness"], max(row["net_weakness"].values()))
 
+    def test_weakness_is_internally_consistent(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=5)
+        for row in result[4]["rows"]:
+            self.assertEqual(row["worst_weakness"], max(row["weakness"].values()))
+
+    def test_weakness_is_never_less_than_net_weakness(self):
+        """The absolute count can never be LOWER than the net reading for
+        the same type -- net subtracts resistors, absolute doesn't."""
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20)
+        for row in result[4]["rows"]:
+            for t in row["weakness"]:
+                self.assertGreaterEqual(row["weakness"][t], row["net_weakness"][t])
+
     def test_must_include_forces_a_name_through_narrowing(self):
         """"specify individual Pokemon to include" end-to-end: with
         `max_search_names` pinned to exactly the group size, narrowing
@@ -10674,6 +10732,30 @@ class TestCoverageGroupSearchRealData(unittest.TestCase):
         for row in capped[4]["rows"]:
             self.assertLessEqual(row["worst_net_weakness"], cap)
         self.assertLess(len(capped[4]["rows"]), len(uncapped[4]["rows"]))
+
+    def test_max_weakness_caps_the_worst_types_absolute_count(self):
+        """"cap absolute weaknesses per type too" -- unlike max_net_
+        weakness, no credit for how many others resist that type."""
+        uncapped = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20)
+        cap = 1
+        capped = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            max_weakness=cap)
+        self.assertTrue(capped[4]["rows"])
+        for row in capped[4]["rows"]:
+            self.assertLessEqual(row["worst_weakness"], cap)
+        self.assertLess(len(capped[4]["rows"]), len(uncapped[4]["rows"]))
+
+    def test_exclude_removes_a_name_from_every_returned_group(self):
+        """"allow an option to exclude specific pokemon" -- end to end
+        through real data, not just the offered pool."""
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            exclude=["Garchomp"])
+        self.assertTrue(result[4]["rows"])
+        for row in result[4]["rows"]:
+            self.assertNotIn("Garchomp", row["group"])
 
     def test_two_different_megas_never_both_appear_beyond_the_cap(self):
         result = cf.coverage_group_search(

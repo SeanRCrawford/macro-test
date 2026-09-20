@@ -248,6 +248,62 @@ class TestCounterTableTabExists(unittest.TestCase):
             for nm in row["group"]:
                 self.assertGreaterEqual(merged[nm]["score"], floor)
 
+    def test_exclude_pokemon_removes_them_from_every_group(self):
+        """"allow an option to exclude specific pokemon" -- the excluded
+        name never appears in a returned group of any size."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        exclude_ms = [m for m in at.multiselect if m.key == "ct_cov_exclude"][0]
+        excluded_name = exclude_ms.options[0]
+        exclude_ms.set_value([excluded_name]).run()
+        self.assertFalse(at.exception, list(at.exception))
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"])
+        for row in results[3]["rows"]:
+            self.assertNotIn(excluded_name, row["group"])
+
+    def test_excluding_an_always_include_name_is_a_visible_conflict(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        forced_name = "Ariados"
+        [m for m in at.multiselect if m.key == "ct_cov_include"][0].set_value(
+            [forced_name]).run()
+        [m for m in at.multiselect if m.key == "ct_cov_exclude"][0].set_value(
+            [forced_name]).run()
+        self.assertFalse(at.exception, list(at.exception))
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertEqual(results[3]["rows"], [])
+
+    def test_absolute_weakness_cap_caps_the_worst_types_raw_count(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_abs_cap_on"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        cap_sliders = [s for s in at.slider if s.key == "ct_cov_max_weak"]
+        self.assertTrue(cap_sliders)
+        cap = 2
+        cap_sliders[0].set_value(cap).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"], "fixture never produced a group -- "
+                        "the cap may be too strict for this pool")
+        for row in results[3]["rows"]:
+            self.assertLessEqual(row["worst_weakness"], cap)
+
     def test_coverage_groups_run_bring4_button_works(self):
         """"add an option to run the actual pair performance vs enemy
         teams in a proper bring 4" -- clicking it must not crash and must
