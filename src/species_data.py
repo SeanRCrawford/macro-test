@@ -434,42 +434,51 @@ def load_default_sets(merged):
 
     "let me create a 'default set' txt [file] where I paste pokepastes for
     individual pokemon, and for enemies this should be the actual sets
-    used by default (if no set or EVs specified)" -- WHOLE SET ONLY: a
-    parsed entry must carry all 5 of `DEFAULT_SETS_FIELDS` to qualify as a
-    species' new default (a paste missing even one, e.g. no EVs, isn't a
-    full statement of what that Pokemon runs), so anything short of that
-    is reported back in `incomplete` (a list of names) instead of being
-    silently half-applied.
+    used by default (if no set or EVs specified)" -- PER-FIELD: each of
+    `DEFAULT_SETS_FIELDS` a parsed entry carries becomes that species' new
+    default for that field alone; a field the entry doesn't specify (e.g.
+    no "EVs:" line) is simply left out of its spec, so that field still
+    falls back to mbsmogon's own usage data exactly as if the entry didn't
+    exist. This was previously whole-set-only (an entry missing even one
+    field was discarded entirely), which meant a real EVs line here was
+    silently ignored just because the same entry happened to omit e.g. a
+    Nature line -- reported here in `partial` (name -> tuple of the fields
+    it's missing) purely for the app's own "heads up, this entry isn't
+    fully specified" caption, never to withhold a field it DOES have.
 
-    Returns ({name: complete_spec}, incomplete_names). `({}, [])` if the
-    file doesn't exist or is empty -- this feature is opt-in and inert
-    until the file has real content."""
+    Returns ({name: spec}, {name: (missing_field, ...)}). `({}, {})` if
+    the file doesn't exist or is empty -- this feature is opt-in and
+    inert until the file has real content."""
     path = DATA_DIR / "default_sets.txt"
     if not path.exists():
-        return {}, []
+        return {}, {}
     text = path.read_text(encoding="utf-8")
     if not text.strip():
-        return {}, []
+        return {}, {}
     names, raw_sets = custom_team_from_export(text, merged)
-    complete, incomplete = {}, []
+    specs, partial = {}, {}
     for name in names:
         spec = raw_sets.get(name) or {}
-        if all(k in spec for k in DEFAULT_SETS_FIELDS):
-            complete[name] = spec
-        else:
-            incomplete.append(name)
-    return complete, incomplete
+        if not spec:
+            continue
+        specs[name] = spec
+        missing = tuple(k for k in DEFAULT_SETS_FIELDS if k not in spec)
+        if missing:
+            partial[name] = missing
+    return specs, partial
 
 
 def apply_default_sets(merged):
-    """Bakes `load_default_sets`'s complete overrides directly into
-    `merged` itself -- "for enemies this should be the actual sets used by
-    default" -- so a species with a custom default becomes THE
-    usage-derived default for every caller reading `merged[name]`'s own
-    item/ability/nature/evs/moves fields, both our own side and an
-    enemy's, with no new plumbing anywhere else (the same
-    single-source-of-truth role `merged` already plays for mbsmogon.xlsx's
-    own usage data).
+    """Bakes `load_default_sets`'s overrides directly into `merged` itself
+    -- "for enemies this should be the actual sets used by default" -- so
+    a species with a custom default becomes THE usage-derived default for
+    every caller reading `merged[name]`'s own item/ability/nature/evs/
+    moves fields, both our own side and an enemy's, with no new plumbing
+    anywhere else (the same single-source-of-truth role `merged` already
+    plays for mbsmogon.xlsx's own usage data). Each field is applied
+    independently -- an entry missing one field (e.g. no Nature line)
+    still overrides every field it DOES specify; only the missing field
+    itself keeps falling back to mbsmogon's own usage data.
 
     ABILITY is the one field that does NOT go on a "Mega X" row directly:
     a Showdown export's "Ability:" line always means the BASE form's
@@ -485,25 +494,30 @@ def apply_default_sets(merged):
     pick's nature/EVs/moveset/stone-item all live on ITS OWN "Mega X" row,
     never the base species'.
 
-    Returns (incomplete, unrecognised) -- `incomplete` from `load_default_
-    sets` (pasted without a full 5-field set), `unrecognised` any complete
-    entry whose own name still isn't a real Pokemon in this dataset --
+    Returns (partial, unrecognised) -- `partial` from `load_default_sets`
+    (name -> the fields it's missing, purely informational), `unrecognised`
+    any entry whose own name still isn't a real Pokemon in this dataset --
     never raises, since a bad/leftover entry in this file must not break
     the whole tool from loading."""
-    complete, incomplete = load_default_sets(merged)
+    specs, partial = load_default_sets(merged)
     unrecognised = []
-    for name, spec in complete.items():
+    for name, spec in specs.items():
         if name not in merged:
             unrecognised.append(name)
             continue
-        merged[name]["items_usage"] = [(spec["item"], 100.0)]
-        merged[name]["nature"] = spec["nature"]
-        merged[name]["evs"] = spec["evs"]
-        merged[name]["moves_usage"] = [(m, 100.0) for m in spec["moves"]]
-        base = base_form_name(name)
-        ability_target = base if (base and base in merged) else name
-        merged[ability_target]["abilities_usage"] = [(spec["ability"], 100.0)]
-    return incomplete, unrecognised
+        if "item" in spec:
+            merged[name]["items_usage"] = [(spec["item"], 100.0)]
+        if "nature" in spec:
+            merged[name]["nature"] = spec["nature"]
+        if "evs" in spec:
+            merged[name]["evs"] = spec["evs"]
+        if "moves" in spec:
+            merged[name]["moves_usage"] = [(m, 100.0) for m in spec["moves"]]
+        if "ability" in spec:
+            base = base_form_name(name)
+            ability_target = base if (base and base in merged) else name
+            merged[ability_target]["abilities_usage"] = [(spec["ability"], 100.0)]
+    return partial, unrecognised
 
 
 def fixed_lead(team_name, meta):

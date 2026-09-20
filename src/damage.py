@@ -67,6 +67,12 @@ class Combatant:
     mega_types: list | None = None
     weight_kg: float | None = None       # current form's weight -- Low Kick/Grass Knot
     mega_weight_kg: float | None = None  # swapped in on mega_evolve(), like mega_stats
+    pre_mega_ability: str | None = None  # base-form ability, set only by counter_finder's
+    # upfront _mega_project (never by engine.mega_evolve, which has no need for it --
+    # `ability` already tracks current-state correctly there turn to turn). Lets a
+    # caller with no send-out event to wait for still ask "what ability was active at
+    # the moment an opening-turn Intimidate resolves" for a combatant this cheap model
+    # has already fast-forwarded straight to its mega form.
 
     def __deepcopy__(self, memo):
         """Fast copy. Every field is a scalar, a flat dict of scalars, or a
@@ -100,6 +106,7 @@ class Combatant:
         new.mega_types = self.mega_types
         new.weight_kg = self.weight_kg
         new.mega_weight_kg = self.mega_weight_kg
+        new.pre_mega_ability = self.pre_mega_ability
         return new
 
     def max_hp(self) -> int:

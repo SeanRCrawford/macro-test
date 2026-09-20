@@ -69,7 +69,7 @@ def load_all(fingerprint):
     merged, unresolved, moves, natures, typechart = build_merged_dataset()
     dups = getattr(build_merged_dataset, "last_duplicates", {}) or {}
     default_set_issues = getattr(build_merged_dataset, "last_default_set_issues",
-                                 ([], [])) or ([], [])
+                                 ({}, [])) or ({}, [])
     return merged, unresolved, moves, natures, typechart, dups, default_set_issues
 
 
@@ -126,10 +126,12 @@ if dups:
     st.caption(f"Note: {', '.join(dups)} appear on multiple rows in mbsmogon.xlsx; "
                f"the Mega-Stone row was used for the Mega and the other filed as its base form.")
 if default_set_incomplete:
-    st.caption(f"Note: data/default_sets.txt has an incomplete set for "
-              f"{', '.join(default_set_incomplete)} (needs item, ability, "
-              f"nature, EVs, AND 4 moves to become that species' new "
-              f"default) -- ignored.")
+    parts = [f"{name} (missing {', '.join(missing)})"
+             for name, missing in default_set_incomplete.items()]
+    st.caption(f"Note: data/default_sets.txt has a partial set for "
+              f"{'; '.join(parts)} -- the fields it DOES specify are still "
+              f"applied as that species' new default; only the missing "
+              f"field(s) keep falling back to mbsmogon usage.")
 if default_set_unrecognised:
     st.caption(f"Note: data/default_sets.txt names "
               f"{', '.join(default_set_unrecognised)}, not a species in "
@@ -1912,15 +1914,18 @@ with tab_build:
                 "\"let me create a 'default set' txt where I paste "
                 "pokepastes for individual pokemon, and for enemies this "
                 "should be the actual sets used by default\" -- one or "
-                "more COMPLETE Showdown exports (item, ability, nature, "
-                "EVs, AND 4 moves all specified), saved to "
-                "data/default_sets.txt. Once saved, that species' set "
-                "becomes THE default everywhere -- both our own side and "
-                "an enemy -- whenever no more specific set is already "
-                "pinned (a real known team, a paste, an explicit "
-                "override), replacing mbsmogon.xlsx's own usage-derived "
-                "pick. A paste missing any of the 5 fields is rejected "
-                "rather than half-applied.")
+                "more Showdown exports, saved to data/default_sets.txt. "
+                "Once saved, each field that species' export specifies "
+                "(item, ability, nature, EVs, moves) becomes THE default "
+                "for that field everywhere -- both our own side and an "
+                "enemy -- whenever no more specific set is already pinned "
+                "(a real known team, a paste, an explicit override), "
+                "replacing mbsmogon.xlsx's own usage-derived pick; any "
+                "field the export leaves out still falls back to "
+                "mbsmogon usage as normal. Saving through this box below "
+                "still requires a COMPLETE export (item, ability, nature, "
+                "EVs, AND 4 moves) -- edit data/default_sets.txt by hand "
+                "for a partial entry.")
             from species_data import (custom_team_from_export, load_default_sets,
                                       team_to_showdown_export, DEFAULT_SETS_FIELDS)
             existing_defaults, _incomplete = load_default_sets(merged)
@@ -4601,7 +4606,7 @@ with tab_counter:
                                 joint_pool_search, find_pair_cores, two_two_two_teams,
                                 coverage_group_search, narrow_coverage_pool_names,
                                 _pair_beaten_frac, choice_scarf_enemy_moveset)
-    from team_search import build_candidate_pool
+    from team_search import build_candidate_pool, TYPE_CORES
 
     # Shared with the "Coverage groups" mode's own "Send to Bring-4" button
     # below, which pre-fills Bring-4 mode's own paste box with a candidate
@@ -5564,6 +5569,41 @@ with tab_counter:
         cov_max_megas = st.slider(
             "Max Mega-stone users in a group", 0, 6, 2, key="ct_cov_max_megas",
             help="VGC's real 'only one Mega Evolution per team per game'.")
+        with st.expander("Advanced: must-bring type cores and minimum Score"):
+            st.caption("Anything set HERE is a hard requirement -- a group missing a "
+                       "must-bring core or holding even one below-floor member is "
+                       "dropped outright, however well it scores otherwise. Same "
+                       "\"type core\" catalog as the Generate Team tab's own "
+                       "'Required type cores'.")
+            from species_data import TYPES as _ct_cov_all_types
+            cov_core_options = ["/".join(c) for c in TYPE_CORES]
+            cov_required_core_sel = st.multiselect(
+                "Must-bring type cores (ALL selected must be covered by the "
+                "group's combined types)",
+                cov_core_options, key="ct_cov_required_cores",
+                help="e.g. picking Fire/Water/Grass means every returned group must "
+                     "contain at least one member of EACH of those three types -- "
+                     "not just one of them, and not necessarily a single Pokemon "
+                     "carrying all three.")
+            cov_custom_core_txt = st.text_input(
+                "...or a custom 3-type core, comma-separated (e.g. \"Fire, Ground, Fairy\")",
+                value="", key="ct_cov_custom_core")
+            cov_required_cores = [tuple(c.split("/")) for c in cov_required_core_sel]
+            if cov_custom_core_txt.strip():
+                cov_custom_types = [t.strip().title() for t in cov_custom_core_txt.split(",")
+                                    if t.strip()]
+                cov_bad_types = [t for t in cov_custom_types if t not in _ct_cov_all_types]
+                if cov_bad_types:
+                    st.error(f"Not a real type: {', '.join(cov_bad_types)}")
+                elif len(cov_custom_types) != 3:
+                    st.error("A custom core needs exactly 3 types.")
+                else:
+                    cov_required_cores.append(tuple(cov_custom_types))
+            cov_min_score_on = st.checkbox(
+                "Require a minimum Score for every member", key="ct_cov_min_score_on")
+            cov_min_member_score = (
+                st.slider("Minimum Score", 200, 650, 400, key="ct_cov_min_score")
+                if cov_min_score_on else None)
         cov_cap_on = st.checkbox(
             "Cap a group's worst net weakness", key="ct_cov_cap_on")
         cov_max_net = (st.slider("Max net weakness", 0, 6, 2, key="ct_cov_max_net")
@@ -5630,7 +5670,9 @@ with tab_counter:
                         max_net_weakness=cov_max_net,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         must_include=cov_include, suggested=cov_suggested,
-                        suggested_min=cov_suggested_min)
+                        suggested_min=cov_suggested_min,
+                        required_cores=cov_required_cores or None,
+                        min_member_score=cov_min_member_score)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams

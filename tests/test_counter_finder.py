@@ -8682,6 +8682,46 @@ class TestIntimidateInTheJointRace(unittest.TestCase):
                      "E2": cf._build("Sinistcha", merged, natures)}
         self.assertEqual(cf._intimidate_mult_by_role(combatants), {})
 
+    def test_a_mega_that_only_has_intimidate_pre_evolution_still_intimidates(self):
+        """"Mega Salamence has intimidate in base form, so it intimidates
+        before mega evolving" -- base Salamence is Intimidate, Mega
+        Salamence is Aerilate, but real Intimidate fires at switch-in,
+        before that turn's own Mega Evolution. `_build`'s mega-projection
+        already fast-forwards straight to Aerilate for everything else
+        this module computes, but the opposing side must still take the
+        real -1 Atk drop from Salamence's own (pre-evolution) Intimidate."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        salamence = cf._build("Mega Salamence", merged, natures)
+        self.assertEqual(salamence.ability, "Aerilate")
+        self.assertEqual(salamence.pre_mega_ability, "Intimidate")
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)  # ordinary ability
+        e2 = cf._build("Sinistcha", merged, natures)
+        mult = cf._intimidate_mult_by_role(
+            {"C": salamence, "P": partner, "E1": e1, "E2": e2})
+        self.assertEqual(mult.get("E1"), {"physical": 2 / 3})
+        self.assertEqual(mult.get("E2"), {"physical": 2 / 3})
+
+    def test_a_mega_that_only_gains_contrary_on_evolving_still_takes_the_real_drop(self):
+        """"Staraptor only gains contrary after mega evolving, so enemy
+        intimidate reduces its attack before it mega evolves" -- base
+        Staraptor is Intimidate, Mega Staraptor is Contrary. An opposing
+        Intimidate holder's stat drop resolves before OUR OWN Mega
+        Evolution too, so a Staraptor this module has already fast-
+        forwarded to its mega form must still take the real -1 Atk drop,
+        not have it inverted into a Contrary +1 boost."""
+        merged, natures = self.W["merged"], self.W["natures"]
+        staraptor = cf._build("Mega Staraptor", merged, natures)
+        self.assertEqual(staraptor.ability, "Contrary")
+        self.assertEqual(staraptor.pre_mega_ability, "Intimidate")
+        partner = cf._build("Milotic", merged, natures)
+        e1 = cf._build("Garchomp", merged, natures)
+        e1.ability = "Intimidate"
+        e2 = cf._build("Sinistcha", merged, natures)
+        mult = cf._intimidate_mult_by_role(
+            {"C": staraptor, "P": partner, "E1": e1, "E2": e2})
+        self.assertEqual(mult.get("C"), {"physical": 2 / 3})
+
 
 class TestContraryDefenseBoostInTheJointRace(unittest.TestCase):
     """"Mega Staraptor's Contrary meaning Close Combat boosts its def and
@@ -9023,11 +9063,15 @@ class TestBring4FromDeepDive(unittest.TestCase):
         self.assertTrue(checked_any, "fixture never actually produced a "
                         "bring4 carrying both stone holders -- test is vacuous")
 
-    def test_mega_used_is_none_for_a_bring4_that_excludes_the_dives_mega(self):
-        """A bring4 that leaves out `dive`'s own chosen mega (but still
-        carries the OTHER, non-transforming stone holder) never claims a
-        mega -- that member just never transformed in this dive, whichever
-        bring you look at."""
+    def test_the_other_mega_still_transforms_when_brought_alone(self):
+        """"in the bring4 full deep dive only one pokemon can mega across
+        all matches, even when only the other mega is brought -- the one
+        mega rule should only apply per match" -- a bring4 that leaves out
+        `dive`'s own whole-core-chosen mega, but still carries the OTHER
+        stone holder, has nothing that Pokemon could be inconsistent with
+        (its rival mega isn't even in this bring): it must transform, not
+        sit in base form just because a DIFFERENT bring4 (or the core as a
+        whole) preferred the other one."""
         rows = cf.bring4_from_deep_dive(self.CORE, self.dive, self.TARGETS)
         other_mega = next(m for m in ("Mega Gengar", "Mega Alakazam")
                           if m != self.dive["mega_used"])
@@ -9036,7 +9080,7 @@ class TestBring4FromDeepDive(unittest.TestCase):
             if (self.dive["mega_used"] not in row["bring4"]
                     and other_mega in row["bring4"]):
                 checked_any = True
-                self.assertIsNone(row["mega_used"])
+                self.assertEqual(row["mega_used"], other_mega)
         self.assertTrue(checked_any, "fixture never produced a bring4 "
                         "excluding the dive's mega while keeping the other "
                         "stone holder -- test is vacuous")
@@ -9551,28 +9595,41 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
         point (the numbers matched the user's stale usage-default bug
         report -- Close Combat 142-155-167% -- proving the OLD behaviour
         really was usage-default stats, not the user's real ones) is now
-        structurally moot: Kingambit and Mega Staraptor are both real
-        default_sets.txt-pinned species, so their own real EVs/Nature/item
-        already supply the DEFAULT (`_build_forms`' own baseline) with no
-        explicit override needed at all -- there is no usage-default
-        fallback left for this "no overrides" call to fall back to. Its
-        real current number (verified directly by running this exact dive)
-        is now close to `test_with_overrides_uses_the_real_stats`' own
-        real-stat range, not the old stale one -- confirming the NEW
-        current reality (default_sets.txt supplies real stats even with no
-        caller-given override) rather than the old bug."""
+        structurally moot twice over: Kingambit and Mega Staraptor are both
+        real default_sets.txt-pinned species, so their own real EVs/Nature/
+        item already supply the DEFAULT (`_build_forms`' own baseline) with
+        no explicit override needed -- AND, since the Intimidate/mega-
+        evolution-timing fix (a real opening-turn Intimidate now correctly
+        resolves against a combatant's PRE-mega ability, not this module's
+        own upfront mega projection -- see `_ability_at_switch_in`), Mega
+        Metagross's Clear Body correctly shields it from Mega Staraptor's
+        own real Intimidate, so Mega Metagross's already-available Psychic
+        Fangs is now a genuine guaranteed KO on turn 1 -- making "Hydreigon
+        Protects while Metagross finishes Staraptor" a real, strictly
+        better-scoring line than trading hits. Mega Staraptor now dies
+        before ever landing Close Combat, so this test checks Psychic
+        Fangs (the move that DOES appear turn 1) instead."""
         log = self._first_log(self._dive())
         t1 = log[0]
-        close_combat = next(h for _r, _t, h in t1 if h.move_name == "Close Combat")
-        self.assertAlmostEqual(close_combat.lo, 1.20, delta=0.02)
-        self.assertAlmostEqual(close_combat.hi, 1.41, delta=0.02)
+        psychic_fangs = next(h for _r, _t, h in t1 if h.move_name == "Psychic Fangs")
+        self.assertAlmostEqual(psychic_fangs.lo, 1.11, delta=0.02)
+        self.assertAlmostEqual(psychic_fangs.hi, 1.31, delta=0.02)
 
     def test_with_overrides_uses_the_real_stats(self):
         """Full overrides given: the damage numbers change to match the
         REAL EVs/Nature (independently computed via `_build_form`'s own
         stat formula, same as `TestBuildFormsRespectsCustomSets`), and
         Kingambit's actual Low Kick (never in its usage-derived top 4)
-        is now a real, available option."""
+        is now a real, available option.
+
+        Mega Staraptor no longer survives to use Close Combat at all (see
+        `test_without_overrides_reproduces_the_stale_bug_report`'s own
+        updated docstring for why) -- Psychic Fangs, the move that DOES
+        land turn 1, still shows the override taking effect: Metagross's
+        own real Adamant/32 Atk spread hits noticeably HARDER than the
+        usage-default one, outweighing Mega Staraptor's real bulk (29 HP/
+        4 SpD) -- confirmed against the no-overrides case's own real,
+        verified range above."""
         dive = self._dive(evs_overrides=self.evs_overrides,
                           nature_overrides=self.nature_overrides,
                           ability_overrides=self.ability_overrides,
@@ -9580,11 +9637,9 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
                           enemy_move_overrides=self.enemy_move_overrides)
         log = self._first_log(dive)
         t1 = log[0]
-        close_combat = next(h for _r, _t, h in t1 if h.move_name == "Close Combat")
-        # Real Mega Staraptor (29 HP/1 Atk/4 SpD/32 Spe Jolly) hits noticeably
-        # softer than the usage-default spread the stale test above used.
-        self.assertLess(close_combat.hi, 1.5)
-        self.assertGreater(close_combat.hi, 1.35)
+        psychic_fangs = next(h for _r, _t, h in t1 if h.move_name == "Psychic Fangs")
+        self.assertAlmostEqual(psychic_fangs.lo, 1.20, delta=0.02)
+        self.assertAlmostEqual(psychic_fangs.hi, 1.41, delta=0.02)
         kingambit_moves = dive["sets"]  # our own sets only carry item/moves
         # Kingambit is the enemy, not in `sets` -- confirm via the built
         # enemy forms directly instead.
@@ -10239,11 +10294,12 @@ def _fake_coverage_row(pair, perfect, coverage_frac, avg_score=None):
 # display column") is a harmless no-op against this fixture, letting these
 # tests isolate pure ranking/filter logic without needing real weakness data.
 _FAKE_MERGED = {
-    name: {"types": types} for name, types in {
-        "A": ["Fire"], "B": ["Water"], "C": ["Grass"], "D": ["Electric"],
-        "E": ["Ice"], "F": ["Fire"],            # F shares A's exact typing
-        "Mega G": ["Dragon", "Flying"], "Mega H": ["Steel", "Psychic"],
-        "Mega I": ["Ghost"],
+    name: {"types": types, "score": score} for name, (types, score) in {
+        "A": (["Fire"], 100.0), "B": (["Water"], 200.0), "C": (["Grass"], 300.0),
+        "D": (["Electric"], 50.0), "E": (["Ice"], 25.0),
+        "F": (["Fire"], 100.0),                 # F shares A's exact typing
+        "Mega G": (["Dragon", "Flying"], 500.0), "Mega H": (["Steel", "Psychic"], 500.0),
+        "Mega I": (["Ghost"], 10.0),
     }.items()
 }
 
@@ -10478,6 +10534,77 @@ class TestCoverageGroupSearchRanking(unittest.TestCase):
         for row in rows_out:
             self.assertIn("A", row["group"])
             self.assertTrue({"B", "C"} & set(row["group"]))
+
+    def test_required_core_keeps_a_group_that_covers_it(self):
+        """A=Fire, B=Water, C=Grass -- their combined types cover the
+        elemental core exactly."""
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            required_cores=[("Fire", "Water", "Grass")], no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"A", "B", "C"}, groups)
+        for g in groups:
+            g_types = {t for n in g for t in _FAKE_MERGED[n]["types"]}
+            self.assertTrue({"Fire", "Water", "Grass"} <= g_types)
+
+    def test_required_core_excludes_a_group_missing_one_of_its_types(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            required_cores=[("Fire", "Water", "Grass")], no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        # A+B+D is Fire/Water/Electric -- no Grass, so the core isn't met.
+        self.assertNotIn({"A", "B", "D"}, groups)
+
+    def test_several_required_cores_are_all_required(self):
+        """Fire/Water/Grass AND Fire/Water/Electric together need all 4
+        types (Fire, Water, Grass, Electric) present at once -- an AND
+        over the list, not "any one of them"."""
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(4,), top_n=50,
+            required_cores=[("Fire", "Water", "Grass"), ("Fire", "Water", "Electric")],
+            no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[4]["rows"]]
+        self.assertIn({"A", "B", "C", "D"}, groups)      # Fire/Water/Grass/Electric
+        self.assertNotIn({"A", "B", "C", "E"}, groups)   # no Electric -- fails core 2
+
+    def test_min_member_score_drops_any_group_with_a_below_floor_member(self):
+        """A's score (100) is below the floor (150); B/C/Mega G (200/300/
+        500) all clear it."""
+        import itertools as _it
+        names = ["A", "B", "C", "Mega G"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            min_member_score=150.0, no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"B", "C", "Mega G"}, groups)
+        for g in groups:
+            self.assertNotIn("A", g)
+
+    def test_min_member_score_excludes_a_must_include_name_that_fails_the_floor(self):
+        """Forcing in a name the floor already excluded is a real, visible
+        conflict -- empty results, not a silent exemption."""
+        import itertools as _it
+        names = ["A", "B", "C"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
+            must_include=["A"], min_member_score=150.0, no_duplicate_typing=False)
+        self.assertEqual(result[3]["rows"], [])
 
 
 class TestCoverageGroupSearchRealData(unittest.TestCase):
@@ -10923,10 +11050,19 @@ class TestPrematchWinConditions(unittest.TestCase):
 
 class TestEvolveFromTeam(unittest.TestCase):
     """"If I define one high-performing team ... then try to see if any
-    improvements can be made" -- a LOCAL, greedy search around one fixed
-    starting core: move swaps on existing members, one substitution at a
-    time, scored by `_evolve_dive_score` (the SAME `_CORE_BLEND_WEIGHTS`-
+    improvements can be made" -- "the --evolve-from-team should iterate for
+    multiple improvements (and respect the fact that only one of a species
+    can be a team ...) I need to see the best possible joint impact of
+    replacing 1-3 pokemon, or replacing moves, or replacing items, with the
+    aim of maximising these effects jointly."
+
+    GREEDY HILL-CLIMBING, up to `max_changes` rounds (default 3): each
+    round is a LOCAL search around that round's own fixed starting core --
+    move swaps, item swaps, and whole-member swaps, one substitution at a
+    time -- scored by `_evolve_dive_score` (the SAME `_CORE_BLEND_WEIGHTS`-
     weighted per-90 yardstick `_core_row`'s own "Avg Wins/90" blend uses).
+    Round 1's own best pick is APPLIED before round 2 searches, and so on,
+    chaining up to `max_changes` joint changes together.
 
     Real, verified, deliberately-suboptimal fixture: Garchomp forced onto
     Poison Jab (a real, usage-backed move, just a clearly worse pick here)
@@ -10935,7 +11071,11 @@ class TestEvolveFromTeam(unittest.TestCase):
     Ground) + Toxapex. Verified directly: at `turns=2` the raw race for
     BOTH of Garchomp's own pairs flips from "no_ko" to "out_trade" once
     Earthquake replaces Poison Jab, taking the blended score from 18.0 to
-    60.0 -- a real, sizeable improvement, not a rounding artifact.
+    60.0 -- a real, sizeable improvement, not a rounding artifact. A
+    further genuine Sitrus Berry -> Life Orb item improvement (60.0 ->
+    66.0, verified directly the same way) is available on TOP of that
+    move swap, once it's the round-2 baseline -- the "joint impact of
+    replacing ... moves, or ... items" fixture below.
     """
 
     def setUp(self):
@@ -10949,16 +11089,24 @@ class TestEvolveFromTeam(unittest.TestCase):
         self.suboptimal_moves = {
             "Garchomp": ["Poison Jab", "Dragon Claw", "Rock Slide", "Protect"]}
 
-    def _evolve(self, swap_pool=()):
+    def _evolve(self, swap_pool=(), max_changes=1, **extra):
         merged, moves = self.W["merged"], self.W["moves"]
         natures, typechart = self.W["natures"], self.W["typechart"]
         return cf.evolve_from_team(
             self.core, self.targets, merged, moves, natures, typechart,
             turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=list(swap_pool))
+            swap_pool=list(swap_pool), max_changes=max_changes, **extra)
+
+    def _round1(self, swap_pool=(), **extra):
+        """Most of this class's own tests are about ONE round's own local
+        search (already covered by `TestEvolveFromTeam`'s pre-iteration
+        assertions) -- `max_changes=1` reproduces that in isolation,
+        `["rounds"][0]` the exact flat, sorted-by-delta-descending list the
+        tool's own original single-pass shape returned."""
+        return self._evolve(swap_pool=swap_pool, max_changes=1, **extra)["rounds"][0]
 
     def test_earthquake_surfaces_as_the_top_move_swap_with_a_positive_delta(self):
-        results = self._evolve()
+        results = self._round1()
         self.assertTrue(results, "expected at least one genuine improvement")
         top = results[0]
         self.assertEqual(top["kind"], "move")
@@ -10971,19 +11119,20 @@ class TestEvolveFromTeam(unittest.TestCase):
         """The whole point of only surfacing `delta > 0` entries -- never a
         neutral or worse swap, "not an exhaustive dump of every swap
         tried."""
-        results = self._evolve()
+        results = self._round1()
         for r in results:
             self.assertGreater(r["delta"], 0.0, r)
 
     def test_results_are_sorted_by_delta_descending(self):
-        results = self._evolve()
+        results = self._round1()
         deltas = [r["delta"] for r in results]
         self.assertEqual(deltas, sorted(deltas, reverse=True))
 
     def test_baseline_score_is_the_same_across_every_returned_entry(self):
-        """Every candidate swap is compared against the SAME fixed
-        baseline (the ONE starting team), not a moving target."""
-        results = self._evolve()
+        """Every candidate swap in the SAME round is compared against the
+        SAME fixed baseline (that round's own ONE starting team), not a
+        moving target."""
+        results = self._round1()
         baselines = {r["baseline_score"] for r in results}
         self.assertEqual(len(baselines), 1)
 
@@ -10992,7 +11141,7 @@ class TestEvolveFromTeam(unittest.TestCase):
         roster -- kept fast) returns entries in the SAME shape as a move
         swap, tagged "kind": "member", with "removed"/"added" naming the
         departing/arriving Pokemon rather than moves."""
-        results = self._evolve(swap_pool=["Hydreigon"])
+        results = self._round1(swap_pool=["Hydreigon"])
         member_results = [r for r in results if r["kind"] == "member"]
         for r in member_results:
             self.assertIn(r["member"], self.core)
@@ -11000,12 +11149,36 @@ class TestEvolveFromTeam(unittest.TestCase):
             self.assertEqual(r["removed"], r["member"])
             self.assertGreater(r["delta"], 0.0)
 
+    def test_item_swap_kind_is_offered_and_never_changes_membership(self):
+        """New third swap kind alongside move/member: try each OTHER legal
+        item on an existing member (`optimize_sets.legal_items`), holding
+        moves and everyone else fixed -- "or replacing items". Uses the
+        REAL (non-suboptimal-moves) core directly -- with Garchomp already
+        on Earthquake, Sitrus Berry is itself the genuinely improvable
+        pick (verified directly: Life Orb/Soft Sand both score +6.0 over
+        it here); `self.suboptimal_moves`' own Poison-Jab fixture has no
+        real item improvement available until ITS OWN move swap has
+        already happened first (see
+        test_iterating_chains_a_move_swap_then_an_item_swap)."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        results = cf.evolve_from_team(
+            self.core, self.targets, merged, moves, natures, typechart,
+            turns=2, swap_pool=["Hydreigon"], max_changes=1)["rounds"][0]
+        item_results = [r for r in results if r["kind"] == "item"]
+        self.assertTrue(item_results, "expected at least one genuine item improvement")
+        for r in item_results:
+            self.assertIn(r["member"], self.core)
+            self.assertNotEqual(r["removed"], r["added"])
+            self.assertEqual(r["team"], self.core)
+            self.assertGreater(r["delta"], 0.0)
+
     def test_each_result_carries_its_own_resulting_team_and_breakdown_rates(self):
         """"give more in depth/summary info" -- each result now carries the
         resulting FULL roster and the individual baseline/new per-90
         breakdown rates (win/tailwind-safe/protect-safe/follow-me-safe),
         not just the single blended score."""
-        results = self._evolve(swap_pool=["Hydreigon"])
+        results = self._round1(swap_pool=["Hydreigon"])
         self.assertTrue(results)
         for r in results:
             self.assertIn(len(r["team"]), (3,))
@@ -11015,36 +11188,115 @@ class TestEvolveFromTeam(unittest.TestCase):
                 self.assertIn(f"baseline_{key}", r)
                 self.assertIn(f"new_{key}", r)
 
+    def test_each_result_carries_its_full_resulting_sets(self):
+        """"I need to see the details, what are the movesets of the new
+        pokemon, what are the move/item changes, and so on" -- every
+        result's own "sets" is the FULL resulting team's per-member item +
+        4-move list, not just the one changed member's new name."""
+        results = self._round1(swap_pool=["Hydreigon"])
+        self.assertTrue(results)
+        for r in results:
+            self.assertEqual(set(r["sets"]), set(r["team"]))
+            for s in r["sets"].values():
+                self.assertIn("item", s)
+                self.assertEqual(len(s["moves"]), 4)
+
     def test_jobs_2_produces_the_same_results_as_serial(self):
         """`jobs` is purely a speed knob -- the same trials, same scores,
         just farmed out to worker processes instead of run one after
         another."""
-        merged, moves = self.W["merged"], self.W["moves"]
-        natures, typechart = self.W["natures"], self.W["typechart"]
-        serial = cf.evolve_from_team(
-            self.core, self.targets, merged, moves, natures, typechart,
-            turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=["Hydreigon"])
-        parallel = cf.evolve_from_team(
-            self.core, self.targets, merged, moves, natures, typechart,
-            turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=["Hydreigon"], jobs=2)
+        serial = self._round1(swap_pool=["Hydreigon"])
+        parallel = self._evolve(swap_pool=["Hydreigon"], jobs=2)["rounds"][0]
         key = lambda r: (r["kind"], r["member"], r["removed"], r["added"])  # noqa: E731
         self.assertEqual(sorted(serial, key=key), sorted(parallel, key=key))
 
     def test_progress_callback_reaches_done_equals_total_exactly_once(self):
         calls = []
-        self._evolve(swap_pool=["Hydreigon"])
-        merged, moves = self.W["merged"], self.W["moves"]
-        natures, typechart = self.W["natures"], self.W["typechart"]
-        cf.evolve_from_team(
-            self.core, self.targets, merged, moves, natures, typechart,
-            turns=2, move_overrides=self.suboptimal_moves,
-            swap_pool=["Hydreigon"], progress_callback=lambda d, t: calls.append((d, t)))
+        self._evolve(swap_pool=["Hydreigon"],
+                     progress_callback=lambda d, t, rnd: calls.append((d, t, rnd)))
         self.assertTrue(calls)
         total = calls[0][1]
-        self.assertTrue(all(t == total for _d, t in calls))
-        self.assertEqual([d for d, _t in calls], list(range(1, total + 1)))
+        self.assertTrue(all(t == total and rnd == 1 for _d, t, rnd in calls))
+        self.assertEqual([d for d, _t, _rnd in calls], list(range(1, total + 1)))
+
+    def test_iterating_chains_a_move_swap_then_an_item_swap(self):
+        """"I need to see the best possible joint impact of replacing ...
+        moves, or replacing items ... maximising these effects jointly" --
+        round 1's own best move swap (Poison Jab -> Earthquake) is chained
+        into round 2's own search around the now-improved team, which finds
+        a further genuine item improvement (Sitrus Berry -> Life Orb) on
+        top of it -- a real joint result neither round alone would show."""
+        evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=2)
+        self.assertEqual(len(evolved["chain"]), 2)
+        step1, step2 = evolved["chain"]
+        self.assertEqual(step1["kind"], "move")
+        self.assertEqual(step1["member"], "Garchomp")
+        self.assertEqual(step1["added"], "Earthquake")
+        self.assertEqual(step2["kind"], "item")
+        self.assertEqual(step2["member"], "Garchomp")
+        self.assertEqual(step2["added"], "Life Orb")
+        # Round 2's own baseline is round 1's OWN new score, a moving
+        # target ACROSS rounds -- unlike within one round (see
+        # test_baseline_score_is_the_same_across_every_returned_entry).
+        self.assertAlmostEqual(step2["baseline_score"], step1["new_score"])
+        self.assertAlmostEqual(evolved["final_score"], step2["new_score"])
+        self.assertGreater(evolved["final_score"], evolved["baseline_score"])
+        self.assertEqual(evolved["final_team"], step2["team"])
+        self.assertEqual(evolved["final_sets"], step2["sets"])
+        self.assertEqual(len(evolved["rounds"]), 2)
+
+    def test_max_changes_1_runs_only_one_round(self):
+        """`max_changes=1` reproduces the tool's original one-pass
+        behaviour -- `chain` still names the single best pick (so a caller
+        always knows what WOULD be applied first), but no second round
+        ever runs to chain onto it."""
+        evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=1)
+        self.assertEqual(len(evolved["rounds"]), 1)
+        self.assertEqual(len(evolved["chain"]), 1)
+        self.assertEqual(evolved["chain"][0], evolved["rounds"][0][0])
+
+    def test_iteration_stops_early_once_a_round_finds_no_improvement(self):
+        """Asking for more rounds than there turn out to be genuine
+        improvements for doesn't pad `rounds`/`chain` with empty or
+        worse-than-baseline entries -- it just stops."""
+        evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=10)
+        self.assertLess(len(evolved["chain"]), 10)
+        self.assertEqual(len(evolved["rounds"]), len(evolved["chain"]) + 1)
+        self.assertEqual(evolved["rounds"][-1], [])
+
+    def test_no_improvement_at_all_returns_an_empty_chain_and_the_original_team(self):
+        """`evolve_from_team`'s own outer orchestration, isolated from
+        needing a real fixture with provably zero improvements anywhere
+        (every real team this search tries tends to have SOME marginal
+        item swap available) -- forcing round 1 itself to come back empty
+        confirms `chain`/`final_team`/`final_score`/`final_sets` all
+        correctly fall back to "nothing changed", not an error."""
+        from unittest import mock
+        baseline_breakdown = {"score": 42.0, "win_rate": 1.0, "tailwind_safe_rate": 1.0,
+                              "protect_safe_rate": 1.0, "follow_me_safe_rate": 1.0}
+        with mock.patch.object(cf, "_evolve_run_one_round",
+                               return_value=(baseline_breakdown, [])):
+            evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=3)
+        self.assertEqual(evolved["chain"], [])
+        self.assertEqual(evolved["rounds"], [[]])
+        self.assertEqual(evolved["final_team"], self.core)
+        self.assertEqual(evolved["final_score"], 42.0)
+        self.assertIsNone(evolved["final_sets"])
+
+    def test_a_mega_is_never_offered_as_a_whole_member_swap_alongside_its_own_base_form(self):
+        """"respect the fact that only one of a species can be a team, I
+        see it adding a Mega version of a base form already on the team" --
+        a whole-member-swap candidate that would put a Mega and its own
+        base form on the team together is never offered, even when it's
+        explicitly in `swap_pool`."""
+        core = ["Dragonite", "Kingambit", "Whimsicott"]
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        results = cf.evolve_from_team(
+            core, self.targets, merged, moves, natures, typechart, turns=2,
+            swap_pool=["Mega Dragonite", "Hydreigon"], max_changes=1)["rounds"][0]
+        offered = {r["added"] for r in results if r["kind"] == "member"}
+        self.assertNotIn("Mega Dragonite", offered)
 
 
 class TestRoundRobinSavedTeams(unittest.TestCase):

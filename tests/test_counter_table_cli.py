@@ -2106,30 +2106,40 @@ class TestEvolveFromTeamFlag(unittest.TestCase):
         self.assertIn("Poison Jab -> Earthquake", out)
 
     def test_no_improvement_case_says_so_plainly(self):
-        """An empty `swap_pool` and no move-swap headroom (a single-member
-        `--our` has no OTHER member to swap into, and pinning its own
-        moves to its own real usage top-4 leaves nothing better to try)
-        must not crash -- it reports plainly that nothing improved."""
+        """An empty `swap_pool` and no move/item-swap headroom (a two-
+        member `--our` with no OTHER member to swap into, real usage top-4
+        moves already held, and no better legal item available) must not
+        crash -- it reports plainly that nothing improved."""
         msg, out = run_main(
             ["--evolve-from-team", "--our", "Garchomp,Kingambit",
              "--vs-team", "Kingambit,Basculegion", "--evolve-pool-size", "0",
              "--turns", "1"])
         self.assertIsNone(msg, out)
         self.assertTrue(
-            "No improvement found" in out or "genuine improvement(s)" in out)
+            "No improvement found" in out
+            or ("Applied" in out and "joint change" in out))
 
     def test_our_accepts_a_named_saved_team(self):
         """--our can name a saved team (`data/teams`/`data/my_teams`)
         instead of a raw comma list -- mirrors `--vs-team`'s own name-or-
         list resolution. The starting core printed must be that team's own
         real roster, not an error about an unknown "Pokemon" named after
-        the team itself."""
+        the team itself.
+
+        --vs-team is pinned to a single 2-Pokemon target and --evolve-max-
+        changes to 1: leaving --vs-team unset races the named team against
+        EVERY saved team in the real dataset (19 of them), which at the new
+        default of 3 iterated rounds took over 3 hours and hung the suite --
+        this test only needs to confirm the starting core resolves, not run
+        a full iterated search."""
         from _harness import load_world
         W = load_world()
         team_name = sorted(W["teams"])[0]
         msg, out = run_main(
             ["--evolve-from-team", "--our", team_name,
-             "--evolve-pool-size", "0", "--turns", "1"])
+             "--vs-team", "Arcanine-Hisui,Toxapex",
+             "--evolve-pool-size", "0", "--evolve-max-changes", "1",
+             "--turns", "1"])
         self.assertIsNone(msg, out)
         core = list(dict.fromkeys(W["teams"][team_name]))
         self.assertIn(f"Evolving from: {' / '.join(core)}", out)
@@ -2160,7 +2170,14 @@ class TestEvolveFromTeamFlag(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("needs 2-6 distinct Pokemon", msg)
 
-    def test_xlsx_export_has_potential_teams_sheet(self):
+    def test_xlsx_export_has_chain_final_team_and_round_sheets(self):
+        """"summarise each potential team, and give more in depth/summary
+        info" -- the workbook now has a "Chain" sheet (the applied joint
+        sequence), a "Final team" sheet (the fully-evolved roster's own
+        complete item+moveset), and one "Round N" sheet per round that ran
+        (that round's own full candidate list, `evolve_from_team`'s
+        original single-pass shape plus the new Changed Member Item/Moves
+        columns)."""
         from openpyxl import load_workbook
         path = None
         try:
@@ -2174,26 +2191,55 @@ class TestEvolveFromTeamFlag(unittest.TestCase):
             self.assertIsNone(msg, out)
             self.assertIn("Excel workbook", out)
             wb = load_workbook(path)
-            self.assertIn("Potential teams", wb.sheetnames)
-            ws = wb["Potential teams"]
-            header = [c.value for c in ws[1]]
-            self.assertEqual(header[:6],
+            self.assertIn("Chain", wb.sheetnames)
+            self.assertIn("Final team", wb.sheetnames)
+            self.assertIn("Round 1", wb.sheetnames)
+
+            chain_ws = wb["Chain"]
+            chain_header = [c.value for c in chain_ws[1]]
+            self.assertEqual(chain_header[:5],
+                             ["Round", "Kind", "Member", "Removed", "Added"])
+            self.assertIn("Changed Member Item", chain_header)
+            self.assertIn("Changed Member Moves", chain_header)
+            chain_rows = list(chain_ws.iter_rows(min_row=2, values_only=True))
+            self.assertGreater(len(chain_rows), 0)
+            # Round 1's own real best pick (verified directly: this
+            # fixture's real --evolve-pool-size 0 candidate pool, a single
+            # strong Pokemon, out-scores the well-known Poison Jab ->
+            # Earthquake move swap) is the first chained step.
+            removed_idx = chain_header.index("Removed")
+            added_idx = chain_header.index("Added")
+            self.assertEqual(chain_rows[0][removed_idx], "Whimsicott")
+            self.assertEqual(chain_rows[0][added_idx], "Gallade")
+
+            final_ws = wb["Final team"]
+            final_header = [c.value for c in final_ws[1]]
+            self.assertEqual(final_header,
+                             ["Pokemon", "Item", "Move 1", "Move 2", "Move 3", "Move 4"])
+            final_rows = list(final_ws.iter_rows(min_row=2, values_only=True))
+            self.assertEqual(len(final_rows), 3)
+            self.assertTrue(any(r[0] == "Gallade" for r in final_rows))
+
+            round1_ws = wb["Round 1"]
+            round1_header = [c.value for c in round1_ws[1]]
+            self.assertEqual(round1_header[:6],
                              ["#", "Kind", "Member", "Removed", "Added", "Team"])
-            self.assertIn("Baseline Win Rate/90", header)
-            self.assertIn("New Win Rate/90", header)
-            rows = list(ws.iter_rows(min_row=2, values_only=True))
-            self.assertGreater(len(rows), 0)
-            team_col_idx = header.index("Team")
-            added_col_idx = header.index("Added")
-            removed_col_idx = header.index("Removed")
-            for row in rows:
+            self.assertIn("Changed Member Item", round1_header)
+            self.assertIn("Changed Member Moves", round1_header)
+            self.assertIn("Baseline Win Rate/90", round1_header)
+            round1_rows = list(round1_ws.iter_rows(min_row=2, values_only=True))
+            self.assertGreater(len(round1_rows), 0)
+            team_col_idx = round1_header.index("Team")
+            added_col_idx = round1_header.index("Added")
+            removed_col_idx = round1_header.index("Removed")
+            for row in round1_rows:
                 team = row[team_col_idx].split(" / ")
                 self.assertEqual(len(team), 3, row)
                 # a "member" swap's own arriving Pokemon must show up in the
                 # resulting roster (its own row's "Added" is a Pokemon name,
-                # not a move) -- a "move" swap's roster is unchanged from
-                # `--our`, so "Added" (a move name) never appears there.
-                if row[header.index("Kind")] == "member":
+                # not a move) -- a "move"/"item" swap's roster is unchanged
+                # from `--our`, so "Added" never appears there.
+                if row[round1_header.index("Kind")] == "member":
                     self.assertIn(row[added_col_idx], team)
                     self.assertNotIn(row[removed_col_idx], team)
         finally:
@@ -2207,6 +2253,50 @@ class TestEvolveFromTeamFlag(unittest.TestCase):
              "--turns", "1"])
         self.assertIsNone(msg, out)
         self.assertNotIn("Excel workbook", out)
+
+    def test_default_iterates_and_chains_a_second_round_on_top_of_the_first(self):
+        """"the --evolve-from-team should iterate for multiple improvements
+        ... I need to see the best possible joint impact ... maximising
+        these effects jointly" -- the new default (`--evolve-max-changes`
+        3) chains round 1's own best pick (verified directly: with this
+        fixture and --evolve-pool-size 0's own real 1-candidate pool,
+        round 1's best is the whole-member swap Whimsicott -> Gallade,
+        +48.0, comfortably beating the well-known Poison Jab -> Earthquake
+        move swap, +24.0) into a further genuine round-2 win on the SAME
+        already-improved team (Garchomp's own remaining Rock Slide ->
+        Stomping Tantrum, +6.0) -- a real joint result, not just round 1's
+        pick alone. The well-known Earthquake swap still shows up, now as
+        a listed round-1 alternative that wasn't chained."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("=== Round 2 ===", out)
+        self.assertIn("Whimsicott -> Gallade", out)
+        self.assertIn("Rock Slide -> Stomping Tantrum", out)
+        self.assertIn("Applied 2 joint change(s)", out)
+        self.assertIn("Final team:", out)
+        self.assertIn("Poison Jab -> Earthquake", out)
+        self.assertIn("round-1 alternative(s)", out)
+
+    def test_evolve_max_changes_1_stops_after_a_single_round(self):
+        """--evolve-max-changes 1 reproduces the tool's original single-
+        pass behaviour -- no round 2, no further chaining, even though the
+        same team has a further genuine round-2 improvement available (see
+        test_default_iterates_and_chains_a_second_round_on_top_of_the_first)."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2", "--evolve-max-changes", "1"])
+        self.assertIsNone(msg, out)
+        self.assertNotIn("=== Round 2 ===", out)
+        self.assertIn("Whimsicott -> Gallade", out)
+        self.assertIn("Applied 1 joint change(s)", out)
+        self.assertIn("Poison Jab -> Earthquake", out)
+        self.assertIn("Applied 1 joint change(s)", out)
 
     def test_jobs_is_accepted_and_shows_a_workers_line(self):
         """A real run left `--jobs 120` running for >8 hours with only one

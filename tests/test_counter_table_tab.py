@@ -169,6 +169,85 @@ class TestCounterTableTabExists(unittest.TestCase):
         # dataframe of the group's own internal pairs, no button needed.
         self.assertTrue(len(at.dataframe) >= 1)
 
+    def test_coverage_groups_advanced_controls_render(self):
+        """"define must bring cores and minimum scores" -- the new
+        Advanced expander's controls exist under the expected keys."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(m.key == "ct_cov_required_cores" for m in at.multiselect))
+        self.assertTrue(any(t.key == "ct_cov_custom_core" for t in at.text_input))
+        self.assertTrue(any(c.key == "ct_cov_min_score_on" for c in at.checkbox))
+
+    def test_required_type_core_keeps_only_groups_covering_it(self):
+        """Picking a must-bring core must mean every returned group's own
+        combined types cover all 3 of it -- not just offered in the UI."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        merged = W["merged"]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        cores_ms = [m for m in at.multiselect if m.key == "ct_cov_required_cores"][0]
+        self.assertIn("Fighting/Psychic/Dark", cores_ms.options)
+        cores_ms.set_value(["Fighting/Psychic/Dark"]).run()
+        self.assertFalse(at.exception, list(at.exception))
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"], "fixture never produced a group -- "
+                        "widen the pool or the test is vacuous")
+        for row in results[3]["rows"]:
+            group_types = {t for nm in row["group"] for t in merged[nm]["types"]}
+            self.assertTrue({"Fighting", "Psychic", "Dark"} <= group_types)
+
+    def test_custom_type_core_is_parsed_and_enforced(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [t for t in at.text_input if t.key == "ct_cov_custom_core"][0].set_value(
+            "Fire, Water, Electric").run()
+        self.assertFalse(at.exception, list(at.exception))
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        merged = load_world()["merged"]
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[3]["rows"]:
+            group_types = {t for nm in row["group"] for t in merged[nm]["types"]}
+            self.assertTrue({"Fire", "Water", "Electric"} <= group_types)
+
+    def test_minimum_score_floor_excludes_below_floor_members(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        merged = load_world()["merged"]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_min_score_on"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        min_score_sliders = [s for s in at.slider if s.key == "ct_cov_min_score"]
+        self.assertTrue(min_score_sliders)
+        floor = 500
+        min_score_sliders[0].set_value(floor).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"], "fixture never produced a group -- "
+                        "the floor may be too strict for this pool")
+        for row in results[3]["rows"]:
+            for nm in row["group"]:
+                self.assertGreaterEqual(merged[nm]["score"], floor)
+
     def test_coverage_groups_run_bring4_button_works(self):
         """"add an option to run the actual pair performance vs enemy
         teams in a proper bring 4" -- clicking it must not crash and must
