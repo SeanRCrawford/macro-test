@@ -4606,7 +4606,7 @@ with tab_counter:
                                 joint_pool_search, find_pair_cores, two_two_two_teams,
                                 coverage_group_search, narrow_coverage_pool_names,
                                 _pair_beaten_frac, choice_scarf_enemy_moveset)
-    from team_search import build_candidate_pool
+    from team_search import build_candidate_pool, TYPE_CORES
 
     # Shared with the "Coverage groups" mode's own "Send to Bring-4" button
     # below, which pre-fills Bring-4 mode's own paste box with a candidate
@@ -5569,6 +5569,41 @@ with tab_counter:
         cov_max_megas = st.slider(
             "Max Mega-stone users in a group", 0, 6, 2, key="ct_cov_max_megas",
             help="VGC's real 'only one Mega Evolution per team per game'.")
+        with st.expander("Advanced: must-bring type cores and minimum Score"):
+            st.caption("Anything set HERE is a hard requirement -- a group missing a "
+                       "must-bring core or holding even one below-floor member is "
+                       "dropped outright, however well it scores otherwise. Same "
+                       "\"type core\" catalog as the Generate Team tab's own "
+                       "'Required type cores'.")
+            from species_data import TYPES as _ct_cov_all_types
+            cov_core_options = ["/".join(c) for c in TYPE_CORES]
+            cov_required_core_sel = st.multiselect(
+                "Must-bring type cores (ALL selected must be covered by the "
+                "group's combined types)",
+                cov_core_options, key="ct_cov_required_cores",
+                help="e.g. picking Fire/Water/Grass means every returned group must "
+                     "contain at least one member of EACH of those three types -- "
+                     "not just one of them, and not necessarily a single Pokemon "
+                     "carrying all three.")
+            cov_custom_core_txt = st.text_input(
+                "...or a custom 3-type core, comma-separated (e.g. \"Fire, Ground, Fairy\")",
+                value="", key="ct_cov_custom_core")
+            cov_required_cores = [tuple(c.split("/")) for c in cov_required_core_sel]
+            if cov_custom_core_txt.strip():
+                cov_custom_types = [t.strip().title() for t in cov_custom_core_txt.split(",")
+                                    if t.strip()]
+                cov_bad_types = [t for t in cov_custom_types if t not in _ct_cov_all_types]
+                if cov_bad_types:
+                    st.error(f"Not a real type: {', '.join(cov_bad_types)}")
+                elif len(cov_custom_types) != 3:
+                    st.error("A custom core needs exactly 3 types.")
+                else:
+                    cov_required_cores.append(tuple(cov_custom_types))
+            cov_min_score_on = st.checkbox(
+                "Require a minimum Score for every member", key="ct_cov_min_score_on")
+            cov_min_member_score = (
+                st.slider("Minimum Score", 200, 650, 400, key="ct_cov_min_score")
+                if cov_min_score_on else None)
         cov_cap_on = st.checkbox(
             "Cap a group's worst net weakness", key="ct_cov_cap_on")
         cov_max_net = (st.slider("Max net weakness", 0, 6, 2, key="ct_cov_max_net")
@@ -5635,7 +5670,9 @@ with tab_counter:
                         max_net_weakness=cov_max_net,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         must_include=cov_include, suggested=cov_suggested,
-                        suggested_min=cov_suggested_min)
+                        suggested_min=cov_suggested_min,
+                        required_cores=cov_required_cores or None,
+                        min_member_score=cov_min_member_score)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams

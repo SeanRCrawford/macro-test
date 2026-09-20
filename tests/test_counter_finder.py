@@ -10294,11 +10294,12 @@ def _fake_coverage_row(pair, perfect, coverage_frac, avg_score=None):
 # display column") is a harmless no-op against this fixture, letting these
 # tests isolate pure ranking/filter logic without needing real weakness data.
 _FAKE_MERGED = {
-    name: {"types": types} for name, types in {
-        "A": ["Fire"], "B": ["Water"], "C": ["Grass"], "D": ["Electric"],
-        "E": ["Ice"], "F": ["Fire"],            # F shares A's exact typing
-        "Mega G": ["Dragon", "Flying"], "Mega H": ["Steel", "Psychic"],
-        "Mega I": ["Ghost"],
+    name: {"types": types, "score": score} for name, (types, score) in {
+        "A": (["Fire"], 100.0), "B": (["Water"], 200.0), "C": (["Grass"], 300.0),
+        "D": (["Electric"], 50.0), "E": (["Ice"], 25.0),
+        "F": (["Fire"], 100.0),                 # F shares A's exact typing
+        "Mega G": (["Dragon", "Flying"], 500.0), "Mega H": (["Steel", "Psychic"], 500.0),
+        "Mega I": (["Ghost"], 10.0),
     }.items()
 }
 
@@ -10533,6 +10534,77 @@ class TestCoverageGroupSearchRanking(unittest.TestCase):
         for row in rows_out:
             self.assertIn("A", row["group"])
             self.assertTrue({"B", "C"} & set(row["group"]))
+
+    def test_required_core_keeps_a_group_that_covers_it(self):
+        """A=Fire, B=Water, C=Grass -- their combined types cover the
+        elemental core exactly."""
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            required_cores=[("Fire", "Water", "Grass")], no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"A", "B", "C"}, groups)
+        for g in groups:
+            g_types = {t for n in g for t in _FAKE_MERGED[n]["types"]}
+            self.assertTrue({"Fire", "Water", "Grass"} <= g_types)
+
+    def test_required_core_excludes_a_group_missing_one_of_its_types(self):
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            required_cores=[("Fire", "Water", "Grass")], no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        # A+B+D is Fire/Water/Electric -- no Grass, so the core isn't met.
+        self.assertNotIn({"A", "B", "D"}, groups)
+
+    def test_several_required_cores_are_all_required(self):
+        """Fire/Water/Grass AND Fire/Water/Electric together need all 4
+        types (Fire, Water, Grass, Electric) present at once -- an AND
+        over the list, not "any one of them"."""
+        import itertools as _it
+        names = ["A", "B", "C", "D", "E"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(4,), top_n=50,
+            required_cores=[("Fire", "Water", "Grass"), ("Fire", "Water", "Electric")],
+            no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[4]["rows"]]
+        self.assertIn({"A", "B", "C", "D"}, groups)      # Fire/Water/Grass/Electric
+        self.assertNotIn({"A", "B", "C", "E"}, groups)   # no Electric -- fails core 2
+
+    def test_min_member_score_drops_any_group_with_a_below_floor_member(self):
+        """A's score (100) is below the floor (150); B/C/Mega G (200/300/
+        500) all clear it."""
+        import itertools as _it
+        names = ["A", "B", "C", "Mega G"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,), top_n=50,
+            min_member_score=150.0, no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertIn({"B", "C", "Mega G"}, groups)
+        for g in groups:
+            self.assertNotIn("A", g)
+
+    def test_min_member_score_excludes_a_must_include_name_that_fails_the_floor(self):
+        """Forcing in a name the floor already excluded is a real, visible
+        conflict -- empty results, not a silent exemption."""
+        import itertools as _it
+        names = ["A", "B", "C"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, _FAKE_MERGED, pool=names, group_sizes=(3,),
+            must_include=["A"], min_member_score=150.0, no_duplicate_typing=False)
+        self.assertEqual(result[3]["rows"], [])
 
 
 class TestCoverageGroupSearchRealData(unittest.TestCase):

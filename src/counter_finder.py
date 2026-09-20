@@ -930,7 +930,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           max_eval=_COVERAGE_GROUP_MAX_EVAL,
                           keep_cap=_COVERAGE_GROUP_KEEP_CAP,
                           max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES,
-                          must_include=None, suggested=None, suggested_min=0):
+                          must_include=None, suggested=None, suggested_min=0,
+                          required_cores=None, min_member_score=None):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -1043,6 +1044,31 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     quorum stays satisfiable by construction rather than accidentally
     narrowed into impossibility.
 
+    `required_cores`: `team_search.TYPE_CORES`-style "must bring cores" --
+    an ITERABLE of 3-type tuples that must ALL be satisfied (an AND over
+    the list, same "make sure certain cores are included" semantics
+    `team_search.hard_violations`'s own `required_cores` already uses for
+    team GENERATION): a group only survives if, for
+    EVERY core here, all 3 of its types appear SOMEWHERE among the
+    group's own members' combined types -- not one Pokemon carrying all
+    3, just the union. A HARD FILTER, checked once a full candidate group
+    is assembled (its own types aren't known before every seat is filled,
+    unlike the incrementally-prunable checks above). `None` (the default)
+    checks nothing, exactly as before this existed.
+
+    `min_member_score`: a HARD per-NAME floor -- every member of a
+    returned group must have its own `merged[name]["score"]` at or above
+    this value. Since a name's own Score never depends on the rest of the
+    group, this is enforced by simply dropping any name below the floor
+    from the search pool BEFORE the DFS runs (cheaper than a per-group
+    check, and equivalent -- a group containing a below-floor name is
+    illegal regardless of what else is in it), same narrowing-first
+    discipline `max_search_names` already uses. Applies even to a
+    `must_include`/`suggested` name -- forcing in a name that can't clear
+    the floor is a real, visible conflict (that size's own `"rows"` comes
+    back empty), not a silent exemption. `None` (the default) applies no
+    floor, exactly as before this existed.
+
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
     "perfect_links": int, "known_links": int, "total_links": int,
@@ -1055,6 +1081,10 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         names = sorted({n for r in pair_rows for n in r["pair"]})
     else:
         names = list(dict.fromkeys(pool))
+    if min_member_score is not None:
+        names = [nm for nm in names
+                if (merged.get(nm) or {}).get("score") is not None
+                and merged[nm]["score"] >= min_member_score]
     protect = list(dict.fromkeys(list(must_include or ()) + list(suggested or ())))
     names = narrow_coverage_pool_names(pair_rows, names, max_search_names,
                                        must_include=protect)
@@ -1093,6 +1123,13 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     # risk there. The missing Mega-vs-Mega link still counts against
     # `max_missing_frac`'s budget like any other unscored pair.
     illegal_pair = [[bool(_mega_base_overlap((a, b))) for b in names] for a in names]
+    core_sets = [frozenset(c) for c in (required_cores or ())]
+
+    def cores_ok(pick):
+        if not core_sets:
+            return True
+        group_types = frozenset().union(*(type_sig[i] for i in pick))
+        return all(core <= group_types for core in core_sets)
 
     def score_for_sort(row):
         return row["avg_score"] if row["avg_score"] is not None else float("-inf")
@@ -1201,6 +1238,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     continue
                 if not quorum_ok(pick):
                     continue
+                if not cores_ok(pick):
+                    continue
                 keep(evaluate(pick))
             out.sort(key=sort_key)
             return out, state["seen"], state["aborted"]
@@ -1215,7 +1254,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 if state["seen"] > max_eval:
                     state["aborted"] = True
                     return
-                if quorum_ok(pick):
+                if quorum_ok(pick) and cores_ok(pick):
                     keep(evaluate(pick))
                 return
             if n - start < size - k:
