@@ -6717,6 +6717,222 @@ class TestAlwaysTransformsMega(unittest.TestCase):
         self.assertEqual([mt for mt, _cs in options], [NO_MEGA])
 
 
+class TestTeamMissingTechs(unittest.TestCase):
+    """"I want to be able to filter for techs ... a weather setter, terrain
+    setter, a fake out user, speed control such as tailwind/zap cannon
+    (treat these as interchangeable) for a team to be considered a 'good'
+    and flexible team." Pure `_member_has_tech`/`team_missing_techs` logic
+    against real roster data -- Pelipper (Drizzle + Tailwind), Rillaboom
+    (Grassy Surge + Fake Out), Mega Raichu Y (Zap Cannon), Kingambit/
+    Garchomp (none of the four)."""
+
+    def setUp(self):
+        self.merged = world()["merged"]
+
+    def test_ability_based_techs_read_the_default_ability(self):
+        self.assertTrue(cf._member_has_tech("Pelipper", self.merged, "weather"))
+        self.assertTrue(cf._member_has_tech("Rillaboom", self.merged, "terrain"))
+        self.assertFalse(cf._member_has_tech("Kingambit", self.merged, "weather"))
+
+    def test_move_based_techs_read_recorded_usage_moves(self):
+        self.assertTrue(cf._member_has_tech("Rillaboom", self.merged, "fake_out"))
+        self.assertFalse(cf._member_has_tech("Kingambit", self.merged, "fake_out"))
+        self.assertTrue(cf._member_has_tech("Pelipper", self.merged, "speed_control"))
+
+    def test_zap_cannon_counts_as_speed_control_same_as_tailwind(self):
+        """"treat these as interchangeable" -- the user's own named
+        example, verified directly rather than assumed."""
+        self.assertTrue(cf._member_has_tech("Mega Raichu Y", self.merged, "speed_control"))
+
+    def test_team_missing_techs_is_empty_once_every_category_is_covered(self):
+        team = ["Pelipper", "Rillaboom", "Kingambit"]
+        self.assertEqual(
+            cf.team_missing_techs(team, self.merged,
+                                  ["weather", "terrain", "fake_out", "speed_control"]),
+            [])
+
+    def test_team_missing_techs_names_exactly_the_uncovered_categories(self):
+        team = ["Kingambit", "Garchomp"]
+        missing = cf.team_missing_techs(team, self.merged, ["weather", "fake_out"])
+        self.assertEqual(set(missing), {"weather", "fake_out"})
+
+    def test_none_or_empty_required_techs_is_always_a_no_op(self):
+        team = ["Kingambit"]
+        self.assertEqual(cf.team_missing_techs(team, self.merged, None), [])
+        self.assertEqual(cf.team_missing_techs(team, self.merged, []), [])
+
+
+class TestRequiredTechsHardFilters(unittest.TestCase):
+    """`required_techs` wired into the three places it applies: `coverage_
+    group_search` (a group), `bring4_search` (the specific bring-4),
+    `_core_passes_hard_filters`/`multi_bring4_exhaustive` (the whole
+    core) -- each a HARD, "every checked category mandatory" filter, per
+    the user's own choice over a softer quorum."""
+
+    def setUp(self):
+        self.W = world()
+        self.merged, self.moves = self.W["merged"], self.W["moves"]
+        self.natures, self.typechart = self.W["natures"], self.W["typechart"]
+
+    def test_coverage_group_search_drops_groups_missing_a_required_tech(self):
+        import itertools as _it
+        names = ["Pelipper", "Rillaboom", "Kingambit", "Garchomp"]
+        rows = [_fake_coverage_row(p, True, 100.0, 100.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, self.merged, pool=names, group_sizes=(3,), top_n=50,
+            required_techs=["weather"], no_duplicate_typing=False)
+        groups = [set(r["group"]) for r in result[3]["rows"]]
+        self.assertTrue(groups)
+        for g in groups:
+            self.assertIn("Pelipper", g)
+        self.assertNotIn({"Rillaboom", "Kingambit", "Garchomp"}, groups)
+
+    def test_bring4_search_drops_brings_missing_a_required_tech(self):
+        core = ["Pelipper", "Kingambit", "Whimsicott", "Garchomp",
+               "Incineroar", "Hydreigon"]
+        _pair_rows, unfiltered = cf.bring4_search(
+            core, ["Metagross", "Tyranitar"], self.merged, self.moves,
+            self.natures, self.typechart, turns=2)
+        _pair_rows2, filtered = cf.bring4_search(
+            core, ["Metagross", "Tyranitar"], self.merged, self.moves,
+            self.natures, self.typechart, turns=2,
+            required_techs=["fake_out", "weather"])
+        self.assertLess(len(filtered), len(unfiltered))
+        self.assertTrue(filtered)
+        for row in filtered:
+            self.assertEqual(
+                cf.team_missing_techs(row["bring4"], self.merged,
+                                      ["fake_out", "weather"]), [])
+
+    def test_core_passes_hard_filters_respects_required_techs(self):
+        core = ("Kingambit", "Garchomp", "Hydreigon")
+        self.assertTrue(cf._core_passes_hard_filters(core, self.merged, {}))
+        self.assertFalse(cf._core_passes_hard_filters(
+            core, self.merged, {}, required_techs=["weather"]))
+        core_with_weather = ("Kingambit", "Garchomp", "Pelipper")
+        self.assertTrue(cf._core_passes_hard_filters(
+            core_with_weather, self.merged, {}, required_techs=["weather"]))
+
+    def test_multi_bring4_beam_growth_never_prunes_on_required_techs(self):
+        """`required_techs` is NOT monotonic (same reason `max_net_weak_
+        types` isn't) -- a partial core missing a tech can still gain one
+        as it grows, so growth-time calls must never receive it. Directly
+        exercises `_core_passes_hard_filters` the way growth-time calls
+        do (no `required_techs`) vs the way the final capture step does
+        (with it), confirming a 2-member partial missing a tech is never
+        itself rejected by the hard-filter helper when the caller
+        correctly withholds `required_techs`."""
+        partial = ("Kingambit", "Garchomp")  # neither has any tech
+        self.assertTrue(cf._core_passes_hard_filters(partial, self.merged, {}))
+        self.assertFalse(cf._core_passes_hard_filters(
+            partial, self.merged, {}, required_techs=["weather"]))
+
+
+class TestWeaknessBreadthCapsAndMinSpecialAttackers(unittest.TestCase):
+    """"limit the total number of types with absolute weaknesses of 2 or
+    more, and 3 or more" (`max_weak_types`/`max_weak_types_3`, Coverage
+    Groups only) and "minimum special attackers ... by default 2"
+    (`min_special_attackers`, threaded through the same three scopes
+    `required_techs` already covers: `coverage_group_search`, `bring4_
+    search`, and the `_core_passes_hard_filters`/`multi_bring4_exhaustive`/
+    `multi_bring4_beam` core-level trio)."""
+
+    def setUp(self):
+        self.W = world()
+        self.merged, self.moves = self.W["merged"], self.W["moves"]
+        self.natures, self.typechart = self.W["natures"], self.W["typechart"]
+
+    def test_is_special_attacker_counts_a_mixed_attacker_with_any_real_special_move(self):
+        # Salamence usage runs both physical (Facade/EQ) AND special
+        # (Draco Meteor/Fire Blast/Hydro Pump) moves -- "even if they are
+        # mixed attackers like Salamence" must still count it.
+        self.assertTrue(cf._is_special_attacker("Salamence", self.merged, self.moves))
+
+    def test_count_special_attackers_sums_is_special_attacker_over_members(self):
+        team = ["Hydreigon", "Gholdengo", "Kingambit", "Incineroar"]
+        cnt = cf.count_special_attackers(team, self.merged, self.moves)
+        want = sum(1 for n in team
+                  if cf._is_special_attacker(n, self.merged, self.moves))
+        self.assertEqual(cnt, want)
+        self.assertGreater(cnt, 0)
+
+    def test_coverage_group_search_max_weak_types_caps_breadth_at_threshold_2(self):
+        from team_search import build_candidate_pool
+        pool = build_candidate_pool(self.merged, top_n=25)
+        enemy = {"Test": self.W["teams"]["Hard Trick Room"]}
+        pair_rows = cf.find_pair_cores(pool, self.merged, self.moves, self.natures,
+                                       self.typechart, enemy)
+        capped = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=20, max_weak_types=1)
+        self.assertTrue(capped[4]["rows"], "fixture never produced a group -- "
+                        "the cap may be too strict for this pool")
+        for row in capped[4]["rows"]:
+            self.assertLessEqual(row["weak_type_breadth_2"], 1)
+
+    def test_coverage_group_search_max_weak_types_3_caps_breadth_at_threshold_3(self):
+        from team_search import build_candidate_pool
+        pool = build_candidate_pool(self.merged, top_n=25)
+        enemy = {"Test": self.W["teams"]["Hard Trick Room"]}
+        pair_rows = cf.find_pair_cores(pool, self.merged, self.moves, self.natures,
+                                       self.typechart, enemy)
+        capped = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=20, max_weak_types_3=0)
+        self.assertTrue(capped[4]["rows"], "fixture never produced a group -- "
+                        "the cap may be too strict for this pool")
+        for row in capped[4]["rows"]:
+            self.assertEqual(row["weak_type_breadth_3"], 0)
+
+    def test_coverage_group_search_min_special_attackers_drops_groups_below_the_floor(self):
+        from team_search import build_candidate_pool
+        pool = build_candidate_pool(self.merged, top_n=25)
+        enemy = {"Test": self.W["teams"]["Hard Trick Room"]}
+        pair_rows = cf.find_pair_cores(pool, self.merged, self.moves, self.natures,
+                                       self.typechart, enemy)
+        result = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            moves_db=self.moves, min_special_attackers=3)
+        self.assertTrue(result[4]["rows"], "fixture never produced a group -- "
+                        "the floor may be too strict for this pool")
+        for row in result[4]["rows"]:
+            self.assertGreaterEqual(
+                cf.count_special_attackers(row["group"], self.merged, self.moves), 3)
+
+    def test_bring4_search_min_special_attackers_drops_brings_below_the_floor(self):
+        core = ["Pelipper", "Kingambit", "Whimsicott", "Garchomp",
+               "Incineroar", "Hydreigon"]
+        _pair_rows, unfiltered = cf.bring4_search(
+            core, ["Metagross", "Tyranitar"], self.merged, self.moves,
+            self.natures, self.typechart, turns=2)
+        _pair_rows2, filtered = cf.bring4_search(
+            core, ["Metagross", "Tyranitar"], self.merged, self.moves,
+            self.natures, self.typechart, turns=2, min_special_attackers=2)
+        self.assertLess(len(filtered), len(unfiltered))
+        self.assertTrue(filtered)
+        for row in filtered:
+            self.assertGreaterEqual(
+                cf.count_special_attackers(row["bring4"], self.merged, self.moves), 2)
+
+    def test_core_passes_hard_filters_respects_min_special_attackers(self):
+        core = ("Kingambit", "Incineroar", "Garchomp")  # no special attacker
+        self.assertTrue(cf._core_passes_hard_filters(core, self.merged, {}))
+        self.assertFalse(cf._core_passes_hard_filters(
+            core, self.merged, {}, moves_db=self.moves, min_special_attackers=1))
+        core_with_special = ("Kingambit", "Hydreigon", "Garchomp")
+        self.assertTrue(cf._core_passes_hard_filters(
+            core_with_special, self.merged, {}, moves_db=self.moves,
+            min_special_attackers=1))
+
+    def test_multi_bring4_beam_growth_never_prunes_on_min_special_attackers(self):
+        """Same non-monotonicity discipline as `required_techs` -- a
+        partial core short of the floor can still reach it as it grows, so
+        growth-time calls must never receive `min_special_attackers`."""
+        partial = ("Kingambit", "Garchomp")  # neither is a special attacker
+        self.assertTrue(cf._core_passes_hard_filters(partial, self.merged, {}))
+        self.assertFalse(cf._core_passes_hard_filters(
+            partial, self.merged, {}, moves_db=self.moves, min_special_attackers=1))
+
+
 class TestSwitchInSearch(unittest.TestCase):
     """`switch_in_search` -- for a pair that LOSES a specific enemy pair,
     which bench candidate switching in for which of ours turns it around.

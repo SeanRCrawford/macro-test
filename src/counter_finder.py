@@ -455,6 +455,87 @@ def raw_weakness_by_type(core, merged):
     return out
 
 
+# ------------------------------------------------------------- tech coverage
+#
+# "I may need a weather setter, terrain setter, a fake out user, speed
+# control such as tailwind/zap cannon (treat these as interchangeable) for a
+# team to be considered a 'good' and flexible team, or at least some of
+# these." -- named TECH categories, each satisfied by ANY member whose
+# default ability or recorded `moves_usage` covers it. Deliberately a
+# species-level, STATIC property check (default ability / any recorded-usage
+# move), the same discipline `required_cores`'s own type check already
+# uses -- not a specific searched/overridden set, which would need threading
+# through three quite different set-resolution pipelines (`bring4_search`,
+# `multi_bring4_coverage`, `coverage_group_search` don't even resolve full
+# movesets the same way).
+#
+# `speed_control` folds together every way a team answers "who moves
+# first": Tailwind/Trick Room (a team-wide turn-order swap), the
+# guaranteed-or-likely-paralysis moves (Thunder Wave/Glare/Stun Spore/
+# Nuzzle, and the user's own example, Zap Cannon -- its 50% miss chance is
+# no obstacle for a No-Guard user like Mega Raichu Y, see
+# `ALWAYS_TRANSFORMS_MEGA`), and the speed-DROP attacks `app.py`'s own
+# `SIM_SPEED_DROP_ATTACK_NAMES` already treats as speed control for the
+# Battle Simulator's support mode -- all interchangeable for this purpose,
+# every one of them just answers the same question.
+TECH_ABILITIES = {
+    "weather": frozenset(WEATHER_SETTERS),
+    "terrain": frozenset(TERRAIN_SETTERS),
+}
+TECH_MOVES = {
+    "fake_out": frozenset({"Fake Out"}),
+    "speed_control": frozenset({
+        "Tailwind", "Trick Room", "Thunder Wave", "Glare", "Stun Spore",
+        "Nuzzle", "Zap Cannon", "Icy Wind", "Electroweb", "Bulldoze", "Rock Tomb",
+    }),
+}
+TECH_LABELS = {
+    "weather": "weather setter", "terrain": "terrain setter",
+    "fake_out": "Fake Out user", "speed_control": "speed control",
+}
+
+
+def _member_has_tech(name, merged, tech):
+    """True if `name`'s own default ability or any recorded `moves_usage`
+    move covers `tech` (one of `TECH_ABILITIES`/`TECH_MOVES`'s own keys)."""
+    rec = merged.get(name) or {}
+    if tech in TECH_ABILITIES:
+        from combatants import _default_ability
+        return _default_ability(rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]
+    move_names = {mv for mv, _pct in (rec.get("moves_usage") or [])}
+    return bool(move_names & TECH_MOVES[tech])
+
+
+def team_missing_techs(members, merged, required_techs):
+    """Which of `required_techs` (tech category names, `TECH_ABILITIES`/
+    `TECH_MOVES`'s own keys) NONE of `members` covers -- empty when every
+    required category has at least one member. `required_techs` empty or
+    `None` always returns `[]` (nothing required, nothing missing)."""
+    if not required_techs:
+        return []
+    return [t for t in required_techs
+           if not any(_member_has_tech(n, merged, t) for n in members)]
+
+
+def _is_special_attacker(name, merged, moves_db):
+    """True if `name` has at least one real, usage-ranked Special-category
+    damaging move (`_real_damaging_moves`, below) -- "minimum special
+    attackers (pokemon that use special attacks, even if they are mixed
+    attackers like Salamence)". ANY qualifying move is enough; a mixed
+    attacker that also runs physical moves still counts, same as a pure
+    special sweeper -- this asks "can it threaten specially" at all, not
+    "is it primarily special"."""
+    return any(mv.category == "Special"
+              for mv in _real_damaging_moves(name, merged, moves_db))
+
+
+def count_special_attackers(members, merged, moves_db):
+    """How many of `members` are a special attacker (`_is_special_attacker`)
+    -- the raw count `min_special_attackers` hard-floors, the special-
+    attacker sibling of `team_missing_techs`'s tech-category coverage."""
+    return sum(1 for n in members if _is_special_attacker(n, merged, moves_db))
+
+
 # --------------------------------------------------------- 2-2-2 team building
 #
 # "2-2-2 teambuilding: using core pairs that work well together to make your
@@ -964,7 +1045,10 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           keep_cap=_COVERAGE_GROUP_KEEP_CAP,
                           max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES,
                           must_include=None, suggested=None, suggested_min=0,
-                          required_cores=None, min_member_score=None, exclude=None):
+                          required_cores=None, min_member_score=None, exclude=None,
+                          required_techs=None, max_weak_types=None,
+                          max_weak_types_3=None, moves_db=None,
+                          min_special_attackers=None):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -1113,6 +1197,37 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     unlike the incrementally-prunable checks above). `None` (the default)
     checks nothing, exactly as before this existed.
 
+    `required_techs`: "I may need a weather setter, terrain setter, a fake
+    out user, speed control ... for a team to be considered a 'good' and
+    flexible team" -- an ITERABLE of `TECH_ABILITIES`/`TECH_MOVES` category
+    names (`"weather"`, `"terrain"`, `"fake_out"`, `"speed_control"`) that
+    must ALL be covered (an AND over the list, same semantics as
+    `required_cores`, matching the user's own "hard requirement, every
+    checked category mandatory" choice over a softer quorum): a group only
+    survives if, for EVERY category here, at least one member's default
+    ability or recorded moves covers it (`team_missing_techs`). Also a HARD
+    FILTER checked once a full candidate group is assembled. `None` (the
+    default) checks nothing, exactly as before this existed.
+
+    `min_special_attackers` (needs `moves_db`): a HARD floor on how many
+    members are a special attacker (`count_special_attackers` -- ANY real
+    Special-category damaging move in usage, "pokemon that use special
+    attacks, even if they are mixed attackers like Salamence"). Checked the
+    same way as `required_techs` -- once a full candidate group is
+    assembled. `None` (the default) checks nothing.
+
+    `max_weak_types`/`max_weak_types_3`: BREADTH caps on absolute (raw,
+    `raw_weakness_by_type`) weakness -- "limit the total number of types
+    with absolute weaknesses of 2 or more, and 3 or more". `max_weak_types`
+    caps how many DIFFERENT types may have 2+ members weak to them,
+    `max_weak_types_3` the same at a 3+ bar -- distinct from `max_weakness`
+    above, which caps any ONE type's own raw count, not how many types
+    cross a threshold (the same "depth vs breadth" distinction `weak_type_
+    breadth` itself documents). Checked in the same AFTERWARD, top-buffer-
+    only pass as `max_net_weakness`/`max_weakness`, reusing that same `raw`
+    map rather than recomputing it. `None` (the default, for each) checks
+    nothing.
+
     `min_member_score`: a HARD per-NAME floor -- every member of a
     returned group must have its own `merged[name]["score"]` at or above
     this value. Since a name's own Score never depends on the rest of the
@@ -1207,6 +1322,17 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             return True
         group_types = frozenset().union(*(type_sig[i] for i in pick))
         return all(core <= group_types for core in core_sets)
+
+    def techs_ok(pick):
+        if not required_techs:
+            return True
+        return not team_missing_techs([names[i] for i in pick], merged, required_techs)
+
+    def special_ok(pick):
+        if not min_special_attackers:
+            return True
+        return count_special_attackers(
+            [names[i] for i in pick], merged, moves_db) >= min_special_attackers
 
     def score_for_sort(row):
         return row["avg_score"] if row["avg_score"] is not None else float("-inf")
@@ -1318,6 +1444,10 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     continue
                 if not cores_ok(pick):
                     continue
+                if not techs_ok(pick):
+                    continue
+                if not special_ok(pick):
+                    continue
                 keep(evaluate(pick))
             out.sort(key=sort_key)
             return out, state["seen"], state["aborted"]
@@ -1332,7 +1462,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 if state["seen"] > max_eval:
                     state["aborted"] = True
                     return
-                if quorum_ok(pick) and cores_ok(pick):
+                if (quorum_ok(pick) and cores_ok(pick) and techs_ok(pick)
+                        and special_ok(pick)):
                     keep(evaluate(pick))
                 return
             if n - start < size - k:
@@ -1378,8 +1509,16 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             worst_raw = max(raw.values())
             if max_weakness is not None and worst_raw > max_weakness:
                 continue
+            breadth_2 = sum(1 for v in raw.values() if v >= 2)
+            if max_weak_types is not None and breadth_2 > max_weak_types:
+                continue
+            breadth_3 = sum(1 for v in raw.values() if v >= 3)
+            if max_weak_types_3 is not None and breadth_3 > max_weak_types_3:
+                continue
             final.append({**row, "net_weakness": net, "worst_net_weakness": worst,
-                         "weakness": raw, "worst_weakness": worst_raw})
+                         "weakness": raw, "worst_weakness": worst_raw,
+                         "weak_type_breadth_2": breadth_2,
+                         "weak_type_breadth_3": breadth_3})
             if len(final) >= top_n:
                 break
         results[size] = {"rows": final, "seen": seen, "aborted": aborted}
@@ -5634,7 +5773,8 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   enemy_evs_overrides=None, enemy_nature_overrides=None,
                   enemy_ability_overrides=None,
                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
-                  max_life_orb=DEFAULT_MAX_LIFE_ORB, check_trick_room=False):
+                  max_life_orb=DEFAULT_MAX_LIFE_ORB, check_trick_room=False,
+                  required_techs=None, min_special_attackers=None):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
@@ -5712,6 +5852,18 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     overrides`/`nature_overrides`/`ability_overrides`, unchanged from
     before these existed.
 
+    `required_techs`: `_bring4_candidates`'s own "a good and flexible
+    team" hard requirement -- a bring subset only survives Stage 2 if ITS
+    OWN 4 members collectively cover every named tech category
+    (`TECH_ABILITIES`/`TECH_MOVES`: `"weather"`, `"terrain"`,
+    `"fake_out"`, `"speed_control"`). `None` (the default) checks nothing,
+    exactly as before this existed.
+
+    `min_special_attackers`: `_bring4_candidates`'s own minimum-count
+    sibling of `required_techs` -- a bring subset only survives Stage 2 if
+    at least this many of ITS OWN 4 members are a special attacker
+    (`count_special_attackers`). `None` (the default) checks nothing.
+
     Returns (pair_rows, bring4_rows):
       pair_rows -- `joint_pool_search`'s own row-per-pair output (its
         `forced_base` bookkeeping field stripped back out -- this stays
@@ -5771,7 +5923,9 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     bring4_rows = _bring4_candidates(
         our6, pair_by_key, target_names, good_threshold,
         megas=megas if extra_forced_base else None,
-        pair_lookup_forced_base=pair_lookup_forced_base)
+        pair_lookup_forced_base=pair_lookup_forced_base,
+        merged=merged, required_techs=required_techs, moves_db=moves_db,
+        min_special_attackers=min_special_attackers)
     return pair_rows, bring4_rows
 
 
@@ -5793,7 +5947,9 @@ def _uncovered_enemy_pairs(pairs, target_names):
 
 
 def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
-                       megas=None, pair_lookup_forced_base=None):
+                       megas=None, pair_lookup_forced_base=None,
+                       merged=None, required_techs=None, moves_db=None,
+                       min_special_attackers=None):
     """Every one of the C(len(six),min(4,len(six))) possible bring subsets of
     `six` (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this
     also runs for a 3-, 4-, or 5-member PARTIAL team during
@@ -5836,6 +5992,21 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
     specific bring treats as transformed (`None` if it carries none) --
     "note which one is used" when a bring's own 2 stone holders were
     resolved via the consistency check above.
+
+    `required_techs` (needs `merged`): "a good and flexible team" hard
+    requirement -- a bring subset is dropped outright unless ITS OWN 4 (or
+    `bring_size`) members collectively cover every named tech category
+    (`team_missing_techs`). Distinct from a core-level tech check: a core
+    can cover every category across its full 6 while a SPECIFIC bring
+    drops the one member carrying one of them -- this catches that. `None`
+    (the default) checks nothing, exactly as before this existed.
+
+    `min_special_attackers` (needs `merged` and `moves_db`): the same idea,
+    for `count_special_attackers` -- a bring subset is dropped unless its
+    OWN 4 members include at least this many special attackers, the exact
+    same "a core-level pass isn't enough, a specific bring can still drop
+    the members that made it pass" reasoning `required_techs` documents
+    just above. `None` (the default) checks nothing.
     """
     bring_size = min(4, len(six))
 
@@ -5867,6 +6038,11 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
 
     bring4_rows = []
     for bring4 in itertools.combinations(six, bring_size):
+        if required_techs and team_missing_techs(list(bring4), merged, required_techs):
+            continue
+        if (min_special_attackers and
+                count_special_attackers(list(bring4), merged, moves_db) < min_special_attackers):
+            continue
         if megas and len(set(bring4) & set(megas)) == 2:
             m1, m2 = megas
             row_m1_is_mega = _row_for(
@@ -7218,7 +7394,9 @@ def _effective_type_limits(max_weak=None, type_limits=None):
 
 
 def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
-                              max_weak_types=None, max_net_weak_types=None):
+                              max_weak_types=None, max_net_weak_types=None,
+                              required_techs=None, moves_db=None,
+                              min_special_attackers=None):
     """True if `core` (any size) may be proposed as a multi-bring4
     candidate at all: "you cannot have both a mega and its non-mega form"
     (always enforced, `_mega_base_overlap`), "a full team can only have two
@@ -7234,14 +7412,23 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
     `weak_type_breadth` cap ("no more than N types may have 2+ weak
     members"), plus, when `max_net_weak_types` is given, the
     `net_weak_type_breadth` cap ("no more than N types may have net
-    weakness > 1"). `max_megas` and `max_weak_types` are both checked
-    MONOTONICALLY safe to prune on during partial-core growth too
+    weakness > 1"), plus, when `required_techs` is given, `team_missing_
+    techs` ("a good and flexible team" needs a weather/terrain setter,
+    Fake Out user, and/or speed control -- see `TECH_ABILITIES`/
+    `TECH_MOVES`'s own comment). `max_megas` and `max_weak_types` are both
+    checked MONOTONICALLY safe to prune on during partial-core growth too
     (`multi_bring4_beam`'s own use of this function): a partial core
     already over either cap can never fix that by adding more members.
     `max_net_weak_types` is NOT monotonic (same reason `max_net` itself
     isn't -- see `net_weak_type_breadth`'s own docstring), so a caller doing
     incremental growth must only pass it once `core` is a genuine final-size
-    core, never as a growth-time prune.
+    core, never as a growth-time prune. `required_techs` is ALSO not
+    monotonic -- a partial core missing a tech can still gain one as it
+    grows -- so it must be withheld from growth-time calls the exact same
+    way, only checked once `core` is final-size. `min_special_attackers`
+    (needs `moves_db`) is the same minimum-count sibling of `required_techs`
+    -- "minimum special attackers" -- and is NOT monotonic for the exact
+    same reason, withheld from growth-time calls the same way.
     """
     if _mega_base_overlap(core):
         return False
@@ -7255,6 +7442,11 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
         return False
     if (max_net_weak_types is not None
             and net_weak_type_breadth(core, merged) > max_net_weak_types):
+        return False
+    if required_techs and team_missing_techs(list(core), merged, required_techs):
+        return False
+    if (min_special_attackers and
+            count_special_attackers(list(core), merged, moves_db) < min_special_attackers):
         return False
     return True
 
@@ -7312,7 +7504,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_weak=None, type_limits=None, max_megas=2,
                             max_weak_types=None, max_net_weak_types=None,
                             core_sizes=_CORE_SIZES,
-                            enforce_item_clause=False):
+                            enforce_item_clause=False, required_techs=None,
+                            min_special_attackers=None):
     """Every possible CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3, "I would like to output the best 3-pokemon
     cores against each team" -- not just exactly 6) drawn
@@ -7352,6 +7545,17 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     in the sets, summary, and gameplan for each team." False (the default)
     reproduces the old, pool-wide-only behaviour.
 
+    `required_techs`: `_core_passes_hard_filters`'s own "a good and
+    flexible team" hard requirement (weather/terrain setter, Fake Out
+    user, speed control -- `TECH_ABILITIES`/`TECH_MOVES`) -- every core
+    must cover ALL of the named categories. `None` (the default) checks
+    nothing, exactly as before this existed.
+
+    `min_special_attackers`: `_core_passes_hard_filters`'s own minimum-
+    count sibling of `required_techs` -- every core must have at least
+    this many special attackers (`count_special_attackers`). `None` (the
+    default) checks nothing.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first.
     """
     pool = coverage["candidate_pool"]
@@ -7369,6 +7573,7 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                          f"--beam instead")
     effective_limits = _effective_type_limits(max_weak, type_limits)
     merged = coverage["merged"]
+    moves_db = coverage["moves_db"]
     item_clause_context = (_item_clause_context_from_coverage(coverage)
                            if enforce_item_clause else None)
     rows = []
@@ -7379,7 +7584,10 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
             if not _core_passes_hard_filters(core, merged, effective_limits,
                                              max_megas=max_megas,
                                              max_weak_types=max_weak_types,
-                                             max_net_weak_types=max_net_weak_types):
+                                             max_net_weak_types=max_net_weak_types,
+                                             required_techs=required_techs,
+                                             moves_db=moves_db,
+                                             min_special_attackers=min_special_attackers):
                 continue
             row = _core_row(core, coverage["pair_by_key"],
                             coverage["target_name_lists"], good_threshold,
@@ -7397,7 +7605,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                       max_weak=None, type_limits=None, max_megas=2,
                       max_weak_types=None, max_net_weak_types=None,
                       core_sizes=_CORE_SIZES,
-                      enforce_item_clause=False):
+                      enforce_item_clause=False, required_techs=None,
+                      min_special_attackers=None):
     """Beam-search a CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3) over the WHOLE pool
     `multi_bring4_coverage` already has pair data for (the raw pool, NOT
@@ -7428,6 +7637,9 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     ranking during growth already reflects a conflicting core's real,
     Item-Clause-legal performance rather than its illegal pool-wide one.
 
+    `required_techs`/`min_special_attackers`: same hard requirements as
+    `multi_bring4_exhaustive`'s own -- see its docstring.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first, for
     whichever cores the beam actually reached (not exhaustive, so not
     guaranteed globally optimal).
@@ -7452,8 +7664,13 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     # deliberately withheld from every growth-time call below and only
     # applied at the final `found`-capture step, mirroring how `max_net`
     # itself is excluded from `growth_limits` and only checked there via
-    # the full `effective_limits`.
+    # the full `effective_limits`. `required_techs` is likewise NOT
+    # monotonic (a partial core missing a tech can still gain one as it
+    # grows) and is withheld from growth-time calls the same way.
+    # `min_special_attackers` is `required_techs`'s own minimum-count
+    # sibling and is withheld from growth-time calls for the same reason.
     growth_limits = _monotonic_limits(effective_limits)
+    moves_db = coverage["moves_db"]
     pool = sorted({n for pbk in pair_by_key_list for fs in pbk for n in fs})
 
     def score(team):
@@ -7512,8 +7729,11 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                 if not _core_passes_hard_filters(key, merged, effective_limits,
                                                  max_megas=max_megas,
                                                  max_weak_types=max_weak_types,
-                                                 max_net_weak_types=max_net_weak_types):
-                    continue  # catches a max_net/max_net_weak_types violation growth couldn't see
+                                                 max_net_weak_types=max_net_weak_types,
+                                                 required_techs=required_techs,
+                                                 moves_db=moves_db,
+                                                 min_special_attackers=min_special_attackers):
+                    continue  # catches a max_net/max_net_weak_types/required_techs/min_special_attackers violation growth couldn't see
                 row = _core_row(team, pair_by_key_list, target_name_lists,
                                 good_threshold,
                                 pair_by_key_forced_base_list=pair_by_key_forced_base_list,

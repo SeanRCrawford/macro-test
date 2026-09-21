@@ -304,6 +304,91 @@ class TestCounterTableTabExists(unittest.TestCase):
         for row in results[3]["rows"]:
             self.assertLessEqual(row["worst_weakness"], cap)
 
+    def test_required_techs_drops_groups_missing_the_tech(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        merged = load_world()["merged"]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        techs_ms = [m for m in at.multiselect if m.key == "ct_cov_required_techs"][0]
+        self.assertIn("Fake Out user", techs_ms.options)
+        techs_ms.set_value(["Fake Out user"]).run()
+        self.assertFalse(at.exception, list(at.exception))
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"], "fixture never produced a group -- "
+                        "the requirement may be too strict for this pool")
+        import counter_finder as cf
+        for row in results[3]["rows"]:
+            self.assertEqual(cf.team_missing_techs(row["group"], merged, ["fake_out"]), [])
+
+    def test_max_weak_types_caps_the_breadth_of_2plus_weak_types(self):
+        """"limit the total number of types with absolute weaknesses of 2
+        or more" -- a BREADTH cap, distinct from the existing "Max
+        absolute weakness" per-type magnitude cap."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        [s for s in at.slider if s.key == "ct_cov_maxweaktypes2"][0].set_value(2).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[4]["rows"], "fixture never produced a group -- "
+                        "the cap may be too strict for this pool")
+        for row in results[4]["rows"]:
+            self.assertLessEqual(row["weak_type_breadth_2"], 2)
+
+    def test_max_weak_types_3_caps_the_breadth_of_3plus_weak_types(self):
+        """"...and 3 or more" -- the higher-bar sibling of the above."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        [s for s in at.slider if s.key == "ct_cov_maxweaktypes3"][0].set_value(1).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[4]["rows"], "fixture never produced a group -- "
+                        "the cap may be too strict for this pool")
+        for row in results[4]["rows"]:
+            self.assertLessEqual(row["weak_type_breadth_3"], 1)
+
+    def test_min_special_attackers_defaults_to_2_and_is_honoured(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        w = load_world()
+        merged, moves = w["merged"], w["moves"]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        # OFF by default (an unchecked checkbox) -- an ordinary search
+        # must never come back silently narrower just because this
+        # control exists on the page.
+        self.assertFalse([c for c in at.checkbox
+                          if c.key == "ct_cov_minspecial_on"][0].value)
+        at = [c for c in at.checkbox if c.key == "ct_cov_minspecial_on"][0].set_value(
+            True).run()
+        msa = [s for s in at.slider if s.key == "ct_cov_minspecial"]
+        self.assertTrue(msa)
+        self.assertEqual(msa[0].value, 2)
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[4]["rows"])
+        import counter_finder as cf
+        for row in results[4]["rows"]:
+            self.assertGreaterEqual(
+                cf.count_special_attackers(row["group"], merged, moves), 2)
+
     def test_coverage_groups_run_bring4_button_works(self):
         """"add an option to run the actual pair performance vs enemy
         teams in a proper bring 4" -- clicking it must not crash and must
@@ -411,6 +496,33 @@ class TestForceIncludeAcrossViews(unittest.TestCase):
         at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
 
+    def test_bring4_search_pool_offers_and_honours_min_special_attackers(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        w = load_world()
+        merged, moves = w["merged"], w["moves"]
+        at = app(team=[])
+        sb = [s for s in at.selectbox if s.key == "ct_b4_our"][0]
+        at = sb.set_value("\U0001f50d Search a pool for the best team").run()
+        vs_sb = [s for s in at.selectbox if s.key == "ct_b4_vs"][0]
+        vs_sb.set_value("Golisopod Rain").run()
+        at = [c for c in at.checkbox
+             if c.key == "ct_b4_pool_minspecial_on"][0].set_value(True).run()
+        msa = [s for s in at.slider if s.key == "ct_b4_pool_minspecial"]
+        self.assertTrue(msa)
+        self.assertEqual(msa[0].value, 2)
+        at = [s for s in at.slider if s.key == "ct_b4_pool"][0].set_value(12).run()
+        at = [s for s in at.slider if s.key == "ct_b4_maxweak"][0].set_value(6).run()
+        at = [s for s in at.slider if s.key == "ct_b4_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_b4_pool_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state.get("ct_b4_pool_rows") or []
+        self.assertTrue(rows)
+        import counter_finder as cf
+        for r in rows:
+            self.assertGreaterEqual(
+                cf.count_special_attackers(r["core"], merged, moves), 2)
+
     def test_multi_bring4_offers_and_honours_always_include(self):
         at = app()
         at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
@@ -424,6 +536,50 @@ class TestForceIncludeAcrossViews(unittest.TestCase):
             ["Golisopod Rain"]).run()
         at = [b for b in at.button if b.key == "ct_mb4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
+
+    def test_multi_bring4_offers_and_honours_required_techs(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        merged = load_world()["merged"]
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Multi-bring4 (several enemy rosters)").run()
+        techs_ms = [m for m in at.multiselect if m.key == "ct_mb4_required_techs"][0]
+        self.assertIn("Fake Out user", techs_ms.options)
+        at = [s for s in at.slider if s.key == "ct_mb4_pool"][0].set_value(20).run()
+        at = techs_ms.set_value(["Fake Out user"]).run()
+        at = [m for m in at.multiselect if m.key == "ct_mb4_vs"][0].set_value(
+            ["Golisopod Rain"]).run()
+        at = [b for b in at.button if b.key == "ct_mb4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        import counter_finder as cf
+        rows = at.session_state.get("ct_mb4_rows") or []
+        for r in rows:
+            self.assertEqual(cf.team_missing_techs(r["core"], merged, ["fake_out"]), [])
+
+    def test_multi_bring4_offers_and_honours_min_special_attackers(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        w = load_world()
+        merged, moves = w["merged"], w["moves"]
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Multi-bring4 (several enemy rosters)").run()
+        at = [c for c in at.checkbox
+             if c.key == "ct_mb4_minspecial_on"][0].set_value(True).run()
+        msa = [s for s in at.slider if s.key == "ct_mb4_minspecial"]
+        self.assertTrue(msa)
+        self.assertEqual(msa[0].value, 2)
+        at = [s for s in at.slider if s.key == "ct_mb4_pool"][0].set_value(20).run()
+        at = [m for m in at.multiselect if m.key == "ct_mb4_vs"][0].set_value(
+            ["Golisopod Rain"]).run()
+        at = [b for b in at.button if b.key == "ct_mb4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        import counter_finder as cf
+        rows = at.session_state.get("ct_mb4_rows") or []
+        for r in rows:
+            self.assertGreaterEqual(
+                cf.count_special_attackers(r["core"], merged, moves), 2)
 
     def test_joint_pair_search_offers_and_honours_always_include(self):
         at = app()
@@ -611,6 +767,61 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertFalse(any("Pick exactly 6" in w.value for w in at.warning))
+
+    def test_required_techs_drops_brings_missing_the_tech(self):
+        """"I want to be able to filter for techs" -- of the default team
+        (Arcanine-Hisui, Hydreigon, Gallade, Gholdengo, Incineroar,
+        Farigiraf), only Incineroar is a Fake Out user, so requiring it
+        must drop every bring-4 that leaves Incineroar out."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        merged = load_world()["merged"]
+        at = app()
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        unfiltered = at.session_state["ct_b4_bring4_rows"]
+        techs_ms = [m for m in at.multiselect if m.key == "ct_b4_required_techs"][0]
+        self.assertIn("Fake Out user", techs_ms.options)
+        techs_ms.set_value(["Fake Out user"]).run()
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        filtered = at.session_state["ct_b4_bring4_rows"]
+        self.assertLess(len(filtered), len(unfiltered))
+        self.assertTrue(filtered)
+        import counter_finder as cf
+        for row in filtered:
+            self.assertEqual(
+                cf.team_missing_techs(row["bring4"], merged, ["fake_out"]), [])
+
+    def test_min_special_attackers_is_off_by_default_and_defaults_to_2_once_enabled(self):
+        """OFF by default (an unchecked checkbox) -- the pre-existing
+        "just click search" workflow must never come back silently
+        narrower just because this control exists on the page. Once
+        turned on, the slider itself starts at 2 ("minimum special
+        attackers ... by default 2"), and of the default team
+        (Arcanine-Hisui, Hydreigon, Gallade, Gholdengo, Incineroar,
+        Farigiraf), that floor must drop any bring-4 with fewer than 2
+        special attackers among its own 4 members."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        w = load_world()
+        merged, moves = w["merged"], w["moves"]
+        at = app()
+        self.assertFalse([c for c in at.checkbox
+                          if c.key == "ct_b4_minspecial_on"][0].value)
+        at = [c for c in at.checkbox if c.key == "ct_b4_minspecial_on"][0].set_value(
+            True).run()
+        msa = [s for s in at.slider if s.key == "ct_b4_minspecial"]
+        self.assertTrue(msa)
+        self.assertEqual(msa[0].value, 2)
+        [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state["ct_b4_bring4_rows"]
+        self.assertTrue(rows)
+        import counter_finder as cf
+        for row in rows:
+            self.assertGreaterEqual(
+                cf.count_special_attackers(row["bring4"], merged, moves), 2)
 
 
 class TestBring4TabMirrorsTheCliExactly(unittest.TestCase):
@@ -843,6 +1054,55 @@ class TestDeepDiveASpecificTeam(unittest.TestCase):
         dd_buttons = [b for b in at.button if b.key and b.key.startswith("ctb4p_")
                      and b.key.endswith("_go")]
         self.assertTrue(dd_buttons, "expected a deep-dive button on a pool-search core")
+
+
+class TestLeadBackDeepDive(unittest.TestCase):
+    """"look at sequences of their lead and their back ... how much health
+    each of yours have left after a 2v2 lead, and new field conditions" --
+    the opt-in, real-engine bridge (`_render_lead_back_deep_dive`) on a
+    chosen bring-4, alongside (not instead of) the cheap model's own
+    `_render_core_deep_dive` above it."""
+
+    def test_bring4_mode_offers_a_lead_back_deep_dive_expander(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        leads = [s for s in at.selectbox if s.key == "ctb4_lb_1_lead"]
+        self.assertEqual(len(leads), 1)
+        # C(4,2) lead-pair choices out of the bring-4's own 4 members.
+        self.assertEqual(len(leads[0].options), 6)
+        self.assertTrue(
+            any("Lead/back deep dive" in e.label for e in at.expander))
+
+    def test_playing_out_the_back_shows_a_worst_case_win_rate_metric(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        [s for s in at.slider if s.key == "ctb4_lb_1_budget"][0].set_value(15).run()
+        [s for s in at.slider if s.key == "ctb4_lb_1_games"][0].set_value(4).run()
+        at = [b for b in at.button if b.key == "ctb4_lb_1_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        metrics = [m for m in at.metric
+                  if "Worst-case win rate" in (m.label or "")]
+        self.assertEqual(len(metrics), 1)
+        self.assertTrue(metrics[0].value.endswith("%"))
+        self.assertTrue(any(b.key == "ctb4_lb_1_sample" for b in at.button))
+
+    def test_show_one_real_sample_game_renders_a_battle_transcript(self):
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        [s for s in at.slider if s.key == "ctb4_lb_1_budget"][0].set_value(15).run()
+        [s for s in at.slider if s.key == "ctb4_lb_1_games"][0].set_value(4).run()
+        at = [b for b in at.button if b.key == "ctb4_lb_1_go"][0].click().run()
+        r_lead, r_back = at.session_state["ctb4_lb_1_result"][:2]
+        at = [b for b in at.button if b.key == "ctb4_lb_1_sample"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        transcripts = [c.value for c in at.code
+                      if c.value.startswith("Leads: ")
+                      and r_lead[0] in c.value and r_lead[1] in c.value]
+        self.assertEqual(len(transcripts), 1)
+        # A real turn-by-turn transcript, not the cheap model's own
+        # single-line average-rolls summary.
+        self.assertIn("--- Turn 1 ---", transcripts[0])
 
 
 class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):
