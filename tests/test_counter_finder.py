@@ -6649,6 +6649,74 @@ class TestCoreDeepDiveMegaUsed(unittest.TestCase):
         self.assertEqual(dive["mega_used"], "Mega Floette")
 
 
+class TestAlwaysTransformsMega(unittest.TestCase):
+    """"Mega Raichu Y, if brought to a match, must be considered the only
+    Mega. Its moves are far too inaccurate in its base form, but its mega
+    Y has the ability No Guard so never misses." -- this module's own
+    damage calc never discounts for a move's accuracy at all, so the
+    ordinary "try every legal option, let the race decide" machinery
+    can't be trusted to notice this on its own; `ALWAYS_TRANSFORMS_MEGA`
+    overrides it outright instead."""
+
+    ENEMIES = [["Kingambit", "Basculegion", "Sableye", "Ariados"]]
+
+    def setUp(self):
+        self.W = world()
+        self.merged, self.moves = self.W["merged"], self.W["moves"]
+        self.natures, self.typechart = self.W["natures"], self.W["typechart"]
+
+    def test_raichu_y_wins_the_core_deep_dive_choice_over_another_mega(self):
+        core = ["Mega Raichu Y", "Mega Tyranitar", "Kingambit", "Whimsicott"]
+        dive = cf.core_deep_dive(core, self.ENEMIES, self.merged, self.moves,
+                                 self.natures, self.typechart, turns=2)
+        self.assertEqual(dive["mega_used"], "Mega Raichu Y")
+        self.assertIsNotNone(dive["mega_alt"])
+        self.assertEqual(dive["mega_alt"]["mega_used"], "Mega Tyranitar")
+
+    def test_raichu_y_wins_regardless_of_list_order(self):
+        """The override must not depend on which of the two names happens
+        to come first in `core`'s own list (that's what `megas[0]`/
+        `megas[1]` are keyed off internally)."""
+        core = ["Mega Tyranitar", "Mega Raichu Y", "Kingambit", "Whimsicott"]
+        dive = cf.core_deep_dive(core, self.ENEMIES, self.merged, self.moves,
+                                 self.natures, self.typechart, turns=2)
+        self.assertEqual(dive["mega_used"], "Mega Raichu Y")
+
+    def test_raichu_y_wins_the_bring4_candidates_choice(self):
+        core = ["Mega Raichu Y", "Mega Tyranitar", "Kingambit", "Whimsicott"]
+        _pair_rows, bring4_rows = cf.bring4_search(
+            core, self.ENEMIES[0], self.merged, self.moves, self.natures,
+            self.typechart, turns=2)
+        both = [r for r in bring4_rows
+               if {"Mega Raichu Y", "Mega Tyranitar"} <= set(r["bring4"])]
+        self.assertTrue(both, "fixture never produced a bring carrying both "
+                        "stone holders -- test is vacuous")
+        for row in both:
+            self.assertEqual(row["mega_used"], "Mega Raichu Y")
+
+    def test_lone_raichu_y_always_shows_transformed_not_base(self):
+        """No second mega present at all -- still never left in base form,
+        since the ordinary per-pair "try staying base too" exploration is
+        exactly what would otherwise be fooled by the accuracy blind spot."""
+        built = cf._build_forms(["Mega Raichu Y"], self.merged, self.natures,
+                                self.moves)
+        options = list(cf._resolve_forms(["Mega Raichu Y"], built))
+        self.assertEqual([mt for mt, _cs in options], ["Mega Raichu Y"])
+
+    def test_forced_base_names_can_still_force_it_out(self):
+        """The override only applies when Mega Raichu Y is still a LEGAL
+        option -- an outer team-wide hypothesis computing "what if the
+        OTHER stone holder transforms instead" must still be able to force
+        it to base (needed so a bring that leaves Raichu Y out entirely
+        still resolves the other stone holder correctly)."""
+        built = cf._build_forms(["Mega Raichu Y"], self.merged, self.natures,
+                                self.moves)
+        options = list(cf._resolve_forms(
+            ["Mega Raichu Y"], built, forced_base_names=frozenset({"Mega Raichu Y"})))
+        from species_data import NO_MEGA
+        self.assertEqual([mt for mt, _cs in options], [NO_MEGA])
+
+
 class TestSwitchInSearch(unittest.TestCase):
     """`switch_in_search` -- for a pair that LOSES a specific enemy pair,
     which bench candidate switching in for which of ours turns it around.

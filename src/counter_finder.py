@@ -242,6 +242,22 @@ def _build_form(name, merged, natures, item=None, stay_base=False,
     return c
 
 
+# "Mega Raichu Y, if brought to a match, must be considered the only Mega.
+# Its moves are far too inaccurate in its base form, but its mega Y has the
+# ability No Guard so never misses." -- the cheap model's own damage calc
+# (`_raw_hit` below) never discounts expected damage by a move's accuracy at
+# all (`solver.py`'s own action-value function documents the same choice:
+# "no accuracy roll is modeled... moves always hit here"), so this module's
+# usual "try every legal option, let the race decide" comparison can't be
+# trusted to find this on its own -- base Raichu's miss-prone moves score as
+# if they always land, hiding the exact reason its base form is unplayable.
+# Hardcoded instead, the same way `combatants.FORCED_BASE_ABILITY` hardcodes
+# Dragonite's own base ability: whenever Mega Raichu Y is a real, legal
+# option, it is THE choice, never compared against staying base or against
+# a different stone-holder sharing the same team/bring.
+ALWAYS_TRANSFORMS_MEGA = frozenset({"Mega Raichu Y"})
+
+
 def _mega_choices(names_pair):
     """Every legal `mega_transforms` value for this pair -- who (if anyone)
     actually Mega Evolves, subject to VGC's real "at most one Mega Evolution
@@ -1441,10 +1457,23 @@ def _resolve_forms(names, built, forced_base_names=frozenset()):
     just within whichever single pair it happens to share with the other
     stone-holder. Default empty set changes nothing -- every existing
     caller/test is unaffected.
+
+    `ALWAYS_TRANSFORMS_MEGA`: when one of its names is still a legal option
+    here (not itself in `forced_base_names`), every OTHER option is
+    dropped -- no race gets to "discover" that its base form was secretly
+    better, since the one real reason it could look that way (miss-prone
+    moves scoring as guaranteed hits) is a blind spot in this model's own
+    damage calc, not a genuine matchup read. Never drops every option:
+    when its own name IS in `forced_base_names` (the OTHER hypothesis in a
+    two-stone-holder bring, needed so a bring that leaves it out still
+    resolves the other stone-holder correctly), this has nothing left to
+    prefer and the ordinary options are yielded unchanged.
     """
-    for mt in _mega_choices(names):
-        if mt in forced_base_names:
-            continue
+    choices = [mt for mt in _mega_choices(names) if mt not in forced_base_names]
+    forced = next((mt for mt in choices if mt in ALWAYS_TRANSFORMS_MEGA), None)
+    if forced is not None:
+        choices = [forced]
+    for mt in choices:
         _evolves, forced_base = resolve_team_mega_slot(list(names),
                                                         mega_transforms=mt)
         cs = [built[n]["base" if n in forced_base else "mega"] for n in names]
@@ -5792,9 +5821,14 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
     once with megas[1] locked to base (so megas[0] is free, "the team's
     mega" for this bring) and once the mirror image -- and the
     better-ranked of the two, by the exact same key used to rank every
-    other bring, is kept. A bring with 0 or 1 of `megas` needs no such
-    consistency (nothing to be inconsistent WITH) and uses the ordinary
-    unconstrained `pair_lookup`, unchanged.
+    other bring, is kept -- UNLESS one of `megas` is in `ALWAYS_TRANSFORMS_
+    MEGA` (Mega Raichu Y), in which case its own hypothesis is kept
+    outright, no ranking involved: that comparison trusts this module's
+    own damage numbers, which never discount for a move's accuracy, so it
+    cannot be trusted to notice a base form kept alive only by moves that
+    would actually miss constantly. A bring with 0 or 1 of `megas` needs
+    no such consistency (nothing to be inconsistent WITH) and uses the
+    ordinary unconstrained `pair_lookup`, unchanged.
 
     Returns bring4_rows in `bring4_search`'s own shape, best-worst-case
     first -- `[0]` is always "the best bring available from `six`." Each
@@ -5843,7 +5877,18 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
                 bring4, lambda p, forced=m1: pair_lookup_forced_base[forced].get(
                     frozenset(p), pair_lookup[frozenset(p)]),
                 forced_base_name=m1)
-            bring4_rows.append(min(row_m1_is_mega, row_m2_is_mega, key=_rank_key))
+            # ALWAYS_TRANSFORMS_MEGA overrides the ordinary "keep the
+            # better-ranked hypothesis" comparison -- that comparison
+            # trusts this module's own damage numbers, which never
+            # discount for a move's accuracy, so it cannot by itself
+            # notice a base form kept alive only by moves that would
+            # actually miss constantly.
+            if m1 in ALWAYS_TRANSFORMS_MEGA:
+                bring4_rows.append(row_m1_is_mega)
+            elif m2 in ALWAYS_TRANSFORMS_MEGA:
+                bring4_rows.append(row_m2_is_mega)
+            else:
+                bring4_rows.append(min(row_m1_is_mega, row_m2_is_mega, key=_rank_key))
         else:
             bring4_rows.append(_row_for(bring4, lambda p: pair_lookup[frozenset(p)]))
     bring4_rows.sort(key=_rank_key)
@@ -7691,7 +7736,11 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     directly, so there is no "which subset" question at THIS level, only
     "which of the (at most 2) team-wide hypotheses is better for this core
     as a WHOLE" (`_pair_sort_key`'s existing "lower is better" ranking on
-    each `overall` decides the winner). The whole racing pass runs TWICE,
+    each `overall` decides the winner -- UNLESS one of the two is in
+    `ALWAYS_TRANSFORMS_MEGA`, Mega Raichu Y, in which case its own
+    hypothesis wins outright, no ranking involved: see `ALWAYS_TRANSFORMS_
+    MEGA`'s own comment for why this module's damage numbers can't be
+    trusted to find that on their own). The whole racing pass runs TWICE,
     once per hypothesis, and the winning one is returned as this function's
     own `per_pair`/`overall`/`mega_used` -- unchanged from before, so every
     existing caller reading just those three fields (xlsx export, console
@@ -7777,8 +7826,17 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
             worst_case_targeting=worst_case_targeting,
             check_trick_room=check_trick_room)
         dive_b["mega_used"] = megas[1]
-        winner, loser = (dive_a, dive_b) if (_pair_sort_key(dive_a["overall"])
-                                             <= _pair_sort_key(dive_b["overall"])) else (dive_b, dive_a)
+        # ALWAYS_TRANSFORMS_MEGA overrides the ordinary "whichever scores
+        # better" comparison outright -- that comparison trusts THIS
+        # module's own damage numbers, which never discount for a move's
+        # accuracy, so it cannot be trusted to notice a base form kept
+        # alive only by moves that would actually miss constantly.
+        forced = next((m for m in megas if m in ALWAYS_TRANSFORMS_MEGA), None)
+        if forced is not None:
+            winner, loser = (dive_a, dive_b) if forced == megas[0] else (dive_b, dive_a)
+        else:
+            winner, loser = (dive_a, dive_b) if (_pair_sort_key(dive_a["overall"])
+                                                 <= _pair_sort_key(dive_b["overall"])) else (dive_b, dive_a)
         winner["mega_alt"] = {"mega_used": loser["mega_used"],
                               "per_pair": loser["per_pair"], "overall": loser["overall"]}
         return winner
