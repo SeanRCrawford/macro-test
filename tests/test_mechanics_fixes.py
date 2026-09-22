@@ -1518,5 +1518,90 @@ class TestKnockOffStripsSitrusBeforeItCanTrigger(unittest.TestCase):
         self.assertNotIn("to Knock Off!", log)
 
 
+class TestStatStagesResetOnSwitchOut(unittest.TestCase):
+    """"Stat changes should reset on own switch out, such as attack drop
+    from intimidate" -- a boost/drop is tied to being on the field. The
+    engine used to just leave a benched Pokemon's `.stages` frozen at
+    whatever it was the moment it left, so switching it back in later
+    incorrectly kept the old stage instead of resetting to neutral."""
+
+    def _fixture(self):
+        # Incineroar's own Intimidate fires on ITS entry and drops BOTH
+        # of p1's leads' Attack -- Garchomp isn't Defiant/Contrary, so a
+        # clean -1 to measure.
+        b = battle(["Garchomp", "Gholdengo", "Hydreigon", "Kingambit"],
+                  ["Incineroar", "Farigiraf", "Pelipper", "Grimmsnarl"])
+        garchomp = b.p1.active[0]
+        self.assertEqual(garchomp.stages["atk"], -1,
+                         "fixture assumption: Incineroar's own Intimidate "
+                         "dropped Garchomp's Attack on entry")
+        return b, garchomp
+
+    def test_a_voluntary_pre_turn_switch_resets_the_outgoing_pokemons_stages(self):
+        b, garchomp = self._fixture()
+        hydreigon = b.p1.bench[0]
+        protect = b.make_move("protect")
+        b.run_turn(
+            [Action(garchomp, "p1", "switch", None, [hydreigon]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(c, "p2", "protect", protect, [c]) for c in b.p2.active])
+        self.assertIn(garchomp, b.p1.bench)
+        self.assertEqual(garchomp.stages["atk"], 0, b.log.dump()[-1000:])
+
+    def test_a_self_switch_move_also_resets_the_outgoing_pokemons_stages(self):
+        b, garchomp = self._fixture()
+        protect = b.make_move("protect")
+        tailwind = b.make_move("tailwind")
+        # p2's target must NOT Protect, or U-turn never connects and never
+        # pivots at all (see TestASwitchMoveThatDoesNotHitDoesNotSwitch).
+        b.run_turn(
+            [Action(garchomp, "p1", "move", b.make_move("uturn"), [b.p2.active[0]]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(c, "p2", "move", tailwind, [c]) for c in b.p2.active])
+        self.assertIn(garchomp, b.p1.bench, b.log.dump()[-1000:])
+        self.assertEqual(garchomp.stages["atk"], 0, b.log.dump()[-1000:])
+
+    def test_switching_back_in_does_not_carry_the_old_stage_forward(self):
+        b, garchomp = self._fixture()
+        hydreigon = b.p1.bench[0]
+        protect = b.make_move("protect")
+        p2_protect = lambda: [Action(c, "p2", "protect", protect, [c]) for c in b.p2.active]
+        b.run_turn(
+            [Action(garchomp, "p1", "switch", None, [hydreigon]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            p2_protect())
+        b.run_turn(
+            [Action(hydreigon, "p1", "switch", None, [garchomp]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            p2_protect())
+        # Intimidate only ever fires on ITS OWN holder's entry, not every
+        # time an opponent switches -- Garchomp comes back at a clean 0,
+        # not re-dropped to -1 just because Incineroar is still out there.
+        self.assertIn(garchomp, b.p1.active)
+        self.assertEqual(garchomp.stages["atk"], 0, b.log.dump()[-1500:])
+
+    def test_a_fainted_pokemon_is_unaffected(self):
+        """The reset only fires for a LIVE switch-out (`side.bench.append`
+        only happens when `not outgoing.fainted`) -- a fainted Pokemon
+        never returns to the field, so there is nothing to reset FOR, and
+        this must not raise for that case."""
+        b, garchomp = self._fixture()
+        stone_edge = b.make_move("stoneedge")
+        protect = b.make_move("protect")
+        # Two hits from the p2 side to guarantee the KO regardless of roll.
+        b.run_turn(
+            [Action(garchomp, "p1", "protect", protect, [garchomp]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(c, "p2", "protect", protect, [c]) for c in b.p2.active])
+        garchomp.current_hp = 1
+        b.run_turn(
+            [Action(garchomp, "p1", "protect", protect, [garchomp]),
+             Action(b.p1.active[1], "p1", "protect", protect, [b.p1.active[1]])],
+            [Action(b.p2.active[0], "p2", "move", stone_edge, [garchomp]),
+             Action(b.p2.active[1], "p2", "protect", protect, [b.p2.active[1]])])
+        self.assertTrue(garchomp.fainted, b.log.dump()[-1500:])
+        self.assertNotIn(garchomp, b.p1.bench)
+
+
 if __name__ == "__main__":
     unittest.main()

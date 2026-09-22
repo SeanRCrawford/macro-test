@@ -5101,6 +5101,257 @@ class TestCoreRowRespectsMegaConsistency(unittest.TestCase):
         self.assertEqual(without, with_fb)
 
 
+class TestPairCoverageExportImport(unittest.TestCase):
+    """"With counter_table.py having done work on generating the best /15
+    pairs vs enemy pairs, I want a section in the streamlit app to somehow
+    upload this output, and use the streamlit app to try to create the
+    best teams of 6" -- `top_coverage_pairs`/`coverage_from_pair_rows` are
+    the two halves of that round trip: rank the best pairs out of an
+    already-computed `multi_bring4_coverage`, then reconstruct an
+    equivalent `coverage` dict from exactly the rows
+    `tools/counter_table.py`'s own "Pair Coverage"/"Pair Detail" sheets
+    would hold for them -- real sets, real per-enemy racing, no new
+    combat simulation on import."""
+
+    POOL = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit", "Whimsicott"]
+    ENEMIES = [["Sableye", "Ariados"], ["Basculegion", "Mega Floette"]]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.5, min_enemies=1)
+
+    def _rows_for(self, top_n):
+        """Exactly the (pair_rows, detail_rows) shape
+        `_write_pair_coverage_sheets` would write for the top `top_n`
+        pairs -- mirrors the xlsx writer's own loop without touching
+        openpyxl, so this test stays fast and format-agnostic."""
+        top_pairs = cf.top_coverage_pairs(self.coverage, top_n=top_n)
+        top_keys = {frozenset(p) for p in top_pairs}
+        pair_rows, detail_rows = [], []
+        for enemy_idx, pbk in enumerate(self.coverage["pair_by_key"]):
+            for pk, r in pbk.items():
+                if pk not in top_keys:
+                    continue
+                n1, n2 = r["pair"]
+                pair_rows.append({
+                    "pair": (n1, n2), "enemy_idx": enemy_idx,
+                    "item1": r["item1"], "item2": r["item2"],
+                    "moves1": self.coverage["fixed_moves"][n1],
+                    "moves2": self.coverage["fixed_moves"][n2],
+                    "swept": r["pairs_swept"], "traded": r["pairs_traded"],
+                    "lost": r["pairs_lost"], "no_ko": r["pairs_no_ko"],
+                    "tailwind_safe": r["pairs_tailwind_safe"],
+                    "protect_safe": r["pairs_protect_safe"],
+                    "follow_me_safe": r["pairs_follow_me_safe"],
+                    "clean_win_total": r["pairs_clean_win_total"],
+                    "total": r["pairs_total"]})
+                for (e1, e2), d in r["detail"].items():
+                    detail_rows.append({
+                        "pair": (n1, n2), "enemy_idx": enemy_idx,
+                        "e1": e1, "e2": e2, "outcome": d["outcome"],
+                        "our_hp_c": d["our_hp"]["C"], "our_hp_p": d["our_hp"]["P"],
+                        "tailwind_safe": d["tailwind_safe"],
+                        "protect_safe": d["protect_safe"],
+                        "follow_me_safe": d["follow_me_safe"],
+                        "clean_win_value": d["clean_win_value"]})
+        return top_pairs, pair_rows, detail_rows
+
+    def _rebuild(self, top_n):
+        top_pairs, pair_rows, detail_rows = self._rows_for(top_n)
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        rebuilt = cf.coverage_from_pair_rows(
+            pair_rows, detail_rows, self.ENEMIES, merged, moves, natures, typechart)
+        return top_pairs, rebuilt
+
+    def test_top_coverage_pairs_returns_the_requested_count_best_first(self):
+        top_pairs = cf.top_coverage_pairs(self.coverage, top_n=5)
+        self.assertEqual(len(top_pairs), 5)
+        keys = [frozenset(p) for p in top_pairs]
+        rank_keys = [cf._pair_coverage_rank_key(k, self.coverage["pair_by_key"])
+                    for k in keys]
+        self.assertEqual(rank_keys, sorted(rank_keys))
+
+    def test_reconstructed_summary_counts_match_the_source_exactly(self):
+        top_pairs, rebuilt = self._rebuild(top_n=5)
+        for p in top_pairs:
+            pk = frozenset(p)
+            for enemy_idx in range(len(self.ENEMIES)):
+                orig = self.coverage["pair_by_key"][enemy_idx].get(pk)
+                got = rebuilt["pair_by_key"][enemy_idx].get(pk)
+                if orig is None:
+                    continue
+                self.assertIsNotNone(got)
+                for field in cf._ROW_TOTAL_FIELDS:
+                    if field == "pairs_clean_win_total":
+                        self.assertAlmostEqual(orig[field], got[field], places=2)
+                    else:
+                        self.assertEqual(orig[field], got[field])
+
+    def test_reconstructed_no_faint_matches_the_source(self):
+        """The whole reason `detail` gets exported at all: `bring4_pair_
+        depth`'s `no_faint_*` reads directly into it -- confirm a
+        reconstructed row scores identically to the original for this."""
+        top_pairs, rebuilt = self._rebuild(top_n=5)
+        for p in top_pairs:
+            pk = frozenset(p)
+            for enemy_idx in range(len(self.ENEMIES)):
+                orig = self.coverage["pair_by_key"][enemy_idx].get(pk)
+                got = rebuilt["pair_by_key"][enemy_idx].get(pk)
+                if orig is None:
+                    continue
+                self.assertEqual(cf._pairs_beaten_without_fainting(orig),
+                                 cf._pairs_beaten_without_fainting(got))
+
+    def test_candidate_pool_is_every_name_appearing_in_a_top_pair(self):
+        top_pairs, rebuilt = self._rebuild(top_n=5)
+        expected = sorted({n for p in top_pairs for n in p})
+        self.assertEqual(rebuilt["candidate_pool"], expected)
+
+    def test_multi_bring4_exhaustive_needs_a_complete_pairwise_matrix(self):
+        """A sparse "top N pairs" import does NOT carry every cross-pairing
+        `multi_bring4_exhaustive`'s own best-bring-4-from-any-6 search
+        needs (it freely recombines members ACROSS what were originally
+        different pairs) -- confirmed here as a real, expected `KeyError`,
+        not silently wrong numbers, which is exactly why
+        `pair_coverage_teams` (below) exists as the sparse-data-safe
+        alternative instead of trying to patch this one into tolerating
+        gaps."""
+        _top_pairs, rebuilt = self._rebuild(top_n=7)
+        with self.assertRaises(KeyError):
+            cf.multi_bring4_exhaustive(rebuilt, core_sizes=(4,))
+
+    def test_merge_named_team_pairs_adds_the_teams_own_real_set(self):
+        """"Make sure the sets from the defined pairs and named teams are
+        included" -- a saved team's own member, with its own pinned item,
+        must appear in the merged coverage's candidate pool AND carry that
+        exact item, never a freshly re-searched one."""
+        _top_pairs, rebuilt = self._rebuild(top_n=5)
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        named_teams = {"Squad": ["Garchomp", "Toxapex", "Arcanine-Hisui"]}
+        meta = {"Squad": {"sets": {"Garchomp": {"item": "Sitrus Berry"}}}}
+        cf.merge_named_team_pairs(rebuilt, named_teams, meta, merged, moves,
+                                  natures, typechart)
+        self.assertIn("Garchomp", rebuilt["candidate_pool"])
+        self.assertIn("Toxapex", rebuilt["candidate_pool"])
+        self.assertEqual(rebuilt["fixed_items"]["Garchomp"], "Sitrus Berry")
+        for enemy_idx in range(len(self.ENEMIES)):
+            pk = frozenset(("Garchomp", "Toxapex"))
+            self.assertIn(pk, rebuilt["pair_by_key"][enemy_idx])
+            self.assertEqual(
+                rebuilt["pair_by_key"][enemy_idx][pk]["item1"] == "Sitrus Berry"
+                or rebuilt["pair_by_key"][enemy_idx][pk]["item2"] == "Sitrus Berry",
+                True)
+
+    def test_merge_named_team_pairs_never_overwrites_an_uploaded_pair(self):
+        """A pair already present in the imported coverage (from the
+        uploaded file) is left exactly as uploaded -- a named team sharing
+        one of its members must never silently replace real, already-
+        raced results with a re-derived duplicate."""
+        top_pairs, rebuilt = self._rebuild(top_n=5)
+        before = copy.deepcopy(rebuilt["pair_by_key"])
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        n1, n2 = top_pairs[0]
+        named_teams = {"Squad": [n1, n2, "Toxapex"]}
+        cf.merge_named_team_pairs(rebuilt, named_teams, {}, merged, moves,
+                                  natures, typechart)
+        pk = frozenset((n1, n2))
+        for enemy_idx in range(len(self.ENEMIES)):
+            if pk in before[enemy_idx]:
+                self.assertEqual(rebuilt["pair_by_key"][enemy_idx][pk],
+                                 before[enemy_idx][pk])
+
+
+class TestPairCoverageTeams(unittest.TestCase):
+    """`pair_coverage_teams`: the sparse-data-safe way to "try to create
+    the best teams of 6" from an already-computed (or imported) pair
+    library -- assembling KNOWN, already-real-sets pairs directly, never
+    asking for a cross-pairing (member of pair A + member of pair B) this
+    module never actually raced (see
+    TestPairCoverageExportImport.test_multi_bring4_exhaustive_needs_a_
+    complete_pairwise_matrix for why `multi_bring4_exhaustive` itself
+    can't be reused here)."""
+
+    POOL = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit", "Whimsicott"]
+    ENEMIES = [["Sableye", "Ariados"], ["Basculegion", "Mega Floette"]]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        # min_enemies=0/good_threshold=0.0: every C(POOL, 2) pair is raced
+        # and kept (pair_by_key covers the whole pool regardless), so this
+        # fixture's own "known pairs" graph is COMPLETE over 7 members --
+        # enough to guarantee at least one legal 3-disjoint-pair team of 6.
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=0)
+
+    def test_every_returned_team_is_6_distinct_names_from_3_disjoint_pairs(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10)
+        self.assertTrue(results)
+        for r in results:
+            self.assertEqual(len(r["team"]), 6)
+            self.assertEqual(len(set(r["team"])), 6)
+            self.assertEqual(len(r["pairs"]), 3)
+            self.assertEqual(set().union(*(set(p) for p in r["pairs"])), set(r["team"]))
+
+    def test_results_are_sorted_by_score_descending(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10)
+        scores = [r["score"] for r in results]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_every_returned_team_carries_its_own_full_sets(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10)
+        self.assertTrue(results)
+        for r in results:
+            self.assertEqual(set(r["sets"]), set(r["team"]))
+            for s in r["sets"].values():
+                self.assertIn("item", s)
+                self.assertTrue(s["moves"])
+
+    def test_must_include_forces_every_returned_team_to_carry_it(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         must_include=["Kingambit"])
+        self.assertTrue(results)
+        for r in results:
+            self.assertIn("Kingambit", r["team"])
+
+    def test_exclude_drops_every_pair_containing_the_name(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         exclude=["Kingambit"])
+        self.assertTrue(results)
+        for r in results:
+            self.assertNotIn("Kingambit", r["team"])
+
+    def test_group_size_must_be_even(self):
+        with self.assertRaises(ValueError):
+            cf.pair_coverage_teams(self.coverage, group_size=5)
+
+    def test_max_weak_filters_out_a_team_over_the_default_exception_cap(self):
+        """A hard `max_weak`/`type_limits` filter reads only team
+        composition (never pairwise combat data), so it applies exactly
+        the same way it does for `multi_bring4_exhaustive` -- confirmed
+        here by pinning every type to `max_weak=0` (no weaknesses allowed
+        at all, no default exception possible either since an explicit
+        `type_limits` entry is never exception-eligible): nothing can
+        possibly pass, so the result must be empty rather than ignoring
+        the cap."""
+        from species_data import TYPES
+        type_limits = {t: {"max_weak": 0} for t in TYPES}
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         type_limits=type_limits)
+        self.assertEqual(results, [])
+
+
 class TestMultiBring4CoverageMegaConsistency(unittest.TestCase):
     """End-to-end through `multi_bring4_coverage` -> `multi_bring4_exhaustive`
     with REAL megas (not the hand-built fixture above) -- the actual
@@ -6744,6 +6995,21 @@ class TestTeamMissingTechs(unittest.TestCase):
         example, verified directly rather than assumed."""
         self.assertTrue(cf._member_has_tech("Mega Raichu Y", self.merged, "speed_control"))
 
+    def test_granular_single_move_techs_alongside_the_broad_buckets(self):
+        """"I want to be able to define specific techs, like ... fake out,
+        tailwind, coaching, and so on" -- granular techs sit ALONGSIDE the
+        broad `speed_control` bucket, not instead of it: Whimsicott counts
+        for both "speed_control" (the bucket) and "tailwind" (the specific
+        move), since Tailwind is a member of both."""
+        self.assertTrue(cf._member_has_tech("Whimsicott", self.merged, "tailwind"))
+        self.assertTrue(cf._member_has_tech("Whimsicott", self.merged, "speed_control"))
+        for tech in ("trick_room", "coaching", "redirect", "taunt", "helping_hand"):
+            self.assertIn(tech, cf.TECH_LABELS)
+            # A no-op call on real data must never raise, whatever the
+            # answer -- confirms every new key is wired all the way
+            # through `_member_has_tech`'s own move-name lookup.
+            cf._member_has_tech("Kingambit", self.merged, tech)
+
     def test_team_missing_techs_is_empty_once_every_category_is_covered(self):
         team = ["Pelipper", "Rillaboom", "Kingambit"]
         self.assertEqual(
@@ -6931,6 +7197,226 @@ class TestWeaknessBreadthCapsAndMinSpecialAttackers(unittest.TestCase):
         self.assertTrue(cf._core_passes_hard_filters(partial, self.merged, {}))
         self.assertFalse(cf._core_passes_hard_filters(
             partial, self.merged, {}, moves_db=self.moves, min_special_attackers=1))
+
+
+class TestWeakTypeDefaultException(unittest.TestCase):
+    """"By default, in the counter_table.py, allow one type that has 3
+    weaknesses as long as it only has 1 net weakness" -- `max_weak`'s bare
+    scalar default (2) is not a flat, exception-less cap: at most ONE type
+    across a core may exceed it by exactly 1, and only when that type's
+    own net weakness (weak - resist) is <= 1. A type given its own
+    EXPLICIT `--type-limit max_weak` stays exactly as strict as written,
+    no exception. Synthetic `merged` fixtures (bare `defensive_chart`
+    dicts) give exact, deterministic control over weak/resist counts --
+    no need to hunt for real Pokemon with exactly the right numbers."""
+
+    def setUp(self):
+        self.merged = {}
+
+    def _mk(self, name, chart):
+        self.merged[name] = {"defensive_chart": chart}
+
+    def test_a_type_at_exactly_3_weak_with_net_1_is_allowed(self):
+        self._mk("W1", {"Fire": 2.0}); self._mk("W2", {"Fire": 2.0})
+        self._mk("W3", {"Fire": 2.0})
+        self._mk("R1", {"Fire": 0.5}); self._mk("R2", {"Fire": 0.5})
+        core = ["W1", "W2", "W3", "R1", "R2"]  # 3 weak, 2 resist -> net 1
+        limits = {"Fire": {"max_weak": 2}}
+        self.assertTrue(cf._weak_type_limits_ok(
+            core, self.merged, limits, weak_exception_types=frozenset({"Fire"})))
+
+    def test_a_type_at_exactly_3_weak_with_net_2_is_not_allowed(self):
+        self._mk("W1", {"Fire": 2.0}); self._mk("W2", {"Fire": 2.0})
+        self._mk("W3", {"Fire": 2.0})
+        self._mk("R1", {"Fire": 0.5})
+        core = ["W1", "W2", "W3", "R1"]  # 3 weak, 1 resist -> net 2
+        limits = {"Fire": {"max_weak": 2}}
+        self.assertFalse(cf._weak_type_limits_ok(
+            core, self.merged, limits, weak_exception_types=frozenset({"Fire"})))
+
+    def test_a_type_not_exception_eligible_gets_no_slack_even_at_net_1(self):
+        self._mk("W1", {"Fire": 2.0}); self._mk("W2", {"Fire": 2.0})
+        self._mk("W3", {"Fire": 2.0})
+        self._mk("R1", {"Fire": 0.5}); self._mk("R2", {"Fire": 0.5})
+        core = ["W1", "W2", "W3", "R1", "R2"]
+        limits = {"Fire": {"max_weak": 2}}
+        self.assertFalse(cf._weak_type_limits_ok(
+            core, self.merged, limits, weak_exception_types=frozenset()))
+
+    def test_over_by_more_than_one_is_never_allowed_regardless_of_net(self):
+        self._mk("W1", {"Fire": 2.0}); self._mk("W2", {"Fire": 2.0})
+        self._mk("W3", {"Fire": 2.0}); self._mk("W4", {"Fire": 2.0})
+        self._mk("R1", {"Fire": 0.5}); self._mk("R2", {"Fire": 0.5})
+        self._mk("R3", {"Fire": 0.5})
+        core = ["W1", "W2", "W3", "W4", "R1", "R2", "R3"]  # 4 weak, 3 resist -> net 1
+        limits = {"Fire": {"max_weak": 2}}
+        self.assertFalse(cf._weak_type_limits_ok(
+            core, self.merged, limits, weak_exception_types=frozenset({"Fire"})))
+
+    def test_only_one_type_across_the_core_may_use_the_exception(self):
+        self._mk("WF1", {"Fire": 2.0, "Water": 1.0})
+        self._mk("WF2", {"Fire": 2.0, "Water": 1.0})
+        self._mk("WF3", {"Fire": 2.0, "Water": 1.0})
+        self._mk("WW1", {"Fire": 1.0, "Water": 2.0})
+        self._mk("WW2", {"Fire": 1.0, "Water": 2.0})
+        self._mk("WW3", {"Fire": 1.0, "Water": 2.0})
+        self._mk("RFW1", {"Fire": 0.5, "Water": 0.5})
+        self._mk("RFW2", {"Fire": 0.5, "Water": 0.5})
+        core = ["WF1", "WF2", "WF3", "WW1", "WW2", "WW3", "RFW1", "RFW2"]
+        # Both Fire and Water: 3 weak, 2 resist -> net 1 each -- individually
+        # allowed, but only ONE type total may use the exception.
+        limits = {"Fire": {"max_weak": 2}, "Water": {"max_weak": 2}}
+        self.assertFalse(cf._weak_type_limits_ok(
+            core, self.merged, limits,
+            weak_exception_types=frozenset({"Fire", "Water"})))
+
+    def test_growth_time_net_unaware_call_defers_instead_of_pruning(self):
+        """`net_aware=False` (`multi_bring4_beam`'s own growth-time calls)
+        must never reject a core that the real, final check might still
+        accept -- net weakness isn't monotonic under growth, so a partial
+        core over by 1 with a bad net right now could still recover."""
+        self._mk("W1", {"Fire": 2.0}); self._mk("W2", {"Fire": 2.0})
+        self._mk("W3", {"Fire": 2.0})
+        self._mk("R1", {"Fire": 0.5})
+        core = ["W1", "W2", "W3", "R1"]  # net 2 -- fails the real check
+        limits = {"Fire": {"max_weak": 2}}
+        self.assertFalse(cf._weak_type_limits_ok(
+            core, self.merged, limits, weak_exception_types=frozenset({"Fire"}),
+            net_aware=True))
+        self.assertTrue(cf._weak_type_limits_ok(
+            core, self.merged, limits, weak_exception_types=frozenset({"Fire"}),
+            net_aware=False))
+
+    def test_weak_exception_eligible_types_excludes_only_explicit_overrides(self):
+        from species_data import TYPES
+        eligible = cf._weak_exception_eligible_types({"Fire": {"max_weak": 1}})
+        self.assertNotIn("Fire", eligible)
+        self.assertIn("Water", eligible)
+        self.assertEqual(len(eligible), len(TYPES) - 1)
+        # A type present in type_limits but WITHOUT its own max_weak (e.g.
+        # only max_net set) still uses the scalar default -- still eligible.
+        eligible2 = cf._weak_exception_eligible_types({"Fire": {"max_net": -1}})
+        self.assertIn("Fire", eligible2)
+
+    def test_multi_bring4_exhaustive_default_can_accept_an_exception_only_core(self):
+        """End-to-end through the real search entry point, not just the
+        bare helper -- confirms the default `max_weak=2` search actually
+        wires the exception through, not just that the helper function
+        alone implements it correctly. Real `merged` data, a real pool,
+        real racing -- the exact same call `--multi-bring4` makes."""
+        w = world()
+        merged, moves = w["merged"], w["moves"]
+        natures, typechart = w["natures"], w["typechart"]
+        from team_search import build_candidate_pool
+        pool = build_candidate_pool(merged, top_n=45)
+        enemy = ["Sinistcha", "Incineroar", "Whimsicott", "Farigiraf",
+                "Pelipper", "Mega Charizard Y"]
+        coverage = cf.multi_bring4_coverage(
+            pool, [enemy], merged, moves, natures, typechart,
+            min_enemies=1, good_threshold=0.45)
+        # Sliced to a fixed, small size regardless of how wide the raw
+        # candidate pool naturally comes out -- an exhaustive sweep needs a
+        # deterministic, bounded size, not a threshold tuned to happen to
+        # land under `_EXHAUSTIVE_POOL_CEILING` for whatever this fixture's
+        # real roster.csv Scores currently are.
+        coverage["candidate_pool"] = coverage["candidate_pool"][:20]
+        rows_default = cf.multi_bring4_exhaustive(
+            coverage, max_weak=2, core_sizes=(4,))
+        from species_data import TYPES
+        explicit_strict = {t: {"max_weak": 2} for t in TYPES}
+        rows_strict = cf.multi_bring4_exhaustive(
+            coverage, max_weak=2, type_limits=explicit_strict, core_sizes=(4,))
+        default_set = {r["core"] for r in rows_default}
+        strict_set = {r["core"] for r in rows_strict}
+        # The default (with the exception) can only ever ACCEPT more cores
+        # than the fully-strict, explicit-everywhere equivalent -- never fewer.
+        self.assertTrue(strict_set <= default_set)
+
+
+class TestRequiredMembersTeamCompletion(unittest.TestCase):
+    """"I want to be able to run the full counter_table.py exercise but
+    with n mandatory members, taken from a given team pokepaste ... the
+    counter table should seek to find remaining members to maximise wins"
+    -- `required_members` on `multi_bring4_exhaustive`/`multi_bring4_beam`."""
+
+    @classmethod
+    def setUpClass(cls):
+        w = world()
+        cls.merged, cls.moves = w["merged"], w["moves"]
+        cls.natures, cls.typechart = w["natures"], w["typechart"]
+        from team_search import build_candidate_pool
+        pool = build_candidate_pool(cls.merged, top_n=25)
+        cls.required = ("Incineroar", "Farigiraf")
+        pool = sorted(set(pool) | set(cls.required))
+        enemy = ["Sinistcha", "Whimsicott", "Pelipper", "Mega Charizard Y"]
+        cls.coverage = cf.multi_bring4_coverage(
+            pool, [enemy], cls.merged, cls.moves, cls.natures, cls.typechart,
+            min_enemies=1)
+
+    def test_exhaustive_every_returned_core_contains_every_required_member(self):
+        rows = cf.multi_bring4_exhaustive(
+            self.coverage, required_members=self.required, core_sizes=(4,))
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertTrue(set(self.required) <= set(r["core"]))
+
+    def test_beam_every_returned_core_contains_every_required_member(self):
+        rows = cf.multi_bring4_beam(
+            self.coverage, required_members=self.required, core_sizes=(4,),
+            beam_width=30)
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertTrue(set(self.required) <= set(r["core"]))
+
+    def test_a_required_member_short_of_the_good_pair_bar_is_still_usable(self):
+        """The whole point: a mandatory member need not have independently
+        cleared `multi_bring4_coverage`'s own "good pair" narrowing to be
+        forced into every returned core -- that narrowing only decides
+        `candidate_pool`, never who's allowed to be a required member."""
+        outside_candidate_pool = [
+            n for n in self.required if n not in self.coverage["candidate_pool"]]
+        self.assertTrue(outside_candidate_pool,
+                        "fixture assumption: at least one required member "
+                        "should fall short of the good-pair bar on its own")
+        rows = cf.multi_bring4_exhaustive(
+            self.coverage, required_members=self.required, core_sizes=(4,))
+        self.assertTrue(rows)
+
+    def test_a_name_never_raced_at_all_raises(self):
+        with self.assertRaises(ValueError):
+            cf.multi_bring4_exhaustive(
+                self.coverage, required_members=("Not A Real Pokemon Name",),
+                core_sizes=(4,))
+        with self.assertRaises(ValueError):
+            cf.multi_bring4_beam(
+                self.coverage, required_members=("Not A Real Pokemon Name",),
+                core_sizes=(4,))
+
+    def test_required_members_exceeding_every_core_size_raises(self):
+        with self.assertRaises(ValueError):
+            cf.multi_bring4_exhaustive(
+                self.coverage, required_members=self.required, core_sizes=(1,))
+        with self.assertRaises(ValueError):
+            cf.multi_bring4_beam(
+                self.coverage, required_members=self.required, core_sizes=(1,))
+
+    def test_required_members_at_exactly_one_core_size_needs_no_growth(self):
+        """`len(required_members) == the only requested core_size` -- the
+        beam's own seed IS the final answer, with zero growth iterations.
+        The edge case `multi_bring4_beam`'s own `maybe_capture` closure
+        exists for."""
+        rows = cf.multi_bring4_beam(
+            self.coverage, required_members=self.required, core_sizes=(2,),
+            beam_width=10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(set(rows[0]["core"]), set(self.required))
+
+    def test_none_reproduces_the_unforced_search_exactly(self):
+        rows_none = cf.multi_bring4_exhaustive(
+            self.coverage, required_members=None, core_sizes=(4,))
+        rows_omitted = cf.multi_bring4_exhaustive(self.coverage, core_sizes=(4,))
+        self.assertEqual({r["core"] for r in rows_none},
+                         {r["core"] for r in rows_omitted})
 
 
 class TestSwitchInSearch(unittest.TestCase):
@@ -11663,6 +12149,63 @@ class TestEvolveFromTeam(unittest.TestCase):
             swap_pool=["Mega Dragonite", "Hydreigon"], max_changes=1)["rounds"][0]
         offered = {r["added"] for r in results if r["kind"] == "member"}
         self.assertNotIn("Mega Dragonite", offered)
+
+    def test_allow_member_swaps_false_offers_no_member_kind_results(self):
+        """"In the evolve-from-team, you cannot remove protect" -- traced to
+        a real usability gap, not a broken mechanism: a whole-member swap's
+        score delta (a genuinely stronger Pokemon) routinely dwarfs even the
+        best move/item tweak, so with member swaps in play greedy hill-
+        climbing always spends its round on the member swap first, and a
+        smaller, targeted refinement (like dropping Protect for a better
+        move) never gets picked within `max_changes`'s budget -- even
+        though it IS a real, positive-delta improvement on its own (see
+        test_earthquake_surfaces_as_the_top_move_swap_with_a_positive_delta,
+        the same fixture, which already proves the move swap itself scores
+        positively). `allow_member_swaps=False` is the fix: every "kind"
+        in the results must be "move" or "item", never "member", even with
+        a real candidate in `swap_pool`."""
+        results = self._round1(swap_pool=["Hydreigon"], allow_member_swaps=False)
+        self.assertTrue(results)
+        kinds = {r["kind"] for r in results}
+        self.assertLessEqual(kinds, {"move", "item"})
+
+    def test_allow_member_swaps_false_still_finds_the_earthquake_swap_as_top(self):
+        """With whole-member swaps out of the running, the exact same move
+        swap `test_earthquake_surfaces_as_the_top_move_swap_with_a_positive_
+        delta` finds by default still surfaces as the #1 result -- this flag
+        narrows the trial set, it doesn't change move/item scoring."""
+        results = self._round1(swap_pool=["Hydreigon"], allow_member_swaps=False)
+        top = results[0]
+        self.assertEqual(top["kind"], "move")
+        self.assertEqual(top["member"], "Garchomp")
+        self.assertEqual(top["added"], "Earthquake")
+        self.assertGreater(top["delta"], 0.0)
+
+    def test_allow_member_swaps_false_still_chains_across_rounds(self):
+        """The same move-then-item chain
+        (test_iterating_chains_a_move_swap_then_an_item_swap) still chains
+        correctly with member swaps off -- `allow_member_swaps` only prunes
+        WHICH trials each round considers, not the round-to-round chaining
+        itself."""
+        evolved = self._evolve(swap_pool=["Hydreigon"], max_changes=2,
+                               allow_member_swaps=False)
+        self.assertEqual(len(evolved["chain"]), 2)
+        step1, step2 = evolved["chain"]
+        self.assertEqual(step1["kind"], "move")
+        self.assertEqual(step1["added"], "Earthquake")
+        self.assertEqual(step2["kind"], "item")
+        self.assertEqual(step2["added"], "Life Orb")
+        for round_results in evolved["rounds"]:
+            self.assertTrue(all(r["kind"] != "member" for r in round_results))
+
+    def test_allow_member_swaps_true_is_still_the_default(self):
+        """Omitting `allow_member_swaps` entirely reproduces the exact same
+        results as passing `True` explicitly -- the new parameter changes
+        nothing for every existing caller that doesn't pass it."""
+        omitted = self._round1(swap_pool=["Hydreigon"])
+        explicit_true = self._round1(swap_pool=["Hydreigon"], allow_member_swaps=True)
+        key = lambda r: (r["kind"], r["member"], r["removed"], r["added"])  # noqa: E731
+        self.assertEqual(sorted(omitted, key=key), sorted(explicit_true, key=key))
 
 
 class TestRoundRobinSavedTeams(unittest.TestCase):

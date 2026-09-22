@@ -7,6 +7,7 @@ multi_bring4_coverage+exhaustive/beam/joint_pair_search directly -- no new
 search logic, the same functions the CLI calls, so a result here can never
 disagree with the CLI's own answer for the same inputs.
 """
+import json
 import os
 import sys
 import unittest
@@ -33,16 +34,19 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_six_modes_are_offered(self):
+    def test_the_nine_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
         self.assertEqual(set(radios[0].options),
                          {"Bring-4 (one enemy roster)",
                           "Multi-bring4 (several enemy rosters)",
+                          "Enemy's best response (to my team)",
+                          "Complete my team",
                           "Joint pair search",
                           "2-2-2 teambuilding",
                           "Coverage groups",
+                          "Import pair coverage",
                           "Round-robin (saved teams only)"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
@@ -81,6 +85,15 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
         self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
         self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
+
+    def test_switching_to_import_pair_coverage_mode_renders_its_controls(self):
+        """Before any upload -- just the file uploader itself, no crash
+        from the rest of the mode's own controls (which only render once
+        `ct_pc_pair_rows` is in session state) being skipped."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Import pair coverage").run()
+        self.assertFalse(at.exception, list(at.exception))
 
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the
@@ -388,6 +401,69 @@ class TestCounterTableTabExists(unittest.TestCase):
         for row in results[4]["rows"]:
             self.assertGreaterEqual(
                 cf.count_special_attackers(row["group"], merged, moves), 2)
+
+    def test_generation_include_restricts_every_returned_group(self):
+        """"I also want to include or exclude specific generations of
+        pokemon there" -- gen-1-only must return groups entirely made of
+        gen-1 species (a form counts as its BASE species' generation)."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        w = load_world()
+        merged = w["merged"]
+        from species_data import build_generation_map, load_showdown_static
+        pokedex, _moves, _natures, _typechart = load_showdown_static()
+        gen_map = build_generation_map(merged.keys(), pokedex)
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [m for m in at.multiselect if m.key == "ct_cov_gen_include"][0].set_value(
+            [1]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"], "fixture never produced a group -- "
+                        "gen-1 pool may be too narrow for this pool size")
+        for row in results[3]["rows"]:
+            for n in row["group"]:
+                self.assertEqual(gen_map.get(n), 1, f"{n} is not gen 1")
+
+    def test_generation_exclude_drops_every_excluded_generation(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        w = load_world()
+        merged = w["merged"]
+        from species_data import build_generation_map, load_showdown_static
+        pokedex, _moves, _natures, _typechart = load_showdown_static()
+        gen_map = build_generation_map(merged.keys(), pokedex)
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(30).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [m for m in at.multiselect if m.key == "ct_cov_gen_exclude"][0].set_value(
+            list(range(1, 9))).run()  # exclude every generation except 9
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"], "fixture never produced a group -- "
+                        "gen-9-only pool may be too narrow for this pool size")
+        for row in results[3]["rows"]:
+            for n in row["group"]:
+                self.assertEqual(gen_map.get(n), 9, f"{n} is not gen 9")
+
+    def test_required_techs_offers_the_new_granular_options(self):
+        """"I want to be able to define specific techs, like ... fake out,
+        tailwind, coaching, and so on" -- the granular techs sit alongside
+        the existing broad buckets in the SAME multiselect, not a
+        separate control."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        techs_ms = [m for m in at.multiselect if m.key == "ct_cov_required_techs"][0]
+        for label in ("Tailwind user", "Coaching user", "Fake Out user"):
+            self.assertIn(label, techs_ms.options)
 
     def test_coverage_groups_run_bring4_button_works(self):
         """"add an option to run the actual pair performance vs enemy
@@ -1103,6 +1179,180 @@ class TestLeadBackDeepDive(unittest.TestCase):
         # A real turn-by-turn transcript, not the cheap model's own
         # single-line average-rolls summary.
         self.assertIn("--- Turn 1 ---", transcripts[0])
+
+
+class TestEnemyBestResponseMode(unittest.TestCase):
+    """"an option for the enemy to run their best response against my
+    team, and then in the battle simulator I will play that team" -- the
+    mirror of Multi-bring4 (which searches a pool for OUR best team
+    against named enemies): here OUR OWN team is fixed/known and the pool
+    is searched for the opponent's best response, with a one-click hand-
+    off into the Battle Simulator's opponent slot."""
+
+    def test_mode_defaults_to_the_current_team_builder_team(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Enemy's best response (to my team)").run()
+        self.assertFalse(at.exception, list(at.exception))
+        my_source = [s for s in at.selectbox if s.key == "ct_er_my_source"]
+        self.assertTrue(my_source)
+        self.assertEqual(my_source[0].value, "(current Team Builder team)")
+
+    def test_searching_returns_responses_against_the_fixed_team(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Enemy's best response (to my team)").run()
+        at = [s for s in at.slider if s.key == "ct_er_pool"][0].set_value(15).run()
+        at = [s for s in at.slider if s.key == "ct_er_maxweak"][0].set_value(6).run()
+        at = [s for s in at.slider if s.key == "ct_er_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_er_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state.get("ct_er_rows")
+        self.assertTrue(rows)
+        # The fixed side is the DEFAULT team, never touched by the search.
+        self.assertEqual(at.session_state.get("ct_er_my_team"), TEAM)
+        # None of the returned "response" cores is just our own team back.
+        for r in rows[:5]:
+            self.assertNotEqual(set(r["core"]), set(TEAM))
+
+    def test_sending_a_result_to_the_battle_simulator_configures_its_opponent_slot(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Enemy's best response (to my team)").run()
+        at = [s for s in at.slider if s.key == "ct_er_pool"][0].set_value(15).run()
+        at = [s for s in at.slider if s.key == "ct_er_maxweak"][0].set_value(6).run()
+        at = [s for s in at.slider if s.key == "ct_er_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_er_go"][0].click().run()
+        first_core = at.session_state["ct_er_rows"][0]["core"]
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("cter_1_")
+                     and b.key.endswith("_go")]
+        self.assertEqual(len(dd_buttons), 1)
+        at = dd_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        send_buttons = [b for b in at.button if b.key and b.key.endswith("_sendsim")]
+        self.assertEqual(len(send_buttons), 1)
+        at = send_buttons[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["sim_foe_source"], "Paste a pokepaste")
+        # "I choose their bring" is the one Simulator mode that works for
+        # a response of ANY size (4, 5, or 6) -- the other two modes
+        # hard-require a full six, which a 4/5-member response isn't.
+        self.assertEqual(at.session_state["sim_mode_choice"], "I choose their bring")
+        import json as _json
+        payload = _json.loads(at.session_state["sim_foe_paste"])
+        self.assertEqual(set(payload["pool"]), set(first_core))
+        self.assertTrue(payload["sets"])
+        if len(first_core) == 4:
+            self.assertEqual(
+                set(at.session_state["sim_their_lead"])
+                | set(at.session_state["sim_their_back"]),
+                set(first_core))
+
+    def test_full_round_trip_can_start_a_battle_against_the_sent_response(self):
+        """The actual "I will play that team" payoff -- after sending, the
+        Battle Simulator's own "Start Battle" must be clickable (once our
+        own side is also picked) and must actually produce a battle, not
+        just accept the paste without wiring it all the way through."""
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Enemy's best response (to my team)").run()
+        at = [s for s in at.slider if s.key == "ct_er_pool"][0].set_value(15).run()
+        at = [s for s in at.slider if s.key == "ct_er_maxweak"][0].set_value(6).run()
+        at = [s for s in at.slider if s.key == "ct_er_good"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_er_go"][0].click().run()
+        dd_buttons = [b for b in at.button if b.key and b.key.startswith("cter_1_")
+                     and b.key.endswith("_go")]
+        at = dd_buttons[0].click().run()
+        send_buttons = [b for b in at.button if b.key and b.key.endswith("_sendsim")]
+        at = send_buttons[0].click().run()
+        at = [r for r in at.radio if r.key == "sim_side_source"][0].set_value(
+            "A saved team").run()
+        go_btn = [b for b in at.button if b.label == "Start Battle"]
+        self.assertTrue(go_btn)
+        self.assertFalse(go_btn[0].disabled)
+        at = go_btn[0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertIsNotNone(at.session_state.get("sim_battle"))
+
+
+class TestCompleteMyTeamMode(unittest.TestCase):
+    """"I want to be able to run the full counter_table.py exercise but
+    with n mandatory members, taken from a given team pokepaste ... the
+    counter table should seek to find remaining members to maximise
+    wins" -- every returned team keeps the pasted members' own species,
+    with the pool searched for the rest."""
+
+    REQUIRED_PASTE = '{"pool": ["Incineroar", "Farigiraf"], "sets": {}}'
+
+    def _search(self, at, pool=10, sizes=(4,), max_weak=6, good=0):
+        at = [t for t in at.text_area if t.key == "ct_ct_paste"][0].set_value(
+            self.REQUIRED_PASTE).run()
+        # Narrowed to ONE enemy roster (the default is the first 3 saved
+        # teams) -- Stage A (`multi_bring4_coverage`) races every pool pair
+        # against every enemy roster's own pairs, so this is the single
+        # biggest cost knob a test controls; at the smallest legal pool
+        # (10) and 3 enemy teams this genuinely ran past AppTest's own
+        # 500s ceiling in this environment -- not a hang, just real combat
+        # work multiplied by 3x more than a regression test needs to prove
+        # "every mandatory member survives."
+        vs_multi = [m for m in at.multiselect if m.key == "ct_ct_vs"][0]
+        at = vs_multi.set_value(vs_multi.options[:1]).run()
+        at = [s for s in at.slider if s.key == "ct_ct_pool"][0].set_value(pool).run()
+        at = [m for m in at.multiselect if m.key == "ct_ct_sizes"][0].set_value(
+            list(sizes)).run()
+        at = [s for s in at.slider if s.key == "ct_ct_maxweak"][0].set_value(
+            max_weak).run()
+        at = [s for s in at.slider if s.key == "ct_ct_good"][0].set_value(good).run()
+        return [b for b in at.button if b.key == "ct_ct_go"][0].click().run()
+
+    def test_pasting_the_mandatory_members_parses_them(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Complete my team").run()
+        at = [t for t in at.text_area if t.key == "ct_ct_paste"][0].set_value(
+            self.REQUIRED_PASTE).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("Parsed: Incineroar, Farigiraf" in s.value
+                            for s in at.success))
+
+    def test_every_returned_core_contains_every_mandatory_member(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Complete my team").run()
+        at = self._search(at)
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state.get("ct_ct_rows")
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertTrue({"Incineroar", "Farigiraf"} <= set(r["core"]))
+
+    def test_no_paste_warns_instead_of_a_disabled_or_broken_button(self):
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Complete my team").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("mandatory members" in w.value for w in at.warning))
+        self.assertFalse(any(b.key == "ct_ct_go" for b in at.button))
+
+    def test_a_size_too_small_for_the_mandatory_members_warns(self):
+        """3 mandatory members can never fit in a completed size of 3 with
+        anything left to search for -- wait, exactly 3 DOES fit trivially
+        (zero extra seats); pick size 4 vs 5 mandatory members instead, a
+        real mismatch, and confirm the app catches it before the button
+        even offers to run."""
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Complete my team").run()
+        big_paste = json.dumps({
+            "pool": ["Incineroar", "Farigiraf", "Kingambit", "Garchomp", "Gholdengo"],
+            "sets": {}})
+        at = [t for t in at.text_area if t.key == "ct_ct_paste"][0].set_value(
+            big_paste).run()
+        at = [m for m in at.multiselect if m.key == "ct_ct_sizes"][0].set_value(
+            [4]).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any("won't fit" in w.value for w in at.warning))
+        self.assertFalse(any(b.key == "ct_ct_go" for b in at.button))
 
 
 class TestBring4RostersAcceptAPastedPokepaste(unittest.TestCase):

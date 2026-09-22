@@ -114,7 +114,11 @@ Eight modes, pick one (or combine --chip-from/--chip-move with --pairs):
               however well it wins its bring-4s) -- e.g. --max-weak 2 for
               "only 2 members may be weak to any one type", or
               --type-limit "Fire:max_weak=1,max_net=-2" for "only 1 member
-              weak to Fire, Fire must have net 2 resistances".
+              weak to Fire, Fire must have net 2 resistances". --max-weak's
+              own default is not a flat cap: by default, one type may
+              exceed it by 1 (e.g. 3 weak) as long as that type's net
+              weakness is <= 1 -- an explicit --type-limit for a type opts
+              it out of this exception.
               --max-weak-types adds a BREADTH cap on top -- e.g.
               --max-weak-types 3 for "no more than 3 different types may
               have 2+ weak members", distinct from --max-weak's own
@@ -1569,7 +1573,8 @@ def _per_90(count, n_pairs, pairs_total, scale=1.0):
 
 def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
                              natures, typechart, item_overrides, move_overrides,
-                             excluded_items, fixed_items, fixed_moves, core_dives):
+                             excluded_items, fixed_items, fixed_moves, core_dives,
+                             coverage=None, pair_coverage_top=15):
     """--multi-bring4's table as an Excel workbook -- "it may make more
     sense to make counter_table.py export an xlsx rather than a csv, so
     that I can see the performance vs team ... for each pair, and then vs
@@ -1616,6 +1621,17 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     Uncovered, then Protect-Safe (descending), then Beaten (descending),
     then Clean Win (descending), then Tailwind-Safe (descending) exactly
     reproduces the tool's own row order.
+
+    `coverage`: the `multi_bring4_coverage` dict this run already computed
+    (`main()` always has one in scope for `--multi-bring4`) -- when given,
+    two more sheets are written, "Pair Coverage" and "Pair Detail": the
+    raw per-(pair, enemy team)/per-(pair, enemy team, enemy pair) numbers
+    behind the best `pair_coverage_top` pairs (`top_coverage_pairs`), real
+    sets included -- "I would need all the /15 results for every pair vs
+    each enemy team ... to reconstruct optimal teams based on conditions."
+    This is the Streamlit app's own "import pair coverage" upload format
+    (`counter_finder.coverage_from_pair_rows` is its exact inverse); `None`
+    (the default) skips both sheets, unchanged from before they existed.
     """
     from openpyxl import Workbook
     from export_excel import _autosize, _safe_sheet_name, _style_header
@@ -1794,9 +1810,62 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     _write_teamsheets_sheet(wb, teamsheet_entries, merged)
     if core_dives:
         _write_dive_sheets(wb, core_dives, _safe_sheet_name, _style_header, _autosize)
+    if coverage is not None:
+        _write_pair_coverage_sheets(wb, coverage, pair_coverage_top)
 
     wb.save(path)
     return path
+
+
+def _write_pair_coverage_sheets(wb, coverage, top_n):
+    """"Pair Coverage" + "Pair Detail": the raw data behind the best
+    `top_n` pairs in `coverage` (`counter_finder.top_coverage_pairs`),
+    real sets included -- see `_write_multi_bring4_xlsx`'s own docstring
+    for why this exists. `counter_finder.coverage_from_pair_rows` is the
+    exact inverse: it reads these two sheets' own rows back into a
+    `multi_bring4_coverage`-shaped dict, real racing already done."""
+    from export_excel import _autosize, _style_header
+    from counter_finder import top_coverage_pairs
+    top_pairs = top_coverage_pairs(coverage, top_n=top_n)
+    top_keys = {frozenset(p) for p in top_pairs}
+    rank_by_key = {frozenset(p): i for i, p in enumerate(top_pairs, start=1)}
+
+    cov_ws = wb.create_sheet("Pair Coverage")
+    cov_ws.append(["Rank", "Pokemon 1", "Pokemon 2", "Enemy #", "Item 1", "Item 2",
+                  "Moves 1", "Moves 2", "Swept", "Traded", "Lost", "No KO",
+                  "Tailwind-safe", "Protect-safe", "Redirect-safe",
+                  "Clean win total", "Total"])
+    _style_header(cov_ws)
+    det_ws = wb.create_sheet("Pair Detail")
+    det_ws.append(["Pokemon 1", "Pokemon 2", "Enemy #", "Enemy 1", "Enemy 2",
+                   "Outcome", "Our HP (C)", "Our HP (P)", "Tailwind-safe",
+                   "Protect-safe", "Redirect-safe", "Clean win value"])
+    _style_header(det_ws)
+    for enemy_idx, pbk in enumerate(coverage["pair_by_key"]):
+        for pk, r in pbk.items():
+            if pk not in top_keys:
+                continue
+            n1, n2 = r["pair"]
+            cov_ws.append([
+                rank_by_key[pk], n1, n2, enemy_idx + 1, r["item1"], r["item2"],
+                ", ".join(coverage["fixed_moves"].get(n1, [])),
+                ", ".join(coverage["fixed_moves"].get(n2, [])),
+                r["pairs_swept"], r["pairs_traded"], r["pairs_lost"],
+                r["pairs_no_ko"], r["pairs_tailwind_safe"], r["pairs_protect_safe"],
+                r["pairs_follow_me_safe"], round(r["pairs_clean_win_total"], 2),
+                r["pairs_total"]])
+            for (e1, e2), d in r["detail"].items():
+                det_ws.append([
+                    n1, n2, enemy_idx + 1, e1, e2, d["outcome"],
+                    round(d["our_hp"]["C"], 3), round(d["our_hp"]["P"], 3),
+                    d["tailwind_safe"], d["protect_safe"], d["follow_me_safe"],
+                    round(d["clean_win_value"], 2)])
+    cov_ws.freeze_panes = "A2"
+    cov_ws.auto_filter.ref = cov_ws.dimensions
+    _autosize(cov_ws)
+    det_ws.freeze_panes = "A2"
+    det_ws.auto_filter.ref = det_ws.dimensions
+    _autosize(det_ws)
 
 
 def _bring4_xlsx_row_values(rank, b, merged, enemy_tw):
@@ -2450,11 +2519,14 @@ def _run_evolve_from_team(args):
         ability_overrides=team_abil,
         max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
         jobs=jobs, progress_callback=_progress,
-        max_changes=args.evolve_max_changes)
+        max_changes=args.evolve_max_changes,
+        allow_member_swaps=not args.evolve_moves_items_only)
     print()
     if not evolved["chain"]:
-        print("No improvement found -- every move/item/whole-member swap "
-             "tried scored no better than the starting team.")
+        tried = ("every move/item swap" if args.evolve_moves_items_only
+                 else "every move/item/whole-member swap")
+        print(f"No improvement found -- {tried} tried scored no better "
+             "than the starting team.")
         return
     gain = evolved["final_score"] - evolved["baseline_score"]
     print(f"Baseline score: {evolved['baseline_score']:.1f}")
@@ -2612,6 +2684,19 @@ def main():
                          "for a single independent pass (every genuine "
                          "improvement around the ORIGINAL team, none of them "
                          "applied or chained)")
+    ap.add_argument("--evolve-moves-items-only", action="store_true",
+                    help="--evolve-from-team only: skip whole-member swaps, "
+                         "considering only move and item changes around "
+                         "--our's own fixed roster. A whole-member swap's "
+                         "score delta (bringing in a genuinely stronger "
+                         "Pokemon) routinely dwarfs even the best available "
+                         "move/item tweak, so by default greedy hill-climbing "
+                         "spends essentially every round replacing a member "
+                         "long before a smaller refinement -- dropping "
+                         "Protect for a better-scoring move, say -- ever gets "
+                         "a turn, even when that refinement is itself a "
+                         "genuine, positive-delta improvement on its own. "
+                         "Pass this to evolve the SET, not the ROSTER")
     ap.add_argument("--benchmark-teams", action="store_true",
                     help="--bring4 only: instead of one --our team, run the "
                          "SAME --bring4 search once independently per every "
@@ -2724,13 +2809,20 @@ def main():
                     help="--multi-bring4 only: hard-drop any candidate CORE "
                          "where more than N of its members are weak to the "
                          "SAME type, for every type (default 2: 'only 2 "
-                         "members may be weak to any one type'). "
-                         "Overridden per-type by --type-limit. Unlike "
+                         "members may be weak to any one type'). NOT a flat, "
+                         "exception-less cap by default: at most ONE type "
+                         "across the core may exceed N by exactly 1 (e.g. 3 "
+                         "when N=2), and only when that type's own NET "
+                         "weakness (weak - resist) is <= 1 -- 'allow one "
+                         "type that has 3 weaknesses as long as it only has "
+                         "1 net weakness'. A type given its own --type-limit "
+                         "max_weak is exempt from this exception and stays "
+                         "exactly as strict as written. Unlike "
                          "--good-threshold this is a hard exclusion, not a "
-                         "ranking factor -- a core that breaks it is never "
-                         "shown, however well it wins its bring-4s. Pass a "
-                         "high value (e.g. --max-weak 6) to effectively "
-                         "disable it")
+                         "ranking factor -- a core that breaks it (even with "
+                         "the exception) is never shown, however well it "
+                         "wins its bring-4s. Pass a high value (e.g. "
+                         "--max-weak 6) to effectively disable it")
     ap.add_argument("--type-limit", action="append", default=[],
                     metavar="TYPE:max_weak=N,max_net=M",
                     help="--multi-bring4 only: a hard per-type override on "
@@ -2894,6 +2986,15 @@ def main():
                          "--vs-team never needs this flag). Ignored under "
                          "--beam, which searches the "
                          "whole pool regardless")
+    ap.add_argument("--pair-coverage-top", type=int, default=15, metavar="N",
+                    help="--multi-bring4 --xlsx only: how many of the best "
+                         "pairs (ranked across every named --vs-team enemy "
+                         "jointly, real sets included) get the extra 'Pair "
+                         "Coverage'/'Pair Detail' sheets -- default 15. "
+                         "This is the Streamlit app's own 'import pair "
+                         "coverage' upload format: 'I would need all the "
+                         "/15 results for every pair vs each enemy team ... "
+                         "to reconstruct optimal teams based on conditions'")
     ap.add_argument("--beam", action="store_true",
                     help="--multi-bring4 only: search the WHOLE pool with "
                          "an incremental beam search (same growth pattern "
@@ -3624,7 +3725,8 @@ def main():
             path = _write_multi_bring4_xlsx(
                 args.xlsx, multi_rows, vs_teams, merged, moves, natures,
                 typechart, item_overrides, move_overrides, excluded_items,
-                coverage["fixed_items"], coverage["fixed_moves"], core_dives)
+                coverage["fixed_items"], coverage["fixed_moves"], core_dives,
+                coverage=coverage, pair_coverage_top=args.pair_coverage_top)
             print(f"\nExcel workbook: {os.path.abspath(path)}")
         if args.teamsheet_json:
             if not multi_rows:

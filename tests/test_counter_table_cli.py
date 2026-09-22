@@ -767,6 +767,13 @@ class TestHelpDocumentsTheNewFlags(unittest.TestCase):
     def test_type_limit_is_parsed(self):
         self.assertIn("--type-limit", self.help_text)
 
+    def test_max_weak_default_exception_is_documented(self):
+        """"By default, in the counter_table.py, allow one type that has 3
+        weaknesses as long as it only has 1 net weakness" -- the default
+        exception is real behaviour, not just an internal implementation
+        detail, so it must be discoverable from --help."""
+        self.assertIn("net weakness", self.help_text)
+
     def test_max_megas_is_parsed(self):
         self.assertIn("--max-megas", self.help_text)
 
@@ -1563,6 +1570,41 @@ class TestMaxNetWeakTypesEndToEnd(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestMaxWeakDefaultExceptionEndToEnd(unittest.TestCase):
+    """"By default, in the counter_table.py, allow one type that has 3
+    weaknesses as long as it only has 1 net weakness" -- --max-weak's bare
+    default is not a flat, exception-less cap.
+
+    The REAL, exact-boundary behaviour (a 3-weak/net-1 type accepted, a
+    second type barred from also using the allowance, growth-time safety,
+    etc.) is covered thoroughly and deterministically at the library level
+    -- `TestWeakTypeDefaultException` in test_counter_finder.py, including
+    one real end-to-end `multi_bring4_exhaustive` call proving the search
+    entry point actually wires the exception through. This class only
+    covers the CLI's OWN wiring (real argv -> real search, no crash, no
+    behaviour change to callers who explicitly opt every type out) -- a
+    real 3-weak scenario is not forced through THIS specific fixture's
+    real Pokemon data, since that turned out to need an impractically
+    wide (slow) search pool to occur reliably.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.argv = ["--pool-size", "16", "--multi-bring4",
+                   "--vs-team", "Kingambit,Basculegion,Garchomp,Whimsicott",
+                   "--good-threshold", "30", "--top", "3"]
+
+    def test_default_run_and_a_fully_pinned_run_both_run_cleanly(self):
+        from species_data import TYPES
+        pin_flags = []
+        for t in TYPES:
+            pin_flags += ["--type-limit", f"{t}:max_weak=2"]
+        msg1, out_default = run_main(self.argv)
+        self.assertIsNone(msg1, out_default)
+        msg2, out_pinned = run_main(self.argv + pin_flags)
+        self.assertIsNone(msg2, out_pinned)
+
+
 class TestTeamsheetJsonExport(unittest.TestCase):
     """"I am primarily using the CLI for counter_table.py and then checking
     results in the streamlit app, so the export in the CLI needs to be
@@ -2105,6 +2147,41 @@ class TestEvolveFromTeamFlag(unittest.TestCase):
         self.assertIn("Garchomp", out)
         self.assertIn("Poison Jab -> Earthquake", out)
 
+    def test_moves_items_only_skips_member_swaps_and_says_so_when_empty(self):
+        """"In the evolve-from-team, you cannot remove protect" -- traced to
+        whole-member swaps' score deltas (a genuinely stronger Pokemon)
+        dwarfing even the best move/item tweak, so by default greedy hill-
+        climbing always spends its round on a member swap first and a
+        smaller, targeted refinement never gets picked. --evolve-moves-
+        items-only is the fix: with a 2-member --our (no room to swap moves
+        or items usefully here, --evolve-pool-size 0 so member swaps would
+        otherwise be the only avenue anyway), passing it must still report
+        "no improvement" cleanly -- never crash, never silently fall back to
+        considering a member swap anyway."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit",
+             "--vs-team", "Kingambit,Basculegion", "--evolve-pool-size", "0",
+             "--turns", "1", "--evolve-moves-items-only"])
+        self.assertIsNone(msg, out)
+        self.assertTrue(
+            "No improvement found" in out
+            or ("Applied" in out and "joint change" in out))
+        self.assertNotIn(" member ", out)
+
+    def test_moves_items_only_still_surfaces_the_known_earthquake_improvement(self):
+        """The same Poison-Jab-to-Earthquake move swap
+        (test_surfaces_the_known_earthquake_improvement) still surfaces with
+        whole-member swaps turned off -- the flag narrows which swap KINDS
+        are tried, it doesn't suppress a genuine move-swap improvement."""
+        msg, out = run_main(
+            ["--evolve-from-team", "--our", "Garchomp,Kingambit,Whimsicott",
+             "--moves", "Garchomp=Poison Jab,Dragon Claw,Rock Slide,Protect",
+             "--vs-team", "Arcanine-Hisui,Toxapex", "--evolve-pool-size", "0",
+             "--turns", "2", "--evolve-moves-items-only"])
+        self.assertIsNone(msg, out)
+        self.assertIn("Garchomp", out)
+        self.assertIn("Poison Jab -> Earthquake", out)
+
     def test_no_improvement_case_says_so_plainly(self):
         """An empty `swap_pool` and no move/item-swap headroom (a two-
         member `--our` with no OTHER member to swap into, real usage top-4
@@ -2580,6 +2657,98 @@ class TestXlsxNewSummaryColumns(unittest.TestCase):
             n_pairs, pt = len(bring4_rows[0]["pair_rows"]), depth["pairs_total"]
             expected = round(depth["beaten_total"] / (n_pairs * pt) * 90, 1)
             self.assertAlmostEqual(row2["Avg Wins/90"], expected, places=1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestPairCoverageXlsxExport(unittest.TestCase):
+    """"I would need all the /15 results for every pair vs each enemy team
+    ... to reconstruct optimal teams based on conditions" -- --multi-
+    bring4 --xlsx's new "Pair Coverage"/"Pair Detail" sheets, and the
+    Streamlit app's own `_parse_pair_coverage_xlsx` reading them back
+    (the exact inverse of `counter_finder.coverage_from_pair_rows`)."""
+
+    def _run_xlsx(self, pair_coverage_top=None):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        args = ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                "--vs-team", "Garchomp,Incineroar", "--pool-size", "20",
+                "--good-threshold", "0", "--min-enemies", "1",
+                "--top", "2", "--no-prompt", "--xlsx", path]
+        if pair_coverage_top is not None:
+            args += ["--pair-coverage-top", str(pair_coverage_top)]
+        msg, out = run_main(args)
+        self.assertIsNone(msg, out)
+        return path
+
+    def test_pair_coverage_and_pair_detail_sheets_exist_with_data(self):
+        path = self._run_xlsx(pair_coverage_top=5)
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertIn("Pair Coverage", wb.sheetnames)
+            self.assertIn("Pair Detail", wb.sheetnames)
+            cov_ws = wb["Pair Coverage"]
+            self.assertGreater(cov_ws.max_row, 1, "no pair coverage rows")
+            header = [c.value for c in cov_ws[1]]
+            for col in ("Rank", "Pokemon 1", "Pokemon 2", "Enemy #", "Item 1",
+                       "Item 2", "Moves 1", "Moves 2", "Swept", "Traded",
+                       "Lost", "No KO", "Tailwind-safe", "Protect-safe",
+                       "Redirect-safe", "Clean win total", "Total"):
+                self.assertIn(col, header)
+            ranks = {row[0].value for row in cov_ws.iter_rows(min_row=2)}
+            self.assertLessEqual(ranks, set(range(1, 6)),
+                                 "pair-coverage-top 5 must cap Rank at 5")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_default_pair_coverage_top_is_15(self):
+        path = self._run_xlsx()
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            cov_ws = wb["Pair Coverage"]
+            ranks = {row[0].value for row in cov_ws.iter_rows(min_row=2)}
+            self.assertLessEqual(ranks, set(range(1, 16)))
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_app_parser_round_trips_into_a_working_search(self):
+        """The full loop: CLI export -> app.py's own parser ->
+        `coverage_from_pair_rows` -> `merge_named_team_pairs` ->
+        `pair_coverage_teams`, all without touching any combat
+        simulation beyond what the CLI already computed."""
+        path = self._run_xlsx(pair_coverage_top=10)
+        try:
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+            from app import _parse_pair_coverage_xlsx
+            from counter_finder import (coverage_from_pair_rows,
+                                        merge_named_team_pairs,
+                                        pair_coverage_teams)
+            from _harness import load_world
+            pair_rows, detail_rows, target_name_lists = _parse_pair_coverage_xlsx(
+                file_bytes)
+            self.assertTrue(pair_rows)
+            self.assertTrue(detail_rows)
+            self.assertEqual(target_name_lists,
+                             [["Kingambit", "Basculegion"], ["Garchomp", "Incineroar"]])
+            W = load_world()
+            coverage = coverage_from_pair_rows(
+                pair_rows, detail_rows, target_name_lists, W["merged"], W["moves"],
+                W["natures"], W["typechart"])
+            merge_named_team_pairs(coverage, {}, {}, W["merged"], W["moves"],
+                                   W["natures"], W["typechart"])
+            results = pair_coverage_teams(coverage, group_size=4, top_n=5)
+            self.assertIsInstance(results, list)
+            for r in results:
+                self.assertEqual(len(r["team"]), 4)
         finally:
             if os.path.exists(path):
                 os.unlink(path)

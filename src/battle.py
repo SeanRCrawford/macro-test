@@ -446,6 +446,7 @@ class Battle:
             side.bench[:] = [b for b in side.bench if b is not incoming]
             if not side.active[slot].fainted:
                 side.bench.append(side.active[slot])
+                self._reset_on_switch_out(side.active[slot])
             side.active[slot] = incoming
             # Remember which SLOT the outgoing Pokemon occupied, so moves aimed at it
             # this turn hit whatever now stands in that slot -- not the other slot.
@@ -1229,6 +1230,22 @@ class Battle:
         if move.self_switch and not attacker.fainted and status_connected:
             self._voluntary_switch_out(attacker, action.side)
 
+    @staticmethod
+    def _reset_on_switch_out(outgoing: Combatant):
+        """Stat stage changes are tied to being on the field -- an
+        Intimidate-dropped Attack (or any other boost/drop) resets the
+        instant its holder switches out, real games included, whether the
+        switch is voluntary (this method's two callers: a pre-turn switch
+        in `run_turn`, and a self-switch move via `_voluntary_switch_out`)
+        or forced. A fainted Pokemon never calls this (nothing to reset
+        FOR -- it can't come back), and Baton Pass's own real "pass the
+        boosts to whoever comes in" effect stays the documented, un-modeled
+        gap `MoveInfo.self_switch`'s own comment already flags -- this only
+        fixes the OUTGOING side resetting, not a new pass-along feature.
+        """
+        for stat in outgoing.stages:
+            outgoing.stages[stat] = 0
+
     def _voluntary_switch_out(self, outgoing: Combatant, action_side: str):
         """A self-switch move (U-turn, Volt Switch, Parting Shot, Flip Turn,
         Chilly Reception, Baton Pass, Shed Tail -- see MoveInfo.self_switch)
@@ -1265,6 +1282,7 @@ class Battle:
         side.bench[:] = [b for b in side.bench if b is not incoming]
         if not outgoing.fainted:
             side.bench.append(outgoing)
+            self._reset_on_switch_out(outgoing)
         side.active[slot] = incoming
         # Same bookkeeping as a voluntary pre-turn switch: later actions this turn
         # aimed at `outgoing` should follow the SLOT and hit `incoming` instead.
