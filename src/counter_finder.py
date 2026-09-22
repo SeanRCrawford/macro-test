@@ -506,6 +506,20 @@ TECH_MOVES = {
     "redirect": frozenset({"Follow Me", "Rage Powder"}),
     "taunt": frozenset({"Taunt"}),
     "helping_hand": frozenset({"Helping Hand"}),
+    # "pivot" -- a self-switch move (Showdown's own `selfSwitch` flag,
+    # `MoveInfo.self_switch`/`battle.py`'s own real-engine handling): the
+    # user swaps out for a bench member the SAME turn the move hits,
+    # instead of spending a separate switch action -- "u turn, parting
+    # shot, flip turn, baton pass, and so on". Named here the same
+    # hardcoded-frozenset way every other single-move/small-family tech
+    # already is, not derived from `MoveInfo.self_switch` itself: this
+    # dict is keyed by move NAME (`_member_has_tech`'s own `moves_usage`
+    # name check), or Showdown's raw per-move data outside `battle.py`'s
+    # own already-resolved `MoveInfo` objects.
+    "pivot": frozenset({
+        "U-turn", "Volt Switch", "Parting Shot", "Flip Turn", "Baton Pass",
+        "Teleport", "Chilly Reception", "Shed Tail",
+    }),
 }
 TECH_LABELS = {
     "weather": "weather setter", "terrain": "terrain setter",
@@ -513,6 +527,7 @@ TECH_LABELS = {
     "tailwind": "Tailwind user", "trick_room": "Trick Room user",
     "coaching": "Coaching user", "redirect": "redirector (Follow Me/Rage Powder)",
     "taunt": "Taunt user", "helping_hand": "Helping Hand user",
+    "pivot": "pivot/switching move (U-turn, Volt Switch, Parting Shot, ...)",
 }
 
 

@@ -462,7 +462,8 @@ class TestCounterTableTabExists(unittest.TestCase):
         [r for r in at.radio if r.key == "ct_mode"][0].set_value(
             "Coverage groups").run()
         techs_ms = [m for m in at.multiselect if m.key == "ct_cov_required_techs"][0]
-        for label in ("Tailwind user", "Coaching user", "Fake Out user"):
+        for label in ("Tailwind user", "Coaching user", "Fake Out user",
+                     "pivot/switching move (U-turn, Volt Switch, Parting Shot, ...)"):
             self.assertIn(label, techs_ms.options)
 
     def test_coverage_groups_run_bring4_button_works(self):

@@ -7003,12 +7003,23 @@ class TestTeamMissingTechs(unittest.TestCase):
         move), since Tailwind is a member of both."""
         self.assertTrue(cf._member_has_tech("Whimsicott", self.merged, "tailwind"))
         self.assertTrue(cf._member_has_tech("Whimsicott", self.merged, "speed_control"))
-        for tech in ("trick_room", "coaching", "redirect", "taunt", "helping_hand"):
+        for tech in ("trick_room", "coaching", "redirect", "taunt", "helping_hand", "pivot"):
             self.assertIn(tech, cf.TECH_LABELS)
             # A no-op call on real data must never raise, whatever the
             # answer -- confirms every new key is wired all the way
             # through `_member_has_tech`'s own move-name lookup.
             cf._member_has_tech("Kingambit", self.merged, tech)
+
+    def test_pivot_tech_covers_the_named_switching_moves(self):
+        """"Add pivot tech (switching move such as u turn, parting shot,
+        flip turn, baton pass, and so on)" -- Incineroar's real usage
+        moveset carries Parting Shot, a real pivot move; Kingambit's own
+        real moveset carries none of them."""
+        self.assertTrue(cf._member_has_tech("Incineroar", self.merged, "pivot"))
+        self.assertFalse(cf._member_has_tech("Kingambit", self.merged, "pivot"))
+        for move in ("U-turn", "Volt Switch", "Parting Shot", "Flip Turn",
+                    "Baton Pass", "Teleport", "Chilly Reception", "Shed Tail"):
+            self.assertIn(move, cf.TECH_MOVES["pivot"])
 
     def test_team_missing_techs_is_empty_once_every_category_is_covered(self):
         team = ["Pelipper", "Rillaboom", "Kingambit"]
