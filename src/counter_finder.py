@@ -242,6 +242,22 @@ def _build_form(name, merged, natures, item=None, stay_base=False,
     return c
 
 
+# "Mega Raichu Y, if brought to a match, must be considered the only Mega.
+# Its moves are far too inaccurate in its base form, but its mega Y has the
+# ability No Guard so never misses." -- the cheap model's own damage calc
+# (`_raw_hit` below) never discounts expected damage by a move's accuracy at
+# all (`solver.py`'s own action-value function documents the same choice:
+# "no accuracy roll is modeled... moves always hit here"), so this module's
+# usual "try every legal option, let the race decide" comparison can't be
+# trusted to find this on its own -- base Raichu's miss-prone moves score as
+# if they always land, hiding the exact reason its base form is unplayable.
+# Hardcoded instead, the same way `combatants.FORCED_BASE_ABILITY` hardcodes
+# Dragonite's own base ability: whenever Mega Raichu Y is a real, legal
+# option, it is THE choice, never compared against staying base or against
+# a different stone-holder sharing the same team/bring.
+ALWAYS_TRANSFORMS_MEGA = frozenset({"Mega Raichu Y"})
+
+
 def _mega_choices(names_pair):
     """Every legal `mega_transforms` value for this pair -- who (if anyone)
     actually Mega Evolves, subject to VGC's real "at most one Mega Evolution
@@ -420,6 +436,125 @@ def net_weakness_by_type(core, merged):
         weak, resist = _weak_resist(list(core), merged, t)
         out[t] = len(weak) - len(resist)
     return out
+
+
+def raw_weakness_by_type(core, merged):
+    """{type: count} for every type -- how many members are weak to it,
+    with no credit for how many others resist it (`net_weakness_by_type`'s
+    own net reading). `weakness_violations`'s own `max_weak` scores this
+    exact same ABSOLUTE count ("most members allowed to be weak to any one
+    type") as `score_team`'s soft synergy term; this is the raw map for a
+    caller applying its own hard threshold directly, same role `net_
+    weakness_by_type` plays for the net reading."""
+    from species_data import TYPES
+    from team_search import _weak_resist
+    out = {}
+    for t in TYPES:
+        weak, _resist = _weak_resist(list(core), merged, t)
+        out[t] = len(weak)
+    return out
+
+
+# ------------------------------------------------------------- tech coverage
+#
+# "I may need a weather setter, terrain setter, a fake out user, speed
+# control such as tailwind/zap cannon (treat these as interchangeable) for a
+# team to be considered a 'good' and flexible team, or at least some of
+# these." -- named TECH categories, each satisfied by ANY member whose
+# default ability or recorded `moves_usage` covers it. Deliberately a
+# species-level, STATIC property check (default ability / any recorded-usage
+# move), the same discipline `required_cores`'s own type check already
+# uses -- not a specific searched/overridden set, which would need threading
+# through three quite different set-resolution pipelines (`bring4_search`,
+# `multi_bring4_coverage`, `coverage_group_search` don't even resolve full
+# movesets the same way).
+#
+# `speed_control` folds together every way a team answers "who moves
+# first": Tailwind/Trick Room (a team-wide turn-order swap), the
+# guaranteed-or-likely-paralysis moves (Thunder Wave/Glare/Stun Spore/
+# Nuzzle, and the user's own example, Zap Cannon -- its 50% miss chance is
+# no obstacle for a No-Guard user like Mega Raichu Y, see
+# `ALWAYS_TRANSFORMS_MEGA`), and the speed-DROP attacks `app.py`'s own
+# `SIM_SPEED_DROP_ATTACK_NAMES` already treats as speed control for the
+# Battle Simulator's support mode -- all interchangeable for this purpose,
+# every one of them just answers the same question.
+TECH_ABILITIES = {
+    "weather": frozenset(WEATHER_SETTERS),
+    "terrain": frozenset(TERRAIN_SETTERS),
+}
+TECH_MOVES = {
+    "fake_out": frozenset({"Fake Out"}),
+    "speed_control": frozenset({
+        "Tailwind", "Trick Room", "Thunder Wave", "Glare", "Stun Spore",
+        "Nuzzle", "Zap Cannon", "Icy Wind", "Electroweb", "Bulldoze", "Rock Tomb",
+    }),
+    # Granular, single-move techs -- "I want to be able to define specific
+    # techs, like ... fake out, tailwind, coaching, and so on (not
+    # necessarily all at once)" -- alongside the broad buckets above, NOT
+    # replacing them: `speed_control` still folds Tailwind in with every
+    # other way to win the speed game, for a caller that just wants "some
+    # form of speed control, any form"; these exist for a caller that
+    # wants THIS specific one. Deliberately open-ended -- add another
+    # single-move entry here (plus a `TECH_LABELS` line) for any other
+    # named tech a real team-building question turns out to need.
+    "tailwind": frozenset({"Tailwind"}),
+    "trick_room": frozenset({"Trick Room"}),
+    "coaching": frozenset({"Coaching"}),
+    # Follow Me and Rage Powder both answer "redirect single-target moves
+    # off a teammate" -- interchangeable for this purpose, same
+    # "any one of them" reasoning `speed_control` itself already uses.
+    "redirect": frozenset({"Follow Me", "Rage Powder"}),
+    "taunt": frozenset({"Taunt"}),
+    "helping_hand": frozenset({"Helping Hand"}),
+}
+TECH_LABELS = {
+    "weather": "weather setter", "terrain": "terrain setter",
+    "fake_out": "Fake Out user", "speed_control": "speed control",
+    "tailwind": "Tailwind user", "trick_room": "Trick Room user",
+    "coaching": "Coaching user", "redirect": "redirector (Follow Me/Rage Powder)",
+    "taunt": "Taunt user", "helping_hand": "Helping Hand user",
+}
+
+
+def _member_has_tech(name, merged, tech):
+    """True if `name`'s own default ability or any recorded `moves_usage`
+    move covers `tech` (one of `TECH_ABILITIES`/`TECH_MOVES`'s own keys)."""
+    rec = merged.get(name) or {}
+    if tech in TECH_ABILITIES:
+        from combatants import _default_ability
+        return _default_ability(rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]
+    move_names = {mv for mv, _pct in (rec.get("moves_usage") or [])}
+    return bool(move_names & TECH_MOVES[tech])
+
+
+def team_missing_techs(members, merged, required_techs):
+    """Which of `required_techs` (tech category names, `TECH_ABILITIES`/
+    `TECH_MOVES`'s own keys) NONE of `members` covers -- empty when every
+    required category has at least one member. `required_techs` empty or
+    `None` always returns `[]` (nothing required, nothing missing)."""
+    if not required_techs:
+        return []
+    return [t for t in required_techs
+           if not any(_member_has_tech(n, merged, t) for n in members)]
+
+
+def _is_special_attacker(name, merged, moves_db):
+    """True if `name` has at least one real, usage-ranked Special-category
+    damaging move (`_real_damaging_moves`, below) -- "minimum special
+    attackers (pokemon that use special attacks, even if they are mixed
+    attackers like Salamence)". ANY qualifying move is enough; a mixed
+    attacker that also runs physical moves still counts, same as a pure
+    special sweeper -- this asks "can it threaten specially" at all, not
+    "is it primarily special"."""
+    return any(mv.category == "Special"
+              for mv in _real_damaging_moves(name, merged, moves_db))
+
+
+def count_special_attackers(members, merged, moves_db):
+    """How many of `members` are a special attacker (`_is_special_attacker`)
+    -- the raw count `min_special_attackers` hard-floors, the special-
+    attacker sibling of `team_missing_techs`'s tech-category coverage."""
+    return sum(1 for n in members if _is_special_attacker(n, merged, moves_db))
 
 
 # --------------------------------------------------------- 2-2-2 team building
@@ -925,13 +1060,16 @@ def narrow_coverage_pool_names(pair_rows, names, max_search_names, must_include=
 def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           pool=None, prefix_limits=(("Mega ", 2),),
                           max_missing_frac=0.4, no_duplicate_typing=True,
-                          max_net_weakness=None, min_avg_score=None,
+                          max_net_weakness=None, max_weakness=None, min_avg_score=None,
                           sort_by="perfect", top_n=40,
                           max_eval=_COVERAGE_GROUP_MAX_EVAL,
                           keep_cap=_COVERAGE_GROUP_KEEP_CAP,
                           max_search_names=_COVERAGE_GROUP_MAX_SEARCH_NAMES,
                           must_include=None, suggested=None, suggested_min=0,
-                          required_cores=None, min_member_score=None):
+                          required_cores=None, min_member_score=None, exclude=None,
+                          required_techs=None, max_weak_types=None,
+                          max_weak_types_3=None, moves_db=None,
+                          min_special_attackers=None):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -965,22 +1103,46 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         as a fraction of the group's own link count -- 0 demands every
         link be a real, scored pair.
 
-    `max_net_weakness`/`min_avg_score` are checked AFTERWARD, only against
+    `max_net_weakness`/`max_weakness`/`min_avg_score` are checked AFTERWARD, only against
     the search's own top few hundred candidates by `sort_by` (`max(top_n *
-    6, 200)` of them) -- `net_weakness_by_type` is a real per-type
-    recomputation (not a cheap lookup like everything above), so, matching
+    6, 200)` of them) -- `net_weakness_by_type`/`raw_weakness_by_type` are real per-type
+    recomputations (not a cheap lookup like everything above), so, matching
     this module's own established "cheap check gates an expensive
     re-race, top-N only" discipline (see `_core_dead_mega_rebuild`'s
-    docstring), it is never computed beyond that buffer. Accepted
+    docstring), neither is ever computed beyond that buffer. Accepted
     tradeoff, stated plainly: a candidate ranked just outside that buffer
-    by the raw link quality, but that would have passed `max_net_weakness`
-    while several buffered candidates don't, is never seen -- exactly the
+    by the raw link quality, but that would have passed `max_net_weakness`/
+    `max_weakness` while several buffered candidates don't, is never seen -- exactly the
     same "the sweep's own ranking is computed first, unaware of the
     later-stage filter" tradeoff Item Clause/Focus-Sash-cap/dead-mega
-    rebuild already accept elsewhere in this module. `net_weakness` is
-    always computed for whatever ends up in the returned rows (a genuine
-    display column, "add type weakness assessment"), not gated behind
-    `max_net_weakness` being set.
+    rebuild already accept elsewhere in this module. `net_weakness`/
+    `weakness` are always computed for whatever ends up in the returned
+    rows (a genuine display column, "add type weakness assessment"), not
+    gated behind `max_net_weakness`/`max_weakness` being set.
+
+    `max_weakness`: like `max_net_weakness`, but on the ABSOLUTE weak
+    count per type (`raw_weakness_by_type`, "cap absolute weaknesses per
+    type too" -- no credit for how many OTHER members resist that type,
+    unlike `max_net_weakness`'s net reading) -- a group is dropped if any
+    type has more than this many members weak to it. The same `team_
+    search.weakness_violations`/`hard_violations` "max_weak" reading
+    Generate Team's own per-type overrides already expose, just applied
+    here as a single scalar across every type (no per-type override --
+    add one if a real need for it shows up). `None` (the default) checks
+    nothing, exactly as before this existed.
+
+    `exclude`: "allow an option to exclude specific pokemon" -- names
+    that may NEVER appear in a returned group, for any size. Applied the
+    same way `min_member_score` is: dropped from the search pool BEFORE
+    the DFS runs (an excluded name is illegal in every group regardless
+    of what else is in it, so removing it from the candidate pool
+    entirely is equivalent and cheaper than a per-group check). Excluding
+    a `must_include` name is a real, visible conflict -- EVERY size comes
+    back empty, same as `min_member_score`'s own conflict case (both are
+    just different ways for a real candidate to be hard-filtered out from
+    under a forced-in requirement). Excluding a `suggested` name is NOT a
+    conflict -- it simply can no longer count toward `suggested_min`.
+    `None` (the default) excludes nothing, exactly as before this existed.
 
     `sort_by`: "perfect" (perfect-link count, most first, then coverage,
     then avg score -- the default), "coverage" (mutual-coverage fraction
@@ -1056,6 +1218,37 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     unlike the incrementally-prunable checks above). `None` (the default)
     checks nothing, exactly as before this existed.
 
+    `required_techs`: "I may need a weather setter, terrain setter, a fake
+    out user, speed control ... for a team to be considered a 'good' and
+    flexible team" -- an ITERABLE of `TECH_ABILITIES`/`TECH_MOVES` category
+    names (`"weather"`, `"terrain"`, `"fake_out"`, `"speed_control"`) that
+    must ALL be covered (an AND over the list, same semantics as
+    `required_cores`, matching the user's own "hard requirement, every
+    checked category mandatory" choice over a softer quorum): a group only
+    survives if, for EVERY category here, at least one member's default
+    ability or recorded moves covers it (`team_missing_techs`). Also a HARD
+    FILTER checked once a full candidate group is assembled. `None` (the
+    default) checks nothing, exactly as before this existed.
+
+    `min_special_attackers` (needs `moves_db`): a HARD floor on how many
+    members are a special attacker (`count_special_attackers` -- ANY real
+    Special-category damaging move in usage, "pokemon that use special
+    attacks, even if they are mixed attackers like Salamence"). Checked the
+    same way as `required_techs` -- once a full candidate group is
+    assembled. `None` (the default) checks nothing.
+
+    `max_weak_types`/`max_weak_types_3`: BREADTH caps on absolute (raw,
+    `raw_weakness_by_type`) weakness -- "limit the total number of types
+    with absolute weaknesses of 2 or more, and 3 or more". `max_weak_types`
+    caps how many DIFFERENT types may have 2+ members weak to them,
+    `max_weak_types_3` the same at a 3+ bar -- distinct from `max_weakness`
+    above, which caps any ONE type's own raw count, not how many types
+    cross a threshold (the same "depth vs breadth" distinction `weak_type_
+    breadth` itself documents). Checked in the same AFTERWARD, top-buffer-
+    only pass as `max_net_weakness`/`max_weakness`, reusing that same `raw`
+    map rather than recomputing it. `None` (the default, for each) checks
+    nothing.
+
     `min_member_score`: a HARD per-NAME floor -- every member of a
     returned group must have its own `merged[name]["score"]` at or above
     this value. Since a name's own Score never depends on the rest of the
@@ -1063,11 +1256,15 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     from the search pool BEFORE the DFS runs (cheaper than a per-group
     check, and equivalent -- a group containing a below-floor name is
     illegal regardless of what else is in it), same narrowing-first
-    discipline `max_search_names` already uses. Applies even to a
-    `must_include`/`suggested` name -- forcing in a name that can't clear
-    the floor is a real, visible conflict (that size's own `"rows"` comes
-    back empty), not a silent exemption. `None` (the default) applies no
-    floor, exactly as before this existed.
+    discipline `max_search_names` already uses. A `must_include` name that
+    fails the floor is a real, visible conflict -- EVERY size's own
+    `"rows"` comes back empty (not just narrowed), since no group is
+    possible at all once a forced-in name is also hard-excluded -- never a
+    silent exemption. A `suggested` name that fails the floor is NOT a
+    conflict (it was only ever a soft quorum candidate): it simply can no
+    longer count toward `suggested_min`, same as if it were never on the
+    list. `None` (the default) applies no floor, exactly as before this
+    existed.
 
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
@@ -1075,16 +1272,32 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     "coverage_pct": float (0-100, missing links count as 0, averaged over
     every POSSIBLE link, not just the measured ones -- same convention the
     standalone tool uses), "avg_score": float or None, "net_weakness":
-    {type: net}, "worst_net_weakness": int}.
+    {type: net}, "worst_net_weakness": int, "weakness": {type: count},
+    "worst_weakness": int}.
     """
     if pool is None:
         names = sorted({n for r in pair_rows for n in r["pair"]})
     else:
         names = list(dict.fromkeys(pool))
+    original_names_set = set(names)
+    if exclude:
+        exclude_set = set(exclude)
+        names = [nm for nm in names if nm not in exclude_set]
     if min_member_score is not None:
         names = [nm for nm in names
                 if (merged.get(nm) or {}).get("score") is not None
                 and merged[nm]["score"] >= min_member_score]
+    # A `must_include` name that WAS a real candidate (present before
+    # `exclude`/`min_member_score` ran) but got hard-filtered out by one of
+    # them is a genuine, visible conflict -- "forced in" and "filtered out"
+    # can't both hold. Distinct from a `must_include` name that was NEVER a
+    # real candidate at all (silently ignored below, unchanged): that one
+    # was never promised, this one was explicitly promised and then denied.
+    # Every size comes back empty, not just narrowed -- there is no
+    # candidate group possible for ANY of them.
+    conflicting_must_include = (original_names_set - set(names)) & set(must_include or ())
+    if conflicting_must_include:
+        return {size: {"rows": [], "seen": 0, "aborted": False} for size in group_sizes}
     protect = list(dict.fromkeys(list(must_include or ()) + list(suggested or ())))
     names = narrow_coverage_pool_names(pair_rows, names, max_search_names,
                                        must_include=protect)
@@ -1131,6 +1344,17 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         group_types = frozenset().union(*(type_sig[i] for i in pick))
         return all(core <= group_types for core in core_sets)
 
+    def techs_ok(pick):
+        if not required_techs:
+            return True
+        return not team_missing_techs([names[i] for i in pick], merged, required_techs)
+
+    def special_ok(pick):
+        if not min_special_attackers:
+            return True
+        return count_special_attackers(
+            [names[i] for i in pick], merged, moves_db) >= min_special_attackers
+
     def score_for_sort(row):
         return row["avg_score"] if row["avg_score"] is not None else float("-inf")
 
@@ -1173,6 +1397,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 "coverage_pct": (total_frac / E * 100.0) if E else 0.0,
                 "avg_score": (score_sum / score_n) if score_n else None,
                 "net_weakness": None, "worst_net_weakness": None,
+                "weakness": None, "worst_weakness": None,
             }
 
         def keep(row):
@@ -1240,6 +1465,10 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     continue
                 if not cores_ok(pick):
                     continue
+                if not techs_ok(pick):
+                    continue
+                if not special_ok(pick):
+                    continue
                 keep(evaluate(pick))
             out.sort(key=sort_key)
             return out, state["seen"], state["aborted"]
@@ -1254,7 +1483,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 if state["seen"] > max_eval:
                     state["aborted"] = True
                     return
-                if quorum_ok(pick) and cores_ok(pick):
+                if (quorum_ok(pick) and cores_ok(pick) and techs_ok(pick)
+                        and special_ok(pick)):
                     keep(evaluate(pick))
                 return
             if n - start < size - k:
@@ -1296,7 +1526,20 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             worst = max(net.values())
             if max_net_weakness is not None and worst > max_net_weakness:
                 continue
-            final.append({**row, "net_weakness": net, "worst_net_weakness": worst})
+            raw = raw_weakness_by_type(row["group"], merged)
+            worst_raw = max(raw.values())
+            if max_weakness is not None and worst_raw > max_weakness:
+                continue
+            breadth_2 = sum(1 for v in raw.values() if v >= 2)
+            if max_weak_types is not None and breadth_2 > max_weak_types:
+                continue
+            breadth_3 = sum(1 for v in raw.values() if v >= 3)
+            if max_weak_types_3 is not None and breadth_3 > max_weak_types_3:
+                continue
+            final.append({**row, "net_weakness": net, "worst_net_weakness": worst,
+                         "weakness": raw, "worst_weakness": worst_raw,
+                         "weak_type_breadth_2": breadth_2,
+                         "weak_type_breadth_3": breadth_3})
             if len(final) >= top_n:
                 break
         results[size] = {"rows": final, "seen": seen, "aborted": aborted}
@@ -1374,10 +1617,23 @@ def _resolve_forms(names, built, forced_base_names=frozenset()):
     just within whichever single pair it happens to share with the other
     stone-holder. Default empty set changes nothing -- every existing
     caller/test is unaffected.
+
+    `ALWAYS_TRANSFORMS_MEGA`: when one of its names is still a legal option
+    here (not itself in `forced_base_names`), every OTHER option is
+    dropped -- no race gets to "discover" that its base form was secretly
+    better, since the one real reason it could look that way (miss-prone
+    moves scoring as guaranteed hits) is a blind spot in this model's own
+    damage calc, not a genuine matchup read. Never drops every option:
+    when its own name IS in `forced_base_names` (the OTHER hypothesis in a
+    two-stone-holder bring, needed so a bring that leaves it out still
+    resolves the other stone-holder correctly), this has nothing left to
+    prefer and the ordinary options are yielded unchanged.
     """
-    for mt in _mega_choices(names):
-        if mt in forced_base_names:
-            continue
+    choices = [mt for mt in _mega_choices(names) if mt not in forced_base_names]
+    forced = next((mt for mt in choices if mt in ALWAYS_TRANSFORMS_MEGA), None)
+    if forced is not None:
+        choices = [forced]
+    for mt in choices:
         _evolves, forced_base = resolve_team_mega_slot(list(names),
                                                         mega_transforms=mt)
         cs = [built[n]["base" if n in forced_base else "mega"] for n in names]
@@ -5538,7 +5794,8 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   enemy_evs_overrides=None, enemy_nature_overrides=None,
                   enemy_ability_overrides=None,
                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
-                  max_life_orb=DEFAULT_MAX_LIFE_ORB, check_trick_room=False):
+                  max_life_orb=DEFAULT_MAX_LIFE_ORB, check_trick_room=False,
+                  required_techs=None, min_special_attackers=None):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
@@ -5616,6 +5873,18 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     overrides`/`nature_overrides`/`ability_overrides`, unchanged from
     before these existed.
 
+    `required_techs`: `_bring4_candidates`'s own "a good and flexible
+    team" hard requirement -- a bring subset only survives Stage 2 if ITS
+    OWN 4 members collectively cover every named tech category
+    (`TECH_ABILITIES`/`TECH_MOVES`: `"weather"`, `"terrain"`,
+    `"fake_out"`, `"speed_control"`). `None` (the default) checks nothing,
+    exactly as before this existed.
+
+    `min_special_attackers`: `_bring4_candidates`'s own minimum-count
+    sibling of `required_techs` -- a bring subset only survives Stage 2 if
+    at least this many of ITS OWN 4 members are a special attacker
+    (`count_special_attackers`). `None` (the default) checks nothing.
+
     Returns (pair_rows, bring4_rows):
       pair_rows -- `joint_pool_search`'s own row-per-pair output (its
         `forced_base` bookkeeping field stripped back out -- this stays
@@ -5675,7 +5944,9 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     bring4_rows = _bring4_candidates(
         our6, pair_by_key, target_names, good_threshold,
         megas=megas if extra_forced_base else None,
-        pair_lookup_forced_base=pair_lookup_forced_base)
+        pair_lookup_forced_base=pair_lookup_forced_base,
+        merged=merged, required_techs=required_techs, moves_db=moves_db,
+        min_special_attackers=min_special_attackers)
     return pair_rows, bring4_rows
 
 
@@ -5697,7 +5968,9 @@ def _uncovered_enemy_pairs(pairs, target_names):
 
 
 def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
-                       megas=None, pair_lookup_forced_base=None):
+                       megas=None, pair_lookup_forced_base=None,
+                       merged=None, required_techs=None, moves_db=None,
+                       min_special_attackers=None):
     """Every one of the C(len(six),min(4,len(six))) possible bring subsets of
     `six` (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this
     also runs for a 3-, 4-, or 5-member PARTIAL team during
@@ -5725,9 +5998,14 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
     once with megas[1] locked to base (so megas[0] is free, "the team's
     mega" for this bring) and once the mirror image -- and the
     better-ranked of the two, by the exact same key used to rank every
-    other bring, is kept. A bring with 0 or 1 of `megas` needs no such
-    consistency (nothing to be inconsistent WITH) and uses the ordinary
-    unconstrained `pair_lookup`, unchanged.
+    other bring, is kept -- UNLESS one of `megas` is in `ALWAYS_TRANSFORMS_
+    MEGA` (Mega Raichu Y), in which case its own hypothesis is kept
+    outright, no ranking involved: that comparison trusts this module's
+    own damage numbers, which never discount for a move's accuracy, so it
+    cannot be trusted to notice a base form kept alive only by moves that
+    would actually miss constantly. A bring with 0 or 1 of `megas` needs
+    no such consistency (nothing to be inconsistent WITH) and uses the
+    ordinary unconstrained `pair_lookup`, unchanged.
 
     Returns bring4_rows in `bring4_search`'s own shape, best-worst-case
     first -- `[0]` is always "the best bring available from `six`." Each
@@ -5735,6 +6013,21 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
     specific bring treats as transformed (`None` if it carries none) --
     "note which one is used" when a bring's own 2 stone holders were
     resolved via the consistency check above.
+
+    `required_techs` (needs `merged`): "a good and flexible team" hard
+    requirement -- a bring subset is dropped outright unless ITS OWN 4 (or
+    `bring_size`) members collectively cover every named tech category
+    (`team_missing_techs`). Distinct from a core-level tech check: a core
+    can cover every category across its full 6 while a SPECIFIC bring
+    drops the one member carrying one of them -- this catches that. `None`
+    (the default) checks nothing, exactly as before this existed.
+
+    `min_special_attackers` (needs `merged` and `moves_db`): the same idea,
+    for `count_special_attackers` -- a bring subset is dropped unless its
+    OWN 4 members include at least this many special attackers, the exact
+    same "a core-level pass isn't enough, a specific bring can still drop
+    the members that made it pass" reasoning `required_techs` documents
+    just above. `None` (the default) checks nothing.
     """
     bring_size = min(4, len(six))
 
@@ -5766,6 +6059,11 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
 
     bring4_rows = []
     for bring4 in itertools.combinations(six, bring_size):
+        if required_techs and team_missing_techs(list(bring4), merged, required_techs):
+            continue
+        if (min_special_attackers and
+                count_special_attackers(list(bring4), merged, moves_db) < min_special_attackers):
+            continue
         if megas and len(set(bring4) & set(megas)) == 2:
             m1, m2 = megas
             row_m1_is_mega = _row_for(
@@ -5776,7 +6074,18 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
                 bring4, lambda p, forced=m1: pair_lookup_forced_base[forced].get(
                     frozenset(p), pair_lookup[frozenset(p)]),
                 forced_base_name=m1)
-            bring4_rows.append(min(row_m1_is_mega, row_m2_is_mega, key=_rank_key))
+            # ALWAYS_TRANSFORMS_MEGA overrides the ordinary "keep the
+            # better-ranked hypothesis" comparison -- that comparison
+            # trusts this module's own damage numbers, which never
+            # discount for a move's accuracy, so it cannot by itself
+            # notice a base form kept alive only by moves that would
+            # actually miss constantly.
+            if m1 in ALWAYS_TRANSFORMS_MEGA:
+                bring4_rows.append(row_m1_is_mega)
+            elif m2 in ALWAYS_TRANSFORMS_MEGA:
+                bring4_rows.append(row_m2_is_mega)
+            else:
+                bring4_rows.append(min(row_m1_is_mega, row_m2_is_mega, key=_rank_key))
         else:
             bring4_rows.append(_row_for(bring4, lambda p: pair_lookup[frozenset(p)]))
     bring4_rows.sort(key=_rank_key)
@@ -7088,6 +7397,332 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
            "turns": turns, "excluded_items": excluded_items}
 
 
+def _pair_coverage_rank_key(pair_key, pair_by_key):
+    """`_pair_sort_key`'s own "best first" ordering (protect-safe wins,
+    then raw beaten count, then win quality, then tailwind-safe wins),
+    summed across every enemy team `pair_key` (a `frozenset` of 2 names)
+    was actually raced against in `pair_by_key` (one `{frozenset: row}`
+    dict per `target_name_lists` entry, `multi_bring4_coverage`'s own
+    shape) -- "the best pairs vs enemy pairs", aggregated over the WHOLE
+    named-enemy universe rather than just one team, for ranking which
+    pairs are worth exporting/importing. A pair absent from every enemy's
+    table (never actually raced -- shouldn't happen for a real `pair_by_key`,
+    but keeps this total rather than raising) ranks last."""
+    rows = [pbk[pair_key] for pbk in pair_by_key if pair_key in pbk]
+    if not rows:
+        return (0, 0, 0.0, 0)
+    return (
+        -sum(r["pairs_protect_safe"] for r in rows),
+        -sum(r["pairs_swept"] + r["pairs_traded"] for r in rows),
+        -sum(r["pairs_clean_win_total"] for r in rows),
+        -sum(r["pairs_tailwind_safe"] for r in rows),
+    )
+
+
+def top_coverage_pairs(coverage, top_n=15):
+    """The best `top_n` pairs in `coverage["pair_by_key"]` (a
+    `multi_bring4_coverage` result), ranked by `_pair_coverage_rank_key` --
+    "generating the best N pairs vs enemy pairs" for export/display,
+    aggregated across every named enemy team a pair was actually raced
+    against (not just whichever one it happened to be sorted by locally).
+    Returns [(n1, n2), ...] sorted names within each pair, best first."""
+    keys = {frozenset(r["pair"]) for pbk in coverage["pair_by_key"] for r in pbk.values()}
+    ranked = sorted(keys, key=lambda k: _pair_coverage_rank_key(k, coverage["pair_by_key"]))
+    return [tuple(sorted(k)) for k in ranked[:top_n]]
+
+
+def coverage_from_pair_rows(pair_rows, detail_rows, target_name_lists, merged,
+                            moves_db, natures, typechart, turns=2,
+                            excluded_items=DEFAULT_EXCLUDED_ITEMS):
+    """Reconstruct a `multi_bring4_coverage`-shaped dict from previously-
+    exported per-(pair, enemy team) rows plus their per-enemy-pair detail
+    -- the inverse of counter_table.py's "Pair Coverage"/"Pair Detail" xlsx
+    sheets (`--multi-bring4 --xlsx`'s own new sheets, see
+    `tools/counter_table.py`'s `_write_pair_coverage_sheets`), so
+    `multi_bring4_exhaustive`/`multi_bring4_beam` can search for the best
+    team(s) of 6 over ALREADY-COMPUTED pair results (real sets, real
+    racing already done in an earlier CLI run) without re-running any
+    combat simulation here -- "upload this output, and use the streamlit
+    app to try to create the best teams of 6."
+
+    `pair_rows`: [{"pair": (n1, n2), "enemy_idx": int, "item1", "item2",
+    "moves1": [...], "moves2": [...], "swept", "traded", "lost", "no_ko",
+    "tailwind_safe", "protect_safe", "follow_me_safe", "clean_win_total",
+    "total"}, ...] -- one entry per (pair, enemy team) actually exported,
+    `enemy_idx` a 0-based index into `target_name_lists`.
+
+    `detail_rows`: [{"pair": (n1, n2), "enemy_idx": int, "e1", "e2",
+    "outcome", "our_hp_c", "our_hp_p", "tailwind_safe", "protect_safe",
+    "follow_me_safe", "clean_win_value"}, ...] -- one entry per (pair,
+    enemy team, specific enemy pair). Reconstructs just enough of
+    `_pair_vs_targets`'s own `detail` shape for `bring4_pair_depth`'s
+    `no_faint_*` reading (the only downstream core-SCORING reader of
+    `detail` beyond the summary counts already on `pair_rows`) -- this
+    module's own deeper DISPLAY features (damage grids, turn-by-turn
+    logs) read fields no export carries and are simply absent here.
+
+    A pair/enemy combination with no matching `detail_rows` entries gets
+    an empty `detail` (a pair `pair_rows` names but no exported per-enemy-
+    pair breakdown for) -- `no_faint_*` reads as 0 for it rather than
+    raising, same "stay honest, don't guess" rule `bring4_pair_depth`
+    itself already documents for a too-short bring.
+
+    `merged`/`moves_db`/`natures`/`typechart`: the caller's own already-
+    loaded full dataset (never serialized into the export -- there is no
+    per-Pokemon data here beyond the two names already spelled out in each
+    row). `turns`/`excluded_items`: metadata `multi_bring4_exhaustive`/
+    `multi_bring4_beam` themselves read from `coverage` for any FRESH
+    re-racing they still do at the core level (e.g. Item Clause
+    resolution) -- pass whatever the original CLI run used for these to
+    stay consistent, or leave the defaults.
+
+    Returns the SAME shape `multi_bring4_coverage` returns (minus
+    `per_enemy`, which nothing outside CLI display reads, and
+    `pair_by_key_forced_base`, reconstructed here as empty per-enemy dicts
+    -- a core carrying 2 Mega-stone holders together still scores, just
+    without the "what if this one never transforms" fallback data no
+    export carries): {"pair_by_key": [{frozenset: row}, ...],
+    "pair_by_key_forced_base": [{}, ...], "target_name_lists": [...],
+    "candidate_pool": [...] (every name appearing in ANY pair -- the
+    export already IS the "good" subset, there is no wider raw pool
+    underneath it left to narrow from), "fixed_items": {...},
+    "fixed_moves": {...}, "merged", "moves_db", "natures", "typechart",
+    "turns", "excluded_items"}.
+    """
+    n_enemies = len(target_name_lists)
+    detail_by_pair_enemy = {}
+    for d in detail_rows:
+        key = (frozenset(d["pair"]), d["enemy_idx"])
+        detail_by_pair_enemy.setdefault(key, {})[(d["e1"], d["e2"])] = {
+            "outcome": d["outcome"],
+            "our_hp": {"C": d["our_hp_c"], "P": d["our_hp_p"]},
+            "tailwind_safe": d["tailwind_safe"],
+            "protect_safe": d["protect_safe"],
+            "follow_me_safe": d["follow_me_safe"],
+            "clean_win_value": d["clean_win_value"],
+        }
+    pair_by_key = [dict() for _ in range(n_enemies)]
+    fixed_items, fixed_moves = {}, {}
+    for r in pair_rows:
+        n1, n2 = r["pair"]
+        pk = frozenset((n1, n2))
+        ei = r["enemy_idx"]
+        fixed_items[n1], fixed_moves[n1] = r["item1"], r["moves1"]
+        fixed_items[n2], fixed_moves[n2] = r["item2"], r["moves2"]
+        pair_by_key[ei][pk] = {
+            "pair": (n1, n2), "item1": r["item1"], "item2": r["item2"],
+            "detail": detail_by_pair_enemy.get((pk, ei), {}),
+            "forced_base": None,
+            "pairs_swept": r["swept"], "pairs_traded": r["traded"],
+            "pairs_lost": r["lost"], "pairs_no_ko": r["no_ko"],
+            "pairs_tailwind_safe": r["tailwind_safe"],
+            "pairs_protect_safe": r["protect_safe"],
+            "pairs_follow_me_safe": r["follow_me_safe"],
+            "pairs_clean_win_total": r["clean_win_total"],
+            "pairs_damage_output_total": 0.0,
+            "pairs_total": r["total"],
+        }
+    candidate_pool = sorted(fixed_items)
+    return {
+        "pair_by_key": pair_by_key,
+        "pair_by_key_forced_base": [{} for _ in range(n_enemies)],
+        "target_name_lists": [list(t) for t in target_name_lists],
+        "candidate_pool": candidate_pool, "fixed_items": fixed_items,
+        "fixed_moves": fixed_moves, "merged": merged, "moves_db": moves_db,
+        "natures": natures, "typechart": typechart, "turns": turns,
+        "excluded_items": excluded_items,
+    }
+
+
+def merge_named_team_pairs(coverage, named_teams, meta, merged, moves_db,
+                           natures, typechart, turns=None,
+                           excluded_items=None):
+    """Fold every `named_teams` roster's OWN real pairs (its own already-
+    decided sets, `_team_side_overrides`'s "sets intact" convention --
+    same as `round_robin_saved_teams`/`--benchmark-teams`) into `coverage`
+    IN PLACE, so a team-of-6 search over imported pair data can also draw
+    on a saved team's own vetted pair, not just the uploaded file's --
+    "make sure the sets from the defined pairs and named teams are
+    included."
+
+    For each team, every one of its own C(n, 2) pairs is raced (real
+    combat, `_pair_vs_targets`) against `coverage["target_name_lists"]`
+    exactly like any other pair -- a pair already present in `coverage`
+    (from the uploaded export) is left untouched, an explicit `--item`/
+    `--moves`-style override never overwriting a real, already-decided
+    set with a duplicate of itself. `turns`/`excluded_items` default to
+    whatever `coverage` itself already carries (the same values the
+    uploaded export was raced under), so a saved team's own pairs are
+    judged on the identical footing.
+
+    Returns `coverage` (mutated and returned, not copied -- same
+    "in place" convention as `dict.update`).
+    """
+    if turns is None:
+        turns = coverage["turns"]
+    if excluded_items is None:
+        excluded_items = coverage["excluded_items"]
+    target_name_lists = coverage["target_name_lists"]
+    # Built ONCE, not per (team, pair) -- every team races against the
+    # SAME `target_name_lists`, so re-building each enemy roster's
+    # Combatants from scratch inside the innermost loop below would
+    # repeat identical work up to (teams x pairs-per-team) times over.
+    enemy_built_by_enemy = [_build_forms(t, merged, natures, moves_db)
+                            for t in target_name_lists]
+    for team_name, roster in named_teams.items():
+        roster = list(dict.fromkeys(roster))
+        if len(roster) < 2:
+            continue
+        item_ov, move_ov, evs_ov, nat_ov, abil_ov = _team_side_overrides(
+            (meta.get(team_name) or {}).get("sets"))
+        built = {}
+        for name in roster:
+            item = item_ov.get(name)
+            moves = move_ov.get(name)
+            if item is None or moves is None:
+                it, mv, _w = _answer_for(
+                    name, merged, moves_db, natures, typechart,
+                    sorted({n for t in target_name_lists for n in t}),
+                    item_overrides=item_ov, move_overrides=move_ov,
+                    excluded_items=excluded_items)
+                item, moves = item or it, moves or mv
+            if not moves:
+                continue
+            entry = _build_forms(
+                [name], merged, natures, moves_db, items={name: item},
+                evs_overrides=evs_ov, nature_overrides=nat_ov,
+                ability_overrides=abil_ov)[name]
+            entry["moves"] = _move_infos(name, merged, moves_db, moves)
+            entry["item"] = item
+            built[name] = entry
+            coverage["fixed_items"].setdefault(name, item)
+            coverage["fixed_moves"].setdefault(name, moves)
+            if name not in coverage["candidate_pool"]:
+                coverage["candidate_pool"].append(name)
+        for n1, n2 in itertools.combinations(sorted(built), 2):
+            if _mega_base_overlap((n1, n2)):
+                continue
+            pk = frozenset((n1, n2))
+            for ei, target_names in enumerate(target_name_lists):
+                if pk in coverage["pair_by_key"][ei]:
+                    continue
+                detail, summary = _pair_vs_targets(
+                    n1, n2, built, target_names, enemy_built_by_enemy[ei],
+                    typechart, turns, merged=merged)
+                coverage["pair_by_key"][ei][pk] = {
+                    "pair": (n1, n2), "item1": built[n1]["item"],
+                    "item2": built[n2]["item"], "detail": detail,
+                    "forced_base": None, **summary,
+                }
+    coverage["candidate_pool"].sort()
+    return coverage
+
+
+def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
+                        max_megas=2, max_weak_types=None, max_net_weak_types=None,
+                        required_techs=None, min_special_attackers=None,
+                        must_include=None, exclude=None, top_n=20):
+    """Assemble teams of `group_size` (6 by default) as DISJOINT pairs drawn
+    from `coverage["pair_by_key"]`'s own KNOWN pairs -- "upload this
+    output, and use the streamlit app to try to create the best teams of
+    6." `coverage` is a `multi_bring4_coverage`-shaped dict, live OR
+    reconstructed (`coverage_from_pair_rows`, `merge_named_team_pairs`).
+
+    Unlike `multi_bring4_exhaustive`, which needs a COMPLETE pairwise
+    matrix over its whole candidate pool (it picks the best BRING-4 from
+    any 6, which can freely recombine members across what were originally
+    different pairs, so it looks up every one of a core's own C(size, 2)
+    cross-pairings), this only ever needs the pairs actually raced --
+    exactly the sparse data a "best N pairs" export or a handful of named
+    teams' own real pairs realistically provides. Each pair's own already-
+    decided SETS are used wholesale, never recombined into a new cross-
+    pairing this module never actually raced -- "make sure the sets from
+    the defined pairs and named teams are included." `group_size` must be
+    even (an odd remainder has no partner pair to fill it).
+
+    Each candidate team's SCORE is the average, across its `group_size //
+    2` pairs, of that pair's OWN `_CORE_BLEND_WEIGHTS`-blended per-90 rate
+    (beaten/tailwind-safe/protect-safe/follow-me-safe), itself averaged
+    over every enemy team that pair has real data for -- the same
+    yardstick `_core_row` ranks cores by, applied to whole KNOWN pairs
+    instead of a freshly-chosen best bring-4. `must_include`/`exclude`:
+    hard name filters -- a returned team always contains every
+    `must_include` name and never contains an `exclude`d one (a KNOWN pair
+    containing an excluded name is dropped from consideration entirely,
+    before any combining). `max_weak`/`type_limits`/`max_megas`/
+    `max_weak_types`/`max_net_weak_types`/`required_techs`/`min_special_
+    attackers`: the SAME hard filters `multi_bring4_exhaustive` applies
+    (`_core_passes_hard_filters`, including the default "one type may sit
+    at 3 weaknesses if its net is <=1" exception) -- these read only the
+    team's own composition (typing, tech coverage), never pairwise combat
+    data, so they apply identically to a sparse pool.
+
+    Returns [{"team": tuple(sorted(names)), "pairs": ((n1, n2), ...) (the
+    `group_size // 2` KNOWN pairs used, each sorted), "score": float,
+    "sets": {name: {"item", "moves"}}}, ...], best `top_n` by score
+    descending.
+    """
+    if group_size % 2 != 0:
+        raise ValueError(f"group_size must be even, got {group_size}")
+    n_pairs_needed = group_size // 2
+    merged = coverage["merged"]
+    moves_db = coverage["moves_db"]
+    exclude_set = set(exclude or ())
+    must_include_set = set(must_include or ())
+    known_pairs = sorted(
+        {frozenset(r["pair"]) for pbk in coverage["pair_by_key"] for r in pbk.values()},
+        key=lambda pk: sorted(pk))
+    known_pairs = [pk for pk in known_pairs if not (pk & exclude_set)]
+    effective_limits = _effective_type_limits(max_weak, type_limits)
+    weak_exception_types = _weak_exception_eligible_types(type_limits)
+    w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
+
+    def pair_score(pk):
+        rows = [pbk[pk] for pbk in coverage["pair_by_key"] if pk in pbk]
+        if not rows:
+            return 0.0
+        rates = [(
+            _rate_per_90(r["pairs_swept"] + r["pairs_traded"], 1, r["pairs_total"]),
+            _rate_per_90(r["pairs_tailwind_safe"], 1, r["pairs_total"]),
+            _rate_per_90(r["pairs_protect_safe"], 1, r["pairs_total"]),
+            _rate_per_90(r["pairs_follow_me_safe"], 1, r["pairs_total"]),
+        ) for r in rows]
+        win = sum(x[0] for x in rates) / len(rates)
+        tw = sum(x[1] for x in rates) / len(rates)
+        pr = sum(x[2] for x in rates) / len(rates)
+        fm = sum(x[3] for x in rates) / len(rates)
+        return w_win * win + w_tw * tw + w_pr * pr + w_fm * fm
+
+    scored_pairs = {pk: pair_score(pk) for pk in known_pairs}
+    results = []
+    for combo in itertools.combinations(known_pairs, n_pairs_needed):
+        names = set().union(*combo)
+        if len(names) != group_size:
+            continue  # two of the chosen pairs share a member -- illegal team
+        if must_include_set - names:
+            continue
+        core = tuple(sorted(names))
+        if _mega_base_overlap(core):
+            continue
+        if not _core_passes_hard_filters(
+                core, merged, effective_limits, max_megas=max_megas,
+                max_weak_types=max_weak_types, max_net_weak_types=max_net_weak_types,
+                required_techs=required_techs, moves_db=moves_db,
+                min_special_attackers=min_special_attackers,
+                weak_exception_types=weak_exception_types):
+            continue
+        score = sum(scored_pairs[pk] for pk in combo) / len(combo)
+        results.append({
+            "team": core,
+            "pairs": tuple(sorted(tuple(sorted(pk)) for pk in combo)),
+            "score": score,
+            "sets": {n: {"item": coverage["fixed_items"][n],
+                        "moves": coverage["fixed_moves"][n]} for n in core},
+        })
+    results.sort(key=lambda r: -r["score"])
+    return results[:top_n]
+
+
 def _effective_type_limits(max_weak=None, type_limits=None):
     """Merge a global `max_weak` (applied to every type not already
     overridden) into `type_limits`'s own per-type {"max_weak", "max_net"}
@@ -7105,8 +7740,84 @@ def _effective_type_limits(max_weak=None, type_limits=None):
     return limits
 
 
+def _weak_exception_eligible_types(type_limits):
+    """Which types are eligible for the DEFAULT "allow one type that has
+    3 weaknesses as long as it only has 1 net weakness" exception
+    (`_weak_type_limits_ok`) -- every type EXCEPT one given its own
+    EXPLICIT `max_weak` via `--type-limit`. An explicit per-type override
+    is a deliberate, non-negotiable choice (the same "explicit is
+    non-negotiable" contract `team_search.hard_violations`'s own
+    docstring already establishes for `type_limits` generally) -- the
+    exception only ever loosens the bare scalar `max_weak` default."""
+    from species_data import TYPES
+    explicit = {t for t, v in (type_limits or {}).items()
+               if v.get("max_weak") is not None}
+    return frozenset(TYPES) - explicit
+
+
+def _weak_type_limits_ok(core, merged, effective_limits,
+                         weak_exception_types=frozenset(), net_aware=True):
+    """True if `core` breaks no per-type limit in `effective_limits`
+    ({type: {"max_weak", "max_net"}}, see `_effective_type_limits`) --
+    same per-type hard-exclusion `team_search.hard_violations` itself
+    checks, PLUS the default exception: "by default ... allow one type
+    that has 3 weaknesses as long as it only has 1 net weakness" -- for
+    `weak_exception_types` ONLY (`_weak_exception_eligible_types`, i.e.
+    NOT a type with its own explicit `--type-limit max_weak`), at most
+    ONE type across the whole core may exceed its own `max_weak` by
+    exactly 1, and only when that type's own net weakness (weak -
+    resist) is <= 1. A second type using the allowance, any type over by
+    more than 1, or a net weakness above 1, is still a hard violation --
+    a single, narrow exception, not a general relaxation. `weak_exception_
+    types` empty (the default) reproduces `hard_violations`'s own plain
+    behaviour exactly, for any caller that hasn't opted into the default
+    exception context (there isn't one today, but this keeps the
+    function honest about it rather than silently exception-eligible).
+
+    `net_aware`: True (the real answer, for a FINAL-size core) checks net
+    weakness before granting the exception. False (growth-time calls,
+    `multi_bring4_beam`'s own incremental candidates) skips the net check
+    and grants any exception-eligible type's exactly-one-over overage
+    unconditionally -- a safe OVER-approximation: net weakness is NOT
+    monotonic under growth (a later addition can add a resist and bring
+    net back under 1), so a partial core failing the real net<=1 bar
+    might still pass it once complete, and growth-time pruning must never
+    reject a core that could still turn out valid. The over-by-more-than-
+    1 and at-most-one-exception checks stay exact either way -- both ARE
+    monotonic (weak counts only grow, never shrink, as a core grows), so
+    pruning on either is always safe.
+    """
+    from team_search import _weak_resist
+    exceptions_used = 0
+    for t, limits in effective_limits.items():
+        weak = resist = None
+        w_cap = limits.get("max_weak")
+        if w_cap is not None:
+            weak, resist = _weak_resist(list(core), merged, t)
+            over = len(weak) - w_cap
+            if over > 0:
+                if over == 1 and t in weak_exception_types:
+                    if net_aware and (len(weak) - len(resist)) > 1:
+                        return False
+                    exceptions_used += 1
+                    if exceptions_used > 1:
+                        return False
+                else:
+                    return False
+        n_cap = limits.get("max_net")
+        if n_cap is not None:
+            if weak is None:
+                weak, resist = _weak_resist(list(core), merged, t)
+            if (len(weak) - len(resist)) > n_cap:
+                return False
+    return True
+
+
 def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
-                              max_weak_types=None, max_net_weak_types=None):
+                              max_weak_types=None, max_net_weak_types=None,
+                              required_techs=None, moves_db=None,
+                              min_special_attackers=None,
+                              weak_exception_types=frozenset(), net_aware=True):
     """True if `core` (any size) may be proposed as a multi-bring4
     candidate at all: "you cannot have both a mega and its non-mega form"
     (always enforced, `_mega_base_overlap`), "a full team can only have two
@@ -7117,32 +7828,49 @@ def _core_passes_hard_filters(core, merged, effective_limits, max_megas=2,
     `_resolve_forms`'s own per-pair minimax already searches -- this is a
     TEAM COMPOSITION cap, not a per-battle one), plus, when
     `effective_limits` is non-empty, the Advanced weakness limits
-    `team_search.hard_violations` already implements -- reused directly,
-    never reimplemented -- plus, when `max_weak_types` is given, the
+    `_weak_type_limits_ok` implements -- the SAME per-type hard exclusion
+    `team_search.hard_violations` itself checks, plus its own default
+    "allow one type that has 3 weaknesses as long as it only has 1 net
+    weakness" exception (see its own docstring for `weak_exception_types`/
+    `net_aware`) -- plus, when `max_weak_types` is given, the
     `weak_type_breadth` cap ("no more than N types may have 2+ weak
     members"), plus, when `max_net_weak_types` is given, the
     `net_weak_type_breadth` cap ("no more than N types may have net
-    weakness > 1"). `max_megas` and `max_weak_types` are both checked
-    MONOTONICALLY safe to prune on during partial-core growth too
+    weakness > 1"), plus, when `required_techs` is given, `team_missing_
+    techs` ("a good and flexible team" needs a weather/terrain setter,
+    Fake Out user, and/or speed control -- see `TECH_ABILITIES`/
+    `TECH_MOVES`'s own comment). `max_megas` and `max_weak_types` are both
+    checked MONOTONICALLY safe to prune on during partial-core growth too
     (`multi_bring4_beam`'s own use of this function): a partial core
     already over either cap can never fix that by adding more members.
     `max_net_weak_types` is NOT monotonic (same reason `max_net` itself
     isn't -- see `net_weak_type_breadth`'s own docstring), so a caller doing
     incremental growth must only pass it once `core` is a genuine final-size
-    core, never as a growth-time prune.
+    core, never as a growth-time prune. `required_techs` is ALSO not
+    monotonic -- a partial core missing a tech can still gain one as it
+    grows -- so it must be withheld from growth-time calls the exact same
+    way, only checked once `core` is final-size. `min_special_attackers`
+    (needs `moves_db`) is the same minimum-count sibling of `required_techs`
+    -- "minimum special attackers" -- and is NOT monotonic for the exact
+    same reason, withheld from growth-time calls the same way.
     """
     if _mega_base_overlap(core):
         return False
     if sum(1 for n in core if n.startswith("Mega ")) > max_megas:
         return False
-    if effective_limits:
-        from team_search import hard_violations
-        if hard_violations(list(core), merged, type_limits=effective_limits):
-            return False
+    if effective_limits and not _weak_type_limits_ok(
+            core, merged, effective_limits,
+            weak_exception_types=weak_exception_types, net_aware=net_aware):
+        return False
     if max_weak_types is not None and weak_type_breadth(core, merged) > max_weak_types:
         return False
     if (max_net_weak_types is not None
             and net_weak_type_breadth(core, merged) > max_net_weak_types):
+        return False
+    if required_techs and team_missing_techs(list(core), merged, required_techs):
+        return False
+    if (min_special_attackers and
+            count_special_attackers(list(core), merged, moves_db) < min_special_attackers):
         return False
     return True
 
@@ -7200,7 +7928,8 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                             max_weak=None, type_limits=None, max_megas=2,
                             max_weak_types=None, max_net_weak_types=None,
                             core_sizes=_CORE_SIZES,
-                            enforce_item_clause=False):
+                            enforce_item_clause=False, required_techs=None,
+                            min_special_attackers=None, required_members=None):
     """Every possible CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3, "I would like to output the best 3-pokemon
     cores against each team" -- not just exactly 6) drawn
@@ -7240,9 +7969,70 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
     in the sets, summary, and gameplan for each team." False (the default)
     reproduces the old, pool-wide-only behaviour.
 
+    `required_techs`: `_core_passes_hard_filters`'s own "a good and
+    flexible team" hard requirement (weather/terrain setter, Fake Out
+    user, speed control -- `TECH_ABILITIES`/`TECH_MOVES`) -- every core
+    must cover ALL of the named categories. `None` (the default) checks
+    nothing, exactly as before this existed.
+
+    `min_special_attackers`: `_core_passes_hard_filters`'s own minimum-
+    count sibling of `required_techs` -- every core must have at least
+    this many special attackers (`count_special_attackers`). `None` (the
+    default) checks nothing.
+
+    `max_weak`/`type_limits` DEFAULT EXCEPTION: "by default, allow one
+    type that has 3 weaknesses as long as it only has 1 net weakness" --
+    the bare `max_weak` scalar (2 by default) is not a flat, exception-
+    less cap: at most ONE type across a returned core may exceed it by
+    exactly 1, and only when doing so its own net weakness is <= 1 (see
+    `_weak_type_limits_ok`). A type given its OWN explicit `max_weak` via
+    `type_limits` stays exactly as strict as written, no exception.
+
+    `required_members`: "run the full counter_table.py exercise but with
+    N mandatory members, taken from a given team pokepaste ... the
+    counter table should seek to find remaining members to maximise wins"
+    -- every returned core contains ALL of these names, with the pool
+    combinatorics restricted to filling only the REMAINING seats (never
+    an O(pool, size) sweep that then filters for inclusion -- an O(pool -
+    required, size - required) sweep that can only ever produce cores
+    containing them). Each name must have been part of the pool passed to
+    `multi_bring4_coverage` in the first place (real pair data against
+    the named enemies, whether or not it cleared the "good pair" bar --
+    see below), or this raises. `None` (the default) reproduces the old,
+    no-forced-members behaviour exactly. A required member's own item/
+    moveset is NOT pinned to whatever it wore in the source pokepaste --
+    `_core_row` resolves it fresh, the same as any other pool member, so
+    "potential modification of movesets/items to achieve that aim" is
+    just what already happens for everyone here, no special-casing needed.
+    A required member does NOT need to have independently cleared
+    `multi_bring4_coverage`'s own "good pair" bar to be usable here (that
+    narrowing is what built `candidate_pool` in the first place) -- it
+    only needs real pair data, which `coverage["pair_by_key"]` already
+    has for every pool member `multi_bring4_coverage` ever raced,
+    regardless of "good" status (see that function's own docstring). A
+    required member missing even THAT (never raced against these enemies
+    at all) still raises.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first.
     """
     pool = coverage["candidate_pool"]
+    required_members = tuple(dict.fromkeys(required_members or ()))
+    if required_members:
+        raced_pool = {nm for pbk in coverage["pair_by_key"] for fs in pbk for nm in fs}
+        missing = [nm for nm in required_members if nm not in raced_pool]
+        if missing:
+            raise ValueError(
+                f"required_members never raced against these enemies at all: "
+                f"{missing} -- these must be in the pool passed to "
+                f"multi_bring4_coverage")
+        # A required member need not have independently cleared the "good
+        # pair" bar -- union it into the working pool regardless.
+        pool = sorted(set(pool) | set(required_members))
+        core_sizes = tuple(s for s in core_sizes if s >= len(required_members))
+        if not core_sizes:
+            raise ValueError(
+                f"{len(required_members)} required member(s) exceeds every "
+                f"requested core size")
     n = len(pool)
     min_size = min(core_sizes)
     if n < min_size:
@@ -7256,18 +8046,30 @@ def multi_bring4_exhaustive(coverage, good_threshold=1.0,
                          f"higher --min-enemies/--good-threshold, or pass "
                          f"--beam instead")
     effective_limits = _effective_type_limits(max_weak, type_limits)
+    weak_exception_types = _weak_exception_eligible_types(type_limits)
     merged = coverage["merged"]
+    moves_db = coverage["moves_db"]
     item_clause_context = (_item_clause_context_from_coverage(coverage)
                            if enforce_item_clause else None)
+    extra_pool = [nm for nm in pool if nm not in required_members]
     rows = []
     for size in core_sizes:
         if size > n:
             continue
-        for core in itertools.combinations(pool, size):
+        if required_members:
+            combos = (required_members + combo for combo in
+                     itertools.combinations(extra_pool, size - len(required_members)))
+        else:
+            combos = itertools.combinations(pool, size)
+        for core in combos:
             if not _core_passes_hard_filters(core, merged, effective_limits,
                                              max_megas=max_megas,
                                              max_weak_types=max_weak_types,
-                                             max_net_weak_types=max_net_weak_types):
+                                             max_net_weak_types=max_net_weak_types,
+                                             required_techs=required_techs,
+                                             moves_db=moves_db,
+                                             min_special_attackers=min_special_attackers,
+                                             weak_exception_types=weak_exception_types):
                 continue
             row = _core_row(core, coverage["pair_by_key"],
                             coverage["target_name_lists"], good_threshold,
@@ -7285,7 +8087,8 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                       max_weak=None, type_limits=None, max_megas=2,
                       max_weak_types=None, max_net_weak_types=None,
                       core_sizes=_CORE_SIZES,
-                      enforce_item_clause=False):
+                      enforce_item_clause=False, required_techs=None,
+                      min_special_attackers=None, required_members=None):
     """Beam-search a CORE (4, 5, or 6 Pokemon by default -- `core_sizes`
     can widen this down to 3) over the WHOLE pool
     `multi_bring4_coverage` already has pair data for (the raw pool, NOT
@@ -7316,6 +8119,28 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     ranking during growth already reflects a conflicting core's real,
     Item-Clause-legal performance rather than its illegal pool-wide one.
 
+    `required_techs`/`min_special_attackers`: same hard requirements as
+    `multi_bring4_exhaustive`'s own -- see its docstring. `max_weak`/
+    `type_limits`'s own default exception ("allow one type that has 3
+    weaknesses as long as it only has 1 net weakness") is ALSO the same
+    -- see `multi_bring4_exhaustive`'s docstring and `_weak_type_limits_
+    ok`; growth-time calls here use the safe, net-unaware over-
+    approximation, and only the final `found`-capture step checks it for
+    real.
+
+    `required_members`: same "N mandatory members, search the rest" hard
+    requirement as `multi_bring4_exhaustive`'s own -- see its docstring
+    for the full contract (must already be in `pool`, or this raises).
+    Here it replaces the normal 2-member seeding entirely: the beam
+    starts from the SINGLE seed `list(required_members)` (every required
+    member locked in from the start, nothing else to choose between at
+    that size) and grows from THAT size instead of 2, for `max(core_
+    sizes) - len(required_members)` iterations instead of the fixed 4.
+    The seed's own size is checked against `core_sizes` up front, same as
+    every subsequent grown size -- unlike the un-forced path (which never
+    starts already AT a valid core_sizes value, since seeding begins at
+    2), a `required_members` seed legitimately can.
+
     Returns rows (`_core_row`'s own shape), best-worst-case first, for
     whichever cores the beam actually reached (not exhaustive, so not
     guaranteed globally optimal).
@@ -7340,9 +8165,34 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
     # deliberately withheld from every growth-time call below and only
     # applied at the final `found`-capture step, mirroring how `max_net`
     # itself is excluded from `growth_limits` and only checked there via
-    # the full `effective_limits`.
+    # the full `effective_limits`. `required_techs` is likewise NOT
+    # monotonic (a partial core missing a tech can still gain one as it
+    # grows) and is withheld from growth-time calls the same way.
+    # `min_special_attackers` is `required_techs`'s own minimum-count
+    # sibling and is withheld from growth-time calls for the same reason.
     growth_limits = _monotonic_limits(effective_limits)
+    # The default "allow one type over by 1 if net<=1" exception
+    # (`_weak_type_limits_ok`) is likewise not monotonic in its NET half --
+    # growth-time calls pass `net_aware=False`, a safe over-approximation
+    # that never prunes a core the real, final check might still accept
+    # (see `_weak_type_limits_ok`'s own docstring); only the final
+    # `found`-capture call below gets the real, net-aware answer.
+    weak_exception_types = _weak_exception_eligible_types(type_limits)
+    moves_db = coverage["moves_db"]
     pool = sorted({n for pbk in pair_by_key_list for fs in pbk for n in fs})
+    required_members = tuple(dict.fromkeys(required_members or ()))
+    if required_members:
+        missing = [nm for nm in required_members if nm not in pool]
+        if missing:
+            raise ValueError(
+                f"required_members not in the search pool (no pair data): "
+                f"{missing} -- these must be unioned into the pool "
+                f"multi_bring4_coverage was built from")
+        core_sizes = tuple(s for s in core_sizes if s >= len(required_members))
+        if not core_sizes:
+            raise ValueError(
+                f"{len(required_members)} required member(s) exceeds every "
+                f"requested core size")
 
     def score(team):
         """Ascending = better, matching `_pair_sort_key`'s own convention.
@@ -7364,20 +8214,70 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                          pool_fixed_items=coverage["fixed_items"]
                          )["worst_enemy_score_key"]
 
-    seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
-             if _core_passes_hard_filters(p, merged, growth_limits,
-                                          max_megas=max_megas,
-                                          max_weak_types=max_weak_types)]
-    # `max_net_weak_types` withheld above -- not monotonic, see comment
-    # above `growth_limits`.
-    seeds.sort(key=lambda x: x[0])
-    beam = [t for _, t in seeds[:beam_width]]
-
     found = {}  # sorted-tuple -> row, across every size 4/5/6 the beam passes through
-    for _ in range(4):  # grow 2 -> 3 -> 4 -> 5 -> 6
+
+    def maybe_capture(team):
+        """Final-size check-and-capture, shared by the seed (when
+        `required_members` already lands exactly on a valid `core_sizes`
+        with nothing left to grow) and every subsequent grown size --
+        the un-forced path never starts AT a valid size (seeding begins
+        at 2, never itself in `_CORE_SIZES`), but a `required_members`
+        seed legitimately can, so this must run before growth even
+        starts, not only after each step."""
+        if len(team) not in core_sizes:
+            return
+        key = tuple(sorted(team))
+        if key in found:
+            return
+        if not _core_passes_hard_filters(key, merged, effective_limits,
+                                         max_megas=max_megas,
+                                         max_weak_types=max_weak_types,
+                                         max_net_weak_types=max_net_weak_types,
+                                         required_techs=required_techs,
+                                         moves_db=moves_db,
+                                         min_special_attackers=min_special_attackers,
+                                         weak_exception_types=weak_exception_types,
+                                         net_aware=True):
+            return  # catches a max_net/max_net_weak_types/required_techs/min_special_attackers/weak-exception violation growth couldn't see
+        row = _core_row(list(key), pair_by_key_list, target_name_lists,
+                        good_threshold,
+                        pair_by_key_forced_base_list=pair_by_key_forced_base_list,
+                        item_clause_context=item_clause_context, merged=merged,
+                        pool_fixed_items=coverage["fixed_items"])
+        if not row["unused"]:
+            found[key] = row
+
+    if required_members:
+        # Nothing to choose between at this size -- every required member
+        # is already locked in, so there is exactly one seed, not a beam
+        # of alternatives.
+        base = list(required_members)
+        beam = ([base] if _core_passes_hard_filters(
+            base, merged, growth_limits, max_megas=max_megas,
+            max_weak_types=max_weak_types, weak_exception_types=weak_exception_types,
+            net_aware=False) else [])
+        for team in beam:
+            maybe_capture(team)
+        grow_iterations = max(0, max(core_sizes) - len(required_members))
+        extra_pool = [n for n in pool if n not in required_members]
+    else:
+        seeds = [(score(list(p)), list(p)) for p in itertools.combinations(pool, 2)
+                 if _core_passes_hard_filters(p, merged, growth_limits,
+                                              max_megas=max_megas,
+                                              max_weak_types=max_weak_types,
+                                              weak_exception_types=weak_exception_types,
+                                              net_aware=False)]
+        # `max_net_weak_types` withheld above -- not monotonic, see comment
+        # above `growth_limits`.
+        seeds.sort(key=lambda x: x[0])
+        beam = [t for _, t in seeds[:beam_width]]
+        grow_iterations = 4  # grow 2 -> 3 -> 4 -> 5 -> 6
+        extra_pool = pool
+
+    for _ in range(grow_iterations):
         cand = {}
         for team in beam:
-            for n in pool:
+            for n in extra_pool:
                 if n in team:
                     continue
                 key = tuple(sorted(team + [n]))
@@ -7385,30 +8285,17 @@ def multi_bring4_beam(coverage, good_threshold=1.0, beam_width=40,
                     continue
                 if not _core_passes_hard_filters(key, merged, growth_limits,
                                                  max_megas=max_megas,
-                                                 max_weak_types=max_weak_types):
+                                                 max_weak_types=max_weak_types,
+                                                 weak_exception_types=weak_exception_types,
+                                                 net_aware=False):
                     continue  # max_net_weak_types withheld -- not monotonic
                 cand[key] = score(list(key))
         ranked = sorted(cand.items(), key=lambda kv: kv[1])[:beam_width]
         beam = [list(k) for k, _ in ranked]
         if not beam:
             break
-        if len(beam[0]) in core_sizes:
-            for team in beam:
-                key = tuple(sorted(team))
-                if key in found:
-                    continue
-                if not _core_passes_hard_filters(key, merged, effective_limits,
-                                                 max_megas=max_megas,
-                                                 max_weak_types=max_weak_types,
-                                                 max_net_weak_types=max_net_weak_types):
-                    continue  # catches a max_net/max_net_weak_types violation growth couldn't see
-                row = _core_row(team, pair_by_key_list, target_name_lists,
-                                good_threshold,
-                                pair_by_key_forced_base_list=pair_by_key_forced_base_list,
-                                item_clause_context=item_clause_context, merged=merged,
-                                pool_fixed_items=coverage["fixed_items"])
-                if not row["unused"]:
-                    found[key] = row
+        for team in beam:
+            maybe_capture(team)
 
     rows = list(found.values())
     rows.sort(key=lambda r: r["worst_enemy_score_key"])
@@ -7624,7 +8511,11 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
     directly, so there is no "which subset" question at THIS level, only
     "which of the (at most 2) team-wide hypotheses is better for this core
     as a WHOLE" (`_pair_sort_key`'s existing "lower is better" ranking on
-    each `overall` decides the winner). The whole racing pass runs TWICE,
+    each `overall` decides the winner -- UNLESS one of the two is in
+    `ALWAYS_TRANSFORMS_MEGA`, Mega Raichu Y, in which case its own
+    hypothesis wins outright, no ranking involved: see `ALWAYS_TRANSFORMS_
+    MEGA`'s own comment for why this module's damage numbers can't be
+    trusted to find that on their own). The whole racing pass runs TWICE,
     once per hypothesis, and the winning one is returned as this function's
     own `per_pair`/`overall`/`mega_used` -- unchanged from before, so every
     existing caller reading just those three fields (xlsx export, console
@@ -7710,8 +8601,17 @@ def core_deep_dive(core, target_name_lists, merged, moves_db, natures, typechart
             worst_case_targeting=worst_case_targeting,
             check_trick_room=check_trick_room)
         dive_b["mega_used"] = megas[1]
-        winner, loser = (dive_a, dive_b) if (_pair_sort_key(dive_a["overall"])
-                                             <= _pair_sort_key(dive_b["overall"])) else (dive_b, dive_a)
+        # ALWAYS_TRANSFORMS_MEGA overrides the ordinary "whichever scores
+        # better" comparison outright -- that comparison trusts THIS
+        # module's own damage numbers, which never discount for a move's
+        # accuracy, so it cannot be trusted to notice a base form kept
+        # alive only by moves that would actually miss constantly.
+        forced = next((m for m in megas if m in ALWAYS_TRANSFORMS_MEGA), None)
+        if forced is not None:
+            winner, loser = (dive_a, dive_b) if forced == megas[0] else (dive_b, dive_a)
+        else:
+            winner, loser = (dive_a, dive_b) if (_pair_sort_key(dive_a["overall"])
+                                                 <= _pair_sort_key(dive_b["overall"])) else (dive_b, dive_a)
         winner["mega_alt"] = {"mega_used": loser["mega_used"],
                               "per_pair": loser["per_pair"], "overall": loser["overall"]}
         return winner
@@ -8088,7 +8988,8 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
                           turns, swap_pool, item_overrides, move_overrides,
                           excluded_items, evs_overrides, nature_overrides,
                           ability_overrides, max_focus_sash, max_life_orb,
-                          good_threshold, jobs, progress_callback, round_num):
+                          good_threshold, jobs, progress_callback, round_num,
+                          allow_member_swaps=True):
     """One round of `evolve_from_team`'s own greedy hill-climbing: every
     move/item/whole-member swap trial around `core` AS GIVEN (already-
     improved by any earlier round, for round 2+), scored against the SAME
@@ -8097,7 +8998,24 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
     sorted descending; empty means this round's own baseline can't be beat
     by any single further change.
 
-    Three swap kinds:
+    `allow_member_swaps`: `False` skips the WHOLE-MEMBER SWAPS trials
+    entirely (MOVE/ITEM swaps still run) -- "bringing in a whole new,
+    much stronger Pokemon almost always beats tweaking one move" is
+    correct but means a real `swap_pool` routinely produces +10-30 score
+    deltas for a member swap against a +1-7 delta for even the BEST move
+    tweak (e.g. dropping Protect for a better-scoring attack): greedy
+    hill-climbing then always spends its round on the member swap first,
+    so a smaller, targeted moveset refinement the user actually wants to
+    see (whether Protect is worth keeping on an ALREADY-decided roster)
+    never gets picked within `max_changes`'s budget, even though it IS a
+    genuine, positive-delta improvement on its own (confirmed by direct
+    testing: a Protect-removal move swap can rank #1 among every move/item
+    swap available, just never among member swaps too). This is the
+    caller-facing escape hatch for "evolve the SET, not the ROSTER" --
+    `evolve_from_team`'s own `allow_member_swaps` passes it straight
+    through, `--evolve-moves-items-only` is the CLI's own name for it.
+
+    Three swap kinds (member swaps only when `allow_member_swaps`):
 
     - MOVE SWAPS: for each existing member, for each of its OTHER real,
       usage-backed moves (`merged[name]["moves_usage"]`) not already in its
@@ -8178,17 +9096,20 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
 
     # WHOLE-MEMBER SWAPS -- the trial core's own set is searched fresh
     # (`core_deep_dive`'s own item/moveset resolution), never re-uses the
-    # departed member's set.
-    pool = swap_pool if swap_pool is not None else [n for n in merged if n not in core]
-    for member in core:
-        for candidate in pool:
-            if candidate in core or candidate == member:
-                continue
-            trial_core = [candidate if n == member else n for n in core]
-            if _mega_base_overlap(trial_core):
-                continue
-            trial_specs.append(("member", member, member, candidate,
-                                trial_core, item_overrides, move_overrides))
+    # departed member's set. Skipped entirely when `allow_member_swaps` is
+    # False (see this function's own docstring for why a caller would want
+    # that -- these trials' deltas otherwise dominate every move/item swap).
+    if allow_member_swaps:
+        pool = swap_pool if swap_pool is not None else [n for n in merged if n not in core]
+        for member in core:
+            for candidate in pool:
+                if candidate in core or candidate == member:
+                    continue
+                trial_core = [candidate if n == member else n for n in core]
+                if _mega_base_overlap(trial_core):
+                    continue
+                trial_specs.append(("member", member, member, candidate,
+                                    trial_core, item_overrides, move_overrides))
 
     total = len(trial_specs)
     done = 0
@@ -8249,7 +9170,7 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
                      evs_overrides=None, nature_overrides=None, ability_overrides=None,
                      max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
                      max_life_orb=DEFAULT_MAX_LIFE_ORB, jobs=1, progress_callback=None,
-                     max_changes=3):
+                     max_changes=3, allow_member_swaps=True):
     """"If I define one high-performing team ... then try to see if any
     improvements can be made" -- "the --evolve-from-team should iterate for
     multiple improvements ... I need to see the best possible joint impact
@@ -8286,6 +9207,19 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
     not already in `core` -- a caller wanting the search bounded to
     realistic options should pass `team_search.build_candidate_pool`'s own
     pool instead (the SAME pool `--multi-bring4` draws from).
+
+    `allow_member_swaps`: `False` restricts every round to MOVE/ITEM swaps
+    only around `core`'s own fixed roster -- see `_evolve_run_one_round`'s
+    own docstring for why a caller evolving an ALREADY-decided team's
+    SET (not its roster) needs this: a whole-member swap's score delta
+    (bringing in a genuinely stronger Pokemon) routinely dwarfs even the
+    best available move/item tweak, so with member swaps on, greedy
+    hill-climbing spends essentially every round replacing a member long
+    before a smaller refinement (dropping Protect for a better-scoring
+    move, say) ever gets a turn -- true even when that refinement is
+    itself a real, positive-delta improvement on its own. `True` (the
+    default) reproduces the original, unrestricted three-swap-kind
+    behaviour.
 
     `jobs`: run each round's own trials (move/item/whole-member swap
     candidates) in parallel worker processes instead of one after another
@@ -8343,7 +9277,8 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
             cur_core, target_name_lists, merged, moves_db, natures, typechart,
             turns, swap_pool, cur_item_overrides, cur_move_overrides, excluded_items,
             evs_overrides, nature_overrides, ability_overrides, max_focus_sash,
-            max_life_orb, good_threshold, jobs, progress_callback, round_num)
+            max_life_orb, good_threshold, jobs, progress_callback, round_num,
+            allow_member_swaps=allow_member_swaps)
         if round_num == 1:
             baseline_breakdown = round_breakdown
         rounds.append(round_results)

@@ -1128,6 +1128,43 @@ def send_to_battle_viewer(our4, enemy4, turns, label=""):
     st.session_state["bv_handoff"] = label or f"{'/'.join(our4)} vs {'/'.join(enemy4)}"
 
 
+def send_to_battle_simulator_as_opponent(core, sets):
+    """Hand a searched-out team to the Battle Simulator's OPPONENT slot --
+    "in the battle simulator, I will play that team." `their_side_pool`'s
+    own "Paste a pokepaste" source (`sim_foe_source`/`sim_foe_paste`) already
+    accepts plain team JSON (`_load_team_text`'s `{"pool", "sets"}` branch,
+    the exact shape `core_deep_dive`'s own `sets` -- {name: {"item",
+    "moves"}} -- already returns), so this needs no new parsing path: seed
+    those two keys and the existing paste box picks it up on the next
+    render. Ability/Nature/EVs aren't in `sets` (a pool search never
+    resolves those) -- same gap "Pick 6" opponents already have, falls back
+    to mbsmogon.xlsx's usage-default stats there too.
+
+    `core` is a searched CORE, not necessarily a full 6 -- "Enemy's best
+    response" (`multi_bring4_exhaustive`/`beam`'s own `core_sizes=(4,5,6)`)
+    can return a 4- or 5-member result. The Battle Simulator's other two
+    "Their bring" modes ("Their optimal bring"/"Step through all 15 leads")
+    both hard-require a full six (`needs_six` in the Simulator setup), so a
+    4/5-member `core` would otherwise leave "Start Battle" disabled with no
+    obvious reason why. Force `sim_mode_choice` to "I choose their bring"
+    instead -- the one mode that only ever needs the 4 actually being
+    brought, whatever size `core` is -- and, when `core` IS exactly a
+    bring-4 (the common case, and the whole point of the search), also
+    pre-fill lead/back with its first two/last two so "Start Battle" is
+    ready with no further clicks; a 5- or 6-member `core` leaves lead/back
+    for the user to choose, same as picking "I choose their bring" by hand
+    always has.
+    """
+    import json as _json
+    st.session_state["sim_foe_source"] = "Paste a pokepaste"
+    st.session_state["sim_foe_paste"] = _json.dumps(
+        {"pool": list(core), "sets": dict(sets)})
+    st.session_state["sim_mode_choice"] = "I choose their bring"
+    if len(core) == 4:
+        st.session_state["sim_their_lead"] = list(core[:2])
+        st.session_state["sim_their_back"] = list(core[2:])
+
+
 def render_joint_salvage(key_prefix, our4, losing_brings, turns, our_sets):
     """ONE change that fixes ALL the losses -- see salvage.salvage_all_losses.
 
@@ -3750,7 +3787,9 @@ with tab_search:
 def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold,
                              min_enemies, max_weak, max_megas, search_kind,
                              beam_width, excluded_items, max_weak_types=None,
-                             always_include=None):
+                             always_include=None, required_techs=None,
+                             min_special_attackers=None, required_members=None,
+                             core_sizes=None):
     """Pool-wide search for the best team-of-4/5/6 across `target_name_lists`
     (one enemy roster or several) -- `multi_bring4_coverage` then
     `multi_bring4_exhaustive`/`multi_bring4_beam`, shared by the Counter
@@ -3769,6 +3808,27 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     returned core; this only guarantees it's genuinely CONSIDERED, not that
     it wins.
 
+    `required_techs`/`min_special_attackers`: forwarded straight to
+    `multi_bring4_exhaustive`/`multi_bring4_beam` -- see their own
+    docstrings.
+
+    `required_members`: "N mandatory members, taken from a given team
+    pokepaste ... find remaining members to maximise wins" -- forwarded
+    straight to `multi_bring4_exhaustive`/`multi_bring4_beam`'s own hard
+    "every returned core contains ALL of these" requirement. Unlike
+    `always_include`, a required member does NOT need to independently
+    clear the good-pair bar (see those functions' own docstrings) -- so
+    unioned into the pool same as `always_include`, but the "candidate
+    pool too small" floor below is measured against the WIDER pool
+    (required members included unconditionally) rather than `candidate_
+    pool` alone, which could otherwise reject a real, searchable request
+    just because the required members themselves happened to not be
+    independently "good".
+
+    `core_sizes`: forwarded straight to `multi_bring4_exhaustive`/
+    `multi_bring4_beam` -- `None` (every caller except "Complete my
+    team") leaves each search function's own `(4, 5, 6)` default alone.
+
     Returns (coverage, rows) -- `rows` is None if the search never ran (the
     candidate pool came back too small, or Exhaustive's own pool-size cap
     rejected it) or `[]` if it ran and found nothing; either case has
@@ -3781,6 +3841,8 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     pool = build_candidate_pool(merged, top_n=pool_size, prefs=prefs)
     if always_include:
         pool = sorted(set(pool) | set(always_include))
+    if required_members:
+        pool = sorted(set(pool) | set(required_members))
     with st.spinner(f"Pair-searching {len(pool)} Pokemon against "
                     f"{len(target_name_lists)} enemy roster(s)..."):
         coverage = multi_bring4_coverage(
@@ -3790,17 +3852,25 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
     st.caption(f"Candidate pool (appears in a good pair for >= "
               f"{min_enemies} of {len(target_name_lists)} enemies): "
               f"{len(coverage['candidate_pool'])} of {len(pool)}")
-    if len(coverage["candidate_pool"]) < 4:
+    floor_pool = (set(coverage["candidate_pool"]) | set(required_members)
+                 if required_members else coverage["candidate_pool"])
+    if len(floor_pool) < 4:
         st.error("Fewer than 4 candidates survive -- widen the pool, lower "
                  "the good-pair bar, or lower min-enemies.")
         return coverage, None
+    # `None` (every caller except "Complete my team") leaves each search
+    # function's own `_CORE_SIZES` default (4, 5, 6) alone rather than
+    # passing an explicit `core_sizes=None`, which isn't valid there.
+    core_sizes_kwargs = {"core_sizes": tuple(core_sizes)} if core_sizes else {}
     with st.spinner("Searching cores..."):
         if search_kind == "Exhaustive":
             try:
                 rows = multi_bring4_exhaustive(
                     coverage, good_threshold=good_threshold,
                     max_weak=max_weak, max_megas=max_megas,
-                    max_weak_types=max_weak_types)
+                    max_weak_types=max_weak_types, required_techs=required_techs,
+                    min_special_attackers=min_special_attackers,
+                    required_members=required_members, **core_sizes_kwargs)
             except ValueError as e:
                 st.error(f"{e} -- try Beam instead.")
                 return coverage, None
@@ -3808,7 +3878,9 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
             rows = multi_bring4_beam(
                 coverage, good_threshold=good_threshold,
                 beam_width=beam_width, max_weak=max_weak, max_megas=max_megas,
-                max_weak_types=max_weak_types)
+                max_weak_types=max_weak_types, required_techs=required_techs,
+                min_special_attackers=min_special_attackers,
+                required_members=required_members, **core_sizes_kwargs)
     if not rows:
         st.error("No core (4, 5, or 6 Pokemon) found -- widen the pool, "
                  "lower the good-pair bar/min-enemies, relax max-weak, "
@@ -3829,6 +3901,136 @@ def _run_multi_bring4_search(pool_size, target_name_lists, turns, good_threshold
             item_caps={"Focus Sash": DEFAULT_MAX_FOCUS_SASH,
                       "Life Orb": DEFAULT_MAX_LIFE_ORB})
     return coverage, rows
+
+
+def _tech_required_multiselect(label, key):
+    """A `required_techs` multiselect -- shared label text/options across
+    Bring-4/Multi-bring4/Coverage-groups mode, each its own `key` so
+    Streamlit doesn't collide the three modes' own selections. Imports
+    `TECH_LABELS` lazily since this runs before the Counter Table tab's
+    own `from counter_finder import ...` block on a cold script run."""
+    from counter_finder import TECH_LABELS
+    return st.multiselect(
+        label, list(TECH_LABELS), key=key, format_func=lambda t: TECH_LABELS[t],
+        help="\"a good and flexible team\" -- a HARD requirement: every "
+             "category checked here must be covered by AT LEAST ONE "
+             "member (its own default ability, or a recorded move), or "
+             "the result is dropped outright. Speed control folds "
+             "together Tailwind/Trick Room, guaranteed-or-likely-"
+             "paralysis moves (Thunder Wave, Glare, Stun Spore, Nuzzle, "
+             "Zap Cannon), and the speed-drop attacks (Icy Wind, "
+             "Electroweb, Bulldoze, Rock Tomb) -- any one is "
+             "interchangeable with another for this purpose.")
+
+
+def _min_special_attackers_slider(key):
+    """A `min_special_attackers` control -- shared label/help text across
+    Bring-4/Multi-bring4/Coverage-groups mode, same "each its own `key`"
+    reasoning as `_tech_required_multiselect`. OFF by default (an
+    unchecked checkbox), matching every other optional hard filter on this
+    tab (`ct_cov_abs_cap_on`'s own checkbox-then-slider shape) -- an
+    ordinary search must never come back silently narrower just because
+    this control exists on the page. Once turned on, the slider itself
+    starts at 2 ("minimum special attackers ... by default 2")."""
+    on = st.checkbox("Require a minimum number of special attackers",
+                     key=f"{key}_on")
+    if not on:
+        return None
+    return st.slider(
+        "Minimum special attackers", 1, 6, 2, key=key,
+        help="\"pokemon that use special attacks, even if they are mixed "
+             "attackers like Salamence\" -- counts any member with at "
+             "least one real, usage-ranked Special-category damaging "
+             "move; a mixed attacker still counts. A HARD requirement, "
+             "same as the tech checklist above/below: a result with fewer "
+             "is dropped outright.")
+
+
+def _parse_pair_coverage_xlsx(file_bytes):
+    """Parse a `--multi-bring4 --xlsx`-produced workbook's own "Cores",
+    "Pair Coverage", and "Pair Detail" sheets back into the plain-dict
+    shape `counter_finder.coverage_from_pair_rows` expects -- the
+    Streamlit-side half of the CLI/app round trip (see
+    `tools/counter_table.py`'s `_write_pair_coverage_sheets` and
+    `counter_finder.coverage_from_pair_rows`'s own docstrings for the
+    full contract). Raises `ValueError` with a plain message for a
+    workbook missing either new sheet (an export from BEFORE this
+    feature existed, or --xlsx run without --multi-bring4).
+
+    Returns (pair_rows, detail_rows, target_name_lists) -- `target_name_
+    lists` is read from the "Cores" sheet's own "Enemy N" columns (every
+    row shows the same roster for a given enemy index, so the first data
+    row is enough), not re-exported separately.
+    """
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    for needed in ("Cores", "Pair Coverage", "Pair Detail"):
+        if needed not in wb.sheetnames:
+            raise ValueError(
+                f"This workbook has no '{needed}' sheet -- it needs to be a "
+                f"--multi-bring4 --xlsx export (real combat, real sets) from "
+                f"a version of counter_table.py new enough to carry pair "
+                f"coverage data.")
+    cores_ws = wb["Cores"]
+    cores_rows = list(cores_ws.iter_rows(values_only=True))
+    header = list(cores_rows[0])
+    enemy_cols = [i for i, h in enumerate(header) if isinstance(h, str)
+                 and h.startswith("Enemy ") and h.endswith(tuple(str(d) for d in range(10)))
+                 and h[6:].strip().isdigit()]
+    enemy_cols.sort(key=lambda i: int(header[i][6:].strip()))
+    if not cores_rows[1:]:
+        raise ValueError("The 'Cores' sheet has no data rows to read enemy "
+                         "rosters from.")
+    first_data = cores_rows[1]
+    target_name_lists = [
+        [n.strip() for n in (first_data[i] or "").split(",") if n.strip()]
+        for i in enemy_cols]
+
+    cov_ws = wb["Pair Coverage"]
+    cov_rows = list(cov_ws.iter_rows(values_only=True))
+    cov_header = {h: i for i, h in enumerate(cov_rows[0])}
+    pair_rows = []
+    for row in cov_rows[1:]:
+        if row[cov_header["Rank"]] is None:
+            continue
+        pair_rows.append({
+            "pair": (row[cov_header["Pokemon 1"]], row[cov_header["Pokemon 2"]]),
+            "enemy_idx": int(row[cov_header["Enemy #"]]) - 1,
+            "item1": row[cov_header["Item 1"]], "item2": row[cov_header["Item 2"]],
+            "moves1": [m.strip() for m in (row[cov_header["Moves 1"]] or "").split(",")
+                      if m.strip()],
+            "moves2": [m.strip() for m in (row[cov_header["Moves 2"]] or "").split(",")
+                      if m.strip()],
+            "swept": row[cov_header["Swept"]], "traded": row[cov_header["Traded"]],
+            "lost": row[cov_header["Lost"]], "no_ko": row[cov_header["No KO"]],
+            "tailwind_safe": row[cov_header["Tailwind-safe"]],
+            "protect_safe": row[cov_header["Protect-safe"]],
+            "follow_me_safe": row[cov_header["Redirect-safe"]],
+            "clean_win_total": row[cov_header["Clean win total"]],
+            "total": row[cov_header["Total"]],
+        })
+
+    det_ws = wb["Pair Detail"]
+    det_rows = list(det_ws.iter_rows(values_only=True))
+    det_header = {h: i for i, h in enumerate(det_rows[0])}
+    detail_rows = []
+    for row in det_rows[1:]:
+        if row[det_header["Pokemon 1"]] is None:
+            continue
+        detail_rows.append({
+            "pair": (row[det_header["Pokemon 1"]], row[det_header["Pokemon 2"]]),
+            "enemy_idx": int(row[det_header["Enemy #"]]) - 1,
+            "e1": row[det_header["Enemy 1"]], "e2": row[det_header["Enemy 2"]],
+            "outcome": row[det_header["Outcome"]],
+            "our_hp_c": row[det_header["Our HP (C)"]],
+            "our_hp_p": row[det_header["Our HP (P)"]],
+            "tailwind_safe": row[det_header["Tailwind-safe"]],
+            "protect_safe": row[det_header["Protect-safe"]],
+            "follow_me_safe": row[det_header["Redirect-safe"]],
+            "clean_win_value": row[det_header["Clean win value"]],
+        })
+    return pair_rows, detail_rows, target_name_lists
 
 
 def _pair_rows_df(pair_rows, include_total=False):
@@ -4374,12 +4576,105 @@ def _render_teamsheet_export(core, sets, key_prefix):
             st.success("Loaded into Team Builder")
 
 
+def _render_lead_back_deep_dive(bring4, vs_roster, our_sets, vs_sets, merged,
+                                moves, natures, typechart, key_prefix):
+    """"look at sequences of their lead and their back... how much health
+    each of yours have left after a 2v2 lead, and new field conditions...
+    do your own back pairs beat the new enemy backs... did a specific enemy
+    lead do enough to make it a losing game state" -- an opt-in, REAL-ENGINE
+    deep dive on an already-chosen bring-4, bridging to `preview_lead.
+    rank_brings` (the same machinery the Lead/Back Search tab already uses
+    for a full team-preview search), constrained to THIS bring's own 4
+    members so its only "back" is the 2 not in the chosen lead -- no further
+    choice, since the bring is already fixed.
+
+    Unlike the cheap model's own single 2v2 snapshot (`core_deep_dive`/
+    `bring4_search`), this actually PLAYS the lead out on the real engine
+    (real accuracy/crit rolls, not average rolls), so surviving HP and
+    field state (Tailwind, weather, terrain) genuinely carry into the back
+    pair that follows -- the cheap model tracks neither at all: `_joint_
+    race` never mutates weather/terrain once resolved, models Tailwind as
+    a flat post-turn-1 speed multiplier that never expires, and only OUR
+    OWN survivor HP (never the enemy's, and never for a non-win outcome)
+    is kept past one race. Real racing is slow (budgeted, adaptive
+    sampling), so this stays opt-in on ONE already-chosen bring-4, never
+    part of a full sweep.
+    """
+    if len(bring4) != 4:
+        return
+    with st.expander("Lead/back deep dive (real engine)"):
+        st.caption(
+            "Plays the chosen lead out for real against every one of the "
+            "enemy's own openings, keeping the WORST case -- maximin, "
+            "since they choose knowing your team. Surviving HP and field "
+            "conditions genuinely carry into the back pair that follows, "
+            "unlike the cheap model's own single 2v2 snapshot above. Real "
+            "racing is slow -- a wider budget or more games per pairing "
+            "buys a tighter answer, not a guaranteed one.")
+        lead_options = list(itertools.combinations(bring4, 2))
+        lead_pick = st.selectbox(
+            "Lead pair", lead_options,
+            format_func=lambda p: " / ".join(p), key=f"{key_prefix}_lead")
+        back = tuple(n for n in bring4 if n not in lead_pick)
+        st.caption(f"Back (fixed -- the bring's other 2): {' / '.join(back)}")
+        c1, c2 = st.columns(2)
+        budget = c1.slider("Seconds", 15, 180, 45, step=15, key=f"{key_prefix}_budget")
+        games = c2.slider("Games per pairing", 4, 16, 4, step=4, key=f"{key_prefix}_games")
+        if st.button("Play out this bring's back", key=f"{key_prefix}_go"):
+            import preview_lead
+            world = {"merged": merged, "moves": moves, "natures": natures,
+                     "typechart": typechart}
+            bar = st.progress(0.0, text="Playing back pairs...")
+            try:
+                def _tick(e, elapsed):
+                    bar.progress(min(1.0, elapsed / budget),
+                                text=f"{'/'.join(e['back'])}  {elapsed:.0f}s")
+                backs, _bmeta = preview_lead.rank_brings(
+                    {"lead": list(lead_pick)}, list(bring4), list(vs_roster), world,
+                    budget=float(budget), our_sets=our_sets, enemy_sets=vs_sets,
+                    win_samples=int(games), on_progress=_tick)
+            finally:
+                bar.empty()
+            st.session_state[f"{key_prefix}_result"] = (lead_pick, back, backs)
+
+        result = st.session_state.get(f"{key_prefix}_result")
+        if result:
+            r_lead, r_back, backs = result
+            if not backs:
+                st.warning("No game finished inside the budget -- raise it.")
+            else:
+                row = backs[0]
+                st.metric(
+                    "Worst-case win rate (this lead, this back)",
+                    f"{row['worst_win'] * 100:.0f}%",
+                    help="The lowest win probability found across the "
+                         "enemy's own openings -- maximin, matching how "
+                         "the rest of this tool ranks matchups.")
+                st.caption(
+                    f"Their worst opening for you: "
+                    f"{' / '.join(row['worst_vs'] or [])}  |  checked "
+                    f"{row['checked']}/{row['of']} of their openings "
+                    f"({'fully checked' if row['complete'] else 'budget-limited -- an upper bound'})")
+                if st.button("Show one real sample game", key=f"{key_prefix}_sample"):
+                    from preview_lead import _bring
+                    from matchup_search import play_out_pair, EQUILIBRIUM_PILOT
+                    their_lead = row["worst_vs"] or list(vs_roster[:2])
+                    their_bring = _bring(list(vs_roster), their_lead)
+                    _winner, _t, battle = play_out_pair(
+                        list(r_lead) + list(r_back), their_bring, merged, moves,
+                        natures, typechart, max_turns=18,
+                        our_sets=our_sets, enemy_sets=vs_sets, rng_seed=0,
+                        pilot=EQUILIBRIUM_PILOT)
+                    st.code("\n".join(battle.log.lines), language=None)
+
+
 def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
                            excluded_items, key_prefix, item_overrides=None,
                            move_overrides=None, evs_overrides=None,
                            nature_overrides=None, ability_overrides=None,
                            enemy_item_overrides=None, enemy_move_overrides=None,
-                           item_resolution_enemies=None):
+                           item_resolution_enemies=None,
+                           offer_send_to_battle_sim=False):
     """"I want to be able to choose a specific team to deep dive into" --
     an opt-in, on-demand `core_deep_dive` call for ONE already-chosen core
     (any bring-4, or a multi-bring4 core), the app-side counterpart to the
@@ -4411,6 +4706,14 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     me the gameplan" and "give me a teamsheet I can load", since
     `core_deep_dive` already computes the fixed item/moveset for every
     member as part of racing it.
+
+    `offer_send_to_battle_sim`: off by default -- when True, ALSO offers a
+    "Send to Battle Simulator as opponent" button (`send_to_battle_
+    simulator_as_opponent`) next to the teamsheet export. Only meaningful
+    when `core` itself IS conceptually the enemy (e.g. "Enemy's best
+    response" mode, where `core` is drawn from a pool searched against the
+    user's own team) -- every other caller deep-dives the user's OWN team,
+    where sending it to the Simulator's opponent slot would be backwards.
 
     When `core` has more than 4 members AND `target_name_lists` is exactly
     ONE enemy roster, also shows a "Best bring-4 (from this deep dive)"
@@ -4472,6 +4775,12 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     if mega_caption:
         st.caption(mega_caption)
     _render_teamsheet_export(core, dive["sets"], key_prefix)
+    if offer_send_to_battle_sim:
+        if st.button("Send to Battle Simulator as opponent",
+                     key=f"{key_prefix}_sendsim", width='stretch'):
+            send_to_battle_simulator_as_opponent(core, dive["sets"])
+            st.success("Sent to the Battle Simulator tab's opponent slot -- "
+                       "switch there and click 'Start Battle'.")
     ov = dive["overall"]
     ov_total = ov["pairs_total"]
     st.markdown(f"**Overall**: {ov['pairs_swept'] + ov['pairs_traded']}/{ov_total} "
@@ -4544,12 +4853,27 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
 
 
 def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
-                              key_prefix="mb4"):
+                              key_prefix="mb4", target_name_lists=None,
+                              offer_send_to_battle_sim=False):
     """One core's expander body: weakness synergy, then its own best
     bring-4 (and any enemy pair NONE of that bring-4's pairs can beat)
     against each roster in `shown_vs`, then an opt-in deep dive on this
     exact core. Shared by both of the pool-search paths that produce
-    `_core_row`-shaped rows -- see `_run_multi_bring4_search`."""
+    `_core_row`-shaped rows -- see `_run_multi_bring4_search`.
+
+    `target_name_lists`: the actual rosters behind `shown_vs`'s own
+    display labels, for the closing deep dive. `None` (every existing
+    caller) falls back to looking `shown_vs` up in the global `teams` --
+    the original behaviour, for labels that really are saved-team names.
+    A caller whose "enemy" is an AD-HOC roster with no saved-team name at
+    all (e.g. "Enemy's best response" scoring against an unsaved, freshly
+    loaded Team Builder team) passes the real roster here directly instead,
+    the same `target_name_lists`/`shown_vs` split `_render_core_deep_dive`
+    itself already uses.
+
+    `offer_send_to_battle_sim`: forwarded straight to `_render_core_deep_
+    dive` -- see its own docstring.
+    """
     from counter_finder import member_weakness_summary
     core = r["core"]
     weak = member_weakness_summary(core, merged)
@@ -4586,10 +4910,12 @@ def _render_multi_bring4_core(r, shown_vs, turns=2, excluded_items=frozenset(),
                 n1, n2 = row["pair"]
                 st.markdown(f"**{n1} + {n2}**")
                 _render_pair_matchup_detail(n1, n2, row["detail"], e_only_losses)
-    target_name_lists = [list(teams[n]) for n in shown_vs if n in teams]
+    if target_name_lists is None:
+        target_name_lists = [list(teams[n]) for n in shown_vs if n in teams]
     if target_name_lists:
         _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
-                               excluded_items, key_prefix=f"{key_prefix}_{'_'.join(core)}")
+                               excluded_items, key_prefix=f"{key_prefix}_{'_'.join(core)}",
+                               offer_send_to_battle_sim=offer_send_to_battle_sim)
 
 
 # ------------------------------------------------------------------ counter table
@@ -4605,7 +4931,8 @@ with tab_counter:
     from counter_finder import (DEFAULT_EXCLUDED_ITEMS, bring4_search, joint_pair_search,
                                 joint_pool_search, find_pair_cores, two_two_two_teams,
                                 coverage_group_search, narrow_coverage_pool_names,
-                                _pair_beaten_frac, choice_scarf_enemy_moveset)
+                                _pair_beaten_frac, choice_scarf_enemy_moveset,
+                                TECH_LABELS)
     from team_search import build_candidate_pool, TYPE_CORES
 
     # Shared with the "Coverage groups" mode's own "Send to Bring-4" button
@@ -4616,8 +4943,9 @@ with tab_counter:
 
     ct_mode = st.radio(
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
+                 "Enemy's best response (to my team)", "Complete my team",
                  "Joint pair search", "2-2-2 teambuilding", "Coverage groups",
-                 "Round-robin (saved teams only)"],
+                 "Import pair coverage", "Round-robin (saved teams only)"],
         key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
@@ -4758,6 +5086,10 @@ with tab_counter:
             ct_beam_width = (c4.slider("Beam width", 5, 100, 40, key="ct_b4_beamw")
                              if ct_search_kind != "Exhaustive" else 40)
             top_n = st.slider("Show top N teams", 1, 20, 5, key="ct_b4_topn")
+            ct_b4_pool_required_techs = _tech_required_multiselect(
+                "Required techs (every returned team must have)",
+                "ct_b4_pool_required_techs")
+            ct_b4_pool_min_special = _min_special_attackers_slider("ct_b4_pool_minspecial")
             if st.button("Search for the best team", type="primary", key="ct_b4_pool_go"):
                 if not vs_roster:
                     st.warning("Provide an enemy roster (pick a saved team, "
@@ -4767,7 +5099,9 @@ with tab_counter:
                         pool_size, [vs_roster], ct_turns, ct_good / 100, 1,
                         ct_max_weak, ct_max_megas, ct_search_kind, ct_beam_width,
                         ct_excluded, max_weak_types=ct_max_weak_types,
-                        always_include=ct_b4_include)
+                        always_include=ct_b4_include,
+                        required_techs=ct_b4_pool_required_techs or None,
+                        min_special_attackers=ct_b4_pool_min_special)
                     if rows:
                         st.session_state["ct_b4_pool_rows"] = rows
                         st.session_state["ct_b4_pool_vs"] = [ct_vs_name]
@@ -4892,6 +5226,9 @@ with tab_counter:
                          "turn 1 and see if that flips the outcome, feeding "
                          "the Win conditions table's own Trick Room caveat "
                          "below. Off leaves every result exactly as before.")
+                ct_b4_required_techs = _tech_required_multiselect(
+                    "Required techs (this bring-4 must have)", "ct_b4_required_techs")
+                ct_b4_min_special = _min_special_attackers_slider("ct_b4_minspecial")
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
@@ -4906,7 +5243,9 @@ with tab_counter:
                                 ability_overrides=ability_overrides,
                                 enemy_item_overrides=enemy_item_overrides,
                                 enemy_move_overrides=enemy_move_overrides,
-                                check_trick_room=ct_check_tr)
+                                check_trick_room=ct_check_tr,
+                                required_techs=ct_b4_required_techs or None,
+                                min_special_attackers=ct_b4_min_special)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -4969,6 +5308,10 @@ with tab_counter:
                         enemy_item_overrides=enemy_item_overrides,
                         enemy_move_overrides=enemy_move_overrides,
                         item_resolution_enemies=item_resolution_enemies)
+                    _render_lead_back_deep_dive(
+                        bring4_rows[pick - 1]["bring4"], vs_roster, our_sets, vs_sets,
+                        merged, moves, natures, typechart,
+                        key_prefix=f"ctb4_lb_{pick}")
 
                 st.markdown("**Full deep dive: all of `Our 6`, every configuration**")
                 st.caption("Every C(6,2) pair `our6` can form -- covers every "
@@ -5175,6 +5518,9 @@ with tab_counter:
                  "any ONE type's count, not how many types cross it).")
         ct_max_weak_types = ct_max_weak_types_raw or None
         top_n = st.slider("Show top N cores", 1, 20, 5, key="ct_mb4_topn")
+        ct_mb4_required_techs = _tech_required_multiselect(
+            "Required techs (every returned core must have)", "ct_mb4_required_techs")
+        ct_mb4_min_special = _min_special_attackers_slider("ct_mb4_minspecial")
 
         if len(ct_vs_names) < 1:
             st.warning("Pick at least one enemy roster.")
@@ -5185,7 +5531,9 @@ with tab_counter:
                 ct_min_enemies, ct_max_weak, ct_max_megas, ct_search_kind,
                 ct_beam_width if ct_search_kind != "Exhaustive" else 40,
                 ct_excluded, max_weak_types=ct_max_weak_types,
-                always_include=ct_mb4_include)
+                always_include=ct_mb4_include,
+                required_techs=ct_mb4_required_techs or None,
+                min_special_attackers=ct_mb4_min_special)
             if rows:
                 st.session_state["ct_mb4_rows"] = rows
                 st.session_state["ct_mb4_vs_names"] = ct_vs_names
@@ -5199,6 +5547,210 @@ with tab_counter:
                     _render_multi_bring4_core(r, shown_vs, turns=ct_turns,
                                               excluded_items=ct_excluded,
                                               key_prefix=f"ctmb4_{i}")
+
+    elif ct_mode == "Enemy's best response (to my team)":
+        st.caption("\"an option for the enemy to run their best response "
+                  "against my team\" -- the MIRROR of Multi-bring4: there, "
+                  "the pool is searched for OUR best team against named "
+                  "enemy rosters; here, YOUR OWN team is the fixed, known "
+                  "side, and the pool is searched for whatever an opponent "
+                  "could bring that scores best against it. Send a result "
+                  "straight to the Battle Simulator's opponent slot to "
+                  "actually play it out.")
+        er_my_source = st.selectbox(
+            "My team", ["(current Team Builder team)", _PASTE_OUR_LABEL] + list(teams),
+            key="ct_er_my_source")
+        if er_my_source == _PASTE_OUR_LABEL:
+            er_my_paste = st.text_area(
+                "Paste a Showdown export, a teamsheet token, or team .json",
+                height=160, key="ct_er_my_paste")
+            if er_my_paste.strip():
+                try:
+                    er_my_team, er_my_sets, _analysis = _load_team_text(er_my_paste, merged)
+                except ValueError as e:
+                    st.error(str(e))
+                    er_my_team, er_my_sets = [], {}
+                else:
+                    st.success(f"Parsed: {', '.join(er_my_team)}")
+            else:
+                er_my_team, er_my_sets = [], {}
+        elif er_my_source == "(current Team Builder team)":
+            er_my_team = get_state_team()
+            er_my_sets = st.session_state.get("sets") or {}
+        else:
+            er_my_team = list(teams[er_my_source])
+            er_my_sets = team_meta.get(er_my_source, {}).get("sets") or {}
+
+        pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
+                              key="ct_er_pool")
+        ct_er_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_er_include",
+            help="Forced into the search pool even if their own roster.csv "
+                 "Score wouldn't otherwise earn them a spot -- doesn't "
+                 "guarantee a forced name wins, only that it's actually "
+                 "considered.")
+        c1, c2, c3 = st.columns(3)
+        er_good = c1.slider("Good-pair bar (%)", 0, 100, 100, key="ct_er_good")
+        er_max_weak = c2.slider("Max weaknesses per type", 0, 6, 2, key="ct_er_maxweak")
+        er_max_megas = c3.slider("Max Mega-stone users on a team", 0, 6, 2,
+                                 key="ct_er_maxmegas")
+        c4, c5 = st.columns(2)
+        er_search_kind = c4.radio("Search", ["Exhaustive", "Beam (broader pool)"],
+                                  key="ct_er_kind", horizontal=True)
+        er_beam_width = (c5.slider("Beam width", 5, 100, 40, key="ct_er_beamw")
+                         if er_search_kind != "Exhaustive" else 40)
+        er_max_weak_types_raw = st.slider(
+            "Max types with 2+ weaknesses (0 = no cap)", 0, 18, 0,
+            key="ct_er_maxweaktypes",
+            help="Hard-drops any response where more than this many DIFFERENT "
+                 "types have 2+ members weak to them -- a BREADTH cap, "
+                 "distinct from 'Max weaknesses per type' above (which caps "
+                 "any ONE type's count, not how many types cross it).")
+        er_max_weak_types = er_max_weak_types_raw or None
+        top_n = st.slider("Show top N responses", 1, 20, 5, key="ct_er_topn")
+        er_required_techs = _tech_required_multiselect(
+            "Required techs (every returned response must have)",
+            "ct_er_required_techs")
+        er_min_special = _min_special_attackers_slider("ct_er_minspecial")
+
+        if not er_my_team:
+            st.warning("Provide your own team first -- pick '(current Team "
+                      "Builder team)', a saved team, or paste one.")
+        elif st.button("Search for the enemy's best response", type="primary",
+                       key="ct_er_go"):
+            _coverage, rows = _run_multi_bring4_search(
+                pool_size, [er_my_team], ct_turns, er_good / 100, 1,
+                er_max_weak, er_max_megas, er_search_kind, er_beam_width,
+                ct_excluded, max_weak_types=er_max_weak_types,
+                always_include=ct_er_include,
+                required_techs=er_required_techs or None,
+                min_special_attackers=er_min_special)
+            if rows:
+                st.session_state["ct_er_rows"] = rows
+                st.session_state["ct_er_my_team"] = er_my_team
+
+        rows = st.session_state.get("ct_er_rows")
+        shown_my_team = st.session_state.get("ct_er_my_team") or []
+        if rows:
+            for i, r in enumerate(rows[:top_n], start=1):
+                with st.expander(f"#{i} ({r['core_size']}) {' / '.join(r['core'])}",
+                                 expanded=(i == 1)):
+                    _render_multi_bring4_core(
+                        r, ["your team"], turns=ct_turns, excluded_items=ct_excluded,
+                        key_prefix=f"cter_{i}", target_name_lists=[shown_my_team],
+                        offer_send_to_battle_sim=True)
+
+    elif ct_mode == "Complete my team":
+        st.caption("\"run the full counter_table.py exercise but with N "
+                  "mandatory members, taken from a given team pokepaste "
+                  "... the counter table should seek to find remaining "
+                  "members to maximise wins\" -- paste a partial team (as "
+                  "few as 1, as many as 5), and the pool is searched for "
+                  "the best REMAINING member(s) to complete it, up to the "
+                  "core size(s) below. Every returned core keeps the "
+                  "pasted members' own SPECIES, but resolves everyone's "
+                  "item/moveset fresh -- the pasted set is a starting "
+                  "point, not pinned.")
+        ct_ct_paste = st.text_area(
+            "Paste the mandatory members (Showdown export, teamsheet "
+            "token, or team .json)", height=160, key="ct_ct_paste")
+        if ct_ct_paste.strip():
+            try:
+                ct_ct_required, _ct_ct_sets, _analysis = _load_team_text(
+                    ct_ct_paste, merged)
+            except ValueError as e:
+                st.error(str(e))
+                ct_ct_required = []
+            else:
+                st.success(f"Parsed: {', '.join(ct_ct_required)}")
+        else:
+            ct_ct_required = []
+
+        pool_size = st.slider("Search pool size (top-Score Pokemon)", 10, 300, 34,
+                              key="ct_ct_pool")
+        ct_ct_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_ct_include",
+            help="Forced into the search pool even if their own roster.csv "
+                 "Score wouldn't otherwise earn them a spot -- doesn't "
+                 "guarantee a forced name wins, only that it's actually "
+                 "considered. The mandatory members above are ALREADY "
+                 "forced into every result regardless -- this is for "
+                 "extra candidates you want genuinely considered for the "
+                 "remaining seats, not required.")
+        ct_ct_vs_names = st.multiselect("Enemy rosters", list(teams),
+                                        default=list(teams)[:3], key="ct_ct_vs")
+        c1, c2, c3 = st.columns(3)
+        ct_ct_good = c1.slider("Good-pair bar (%)", 0, 100, 100, key="ct_ct_good")
+        if len(ct_ct_vs_names) <= 1:
+            ct_ct_min_enemies = 1
+            c2.caption("Min enemies: 1 (only one roster selected)")
+        else:
+            ct_ct_min_enemies = c2.slider(
+                "Min enemies a member must be 'good' against", 1,
+                len(ct_ct_vs_names), min(2, len(ct_ct_vs_names)),
+                key="ct_ct_minenemies")
+        ct_ct_max_weak = c3.slider("Max weaknesses per type", 0, 6, 2, key="ct_ct_maxweak")
+        c4, c5 = st.columns(2)
+        ct_ct_max_megas = c4.slider("Max Mega-stone users on a team", 0, 6, 2,
+                                    key="ct_ct_maxmegas")
+        ct_ct_search_kind = c5.radio("Search", ["Exhaustive", "Beam (broader pool)"],
+                                     key="ct_ct_kind", horizontal=True)
+        ct_ct_beam_width = (st.slider("Beam width", 5, 100, 40, key="ct_ct_beamw")
+                            if ct_ct_search_kind != "Exhaustive" else 40)
+        ct_ct_max_weak_types_raw = st.slider(
+            "Max types with 2+ weaknesses (0 = no cap)", 0, 18, 0,
+            key="ct_ct_maxweaktypes",
+            help="Hard-drops any completed team where more than this many "
+                 "DIFFERENT types have 2+ members weak to them -- a BREADTH "
+                 "cap, distinct from 'Max weaknesses per type' above.")
+        ct_ct_max_weak_types = ct_ct_max_weak_types_raw or None
+        ct_ct_core_sizes = st.multiselect(
+            "Completed team size(s)", [4, 5, 6], default=[6], key="ct_ct_sizes",
+            help="How large the FINISHED team should be -- e.g. 4 mandatory "
+                 "members + size 6 searches for the best 2 more.")
+        top_n = st.slider("Show top N completions", 1, 20, 5, key="ct_ct_topn")
+        ct_ct_required_techs = _tech_required_multiselect(
+            "Required techs (every completed team must have)",
+            "ct_ct_required_techs")
+        ct_ct_min_special = _min_special_attackers_slider("ct_ct_minspecial")
+
+        if not ct_ct_required:
+            st.warning("Paste the mandatory members first.")
+        elif len(ct_ct_vs_names) < 1:
+            st.warning("Pick at least one enemy roster.")
+        elif not ct_ct_core_sizes:
+            st.warning("Pick at least one completed team size.")
+        elif any(s < len(ct_ct_required) for s in ct_ct_core_sizes):
+            st.warning(f"{len(ct_ct_required)} mandatory member(s) won't fit "
+                      f"in a completed size of "
+                      f"{min(s for s in ct_ct_core_sizes if s < len(ct_ct_required))} "
+                      f"-- pick a larger completed team size, or paste fewer "
+                      f"mandatory members.")
+        elif st.button("Complete my team", type="primary", key="ct_ct_go"):
+            target_name_lists = [list(teams[n]) for n in ct_ct_vs_names]
+            _coverage, rows = _run_multi_bring4_search(
+                pool_size, target_name_lists, ct_turns, ct_ct_good / 100,
+                ct_ct_min_enemies, ct_ct_max_weak, ct_ct_max_megas,
+                ct_ct_search_kind, ct_ct_beam_width, ct_excluded,
+                max_weak_types=ct_ct_max_weak_types,
+                always_include=ct_ct_include,
+                required_techs=ct_ct_required_techs or None,
+                min_special_attackers=ct_ct_min_special,
+                required_members=ct_ct_required,
+                core_sizes=ct_ct_core_sizes)
+            if rows:
+                st.session_state["ct_ct_rows"] = rows
+                st.session_state["ct_ct_vs_names"] = ct_ct_vs_names
+
+        rows = st.session_state.get("ct_ct_rows")
+        shown_vs = st.session_state.get("ct_ct_vs_names") or []
+        if rows:
+            for i, r in enumerate(rows[:top_n], start=1):
+                with st.expander(f"#{i} ({r['core_size']}) {' / '.join(r['core'])}",
+                                 expanded=(i == 1)):
+                    _render_multi_bring4_core(r, shown_vs, turns=ct_turns,
+                                              excluded_items=ct_excluded,
+                                              key_prefix=f"ctct_{i}")
 
     elif ct_mode == "Joint pair search":
         st.caption("GENERATE a partner for a fixed Pokemon: every legal pool member "
@@ -5534,6 +6086,33 @@ with tab_counter:
                  "but forced into every result. A size smaller than the "
                  "number of names picked here can never produce a group at "
                  "all -- that size will show 0 results.")
+        cov_exclude = st.multiselect(
+            "Exclude these Pokemon", all_names, key="ct_cov_exclude",
+            help="A HARD requirement in the other direction: none of these "
+                 "names may ever appear in a returned group, for any size. "
+                 "Naming a Pokemon here AND in 'Always include' is a real "
+                 "conflict -- every size comes back empty.")
+        cgc1, cgc2 = st.columns(2)
+        cov_gen_include = cgc1.multiselect(
+            "Include only generation(s)", list(range(1, 10)), default=[],
+            key="ct_cov_gen_include",
+            help="Narrows the auto-built search pool to just these "
+                 "generations before the search runs -- empty = no "
+                 "restriction (every generation). A form (Mega, regional, "
+                 "...) counts as its BASE species' generation -- Mega "
+                 "Lucario is gen 4, Arcanine-Hisui is gen 1. 'Always "
+                 "include'/'Suggested' names are NEVER dropped by this, "
+                 "even from an excluded generation -- an explicit name "
+                 "always wins over automatic pool narrowing, same as the "
+                 "top-Score cutoff itself.")
+        cov_gen_exclude = cgc2.multiselect(
+            "Exclude generation(s)", list(range(1, 10)), default=[],
+            key="ct_cov_gen_exclude",
+            help="The other direction -- these generations are dropped "
+                 "from the auto-built pool. Naming the same generation in "
+                 "both boxes excludes it (exclude wins on a conflict). "
+                 "Same 'explicit name always wins' exemption as 'Include "
+                 "only generation(s)' above.")
         cov_suggested = st.multiselect(
             "Suggested Pokemon", all_names, key="ct_cov_suggested",
             help="A softer quorum: a group only survives if at least the "
@@ -5604,10 +6183,38 @@ with tab_counter:
             cov_min_member_score = (
                 st.slider("Minimum Score", 200, 650, 400, key="ct_cov_min_score")
                 if cov_min_score_on else None)
+            cov_required_techs = _tech_required_multiselect(
+                "Required techs (every returned group must have)",
+                "ct_cov_required_techs")
+            cov_min_special = _min_special_attackers_slider("ct_cov_minspecial")
         cov_cap_on = st.checkbox(
-            "Cap a group's worst net weakness", key="ct_cov_cap_on")
+            "Cap a group's worst net weakness", key="ct_cov_cap_on",
+            help="Net = (members weak to a type) - (members resistant/"
+                 "immune to it) -- three Fire-weak members matter much "
+                 "less if four others resist it.")
         cov_max_net = (st.slider("Max net weakness", 0, 6, 2, key="ct_cov_max_net")
                       if cov_cap_on else None)
+        cov_abs_cap_on = st.checkbox(
+            "Cap a group's worst ABSOLUTE weakness", key="ct_cov_abs_cap_on",
+            help="No credit for how many other members resist that type -- "
+                 "just a raw count of how many are weak to it. Composes "
+                 "with the net cap above; both, either, or neither can be on.")
+        cov_max_weakness = (st.slider("Max absolute weakness", 0, 6, 2, key="ct_cov_max_weak")
+                            if cov_abs_cap_on else None)
+        cov_max_weak_types_raw = st.slider(
+            "Max types with 2+ absolute weaknesses (0 = no cap)", 0, 18, 0,
+            key="ct_cov_maxweaktypes2",
+            help="Hard-drops any group where more than this many DIFFERENT "
+                 "types have 2+ members weak to them -- a BREADTH cap, "
+                 "distinct from 'Max absolute weakness' above (which caps "
+                 "any ONE type's count, not how many types cross it).")
+        cov_max_weak_types = cov_max_weak_types_raw or None
+        cov_max_weak_types_3_raw = st.slider(
+            "Max types with 3+ absolute weaknesses (0 = no cap)", 0, 18, 0,
+            key="ct_cov_maxweaktypes3",
+            help="Same idea, at a higher bar -- how many DIFFERENT types "
+                 "may have 3+ members weak to them.")
+        cov_max_weak_types_3 = cov_max_weak_types_3_raw or None
         cov_real_wins = st.checkbox(
             "Also assess real pair wins (joint-race engine)", key="ct_cov_real_wins",
             help="\"assess all of the pairs in the counter table\" -- runs "
@@ -5647,11 +6254,16 @@ with tab_counter:
                 st.warning("Pick at least one group size.")
             else:
                 pool = build_candidate_pool(merged, top_n=cov_pool_size, prefs=prefs)
+                if cov_gen_include:
+                    pool = [n for n in pool if generation_map.get(n) in set(cov_gen_include)]
+                if cov_gen_exclude:
+                    pool = [n for n in pool if generation_map.get(n) not in set(cov_gen_exclude)]
                 # "Always include"/"Suggested" both win over the top-Score
                 # cutoff too -- a name a user explicitly names belongs in
                 # the search pool even if its own roster.csv Score wouldn't
                 # otherwise earn it a spot, not just protected from
-                # narrowing later.
+                # narrowing later. Also exempt from the generation filter
+                # just above, for the same reason.
                 pool = sorted(set(pool) | set(cov_include) | set(cov_suggested))
                 enemy_teams = {n: list(teams[n]) for n in ct_cov_teams}
                 sort_map = {"Perfect links": "perfect", "Mutual coverage": "coverage",
@@ -5668,11 +6280,16 @@ with tab_counter:
                         max_missing_frac=cov_missing_pct / 100.0,
                         no_duplicate_typing=cov_dup_typing,
                         max_net_weakness=cov_max_net,
+                        max_weakness=cov_max_weakness,
+                        max_weak_types=cov_max_weak_types,
+                        max_weak_types_3=cov_max_weak_types_3,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         must_include=cov_include, suggested=cov_suggested,
                         suggested_min=cov_suggested_min,
                         required_cores=cov_required_cores or None,
-                        min_member_score=cov_min_member_score)
+                        min_member_score=cov_min_member_score,
+                        exclude=cov_exclude, required_techs=cov_required_techs or None,
+                        moves_db=moves, min_special_attackers=cov_min_special)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams
@@ -5768,6 +6385,7 @@ with tab_counter:
                                          -(_real_win_rate(row["group"]) or 0.0)))
                 for i, row in enumerate(shown_rows, start=1):
                     exposed = {t: n for t, n in row["net_weakness"].items() if n > 0}
+                    exposed_abs = {t: n for t, n in row["weakness"].items() if n > 0}
                     score_str = f"{row['avg_score']:.1f}" if row["avg_score"] is not None else "-"
                     with st.expander(f"#{i}: {' / '.join(row['group'])}",
                                      expanded=first_shown):
@@ -5790,6 +6408,14 @@ with tab_counter:
                                        f"{t} ({n})" for t, n in exposed.items())
                                       if exposed else ""))
                         st.caption(weak_str)
+                        abs_weak_str = ("Worst absolute weakness: " + str(row["worst_weakness"])
+                                       + ("  |  Weak types: " + ", ".join(
+                                           f"{t} ({n})" for t, n in exposed_abs.items())
+                                          if exposed_abs else ""))
+                        st.caption(abs_weak_str)
+                        st.caption(
+                            f"Types with 2+ weak: {row['weak_type_breadth_2']}  |  "
+                            f"Types with 3+ weak: {row['weak_type_breadth_3']}")
                         if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
                             st.caption("Pair performance (this group's own links):")
                             pair_table = []
@@ -5860,7 +6486,114 @@ with tab_counter:
                             st.session_state["ct_b4_our_paste"] = "\n\n".join(row["group"])
                             st.rerun()
 
-    else:  # Round-robin (saved teams only)
+    elif ct_mode == "Import pair coverage":
+        st.caption("\"With counter_table.py having done work on generating "
+                   "the best /15 pairs vs enemy pairs, I want a section in "
+                   "the streamlit app to somehow upload this output, and "
+                   "use the streamlit app to try to create the best teams "
+                   "of 6\" -- upload a --multi-bring4 --xlsx export (real "
+                   "combat, real sets already decided) and assemble teams "
+                   "of 6 out of its own top pairs, PLUS every saved team's "
+                   "own real pairs (always included), without re-running "
+                   "any combat simulation. A team is built from 3 KNOWN, "
+                   "already-raced pairs -- never a new cross-pairing "
+                   "(one member from pair A + one from pair B) this app "
+                   "never actually raced.")
+        up_pc = st.file_uploader(
+            "Upload a --multi-bring4 --xlsx export", type=["xlsx"], key="ct_pc_upload")
+        if up_pc is not None:
+            try:
+                pair_rows, detail_rows, target_name_lists = _parse_pair_coverage_xlsx(
+                    up_pc.read())
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                st.session_state["ct_pc_pair_rows"] = pair_rows
+                st.session_state["ct_pc_detail_rows"] = detail_rows
+                st.session_state["ct_pc_target_name_lists"] = target_name_lists
+                st.success(f"Loaded {len(pair_rows)} pair/enemy rows across "
+                          f"{len(target_name_lists)} enemy team(s).")
+        pair_rows = st.session_state.get("ct_pc_pair_rows")
+        if pair_rows:
+            target_name_lists = st.session_state["ct_pc_target_name_lists"]
+            detail_rows = st.session_state["ct_pc_detail_rows"]
+            uploaded_names = sorted({n for r in pair_rows for n in r["pair"]})
+            st.caption(f"{len(uploaded_names)} uploaded Pokemon, "
+                      f"{len(target_name_lists)} enemy team(s): " +
+                      ", ".join(", ".join(t) for t in target_name_lists))
+            pc_include = st.multiselect(
+                "Always include these Pokemon", all_names, key="ct_pc_include",
+                help="A HARD requirement: every returned team contains ALL "
+                     "of these names.")
+            pc_exclude = st.multiselect(
+                "Exclude these Pokemon", all_names, key="ct_pc_exclude",
+                help="Any KNOWN pair containing one of these names is "
+                     "dropped from consideration entirely.")
+            pc_sizes = st.multiselect("Team size(s)", [4, 6], default=[6], key="ct_pc_sizes")
+            with st.expander("Advanced: techs, weaknesses, minimum special attackers"):
+                pc_required_techs = _tech_required_multiselect(
+                    "Required techs (every returned team must have)",
+                    "ct_pc_required_techs")
+                pc_min_special = _min_special_attackers_slider("ct_pc_minspecial")
+                pc_abs_cap_on = st.checkbox(
+                    "Cap a type's max absolute weakness", key="ct_pc_abs_cap_on",
+                    help="Applied per type, with the default exception "
+                         "already used everywhere else on this tab: one "
+                         "type may sit at this cap + 1 if its own net "
+                         "weakness (weak minus resist) is <= 1.")
+                pc_max_weak = (st.slider("Max absolute weakness", 0, 6, 2, key="ct_pc_max_weak")
+                              if pc_abs_cap_on else None)
+            pc_top_n = st.slider("Top teams to show", 1, 40, 15, key="ct_pc_top_n")
+            if st.button("Find best teams", type="primary", key="ct_pc_go"):
+                merged_teams = {n: list(t) for n, t in teams.items()}
+                with st.spinner("Reconstructing pair coverage and racing "
+                                f"{len(merged_teams)} named team(s) own pairs..."):
+                    from counter_finder import (coverage_from_pair_rows,
+                                                merge_named_team_pairs,
+                                                pair_coverage_teams)
+                    coverage = coverage_from_pair_rows(
+                        pair_rows, detail_rows, target_name_lists, merged,
+                        moves, natures, typechart)
+                    merge_named_team_pairs(coverage, merged_teams, team_meta, merged,
+                                           moves, natures, typechart)
+                    results_by_size = {}
+                    for size in (pc_sizes or [6]):
+                        results_by_size[size] = pair_coverage_teams(
+                            coverage, group_size=size, max_weak=pc_max_weak,
+                            required_techs=pc_required_techs or None,
+                            min_special_attackers=pc_min_special,
+                            must_include=pc_include or None,
+                            exclude=pc_exclude or None, top_n=pc_top_n)
+                    st.session_state["ct_pc_coverage_pool_size"] = len(coverage["candidate_pool"])
+                    st.session_state["ct_pc_results_by_size"] = results_by_size
+            results_by_size = st.session_state.get("ct_pc_results_by_size")
+            if results_by_size:
+                st.caption(f"{st.session_state.get('ct_pc_coverage_pool_size', '?')} "
+                          f"Pokemon in the combined pool (uploaded + named teams).")
+                for size, results in results_by_size.items():
+                    st.markdown(f"**Best {len(results)} team(s) of {size}:**")
+                    if not results:
+                        st.info("No team passed every hard filter -- widen "
+                               "the weakness caps or drop a required tech.")
+                        continue
+                    st.dataframe(pd.DataFrame([
+                        {"Team": " / ".join(r["team"]),
+                         "Score": round(r["score"], 1),
+                         "From pairs": ", ".join(f"{a}+{b}" for a, b in r["pairs"])}
+                        for r in results]), width='stretch', hide_index=True)
+                    for i, r in enumerate(results, start=1):
+                        with st.expander(f"#{i}: {' / '.join(r['team'])} "
+                                        f"(Score {round(r['score'], 1)})"):
+                            for n in r["team"]:
+                                s = r["sets"][n]
+                                st.markdown(f"**{n}** -- {s['item']}: "
+                                          f"{', '.join(s['moves'])}")
+                            if st.button("Send to Battle Simulator as opponent",
+                                        key=f"ct_pc_sim_{size}_{i}"):
+                                send_to_battle_simulator_as_opponent(r["team"], r["sets"])
+                                st.success("Sent -- open the Battle Simulator tab.")
+
+    elif ct_mode == "Round-robin (saved teams only)":
         st.caption("\"Give me an option ... to only run all the saved teams "
                    "vs the other teams (including themself), rather than "
                    "creating teams\" -- every saved team raced against "
