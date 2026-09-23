@@ -171,6 +171,72 @@ class TestMonotonicPrune(unittest.TestCase):
             ["Incineroar", "Kingambit"], self.merged, None))
 
 
+class TestAbilityGrantedTypeImmunity(unittest.TestCase):
+    """"Hydreigon and any pokemon with Levitate should be considered
+    immune to ground, I see this come up in the coverage table" --
+    `defensive_chart` (roster.csv's own per-type multiplier) is a pure
+    TYPE chart reading with no notion of an ability-granted immunity;
+    `type_matchup` folds one in via `damage.TYPE_IMMUNITY_ABILITIES`, the
+    same catalogue the real combat engine already uses.
+
+    Real, verified fixture: Eelektross (pure Electric, 100% usage
+    Levitate) has NO type-chart reason to resist Ground (`defensive_
+    chart["Ground"] == 2.0`, weak) -- its immunity is ENTIRELY
+    ability-granted, the cleanest possible regression case."""
+
+    def setUp(self):
+        self.merged = world()["merged"]
+
+    def test_eelektross_reads_as_immune_to_ground_not_weak(self):
+        dc = self.merged["Eelektross"]["defensive_chart"]["Ground"]
+        self.assertEqual(dc, 2.0, "fixture assumes a pure type-chart-weak "
+                                  "base with no other Ground resistance")
+        self.assertEqual(ts.type_matchup("Eelektross", self.merged, "Ground"),
+                         "immune")
+
+    def test_weak_resist_excludes_eelektross_from_ground_weak(self):
+        weak, resist = ts._weak_resist(["Eelektross"], self.merged, "Ground")
+        self.assertEqual(weak, [])
+        self.assertEqual(resist, ["Eelektross"])
+
+    def test_a_type_chart_weak_pokemon_without_the_ability_still_counts(self):
+        """Regression guard: this isn't a blanket "never weak to Ground"
+        rule -- Kingambit (Dark/Steel, ability Defiant, no Ground-immunity
+        ability) is weak to Ground by TYPING alone and must still show up
+        as weak."""
+        ability_names = [a for a, _pct in self.merged["Kingambit"]["abilities_usage"]]
+        self.assertNotIn("Levitate", ability_names)
+        weak, _resist = ts._weak_resist(["Kingambit"], self.merged, "Ground")
+        self.assertEqual(weak, ["Kingambit"])
+
+    def test_hard_violations_no_longer_flags_a_levitate_user_for_ground(self):
+        """The hard `--max-weak`/`--type-limit` filter (`hard_violations`
+        -> `_weak_resist`) must agree with the display -- Eelektross alone
+        must never trip a Ground cap of 0."""
+        self.assertFalse(ts.hard_violations(
+            ["Eelektross"], self.merged, type_limits={"Ground": {"max_weak": 0}}))
+
+    def test_app_weakness_table_buckets_a_levitate_user_as_immune(self):
+        """The Team Builder's own weakness display (`app.weakness_table`,
+        "I see this come up in the coverage table") must agree too --
+        Eelektross lands in the "Immune" column for Ground, not "Weak"."""
+        from app import weakness_table
+        rows = weakness_table(["Eelektross"])
+        ground_row = next(r for r in rows.to_dict("records") if r["Type"] == "Ground")
+        self.assertEqual(ground_row["Weak"], "")
+        self.assertEqual(ground_row["Immune"], "Eelektross")
+
+    def test_pair_defensive_synergy_credits_the_ability_immunity(self):
+        """`_pair_defensive_synergy`/`_pair_mutual_resist_coverage`
+        (counter_finder.py, feeds "2-2-2 teambuilding"'s own pair table)
+        must not count Ground as a `shared_weak` for a pair where one
+        side's ONLY reason to be safe is Levitate."""
+        import counter_finder as cf
+        r = cf._pair_defensive_synergy("Eelektross", "Kingambit", self.merged)
+        self.assertNotIn("Ground", r["shared_weak"])
+        self.assertIn("Ground", r["covered_weak"])
+
+
 class TestBeamSearchWiring(unittest.TestCase):
     """`beam_search_teams` actually USES max_weak/type_limits/required_cores
     when given them -- the regression test for the wiring bug (`src/app.py`

@@ -225,20 +225,25 @@ def weakness_table(team, max_weak=2, type_limits=None):
     who's outright immune, and the net (weak - resist - immune). `max_weak`/
     `type_limits` decide "Over limit" -- pass whatever the run actually used
     (the Advanced per-type override when one is set, else the global slider)
-    so the table's own "Over limit" column agrees with the search."""
+    so the table's own "Over limit" column agrees with the search.
+
+    "Immune" also covers an ABILITY-granted immunity (Levitate/Ground,
+    Flash Fire/Fire, ...), not just a type-chart 0x -- `team_search.type_
+    matchup`, the same read every other weakness display in this app uses."""
     from species_data import TYPES
+    from team_search import type_matchup
     rows = []
     for t in TYPES:
         weak, resist, immune = [], [], []
         for n in team:
-            dc = merged[n].get("defensive_chart")
-            if not dc:
+            if not merged[n].get("defensive_chart"):
                 continue
-            if dc[t] > 1.0:
+            m = type_matchup(n, merged, t)
+            if m == "weak":
                 weak.append(n)
-            elif dc[t] == 0.0:
+            elif m == "immune":
                 immune.append(n)
-            elif dc[t] < 1.0:
+            elif m == "resist":
                 resist.append(n)
         limit = ((type_limits or {}).get(t) or {}).get("max_weak", max_weak)
         limit = max_weak if limit is None else limit

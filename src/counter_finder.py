@@ -359,11 +359,10 @@ def member_weakness_summary(core, merged):
     "weak_to_0": int, "total_weakness_instances": int}.
     """
     from species_data import TYPES
-    from team_search import _weak_resist
+    from team_search import _weak_resist, type_matchup
     per_member = {}
     for n in core:
-        dc = (merged.get(n) or {}).get("defensive_chart") or {}
-        per_member[n] = sum(1 for t in TYPES if dc.get(t, 1.0) > 1.0)
+        per_member[n] = sum(1 for t in TYPES if type_matchup(n, merged, t) == "weak")
     counts = list(per_member.values())
     per_type = {t: len(_weak_resist(list(core), merged, t)[0]) for t in TYPES}
     return {
@@ -596,23 +595,25 @@ def _pair_defensive_synergy(name1, name2, merged):
     defensively (e.g., all super effective attacks into one are resisted by
     the other)".
 
-    For every type, reads each member's own `defensive_chart` (roster.csv's
-    per-type multiplier -- the SAME source `_weak_resist`/`member_weakness_
-    summary` already read, so "weak to" means the same thing everywhere in
-    this module): `shared_weak` is every type BOTH members take super-
-    effective damage from (a real gap this pair has NO answer to); `covered_
-    weak` is every type exactly ONE of them is weak to while the other
-    resists or is neutral/immune (a weakness the partner actually patches).
+    For every type, reads each member's own matchup via `team_search.type_
+    matchup` (the SAME per-species read `_weak_resist`/`member_weakness_
+    summary` already use -- a Levitate user counts as immune to Ground
+    here too, not just in the raw `defensive_chart` reading, so "weak to"
+    means the same thing everywhere in this module): `shared_weak` is
+    every type BOTH members take super-effective damage from (a real gap
+    this pair has NO answer to); `covered_weak` is every type exactly ONE
+    of them is weak to while the other resists or is neutral/immune (a
+    weakness the partner actually patches).
 
     Returns {"shared_weak": [type, ...], "covered_weak": [type, ...]} -- a
     PERFECTLY covering pair has an empty `shared_weak`.
     """
     from species_data import TYPES
-    dc1 = merged[name1]["defensive_chart"]
-    dc2 = merged[name2]["defensive_chart"]
+    from team_search import type_matchup
     shared, covered = [], []
     for t in TYPES:
-        w1, w2 = dc1.get(t, 1.0) > 1.0, dc2.get(t, 1.0) > 1.0
+        w1 = type_matchup(name1, merged, t) == "weak"
+        w2 = type_matchup(name2, merged, t) == "weak"
         if w1 and w2:
             shared.append(t)
         elif w1 != w2:
@@ -638,12 +639,13 @@ def _pair_mutual_resist_coverage(name1, name2, merged):
     true for a side with no weaknesses at all), the "side feature" this
     was asked for: a pair that "perfectly... covers type weaknesses"."""
     from species_data import TYPES
-    dc1 = merged[name1]["defensive_chart"]
-    dc2 = merged[name2]["defensive_chart"]
-    a_weak = [t for t in TYPES if dc1.get(t, 1.0) > 1.0]
-    b_weak = [t for t in TYPES if dc2.get(t, 1.0) > 1.0]
-    a_resisted_by_b = sum(1 for t in a_weak if dc2.get(t, 1.0) < 1.0)
-    b_resisted_by_a = sum(1 for t in b_weak if dc1.get(t, 1.0) < 1.0)
+    from team_search import type_matchup
+    a_weak = [t for t in TYPES if type_matchup(name1, merged, t) == "weak"]
+    b_weak = [t for t in TYPES if type_matchup(name2, merged, t) == "weak"]
+    a_resisted_by_b = sum(1 for t in a_weak
+                          if type_matchup(name2, merged, t) in ("resist", "immune"))
+    b_resisted_by_a = sum(1 for t in b_weak
+                          if type_matchup(name1, merged, t) in ("resist", "immune"))
     total_weak = len(a_weak) + len(b_weak)
     total_resisted = a_resisted_by_b + b_resisted_by_a
     coverage_frac = (total_resisted / total_weak) if total_weak else 1.0

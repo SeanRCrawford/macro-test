@@ -155,18 +155,65 @@ def build_pair_matrix(pool, enemy_pairs, merged, moves_db, natures, typechart,
 
 # ---------------------------------------------------------------- synergy
 
+def type_matchup(name, merged, t):
+    """"weak"/"resist"/"immune"/"neutral" for how `name` (a `merged` key)
+    takes a `t`-type hit -- the ONE place an ability-granted immunity
+    (Levitate/Ground, Flash Fire/Fire, Water Absorb/Water, ...) gets
+    folded into roster.csv's own pure TYPE-chart `defensive_chart`
+    reading, so every weakness display/search in this app agrees:
+    `_weak_resist` below, `counter_finder.member_weakness_summary`/`_pair_
+    defensive_synergy`/`_pair_mutual_resist_coverage`, and `app.py`'s own
+    Team Builder `weakness_table`.
+
+    "Hydreigon and any pokemon with Levitate should be considered immune
+    to ground, I see this come up in the coverage table" -- `defensive_
+    chart` already reflects a dual-TYPING immunity (Flying's own Ground
+    immunity is baked into the combined multiplier), but has no notion of
+    an ABILITY one: e.g. Eelektross (pure Electric, ability Levitate)
+    reads `defensive_chart["Ground"] == 2.0` (weak) with no adjustment,
+    the same gap `damage.py`'s own `ability_type_immunity` already exists
+    to close for REAL combat (`TYPE_IMMUNITY_ABILITIES`) -- reused here
+    directly rather than a second, drifting copy. A member's DEFAULT
+    (most-used) ability decides it, the same static species-level
+    convention `counter_finder.TECH_ABILITIES` already uses.
+
+    Returns "neutral" for a name with no `defensive_chart` at all (a data
+    gap, not a real answer -- every caller already treats that the same
+    way its own `if not dc: continue`/`dc.get(t, 1.0)` fallback did)."""
+    from combatants import _default_ability
+    from damage import TYPE_IMMUNITY_ABILITIES
+    rec = merged.get(name) or {}
+    dc = rec.get("defensive_chart")
+    if not dc:
+        return "neutral"
+    ability = _default_ability(rec.get("abilities_usage") or [])
+    if TYPE_IMMUNITY_ABILITIES.get(ability) == t:
+        return "immune"
+    mult = dc.get(t, 1.0)
+    if mult > 1.0:
+        return "weak"
+    if mult == 0.0:
+        return "immune"
+    if mult < 1.0:
+        return "resist"
+    return "neutral"
+
+
 def _weak_resist(team, merged, t):
     """(weak, resist) member-name lists for one type -- the one place this
-    per-type split is computed, shared by the soft count and the hard check
-    so they can never disagree on what "weak to Fire" means."""
+    per-team split is computed, shared by the soft count and the hard
+    check so they can never disagree on what "weak to Fire" means. `resist`
+    also covers an outright immunity (type-chart 0x, or an ability-granted
+    one via `type_matchup`) -- this function doesn't otherwise distinguish
+    "resist" from "immune", so either fits its existing binary split."""
     weak, resist = [], []
     for n in team:
-        dc = merged[n].get("defensive_chart")
-        if not dc:
+        if not (merged.get(n) or {}).get("defensive_chart"):
             continue
-        if dc[t] > 1.0:
+        m = type_matchup(n, merged, t)
+        if m == "weak":
             weak.append(n)
-        elif dc[t] < 1.0:
+        elif m in ("resist", "immune"):
             resist.append(n)
     return weak, resist
 
