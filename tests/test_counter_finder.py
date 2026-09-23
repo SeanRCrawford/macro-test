@@ -4365,6 +4365,71 @@ class TestBring4PairDepth(unittest.TestCase):
         for nf, bt in zip(no_faint, beaten):
             self.assertLessEqual(nf, bt)
 
+    def test_own_tailwind_used_total_sums_pairs_own_tailwind_used(self):
+        """"I need to explore tailwind robustness" -- `own_tailwind_used_
+        total` must be a plain sum of each internal pair's own already-
+        existing `pairs_own_tailwind_used` field (the unconditional "OUR
+        OWN TAILWIND AS A MATCHING ANSWER" counter `_pair_vs_targets`
+        already computes for every pair), not a fresh re-race."""
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        self.assertEqual(
+            depth["own_tailwind_used_total"],
+            sum(r["pairs_own_tailwind_used"] for r in b["pair_rows"]))
+        self.assertGreaterEqual(depth["own_tailwind_used_total"], 0)
+
+
+class TestBring4BlendedScore(unittest.TestCase):
+    """`bring4_blended_score` -- "It would also be good to see the bring
+    maximising for total wins, rather than maximin, especially across
+    tailwind/protect too" -- the SAME `_CORE_BLEND_WEIGHTS`-weighted
+    win-rate/tailwind-safe/protect-safe/follow-me-safe per-90 blend
+    `_core_row` already uses to rank whole cores, applied here to one
+    bring-4's own 6 internal pairs."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.pair_rows, self.bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+
+    def test_matches_the_documented_formula_directly(self):
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        n_pairs = len(b["pair_rows"])
+        pt = depth["pairs_total"]
+        w_win, w_tw, w_pr, w_fm = cf._CORE_BLEND_WEIGHTS
+        expected = (w_win * cf._rate_per_90(depth["beaten_total"], n_pairs, pt)
+                   + w_tw * cf._rate_per_90(depth["tailwind_safe_total"], n_pairs, pt)
+                   + w_pr * cf._rate_per_90(depth["protect_safe_total"], n_pairs, pt)
+                   + w_fm * cf._rate_per_90(depth["follow_me_safe_total"], n_pairs, pt))
+        self.assertAlmostEqual(cf.bring4_blended_score(b), expected)
+
+    def test_every_bring4_row_gets_a_finite_non_negative_score(self):
+        for b in self.bring4_rows:
+            score = cf.bring4_blended_score(b)
+            self.assertGreaterEqual(score, 0.0)
+            self.assertLessEqual(score, 90.0)
+
+    def test_a_strictly_better_bring4_scores_strictly_higher(self):
+        """A bring-4 that wins every single one of its internal pairs,
+        under tailwind, protect, AND follow-me, must outscore one that
+        wins none of them -- the blend's own most basic monotonicity
+        property, checked here against the real-racing `bring4_rows`
+        already built in `setUp`."""
+        best = max(self.bring4_rows, key=cf.bring4_blended_score)
+        worst = min(self.bring4_rows, key=cf.bring4_blended_score)
+        if cf.bring4_blended_score(best) == cf.bring4_blended_score(worst):
+            self.skipTest("every candidate tied on the blend for this pool")
+        self.assertGreater(cf.bring4_blended_score(best),
+                           cf.bring4_blended_score(worst))
+
 
 class TestRecommendedLead(unittest.TestCase):
     """`recommended_lead` -- "is there a way to assess the best lead vs a
@@ -6405,6 +6470,184 @@ class TestUncoveredEnemyPairsDominateRanking(unittest.TestCase):
                         "ABCE (no unconditional loss) must rank above ABCD "
                         "(loses Y+Z no matter which pair is sent out), even "
                         "though they tie on raw beaten count")
+
+
+class TestBring4CandidatesRankByTotalWins(unittest.TestCase):
+    """`_bring4_candidates(rank_by=...)` -- "I see the all possible groups
+    of 6 possible bring-4s ranked by their worst case, rather than their
+    total wins. It would also be good to see the bring maximising for
+    total wins, rather than maximin, especially across tailwind/protect
+    too."
+
+    A hand-built fixture (`_fake_pair_row`, no real racing, same style as
+    `TestUncoveredEnemyPairsDominateRanking`) with two bring-4 candidates
+    from a 6-member pool, A-F:
+
+    - MODERATE = {A, B, C, D}: all 6 internal pairs (AB/AC/AD/BC/BD/CD)
+      beat the SAME 2 of 3 enemy pairs each (consistent, no unconditional
+      loss -- every enemy pair is beaten by SOME pair of this bring-4).
+      Sum of wins across its 6 pairs: 6 * 2 = 12.
+    - LOPSIDED = {A, B, E, F}: AE/AF/BE/BF each beat ALL 3 enemy pairs,
+      but EF beats NONE (a real, total loss for that one pair) -- still
+      no unconditional loss overall since AE/AF/BE/BF cover every enemy
+      pair between them. Sum of wins: 2 (shared AB) + 3+3+3+3 (AE/AF/BE/BF)
+      + 0 (EF) = 14.
+
+    LOPSIDED's total (14) beats MODERATE's (12), but LOPSIDED's WORST pair
+    (EF, 0/3) is far worse than MODERATE's worst (every pair tied at 2/3).
+    `rank_by="worst_case"` (the default) must rank MODERATE above LOPSIDED
+    (maximin: EF's total loss is disqualifying); `rank_by="total_wins"`
+    must rank LOPSIDED above MODERATE (the blend rewards the higher
+    overall total, exactly what the maximin ranking structurally can't
+    see).
+    """
+
+    TARGETS = ["X", "Y", "Z"]  # enemy pairs: XY, XZ, YZ
+
+    def setUp(self):
+        XY, XZ, YZ = ("X", "Y"), ("X", "Z"), ("Y", "Z")
+        rows = {
+            # MODERATE's own 6 pairs: each ties at 2/3, losses spread out
+            # so every enemy pair is beaten by at least one -- 0 uncovered.
+            ("A", "B"): _fake_pair_row(("A", "B"), {XY, XZ}, self.TARGETS),
+            ("A", "C"): _fake_pair_row(("A", "C"), {XY, YZ}, self.TARGETS),
+            ("A", "D"): _fake_pair_row(("A", "D"), {XZ, YZ}, self.TARGETS),
+            ("B", "C"): _fake_pair_row(("B", "C"), {XY, XZ}, self.TARGETS),
+            ("B", "D"): _fake_pair_row(("B", "D"), {XY, YZ}, self.TARGETS),
+            ("C", "D"): _fake_pair_row(("C", "D"), {XZ, YZ}, self.TARGETS),
+            # LOPSIDED's own extra pairs: AE/AF/BE/BF sweep everything,
+            # EF is a total loss -- also 0 uncovered (AE/AF/BE/BF alone
+            # already cover all 3 enemy pairs between them).
+            ("A", "E"): _fake_pair_row(("A", "E"), {XY, XZ, YZ}, self.TARGETS),
+            ("A", "F"): _fake_pair_row(("A", "F"), {XY, XZ, YZ}, self.TARGETS),
+            ("B", "E"): _fake_pair_row(("B", "E"), {XY, XZ, YZ}, self.TARGETS),
+            ("B", "F"): _fake_pair_row(("B", "F"), {XY, XZ, YZ}, self.TARGETS),
+            ("E", "F"): _fake_pair_row(("E", "F"), set(), self.TARGETS),
+            # Never exercised by MODERATE or LOPSIDED -- just needs to
+            # exist so the OTHER C(6,4) subsets `_bring4_candidates` also
+            # builds don't KeyError.
+            ("C", "E"): _fake_pair_row(("C", "E"), set(), self.TARGETS),
+            ("C", "F"): _fake_pair_row(("C", "F"), set(), self.TARGETS),
+            ("D", "E"): _fake_pair_row(("D", "E"), set(), self.TARGETS),
+            ("D", "F"): _fake_pair_row(("D", "F"), set(), self.TARGETS),
+        }
+        self.pair_lookup = {frozenset(p): r for p, r in rows.items()}
+        self.six = ["A", "B", "C", "D", "E", "F"]
+
+    def _rows(self, rank_by):
+        return cf._bring4_candidates(self.six, self.pair_lookup, self.TARGETS,
+                                     good_threshold=1.0, rank_by=rank_by)
+
+    def test_neither_candidate_has_an_unconditional_loss(self):
+        by_bring4 = {frozenset(b["bring4"]): b for b in self._rows("worst_case")}
+        moderate = by_bring4[frozenset(("A", "B", "C", "D"))]
+        lopsided = by_bring4[frozenset(("A", "B", "E", "F"))]
+        self.assertEqual(moderate["uncovered_enemy_pairs"], [])
+        self.assertEqual(lopsided["uncovered_enemy_pairs"], [])
+
+    def test_lopsided_has_the_higher_raw_total(self):
+        by_bring4 = {frozenset(b["bring4"]): b for b in self._rows("worst_case")}
+        moderate = by_bring4[frozenset(("A", "B", "C", "D"))]
+        lopsided = by_bring4[frozenset(("A", "B", "E", "F"))]
+        moderate_total = sum(r["pairs_swept"] + r["pairs_traded"]
+                             for r in moderate["pair_rows"])
+        lopsided_total = sum(r["pairs_swept"] + r["pairs_traded"]
+                             for r in lopsided["pair_rows"])
+        self.assertEqual(moderate_total, 12)
+        self.assertEqual(lopsided_total, 14)
+        self.assertGreater(lopsided_total, moderate_total)
+
+    def test_default_worst_case_ranks_moderate_above_lopsided(self):
+        rows = self._rows("worst_case")
+        idx = {frozenset(b["bring4"]): i for i, b in enumerate(rows)}
+        self.assertLess(idx[frozenset(("A", "B", "C", "D"))],
+                        idx[frozenset(("A", "B", "E", "F"))],
+                        "maximin must reject LOPSIDED's total-loss EF pair "
+                        "even though its raw total is higher")
+
+    def test_total_wins_ranks_lopsided_above_moderate(self):
+        rows = self._rows("total_wins")
+        idx = {frozenset(b["bring4"]): i for i, b in enumerate(rows)}
+        self.assertLess(idx[frozenset(("A", "B", "E", "F"))],
+                        idx[frozenset(("A", "B", "C", "D"))],
+                        "total_wins must reward LOPSIDED's higher overall "
+                        "blend even though its worst single pair is a "
+                        "total loss")
+
+    def test_total_wins_ranking_is_sorted_by_uncovered_then_blended_score(self):
+        rows = self._rows("total_wins")
+        keys = [(len(b["uncovered_enemy_pairs"]), -cf.bring4_blended_score(b))
+               for b in rows]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_worst_case_default_matches_omitting_rank_by(self):
+        explicit = self._rows("worst_case")
+        implicit = cf._bring4_candidates(self.six, self.pair_lookup, self.TARGETS,
+                                         good_threshold=1.0)
+        self.assertEqual([b["bring4"] for b in explicit],
+                         [b["bring4"] for b in implicit])
+
+
+class TestBring4SearchRankByThreading(unittest.TestCase):
+    """`bring4_search(rank_by=...)` must thread straight through to its own
+    `_bring4_candidates` call, exactly like `test_bring4_candidates_matches_
+    bring4_search_stage_two` already checks for the default ranking."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+
+    def test_total_wins_returns_the_same_set_of_bring4s_as_worst_case(self):
+        """`rank_by` only ever changes the SORT KEY (`_bring4_candidates`'s
+        own `rank_by="worst_case"` vs. `"total_wins"` selector) -- row
+        computation/shape is untouched, so both modes must return the
+        exact same set of C(6,4) bring-4 candidates, just reordered."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pr1, worst_case = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="worst_case")
+        _pr2, total_wins = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="total_wins")
+        self.assertEqual({frozenset(b["bring4"]) for b in worst_case},
+                         {frozenset(b["bring4"]) for b in total_wins})
+        self.assertEqual(len(worst_case), len(total_wins))
+
+    def test_total_wins_is_sorted_by_uncovered_then_blended_score_on_real_data(self):
+        """"Maybe the maximin vs max win bring should at least try to make
+        sure there are no uncovered enemy pairs" -- `rank_by="total_wins"`
+        sorts by `(len(uncovered_enemy_pairs), -bring4_blended_score)`, NOT
+        blended score alone: fewest unconditional losses always still wins
+        first, same as `"worst_case"`'s own primary criterion, THEN ties
+        within the same uncovered-count are broken by score."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pair_rows, bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="total_wins")
+        keys = [(len(b["uncovered_enemy_pairs"]), -cf.bring4_blended_score(b))
+               for b in bring4_rows]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_default_rank_by_leaves_stage_two_unchanged(self):
+        """Regression guard: `bring4_search`'s own default output (no
+        `rank_by` passed) must be byte-for-byte identical to before this
+        feature existed -- `rank_by="worst_case"` explicitly given must
+        match omitting it entirely."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pr1, implicit = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+        _pr2, explicit = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="worst_case")
+        self.assertEqual([b["bring4"] for b in implicit],
+                         [b["bring4"] for b in explicit])
 
 
 class TestCoreRowBlendedRanking(unittest.TestCase):

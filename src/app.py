@@ -4104,17 +4104,28 @@ def _bring4_rows_df(bring4_rows, total):
     "It should also show the chosen mega vs a given six" -- `mega_used`
     (`_bring4_candidates`'s own field, already computed for every row) as
     its own column, `"-"` for a bring carrying no Mega-stone holder at
-    all."""
+    all. "Own TW used" (`bring4_pair_depth`'s own `own_tailwind_used_
+    total`) and "Score" (`bring4_blended_score`) surface tailwind-
+    robustness and the total-wins ranking alongside the maximin columns
+    above, regardless of which ranking (`rank_by`) actually sorted these
+    rows -- "explore tailwind robustness ... as long as it maximises
+    total wins"."""
+    from counter_finder import bring4_blended_score, bring4_pair_depth
     n_pairs = len(bring4_rows[0]["pair_rows"]) if bring4_rows else 6
-    return pd.DataFrame([
-        {"Bring-4": " / ".join(b["bring4"]),
-         "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
-         "Good pairs": f"{b['pairs_good']}/{n_pairs}",
-         "Worst pair": " + ".join(b["worst_pair"]),
-         "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
-                               f"/{total}"),
-         "Mega": b.get("mega_used") or "-"}
-        for b in bring4_rows])
+    rows = []
+    for b in bring4_rows:
+        depth = bring4_pair_depth(b)
+        rows.append({
+            "Bring-4": " / ".join(b["bring4"]),
+            "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
+            "Good pairs": f"{b['pairs_good']}/{n_pairs}",
+            "Worst pair": " + ".join(b["worst_pair"]),
+            "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
+                                  f"/{total}"),
+            "Mega": b.get("mega_used") or "-",
+            "Own TW used": f"{depth['own_tailwind_used_total']}/{n_pairs}",
+            "Score": round(bring4_blended_score(b), 1)})
+    return pd.DataFrame(rows)
 
 
 def _all_teams_summary_df(team_names, target_lists, our6, dive):
@@ -5234,6 +5245,21 @@ with tab_counter:
                 ct_b4_required_techs = _tech_required_multiselect(
                     "Required techs (this bring-4 must have)", "ct_b4_required_techs")
                 ct_b4_min_special = _min_special_attackers_slider("ct_b4_minspecial")
+                ct_b4_rank_by_label = st.radio(
+                    "Rank bring-4s by", ["Worst case (maximin)", "Total wins"],
+                    key="ct_b4_rank_by", horizontal=True,
+                    help="Both still rank fewest unconditional losses (enemy "
+                         "pairs NONE of a bring-4's own pairs beat) first. "
+                         "'Worst case': the default maximin ranking -- then "
+                         "breaks ties by the best worst-pair. 'Total wins': "
+                         "then breaks ties by the SAME win-rate/tailwind-"
+                         "safe/protect-safe/follow-me-safe blend Multi-bring4 "
+                         "already uses for whole cores, applied here to each "
+                         "bring-4's own internal pairs instead -- 'the bring "
+                         "maximising for total wins, rather than maximin, "
+                         "especially across tailwind/protect.'")
+                ct_b4_rank_by = ("total_wins" if ct_b4_rank_by_label == "Total wins"
+                                 else "worst_case")
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
@@ -5250,7 +5276,8 @@ with tab_counter:
                                 enemy_move_overrides=enemy_move_overrides,
                                 check_trick_room=ct_check_tr,
                                 required_techs=ct_b4_required_techs or None,
-                                min_special_attackers=ct_b4_min_special)
+                                min_special_attackers=ct_b4_min_special,
+                                rank_by=ct_b4_rank_by)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -5259,6 +5286,7 @@ with tab_counter:
                         _cache_gameplans(pair_rows, "Bring-4 search")
                         st.session_state["ct_b4_our6"] = our6
                         st.session_state["ct_b4_vs_name"] = ct_vs_name
+                        st.session_state["ct_b4_rank_by_used"] = ct_b4_rank_by
 
                 pair_rows = st.session_state.get("ct_b4_pair_rows")
                 bring4_rows = st.session_state.get("ct_b4_bring4_rows")
@@ -5269,8 +5297,13 @@ with tab_counter:
                                f"your {len(shown_our6)}, "
                                f"vs {ct_vs_name}'s {total} enemy pairs:")
                     st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
+                    shown_rank_by = st.session_state.get("ct_b4_rank_by_used", "worst_case")
+                    rank_by_desc = ("by total-wins score (win rate/tailwind-safe/"
+                                    "protect-safe/follow-me-safe blend)"
+                                    if shown_rank_by == "total_wins"
+                                    else "best worst-case first")
                     st.markdown(f"**Stage 2** -- all {len(bring4_rows)} possible bring-4s, "
-                               f"ranked best worst-case first:")
+                               f"ranked {rank_by_desc}:")
                     st.dataframe(_bring4_rows_df(bring4_rows, total),
                                 width='stretch', hide_index=True)
 

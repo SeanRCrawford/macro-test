@@ -219,6 +219,7 @@ from counter_finder import (DEFAULT_EXCLUDED_ITEMS, DEFAULT_MAX_FOCUS_SASH,  # n
                             _fixed_sets_from_pair_rows,
                             _item_clause_context_from_coverage, _pair_sort_key,
                             _team_side_overrides,
+                            bring4_blended_score,
                             bring4_damage_output, bring4_pair_depth, bring4_search,
                             chip_then_ko, core_deep_dive, core_damage_output,
                             deep_dive, enemy_has_real_tailwind, evolve_from_team,
@@ -840,11 +841,16 @@ def _print_deep(name1, name2, item1, item2, targets, detail, summary, turns):
         print()
 
 
-def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_threshold):
+def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns,
+                  good_threshold, rank_by="worst_case"):
     """`bring4_search`'s own two-stage output: every pair drawn from
-    `our6`, then every possible bring-4 subset ranked by how bad its WORST
-    pair is (maximin -- "always have options no matter what position I am
-    in")."""
+    `our6`, then every possible bring-4 subset ranked -- by default by how
+    bad its WORST pair is (maximin -- "always have options no matter what
+    position I am in"), or, with `rank_by="total_wins"`, by
+    `bring4_blended_score`'s own win-rate/tailwind-safe/protect-safe/
+    follow-me-safe blend across ALL of the bring-4's pairs instead ("the
+    bring maximising for total wins, rather than maximin, especially
+    across tailwind/protect")."""
     total = pair_rows[0]["pairs_total"] if pair_rows else 0
     print(f"Bring-4 robustness: {' / '.join(our6)}")
     print(f"vs {', '.join(targets)} ({turns} turns, average rolls, "
@@ -869,12 +875,21 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
              f"{r['pairs_own_protect_used']:>4d}/{total:<2d}")
 
     n_pairs = bring4_rows[0]["pairs_total"] if bring4_rows else 6
-    print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked by "
-         f"how many enemy pairs\nNONE of its {n_pairs} pairs can beat (fewest "
-         f"first), then by how their WORST pair does\n(best worst-case "
-         f"first), then by how many of its {n_pairs} pairs clear the "
-         f"good-pair bar:")
+    if rank_by == "total_wins":
+        print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked "
+             f"first by how many enemy pairs\nNONE of its {n_pairs} pairs can "
+             f"beat (fewest first, same as always), THEN by total-wins score\n"
+             f"(win rate / tailwind-safe / protect-safe / follow-me-safe blend "
+             f"across ALL {n_pairs}\nof its pairs, not just the worst one -- "
+             f"`--bring4-rank-by total_wins`):")
+    else:
+        print(f"\nStage 2 -- all {len(bring4_rows)} possible bring-4s, ranked by "
+             f"how many enemy pairs\nNONE of its {n_pairs} pairs can beat (fewest "
+             f"first), then by how their WORST pair does\n(best worst-case "
+             f"first), then by how many of its {n_pairs} pairs clear the "
+             f"good-pair bar:")
     header2 = (f"  {'#':>3} {'Bring-4':46s} {'uncov':>6s} {'good':>6s} "
+              f"{'own-tw':>7s} {'score':>6s} "
               f"{'worst pair':34s} {'worst beaten':>13s}")
     print(header2)
     print("  " + "-" * (len(header2) - 2))
@@ -883,8 +898,12 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
         worst_str = " + ".join(b["worst_pair"])
         wr = b["worst_pair_row"]
         uncov = len(b["uncovered_enemy_pairs"])
+        depth = bring4_pair_depth(b)
+        own_tw = depth["own_tailwind_used_total"]
+        score = bring4_blended_score(b)
         print(f"  {i:>3} {bring4_str[:46]:46s} {uncov:>3d}/{total:<2d} "
-             f"{b['pairs_good']:>3d}/{n_pairs:<2d}"
+             f"{b['pairs_good']:>3d}/{n_pairs:<2d} "
+             f"{own_tw:>4d}/{n_pairs:<2d} {score:>5.1f} "
              f"{worst_str[:34]:34s} "
              f"{wr['pairs_swept'] + wr['pairs_traded']:>4d}/{total:<2d}")
         if b["uncovered_enemy_pairs"]:
@@ -897,6 +916,15 @@ def _print_bring4(pair_rows, bring4_rows, our6, targets, top, turns, good_thresh
     print("           only beats by choosing to open with ITS OWN real")
     print("           Tailwind (a setter + attacker hyper-offense answer) --")
     print("           0 for a pair with no real Tailwind setter of its own.")
+    print("           (Stage 2) the same count summed across all of this")
+    print("           bring-4's own internal pairs -- how much this bring-4")
+    print("           as a whole relies on matching the enemy's own")
+    print("           Tailwind with ours to win, rather than winning outright.")
+    print("score      (Stage 2) `bring4_blended_score` -- the win rate / ")
+    print("           tailwind-safe / protect-safe / follow-me-safe blend")
+    print("           across ALL of this bring-4's pairs (higher is better),")
+    print("           the sort key when ranked by total wins rather than")
+    print("           worst case.")
     bring_size = len(bring4_rows[0]["bring4"]) if bring4_rows else 4
     print(f"uncov      (Stage 2) enemy pairs that NONE of this bring-4's "
          f"{n_pairs}")
@@ -1909,7 +1937,9 @@ def _bring4_xlsx_row_values(rank, b, merged, enemy_tw):
            f"{depth['no_faint_best']}/{pt}",
            f"{depth['no_faint_3rd']}/{pt}",
            _pairs_note(b["pair_rows"]),
-           round(bring4_damage_output(b), 2)]
+           round(bring4_damage_output(b), 2),
+           depth["own_tailwind_used_total"],
+           round(bring4_blended_score(b), 2)]
 
 
 _BRING4_XLSX_COLUMNS = [
@@ -1931,6 +1961,8 @@ _BRING4_XLSX_COLUMNS = [
     "pairs beaten without fainting best",
     "pairs beaten without fainting 3rd best", "6 pairs",
     "Total Damage Output",
+    "Own Tailwind used total (matching enemy's)",
+    "Total-wins score",
 ]
 
 
@@ -3054,6 +3086,27 @@ def main():
                          "the enemy targets as well as I do' rather than "
                          "'assume the enemy just grabs its own best-looking "
                          "target each turn'")
+    ap.add_argument("--bring4-rank-by", choices=("worst_case", "total_wins"),
+                    default="worst_case",
+                    help="--bring4 only (NOT --multi-bring4, which keeps its "
+                         "own separate core-ranking blend unconditionally): "
+                         "how Stage 2 ranks the 15 possible bring-4s. Both "
+                         "modes still rank fewest unconditional losses "
+                         "first ('at least try to make sure there are no "
+                         "uncovered enemy pairs') -- 'worst_case' (default) "
+                         "then breaks ties by the best worst-pair, same as "
+                         "always. 'total_wins' instead breaks ties by "
+                         "`bring4_blended_score`'s own win-rate/tailwind-"
+                         "safe/protect-safe/follow-me-safe blend across ALL "
+                         "of the bring-4's pairs instead of just its worst "
+                         "one -- 'the bring maximising for total wins, "
+                         "rather than maximin, especially across tailwind/"
+                         "protect'. Stage 1's own per-pair 'own-tw' column "
+                         "already shows, unconditionally in both modes, how "
+                         "often a pair only wins by opening with ITS OWN "
+                         "real Tailwind to match the enemy's -- this flag "
+                         "only changes which bring-4s that fact gets "
+                         "credited towards in the Stage 2 ranking.")
     ap.add_argument("--deep-dive-worst-case-targeting",
                     action=argparse.BooleanOptionalAction, default=True,
                     help="--bring4/--multi-bring4 only: whether the deep-"
@@ -3509,10 +3562,12 @@ def main():
                 evs_overrides=team_evs_overrides,
                 nature_overrides=team_nature_overrides,
                 ability_overrides=team_ability_overrides,
-                max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+                max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
+                rank_by=args.bring4_rank_by)
             print(f"=== Source team: {team_name} ===")
             _print_bring4(team_pair_rows, team_bring4_rows, team_our6, targets,
-                         args.top, args.turns, good_threshold)
+                         args.top, args.turns, good_threshold,
+                         rank_by=args.bring4_rank_by)
             if team_bring4_rows:
                 _print_win_conditions(team_bring4_rows[0], targets, merged, moves,
                                       natures, typechart,
@@ -3533,9 +3588,10 @@ def main():
             excluded_items=excluded_items,
             enforce_item_clause=args.unique_items,
             worst_case_targeting=args.worst_case_targeting,
-            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
+            rank_by=args.bring4_rank_by)
         _print_bring4(pair_rows, bring4_rows, our6, targets, args.top,
-                     args.turns, good_threshold)
+                     args.turns, good_threshold, rank_by=args.bring4_rank_by)
         if bring4_rows:
             _print_win_conditions(bring4_rows[0], targets, merged, moves, natures,
                                   typechart, item_overrides=item_overrides,

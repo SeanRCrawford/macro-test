@@ -6032,7 +6032,8 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   enemy_ability_overrides=None,
                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
                   max_life_orb=DEFAULT_MAX_LIFE_ORB, check_trick_room=False,
-                  required_techs=None, min_special_attackers=None):
+                  required_techs=None, min_special_attackers=None,
+                  rank_by="worst_case"):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
@@ -6075,7 +6076,14 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     teams and searching for how bad their worst pair performs," maximin:
     the bring-4 whose worst case is LEAST bad wins. THEN by how many of its
     pairs are "good" (beat at least `good_threshold` of `target_names`'s
-    enemy pairs, default 100% -- "always have options").
+    enemy pairs, default 100% -- "always have options"). This whole
+    ranking is `rank_by="worst_case"` (the default); see `_bring4_
+    candidates`'s own `rank_by` for the `"total_wins"` alternative --
+    "It would also be good to see the bring maximising for total wins,
+    rather than maximin, especially across tailwind/protect too" -- and
+    `bring4_pair_depth`'s own `own_tailwind_used_total` for exploring how
+    many of a bring's wins actually depend on countering enemy speed
+    control with our own Tailwind opener.
 
     BRING-4-CONSISTENT MEGA CHOICE: when `our6` carries exactly 2 Mega-stone
     holders (the existing `--max-megas` composition cap, unaffected by any
@@ -6183,7 +6191,7 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
         megas=megas if extra_forced_base else None,
         pair_lookup_forced_base=pair_lookup_forced_base,
         merged=merged, required_techs=required_techs, moves_db=moves_db,
-        min_special_attackers=min_special_attackers)
+        min_special_attackers=min_special_attackers, rank_by=rank_by)
     return pair_rows, bring4_rows
 
 
@@ -6207,7 +6215,7 @@ def _uncovered_enemy_pairs(pairs, target_names):
 def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
                        megas=None, pair_lookup_forced_base=None,
                        merged=None, required_techs=None, moves_db=None,
-                       min_special_attackers=None):
+                       min_special_attackers=None, rank_by="worst_case"):
     """Every one of the C(len(six),min(4,len(six))) possible bring subsets of
     `six` (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this
     also runs for a 3-, 4-, or 5-member PARTIAL team during
@@ -6265,6 +6273,35 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
     same "a core-level pass isn't enough, a specific bring can still drop
     the members that made it pass" reasoning `required_techs` documents
     just above. `None` (the default) checks nothing.
+
+    `rank_by`: "I see the all possible groups of 6 possible bring-4s
+    ranked by their worst case, rather than their total wins. It would
+    also be good to see the bring maximising for total wins, rather than
+    maximin, especially across tailwind/protect too." `"worst_case"` (the
+    default, exactly the ranking described two paragraphs up -- unchanged
+    from before this existed) prioritizes never having an unconditional
+    loss, THEN the single worst pair's own quality; `"total_wins"` ranks
+    by `bring4_blended_score` (the SAME `_CORE_BLEND_WEIGHTS` blend of win
+    rate/tailwind-safe/protect-safe/follow-me-safe `multi_bring4_
+    exhaustive` already ranks whole CORES by) instead of the single worst
+    pair -- a bring that wins MORE often in total, even if its single
+    worst pair is a bit worse than another candidate's, can rank above it.
+    "Maybe the maximin vs max win bring should at least try to make sure
+    there are no uncovered enemy pairs" -- BOTH modes still sort primarily
+    by `len(uncovered_enemy_pairs)` (fewest first): `"total_wins"` never
+    picks a bring-4 with a real, unconditional loss over one without,
+    purely for a marginally higher average, the same "having a pair that
+    every pair of yours loses against is terrible" reasoning that already
+    dominates `"worst_case"`. It only changes how ties/candidates WITHIN
+    the same uncovered-count are ordered -- by total-wins score rather
+    than by worst-pair quality. Also decides which hypothesis wins the
+    BRING-4-CONSISTENT MEGA CHOICE comparison above, so the two stay
+    self-consistent (a `"total_wins"` search never ends up silently
+    picking its mega hypothesis by the maximin rule instead). This
+    governs SORT ORDER only -- every row's own fields are identical
+    either way; a caller wanting the blended score or the own-Tailwind-
+    rescue count for display regardless of which ranking was used calls
+    `bring4_pair_depth`/`bring4_blended_score` on any row directly.
     """
     bring_size = min(4, len(six))
 
@@ -6290,9 +6327,29 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
             "mega_used": mega_members[0] if len(mega_members) == 1 else None,
         }
 
-    def _rank_key(b):
+    def _worst_case_key(b):
         return (len(b["uncovered_enemy_pairs"]), _pair_sort_key(b["worst_pair_row"]),
                 -b["pairs_good"])
+
+    def _total_wins_key(b):
+        # "Maybe the maximin vs max win bring should at least try to make
+        # sure there are no uncovered enemy pairs" -- STILL sorts primarily
+        # by uncovered-pair count (fewest first, same as `_worst_case_key`'s
+        # own primary criterion, and the same "an unconditional loss is
+        # terrible no matter how good the average is" reasoning
+        # `TestUncoveredEnemyPairsDominateRanking` already established for
+        # the maximin ranking), but breaks ties/orders WITHIN each
+        # uncovered-count bucket by total-wins score rather than by worst-
+        # pair -- a bring-4 with one fewer unconditional loss always still
+        # wins over one with more, but among bring-4s tied on that (most
+        # commonly: both at zero), the higher-total one now wins instead of
+        # the better-worst-case one. Negated score so the SAME "ascending =
+        # best first" convention `_worst_case_key`/`min`/`sort` already use
+        # still applies -- `bring4_blended_score` itself is "higher is
+        # better."
+        return (len(b["uncovered_enemy_pairs"]), -bring4_blended_score(b))
+
+    _rank_key = _total_wins_key if rank_by == "total_wins" else _worst_case_key
 
     bring4_rows = []
     for bring4 in itertools.combinations(six, bring_size):
@@ -6378,6 +6435,19 @@ def bring4_pair_depth(bring4_row):
     `_pairs_beaten_without_fainting` below, which reads each matchup's
     `detail[...]["our_hp"]` directly -- a real win (`sweep`/`out_trade`)
     where NEITHER of the pair's own two Pokemon actually fainted.
+
+    `own_tailwind_used_total`: "I need to explore tailwind robustness; if
+    my team loses to enemy tailwind but wins if otherwise, it is probably
+    important I lead with my own tailwind to at least match" -- the
+    OPTIMISTIC own-side counter (`_pair_vs_targets`'s own "OUR OWN
+    TAILWIND AS A MATCHING ANSWER", already unconditionally applied to
+    every `outcome` this bring-4's own pairs carry, not a separate re-race
+    here) is summed across the bring's own pairs -- how many of its total
+    wins actually DEPENDED on countering with our own Tailwind opener,
+    rather than winning at normal speed already. A real, non-zero count
+    here is exactly the fragility the user is asking to see: those wins
+    hinge on us successfully identifying and executing the tailwind-open
+    plan, not a free bonus.
     """
     pairs = sorted(bring4_row["pair_rows"], key=_pair_sort_key)
     pairs_total = pairs[0]["pairs_total"] if pairs else 0
@@ -6405,7 +6475,29 @@ def bring4_pair_depth(bring4_row):
         "no_faint_total": sum(no_faint),
         "no_faint_best": no_faint[0] if no_faint else None,
         "no_faint_3rd": no_faint[2] if len(no_faint) > 2 else None,
+        "own_tailwind_used_total": sum(r.get("pairs_own_tailwind_used", 0)
+                                       for r in pairs),
     }
+
+
+def bring4_blended_score(bring4_row):
+    """The SAME `_CORE_BLEND_WEIGHTS`-weighted per-90 blend `multi_bring4_
+    exhaustive`'s own `_core_row` already ranks whole CORES by (win rate,
+    tailwind-safe, protect-safe, follow-me-safe), applied here to ONE
+    bring-4's own 6 internal pairs -- "It would also be good to see the
+    bring maximising for total wins, rather than maximin, especially
+    across tailwind/protect too." Higher is better, unlike `_pair_sort_
+    key`'s own ascending convention. See `_bring4_candidates`'s own
+    `rank_by="total_wins"` for where this actually replaces the maximin
+    ranking, rather than just being available to compute on the side."""
+    depth = bring4_pair_depth(bring4_row)
+    n_pairs = len(bring4_row["pair_rows"])
+    pt = depth["pairs_total"]
+    w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
+    return (w_win * _rate_per_90(depth["beaten_total"], n_pairs, pt)
+           + w_tw * _rate_per_90(depth["tailwind_safe_total"], n_pairs, pt)
+           + w_pr * _rate_per_90(depth["protect_safe_total"], n_pairs, pt)
+           + w_fm * _rate_per_90(depth["follow_me_safe_total"], n_pairs, pt))
 
 
 def recommended_lead(bring4_row):
