@@ -157,6 +157,52 @@ class TestCounterTableTabExists(unittest.TestCase):
         for row in results[3]["rows"]:
             self.assertIn(forced_name, row["group"])
 
+    def test_offensive_and_threat_coverage_populate_on_a_real_search(self):
+        """"assess offensive type coverage as well as simple 1v1 threat
+        coverage of common enemies" -- both are always computed once a
+        real search runs (no need to turn on either hard-cap checkbox),
+        wired through from the app's own typechart/one_v_one_matrix."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"])
+        for row in results[3]["rows"]:
+            self.assertIsNotNone(row["offensive_coverage"])
+            self.assertIsNotNone(row["threat_coverage"])
+
+    def test_min_offensive_types_checkbox_filters_results(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_min_off_on"][0].set_value(True).run()
+        at = [s for s in at.slider if s.key == "ct_cov_min_off"][0].set_value(18).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[3]["rows"]:
+            self.assertEqual(len(row["offensive_coverage"]["covered"]), 18)
+
+    def test_max_uncovered_threats_checkbox_filters_results(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_max_uncov_on"][0].set_value(True).run()
+        at = [s for s in at.slider if s.key == "ct_cov_max_uncov"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[3]["rows"]:
+            self.assertEqual(row["threat_coverage"]["uncovered"], [])
+
     def test_suggested_pokemon_controls_render_and_apply_quorum(self):
         """"Give a 'suggested' list as well, of which at least 3 (or n,
         selected) must appear" -- the new multiselect + quorum slider

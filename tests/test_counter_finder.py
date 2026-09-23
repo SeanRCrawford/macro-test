@@ -11555,6 +11555,138 @@ class TestCoverageGroupSearchRealData(unittest.TestCase):
             self.assertEqual(len(sigs), len(set(sigs)), row["group"])
 
 
+class TestCoverageGroupSearchOffensiveCoverage(unittest.TestCase):
+    """"It would be good to also assess offensive type coverage" --
+    `typechart` given turns on `"offensive_coverage"` on every row (which
+    of the 18 defending types the group can collectively hit for real
+    super-effective damage), and `min_offensive_types` makes it a hard
+    floor. Real roster data -- Garchomp (Ground/Dragon STAB) and
+    Incineroar (Fire/Dark STAB) between them hit a wide type spread."""
+
+    POOL = ["Garchomp", "Kingambit", "Incineroar", "Whimsicott", "Sinistcha"]
+
+    def setUp(self):
+        from species_data import TYPES
+        self.TYPES = TYPES
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.merged, self.moves, self.typechart = merged, moves, typechart
+        self.pair_rows = cf.find_pair_cores(
+            self.POOL, merged, moves, natures, typechart, self.W["teams"])
+
+    def test_typechart_none_leaves_offensive_coverage_unset(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=5)
+        for row in result[4]["rows"]:
+            self.assertIsNone(row["offensive_coverage"])
+
+    def test_typechart_given_populates_offensive_coverage(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=5,
+            typechart=self.typechart, moves_db=self.moves)
+        for row in result[4]["rows"]:
+            cov = row["offensive_coverage"]
+            self.assertIsNotNone(cov)
+            self.assertEqual(set(cov["covered"]) | set(cov["uncovered"]),
+                             set(self.TYPES))
+            self.assertEqual(set(cov["covered"]) & set(cov["uncovered"]), set())
+
+    def test_min_offensive_types_drops_groups_under_the_floor(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            typechart=self.typechart, moves_db=self.moves)
+        widest = max(len(r["offensive_coverage"]["covered"]) for r in result[4]["rows"])
+        floor = widest  # only the widest-covering group(s) may pass
+        capped = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            typechart=self.typechart, moves_db=self.moves,
+            min_offensive_types=floor)
+        self.assertTrue(capped[4]["rows"])
+        for row in capped[4]["rows"]:
+            self.assertGreaterEqual(len(row["offensive_coverage"]["covered"]), floor)
+
+    def test_min_offensive_types_can_drop_every_result(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            typechart=self.typechart, moves_db=self.moves,
+            min_offensive_types=len(self.TYPES) + 1)
+        self.assertEqual(result[4]["rows"], [])
+
+
+class TestCoverageGroupSearchThreatCoverage(unittest.TestCase):
+    """"assess ... simple 1v1 threat coverage of common enemies. For
+    instance, do all of my team just lose to kingambit" --
+    `one_v_one_matrix` given turns on `"threat_coverage"` on every row (an
+    enemy counts as covered the moment ANY group member beats it 1v1),
+    and `max_uncovered_threats` makes it a hard cap. A hand-built,
+    fully-controlled matrix -- the "does everyone lose to Kingambit"
+    scenario made deterministic and explicit rather than left to real
+    data's own current matchups."""
+
+    POOL = ["A", "B", "C", "D"]
+
+    def setUp(self):
+        import itertools as _it
+        self.merged = {n: {"types": ["Normal"], "score": 100.0} for n in self.POOL}
+        self.pair_rows = [
+            {"pair": p, "avg_score": 0.0, "mutual_resist": {"perfect": True,
+                                                            "coverage_frac": 100.0}}
+            for p in _it.combinations(self.POOL, 2)]
+        # Every one of A/B/C/D loses to Kingambit outright -- the exact
+        # "does my whole team just lose to Kingambit" scenario -- but each
+        # still beats ONE other, unrelated enemy, so the matrix isn't
+        # trivially all-losses.
+        self.matrix = {
+            "A": {"Kingambit": "loss", "Sinistcha": "win"},
+            "B": {"Kingambit": "loss", "Whimsicott": "win"},
+            "C": {"Kingambit": "loss", "Sinistcha": "win"},
+            "D": {"Kingambit": "loss", "Whimsicott": "win"},
+        }
+
+    def _search(self, **kwargs):
+        return cf.coverage_group_search(
+            self.pair_rows, self.merged, pool=self.POOL, group_sizes=(4,),
+            top_n=5, no_duplicate_typing=False, **kwargs)
+
+    def test_matrix_none_leaves_threat_coverage_unset(self):
+        result = self._search()
+        for row in result[4]["rows"]:
+            self.assertIsNone(row["threat_coverage"])
+
+    def test_matrix_given_flags_kingambit_as_uncovered(self):
+        result = self._search(one_v_one_matrix=self.matrix)
+        self.assertTrue(result[4]["rows"])
+        tc = result[4]["rows"][0]["threat_coverage"]
+        self.assertIn("Kingambit", tc["uncovered"])
+        self.assertNotIn("Sinistcha", tc["uncovered"])
+        self.assertNotIn("Whimsicott", tc["uncovered"])
+        self.assertEqual(tc["total"], 3)
+        self.assertEqual(tc["covered"], 2)
+
+    def test_max_uncovered_threats_zero_drops_the_only_group(self):
+        """The one possible group of 4 (the whole pool) has exactly one
+        uncovered enemy (Kingambit) -- capping at 0 must drop it."""
+        result = self._search(one_v_one_matrix=self.matrix,
+                              max_uncovered_threats=0)
+        self.assertEqual(result[4]["rows"], [])
+
+    def test_max_uncovered_threats_one_keeps_it(self):
+        result = self._search(one_v_one_matrix=self.matrix,
+                              max_uncovered_threats=1)
+        self.assertTrue(result[4]["rows"])
+
+    def test_adding_a_kingambit_beater_covers_it(self):
+        """Positive control: give one member a real win over Kingambit --
+        the group-wide reading must flip to covered."""
+        matrix = {k: dict(v) for k, v in self.matrix.items()}
+        matrix["A"]["Kingambit"] = "win"
+        result = self._search(one_v_one_matrix=matrix)
+        tc = result[4]["rows"][0]["threat_coverage"]
+        self.assertNotIn("Kingambit", tc["uncovered"])
+        self.assertEqual(tc["covered"], 3)
+
+
 class TestCoverageGroupSearchMegaLegality(unittest.TestCase):
     """`coverage_group_search`'s own hard exclusion for a Mega alongside
     its own base form -- distinct from `find_pair_cores`'s pairwise

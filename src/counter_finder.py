@@ -847,6 +847,19 @@ def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart):
                              natures, typechart)[name][enemy_name]
 
 
+def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart):
+    """Public entry point onto `_one_v_one_matrix` -- for a caller outside
+    this module (the Streamlit app) wanting to build the SAME cheap 1v1
+    read `find_pair_cores`'s own `threat_coverage` already uses, to hand
+    into `coverage_group_search`'s own `one_v_one_matrix` param for its
+    whole-GROUP reading ("do all of my team just lose to Kingambit").
+    Building it once here (rather than `coverage_group_search` building
+    its own) means the SAME matrix backs both the pair-level and group-
+    level readings -- they can never quietly disagree on what "beats"
+    means for the same pool/enemy universe."""
+    return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
+
+
 def _pair_threat_coverage(name1, name2, matrix):
     """How well (name1, name2) cover each other's individual 1v1 losses
     against `matrix`'s own enemy universe -- "what pokemon in all named
@@ -1086,7 +1099,9 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           required_cores=None, min_member_score=None, exclude=None,
                           required_techs=None, max_weak_types=None,
                           max_weak_types_3=None, moves_db=None,
-                          min_special_attackers=None):
+                          min_special_attackers=None, typechart=None,
+                          min_offensive_types=None, one_v_one_matrix=None,
+                          max_uncovered_threats=None):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -1303,6 +1318,48 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     list. `None` (the default) applies no floor, exactly as before this
     existed.
 
+    `typechart`/`min_offensive_types`: "assess offensive type coverage" --
+    which of the 18 defending types the group can collectively hit for
+    real super-effective damage, ANY member's own real usage move
+    counting (`_real_damaging_moves` + `type_multiplier`, the exact same
+    per-move read `_pair_offensive_pin`'s own follow-up half already
+    uses). `typechart=None` (the default) skips this entirely -- every
+    row's own `"offensive_coverage"` is `None`, and `min_offensive_types`
+    is ignored even if set (there's nothing to check it against). With
+    `typechart` given, `"offensive_coverage"` is always populated
+    (`{"covered": [type, ...], "uncovered": [type, ...]}`, a genuine
+    display column); `min_offensive_types` additionally makes it a HARD
+    floor -- a group covering fewer types than this is dropped. NOT
+    growth-monotonic-PRUNABLE mid-search the way the raw-weakness caps
+    are (a partial group short of the floor can still reach it with more
+    members), so -- like `max_net_weakness`/`min_avg_score` -- checked
+    once per COMPLETE candidate (`passes_final_filters`), never a ranked
+    buffer.
+
+    `one_v_one_matrix`/`max_uncovered_threats`: "assess simple 1v1 threat
+    coverage of common enemies ... do all of my team just lose to
+    Kingambit, or whatever pokemon are most commonly on enemy teams" --
+    `one_v_one_matrix` is `_one_v_one_matrix`'s own {name: {enemy:
+    outcome}} map, built ONCE by the caller (over the SAME named-team
+    enemy universe `find_pair_cores` itself already used for `pair_rows`,
+    so "most common" means "appears in the most of the selected teams",
+    consistent with everything else this search already reads from that
+    same universe) and passed in rather than rebuilt here -- this
+    function has no `moves_db`/`natures` of its own to build one fresh
+    even if it wanted to for every candidate. `None` (the default) skips
+    this too, same "nothing to check against" reasoning as `typechart`.
+    With a matrix given, every row's own `"threat_coverage"` is always
+    populated (`{"covered": int, "total": int, "uncovered": [enemy,
+    ...]}` -- an enemy counts as covered the moment ANY group member
+    beats it 1v1, `uncovered` lists the rest by name so "do we just lose
+    to X" reads directly off the row); `max_uncovered_threats` caps how
+    many may stay uncovered. Also NOT prunable mid-search -- coverage can
+    only ever GROW as members are added (once some member beats an enemy,
+    that stays true for every larger group containing it), so a partial
+    group's own uncovered COUNT can only fall, never rise, meaning an
+    early "still too many uncovered" reading is never a safe reason to
+    prune -- checked at the leaf, same as `min_offensive_types` above.
+
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
     "perfect_links": int, "known_links": int, "total_links": int,
@@ -1310,7 +1367,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     every POSSIBLE link, not just the measured ones -- same convention the
     standalone tool uses), "avg_score": float or None, "net_weakness":
     {type: net}, "worst_net_weakness": int, "weakness": {type: count},
-    "worst_weakness": int}.
+    "worst_weakness": int, "offensive_coverage": {"covered", "uncovered"}
+    or None, "threat_coverage": {"covered", "total", "uncovered"} or None}.
     """
     if pool is None:
         names = sorted({n for r in pair_rows for n in r["pair"]})
@@ -1376,6 +1434,23 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 r.append(type_index[t])
         weak_idx_by_name.append(w)
         resist_idx_by_name.append(r)
+    # Per-name offensive type coverage: every defending type index this
+    # name's own real usage moveset hits for super-effective damage
+    # (`_real_damaging_moves` + `type_multiplier`, `_pair_offensive_pin`'s
+    # own per-move read) -- precomputed ONCE, not per candidate group,
+    # same reasoning as `weak_idx_by_name` above. `None` (`typechart` not
+    # given) leaves this `None` for every name -- `evaluate` skips
+    # offensive coverage entirely rather than reading a placeholder.
+    hit_idx_by_name = None
+    if typechart is not None:
+        hit_idx_by_name = []
+        for nm in names:
+            hit = set()
+            for mv in _real_damaging_moves(nm, merged, moves_db):
+                for t in TYPES:
+                    if type_multiplier(mv.move_type, [t], typechart) > 1.0:
+                        hit.add(type_index[t])
+            hit_idx_by_name.append(hit)
     # A Mega alongside its own base form is a HARD exclusion (the SAME
     # Pokemon counted twice, not two teammates) -- `find_pair_cores` never
     # generates that pair's row at all, which would otherwise let it slip
@@ -1458,8 +1533,29 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             weakness = {TYPES[k]: weak_count[k] for k in range(len(TYPES))}
             net_weakness = {TYPES[k]: weak_count[k] - resist_count[k]
                             for k in range(len(TYPES))}
+            group = tuple(names[i] for i in pick)
+            offensive_coverage = None
+            if hit_idx_by_name is not None:
+                hit = set()
+                for i in pick:
+                    hit |= hit_idx_by_name[i]
+                offensive_coverage = {
+                    "covered": sorted(TYPES[k] for k in hit),
+                    "uncovered": sorted(TYPES[k] for k in range(len(TYPES)) if k not in hit),
+                }
+            threat_coverage = None
+            if one_v_one_matrix is not None:
+                enemies = sorted({e for i in pick for e in one_v_one_matrix.get(names[i], {})})
+                uncovered_enemies = [
+                    e for e in enemies
+                    if not any(one_v_one_matrix.get(names[i], {}).get(e) == "win"
+                              for i in pick)]
+                threat_coverage = {
+                    "covered": len(enemies) - len(uncovered_enemies),
+                    "total": len(enemies), "uncovered": uncovered_enemies,
+                }
             return {
-                "group": tuple(names[i] for i in pick), "size": size,
+                "group": group, "size": size,
                 "perfect_links": perfect, "known_links": known, "total_links": E,
                 "coverage_pct": (total_frac / E * 100.0) if E else 0.0,
                 "avg_score": (score_sum / score_n) if score_n else None,
@@ -1468,22 +1564,31 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 "weakness": weakness, "worst_weakness": max(weakness.values()),
                 "weak_type_breadth_2": sum(1 for v in weakness.values() if v >= 2),
                 "weak_type_breadth_3": sum(1 for v in weakness.values() if v >= 3),
+                "offensive_coverage": offensive_coverage,
+                "threat_coverage": threat_coverage,
             }
 
         def passes_final_filters(row):
-            # `max_net_weakness`/`min_avg_score` are NOT growth-monotonic
-            # (a later resist can pull net weakness back down; avg Score
-            # moves either way) -- so unlike the raw-weakness caps below,
-            # they can't be pruned mid-DFS and are checked here, once per
-            # COMPLETE candidate, never restricted to a ranked buffer: with
-            # `weak_count`/`resist_count` already accumulated for free,
-            # checking every leaf costs nothing extra over checking a
-            # top-N subset of them did before.
+            # `max_net_weakness`/`min_avg_score`/`min_offensive_types`/
+            # `max_uncovered_threats` are NOT growth-monotonic (a later
+            # resist can pull net weakness back down; avg Score moves
+            # either way; a partial group can still reach a coverage floor
+            # OR still has an uncovered count that can only fall, never
+            # rise, as more members are added) -- so unlike the raw-
+            # weakness caps below, none of them can be pruned mid-DFS, and
+            # are all checked here, once per COMPLETE candidate, never
+            # restricted to a ranked buffer.
             if min_avg_score is not None and (
                     row["avg_score"] is None or row["avg_score"] < min_avg_score):
                 return False
             if max_net_weakness is not None and row["worst_net_weakness"] > max_net_weakness:
                 return False
+            if min_offensive_types is not None and row["offensive_coverage"] is not None:
+                if len(row["offensive_coverage"]["covered"]) < min_offensive_types:
+                    return False
+            if max_uncovered_threats is not None and row["threat_coverage"] is not None:
+                if len(row["threat_coverage"]["uncovered"]) > max_uncovered_threats:
+                    return False
             return True
 
         def keep(row):

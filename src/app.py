@@ -6206,6 +6206,32 @@ with tab_counter:
                 "Required techs (every returned group must have)",
                 "ct_cov_required_techs")
             cov_min_special = _min_special_attackers_slider("ct_cov_minspecial")
+            st.caption("Offensive type coverage and 1v1 threat coverage are "
+                      "always SHOWN once you run a search below -- these "
+                      "two only turn them into a hard requirement too.")
+            cov_min_off_on = st.checkbox(
+                "Require a minimum offensive type coverage",
+                key="ct_cov_min_off_on",
+                help="How many of the 18 defending types the group can "
+                     "collectively hit for real super-effective damage "
+                     "(ANY member's own real usage move counts). "
+                     "\"assess offensive type coverage\".")
+            cov_min_offensive_types = (
+                st.slider("Minimum types covered", 1, 18, 10, key="ct_cov_min_off")
+                if cov_min_off_on else None)
+            cov_max_uncovered_on = st.checkbox(
+                "Cap how many named enemies nobody on the group beats 1v1",
+                key="ct_cov_max_uncov_on",
+                help="\"do all of my team just lose to Kingambit, or "
+                     "whatever pokemon are most commonly on enemy teams\" "
+                     "-- a cheap 1v1 read (not a full battle) against "
+                     "every Pokemon in the 'Enemy universe' selected "
+                     "below. An enemy counts as covered the moment ANY "
+                     "group member beats it.")
+            cov_max_uncovered_threats = (
+                st.slider("Max enemies with zero answer", 0, 20, 3,
+                         key="ct_cov_max_uncov")
+                if cov_max_uncovered_on else None)
         cov_cap_on = st.checkbox(
             "Cap a group's worst net weakness", key="ct_cov_cap_on",
             help="Net = (members weak to a type) - (members resistant/"
@@ -6293,6 +6319,11 @@ with tab_counter:
                                 f"{', '.join(str(s) for s in sorted(cov_sizes))}..."):
                     cov_pair_rows = find_pair_cores(pool, merged, moves, natures,
                                                     typechart, enemy_teams)
+                    cov_enemy_names = sorted({n for roster in enemy_teams.values()
+                                              for n in roster})
+                    from counter_finder import one_v_one_matrix_for_pool
+                    cov_matrix = one_v_one_matrix_for_pool(
+                        pool, cov_enemy_names, merged, moves, natures, typechart)
                     cov_search_kwargs = {"max_search_names": None} if cov_full_pool else {}
                     cov_results = coverage_group_search(
                         cov_pair_rows, merged, group_sizes=tuple(sorted(cov_sizes)),
@@ -6303,6 +6334,10 @@ with tab_counter:
                         max_weakness=cov_max_weakness,
                         max_weak_types=cov_max_weak_types,
                         max_weak_types_3=cov_max_weak_types_3,
+                        typechart=typechart, moves_db=moves,
+                        min_offensive_types=cov_min_offensive_types,
+                        one_v_one_matrix=cov_matrix,
+                        max_uncovered_threats=cov_max_uncovered_threats,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         **cov_search_kwargs,
                         must_include=cov_include, suggested=cov_suggested,
@@ -6310,7 +6345,7 @@ with tab_counter:
                         required_cores=cov_required_cores or None,
                         min_member_score=cov_min_member_score,
                         exclude=cov_exclude, required_techs=cov_required_techs or None,
-                        moves_db=moves, min_special_attackers=cov_min_special)
+                        min_special_attackers=cov_min_special)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams
@@ -6437,6 +6472,20 @@ with tab_counter:
                         st.caption(
                             f"Types with 2+ weak: {row['weak_type_breadth_2']}  |  "
                             f"Types with 3+ weak: {row['weak_type_breadth_3']}")
+                        if row["offensive_coverage"] is not None:
+                            oc = row["offensive_coverage"]
+                            st.caption(
+                                f"Offensive coverage: {len(oc['covered'])}/"
+                                f"{len(oc['covered']) + len(oc['uncovered'])} types"
+                                + (f"  |  Can't hit: {', '.join(oc['uncovered'])}"
+                                   if oc["uncovered"] else ""))
+                        if row["threat_coverage"] is not None:
+                            tc = row["threat_coverage"]
+                            st.caption(
+                                f"1v1 threat coverage: {tc['covered']}/{tc['total']} "
+                                f"named enemies"
+                                + (f"  |  No answer to: {', '.join(tc['uncovered'])}"
+                                   if tc["uncovered"] else ""))
                         if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
                             st.caption("Pair performance (this group's own links):")
                             pair_table = []
