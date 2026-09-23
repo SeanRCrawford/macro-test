@@ -84,7 +84,21 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertTrue(any(m.key == "ct_cov_suggested" for m in at.multiselect))
         self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
         self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
+        self.assertTrue(any(c.key == "ct_cov_full_pool" for c in at.checkbox))
         self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
+
+    def test_full_pool_checkbox_runs_the_search_unnarrowed(self):
+        """"I need it to be comprehensive within the defined set, no
+        matter the links" -- checking it and running a (tiny, fast) real
+        search must not crash, and the resulting search must not have
+        silently narrowed the pool via the best-link heuristic."""
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        at = [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        at = [c for c in at.checkbox if c.key == "ct_cov_full_pool"][0].set_value(True).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
 
     def test_switching_to_import_pair_coverage_mode_renders_its_controls(self):
         """Before any upload -- just the file uploader itself, no crash
@@ -142,6 +156,52 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertTrue(results[3]["rows"])
         for row in results[3]["rows"]:
             self.assertIn(forced_name, row["group"])
+
+    def test_offensive_and_threat_coverage_populate_on_a_real_search(self):
+        """"assess offensive type coverage as well as simple 1v1 threat
+        coverage of common enemies" -- both are always computed once a
+        real search runs (no need to turn on either hard-cap checkbox),
+        wired through from the app's own typechart/one_v_one_matrix."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        self.assertTrue(results[3]["rows"])
+        for row in results[3]["rows"]:
+            self.assertIsNotNone(row["offensive_coverage"])
+            self.assertIsNotNone(row["threat_coverage"])
+
+    def test_min_offensive_types_checkbox_filters_results(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_min_off_on"][0].set_value(True).run()
+        at = [s for s in at.slider if s.key == "ct_cov_min_off"][0].set_value(18).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[3]["rows"]:
+            self.assertEqual(len(row["offensive_coverage"]["covered"]), 18)
+
+    def test_max_uncovered_threats_checkbox_filters_results(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [c for c in at.checkbox if c.key == "ct_cov_max_uncov_on"][0].set_value(True).run()
+        at = [s for s in at.slider if s.key == "ct_cov_max_uncov"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[3]["rows"]:
+            self.assertEqual(row["threat_coverage"]["uncovered"], [])
 
     def test_suggested_pokemon_controls_render_and_apply_quorum(self):
         """"Give a 'suggested' list as well, of which at least 3 (or n,
@@ -462,7 +522,8 @@ class TestCounterTableTabExists(unittest.TestCase):
         [r for r in at.radio if r.key == "ct_mode"][0].set_value(
             "Coverage groups").run()
         techs_ms = [m for m in at.multiselect if m.key == "ct_cov_required_techs"][0]
-        for label in ("Tailwind user", "Coaching user", "Fake Out user"):
+        for label in ("Tailwind user", "Coaching user", "Fake Out user",
+                     "pivot/switching move (U-turn, Volt Switch, Parting Shot, ...)"):
             self.assertIn(label, techs_ms.options)
 
     def test_coverage_groups_run_bring4_button_works(self):

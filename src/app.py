@@ -225,20 +225,25 @@ def weakness_table(team, max_weak=2, type_limits=None):
     who's outright immune, and the net (weak - resist - immune). `max_weak`/
     `type_limits` decide "Over limit" -- pass whatever the run actually used
     (the Advanced per-type override when one is set, else the global slider)
-    so the table's own "Over limit" column agrees with the search."""
+    so the table's own "Over limit" column agrees with the search.
+
+    "Immune" also covers an ABILITY-granted immunity (Levitate/Ground,
+    Flash Fire/Fire, ...), not just a type-chart 0x -- `team_search.type_
+    matchup`, the same read every other weakness display in this app uses."""
     from species_data import TYPES
+    from team_search import type_matchup
     rows = []
     for t in TYPES:
         weak, resist, immune = [], [], []
         for n in team:
-            dc = merged[n].get("defensive_chart")
-            if not dc:
+            if not merged[n].get("defensive_chart"):
                 continue
-            if dc[t] > 1.0:
+            m = type_matchup(n, merged, t)
+            if m == "weak":
                 weak.append(n)
-            elif dc[t] == 0.0:
+            elif m == "immune":
                 immune.append(n)
-            elif dc[t] < 1.0:
+            elif m == "resist":
                 resist.append(n)
         limit = ((type_limits or {}).get(t) or {}).get("max_weak", max_weak)
         limit = max_weak if limit is None else limit
@@ -4099,17 +4104,28 @@ def _bring4_rows_df(bring4_rows, total):
     "It should also show the chosen mega vs a given six" -- `mega_used`
     (`_bring4_candidates`'s own field, already computed for every row) as
     its own column, `"-"` for a bring carrying no Mega-stone holder at
-    all."""
+    all. "Own TW used" (`bring4_pair_depth`'s own `own_tailwind_used_
+    total`) and "Score" (`bring4_blended_score`) surface tailwind-
+    robustness and the total-wins ranking alongside the maximin columns
+    above, regardless of which ranking (`rank_by`) actually sorted these
+    rows -- "explore tailwind robustness ... as long as it maximises
+    total wins"."""
+    from counter_finder import bring4_blended_score, bring4_pair_depth
     n_pairs = len(bring4_rows[0]["pair_rows"]) if bring4_rows else 6
-    return pd.DataFrame([
-        {"Bring-4": " / ".join(b["bring4"]),
-         "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
-         "Good pairs": f"{b['pairs_good']}/{n_pairs}",
-         "Worst pair": " + ".join(b["worst_pair"]),
-         "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
-                               f"/{total}"),
-         "Mega": b.get("mega_used") or "-"}
-        for b in bring4_rows])
+    rows = []
+    for b in bring4_rows:
+        depth = bring4_pair_depth(b)
+        rows.append({
+            "Bring-4": " / ".join(b["bring4"]),
+            "Uncovered enemy pairs": len(b["uncovered_enemy_pairs"]),
+            "Good pairs": f"{b['pairs_good']}/{n_pairs}",
+            "Worst pair": " + ".join(b["worst_pair"]),
+            "Worst pair beaten": (f"{b['worst_pair_row']['pairs_swept'] + b['worst_pair_row']['pairs_traded']}"
+                                  f"/{total}"),
+            "Mega": b.get("mega_used") or "-",
+            "Own TW used": f"{depth['own_tailwind_used_total']}/{n_pairs}",
+            "Score": round(bring4_blended_score(b), 1)})
+    return pd.DataFrame(rows)
 
 
 def _all_teams_summary_df(team_names, target_lists, our6, dive):
@@ -5229,6 +5245,21 @@ with tab_counter:
                 ct_b4_required_techs = _tech_required_multiselect(
                     "Required techs (this bring-4 must have)", "ct_b4_required_techs")
                 ct_b4_min_special = _min_special_attackers_slider("ct_b4_minspecial")
+                ct_b4_rank_by_label = st.radio(
+                    "Rank bring-4s by", ["Worst case (maximin)", "Total wins"],
+                    key="ct_b4_rank_by", horizontal=True,
+                    help="Both still rank fewest unconditional losses (enemy "
+                         "pairs NONE of a bring-4's own pairs beat) first. "
+                         "'Worst case': the default maximin ranking -- then "
+                         "breaks ties by the best worst-pair. 'Total wins': "
+                         "then breaks ties by the SAME win-rate/tailwind-"
+                         "safe/protect-safe/follow-me-safe blend Multi-bring4 "
+                         "already uses for whole cores, applied here to each "
+                         "bring-4's own internal pairs instead -- 'the bring "
+                         "maximising for total wins, rather than maximin, "
+                         "especially across tailwind/protect.'")
+                ct_b4_rank_by = ("total_wins" if ct_b4_rank_by_label == "Total wins"
+                                 else "worst_case")
                 if st.button("Search bring-4s", type="primary", key="ct_b4_go"):
                     try:
                         with st.spinner("Searching every pair, then every bring-4..."):
@@ -5245,7 +5276,8 @@ with tab_counter:
                                 enemy_move_overrides=enemy_move_overrides,
                                 check_trick_room=ct_check_tr,
                                 required_techs=ct_b4_required_techs or None,
-                                min_special_attackers=ct_b4_min_special)
+                                min_special_attackers=ct_b4_min_special,
+                                rank_by=ct_b4_rank_by)
                     except ValueError as e:
                         st.error(str(e))
                     else:
@@ -5254,6 +5286,7 @@ with tab_counter:
                         _cache_gameplans(pair_rows, "Bring-4 search")
                         st.session_state["ct_b4_our6"] = our6
                         st.session_state["ct_b4_vs_name"] = ct_vs_name
+                        st.session_state["ct_b4_rank_by_used"] = ct_b4_rank_by
 
                 pair_rows = st.session_state.get("ct_b4_pair_rows")
                 bring4_rows = st.session_state.get("ct_b4_bring4_rows")
@@ -5264,8 +5297,13 @@ with tab_counter:
                                f"your {len(shown_our6)}, "
                                f"vs {ct_vs_name}'s {total} enemy pairs:")
                     st.dataframe(_pair_rows_df(pair_rows), width='stretch', hide_index=True)
+                    shown_rank_by = st.session_state.get("ct_b4_rank_by_used", "worst_case")
+                    rank_by_desc = ("by total-wins score (win rate/tailwind-safe/"
+                                    "protect-safe/follow-me-safe blend)"
+                                    if shown_rank_by == "total_wins"
+                                    else "best worst-case first")
                     st.markdown(f"**Stage 2** -- all {len(bring4_rows)} possible bring-4s, "
-                               f"ranked best worst-case first:")
+                               f"ranked {rank_by_desc}:")
                     st.dataframe(_bring4_rows_df(bring4_rows, total),
                                 width='stretch', hide_index=True)
 
@@ -6069,9 +6107,23 @@ with tab_counter:
             help="How many top-Score Pokemon find_pair_cores scores pairs "
                  "for -- cheap even at 300 (a single O(pool^2) pass). The "
                  "group search itself then narrows to the best-connected "
-                 "~40 of those before searching combinations, so raising "
-                 "this widens what gets CONSIDERED without the search "
-                 "itself blowing up.")
+                 "~40 of those before searching combinations, unless "
+                 "'Search the full pool' below is on.")
+        cov_full_pool = st.checkbox(
+            "Search the full pool, no best-link pre-narrowing", key="ct_cov_full_pool",
+            help="\"I need it to be comprehensive within the defined set, "
+                 "no matter the links\" -- by default, before the group "
+                 "search runs, the pool above is narrowed to the "
+                 "best-CONNECTED ~40 names (each name's own single best "
+                 "pairing) -- a name whose best individual link is "
+                 "mediocre gets dropped even if it would complete an "
+                 "excellent GROUP with more members. Turning this on "
+                 "searches every name in the pool instead. The absolute-"
+                 "weakness caps below (not the net cap) are pruned "
+                 "INCREMENTALLY during the search itself, not just "
+                 "filtered from the results afterward, so with a real cap "
+                 "set this stays fast even fully un-narrowed -- a tight "
+                 "cap is what keeps this tractable, not the pool size.")
         ct_cov_teams = st.multiselect(
             "Enemy universe (named teams)", list(teams), default=list(teams),
             key="ct_cov_teams",
@@ -6187,6 +6239,32 @@ with tab_counter:
                 "Required techs (every returned group must have)",
                 "ct_cov_required_techs")
             cov_min_special = _min_special_attackers_slider("ct_cov_minspecial")
+            st.caption("Offensive type coverage and 1v1 threat coverage are "
+                      "always SHOWN once you run a search below -- these "
+                      "two only turn them into a hard requirement too.")
+            cov_min_off_on = st.checkbox(
+                "Require a minimum offensive type coverage",
+                key="ct_cov_min_off_on",
+                help="How many of the 18 defending types the group can "
+                     "collectively hit for real super-effective damage "
+                     "(ANY member's own real usage move counts). "
+                     "\"assess offensive type coverage\".")
+            cov_min_offensive_types = (
+                st.slider("Minimum types covered", 1, 18, 10, key="ct_cov_min_off")
+                if cov_min_off_on else None)
+            cov_max_uncovered_on = st.checkbox(
+                "Cap how many named enemies nobody on the group beats 1v1",
+                key="ct_cov_max_uncov_on",
+                help="\"do all of my team just lose to Kingambit, or "
+                     "whatever pokemon are most commonly on enemy teams\" "
+                     "-- a cheap 1v1 read (not a full battle) against "
+                     "every Pokemon in the 'Enemy universe' selected "
+                     "below. An enemy counts as covered the moment ANY "
+                     "group member beats it.")
+            cov_max_uncovered_threats = (
+                st.slider("Max enemies with zero answer", 0, 20, 3,
+                         key="ct_cov_max_uncov")
+                if cov_max_uncovered_on else None)
         cov_cap_on = st.checkbox(
             "Cap a group's worst net weakness", key="ct_cov_cap_on",
             help="Net = (members weak to a type) - (members resistant/"
@@ -6274,6 +6352,12 @@ with tab_counter:
                                 f"{', '.join(str(s) for s in sorted(cov_sizes))}..."):
                     cov_pair_rows = find_pair_cores(pool, merged, moves, natures,
                                                     typechart, enemy_teams)
+                    cov_enemy_names = sorted({n for roster in enemy_teams.values()
+                                              for n in roster})
+                    from counter_finder import one_v_one_matrix_for_pool
+                    cov_matrix = one_v_one_matrix_for_pool(
+                        pool, cov_enemy_names, merged, moves, natures, typechart)
+                    cov_search_kwargs = {"max_search_names": None} if cov_full_pool else {}
                     cov_results = coverage_group_search(
                         cov_pair_rows, merged, group_sizes=tuple(sorted(cov_sizes)),
                         prefix_limits=(("Mega ", cov_max_megas),),
@@ -6283,13 +6367,18 @@ with tab_counter:
                         max_weakness=cov_max_weakness,
                         max_weak_types=cov_max_weak_types,
                         max_weak_types_3=cov_max_weak_types_3,
+                        typechart=typechart, moves_db=moves,
+                        min_offensive_types=cov_min_offensive_types,
+                        one_v_one_matrix=cov_matrix,
+                        max_uncovered_threats=cov_max_uncovered_threats,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
+                        **cov_search_kwargs,
                         must_include=cov_include, suggested=cov_suggested,
                         suggested_min=cov_suggested_min,
                         required_cores=cov_required_cores or None,
                         min_member_score=cov_min_member_score,
                         exclude=cov_exclude, required_techs=cov_required_techs or None,
-                        moves_db=moves, min_special_attackers=cov_min_special)
+                        min_special_attackers=cov_min_special)
                 st.session_state["ct_cov_results"] = cov_results
                 st.session_state["ct_cov_pair_rows"] = cov_pair_rows
                 st.session_state["ct_cov_enemy_teams"] = enemy_teams
@@ -6416,6 +6505,20 @@ with tab_counter:
                         st.caption(
                             f"Types with 2+ weak: {row['weak_type_breadth_2']}  |  "
                             f"Types with 3+ weak: {row['weak_type_breadth_3']}")
+                        if row["offensive_coverage"] is not None:
+                            oc = row["offensive_coverage"]
+                            st.caption(
+                                f"Offensive coverage: {len(oc['covered'])}/"
+                                f"{len(oc['covered']) + len(oc['uncovered'])} types"
+                                + (f"  |  Can't hit: {', '.join(oc['uncovered'])}"
+                                   if oc["uncovered"] else ""))
+                        if row["threat_coverage"] is not None:
+                            tc = row["threat_coverage"]
+                            st.caption(
+                                f"1v1 threat coverage: {tc['covered']}/{tc['total']} "
+                                f"named enemies"
+                                + (f"  |  No answer to: {', '.join(tc['uncovered'])}"
+                                   if tc["uncovered"] else ""))
                         if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
                             st.caption("Pair performance (this group's own links):")
                             pair_table = []

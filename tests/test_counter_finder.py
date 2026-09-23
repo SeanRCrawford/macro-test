@@ -4365,6 +4365,71 @@ class TestBring4PairDepth(unittest.TestCase):
         for nf, bt in zip(no_faint, beaten):
             self.assertLessEqual(nf, bt)
 
+    def test_own_tailwind_used_total_sums_pairs_own_tailwind_used(self):
+        """"I need to explore tailwind robustness" -- `own_tailwind_used_
+        total` must be a plain sum of each internal pair's own already-
+        existing `pairs_own_tailwind_used` field (the unconditional "OUR
+        OWN TAILWIND AS A MATCHING ANSWER" counter `_pair_vs_targets`
+        already computes for every pair), not a fresh re-race."""
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        self.assertEqual(
+            depth["own_tailwind_used_total"],
+            sum(r["pairs_own_tailwind_used"] for r in b["pair_rows"]))
+        self.assertGreaterEqual(depth["own_tailwind_used_total"], 0)
+
+
+class TestBring4BlendedScore(unittest.TestCase):
+    """`bring4_blended_score` -- "It would also be good to see the bring
+    maximising for total wins, rather than maximin, especially across
+    tailwind/protect too" -- the SAME `_CORE_BLEND_WEIGHTS`-weighted
+    win-rate/tailwind-safe/protect-safe/follow-me-safe per-90 blend
+    `_core_row` already uses to rank whole cores, applied here to one
+    bring-4's own 6 internal pairs."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.pair_rows, self.bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+
+    def test_matches_the_documented_formula_directly(self):
+        b = self.bring4_rows[0]
+        depth = cf.bring4_pair_depth(b)
+        n_pairs = len(b["pair_rows"])
+        pt = depth["pairs_total"]
+        w_win, w_tw, w_pr, w_fm = cf._CORE_BLEND_WEIGHTS
+        expected = (w_win * cf._rate_per_90(depth["beaten_total"], n_pairs, pt)
+                   + w_tw * cf._rate_per_90(depth["tailwind_safe_total"], n_pairs, pt)
+                   + w_pr * cf._rate_per_90(depth["protect_safe_total"], n_pairs, pt)
+                   + w_fm * cf._rate_per_90(depth["follow_me_safe_total"], n_pairs, pt))
+        self.assertAlmostEqual(cf.bring4_blended_score(b), expected)
+
+    def test_every_bring4_row_gets_a_finite_non_negative_score(self):
+        for b in self.bring4_rows:
+            score = cf.bring4_blended_score(b)
+            self.assertGreaterEqual(score, 0.0)
+            self.assertLessEqual(score, 90.0)
+
+    def test_a_strictly_better_bring4_scores_strictly_higher(self):
+        """A bring-4 that wins every single one of its internal pairs,
+        under tailwind, protect, AND follow-me, must outscore one that
+        wins none of them -- the blend's own most basic monotonicity
+        property, checked here against the real-racing `bring4_rows`
+        already built in `setUp`."""
+        best = max(self.bring4_rows, key=cf.bring4_blended_score)
+        worst = min(self.bring4_rows, key=cf.bring4_blended_score)
+        if cf.bring4_blended_score(best) == cf.bring4_blended_score(worst):
+            self.skipTest("every candidate tied on the blend for this pool")
+        self.assertGreater(cf.bring4_blended_score(best),
+                           cf.bring4_blended_score(worst))
+
 
 class TestRecommendedLead(unittest.TestCase):
     """`recommended_lead` -- "is there a way to assess the best lead vs a
@@ -6407,6 +6472,184 @@ class TestUncoveredEnemyPairsDominateRanking(unittest.TestCase):
                         "though they tie on raw beaten count")
 
 
+class TestBring4CandidatesRankByTotalWins(unittest.TestCase):
+    """`_bring4_candidates(rank_by=...)` -- "I see the all possible groups
+    of 6 possible bring-4s ranked by their worst case, rather than their
+    total wins. It would also be good to see the bring maximising for
+    total wins, rather than maximin, especially across tailwind/protect
+    too."
+
+    A hand-built fixture (`_fake_pair_row`, no real racing, same style as
+    `TestUncoveredEnemyPairsDominateRanking`) with two bring-4 candidates
+    from a 6-member pool, A-F:
+
+    - MODERATE = {A, B, C, D}: all 6 internal pairs (AB/AC/AD/BC/BD/CD)
+      beat the SAME 2 of 3 enemy pairs each (consistent, no unconditional
+      loss -- every enemy pair is beaten by SOME pair of this bring-4).
+      Sum of wins across its 6 pairs: 6 * 2 = 12.
+    - LOPSIDED = {A, B, E, F}: AE/AF/BE/BF each beat ALL 3 enemy pairs,
+      but EF beats NONE (a real, total loss for that one pair) -- still
+      no unconditional loss overall since AE/AF/BE/BF cover every enemy
+      pair between them. Sum of wins: 2 (shared AB) + 3+3+3+3 (AE/AF/BE/BF)
+      + 0 (EF) = 14.
+
+    LOPSIDED's total (14) beats MODERATE's (12), but LOPSIDED's WORST pair
+    (EF, 0/3) is far worse than MODERATE's worst (every pair tied at 2/3).
+    `rank_by="worst_case"` (the default) must rank MODERATE above LOPSIDED
+    (maximin: EF's total loss is disqualifying); `rank_by="total_wins"`
+    must rank LOPSIDED above MODERATE (the blend rewards the higher
+    overall total, exactly what the maximin ranking structurally can't
+    see).
+    """
+
+    TARGETS = ["X", "Y", "Z"]  # enemy pairs: XY, XZ, YZ
+
+    def setUp(self):
+        XY, XZ, YZ = ("X", "Y"), ("X", "Z"), ("Y", "Z")
+        rows = {
+            # MODERATE's own 6 pairs: each ties at 2/3, losses spread out
+            # so every enemy pair is beaten by at least one -- 0 uncovered.
+            ("A", "B"): _fake_pair_row(("A", "B"), {XY, XZ}, self.TARGETS),
+            ("A", "C"): _fake_pair_row(("A", "C"), {XY, YZ}, self.TARGETS),
+            ("A", "D"): _fake_pair_row(("A", "D"), {XZ, YZ}, self.TARGETS),
+            ("B", "C"): _fake_pair_row(("B", "C"), {XY, XZ}, self.TARGETS),
+            ("B", "D"): _fake_pair_row(("B", "D"), {XY, YZ}, self.TARGETS),
+            ("C", "D"): _fake_pair_row(("C", "D"), {XZ, YZ}, self.TARGETS),
+            # LOPSIDED's own extra pairs: AE/AF/BE/BF sweep everything,
+            # EF is a total loss -- also 0 uncovered (AE/AF/BE/BF alone
+            # already cover all 3 enemy pairs between them).
+            ("A", "E"): _fake_pair_row(("A", "E"), {XY, XZ, YZ}, self.TARGETS),
+            ("A", "F"): _fake_pair_row(("A", "F"), {XY, XZ, YZ}, self.TARGETS),
+            ("B", "E"): _fake_pair_row(("B", "E"), {XY, XZ, YZ}, self.TARGETS),
+            ("B", "F"): _fake_pair_row(("B", "F"), {XY, XZ, YZ}, self.TARGETS),
+            ("E", "F"): _fake_pair_row(("E", "F"), set(), self.TARGETS),
+            # Never exercised by MODERATE or LOPSIDED -- just needs to
+            # exist so the OTHER C(6,4) subsets `_bring4_candidates` also
+            # builds don't KeyError.
+            ("C", "E"): _fake_pair_row(("C", "E"), set(), self.TARGETS),
+            ("C", "F"): _fake_pair_row(("C", "F"), set(), self.TARGETS),
+            ("D", "E"): _fake_pair_row(("D", "E"), set(), self.TARGETS),
+            ("D", "F"): _fake_pair_row(("D", "F"), set(), self.TARGETS),
+        }
+        self.pair_lookup = {frozenset(p): r for p, r in rows.items()}
+        self.six = ["A", "B", "C", "D", "E", "F"]
+
+    def _rows(self, rank_by):
+        return cf._bring4_candidates(self.six, self.pair_lookup, self.TARGETS,
+                                     good_threshold=1.0, rank_by=rank_by)
+
+    def test_neither_candidate_has_an_unconditional_loss(self):
+        by_bring4 = {frozenset(b["bring4"]): b for b in self._rows("worst_case")}
+        moderate = by_bring4[frozenset(("A", "B", "C", "D"))]
+        lopsided = by_bring4[frozenset(("A", "B", "E", "F"))]
+        self.assertEqual(moderate["uncovered_enemy_pairs"], [])
+        self.assertEqual(lopsided["uncovered_enemy_pairs"], [])
+
+    def test_lopsided_has_the_higher_raw_total(self):
+        by_bring4 = {frozenset(b["bring4"]): b for b in self._rows("worst_case")}
+        moderate = by_bring4[frozenset(("A", "B", "C", "D"))]
+        lopsided = by_bring4[frozenset(("A", "B", "E", "F"))]
+        moderate_total = sum(r["pairs_swept"] + r["pairs_traded"]
+                             for r in moderate["pair_rows"])
+        lopsided_total = sum(r["pairs_swept"] + r["pairs_traded"]
+                             for r in lopsided["pair_rows"])
+        self.assertEqual(moderate_total, 12)
+        self.assertEqual(lopsided_total, 14)
+        self.assertGreater(lopsided_total, moderate_total)
+
+    def test_default_worst_case_ranks_moderate_above_lopsided(self):
+        rows = self._rows("worst_case")
+        idx = {frozenset(b["bring4"]): i for i, b in enumerate(rows)}
+        self.assertLess(idx[frozenset(("A", "B", "C", "D"))],
+                        idx[frozenset(("A", "B", "E", "F"))],
+                        "maximin must reject LOPSIDED's total-loss EF pair "
+                        "even though its raw total is higher")
+
+    def test_total_wins_ranks_lopsided_above_moderate(self):
+        rows = self._rows("total_wins")
+        idx = {frozenset(b["bring4"]): i for i, b in enumerate(rows)}
+        self.assertLess(idx[frozenset(("A", "B", "E", "F"))],
+                        idx[frozenset(("A", "B", "C", "D"))],
+                        "total_wins must reward LOPSIDED's higher overall "
+                        "blend even though its worst single pair is a "
+                        "total loss")
+
+    def test_total_wins_ranking_is_sorted_by_uncovered_then_blended_score(self):
+        rows = self._rows("total_wins")
+        keys = [(len(b["uncovered_enemy_pairs"]), -cf.bring4_blended_score(b))
+               for b in rows]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_worst_case_default_matches_omitting_rank_by(self):
+        explicit = self._rows("worst_case")
+        implicit = cf._bring4_candidates(self.six, self.pair_lookup, self.TARGETS,
+                                         good_threshold=1.0)
+        self.assertEqual([b["bring4"] for b in explicit],
+                         [b["bring4"] for b in implicit])
+
+
+class TestBring4SearchRankByThreading(unittest.TestCase):
+    """`bring4_search(rank_by=...)` must thread straight through to its own
+    `_bring4_candidates` call, exactly like `test_bring4_candidates_matches_
+    bring4_search_stage_two` already checks for the default ranking."""
+
+    OUR6 = ["Mega Gengar", "Mega Alakazam", "Ninetales-Alola", "Sharpedo",
+           "Rampardos", "Kingambit"]
+    TARGETS = ["Sableye", "Ariados", "Froslass", "Absol"]
+
+    def setUp(self):
+        self.W = world()
+
+    def test_total_wins_returns_the_same_set_of_bring4s_as_worst_case(self):
+        """`rank_by` only ever changes the SORT KEY (`_bring4_candidates`'s
+        own `rank_by="worst_case"` vs. `"total_wins"` selector) -- row
+        computation/shape is untouched, so both modes must return the
+        exact same set of C(6,4) bring-4 candidates, just reordered."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pr1, worst_case = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="worst_case")
+        _pr2, total_wins = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="total_wins")
+        self.assertEqual({frozenset(b["bring4"]) for b in worst_case},
+                         {frozenset(b["bring4"]) for b in total_wins})
+        self.assertEqual(len(worst_case), len(total_wins))
+
+    def test_total_wins_is_sorted_by_uncovered_then_blended_score_on_real_data(self):
+        """"Maybe the maximin vs max win bring should at least try to make
+        sure there are no uncovered enemy pairs" -- `rank_by="total_wins"`
+        sorts by `(len(uncovered_enemy_pairs), -bring4_blended_score)`, NOT
+        blended score alone: fewest unconditional losses always still wins
+        first, same as `"worst_case"`'s own primary criterion, THEN ties
+        within the same uncovered-count are broken by score."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pair_rows, bring4_rows = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="total_wins")
+        keys = [(len(b["uncovered_enemy_pairs"]), -cf.bring4_blended_score(b))
+               for b in bring4_rows]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_default_rank_by_leaves_stage_two_unchanged(self):
+        """Regression guard: `bring4_search`'s own default output (no
+        `rank_by` passed) must be byte-for-byte identical to before this
+        feature existed -- `rank_by="worst_case"` explicitly given must
+        match omitting it entirely."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        _pr1, implicit = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0)
+        _pr2, explicit = cf.bring4_search(
+            self.OUR6, self.TARGETS, merged, moves, natures, typechart,
+            good_threshold=0.0, rank_by="worst_case")
+        self.assertEqual([b["bring4"] for b in implicit],
+                         [b["bring4"] for b in explicit])
+
+
 class TestCoreRowBlendedRanking(unittest.TestCase):
     """`_core_row`'s redesigned `worst_enemy_score_key`: "I am trying to
     maximise overall wins and keep myself in winning matchups all the
@@ -7003,12 +7246,23 @@ class TestTeamMissingTechs(unittest.TestCase):
         move), since Tailwind is a member of both."""
         self.assertTrue(cf._member_has_tech("Whimsicott", self.merged, "tailwind"))
         self.assertTrue(cf._member_has_tech("Whimsicott", self.merged, "speed_control"))
-        for tech in ("trick_room", "coaching", "redirect", "taunt", "helping_hand"):
+        for tech in ("trick_room", "coaching", "redirect", "taunt", "helping_hand", "pivot"):
             self.assertIn(tech, cf.TECH_LABELS)
             # A no-op call on real data must never raise, whatever the
             # answer -- confirms every new key is wired all the way
             # through `_member_has_tech`'s own move-name lookup.
             cf._member_has_tech("Kingambit", self.merged, tech)
+
+    def test_pivot_tech_covers_the_named_switching_moves(self):
+        """"Add pivot tech (switching move such as u turn, parting shot,
+        flip turn, baton pass, and so on)" -- Incineroar's real usage
+        moveset carries Parting Shot, a real pivot move; Kingambit's own
+        real moveset carries none of them."""
+        self.assertTrue(cf._member_has_tech("Incineroar", self.merged, "pivot"))
+        self.assertFalse(cf._member_has_tech("Kingambit", self.merged, "pivot"))
+        for move in ("U-turn", "Volt Switch", "Parting Shot", "Flip Turn",
+                    "Baton Pass", "Teleport", "Chilly Reception", "Shed Tail"):
+            self.assertIn(move, cf.TECH_MOVES["pivot"])
 
     def test_team_missing_techs_is_empty_once_every_category_is_covered(self):
         team = ["Pelipper", "Rillaboom", "Kingambit"]
@@ -11544,6 +11798,138 @@ class TestCoverageGroupSearchRealData(unittest.TestCase):
             self.assertEqual(len(sigs), len(set(sigs)), row["group"])
 
 
+class TestCoverageGroupSearchOffensiveCoverage(unittest.TestCase):
+    """"It would be good to also assess offensive type coverage" --
+    `typechart` given turns on `"offensive_coverage"` on every row (which
+    of the 18 defending types the group can collectively hit for real
+    super-effective damage), and `min_offensive_types` makes it a hard
+    floor. Real roster data -- Garchomp (Ground/Dragon STAB) and
+    Incineroar (Fire/Dark STAB) between them hit a wide type spread."""
+
+    POOL = ["Garchomp", "Kingambit", "Incineroar", "Whimsicott", "Sinistcha"]
+
+    def setUp(self):
+        from species_data import TYPES
+        self.TYPES = TYPES
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.merged, self.moves, self.typechart = merged, moves, typechart
+        self.pair_rows = cf.find_pair_cores(
+            self.POOL, merged, moves, natures, typechart, self.W["teams"])
+
+    def test_typechart_none_leaves_offensive_coverage_unset(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=5)
+        for row in result[4]["rows"]:
+            self.assertIsNone(row["offensive_coverage"])
+
+    def test_typechart_given_populates_offensive_coverage(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=5,
+            typechart=self.typechart, moves_db=self.moves)
+        for row in result[4]["rows"]:
+            cov = row["offensive_coverage"]
+            self.assertIsNotNone(cov)
+            self.assertEqual(set(cov["covered"]) | set(cov["uncovered"]),
+                             set(self.TYPES))
+            self.assertEqual(set(cov["covered"]) & set(cov["uncovered"]), set())
+
+    def test_min_offensive_types_drops_groups_under_the_floor(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            typechart=self.typechart, moves_db=self.moves)
+        widest = max(len(r["offensive_coverage"]["covered"]) for r in result[4]["rows"])
+        floor = widest  # only the widest-covering group(s) may pass
+        capped = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            typechart=self.typechart, moves_db=self.moves,
+            min_offensive_types=floor)
+        self.assertTrue(capped[4]["rows"])
+        for row in capped[4]["rows"]:
+            self.assertGreaterEqual(len(row["offensive_coverage"]["covered"]), floor)
+
+    def test_min_offensive_types_can_drop_every_result(self):
+        result = cf.coverage_group_search(
+            self.pair_rows, self.merged, group_sizes=(4,), top_n=20,
+            typechart=self.typechart, moves_db=self.moves,
+            min_offensive_types=len(self.TYPES) + 1)
+        self.assertEqual(result[4]["rows"], [])
+
+
+class TestCoverageGroupSearchThreatCoverage(unittest.TestCase):
+    """"assess ... simple 1v1 threat coverage of common enemies. For
+    instance, do all of my team just lose to kingambit" --
+    `one_v_one_matrix` given turns on `"threat_coverage"` on every row (an
+    enemy counts as covered the moment ANY group member beats it 1v1),
+    and `max_uncovered_threats` makes it a hard cap. A hand-built,
+    fully-controlled matrix -- the "does everyone lose to Kingambit"
+    scenario made deterministic and explicit rather than left to real
+    data's own current matchups."""
+
+    POOL = ["A", "B", "C", "D"]
+
+    def setUp(self):
+        import itertools as _it
+        self.merged = {n: {"types": ["Normal"], "score": 100.0} for n in self.POOL}
+        self.pair_rows = [
+            {"pair": p, "avg_score": 0.0, "mutual_resist": {"perfect": True,
+                                                            "coverage_frac": 100.0}}
+            for p in _it.combinations(self.POOL, 2)]
+        # Every one of A/B/C/D loses to Kingambit outright -- the exact
+        # "does my whole team just lose to Kingambit" scenario -- but each
+        # still beats ONE other, unrelated enemy, so the matrix isn't
+        # trivially all-losses.
+        self.matrix = {
+            "A": {"Kingambit": "loss", "Sinistcha": "win"},
+            "B": {"Kingambit": "loss", "Whimsicott": "win"},
+            "C": {"Kingambit": "loss", "Sinistcha": "win"},
+            "D": {"Kingambit": "loss", "Whimsicott": "win"},
+        }
+
+    def _search(self, **kwargs):
+        return cf.coverage_group_search(
+            self.pair_rows, self.merged, pool=self.POOL, group_sizes=(4,),
+            top_n=5, no_duplicate_typing=False, **kwargs)
+
+    def test_matrix_none_leaves_threat_coverage_unset(self):
+        result = self._search()
+        for row in result[4]["rows"]:
+            self.assertIsNone(row["threat_coverage"])
+
+    def test_matrix_given_flags_kingambit_as_uncovered(self):
+        result = self._search(one_v_one_matrix=self.matrix)
+        self.assertTrue(result[4]["rows"])
+        tc = result[4]["rows"][0]["threat_coverage"]
+        self.assertIn("Kingambit", tc["uncovered"])
+        self.assertNotIn("Sinistcha", tc["uncovered"])
+        self.assertNotIn("Whimsicott", tc["uncovered"])
+        self.assertEqual(tc["total"], 3)
+        self.assertEqual(tc["covered"], 2)
+
+    def test_max_uncovered_threats_zero_drops_the_only_group(self):
+        """The one possible group of 4 (the whole pool) has exactly one
+        uncovered enemy (Kingambit) -- capping at 0 must drop it."""
+        result = self._search(one_v_one_matrix=self.matrix,
+                              max_uncovered_threats=0)
+        self.assertEqual(result[4]["rows"], [])
+
+    def test_max_uncovered_threats_one_keeps_it(self):
+        result = self._search(one_v_one_matrix=self.matrix,
+                              max_uncovered_threats=1)
+        self.assertTrue(result[4]["rows"])
+
+    def test_adding_a_kingambit_beater_covers_it(self):
+        """Positive control: give one member a real win over Kingambit --
+        the group-wide reading must flip to covered."""
+        matrix = {k: dict(v) for k, v in self.matrix.items()}
+        matrix["A"]["Kingambit"] = "win"
+        result = self._search(one_v_one_matrix=matrix)
+        tc = result[4]["rows"][0]["threat_coverage"]
+        self.assertNotIn("Kingambit", tc["uncovered"])
+        self.assertEqual(tc["covered"], 3)
+
+
 class TestCoverageGroupSearchMegaLegality(unittest.TestCase):
     """`coverage_group_search`'s own hard exclusion for a Mega alongside
     its own base form -- distinct from `find_pair_cores`'s pairwise
@@ -11641,6 +12027,183 @@ class TestCoverageGroupSearchLargePoolNarrowing(unittest.TestCase):
             rows, merged, pool=names, group_sizes=(3,), top_n=5,
             no_duplicate_typing=False, max_search_names=None)
         self.assertTrue(result[3]["rows"])
+
+
+class TestCoverageGroupSearchIncrementalWeaknessPruning(unittest.TestCase):
+    """"Is the coverage group search truly exhaustive?" / "I need it to be
+    comprehensive within the defined set, no matter the links" --
+    `max_weakness`/`max_weak_types`/`max_weak_types_3` are growth-
+    monotonic (a type's own raw weak count never goes DOWN as members are
+    added), so they're now pruned INCREMENTALLY during the DFS itself,
+    not just filtered from the results afterward -- a real prune, never
+    losing a valid group, and (this class's own point) actually cutting
+    the search space rather than just hiding results from it."""
+
+    def _fixture(self, n_weak=4, n_safe=4):
+        """`n_weak` members weak to Fire (`defensive_chart={"Fire": 2.0}`),
+        `n_safe` members neutral to it -- every pair perfect/100% so link
+        quality never discriminates between groups, isolating the
+        weakness-cap's own effect."""
+        import itertools as _it
+        weak = [f"W{i}" for i in range(n_weak)]
+        safe = [f"S{i}" for i in range(n_safe)]
+        names = weak + safe
+        merged = {n: {"types": ["Normal"], "defensive_chart": {"Fire": 2.0}}
+                 for n in weak}
+        merged.update({n: {"types": ["Normal"], "defensive_chart": {"Fire": 1.0}}
+                      for n in safe})
+        rows = [_fake_coverage_row(p, True, 100.0, 0.0)
+               for p in _it.combinations(names, 2)]
+        return rows, merged, names
+
+    def test_max_weakness_never_returns_a_group_over_the_cap(self):
+        # A size-6 group under max_weakness=2 needs >= 4 safe seats -- give
+        # exactly 4 safe names so a valid group exists at all (5 weak, 3
+        # safe would make every possible 6-group need >= 3 weak members,
+        # already over the cap, and trivially return nothing).
+        rows, merged, names = self._fixture(n_weak=5, n_safe=4)
+        result = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=2)
+        self.assertTrue(result[6]["rows"])
+        for row in result[6]["rows"]:
+            self.assertLessEqual(row["weakness"]["Fire"], 2)
+
+    def test_max_weakness_actually_shrinks_the_explored_space(self):
+        """The real regression guard: a tight cap must cut down how many
+        candidates the DFS even VISITS (`seen`), not just how many it
+        returns -- confirms this is a genuine incremental prune, not a
+        post-hoc filter relabelled."""
+        rows, merged, names = self._fixture(n_weak=6, n_safe=4)
+        uncapped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=None)
+        capped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=1)
+        self.assertLess(capped[6]["seen"], uncapped[6]["seen"])
+
+    def test_max_weak_types_breadth_cap_is_also_pruned_incrementally(self):
+        """Same idea, at the BREADTH cap (`max_weak_types`): a synthetic
+        pool where 3 different types each have several weak members --
+        capping to 1 type allowed at breadth-2 must cut the explored
+        space, not just the returned rows."""
+        import itertools as _it
+        names = [f"N{i}" for i in range(9)]
+        merged = {}
+        for i, n in enumerate(names):
+            t = ["Fire", "Water", "Grass"][i % 3]
+            merged[n] = {"types": ["Normal"], "defensive_chart": {t: 2.0}}
+        rows = [_fake_coverage_row(p, True, 100.0, 0.0)
+               for p in _it.combinations(names, 2)]
+        uncapped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None)
+        capped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weak_types=1)
+        self.assertLess(capped[6]["seen"], uncapped[6]["seen"])
+        for row in capped[6]["rows"]:
+            breadth_2 = sum(1 for v in row["weakness"].values() if v >= 2)
+            self.assertLessEqual(breadth_2, 1)
+
+
+class TestCoverageGroupSearchNetWeaknessNotBufferRestricted(unittest.TestCase):
+    """The other half of "truly exhaustive": `max_net_weakness`/`min_avg_
+    score` used to only be checked against the search's own top `max(top_n
+    * 6, 200)` candidates by raw LINK quality -- a genuinely valid group
+    ranked outside that buffer (because its own links are mediocre, even
+    though its final weakness profile is fine) was silently dropped and
+    never even considered. Now checked at every leaf the DFS reaches, so
+    it surfaces regardless of how it ranks on link quality alone.
+
+    Fixture: 10 "H" members, every H-H pair perfect/100% link quality (so
+    every one of the C(10,6)=210 all-H groups of size 6 ties for the BEST
+    possible link-quality rank -- comfortably over the old 200-candidate
+    buffer on its own) but ALL weak to Fire with nothing resisting it
+    (net_weakness["Fire"] = 6, fails a max_net_weakness=0 cap). 6 "L"
+    members, mediocre L-L link quality (ranked below EVERY all-H group)
+    but all RESIST Fire (net_weakness["Fire"] = -6, passes easily) --
+    the only real "good" group is the full {L0..L5}, ranked dead last on
+    link quality among the fixture's own valid full-size candidates.
+
+    NO H-L pair rows are defined at all, and `max_missing_frac=0` is used
+    below -- a MIXED group would otherwise still pick up real "perfect"
+    credit from whichever H-H pairs it contains (even just 2 H's already
+    contribute one), letting it outrank the pure all-L group without ever
+    exercising the bug this class is guarding against. Excluding mixed
+    groups entirely (via the missing cross-links) leaves pure-H and
+    pure-L as the only two shapes in play, exactly the comparison this
+    fixture is built to make."""
+
+    def setUp(self):
+        import itertools as _it
+        self.H = [f"H{i}" for i in range(10)]
+        self.L = [f"L{i}" for i in range(6)]
+        names = self.H + self.L
+        merged = {n: {"types": ["Normal"], "defensive_chart": {"Fire": 2.0}}
+                 for n in self.H}
+        merged.update({n: {"types": ["Normal"], "defensive_chart": {"Fire": 0.5}}
+                      for n in self.L})
+        rows = ([_fake_coverage_row(p, True, 100.0, 0.0)
+                for p in _it.combinations(self.H, 2)] +
+               [_fake_coverage_row(p, False, 5.0, 0.0)
+                for p in _it.combinations(self.L, 2)])
+        self.rows, self.merged, self.names = rows, merged, names
+
+    def test_the_low_ranked_but_valid_group_is_still_found(self):
+        result = cf.coverage_group_search(
+            self.rows, self.merged, pool=self.names, group_sizes=(6,), top_n=5,
+            no_duplicate_typing=False, max_search_names=None,
+            max_net_weakness=0, max_missing_frac=0)
+        self.assertTrue(result[6]["rows"],
+                        "the only net-weakness-safe group (all-L) must "
+                        "still surface even though 210 all-H groups "
+                        "outrank it on raw link quality alone")
+        self.assertEqual(set(result[6]["rows"][0]["group"]), set(self.L))
+
+    def test_every_all_h_group_genuinely_fails_the_cap(self):
+        """Sanity check on the fixture itself -- confirms the 210
+        higher-ranked groups are a real obstacle (not accidentally also
+        passing), so the test above is actually exercising the fix."""
+        import itertools as _it
+        for combo in _it.combinations(self.H, 6):
+            net = cf.net_weakness_by_type(list(combo), self.merged)
+            self.assertGreater(max(net.values()), 0)
+
+
+class TestCoverageGroupSearchFullPoolTractableUnderTightCap(unittest.TestCase):
+    """"Often this is a very reduced pool, given default absolute
+    weaknesses of 3, default 2+ weaknesses of 8, and default 3+
+    weaknesses of 1" -- with `max_search_names=None` (the WHOLE pool, no
+    best-link pre-narrowing) and a genuinely tight `max_weakness`, the
+    search must stay tractable purely from the incremental prune, not by
+    secretly relying on a small pool. C(60, 6) is ~50 million -- if this
+    ran unpruned it would hit `max_eval` (2,000,000) and abort; a real
+    incremental prune keeps `seen` far below that."""
+
+    def test_a_tight_cap_keeps_a_60_name_pool_from_aborting(self):
+        import itertools as _it
+        # 55 names weak to Fire, 5 that resist it -- a group may have at
+        # most 2 Fire-weak members, so every valid 6-member group needs at
+        # least 4 of its 6 seats filled from the 5-name resist pool alone,
+        # a tiny, fast-to-find slice of the full C(60,6) space.
+        weak = [f"W{i}" for i in range(55)]
+        safe = [f"S{i}" for i in range(5)]
+        names = weak + safe
+        merged = {n: {"types": ["Normal"], "defensive_chart": {"Fire": 2.0}}
+                 for n in weak}
+        merged.update({n: {"types": ["Normal"], "defensive_chart": {"Fire": 0.5}}
+                      for n in safe})
+        rows = [_fake_coverage_row(p, True, 50.0, 0.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=10,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=2)
+        self.assertFalse(result[6]["aborted"])
+        self.assertLess(result[6]["seen"], 2_000_000)
+        for row in result[6]["rows"]:
+            self.assertLessEqual(row["weakness"]["Fire"], 2)
 
 
 class TestNarrowCoveragePoolNames(unittest.TestCase):

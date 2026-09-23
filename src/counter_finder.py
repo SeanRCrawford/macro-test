@@ -359,11 +359,10 @@ def member_weakness_summary(core, merged):
     "weak_to_0": int, "total_weakness_instances": int}.
     """
     from species_data import TYPES
-    from team_search import _weak_resist
+    from team_search import _weak_resist, type_matchup
     per_member = {}
     for n in core:
-        dc = (merged.get(n) or {}).get("defensive_chart") or {}
-        per_member[n] = sum(1 for t in TYPES if dc.get(t, 1.0) > 1.0)
+        per_member[n] = sum(1 for t in TYPES if type_matchup(n, merged, t) == "weak")
     counts = list(per_member.values())
     per_type = {t: len(_weak_resist(list(core), merged, t)[0]) for t in TYPES}
     return {
@@ -506,6 +505,20 @@ TECH_MOVES = {
     "redirect": frozenset({"Follow Me", "Rage Powder"}),
     "taunt": frozenset({"Taunt"}),
     "helping_hand": frozenset({"Helping Hand"}),
+    # "pivot" -- a self-switch move (Showdown's own `selfSwitch` flag,
+    # `MoveInfo.self_switch`/`battle.py`'s own real-engine handling): the
+    # user swaps out for a bench member the SAME turn the move hits,
+    # instead of spending a separate switch action -- "u turn, parting
+    # shot, flip turn, baton pass, and so on". Named here the same
+    # hardcoded-frozenset way every other single-move/small-family tech
+    # already is, not derived from `MoveInfo.self_switch` itself: this
+    # dict is keyed by move NAME (`_member_has_tech`'s own `moves_usage`
+    # name check), or Showdown's raw per-move data outside `battle.py`'s
+    # own already-resolved `MoveInfo` objects.
+    "pivot": frozenset({
+        "U-turn", "Volt Switch", "Parting Shot", "Flip Turn", "Baton Pass",
+        "Teleport", "Chilly Reception", "Shed Tail",
+    }),
 }
 TECH_LABELS = {
     "weather": "weather setter", "terrain": "terrain setter",
@@ -513,6 +526,7 @@ TECH_LABELS = {
     "tailwind": "Tailwind user", "trick_room": "Trick Room user",
     "coaching": "Coaching user", "redirect": "redirector (Follow Me/Rage Powder)",
     "taunt": "Taunt user", "helping_hand": "Helping Hand user",
+    "pivot": "pivot/switching move (U-turn, Volt Switch, Parting Shot, ...)",
 }
 
 
@@ -581,23 +595,25 @@ def _pair_defensive_synergy(name1, name2, merged):
     defensively (e.g., all super effective attacks into one are resisted by
     the other)".
 
-    For every type, reads each member's own `defensive_chart` (roster.csv's
-    per-type multiplier -- the SAME source `_weak_resist`/`member_weakness_
-    summary` already read, so "weak to" means the same thing everywhere in
-    this module): `shared_weak` is every type BOTH members take super-
-    effective damage from (a real gap this pair has NO answer to); `covered_
-    weak` is every type exactly ONE of them is weak to while the other
-    resists or is neutral/immune (a weakness the partner actually patches).
+    For every type, reads each member's own matchup via `team_search.type_
+    matchup` (the SAME per-species read `_weak_resist`/`member_weakness_
+    summary` already use -- a Levitate user counts as immune to Ground
+    here too, not just in the raw `defensive_chart` reading, so "weak to"
+    means the same thing everywhere in this module): `shared_weak` is
+    every type BOTH members take super-effective damage from (a real gap
+    this pair has NO answer to); `covered_weak` is every type exactly ONE
+    of them is weak to while the other resists or is neutral/immune (a
+    weakness the partner actually patches).
 
     Returns {"shared_weak": [type, ...], "covered_weak": [type, ...]} -- a
     PERFECTLY covering pair has an empty `shared_weak`.
     """
     from species_data import TYPES
-    dc1 = merged[name1]["defensive_chart"]
-    dc2 = merged[name2]["defensive_chart"]
+    from team_search import type_matchup
     shared, covered = [], []
     for t in TYPES:
-        w1, w2 = dc1.get(t, 1.0) > 1.0, dc2.get(t, 1.0) > 1.0
+        w1 = type_matchup(name1, merged, t) == "weak"
+        w2 = type_matchup(name2, merged, t) == "weak"
         if w1 and w2:
             shared.append(t)
         elif w1 != w2:
@@ -623,12 +639,13 @@ def _pair_mutual_resist_coverage(name1, name2, merged):
     true for a side with no weaknesses at all), the "side feature" this
     was asked for: a pair that "perfectly... covers type weaknesses"."""
     from species_data import TYPES
-    dc1 = merged[name1]["defensive_chart"]
-    dc2 = merged[name2]["defensive_chart"]
-    a_weak = [t for t in TYPES if dc1.get(t, 1.0) > 1.0]
-    b_weak = [t for t in TYPES if dc2.get(t, 1.0) > 1.0]
-    a_resisted_by_b = sum(1 for t in a_weak if dc2.get(t, 1.0) < 1.0)
-    b_resisted_by_a = sum(1 for t in b_weak if dc1.get(t, 1.0) < 1.0)
+    from team_search import type_matchup
+    a_weak = [t for t in TYPES if type_matchup(name1, merged, t) == "weak"]
+    b_weak = [t for t in TYPES if type_matchup(name2, merged, t) == "weak"]
+    a_resisted_by_b = sum(1 for t in a_weak
+                          if type_matchup(name2, merged, t) in ("resist", "immune"))
+    b_resisted_by_a = sum(1 for t in b_weak
+                          if type_matchup(name1, merged, t) in ("resist", "immune"))
     total_weak = len(a_weak) + len(b_weak)
     total_resisted = a_resisted_by_b + b_resisted_by_a
     coverage_frac = (total_resisted / total_weak) if total_weak else 1.0
@@ -828,6 +845,19 @@ def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart):
     a whole pool's worth."""
     return _one_v_one_matrix([name], [enemy_name], merged, moves_db,
                              natures, typechart)[name][enemy_name]
+
+
+def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart):
+    """Public entry point onto `_one_v_one_matrix` -- for a caller outside
+    this module (the Streamlit app) wanting to build the SAME cheap 1v1
+    read `find_pair_cores`'s own `threat_coverage` already uses, to hand
+    into `coverage_group_search`'s own `one_v_one_matrix` param for its
+    whole-GROUP reading ("do all of my team just lose to Kingambit").
+    Building it once here (rather than `coverage_group_search` building
+    its own) means the SAME matrix backs both the pair-level and group-
+    level readings -- they can never quietly disagree on what "beats"
+    means for the same pool/enemy universe."""
+    return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
 
 
 def _pair_threat_coverage(name1, name2, matrix):
@@ -1069,7 +1099,9 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           required_cores=None, min_member_score=None, exclude=None,
                           required_techs=None, max_weak_types=None,
                           max_weak_types_3=None, moves_db=None,
-                          min_special_attackers=None):
+                          min_special_attackers=None, typechart=None,
+                          min_offensive_types=None, one_v_one_matrix=None,
+                          max_uncovered_threats=None):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -1090,7 +1122,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     concrete, principled reason for the gap instead of a data-entry hole.
 
     HARD FILTERS, checked INCREMENTALLY during the search (a bad branch is
-    pruned immediately, never merely dropped at the end):
+    pruned immediately, never merely dropped at the end) -- "I need it to
+    be comprehensive within the defined set, no matter the links":
       - `prefix_limits`: `[(prefix, max_count), ...]` -- "how many may
         share one group" (default: at most 2 names starting with "Mega ",
         the same team-wide cap `two_two_two_teams`/`multi_bring4_
@@ -1102,34 +1135,42 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         be missing (no `find_pair_cores` row at all) before it's dropped,
         as a fraction of the group's own link count -- 0 demands every
         link be a real, scored pair.
+      - `max_weakness`/`max_weak_types`/`max_weak_types_3`: a type's own
+        RAW weak-member count only ever GROWS as members are added (it
+        doesn't depend on who else is in the group, unlike the net
+        reading below), so these are genuinely growth-monotonic -- a
+        partial group already at or over any of them can never recover,
+        and pruning it here loses no valid completion. This is what makes
+        a large, un-narrowed `pool` tractable under a real cap (see
+        `max_search_names` below) rather than needing a lossy pool-size
+        heuristic to do the pruning instead.
 
-    `max_net_weakness`/`max_weakness`/`min_avg_score` are checked AFTERWARD, only against
-    the search's own top few hundred candidates by `sort_by` (`max(top_n *
-    6, 200)` of them) -- `net_weakness_by_type`/`raw_weakness_by_type` are real per-type
-    recomputations (not a cheap lookup like everything above), so, matching
-    this module's own established "cheap check gates an expensive
-    re-race, top-N only" discipline (see `_core_dead_mega_rebuild`'s
-    docstring), neither is ever computed beyond that buffer. Accepted
-    tradeoff, stated plainly: a candidate ranked just outside that buffer
-    by the raw link quality, but that would have passed `max_net_weakness`/
-    `max_weakness` while several buffered candidates don't, is never seen -- exactly the
-    same "the sweep's own ranking is computed first, unaware of the
-    later-stage filter" tradeoff Item Clause/Focus-Sash-cap/dead-mega
-    rebuild already accept elsewhere in this module. `net_weakness`/
-    `weakness` are always computed for whatever ends up in the returned
-    rows (a genuine display column, "add type weakness assessment"), not
-    gated behind `max_net_weakness`/`max_weakness` being set.
+    `max_net_weakness`/`min_avg_score` are the two checks that are NOT
+    growth-monotonic (a later member's own RESIST can pull a type's net
+    weakness back down; avg Score moves either direction as members are
+    added), so they can't be pruned mid-search the way the raw-weakness
+    caps above are -- but they ARE checked against EVERY complete
+    candidate the search reaches (`passes_final_filters`, once per leaf),
+    never restricted to a ranked top-N buffer: the per-type weak/resist
+    counts are already being tracked incrementally for `max_weakness`'s
+    own pruning above, so building the full `net_weakness`/`weakness`
+    dicts at a leaf costs nothing beyond what was already computed getting
+    there -- no separate `net_weakness_by_type`/`raw_weakness_by_type`
+    recomputation, and no candidate that would have passed is ever
+    dropped for ranking outside some cutoff. `net_weakness`/`weakness` are
+    always populated on every returned row (a genuine display column, "add
+    type weakness assessment"), not gated behind either cap being set.
 
     `max_weakness`: like `max_net_weakness`, but on the ABSOLUTE weak
-    count per type (`raw_weakness_by_type`, "cap absolute weaknesses per
-    type too" -- no credit for how many OTHER members resist that type,
-    unlike `max_net_weakness`'s net reading) -- a group is dropped if any
-    type has more than this many members weak to it. The same `team_
-    search.weakness_violations`/`hard_violations` "max_weak" reading
-    Generate Team's own per-type overrides already expose, just applied
-    here as a single scalar across every type (no per-type override --
-    add one if a real need for it shows up). `None` (the default) checks
-    nothing, exactly as before this existed.
+    count per type (no credit for how many OTHER members resist that
+    type, unlike `max_net_weakness`'s net reading) -- "cap absolute
+    weaknesses per type too": a group is dropped if any type has more
+    than this many members weak to it. The same `team_search.weakness_
+    violations`/`hard_violations` "max_weak" reading Generate Team's own
+    per-type overrides already expose, just applied here as a single
+    scalar across every type (no per-type override -- add one if a real
+    need for it shows up). `None` (the default) checks nothing, exactly
+    as before this existed.
 
     `exclude`: "allow an option to exclude specific pokemon" -- names
     that may NEVER appear in a returned group, for any size. Applied the
@@ -1172,7 +1213,17 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     partner is mediocre is exactly the one least likely to anchor a
     top-ranked GROUP anyway, so this rarely changes the answer, just the
     time it takes to find it. `None` disables this (the old unbounded
-    behaviour, for a caller that already knows its pool is small).
+    behaviour, for a caller that already knows its pool is small) --
+    "I need it to be comprehensive within the defined set, no matter the
+    links": this narrowing, unlike the raw-weakness caps above, is a
+    HEURISTIC, not a provably-safe prune -- a name with a mediocre best
+    single link can still complete an excellent GROUP, so it's the one
+    real gap left in "exhaustive." With a genuinely tight `max_weakness`/
+    `max_weak_types`/`max_weak_types_3` (now pruned incrementally, not
+    just checked afterward) doing the heavy lifting to keep the DFS itself
+    tractable, passing `None` here to search the WHOLE pool is realistic,
+    not just theoretically available -- it no longer depends on `max_
+    missing_frac` or `max_eval` alone to keep the search from exploding.
 
     `must_include`: "make sure the Pokemon is present on EVERY identified
     team" -- a HARD requirement, not just a narrowing exemption: every
@@ -1237,17 +1288,18 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     same way as `required_techs` -- once a full candidate group is
     assembled. `None` (the default) checks nothing.
 
-    `max_weak_types`/`max_weak_types_3`: BREADTH caps on absolute (raw,
-    `raw_weakness_by_type`) weakness -- "limit the total number of types
-    with absolute weaknesses of 2 or more, and 3 or more". `max_weak_types`
-    caps how many DIFFERENT types may have 2+ members weak to them,
-    `max_weak_types_3` the same at a 3+ bar -- distinct from `max_weakness`
-    above, which caps any ONE type's own raw count, not how many types
-    cross a threshold (the same "depth vs breadth" distinction `weak_type_
-    breadth` itself documents). Checked in the same AFTERWARD, top-buffer-
-    only pass as `max_net_weakness`/`max_weakness`, reusing that same `raw`
-    map rather than recomputing it. `None` (the default, for each) checks
-    nothing.
+    `max_weak_types`/`max_weak_types_3`: BREADTH caps on absolute (raw)
+    weakness -- "limit the total number of types with absolute weaknesses
+    of 2 or more, and 3 or more". `max_weak_types` caps how many DIFFERENT
+    types may have 2+ members weak to them, `max_weak_types_3` the same at
+    a 3+ bar -- distinct from `max_weakness` above, which caps any ONE
+    type's own raw count, not how many types cross a threshold (the same
+    "depth vs breadth" distinction `weak_type_breadth` itself documents).
+    Like `max_weakness`, a BREADTH count also only ever grows as members
+    are added (an existing type already past its threshold stays past it;
+    only a NEW type can push the count higher), so this is pruned
+    incrementally too, not restricted to any top-ranked subset. `None`
+    (the default, for each) checks nothing.
 
     `min_member_score`: a HARD per-NAME floor -- every member of a
     returned group must have its own `merged[name]["score"]` at or above
@@ -1266,6 +1318,48 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     list. `None` (the default) applies no floor, exactly as before this
     existed.
 
+    `typechart`/`min_offensive_types`: "assess offensive type coverage" --
+    which of the 18 defending types the group can collectively hit for
+    real super-effective damage, ANY member's own real usage move
+    counting (`_real_damaging_moves` + `type_multiplier`, the exact same
+    per-move read `_pair_offensive_pin`'s own follow-up half already
+    uses). `typechart=None` (the default) skips this entirely -- every
+    row's own `"offensive_coverage"` is `None`, and `min_offensive_types`
+    is ignored even if set (there's nothing to check it against). With
+    `typechart` given, `"offensive_coverage"` is always populated
+    (`{"covered": [type, ...], "uncovered": [type, ...]}`, a genuine
+    display column); `min_offensive_types` additionally makes it a HARD
+    floor -- a group covering fewer types than this is dropped. NOT
+    growth-monotonic-PRUNABLE mid-search the way the raw-weakness caps
+    are (a partial group short of the floor can still reach it with more
+    members), so -- like `max_net_weakness`/`min_avg_score` -- checked
+    once per COMPLETE candidate (`passes_final_filters`), never a ranked
+    buffer.
+
+    `one_v_one_matrix`/`max_uncovered_threats`: "assess simple 1v1 threat
+    coverage of common enemies ... do all of my team just lose to
+    Kingambit, or whatever pokemon are most commonly on enemy teams" --
+    `one_v_one_matrix` is `_one_v_one_matrix`'s own {name: {enemy:
+    outcome}} map, built ONCE by the caller (over the SAME named-team
+    enemy universe `find_pair_cores` itself already used for `pair_rows`,
+    so "most common" means "appears in the most of the selected teams",
+    consistent with everything else this search already reads from that
+    same universe) and passed in rather than rebuilt here -- this
+    function has no `moves_db`/`natures` of its own to build one fresh
+    even if it wanted to for every candidate. `None` (the default) skips
+    this too, same "nothing to check against" reasoning as `typechart`.
+    With a matrix given, every row's own `"threat_coverage"` is always
+    populated (`{"covered": int, "total": int, "uncovered": [enemy,
+    ...]}` -- an enemy counts as covered the moment ANY group member
+    beats it 1v1, `uncovered` lists the rest by name so "do we just lose
+    to X" reads directly off the row); `max_uncovered_threats` caps how
+    many may stay uncovered. Also NOT prunable mid-search -- coverage can
+    only ever GROW as members are added (once some member beats an enemy,
+    that stays true for every larger group containing it), so a partial
+    group's own uncovered COUNT can only fall, never rise, meaning an
+    early "still too many uncovered" reading is never a safe reason to
+    prune -- checked at the leaf, same as `min_offensive_types` above.
+
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
     "perfect_links": int, "known_links": int, "total_links": int,
@@ -1273,7 +1367,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     every POSSIBLE link, not just the measured ones -- same convention the
     standalone tool uses), "avg_score": float or None, "net_weakness":
     {type: net}, "worst_net_weakness": int, "weakness": {type: count},
-    "worst_weakness": int}.
+    "worst_weakness": int, "offensive_coverage": {"covered", "uncovered"}
+    or None, "threat_coverage": {"covered", "total", "uncovered"} or None}.
     """
     if pool is None:
         names = sorted({n for r in pair_rows for n in r["pair"]})
@@ -1318,6 +1413,44 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     tags = [[pi for pi, (prefix, _cap) in enumerate(prefix_limits)
             if nm.startswith(prefix)] for nm in names]
     caps = [cap for _prefix, cap in prefix_limits]
+    # Per-name (weak type indices, resist-or-immune type indices) --
+    # `team_search.type_matchup`, the SAME ability-aware read (Levitate
+    # immune to Ground, ...) `_weak_resist`/`member_weakness_summary`
+    # already use, computed ONCE per name here rather than per candidate
+    # group, so the incremental weakness tracking below (`weak_count`/
+    # `resist_count`) is cheap array bookkeeping, not a per-group
+    # `net_weakness_by_type`/`raw_weakness_by_type` recomputation.
+    from species_data import TYPES
+    from team_search import type_matchup
+    type_index = {t: k for k, t in enumerate(TYPES)}
+    weak_idx_by_name, resist_idx_by_name = [], []
+    for nm in names:
+        w, r = [], []
+        for t in TYPES:
+            m = type_matchup(nm, merged, t)
+            if m == "weak":
+                w.append(type_index[t])
+            elif m in ("resist", "immune"):
+                r.append(type_index[t])
+        weak_idx_by_name.append(w)
+        resist_idx_by_name.append(r)
+    # Per-name offensive type coverage: every defending type index this
+    # name's own real usage moveset hits for super-effective damage
+    # (`_real_damaging_moves` + `type_multiplier`, `_pair_offensive_pin`'s
+    # own per-move read) -- precomputed ONCE, not per candidate group,
+    # same reasoning as `weak_idx_by_name` above. `None` (`typechart` not
+    # given) leaves this `None` for every name -- `evaluate` skips
+    # offensive coverage entirely rather than reading a placeholder.
+    hit_idx_by_name = None
+    if typechart is not None:
+        hit_idx_by_name = []
+        for nm in names:
+            hit = set()
+            for mv in _real_damaging_moves(nm, merged, moves_db):
+                for t in TYPES:
+                    if type_multiplier(mv.move_type, [t], typechart) > 1.0:
+                        hit.add(type_index[t])
+            hit_idx_by_name.append(hit)
     # A Mega alongside its own base form is a HARD exclusion (the SAME
     # Pokemon counted twice, not two teammates) -- `find_pair_cores` never
     # generates that pair's row at all, which would otherwise let it slip
@@ -1372,7 +1505,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         state = {"worst": None, "seen": 0, "aborted": False}
         used = [0] * len(prefix_limits)
 
-        def evaluate(pick):
+        def evaluate(pick, weak_count, resist_count):
             perfect = known = 0
             total_frac = 0.0
             score_sum = 0.0
@@ -1391,16 +1524,76 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     if sc is not None:
                         score_sum += sc
                         score_n += 1
+            # `weak_count`/`resist_count` are already fully accumulated for
+            # every member of `pick` by the time a leaf is reached (the DFS
+            # path threads them down incrementally, the forced-indices path
+            # sums them fresh per candidate) -- a cheap O(TYPES) dict build,
+            # never a separate `net_weakness_by_type`/`raw_weakness_by_type`
+            # recomputation over the group.
+            weakness = {TYPES[k]: weak_count[k] for k in range(len(TYPES))}
+            net_weakness = {TYPES[k]: weak_count[k] - resist_count[k]
+                            for k in range(len(TYPES))}
+            group = tuple(names[i] for i in pick)
+            offensive_coverage = None
+            if hit_idx_by_name is not None:
+                hit = set()
+                for i in pick:
+                    hit |= hit_idx_by_name[i]
+                offensive_coverage = {
+                    "covered": sorted(TYPES[k] for k in hit),
+                    "uncovered": sorted(TYPES[k] for k in range(len(TYPES)) if k not in hit),
+                }
+            threat_coverage = None
+            if one_v_one_matrix is not None:
+                enemies = sorted({e for i in pick for e in one_v_one_matrix.get(names[i], {})})
+                uncovered_enemies = [
+                    e for e in enemies
+                    if not any(one_v_one_matrix.get(names[i], {}).get(e) == "win"
+                              for i in pick)]
+                threat_coverage = {
+                    "covered": len(enemies) - len(uncovered_enemies),
+                    "total": len(enemies), "uncovered": uncovered_enemies,
+                }
             return {
-                "group": tuple(names[i] for i in pick), "size": size,
+                "group": group, "size": size,
                 "perfect_links": perfect, "known_links": known, "total_links": E,
                 "coverage_pct": (total_frac / E * 100.0) if E else 0.0,
                 "avg_score": (score_sum / score_n) if score_n else None,
-                "net_weakness": None, "worst_net_weakness": None,
-                "weakness": None, "worst_weakness": None,
+                "net_weakness": net_weakness,
+                "worst_net_weakness": max(net_weakness.values()),
+                "weakness": weakness, "worst_weakness": max(weakness.values()),
+                "weak_type_breadth_2": sum(1 for v in weakness.values() if v >= 2),
+                "weak_type_breadth_3": sum(1 for v in weakness.values() if v >= 3),
+                "offensive_coverage": offensive_coverage,
+                "threat_coverage": threat_coverage,
             }
 
+        def passes_final_filters(row):
+            # `max_net_weakness`/`min_avg_score`/`min_offensive_types`/
+            # `max_uncovered_threats` are NOT growth-monotonic (a later
+            # resist can pull net weakness back down; avg Score moves
+            # either way; a partial group can still reach a coverage floor
+            # OR still has an uncovered count that can only fall, never
+            # rise, as more members are added) -- so unlike the raw-
+            # weakness caps below, none of them can be pruned mid-DFS, and
+            # are all checked here, once per COMPLETE candidate, never
+            # restricted to a ranked buffer.
+            if min_avg_score is not None and (
+                    row["avg_score"] is None or row["avg_score"] < min_avg_score):
+                return False
+            if max_net_weakness is not None and row["worst_net_weakness"] > max_net_weakness:
+                return False
+            if min_offensive_types is not None and row["offensive_coverage"] is not None:
+                if len(row["offensive_coverage"]["covered"]) < min_offensive_types:
+                    return False
+            if max_uncovered_threats is not None and row["threat_coverage"] is not None:
+                if len(row["threat_coverage"]["uncovered"]) > max_uncovered_threats:
+                    return False
+            return True
+
         def keep(row):
+            if not passes_final_filters(row):
+                return
             if state["worst"] is not None and sort_key(row) > sort_key(state["worst"]):
                 return
             out.append(row)
@@ -1430,28 +1623,51 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             remaining_size = size - len(forced_indices)
 
             def group_is_legal(pick):
+                """(legal, weak_count, resist_count) -- `weak_count`/
+                `resist_count` are `None` when `legal` is False (never
+                read). The raw-weakness caps are checked here too (not
+                just left to `passes_final_filters`): unlike `max_net_
+                weakness` they're growth-monotonic-safe, so failing them
+                is exactly as final a rejection as any other structural
+                illegality -- this path has no DFS to prune mid-growth,
+                but there's no reason to build the full `evaluate` row for
+                a candidate already known to fail one of them."""
                 seen_types = set()
                 local_used = [0] * len(prefix_limits)
                 missing = 0
+                weak_count = [0] * len(TYPES)
+                resist_count = [0] * len(TYPES)
                 for x in range(size):
                     i = pick[x]
                     if no_duplicate_typing:
                         if type_sig[i] in seen_types:
-                            return False
+                            return False, None, None
                         seen_types.add(type_sig[i])
                     for pi in tags[i]:
                         local_used[pi] += 1
                         if local_used[pi] > caps[pi]:
-                            return False
+                            return False, None, None
+                    for k2 in weak_idx_by_name[i]:
+                        weak_count[k2] += 1
+                    for k2 in resist_idx_by_name[i]:
+                        resist_count[k2] += 1
                     for y in range(x + 1, size):
                         j = pick[y]
                         if illegal_pair[i][j]:
-                            return False
+                            return False, None, None
                         if (i, j) not in edge:
                             missing += 1
                 if missing > max_missing:
-                    return False
-                return True
+                    return False, None, None
+                if max_weakness is not None and max(weak_count) > max_weakness:
+                    return False, None, None
+                if (max_weak_types is not None
+                        and sum(1 for c in weak_count if c >= 2) > max_weak_types):
+                    return False, None, None
+                if (max_weak_types_3 is not None
+                        and sum(1 for c in weak_count if c >= 3) > max_weak_types_3):
+                    return False, None, None
+                return True, weak_count, resist_count
 
             for combo in itertools.combinations(free, remaining_size):
                 state["seen"] += 1
@@ -1459,7 +1675,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     state["aborted"] = True
                     break
                 pick = sorted(forced_indices + list(combo))
-                if not group_is_legal(pick):
+                legal, weak_count, resist_count = group_is_legal(pick)
+                if not legal:
                     continue
                 if not quorum_ok(pick):
                     continue
@@ -1469,13 +1686,14 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     continue
                 if not special_ok(pick):
                     continue
-                keep(evaluate(pick))
+                keep(evaluate(pick, weak_count, resist_count))
             out.sort(key=sort_key)
             return out, state["seen"], state["aborted"]
 
         pick = [0] * size
+        zero_counts = [0] * len(TYPES)
 
-        def rec(start, k, missing, seen_types):
+        def rec(start, k, missing, seen_types, weak_count, resist_count):
             if state["aborted"]:
                 return
             if k == size:
@@ -1485,7 +1703,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     return
                 if (quorum_ok(pick) and cores_ok(pick) and techs_ok(pick)
                         and special_ok(pick)):
-                    keep(evaluate(pick))
+                    keep(evaluate(pick, weak_count, resist_count))
                 return
             if n - start < size - k:
                 return
@@ -1499,50 +1717,69 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     continue
                 if any(used[pi] + 1 > caps[pi] for pi in tags[i]):
                     continue
+                # Incremental, growth-monotonic-safe raw-weakness pruning:
+                # a type's own weak count only ever GROWS as members are
+                # added, so a partial group already at/over `max_weakness`
+                # for some type -- or already over `max_weak_types`/`max_
+                # weak_types_3`'s BREADTH count -- can never recover by
+                # adding more. This is a real prune, not a heuristic: no
+                # valid completion is ever pruned away by it, and it's what
+                # keeps a large, un-narrowed pool tractable under a tight
+                # cap without needing `max_search_names` to guess which
+                # names to drop first ("I need it to be comprehensive
+                # within the defined set, no matter the links").
+                new_weak = weak_count
+                if weak_idx_by_name[i]:
+                    if max_weakness is not None and any(
+                            weak_count[k2] + 1 > max_weakness
+                            for k2 in weak_idx_by_name[i]):
+                        continue
+                    if max_weak_types is not None or max_weak_types_3 is not None:
+                        new_weak = list(weak_count)
+                        for k2 in weak_idx_by_name[i]:
+                            new_weak[k2] += 1
+                        if (max_weak_types is not None
+                                and sum(1 for c in new_weak if c >= 2) > max_weak_types):
+                            continue
+                        if (max_weak_types_3 is not None
+                                and sum(1 for c in new_weak if c >= 3) > max_weak_types_3):
+                            continue
+                    else:
+                        new_weak = list(weak_count)
+                        for k2 in weak_idx_by_name[i]:
+                            new_weak[k2] += 1
+                new_resist = resist_count
+                if resist_idx_by_name[i]:
+                    new_resist = list(resist_count)
+                    for k2 in resist_idx_by_name[i]:
+                        new_resist[k2] += 1
                 for pi in tags[i]:
                     used[pi] += 1
                 pick[k] = i
                 rec(i + 1, k + 1, missing + add,
-                    seen_types | {type_sig[i]} if no_duplicate_typing else seen_types)
+                    seen_types | {type_sig[i]} if no_duplicate_typing else seen_types,
+                    new_weak, new_resist)
                 for pi in tags[i]:
                     used[pi] -= 1
                 if state["aborted"]:
                     return
 
-        rec(0, 0, 0, frozenset())
+        rec(0, 0, 0, frozenset(), zero_counts, zero_counts)
         out.sort(key=sort_key)
         return out, state["seen"], state["aborted"]
 
+    # Every candidate `search_one_size` returns has ALREADY passed every
+    # hard filter -- raw-weakness caps pruned incrementally during the
+    # search itself (growth-monotonic, so no valid group is ever lost),
+    # `max_net_weakness`/`min_avg_score` checked at every leaf via
+    # `passes_final_filters` -- so ranking and slicing to `top_n` is all
+    # that's left; no second, buffer-restricted filter pass (there is no
+    # candidate here that could have been dropped by taking only a top
+    # slice of `--perfect-links` before this ran).
     results = {}
     for size in group_sizes:
         candidates, seen, aborted = search_one_size(size)
-        buffer_n = max(top_n * 6, 200)
-        final = []
-        for row in candidates[:buffer_n]:
-            if min_avg_score is not None and (
-                    row["avg_score"] is None or row["avg_score"] < min_avg_score):
-                continue
-            net = net_weakness_by_type(row["group"], merged)
-            worst = max(net.values())
-            if max_net_weakness is not None and worst > max_net_weakness:
-                continue
-            raw = raw_weakness_by_type(row["group"], merged)
-            worst_raw = max(raw.values())
-            if max_weakness is not None and worst_raw > max_weakness:
-                continue
-            breadth_2 = sum(1 for v in raw.values() if v >= 2)
-            if max_weak_types is not None and breadth_2 > max_weak_types:
-                continue
-            breadth_3 = sum(1 for v in raw.values() if v >= 3)
-            if max_weak_types_3 is not None and breadth_3 > max_weak_types_3:
-                continue
-            final.append({**row, "net_weakness": net, "worst_net_weakness": worst,
-                         "weakness": raw, "worst_weakness": worst_raw,
-                         "weak_type_breadth_2": breadth_2,
-                         "weak_type_breadth_3": breadth_3})
-            if len(final) >= top_n:
-                break
-        results[size] = {"rows": final, "seen": seen, "aborted": aborted}
+        results[size] = {"rows": candidates[:top_n], "seen": seen, "aborted": aborted}
     return results
 
 
@@ -5795,7 +6032,8 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
                   enemy_ability_overrides=None,
                   max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
                   max_life_orb=DEFAULT_MAX_LIFE_ORB, check_trick_room=False,
-                  required_techs=None, min_special_attackers=None):
+                  required_techs=None, min_special_attackers=None,
+                  rank_by="worst_case"):
     """For an ALREADY-DECIDED team (3, 4, 5, or 6 Pokemon, from team preview)
     against one specific enemy roster, which 4 should you actually bring?
 
@@ -5838,7 +6076,14 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
     teams and searching for how bad their worst pair performs," maximin:
     the bring-4 whose worst case is LEAST bad wins. THEN by how many of its
     pairs are "good" (beat at least `good_threshold` of `target_names`'s
-    enemy pairs, default 100% -- "always have options").
+    enemy pairs, default 100% -- "always have options"). This whole
+    ranking is `rank_by="worst_case"` (the default); see `_bring4_
+    candidates`'s own `rank_by` for the `"total_wins"` alternative --
+    "It would also be good to see the bring maximising for total wins,
+    rather than maximin, especially across tailwind/protect too" -- and
+    `bring4_pair_depth`'s own `own_tailwind_used_total` for exploring how
+    many of a bring's wins actually depend on countering enemy speed
+    control with our own Tailwind opener.
 
     BRING-4-CONSISTENT MEGA CHOICE: when `our6` carries exactly 2 Mega-stone
     holders (the existing `--max-megas` composition cap, unaffected by any
@@ -5946,7 +6191,7 @@ def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
         megas=megas if extra_forced_base else None,
         pair_lookup_forced_base=pair_lookup_forced_base,
         merged=merged, required_techs=required_techs, moves_db=moves_db,
-        min_special_attackers=min_special_attackers)
+        min_special_attackers=min_special_attackers, rank_by=rank_by)
     return pair_rows, bring4_rows
 
 
@@ -5970,7 +6215,7 @@ def _uncovered_enemy_pairs(pairs, target_names):
 def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
                        megas=None, pair_lookup_forced_base=None,
                        merged=None, required_techs=None, moves_db=None,
-                       min_special_attackers=None):
+                       min_special_attackers=None, rank_by="worst_case"):
     """Every one of the C(len(six),min(4,len(six))) possible bring subsets of
     `six` (`six` is exactly 6 for `bring4_search`'s own Stage 2, but this
     also runs for a 3-, 4-, or 5-member PARTIAL team during
@@ -6028,6 +6273,35 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
     same "a core-level pass isn't enough, a specific bring can still drop
     the members that made it pass" reasoning `required_techs` documents
     just above. `None` (the default) checks nothing.
+
+    `rank_by`: "I see the all possible groups of 6 possible bring-4s
+    ranked by their worst case, rather than their total wins. It would
+    also be good to see the bring maximising for total wins, rather than
+    maximin, especially across tailwind/protect too." `"worst_case"` (the
+    default, exactly the ranking described two paragraphs up -- unchanged
+    from before this existed) prioritizes never having an unconditional
+    loss, THEN the single worst pair's own quality; `"total_wins"` ranks
+    by `bring4_blended_score` (the SAME `_CORE_BLEND_WEIGHTS` blend of win
+    rate/tailwind-safe/protect-safe/follow-me-safe `multi_bring4_
+    exhaustive` already ranks whole CORES by) instead of the single worst
+    pair -- a bring that wins MORE often in total, even if its single
+    worst pair is a bit worse than another candidate's, can rank above it.
+    "Maybe the maximin vs max win bring should at least try to make sure
+    there are no uncovered enemy pairs" -- BOTH modes still sort primarily
+    by `len(uncovered_enemy_pairs)` (fewest first): `"total_wins"` never
+    picks a bring-4 with a real, unconditional loss over one without,
+    purely for a marginally higher average, the same "having a pair that
+    every pair of yours loses against is terrible" reasoning that already
+    dominates `"worst_case"`. It only changes how ties/candidates WITHIN
+    the same uncovered-count are ordered -- by total-wins score rather
+    than by worst-pair quality. Also decides which hypothesis wins the
+    BRING-4-CONSISTENT MEGA CHOICE comparison above, so the two stay
+    self-consistent (a `"total_wins"` search never ends up silently
+    picking its mega hypothesis by the maximin rule instead). This
+    governs SORT ORDER only -- every row's own fields are identical
+    either way; a caller wanting the blended score or the own-Tailwind-
+    rescue count for display regardless of which ranking was used calls
+    `bring4_pair_depth`/`bring4_blended_score` on any row directly.
     """
     bring_size = min(4, len(six))
 
@@ -6053,9 +6327,29 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
             "mega_used": mega_members[0] if len(mega_members) == 1 else None,
         }
 
-    def _rank_key(b):
+    def _worst_case_key(b):
         return (len(b["uncovered_enemy_pairs"]), _pair_sort_key(b["worst_pair_row"]),
                 -b["pairs_good"])
+
+    def _total_wins_key(b):
+        # "Maybe the maximin vs max win bring should at least try to make
+        # sure there are no uncovered enemy pairs" -- STILL sorts primarily
+        # by uncovered-pair count (fewest first, same as `_worst_case_key`'s
+        # own primary criterion, and the same "an unconditional loss is
+        # terrible no matter how good the average is" reasoning
+        # `TestUncoveredEnemyPairsDominateRanking` already established for
+        # the maximin ranking), but breaks ties/orders WITHIN each
+        # uncovered-count bucket by total-wins score rather than by worst-
+        # pair -- a bring-4 with one fewer unconditional loss always still
+        # wins over one with more, but among bring-4s tied on that (most
+        # commonly: both at zero), the higher-total one now wins instead of
+        # the better-worst-case one. Negated score so the SAME "ascending =
+        # best first" convention `_worst_case_key`/`min`/`sort` already use
+        # still applies -- `bring4_blended_score` itself is "higher is
+        # better."
+        return (len(b["uncovered_enemy_pairs"]), -bring4_blended_score(b))
+
+    _rank_key = _total_wins_key if rank_by == "total_wins" else _worst_case_key
 
     bring4_rows = []
     for bring4 in itertools.combinations(six, bring_size):
@@ -6141,6 +6435,19 @@ def bring4_pair_depth(bring4_row):
     `_pairs_beaten_without_fainting` below, which reads each matchup's
     `detail[...]["our_hp"]` directly -- a real win (`sweep`/`out_trade`)
     where NEITHER of the pair's own two Pokemon actually fainted.
+
+    `own_tailwind_used_total`: "I need to explore tailwind robustness; if
+    my team loses to enemy tailwind but wins if otherwise, it is probably
+    important I lead with my own tailwind to at least match" -- the
+    OPTIMISTIC own-side counter (`_pair_vs_targets`'s own "OUR OWN
+    TAILWIND AS A MATCHING ANSWER", already unconditionally applied to
+    every `outcome` this bring-4's own pairs carry, not a separate re-race
+    here) is summed across the bring's own pairs -- how many of its total
+    wins actually DEPENDED on countering with our own Tailwind opener,
+    rather than winning at normal speed already. A real, non-zero count
+    here is exactly the fragility the user is asking to see: those wins
+    hinge on us successfully identifying and executing the tailwind-open
+    plan, not a free bonus.
     """
     pairs = sorted(bring4_row["pair_rows"], key=_pair_sort_key)
     pairs_total = pairs[0]["pairs_total"] if pairs else 0
@@ -6168,7 +6475,29 @@ def bring4_pair_depth(bring4_row):
         "no_faint_total": sum(no_faint),
         "no_faint_best": no_faint[0] if no_faint else None,
         "no_faint_3rd": no_faint[2] if len(no_faint) > 2 else None,
+        "own_tailwind_used_total": sum(r.get("pairs_own_tailwind_used", 0)
+                                       for r in pairs),
     }
+
+
+def bring4_blended_score(bring4_row):
+    """The SAME `_CORE_BLEND_WEIGHTS`-weighted per-90 blend `multi_bring4_
+    exhaustive`'s own `_core_row` already ranks whole CORES by (win rate,
+    tailwind-safe, protect-safe, follow-me-safe), applied here to ONE
+    bring-4's own 6 internal pairs -- "It would also be good to see the
+    bring maximising for total wins, rather than maximin, especially
+    across tailwind/protect too." Higher is better, unlike `_pair_sort_
+    key`'s own ascending convention. See `_bring4_candidates`'s own
+    `rank_by="total_wins"` for where this actually replaces the maximin
+    ranking, rather than just being available to compute on the side."""
+    depth = bring4_pair_depth(bring4_row)
+    n_pairs = len(bring4_row["pair_rows"])
+    pt = depth["pairs_total"]
+    w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
+    return (w_win * _rate_per_90(depth["beaten_total"], n_pairs, pt)
+           + w_tw * _rate_per_90(depth["tailwind_safe_total"], n_pairs, pt)
+           + w_pr * _rate_per_90(depth["protect_safe_total"], n_pairs, pt)
+           + w_fm * _rate_per_90(depth["follow_me_safe_total"], n_pairs, pt))
 
 
 def recommended_lead(bring4_row):
