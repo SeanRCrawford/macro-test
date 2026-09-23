@@ -11654,6 +11654,183 @@ class TestCoverageGroupSearchLargePoolNarrowing(unittest.TestCase):
         self.assertTrue(result[3]["rows"])
 
 
+class TestCoverageGroupSearchIncrementalWeaknessPruning(unittest.TestCase):
+    """"Is the coverage group search truly exhaustive?" / "I need it to be
+    comprehensive within the defined set, no matter the links" --
+    `max_weakness`/`max_weak_types`/`max_weak_types_3` are growth-
+    monotonic (a type's own raw weak count never goes DOWN as members are
+    added), so they're now pruned INCREMENTALLY during the DFS itself,
+    not just filtered from the results afterward -- a real prune, never
+    losing a valid group, and (this class's own point) actually cutting
+    the search space rather than just hiding results from it."""
+
+    def _fixture(self, n_weak=4, n_safe=4):
+        """`n_weak` members weak to Fire (`defensive_chart={"Fire": 2.0}`),
+        `n_safe` members neutral to it -- every pair perfect/100% so link
+        quality never discriminates between groups, isolating the
+        weakness-cap's own effect."""
+        import itertools as _it
+        weak = [f"W{i}" for i in range(n_weak)]
+        safe = [f"S{i}" for i in range(n_safe)]
+        names = weak + safe
+        merged = {n: {"types": ["Normal"], "defensive_chart": {"Fire": 2.0}}
+                 for n in weak}
+        merged.update({n: {"types": ["Normal"], "defensive_chart": {"Fire": 1.0}}
+                      for n in safe})
+        rows = [_fake_coverage_row(p, True, 100.0, 0.0)
+               for p in _it.combinations(names, 2)]
+        return rows, merged, names
+
+    def test_max_weakness_never_returns_a_group_over_the_cap(self):
+        # A size-6 group under max_weakness=2 needs >= 4 safe seats -- give
+        # exactly 4 safe names so a valid group exists at all (5 weak, 3
+        # safe would make every possible 6-group need >= 3 weak members,
+        # already over the cap, and trivially return nothing).
+        rows, merged, names = self._fixture(n_weak=5, n_safe=4)
+        result = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=2)
+        self.assertTrue(result[6]["rows"])
+        for row in result[6]["rows"]:
+            self.assertLessEqual(row["weakness"]["Fire"], 2)
+
+    def test_max_weakness_actually_shrinks_the_explored_space(self):
+        """The real regression guard: a tight cap must cut down how many
+        candidates the DFS even VISITS (`seen`), not just how many it
+        returns -- confirms this is a genuine incremental prune, not a
+        post-hoc filter relabelled."""
+        rows, merged, names = self._fixture(n_weak=6, n_safe=4)
+        uncapped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=None)
+        capped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=1)
+        self.assertLess(capped[6]["seen"], uncapped[6]["seen"])
+
+    def test_max_weak_types_breadth_cap_is_also_pruned_incrementally(self):
+        """Same idea, at the BREADTH cap (`max_weak_types`): a synthetic
+        pool where 3 different types each have several weak members --
+        capping to 1 type allowed at breadth-2 must cut the explored
+        space, not just the returned rows."""
+        import itertools as _it
+        names = [f"N{i}" for i in range(9)]
+        merged = {}
+        for i, n in enumerate(names):
+            t = ["Fire", "Water", "Grass"][i % 3]
+            merged[n] = {"types": ["Normal"], "defensive_chart": {t: 2.0}}
+        rows = [_fake_coverage_row(p, True, 100.0, 0.0)
+               for p in _it.combinations(names, 2)]
+        uncapped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None)
+        capped = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=40,
+            no_duplicate_typing=False, max_search_names=None, max_weak_types=1)
+        self.assertLess(capped[6]["seen"], uncapped[6]["seen"])
+        for row in capped[6]["rows"]:
+            breadth_2 = sum(1 for v in row["weakness"].values() if v >= 2)
+            self.assertLessEqual(breadth_2, 1)
+
+
+class TestCoverageGroupSearchNetWeaknessNotBufferRestricted(unittest.TestCase):
+    """The other half of "truly exhaustive": `max_net_weakness`/`min_avg_
+    score` used to only be checked against the search's own top `max(top_n
+    * 6, 200)` candidates by raw LINK quality -- a genuinely valid group
+    ranked outside that buffer (because its own links are mediocre, even
+    though its final weakness profile is fine) was silently dropped and
+    never even considered. Now checked at every leaf the DFS reaches, so
+    it surfaces regardless of how it ranks on link quality alone.
+
+    Fixture: 10 "H" members, every H-H pair perfect/100% link quality (so
+    every one of the C(10,6)=210 all-H groups of size 6 ties for the BEST
+    possible link-quality rank -- comfortably over the old 200-candidate
+    buffer on its own) but ALL weak to Fire with nothing resisting it
+    (net_weakness["Fire"] = 6, fails a max_net_weakness=0 cap). 6 "L"
+    members, mediocre L-L link quality (ranked below EVERY all-H group)
+    but all RESIST Fire (net_weakness["Fire"] = -6, passes easily) --
+    the only real "good" group is the full {L0..L5}, ranked dead last on
+    link quality among the fixture's own valid full-size candidates.
+
+    NO H-L pair rows are defined at all, and `max_missing_frac=0` is used
+    below -- a MIXED group would otherwise still pick up real "perfect"
+    credit from whichever H-H pairs it contains (even just 2 H's already
+    contribute one), letting it outrank the pure all-L group without ever
+    exercising the bug this class is guarding against. Excluding mixed
+    groups entirely (via the missing cross-links) leaves pure-H and
+    pure-L as the only two shapes in play, exactly the comparison this
+    fixture is built to make."""
+
+    def setUp(self):
+        import itertools as _it
+        self.H = [f"H{i}" for i in range(10)]
+        self.L = [f"L{i}" for i in range(6)]
+        names = self.H + self.L
+        merged = {n: {"types": ["Normal"], "defensive_chart": {"Fire": 2.0}}
+                 for n in self.H}
+        merged.update({n: {"types": ["Normal"], "defensive_chart": {"Fire": 0.5}}
+                      for n in self.L})
+        rows = ([_fake_coverage_row(p, True, 100.0, 0.0)
+                for p in _it.combinations(self.H, 2)] +
+               [_fake_coverage_row(p, False, 5.0, 0.0)
+                for p in _it.combinations(self.L, 2)])
+        self.rows, self.merged, self.names = rows, merged, names
+
+    def test_the_low_ranked_but_valid_group_is_still_found(self):
+        result = cf.coverage_group_search(
+            self.rows, self.merged, pool=self.names, group_sizes=(6,), top_n=5,
+            no_duplicate_typing=False, max_search_names=None,
+            max_net_weakness=0, max_missing_frac=0)
+        self.assertTrue(result[6]["rows"],
+                        "the only net-weakness-safe group (all-L) must "
+                        "still surface even though 210 all-H groups "
+                        "outrank it on raw link quality alone")
+        self.assertEqual(set(result[6]["rows"][0]["group"]), set(self.L))
+
+    def test_every_all_h_group_genuinely_fails_the_cap(self):
+        """Sanity check on the fixture itself -- confirms the 210
+        higher-ranked groups are a real obstacle (not accidentally also
+        passing), so the test above is actually exercising the fix."""
+        import itertools as _it
+        for combo in _it.combinations(self.H, 6):
+            net = cf.net_weakness_by_type(list(combo), self.merged)
+            self.assertGreater(max(net.values()), 0)
+
+
+class TestCoverageGroupSearchFullPoolTractableUnderTightCap(unittest.TestCase):
+    """"Often this is a very reduced pool, given default absolute
+    weaknesses of 3, default 2+ weaknesses of 8, and default 3+
+    weaknesses of 1" -- with `max_search_names=None` (the WHOLE pool, no
+    best-link pre-narrowing) and a genuinely tight `max_weakness`, the
+    search must stay tractable purely from the incremental prune, not by
+    secretly relying on a small pool. C(60, 6) is ~50 million -- if this
+    ran unpruned it would hit `max_eval` (2,000,000) and abort; a real
+    incremental prune keeps `seen` far below that."""
+
+    def test_a_tight_cap_keeps_a_60_name_pool_from_aborting(self):
+        import itertools as _it
+        # 55 names weak to Fire, 5 that resist it -- a group may have at
+        # most 2 Fire-weak members, so every valid 6-member group needs at
+        # least 4 of its 6 seats filled from the 5-name resist pool alone,
+        # a tiny, fast-to-find slice of the full C(60,6) space.
+        weak = [f"W{i}" for i in range(55)]
+        safe = [f"S{i}" for i in range(5)]
+        names = weak + safe
+        merged = {n: {"types": ["Normal"], "defensive_chart": {"Fire": 2.0}}
+                 for n in weak}
+        merged.update({n: {"types": ["Normal"], "defensive_chart": {"Fire": 0.5}}
+                      for n in safe})
+        rows = [_fake_coverage_row(p, True, 50.0, 0.0)
+               for p in _it.combinations(names, 2)]
+        result = cf.coverage_group_search(
+            rows, merged, pool=names, group_sizes=(6,), top_n=10,
+            no_duplicate_typing=False, max_search_names=None, max_weakness=2)
+        self.assertFalse(result[6]["aborted"])
+        self.assertLess(result[6]["seen"], 2_000_000)
+        for row in result[6]["rows"]:
+            self.assertLessEqual(row["weakness"]["Fire"], 2)
+
+
 class TestNarrowCoveragePoolNames(unittest.TestCase):
     """`narrow_coverage_pool_names`, `coverage_group_search`'s own
     pool-narrowing step factored out so a caller running something else

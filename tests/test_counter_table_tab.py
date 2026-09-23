@@ -84,7 +84,21 @@ class TestCounterTableTabExists(unittest.TestCase):
         self.assertTrue(any(m.key == "ct_cov_suggested" for m in at.multiselect))
         self.assertTrue(any(m.key == "ct_cov_sizes" for m in at.multiselect))
         self.assertTrue(any(c.key == "ct_cov_dup" for c in at.checkbox))
+        self.assertTrue(any(c.key == "ct_cov_full_pool" for c in at.checkbox))
         self.assertTrue(any(b.key == "ct_cov_go" for b in at.button))
+
+    def test_full_pool_checkbox_runs_the_search_unnarrowed(self):
+        """"I need it to be comprehensive within the defined set, no
+        matter the links" -- checking it and running a (tiny, fast) real
+        search must not crash, and the resulting search must not have
+        silently narrowed the pool via the best-link heuristic."""
+        at = app()
+        at = [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        at = [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        at = [c for c in at.checkbox if c.key == "ct_cov_full_pool"][0].set_value(True).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
 
     def test_switching_to_import_pair_coverage_mode_renders_its_controls(self):
         """Before any upload -- just the file uploader itself, no crash

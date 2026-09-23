@@ -6074,9 +6074,23 @@ with tab_counter:
             help="How many top-Score Pokemon find_pair_cores scores pairs "
                  "for -- cheap even at 300 (a single O(pool^2) pass). The "
                  "group search itself then narrows to the best-connected "
-                 "~40 of those before searching combinations, so raising "
-                 "this widens what gets CONSIDERED without the search "
-                 "itself blowing up.")
+                 "~40 of those before searching combinations, unless "
+                 "'Search the full pool' below is on.")
+        cov_full_pool = st.checkbox(
+            "Search the full pool, no best-link pre-narrowing", key="ct_cov_full_pool",
+            help="\"I need it to be comprehensive within the defined set, "
+                 "no matter the links\" -- by default, before the group "
+                 "search runs, the pool above is narrowed to the "
+                 "best-CONNECTED ~40 names (each name's own single best "
+                 "pairing) -- a name whose best individual link is "
+                 "mediocre gets dropped even if it would complete an "
+                 "excellent GROUP with more members. Turning this on "
+                 "searches every name in the pool instead. The absolute-"
+                 "weakness caps below (not the net cap) are pruned "
+                 "INCREMENTALLY during the search itself, not just "
+                 "filtered from the results afterward, so with a real cap "
+                 "set this stays fast even fully un-narrowed -- a tight "
+                 "cap is what keeps this tractable, not the pool size.")
         ct_cov_teams = st.multiselect(
             "Enemy universe (named teams)", list(teams), default=list(teams),
             key="ct_cov_teams",
@@ -6279,6 +6293,7 @@ with tab_counter:
                                 f"{', '.join(str(s) for s in sorted(cov_sizes))}..."):
                     cov_pair_rows = find_pair_cores(pool, merged, moves, natures,
                                                     typechart, enemy_teams)
+                    cov_search_kwargs = {"max_search_names": None} if cov_full_pool else {}
                     cov_results = coverage_group_search(
                         cov_pair_rows, merged, group_sizes=tuple(sorted(cov_sizes)),
                         prefix_limits=(("Mega ", cov_max_megas),),
@@ -6289,6 +6304,7 @@ with tab_counter:
                         max_weak_types=cov_max_weak_types,
                         max_weak_types_3=cov_max_weak_types_3,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
+                        **cov_search_kwargs,
                         must_include=cov_include, suggested=cov_suggested,
                         suggested_min=cov_suggested_min,
                         required_cores=cov_required_cores or None,
