@@ -1109,7 +1109,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           max_weak_types_3=None, moves_db=None,
                           min_special_attackers=None, typechart=None,
                           min_offensive_types=None, one_v_one_matrix=None,
-                          max_uncovered_threats=None):
+                          max_uncovered_threats=None, min_threat_answers=1):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -1357,16 +1357,32 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     even if it wanted to for every candidate. `None` (the default) skips
     this too, same "nothing to check against" reasoning as `typechart`.
     With a matrix given, every row's own `"threat_coverage"` is always
-    populated (`{"covered": int, "total": int, "uncovered": [enemy,
-    ...]}` -- an enemy counts as covered the moment ANY group member
-    beats it 1v1, `uncovered` lists the rest by name so "do we just lose
-    to X" reads directly off the row); `max_uncovered_threats` caps how
-    many may stay uncovered. Also NOT prunable mid-search -- coverage can
-    only ever GROW as members are added (once some member beats an enemy,
-    that stays true for every larger group containing it), so a partial
-    group's own uncovered COUNT can only fall, never rise, meaning an
-    early "still too many uncovered" reading is never a safe reason to
-    prune -- checked at the leaf, same as `min_offensive_types` above.
+    populated (`{"covered": int, "total": int, "uncovered": [enemy, ...],
+    "answer_counts": {enemy: int}}` -- `answer_counts` is how many DIFFERENT
+    group members beat that enemy 1v1, for every enemy in the universe, so
+    "as many as possible, to have redundant answers" reads directly off the
+    row even where the hard floor below doesn't bind); `max_uncovered_
+    threats` caps how many enemies may stay "uncovered" -- see `min_threat_
+    answers` for what "uncovered" means. Also NOT prunable mid-search --
+    coverage can only ever GROW as members are added (once some member
+    beats an enemy, that stays true for every larger group containing it),
+    so a partial group's own uncovered COUNT can only fall, never rise,
+    meaning an early "still too many uncovered" reading is never a safe
+    reason to prune -- checked at the leaf, same as `min_offensive_types`
+    above.
+
+    `min_threat_answers` (default 1): "it would also be good to filter for
+    having multiple 1v1 answers to each enemy, ideally at least two" --
+    raises the bar for what counts as "covered" from "at least ONE member
+    beats it" (the original, default-1 reading) to "at least THIS MANY
+    DIFFERENT members beat it" -- an enemy with exactly one answer on the
+    team is a single point of failure (lose that one member first and the
+    team has no answer left), not genuinely "covered" once redundancy
+    matters. `"uncovered"` (and so `max_uncovered_threats`) is read against
+    THIS bar, not a fixed 1 -- `min_threat_answers=2, max_uncovered_
+    threats=0` is exactly "guarantee every enemy has at least 2 independent
+    answers." Default 1 reproduces the original single-answer-is-enough
+    behaviour unchanged for every existing caller.
 
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
@@ -1554,13 +1570,16 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             threat_coverage = None
             if one_v_one_matrix is not None:
                 enemies = sorted({e for i in pick for e in one_v_one_matrix.get(names[i], {})})
-                uncovered_enemies = [
-                    e for e in enemies
-                    if not any(one_v_one_matrix.get(names[i], {}).get(e) == "win"
-                              for i in pick)]
+                answer_counts = {
+                    e: sum(1 for i in pick
+                          if one_v_one_matrix.get(names[i], {}).get(e) == "win")
+                    for e in enemies}
+                uncovered_enemies = [e for e in enemies
+                                     if answer_counts[e] < min_threat_answers]
                 threat_coverage = {
                     "covered": len(enemies) - len(uncovered_enemies),
                     "total": len(enemies), "uncovered": uncovered_enemies,
+                    "answer_counts": answer_counts,
                 }
             return {
                 "group": group, "size": size,

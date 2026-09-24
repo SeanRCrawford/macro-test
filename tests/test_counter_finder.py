@@ -12098,6 +12098,60 @@ class TestCoverageGroupSearchThreatCoverage(unittest.TestCase):
         self.assertNotIn("Kingambit", tc["uncovered"])
         self.assertEqual(tc["covered"], 3)
 
+    def test_answer_counts_reports_how_many_members_beat_each_enemy(self):
+        """"it would also be good to filter for having multiple 1v1
+        answers to each enemy ... as many as possible to have redundant
+        answers" -- `answer_counts` is always populated (regardless of
+        `min_threat_answers`) so a caller can see the REAL redundancy, not
+        just whether the hard floor happens to bind."""
+        result = self._search(one_v_one_matrix=self.matrix)
+        tc = result[4]["rows"][0]["threat_coverage"]
+        self.assertEqual(tc["answer_counts"],
+                         {"Kingambit": 0, "Sinistcha": 2, "Whimsicott": 2})
+
+    def test_min_threat_answers_default_reproduces_the_old_any_answer_reading(self):
+        """Omitting `min_threat_answers` entirely (or passing 1 explicitly)
+        must reproduce the exact original "any answer at all" behaviour --
+        Sinistcha/Whimsicott (2 real answers each) stay covered."""
+        implicit = self._search(one_v_one_matrix=self.matrix)
+        explicit = self._search(one_v_one_matrix=self.matrix, min_threat_answers=1)
+        self.assertEqual(implicit[4]["rows"][0]["threat_coverage"],
+                         explicit[4]["rows"][0]["threat_coverage"])
+
+    def test_min_threat_answers_two_flags_a_single_point_of_failure(self):
+        """Sinistcha has only ONE real answer (A; C is dropped here) --
+        `min_threat_answers=2` must now flag it as "uncovered" even though
+        it's a genuine, real win for A, unlike Kingambit's true zero."""
+        matrix = {k: dict(v) for k, v in self.matrix.items()}
+        del matrix["C"]["Sinistcha"]
+        result = self._search(one_v_one_matrix=matrix, min_threat_answers=2)
+        tc = result[4]["rows"][0]["threat_coverage"]
+        self.assertIn("Sinistcha", tc["uncovered"])
+        self.assertIn("Kingambit", tc["uncovered"])
+        self.assertNotIn("Whimsicott", tc["uncovered"])
+        self.assertEqual(tc["answer_counts"]["Sinistcha"], 1)
+
+    def test_min_threat_answers_two_a_genuinely_redundant_enemy_stays_covered(self):
+        """Whimsicott has TWO real answers (B and D) -- at
+        `min_threat_answers=2` it must stay covered, distinguishing "one
+        answer" from "genuinely redundant" instead of treating both as
+        equally fine (`min_threat_answers=1`'s own reading)."""
+        result = self._search(one_v_one_matrix=self.matrix, min_threat_answers=2)
+        tc = result[4]["rows"][0]["threat_coverage"]
+        self.assertNotIn("Whimsicott", tc["uncovered"])
+        self.assertEqual(tc["answer_counts"]["Whimsicott"], 2)
+
+    def test_min_threat_answers_two_and_max_uncovered_zero_demands_full_redundancy(self):
+        """"ideally at least two" as a hard guarantee: `min_threat_
+        answers=2, max_uncovered_threats=0` together must drop a group
+        that has even ONE single-point-of-failure enemy (Sinistcha here),
+        not just a truly unanswered one."""
+        matrix = {k: dict(v) for k, v in self.matrix.items()}
+        del matrix["C"]["Sinistcha"]
+        result = self._search(one_v_one_matrix=matrix, min_threat_answers=2,
+                              max_uncovered_threats=0)
+        self.assertEqual(result[4]["rows"], [])
+
 
 class TestCoverageGroupSearchMegaLegality(unittest.TestCase):
     """`coverage_group_search`'s own hard exclusion for a Mega alongside

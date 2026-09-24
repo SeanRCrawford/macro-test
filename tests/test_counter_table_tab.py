@@ -203,6 +203,29 @@ class TestCounterTableTabExists(unittest.TestCase):
         for row in results[3]["rows"]:
             self.assertEqual(row["threat_coverage"]["uncovered"], [])
 
+    def test_min_threat_answers_slider_raises_the_covered_bar(self):
+        """"it would also be good to filter for having multiple 1v1
+        answers to each enemy, ideally at least two" -- raising "Minimum
+        1v1 answers per enemy" to 2 and capping "Max enemies short of
+        that" at 0 must return only groups where every named enemy has at
+        least 2 independent 1v1 answers, not just one."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        [s for s in at.slider if s.key == "ct_cov_min_threat_answers"][0].set_value(2).run()
+        [c for c in at.checkbox if c.key == "ct_cov_max_uncov_on"][0].set_value(True).run()
+        at = [s for s in at.slider if s.key == "ct_cov_max_uncov"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[4]["rows"]:
+            tc = row["threat_coverage"]
+            self.assertEqual(tc["uncovered"], [])
+            for count in tc["answer_counts"].values():
+                self.assertGreaterEqual(count, 2)
+
     def test_suggested_pokemon_controls_render_and_apply_quorum(self):
         """"Give a 'suggested' list as well, of which at least 3 (or n,
         selected) must appear" -- the new multiselect + quorum slider

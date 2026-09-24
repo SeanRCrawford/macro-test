@@ -6252,17 +6252,33 @@ with tab_counter:
             cov_min_offensive_types = (
                 st.slider("Minimum types covered", 1, 18, 10, key="ct_cov_min_off")
                 if cov_min_off_on else None)
+            cov_min_threat_answers = st.slider(
+                "Minimum 1v1 answers per enemy", 1, 6, 1,
+                key="ct_cov_min_threat_answers",
+                help="\"it would also be good to filter for having "
+                     "multiple 1v1 answers to each enemy, ideally at "
+                     "least two, but in theory as many as possible to "
+                     "have redundant answers\" -- raises what counts as "
+                     "'covered' below from 'at least one member beats it' "
+                     "to 'at least THIS MANY different members beat it'. "
+                     "An enemy with only one answer is a single point of "
+                     "failure -- lose that one member first and the team "
+                     "has nothing left for it. Leave at 1 for the "
+                     "original 'any answer at all' reading.")
             cov_max_uncovered_on = st.checkbox(
-                "Cap how many named enemies nobody on the group beats 1v1",
+                "Cap how many named enemies fall short of that",
                 key="ct_cov_max_uncov_on",
                 help="\"do all of my team just lose to Kingambit, or "
                      "whatever pokemon are most commonly on enemy teams\" "
                      "-- a cheap 1v1 read (not a full battle) against "
                      "every Pokemon in the 'Enemy universe' selected "
-                     "below. An enemy counts as covered the moment ANY "
-                     "group member beats it.")
+                     "below. An enemy counts as covered once it has at "
+                     "least 'Minimum 1v1 answers per enemy' different "
+                     "group members beating it -- set that to 2 and this "
+                     "to 0 for 'guarantee every enemy has at least 2 "
+                     "independent answers.'")
             cov_max_uncovered_threats = (
-                st.slider("Max enemies with zero answer", 0, 20, 3,
+                st.slider("Max enemies short of the minimum", 0, 20, 3,
                          key="ct_cov_max_uncov")
                 if cov_max_uncovered_on else None)
         cov_cap_on = st.checkbox(
@@ -6371,6 +6387,7 @@ with tab_counter:
                         min_offensive_types=cov_min_offensive_types,
                         one_v_one_matrix=cov_matrix,
                         max_uncovered_threats=cov_max_uncovered_threats,
+                        min_threat_answers=cov_min_threat_answers,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         **cov_search_kwargs,
                         must_include=cov_include, suggested=cov_suggested,
@@ -6514,11 +6531,23 @@ with tab_counter:
                                    if oc["uncovered"] else ""))
                         if row["threat_coverage"] is not None:
                             tc = row["threat_coverage"]
+                            answer_counts = tc.get("answer_counts", {})
+                            zero = sorted(e for e in tc["uncovered"]
+                                         if answer_counts.get(e, 0) == 0)
+                            underredundant = sorted(
+                                (e for e in tc["uncovered"] if answer_counts.get(e, 0) > 0),
+                                key=lambda e: answer_counts[e])
+                            bar = (f" (>= {cov_min_threat_answers} answers)"
+                                  if cov_min_threat_answers > 1 else "")
                             st.caption(
-                                f"1v1 threat coverage: {tc['covered']}/{tc['total']} "
+                                f"1v1 threat coverage{bar}: {tc['covered']}/{tc['total']} "
                                 f"named enemies"
-                                + (f"  |  No answer to: {', '.join(tc['uncovered'])}"
-                                   if tc["uncovered"] else ""))
+                                + (f"  |  No answer at all: {', '.join(zero)}"
+                                   if zero else "")
+                                + ("  |  Single point of failure: " +
+                                   ", ".join(f"{e} ({answer_counts[e]})"
+                                            for e in underredundant)
+                                   if underredundant else ""))
                         if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
                             st.caption("Pair performance (this group's own links):")
                             pair_table = []
