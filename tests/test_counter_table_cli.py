@@ -1961,6 +1961,55 @@ class TestVsAllTeamsFlag(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("requires --multi-bring4", msg)
 
+    def test_defaults_max_weak_types_to_9(self):
+        """"I want to establish the same default limits applied above
+        [Coverage Groups], namely no more than 3 absolute weaknesses, no
+        more than 1 type with 3 absolute weaknesses, and no more than 9
+        types with 2 or more absolute weaknesses" -- --max-weak's own
+        default (2, with its built-in 'one type may reach 3' exception)
+        already covers the first two bullets; --vs-all-teams must ALSO
+        default --max-weak-types (otherwise uncapped) to 9 for the third.
+        Confirmed behaviorally: an explicit --max-weak-types 9 run must
+        produce byte-for-byte the same output as the bare default. A tiny
+        --pool-size keeps this tractable -- --vs-all-teams already races
+        against every saved team, so the search cost is real regardless
+        of how small the candidate pool is."""
+        args = ["--multi-bring4", "--vs-all-teams", "--pool-size", "3", "--top", "1"]
+        msg_default, out_default = run_main(args)
+        msg_explicit, out_explicit = run_main(args + ["--max-weak-types", "9"])
+        self.assertIsNone(msg_default, out_default)
+        self.assertIsNone(msg_explicit, out_explicit)
+        self.assertEqual(out_default, out_explicit)
+
+    def test_an_explicit_max_weak_types_is_never_overridden(self):
+        """A caller who passes their OWN --max-weak-types must see that
+        EXACT value actually reach the search, not the --vs-all-teams
+        default of 9 -- confirmed directly by capturing the kwarg
+        `multi_bring4_exhaustive`/`multi_bring4_beam` are actually called
+        with (whichever path a real run takes), rather than depending on
+        a --pool-size small enough to run fast also being large enough to
+        make the two caps behave visibly differently."""
+        seen = []
+        orig_exhaustive = ct.multi_bring4_exhaustive
+        orig_beam = ct.multi_bring4_beam
+        def _capture(fn):
+            def _wrapped(*args, **kwargs):
+                seen.append(kwargs.get("max_weak_types"))
+                return fn(*args, **kwargs)
+            return _wrapped
+        ct.multi_bring4_exhaustive = _capture(orig_exhaustive)
+        ct.multi_bring4_beam = _capture(orig_beam)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-all-teams", "--pool-size", "3",
+                 "--top", "1", "--max-weak-types", "1"])
+        finally:
+            ct.multi_bring4_exhaustive = orig_exhaustive
+            ct.multi_bring4_beam = orig_beam
+        self.assertIsNone(msg, out)
+        self.assertTrue(seen, "expected the search to actually run")
+        self.assertTrue(all(v == 1 for v in seen), seen)
+
 
 class TestBenchmarkTeamsFlag(unittest.TestCase):
     """--benchmark-teams: "always add all of the saved teams in data/
@@ -2060,7 +2109,9 @@ class TestRoundRobinFlag(unittest.TestCase):
         """Two named teams -> the mirrors A-A/B-B (one direction each, "race
         both directions" doesn't apply to a mirror), the non-mirror pair
         raced BOTH directions (A-B and B-A), plus the "best4 vs best4" head-
-        to-head layer for that same non-mirror pair -- 5 matchup headers
+        to-head layer for that same non-mirror pair, ALSO raced both
+        directions ("matches still systematically favour side A" -- see
+        `round_robin_saved_teams`'s own docstring) -- 6 matchup headers
         total, sorted alphabetically by team."""
         from _harness import load_world
         W = load_world()
@@ -2074,9 +2125,10 @@ class TestRoundRobinFlag(unittest.TestCase):
         self.assertIn(f"=== {a} vs {b} ===", out)
         self.assertIn(f"=== {b} vs {a} ===", out)
         self.assertIn(f"=== {a} best-4 vs {b} best-4 ===", out)
+        self.assertIn(f"=== {b} best-4 vs {a} best-4 ===", out)
         self.assertIn(f"=== {b} vs {b} ===", out)
         header_lines = [ln for ln in out.splitlines() if ln.startswith("=== ")]
-        self.assertEqual(len(header_lines), 5, header_lines)
+        self.assertEqual(len(header_lines), 6, header_lines)
 
     def test_xlsx_has_round_robin_best4_and_team_summary_sheets(self):
         from _harness import load_world
@@ -2106,7 +2158,7 @@ class TestRoundRobinFlag(unittest.TestCase):
             header2 = [c.value for c in ws2[1]]
             self.assertEqual(header2[:2], ["Team A", "Team B"])
             rows2 = [(row[0], row[1]) for row in ws2.iter_rows(min_row=2, values_only=True)]
-            self.assertEqual(rows2, [(a, b)])
+            self.assertEqual(set(rows2), {(a, b), (b, a)})
 
             self.assertIn("Team Summary", wb.sheetnames)
             ws3 = wb["Team Summary"]
@@ -2749,6 +2801,106 @@ class TestPairCoverageXlsxExport(unittest.TestCase):
             self.assertIsInstance(results, list)
             for r in results:
                 self.assertEqual(len(r["team"]), 4)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestPairsOnlyFlag(unittest.TestCase):
+    """"the multi-bring4 is taking hours, I just want a lighter weight
+    version that just outputs comprehensive 2v2 pairs for use in building
+    teams" -- `--pairs-only` runs Stage A (`multi_bring4_coverage`, the
+    pair-vs-enemy racing) and stops, skipping Stage B (the exhaustive/
+    --beam team-of-6 core search) entirely."""
+
+    def test_requires_multi_bring4(self):
+        msg, _out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                      "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
+             "--pairs-only"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only requires --multi-bring4", msg)
+
+    def test_incompatible_with_deep_dive_core(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--pairs-only", "--deep-dive-core", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only", msg)
+
+    def test_incompatible_with_auto_deep_dive(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--pairs-only", "--auto-deep-dive", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only", msg)
+
+    def test_incompatible_with_teamsheet_json(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--pairs-only", "--teamsheet-json", "/tmp/x.json"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only", msg)
+
+    def test_stage_b_core_search_never_runs(self):
+        """Stage A's own pair summary is still printed (the exact thing
+        the user still wants), but Stage B's core-table header
+        ("Multi-bring4 search (exhaustive/beam, ...)") never appears --
+        confirming the expensive team-of-6 sweep was genuinely skipped,
+        not just hidden from the printed top-N."""
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--good-threshold", "0", "--min-enemies", "1",
+             "--pairs-only"])
+        self.assertIsNone(msg, out)
+        self.assertIn("top pairs", out)
+        self.assertNotIn("Multi-bring4 search (", out)
+
+    def test_xlsx_carries_pair_coverage_sheets_without_a_cores_search_sheet(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "10",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--pairs-only", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertEqual(set(wb.sheetnames), {"Cores", "Pair Coverage", "Pair Detail"})
+            cores_ws = wb["Cores"]
+            cores_rows = list(cores_ws.iter_rows(values_only=True))
+            self.assertEqual(cores_rows[0], ("Enemy 1", "Enemy 2"))
+            self.assertEqual(cores_rows[1], ("Kingambit, Basculegion",
+                                             "Garchomp, Incineroar"))
+            self.assertGreater(wb["Pair Coverage"].max_row, 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_xlsx_round_trips_through_the_app_parser(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--pool-size", "10", "--good-threshold", "0", "--min-enemies", "1",
+                 "--pairs-only", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+            from app import _parse_pair_coverage_xlsx
+            pair_rows, detail_rows, target_name_lists = _parse_pair_coverage_xlsx(
+                file_bytes)
+            self.assertTrue(pair_rows)
+            self.assertTrue(detail_rows)
+            self.assertEqual(target_name_lists, [["Kingambit", "Basculegion"]])
         finally:
             if os.path.exists(path):
                 os.unlink(path)

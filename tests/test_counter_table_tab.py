@@ -109,6 +109,56 @@ class TestCounterTableTabExists(unittest.TestCase):
             "Import pair coverage").run()
         self.assertFalse(at.exception, list(at.exception))
 
+    def test_min_offensive_types_and_threat_controls_wire_through(self):
+        """"using the same constraints as the coverage groups" -- Import
+        pair coverage's own filter controls only render once pair_rows are
+        in session state (the file uploader can't be driven via AppTest),
+        so this seeds them directly with a real --pairs-only export, same
+        as a genuine upload would produce."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        import counter_finder as cf
+        import counter_table as ct
+        import tempfile
+        W = load_world()
+        merged, moves = W["merged"], W["moves"]
+        natures, typechart = W["natures"], W["typechart"]
+        pool = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
+               "Whimsicott", "Mega Alakazam"]
+        vs_teams = [["Kingambit", "Basculegion"]]
+        coverage = cf.multi_bring4_coverage(
+            pool, vs_teams, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=0)
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            ct._write_pairs_only_xlsx(path, coverage, vs_teams, 15)
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        from app import _parse_pair_coverage_xlsx
+        pair_rows, detail_rows, target_name_lists = _parse_pair_coverage_xlsx(file_bytes)
+        self.assertTrue(pair_rows)
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Import pair coverage").run()
+        at.session_state["ct_pc_pair_rows"] = pair_rows
+        at.session_state["ct_pc_detail_rows"] = detail_rows
+        at.session_state["ct_pc_target_name_lists"] = target_name_lists
+        at.run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(c.key == "ct_pc_min_off_on" for c in at.checkbox))
+        self.assertTrue(any(c.key == "ct_pc_threat_on" for c in at.checkbox))
+        [c for c in at.checkbox if c.key == "ct_pc_threat_on"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_pc_min_threat_answers" for s in at.slider))
+        at = [b for b in at.button if b.key == "ct_pc_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertIn("ct_pc_results_by_size", at.session_state)
+
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the
         top-Score pool cutoff must still show up in the results once
@@ -202,6 +252,29 @@ class TestCounterTableTabExists(unittest.TestCase):
         results = at.session_state["ct_cov_results"]
         for row in results[3]["rows"]:
             self.assertEqual(row["threat_coverage"]["uncovered"], [])
+
+    def test_min_threat_answers_slider_raises_the_covered_bar(self):
+        """"it would also be good to filter for having multiple 1v1
+        answers to each enemy, ideally at least two" -- raising "Minimum
+        1v1 answers per enemy" to 2 and capping "Max enemies short of
+        that" at 0 must return only groups where every named enemy has at
+        least 2 independent 1v1 answers, not just one."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        [s for s in at.slider if s.key == "ct_cov_min_threat_answers"][0].set_value(2).run()
+        [c for c in at.checkbox if c.key == "ct_cov_max_uncov_on"][0].set_value(True).run()
+        at = [s for s in at.slider if s.key == "ct_cov_max_uncov"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[4]["rows"]:
+            tc = row["threat_coverage"]
+            self.assertEqual(tc["uncovered"], [])
+            for count in tc["answer_counts"].values():
+                self.assertGreaterEqual(count, 2)
 
     def test_suggested_pokemon_controls_render_and_apply_quorum(self):
         """"Give a 'suggested' list as well, of which at least 3 (or n,
@@ -1964,12 +2037,15 @@ class TestRoundRobinMode(unittest.TestCase):
         self.assertTrue(any(m.key == "ct_rr_teams" for m in at.multiselect))
         self.assertTrue(any(b.key == "ct_rr_go" for b in at.button))
 
-    def test_running_it_on_two_teams_renders_all_five_matchups(self):
+    def test_running_it_on_two_teams_renders_all_six_matchups(self):
         """Two teams: the mirrors A-A/B-B (one direction each), the non-
         mirror pair raced BOTH directions (A-B and B-A -- "race both
         directions" so every team's own summary reflects its own real
         performance), plus the "best4 vs best4" head-to-head layer for
-        that same non-mirror pair, rendered in its own section below."""
+        that same non-mirror pair, ALSO raced both directions ("matches
+        still systematically favour side A, without representing a
+        genuine assessment of the matchup" -- see `round_robin_saved_
+        teams`'s own docstring), rendered in its own section below."""
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
         from _harness import load_world
         W = load_world()
@@ -1988,9 +2064,10 @@ class TestRoundRobinMode(unittest.TestCase):
         self.assertIn(f"### {a} vs {b}", headings)
         self.assertIn(f"### {b} vs {a}", headings)
         self.assertIn(f"### {a} best-4 vs {b} best-4", headings)
+        self.assertIn(f"### {b} best-4 vs {a} best-4", headings)
         self.assertIn(f"### {b} vs {b}", headings)
         results = at.session_state["ct_rr_results"]
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), 6)
 
     def test_running_it_also_populates_the_gameplan_cache(self):
         """The same `_cache_gameplans` hook every other Counter Table

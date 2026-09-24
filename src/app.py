@@ -4747,14 +4747,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     """
     from counter_finder import core_deep_dive, bring4_from_deep_dive, recommended_lead
     worst_case_targeting = st.checkbox(
-        "Worst-case enemy targeting", key=f"{key_prefix}_worst_case",
-        help="By default the enemy's own per-turn target choice is a "
-             "single greedy guess. Check this to also exhaustively search "
-             "the enemy's OWN targeting each turn and assume whichever "
-             "combo is worst for us -- mirrors the worst-case search "
-             "already done for the enemy's Mega-evolve choice. Real cost: "
-             "roughly squares the per-turn search on top of the engine's "
-             "own 2-turn lookahead.")
+        "Worst-case enemy targeting", value=True, key=f"{key_prefix}_worst_case",
+        help="ON by default (matches the CLI's own --deep-dive-worst-case-"
+             "targeting default): the enemy's own per-turn target choice "
+             "is ALSO exhaustively searched each turn, and whichever "
+             "combo is worst for us is what gets played -- mirrors the "
+             "worst-case search already done for the enemy's Mega-evolve "
+             "choice. Cheap here regardless: the deep dive only ever runs "
+             "on a handful of already-narrowed candidates. Uncheck to "
+             "fall back to a single greedy guess per turn.")
     check_trick_room = st.checkbox(
         "Also check enemy Trick Room", key=f"{key_prefix}_check_tr",
         help="\"avoiding enemy tailwind and trick room may be key for a "
@@ -5242,6 +5243,15 @@ with tab_counter:
                          "turn 1 and see if that flips the outcome, feeding "
                          "the Win conditions table's own Trick Room caveat "
                          "below. Off leaves every result exactly as before.")
+                ct_b4_worst_case = st.checkbox(
+                    "Worst-case enemy targeting", key="ct_b4_worst_case",
+                    help="Off by default -- a real cost (roughly squares "
+                         "the per-turn search on top of the engine's own "
+                         "2-turn lookahead). Check this to also "
+                         "exhaustively search the enemy's own per-turn "
+                         "target choice each turn and assume whichever "
+                         "combo is worst for us, instead of the enemy's "
+                         "usual single greedy guess.")
                 ct_b4_required_techs = _tech_required_multiselect(
                     "Required techs (this bring-4 must have)", "ct_b4_required_techs")
                 ct_b4_min_special = _min_special_attackers_slider("ct_b4_minspecial")
@@ -5275,6 +5285,7 @@ with tab_counter:
                                 enemy_item_overrides=enemy_item_overrides,
                                 enemy_move_overrides=enemy_move_overrides,
                                 check_trick_room=ct_check_tr,
+                                worst_case_targeting=ct_b4_worst_case,
                                 required_techs=ct_b4_required_techs or None,
                                 min_special_attackers=ct_b4_min_special,
                                 rank_by=ct_b4_rank_by)
@@ -5368,12 +5379,14 @@ with tab_counter:
                 allteams_worst_case = st.checkbox(
                     "Worst-case enemy targeting",
                     key="ctb4_dd_all6_allteams_worst_case",
-                    help="Exhaustively search the enemy's OWN per-turn "
-                         "targeting too, assuming whichever combo is worst "
-                         "for us, instead of the enemy's usual single "
-                         "greedy guess. Real cost: roughly squares the "
-                         "per-turn search on top of the engine's own "
-                         "2-turn lookahead.")
+                    help="Off by default here, UNLIKE the other deep-dive "
+                         "checkboxes -- this button already races against "
+                         "EVERY saved team at once (measured ~8 minutes "
+                         "with this off; worst-case roughly squares that "
+                         "per-team cost, pushing a single click well past "
+                         "several minutes). Check it only when you "
+                         "specifically want worst-case rigor here and can "
+                         "afford the wait.")
                 if st.button(f"Full deep dive: all of Our 6 vs ALL "
                             f"{len(teams)} saved enemy teams",
                             key="ctb4_dd_all6_allteams_go"):
@@ -6252,17 +6265,33 @@ with tab_counter:
             cov_min_offensive_types = (
                 st.slider("Minimum types covered", 1, 18, 10, key="ct_cov_min_off")
                 if cov_min_off_on else None)
+            cov_min_threat_answers = st.slider(
+                "Minimum 1v1 answers per enemy", 1, 6, 1,
+                key="ct_cov_min_threat_answers",
+                help="\"it would also be good to filter for having "
+                     "multiple 1v1 answers to each enemy, ideally at "
+                     "least two, but in theory as many as possible to "
+                     "have redundant answers\" -- raises what counts as "
+                     "'covered' below from 'at least one member beats it' "
+                     "to 'at least THIS MANY different members beat it'. "
+                     "An enemy with only one answer is a single point of "
+                     "failure -- lose that one member first and the team "
+                     "has nothing left for it. Leave at 1 for the "
+                     "original 'any answer at all' reading.")
             cov_max_uncovered_on = st.checkbox(
-                "Cap how many named enemies nobody on the group beats 1v1",
+                "Cap how many named enemies fall short of that",
                 key="ct_cov_max_uncov_on",
                 help="\"do all of my team just lose to Kingambit, or "
                      "whatever pokemon are most commonly on enemy teams\" "
                      "-- a cheap 1v1 read (not a full battle) against "
                      "every Pokemon in the 'Enemy universe' selected "
-                     "below. An enemy counts as covered the moment ANY "
-                     "group member beats it.")
+                     "below. An enemy counts as covered once it has at "
+                     "least 'Minimum 1v1 answers per enemy' different "
+                     "group members beating it -- set that to 2 and this "
+                     "to 0 for 'guarantee every enemy has at least 2 "
+                     "independent answers.'")
             cov_max_uncovered_threats = (
-                st.slider("Max enemies with zero answer", 0, 20, 3,
+                st.slider("Max enemies short of the minimum", 0, 20, 3,
                          key="ct_cov_max_uncov")
                 if cov_max_uncovered_on else None)
         cov_cap_on = st.checkbox(
@@ -6371,6 +6400,7 @@ with tab_counter:
                         min_offensive_types=cov_min_offensive_types,
                         one_v_one_matrix=cov_matrix,
                         max_uncovered_threats=cov_max_uncovered_threats,
+                        min_threat_answers=cov_min_threat_answers,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         **cov_search_kwargs,
                         must_include=cov_include, suggested=cov_suggested,
@@ -6514,11 +6544,23 @@ with tab_counter:
                                    if oc["uncovered"] else ""))
                         if row["threat_coverage"] is not None:
                             tc = row["threat_coverage"]
+                            answer_counts = tc.get("answer_counts", {})
+                            zero = sorted(e for e in tc["uncovered"]
+                                         if answer_counts.get(e, 0) == 0)
+                            underredundant = sorted(
+                                (e for e in tc["uncovered"] if answer_counts.get(e, 0) > 0),
+                                key=lambda e: answer_counts[e])
+                            bar = (f" (>= {cov_min_threat_answers} answers)"
+                                  if cov_min_threat_answers > 1 else "")
                             st.caption(
-                                f"1v1 threat coverage: {tc['covered']}/{tc['total']} "
+                                f"1v1 threat coverage{bar}: {tc['covered']}/{tc['total']} "
                                 f"named enemies"
-                                + (f"  |  No answer to: {', '.join(tc['uncovered'])}"
-                                   if tc["uncovered"] else ""))
+                                + (f"  |  No answer at all: {', '.join(zero)}"
+                                   if zero else "")
+                                + ("  |  Single point of failure: " +
+                                   ", ".join(f"{e} ({answer_counts[e]})"
+                                            for e in underredundant)
+                                   if underredundant else ""))
                         if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
                             st.caption("Pair performance (this group's own links):")
                             pair_table = []
@@ -6646,6 +6688,43 @@ with tab_counter:
                          "weakness (weak minus resist) is <= 1.")
                 pc_max_weak = (st.slider("Max absolute weakness", 0, 6, 2, key="ct_pc_max_weak")
                               if pc_abs_cap_on else None)
+                pc_min_off_on = st.checkbox(
+                    "Require a minimum offensive type coverage",
+                    key="ct_pc_min_off_on",
+                    help="How many of the 18 defending types the team can "
+                         "collectively hit for real super-effective damage "
+                         "(ANY member's own real usage move counts). Cheap "
+                         "to check -- no extra racing, unlike the 1v1 "
+                         "check below.")
+                pc_min_offensive_types = (
+                    st.slider("Minimum types covered", 1, 18, 10, key="ct_pc_min_off")
+                    if pc_min_off_on else None)
+                pc_threat_on = st.checkbox(
+                    "Assess 1v1 threat coverage (extra racing)",
+                    key="ct_pc_threat_on",
+                    help="\"using the same constraints as the coverage "
+                         "groups\" -- races every uploaded/named Pokemon "
+                         "1v1 against every enemy named in the uploaded "
+                         "workbook. Cheap per pair, but adds real work on "
+                         "top of the otherwise-instant team assembly below "
+                         "-- off by default to keep this mode lightweight.")
+                pc_min_threat_answers, pc_max_uncovered_threats = 1, None
+                if pc_threat_on:
+                    pc_min_threat_answers = st.slider(
+                        "Minimum 1v1 answers per enemy", 1, 6, 1,
+                        key="ct_pc_min_threat_answers",
+                        help="An enemy only counts as covered once at "
+                             "least this many different team members beat "
+                             "it 1v1 -- raise it to demand redundant "
+                             "answers, not just one. Leave at 1 for 'any "
+                             "answer at all'.")
+                    pc_max_uncov_on = st.checkbox(
+                        "Cap how many named enemies fall short of that",
+                        key="ct_pc_max_uncov_on")
+                    pc_max_uncovered_threats = (
+                        st.slider("Max enemies short of the minimum", 0, 20, 3,
+                                 key="ct_pc_max_uncov")
+                        if pc_max_uncov_on else None)
             pc_top_n = st.slider("Top teams to show", 1, 40, 15, key="ct_pc_top_n")
             if st.button("Find best teams", type="primary", key="ct_pc_go"):
                 merged_teams = {n: list(t) for n, t in teams.items()}
@@ -6659,6 +6738,13 @@ with tab_counter:
                         moves, natures, typechart)
                     merge_named_team_pairs(coverage, merged_teams, team_meta, merged,
                                            moves, natures, typechart)
+                    pc_matrix = None
+                    if pc_threat_on:
+                        from counter_finder import one_v_one_matrix_for_pool
+                        pc_enemy_names = sorted({n for t in target_name_lists for n in t})
+                        pc_matrix = one_v_one_matrix_for_pool(
+                            coverage["candidate_pool"], pc_enemy_names, merged,
+                            moves, natures, typechart)
                     results_by_size = {}
                     for size in (pc_sizes or [6]):
                         results_by_size[size] = pair_coverage_teams(
@@ -6666,7 +6752,11 @@ with tab_counter:
                             required_techs=pc_required_techs or None,
                             min_special_attackers=pc_min_special,
                             must_include=pc_include or None,
-                            exclude=pc_exclude or None, top_n=pc_top_n)
+                            exclude=pc_exclude or None, top_n=pc_top_n,
+                            min_offensive_types=pc_min_offensive_types,
+                            one_v_one_matrix=pc_matrix,
+                            max_uncovered_threats=pc_max_uncovered_threats,
+                            min_threat_answers=pc_min_threat_answers)
                     st.session_state["ct_pc_coverage_pool_size"] = len(coverage["candidate_pool"])
                     st.session_state["ct_pc_results_by_size"] = results_by_size
             results_by_size = st.session_state.get("ct_pc_results_by_size")
@@ -6691,6 +6781,32 @@ with tab_counter:
                                 s = r["sets"][n]
                                 st.markdown(f"**{n}** -- {s['item']}: "
                                           f"{', '.join(s['moves'])}")
+                            if r["offensive_coverage"] is not None:
+                                oc = r["offensive_coverage"]
+                                st.caption(
+                                    f"Offensive coverage: {len(oc['covered'])}/"
+                                    f"{len(oc['covered']) + len(oc['uncovered'])} types"
+                                    + (f"  |  Can't hit: {', '.join(oc['uncovered'])}"
+                                       if oc["uncovered"] else ""))
+                            if r["threat_coverage"] is not None:
+                                tc = r["threat_coverage"]
+                                answer_counts = tc.get("answer_counts", {})
+                                zero = sorted(e for e in tc["uncovered"]
+                                             if answer_counts.get(e, 0) == 0)
+                                underredundant = sorted(
+                                    (e for e in tc["uncovered"] if answer_counts.get(e, 0) > 0),
+                                    key=lambda e: answer_counts[e])
+                                min_ans = pc_min_threat_answers
+                                bar = f" (>= {min_ans} answers)" if min_ans > 1 else ""
+                                st.caption(
+                                    f"1v1 threat coverage{bar}: {tc['covered']}/{tc['total']} "
+                                    f"named enemies"
+                                    + (f"  |  No answer at all: {', '.join(zero)}"
+                                       if zero else "")
+                                    + ("  |  Single point of failure: " +
+                                       ", ".join(f"{e} ({answer_counts[e]})"
+                                                for e in underredundant)
+                                       if underredundant else ""))
                             if st.button("Send to Battle Simulator as opponent",
                                         key=f"ct_pc_sim_{size}_{i}"):
                                 send_to_battle_simulator_as_opponent(r["team"], r["sets"])
