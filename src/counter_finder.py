@@ -8009,7 +8009,9 @@ def merge_named_team_pairs(coverage, named_teams, meta, merged, moves_db,
 def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                         max_megas=2, max_weak_types=None, max_net_weak_types=None,
                         required_techs=None, min_special_attackers=None,
-                        must_include=None, exclude=None, top_n=20):
+                        must_include=None, exclude=None, top_n=20,
+                        min_offensive_types=None, one_v_one_matrix=None,
+                        max_uncovered_threats=None, min_threat_answers=1):
     """Assemble teams of `group_size` (6 by default) as DISJOINT pairs drawn
     from `coverage["pair_by_key"]`'s own KNOWN pairs -- "upload this
     output, and use the streamlit app to try to create the best teams of
@@ -8045,10 +8047,33 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
     team's own composition (typing, tech coverage), never pairwise combat
     data, so they apply identically to a sparse pool.
 
+    `min_offensive_types`/`one_v_one_matrix`/`max_uncovered_threats`/
+    `min_threat_answers`: the SAME "1v1 threat redundancy" and "offensive
+    type coverage" hard filters `coverage_group_search` applies to its own
+    from-scratch groups -- "using the same constraints as the coverage
+    groups" -- read here from the team's own already-known members instead
+    of a fresh DFS. With `coverage["typechart"]` set (always true, see
+    `multi_bring4_coverage`/`coverage_from_pair_rows`), every result's own
+    `"offensive_coverage"` is always populated (which of the 18 defending
+    types the team's real usage movesets collectively hit super-
+    effectively -- `_real_damaging_moves` + `type_multiplier`, the same
+    per-name computation `coverage_group_search` itself uses); `min_
+    offensive_types` additionally makes it a hard floor. `one_v_one_matrix`
+    (the caller's own `one_v_one_matrix_for_pool` result, keyed by every
+    KNOWN pair's member names) turns on `"threat_coverage"`: an enemy only
+    counts as "answered" once at least `min_threat_answers` different team
+    members beat it 1v1 (default 1, "any answer at all"); `max_uncovered_
+    threats` additionally caps how many named enemies may fall short of
+    that bar. `"threat_coverage"` stays `None` when `one_v_one_matrix`
+    isn't given, same "None turns it off" contract `coverage_group_search`
+    already follows.
+
     Returns [{"team": tuple(sorted(names)), "pairs": ((n1, n2), ...) (the
     `group_size // 2` KNOWN pairs used, each sorted), "score": float,
-    "sets": {name: {"item", "moves"}}}, ...], best `top_n` by score
-    descending.
+    "sets": {name: {"item", "moves"}}, "offensive_coverage":
+    {"covered", "uncovered"} or None, "threat_coverage": {"covered",
+    "total", "uncovered", "answer_counts"} or None}, ...], best `top_n` by
+    score descending.
     """
     if group_size % 2 != 0:
         raise ValueError(f"group_size must be even, got {group_size}")
@@ -8064,6 +8089,27 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
     effective_limits = _effective_type_limits(max_weak, type_limits)
     weak_exception_types = _weak_exception_eligible_types(type_limits)
     w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
+    # Per-name offensive type coverage, computed ONCE over every name that
+    # appears in ANY known pair (a small set here, unlike
+    # `coverage_group_search`'s whole search pool) -- same `_real_damaging_
+    # moves` + `type_multiplier` read that function's own `hit_idx_by_name`
+    # uses, just keyed by name instead of by index since there's no DFS
+    # here to thread an index through.
+    typechart = coverage.get("typechart")
+    hit_types_by_name = None
+    if typechart is not None:
+        from species_data import TYPES
+        hit_types_by_name = {}
+        for pk in known_pairs:
+            for nm in pk:
+                if nm in hit_types_by_name:
+                    continue
+                hit = set()
+                for mv in _real_damaging_moves(nm, merged, moves_db):
+                    for t in TYPES:
+                        if type_multiplier(mv.move_type, [t], typechart) > 1.0:
+                            hit.add(t)
+                hit_types_by_name[nm] = hit
 
     def pair_score(pk):
         rows = [pbk[pk] for pbk in coverage["pair_by_key"] if pk in pbk]
@@ -8099,6 +8145,34 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                 min_special_attackers=min_special_attackers,
                 weak_exception_types=weak_exception_types):
             continue
+        offensive_coverage = None
+        if hit_types_by_name is not None:
+            hit = set()
+            for n in core:
+                hit |= hit_types_by_name.get(n, set())
+            offensive_coverage = {
+                "covered": sorted(hit),
+                "uncovered": sorted(set(TYPES) - hit),
+            }
+            if (min_offensive_types is not None
+                    and len(offensive_coverage["covered"]) < min_offensive_types):
+                continue
+        threat_coverage = None
+        if one_v_one_matrix is not None:
+            enemies = sorted({e for n in core for e in one_v_one_matrix.get(n, {})})
+            answer_counts = {
+                e: sum(1 for n in core if one_v_one_matrix.get(n, {}).get(e) == "win")
+                for e in enemies}
+            uncovered_enemies = [e for e in enemies
+                                 if answer_counts[e] < min_threat_answers]
+            threat_coverage = {
+                "covered": len(enemies) - len(uncovered_enemies),
+                "total": len(enemies), "uncovered": uncovered_enemies,
+                "answer_counts": answer_counts,
+            }
+            if (max_uncovered_threats is not None
+                    and len(uncovered_enemies) > max_uncovered_threats):
+                continue
         score = sum(scored_pairs[pk] for pk in combo) / len(combo)
         results.append({
             "team": core,
@@ -8106,6 +8180,8 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
             "score": score,
             "sets": {n: {"item": coverage["fixed_items"][n],
                         "moves": coverage["fixed_moves"][n]} for n in core},
+            "offensive_coverage": offensive_coverage,
+            "threat_coverage": threat_coverage,
         })
     results.sort(key=lambda r: -r["score"])
     return results[:top_n]

@@ -109,6 +109,56 @@ class TestCounterTableTabExists(unittest.TestCase):
             "Import pair coverage").run()
         self.assertFalse(at.exception, list(at.exception))
 
+    def test_min_offensive_types_and_threat_controls_wire_through(self):
+        """"using the same constraints as the coverage groups" -- Import
+        pair coverage's own filter controls only render once pair_rows are
+        in session state (the file uploader can't be driven via AppTest),
+        so this seeds them directly with a real --pairs-only export, same
+        as a genuine upload would produce."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        import counter_finder as cf
+        import counter_table as ct
+        import tempfile
+        W = load_world()
+        merged, moves = W["merged"], W["moves"]
+        natures, typechart = W["natures"], W["typechart"]
+        pool = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
+               "Whimsicott", "Mega Alakazam"]
+        vs_teams = [["Kingambit", "Basculegion"]]
+        coverage = cf.multi_bring4_coverage(
+            pool, vs_teams, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=0)
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            ct._write_pairs_only_xlsx(path, coverage, vs_teams, 15)
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        from app import _parse_pair_coverage_xlsx
+        pair_rows, detail_rows, target_name_lists = _parse_pair_coverage_xlsx(file_bytes)
+        self.assertTrue(pair_rows)
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Import pair coverage").run()
+        at.session_state["ct_pc_pair_rows"] = pair_rows
+        at.session_state["ct_pc_detail_rows"] = detail_rows
+        at.session_state["ct_pc_target_name_lists"] = target_name_lists
+        at.run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(c.key == "ct_pc_min_off_on" for c in at.checkbox))
+        self.assertTrue(any(c.key == "ct_pc_threat_on" for c in at.checkbox))
+        [c for c in at.checkbox if c.key == "ct_pc_threat_on"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_pc_min_threat_answers" for s in at.slider))
+        at = [b for b in at.button if b.key == "ct_pc_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertIn("ct_pc_results_by_size", at.session_state)
+
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the
         top-Score pool cutoff must still show up in the results once

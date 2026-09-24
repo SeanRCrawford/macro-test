@@ -1845,6 +1845,38 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     return path
 
 
+def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n):
+    """--pairs-only --xlsx: the lightweight export -- "I just want a
+    lighter weight version that just outputs comprehensive 2v2 pairs for
+    use in building teams" -- Stage A's own pair-vs-enemy data, with NONE
+    of `_write_multi_bring4_xlsx`'s Stage B core-search sheets (Cores'
+    real per-core columns, Sets, Teamsheets, any Dive N sheets), since
+    Stage B is exactly what --pairs-only skips.
+
+    Still writes a "Cores" sheet -- but a minimal one, just the "Enemy N"
+    columns and one data row of enemy names, nothing else -- because the
+    Streamlit "Import pair coverage" reader (`_parse_pair_coverage_xlsx`)
+    reads `target_name_lists` back from THAT sheet, not from "Pair
+    Coverage" itself. `_write_pair_coverage_sheets` (used verbatim here,
+    same as a real --multi-bring4 --xlsx export) then adds the actual
+    "Pair Coverage"/"Pair Detail" sheets -- so a --pairs-only export round-
+    trips through the app exactly like a full one does.
+    """
+    from openpyxl import Workbook
+    from export_excel import _autosize, _style_header
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Cores"
+    header = [f"Enemy {i + 1}" for i in range(len(target_name_lists))]
+    ws.append(header)
+    _style_header(ws)
+    ws.append([", ".join(names) for names in target_name_lists])
+    _autosize(ws)
+    _write_pair_coverage_sheets(wb, coverage, top_n)
+    wb.save(path)
+    return path
+
+
 def _write_pair_coverage_sheets(wb, coverage, top_n):
     """"Pair Coverage" + "Pair Detail": the raw data behind the best
     `top_n` pairs in `coverage` (`counter_finder.top_coverage_pairs`),
@@ -3058,6 +3090,26 @@ def main():
                          "coverage' upload format: 'I would need all the "
                          "/15 results for every pair vs each enemy team ... "
                          "to reconstruct optimal teams based on conditions'")
+    ap.add_argument("--pairs-only", action="store_true",
+                    help="--multi-bring4 only: \"the multi-bring4 is taking "
+                         "hours, I just want a lighter weight version that "
+                         "just outputs comprehensive 2v2 pairs for use in "
+                         "building teams\" -- run ONLY Stage A (every pool "
+                         "pair raced against every named --vs-team enemy's "
+                         "own pairs, real sets), print the same pair "
+                         "summary --multi-bring4 always prints first, and "
+                         "stop there -- skip Stage B (the exhaustive/--beam "
+                         "team-of-6 core search) entirely, which is what "
+                         "actually takes hours on a large pool. With "
+                         "--xlsx, writes a minimal workbook carrying just "
+                         "the 'Cores' (enemy rosters only, for the "
+                         "Streamlit round trip), 'Pair Coverage', and 'Pair "
+                         "Detail' sheets -- the exact same 'import pair "
+                         "coverage' format a full --multi-bring4 --xlsx "
+                         "export produces, without ever running the core "
+                         "search. Incompatible with --deep-dive-core/"
+                         "--auto-deep-dive/--teamsheet-json (all three need "
+                         "a found core, and none exists here)")
     ap.add_argument("--beam", action="store_true",
                     help="--multi-bring4 only: search the WHOLE pool with "
                          "an incremental beam search (same growth pattern "
@@ -3365,6 +3417,17 @@ def main():
         raise SystemExit("--unique-items only applies to --bring4/--multi-bring4")
     if args.teamsheet_json and not (args.multi_bring4 or args.bring4):
         raise SystemExit("--teamsheet-json requires --multi-bring4 or --bring4")
+    if args.pairs_only and not args.multi_bring4:
+        raise SystemExit("--pairs-only requires --multi-bring4")
+    if args.pairs_only and args.deep_dive_core:
+        raise SystemExit("--pairs-only skips the core search entirely -- "
+                         "--deep-dive-core has no core to dive into")
+    if args.pairs_only and args.auto_deep_dive:
+        raise SystemExit("--pairs-only skips the core search entirely -- "
+                         "--auto-deep-dive has no core to dive into")
+    if args.pairs_only and args.teamsheet_json:
+        raise SystemExit("--pairs-only skips the core search entirely -- "
+                         "--teamsheet-json has no core to export")
     if args.partner and not args.joint:
         raise SystemExit("--partner requires --joint")
     if args.turns != 2 and not (args.joint or args.deep or args.bring4
@@ -3700,6 +3763,18 @@ def main():
         # fallback, so a --multi-bring4 run never depends on Stage B
         # succeeding to show anything at all.
         _print_pair_summary(coverage, top=args.top)
+        if args.pairs_only:
+            # "I just want a lighter weight version that just outputs
+            # comprehensive 2v2 pairs for use in building teams" -- Stage A
+            # above is already done; stop here instead of running Stage B's
+            # team-of-6 core search, which is what actually takes hours on
+            # a large pool.
+            if args.xlsx:
+                path = _write_pairs_only_xlsx(
+                    args.xlsx, coverage, vs_teams, args.pair_coverage_top)
+                print(f"\nExcel workbook (pairs only, no core search): "
+                     f"{os.path.abspath(path)}")
+            return
         # `enforce_item_clause` is deliberately NEVER passed to the sweep
         # below -- "it outputs the best pairs vs each team, then hangs for
         # hours ... unique-items may be drastically slowing it down". True

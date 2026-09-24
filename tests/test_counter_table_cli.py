@@ -2806,6 +2806,106 @@ class TestPairCoverageXlsxExport(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestPairsOnlyFlag(unittest.TestCase):
+    """"the multi-bring4 is taking hours, I just want a lighter weight
+    version that just outputs comprehensive 2v2 pairs for use in building
+    teams" -- `--pairs-only` runs Stage A (`multi_bring4_coverage`, the
+    pair-vs-enemy racing) and stops, skipping Stage B (the exhaustive/
+    --beam team-of-6 core search) entirely."""
+
+    def test_requires_multi_bring4(self):
+        msg, _out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                      "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
+             "--pairs-only"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only requires --multi-bring4", msg)
+
+    def test_incompatible_with_deep_dive_core(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--pairs-only", "--deep-dive-core", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only", msg)
+
+    def test_incompatible_with_auto_deep_dive(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--pairs-only", "--auto-deep-dive", "1"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only", msg)
+
+    def test_incompatible_with_teamsheet_json(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--pairs-only", "--teamsheet-json", "/tmp/x.json"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only", msg)
+
+    def test_stage_b_core_search_never_runs(self):
+        """Stage A's own pair summary is still printed (the exact thing
+        the user still wants), but Stage B's core-table header
+        ("Multi-bring4 search (exhaustive/beam, ...)") never appears --
+        confirming the expensive team-of-6 sweep was genuinely skipped,
+        not just hidden from the printed top-N."""
+        msg, out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "10", "--good-threshold", "0", "--min-enemies", "1",
+             "--pairs-only"])
+        self.assertIsNone(msg, out)
+        self.assertIn("top pairs", out)
+        self.assertNotIn("Multi-bring4 search (", out)
+
+    def test_xlsx_carries_pair_coverage_sheets_without_a_cores_search_sheet(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--vs-team", "Garchomp,Incineroar", "--pool-size", "10",
+                 "--good-threshold", "0", "--min-enemies", "1",
+                 "--pairs-only", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            self.assertEqual(set(wb.sheetnames), {"Cores", "Pair Coverage", "Pair Detail"})
+            cores_ws = wb["Cores"]
+            cores_rows = list(cores_ws.iter_rows(values_only=True))
+            self.assertEqual(cores_rows[0], ("Enemy 1", "Enemy 2"))
+            self.assertEqual(cores_rows[1], ("Kingambit, Basculegion",
+                                             "Garchomp, Incineroar"))
+            self.assertGreater(wb["Pair Coverage"].max_row, 1)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def test_xlsx_round_trips_through_the_app_parser(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--pool-size", "10", "--good-threshold", "0", "--min-enemies", "1",
+                 "--pairs-only", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+            from app import _parse_pair_coverage_xlsx
+            pair_rows, detail_rows, target_name_lists = _parse_pair_coverage_xlsx(
+                file_bytes)
+            self.assertTrue(pair_rows)
+            self.assertTrue(detail_rows)
+            self.assertEqual(target_name_lists, [["Kingambit", "Basculegion"]])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 class TestXlsxMegaUsedAndSixPairsColumns(unittest.TestCase):
     """"In the xlsx where use of a single mega is enforced when both are
     brought, note which one is used in the cores sheet and the Summary/

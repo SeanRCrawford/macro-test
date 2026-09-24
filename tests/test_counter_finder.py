@@ -5531,6 +5531,106 @@ class TestPairCoverageTeams(unittest.TestCase):
         self.assertEqual(results, [])
 
 
+class TestPairCoverageTeamsCoverageFilters(unittest.TestCase):
+    """"using the same constraints as the coverage groups" -- porting
+    `coverage_group_search`'s own `min_offensive_types`/`one_v_one_matrix`/
+    `max_uncovered_threats`/`min_threat_answers` onto `pair_coverage_teams`,
+    read from the team's own already-known members instead of a fresh DFS.
+    Same fixture as `TestPairCoverageTeams` (a complete 7-member pairs
+    graph, guaranteeing legal teams of 6 exist to filter)."""
+
+    POOL = TestPairCoverageTeams.POOL
+    ENEMIES = TestPairCoverageTeams.ENEMIES
+
+    def setUp(self):
+        self.W = world()
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=0)
+        # Two fictional enemies, neither a real POOL member's own name, so
+        # there's no ambiguity between "team member" and "enemy" -- every
+        # POOL member loses to Landorus-Therian and beats Ferrothorn, the
+        # same "does the whole team just lose to X" shape
+        # TestCoverageGroupSearchThreatCoverage's own hand-built matrix uses.
+        self.all_lose_matrix = {n: {"Landorus-Therian": "loss", "Ferrothorn": "win"}
+                                for n in self.POOL}
+        self.one_win_matrix = {n: dict(v) for n, v in self.all_lose_matrix.items()}
+        self.one_win_matrix["Rampardos"]["Landorus-Therian"] = "win"
+
+    def test_offensive_coverage_is_always_populated_when_typechart_present(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10)
+        self.assertTrue(results)
+        from species_data import TYPES
+        for r in results:
+            oc = r["offensive_coverage"]
+            self.assertIsNotNone(oc)
+            self.assertEqual(set(oc["covered"]) | set(oc["uncovered"]), set(TYPES))
+            self.assertEqual(set(oc["covered"]) & set(oc["uncovered"]), set())
+
+    def test_min_offensive_types_impossible_floor_returns_nothing(self):
+        from species_data import TYPES
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         min_offensive_types=len(TYPES) + 1)
+        self.assertEqual(results, [])
+
+    def test_min_offensive_types_is_enforced_on_every_survivor(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         min_offensive_types=5)
+        self.assertTrue(results)
+        for r in results:
+            self.assertGreaterEqual(len(r["offensive_coverage"]["covered"]), 5)
+
+    def test_threat_coverage_is_none_without_a_matrix(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10)
+        self.assertTrue(results)
+        for r in results:
+            self.assertIsNone(r["threat_coverage"])
+
+    def test_matrix_given_flags_the_universal_loss_as_uncovered(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         one_v_one_matrix=self.all_lose_matrix)
+        self.assertTrue(results)
+        for r in results:
+            tc = r["threat_coverage"]
+            self.assertIsNotNone(tc)
+            self.assertIn("Landorus-Therian", tc["uncovered"])
+            self.assertNotIn("Ferrothorn", tc["uncovered"])
+            self.assertEqual(tc["answer_counts"]["Landorus-Therian"], 0)
+            self.assertEqual(tc["answer_counts"]["Ferrothorn"], 6)
+
+    def test_max_uncovered_threats_zero_drops_every_team(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         one_v_one_matrix=self.all_lose_matrix,
+                                         max_uncovered_threats=0)
+        self.assertEqual(results, [])
+
+    def test_max_uncovered_threats_one_keeps_results(self):
+        results = cf.pair_coverage_teams(self.coverage, top_n=10,
+                                         one_v_one_matrix=self.all_lose_matrix,
+                                         max_uncovered_threats=1)
+        self.assertTrue(results)
+
+    def test_min_threat_answers_one_a_single_real_win_is_enough(self):
+        results = cf.pair_coverage_teams(
+            self.coverage, top_n=10, one_v_one_matrix=self.one_win_matrix,
+            must_include=["Rampardos"], min_threat_answers=1)
+        self.assertTrue(results)
+        for r in results:
+            self.assertNotIn("Landorus-Therian", r["threat_coverage"]["uncovered"])
+
+    def test_min_threat_answers_two_the_same_single_win_is_not_enough(self):
+        results = cf.pair_coverage_teams(
+            self.coverage, top_n=10, one_v_one_matrix=self.one_win_matrix,
+            must_include=["Rampardos"], min_threat_answers=2)
+        self.assertTrue(results)
+        for r in results:
+            tc = r["threat_coverage"]
+            self.assertIn("Landorus-Therian", tc["uncovered"])
+            self.assertEqual(tc["answer_counts"]["Landorus-Therian"], 1)
+
+
 class TestMultiBring4CoverageMegaConsistency(unittest.TestCase):
     """End-to-end through `multi_bring4_coverage` -> `multi_bring4_exhaustive`
     with REAL megas (not the hand-built fixture above) -- the actual
