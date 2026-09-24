@@ -12895,6 +12895,178 @@ class TestEvolveFromTeam(unittest.TestCase):
         self.assertEqual(sorted(omitted, key=key), sorted(explicit_true, key=key))
 
 
+class TestEvolveFromTeamMegaCap(unittest.TestCase):
+    """"In the evolve-team, I cannot have more than 2 megas, so a mega
+    must be switched for a mega, or a mega+non-mega pair jointly switched
+    for a new mega+non-mega" -- whole-member-swap trials that would push
+    the team over `max_megas` are hard-dropped, and a new "member_pair"
+    trial kind covers the ONLY other legal way to bring in a genuinely NEW
+    Mega once already at the cap: simultaneously giving up an existing
+    Mega AND another member for a new Mega+non-Mega pair.
+
+    Real racing is unnecessary to prove the FILTERING logic itself --
+    `cf._evolve_trial_result` (the module-level name `_evolve_run_one_
+    round`'s serial path calls, so a monkeypatch here is visible to it) is
+    stubbed to score EVERY trial as a flat, uniform genuine improvement,
+    so a fixture with real Pokemon still exercises the real candidate-
+    generation code path deterministically and fast, without depending on
+    the real engine's own scoring to happen to favour any one candidate.
+    """
+
+    def setUp(self):
+        self.W = world()
+        self.targets = [["Arcanine-Hisui", "Toxapex"]]
+        self._orig_trial_result = cf._evolve_trial_result
+
+        def _stub_trial_result(kind, member, removed, added, trial_core,
+                               *args, **kwargs):
+            return {"kind": kind, "member": member, "removed": removed,
+                   "added": added, "team": list(trial_core),
+                   "sets": {n: {"item": None, "moves": []} for n in trial_core},
+                   "new_score": 100.0, "new_win_rate": 100.0,
+                   "new_tailwind_safe_rate": 100.0,
+                   "new_protect_safe_rate": 100.0,
+                   "new_follow_me_safe_rate": 100.0}
+        cf._evolve_trial_result = _stub_trial_result
+        self.addCleanup(setattr, cf, "_evolve_trial_result", self._orig_trial_result)
+
+    def _round1(self, core, swap_pool, **extra):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        return cf.evolve_from_team(
+            core, self.targets, merged, moves, natures, typechart, turns=1,
+            swap_pool=list(swap_pool), max_changes=1, **extra)["rounds"][0]
+
+    def test_a_single_swap_that_would_exceed_the_cap_is_dropped(self):
+        """Team already at the default cap (2 Megas): offering a THIRD
+        Mega as a plain single-member swap (replacing the one non-Mega
+        member) must never appear in "member" results, even though the
+        stub scores it as a genuine improvement."""
+        core = ["Mega Charizard Y", "Mega Metagross", "Whimsicott"]
+        results = self._round1(core, ["Mega Garchomp"])
+        offered = {(r["kind"], r["member"], r["added"]) for r in results}
+        self.assertNotIn(("member", "Whimsicott", "Mega Garchomp"), offered)
+
+    def test_no_result_ever_exceeds_max_megas(self):
+        """Blanket invariant across every kind of result, not just the one
+        blocked candidate above."""
+        core = ["Mega Charizard Y", "Mega Metagross", "Whimsicott"]
+        results = self._round1(core, ["Mega Garchomp", "Kingambit", "Hydreigon"])
+        for r in results:
+            n_megas = sum(1 for n in r["team"] if n.startswith("Mega "))
+            self.assertLessEqual(n_megas, 2, r)
+
+    def test_mega_for_mega_single_swap_is_still_offered(self):
+        """"a mega must be switched for a mega" -- replacing an EXISTING
+        Mega with a NEW one is a plain 1-for-1 swap (net Mega count
+        unchanged), never needing the member-pair mechanism, so it must
+        still be offered as an ordinary "member" result."""
+        core = ["Mega Charizard Y", "Mega Metagross", "Whimsicott"]
+        results = self._round1(core, ["Mega Garchomp"])
+        offered = {(r["kind"], r["member"], r["added"]) for r in results}
+        self.assertIn(("member", "Mega Charizard Y", "Mega Garchomp"), offered)
+        self.assertIn(("member", "Mega Metagross", "Mega Garchomp"), offered)
+
+    def test_member_pair_swap_brings_in_the_blocked_mega_legally(self):
+        """"a mega+non-mega pair jointly switched for a new mega+non-mega"
+        -- with the team at cap, offering a new Mega (blocked as a bare
+        single swap) alongside a new non-Mega candidate must surface as a
+        "member_pair" result that swaps OUT one existing Mega AND the
+        existing non-Mega member together, staying at exactly 2 Megas."""
+        core = ["Mega Charizard Y", "Mega Metagross", "Whimsicott"]
+        results = self._round1(core, ["Mega Garchomp", "Kingambit"])
+        pair_results = [r for r in results if r["kind"] == "member_pair"]
+        self.assertTrue(pair_results, "expected at least one member_pair result")
+        for r in pair_results:
+            self.assertIn("Mega Garchomp", r["team"])
+            self.assertEqual(sum(1 for n in r["team"] if n.startswith("Mega ")), 2)
+            self.assertEqual(len(r["team"]), len(core))
+
+    def test_member_pair_is_skipped_entirely_when_not_at_the_cap(self):
+        """A team with only 1 Mega (below the cap) can legally take a
+        plain single-member swap for a new Mega -- no "member_pair"
+        trials should even be generated, since the ordinary "member" path
+        already covers it."""
+        core = ["Mega Charizard Y", "Kingambit", "Whimsicott"]
+        results = self._round1(core, ["Mega Garchomp"])
+        kinds = {r["kind"] for r in results}
+        self.assertNotIn("member_pair", kinds)
+        self.assertIn(("member", "Kingambit", "Mega Garchomp"),
+                      {(r["kind"], r["member"], r["added"]) for r in results})
+
+    def test_max_megas_none_disables_the_cap_entirely(self):
+        """The escape hatch: `max_megas=None` reproduces the old,
+        unconstrained behaviour -- the blocked single swap from the first
+        test above is offered again, and no member_pair trials run at
+        all (nothing left for them to unlock)."""
+        core = ["Mega Charizard Y", "Mega Metagross", "Whimsicott"]
+        results = self._round1(core, ["Mega Garchomp"], max_megas=None)
+        offered = {(r["kind"], r["added"]) for r in results}
+        self.assertIn(("member", "Mega Garchomp"), offered)
+        self.assertNotIn("member_pair", {r["kind"] for r in results})
+
+
+class TestEvolveFromTeamItemClause(unittest.TestCase):
+    """"you also cannot add a member with an item that already exists on
+    the team, such as adding a pokemon with a focus sash or life orb,
+    unless it existed on the member being replaced" -- `enforce_item_
+    clause=True` (the new default) resolves every trial's FULL roster
+    with VGC's real Item Clause enforced, via `core_deep_dive`'s own
+    already-existing `enforce_item_clause` support.
+
+    Real, verified fixture: Milotic (Zoom Lens by default) + Mega
+    Charizard Y (Charizardite Y, a Mega-stone lock) + Venusaur -- Venusaur
+    and a swap-pool candidate can both legitimately want Focus Sash,
+    letting a direct A/B comparison (clause on vs off) show the
+    constraint actually taking effect on real data, not a stub.
+    """
+
+    def setUp(self):
+        self.W = world()
+        self.targets = [["Arcanine-Hisui", "Mega Staraptor"]]
+        self.core = ["Milotic", "Mega Charizard Y", "Venusaur"]
+
+    def _round1(self, swap_pool, **extra):
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        return cf.evolve_from_team(
+            self.core, self.targets, merged, moves, natures, typechart,
+            turns=2, swap_pool=list(swap_pool), max_changes=1,
+            **extra)["rounds"][0]
+
+    def test_enforced_by_default_no_result_ever_duplicates_an_item(self):
+        results = self._round1(["Hydreigon", "Kingambit"])
+        for r in results:
+            items = [s["item"] for s in r["sets"].values() if s.get("item")]
+            self.assertEqual(len(items), len(set(items)), r)
+
+    def test_the_flag_actually_reaches_core_deep_dive(self):
+        """`enforce_item_clause=False` must actually reach `core_deep_
+        dive`, not be silently dropped or overridden back to `True`
+        somewhere in `evolve_from_team`'s own call chain -- confirmed
+        directly by capturing every `core_deep_dive` call's own kwarg,
+        rather than hoping a specific real pool happens to contain a
+        collision (this fixture's pool may or may not, and either way
+        proves nothing about whether the flag itself threads through)."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        seen = []
+        orig = cf.core_deep_dive
+        def _capturing(*args, **kwargs):
+            seen.append(kwargs.get("enforce_item_clause"))
+            return orig(*args, **kwargs)
+        cf.core_deep_dive = _capturing
+        try:
+            cf.evolve_from_team(
+                self.core, self.targets, merged, moves, natures, typechart,
+                turns=2, swap_pool=["Hydreigon"], max_changes=1,
+                enforce_item_clause=False)
+        finally:
+            cf.core_deep_dive = orig
+        self.assertTrue(seen, "expected at least one core_deep_dive call")
+        self.assertTrue(all(v is False for v in seen), seen)
+
+
 class TestRoundRobinSavedTeams(unittest.TestCase):
     """"Give me an option ... to only run all the saved teams vs the other
     teams (including themself), rather than creating teams" -- every saved
@@ -12925,11 +13097,17 @@ class TestRoundRobinSavedTeams(unittest.TestCase):
     def test_mirror_included_both_directions_raced_plus_head_to_head(self):
         """Two teams A/B: the mirror A-A and B-B each race once (there is
         only one direction against yourself), but the non-mirror A/B pair
-        races BOTH directions (A's own best-4 vs B's full roster, then B's
-        own best-4 vs A's full roster) plus a third "best4_vs_best4" layer
-        racing each side's own best-4 directly against the other's --
-        "race both directions" so every team's own summary reflects its
-        own real performance, not just whichever side it landed on."""
+        races BOTH directions for "vs_full" (A's own best-4 vs B's full
+        roster, then B's own best-4 vs A's full roster) AND both
+        directions for "best4_vs_best4" (A's best-4 "ours" vs B's, then
+        B's best-4 "ours" vs A's) -- "matches still systematically favour
+        side A, without representing a genuine assessment of the matchup":
+        `bring4_search`'s engine gives "our" side an exhaustive per-turn
+        search the "enemy" side doesn't get, so a one-directional head-to-
+        head would always hand that advantage to whichever team sorts
+        first. Every team's own summary must reflect its own real
+        performance with the search seat, not just whichever side the
+        alphabetical sort landed it on."""
         results = self._run()
         rows = [(a, b, layer) for a, b, _pr, _br, layer, _er in results]
         self.assertEqual(rows, [
@@ -12937,6 +13115,7 @@ class TestRoundRobinSavedTeams(unittest.TestCase):
             ("A", "B", "vs_full"),
             ("B", "A", "vs_full"),
             ("A", "B", "best4_vs_best4"),
+            ("B", "A", "best4_vs_best4"),
             ("B", "B", "vs_full")])
 
     def test_a_teams_own_item_override_survives_on_its_own_side_every_time(self):
@@ -12966,6 +13145,36 @@ class TestRoundRobinSavedTeams(unittest.TestCase):
                 continue
             expected = list(vs_full_by_pair[(b, a)][0]["bring4"])
             self.assertEqual(sorted(enemy_roster), sorted(expected))
+
+    def test_best4_vs_best4_gives_each_team_its_own_our_side_seat(self):
+        """The fix: each non-mirror pair's two "best4_vs_best4" rows must
+        list DIFFERENT teams as `team_a` (the "ours" side that gets the
+        exhaustive per-turn search) -- one row for A, one for B -- never
+        the same team both times."""
+        results = self._run()
+        h2h = [(a, b) for a, b, _pr, _br, layer, _er in results
+              if layer == "best4_vs_best4"]
+        self.assertEqual(sorted(h2h), [("A", "B"), ("B", "A")])
+
+    def test_best4_vs_best4_each_row_uses_its_own_our_side_overrides(self):
+        """Kingambit only exists on team A -- its "Chople Berry" override
+        must still apply in the "best4_vs_best4" row where A is "ours"
+        (item1/item2), even though this layer's `pair_rows` are drawn from
+        `best4_a`/`best4_b` rather than the team's full roster."""
+        results = self._run()
+        for a, b, pair_rows, _br, layer, _er in results:
+            if layer != "best4_vs_best4":
+                continue
+            for r in pair_rows:
+                if "Kingambit" not in r["pair"]:
+                    continue
+                idx = r["pair"].index("Kingambit")
+                item = r["item1"] if idx == 0 else r["item2"]
+                # Kingambit only ever appears on WHICHEVER side is "A" here
+                # (its own best-4 was searched using A's own overrides);
+                # confirm the override survived regardless of which
+                # directional row this is.
+                self.assertEqual(item, "Chople Berry", (a, b, r["pair"]))
 
     def test_team_names_narrows_the_grid(self):
         results = self._run(team_names=["A"])

@@ -1961,6 +1961,55 @@ class TestVsAllTeamsFlag(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("requires --multi-bring4", msg)
 
+    def test_defaults_max_weak_types_to_9(self):
+        """"I want to establish the same default limits applied above
+        [Coverage Groups], namely no more than 3 absolute weaknesses, no
+        more than 1 type with 3 absolute weaknesses, and no more than 9
+        types with 2 or more absolute weaknesses" -- --max-weak's own
+        default (2, with its built-in 'one type may reach 3' exception)
+        already covers the first two bullets; --vs-all-teams must ALSO
+        default --max-weak-types (otherwise uncapped) to 9 for the third.
+        Confirmed behaviorally: an explicit --max-weak-types 9 run must
+        produce byte-for-byte the same output as the bare default. A tiny
+        --pool-size keeps this tractable -- --vs-all-teams already races
+        against every saved team, so the search cost is real regardless
+        of how small the candidate pool is."""
+        args = ["--multi-bring4", "--vs-all-teams", "--pool-size", "3", "--top", "1"]
+        msg_default, out_default = run_main(args)
+        msg_explicit, out_explicit = run_main(args + ["--max-weak-types", "9"])
+        self.assertIsNone(msg_default, out_default)
+        self.assertIsNone(msg_explicit, out_explicit)
+        self.assertEqual(out_default, out_explicit)
+
+    def test_an_explicit_max_weak_types_is_never_overridden(self):
+        """A caller who passes their OWN --max-weak-types must see that
+        EXACT value actually reach the search, not the --vs-all-teams
+        default of 9 -- confirmed directly by capturing the kwarg
+        `multi_bring4_exhaustive`/`multi_bring4_beam` are actually called
+        with (whichever path a real run takes), rather than depending on
+        a --pool-size small enough to run fast also being large enough to
+        make the two caps behave visibly differently."""
+        seen = []
+        orig_exhaustive = ct.multi_bring4_exhaustive
+        orig_beam = ct.multi_bring4_beam
+        def _capture(fn):
+            def _wrapped(*args, **kwargs):
+                seen.append(kwargs.get("max_weak_types"))
+                return fn(*args, **kwargs)
+            return _wrapped
+        ct.multi_bring4_exhaustive = _capture(orig_exhaustive)
+        ct.multi_bring4_beam = _capture(orig_beam)
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-all-teams", "--pool-size", "3",
+                 "--top", "1", "--max-weak-types", "1"])
+        finally:
+            ct.multi_bring4_exhaustive = orig_exhaustive
+            ct.multi_bring4_beam = orig_beam
+        self.assertIsNone(msg, out)
+        self.assertTrue(seen, "expected the search to actually run")
+        self.assertTrue(all(v == 1 for v in seen), seen)
+
 
 class TestBenchmarkTeamsFlag(unittest.TestCase):
     """--benchmark-teams: "always add all of the saved teams in data/
@@ -2060,7 +2109,9 @@ class TestRoundRobinFlag(unittest.TestCase):
         """Two named teams -> the mirrors A-A/B-B (one direction each, "race
         both directions" doesn't apply to a mirror), the non-mirror pair
         raced BOTH directions (A-B and B-A), plus the "best4 vs best4" head-
-        to-head layer for that same non-mirror pair -- 5 matchup headers
+        to-head layer for that same non-mirror pair, ALSO raced both
+        directions ("matches still systematically favour side A" -- see
+        `round_robin_saved_teams`'s own docstring) -- 6 matchup headers
         total, sorted alphabetically by team."""
         from _harness import load_world
         W = load_world()
@@ -2074,9 +2125,10 @@ class TestRoundRobinFlag(unittest.TestCase):
         self.assertIn(f"=== {a} vs {b} ===", out)
         self.assertIn(f"=== {b} vs {a} ===", out)
         self.assertIn(f"=== {a} best-4 vs {b} best-4 ===", out)
+        self.assertIn(f"=== {b} best-4 vs {a} best-4 ===", out)
         self.assertIn(f"=== {b} vs {b} ===", out)
         header_lines = [ln for ln in out.splitlines() if ln.startswith("=== ")]
-        self.assertEqual(len(header_lines), 5, header_lines)
+        self.assertEqual(len(header_lines), 6, header_lines)
 
     def test_xlsx_has_round_robin_best4_and_team_summary_sheets(self):
         from _harness import load_world
@@ -2106,7 +2158,7 @@ class TestRoundRobinFlag(unittest.TestCase):
             header2 = [c.value for c in ws2[1]]
             self.assertEqual(header2[:2], ["Team A", "Team B"])
             rows2 = [(row[0], row[1]) for row in ws2.iter_rows(min_row=2, values_only=True)]
-            self.assertEqual(rows2, [(a, b)])
+            self.assertEqual(set(rows2), {(a, b), (b, a)})
 
             self.assertIn("Team Summary", wb.sheetnames)
             ws3 = wb["Team Summary"]

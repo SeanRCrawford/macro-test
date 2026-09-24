@@ -9199,12 +9199,13 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
     has only the one direction and no separate head-to-head to add -- the
     team would just be playing its own best-4 against itself again.
 
-    A round-robin over N teams is N mirrors + 2*C(N,2) directional pairs +
-    C(N,2) head-to-heads = N**2 matchups total -- genuinely expensive for
-    a large `teams` (8 saved teams is 64 matchups), hence `team_names`
-    narrowing here and the caller's own progress reporting (this is a
-    plain generator, so a caller can update a progress bar between
-    `yield`s without this function needing to know about Streamlit).
+    A round-robin over N teams is N mirrors + 2*C(N,2) "vs_full" directional
+    pairs + 2*C(N,2) head-to-heads = N + 4*C(N,2) matchups total --
+    genuinely expensive for a large `teams` (8 saved teams is 116
+    matchups), hence `team_names` narrowing here and the caller's own
+    progress reporting (this is a plain generator, so a caller can update a
+    progress bar between `yield`s without this function needing to know
+    about Streamlit).
 
     Yields (team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster) --
     `bring4_search`'s own two return values, unchanged, plus `layer`, one
@@ -9215,11 +9216,21 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
         `enemy_roster` is `teams[team_b]`, its full roster.
       "best4_vs_best4" -- team_a's and team_b's own best bring-4 (each
         already found from its own "vs_full" rows above) raced directly
-        against each other; team_a is still listed as "ours" for this
-        row's single-entry `bring4_rows` (both sides are already exactly
-        4, so `bring4_search` degenerates to one row). `enemy_roster` is
-        team_b's own best bring-4 (NOT its full roster) -- the actual
-        enemy this row raced against.
+        against each other, BOTH directions (`team_a` "ours" vs `team_b`,
+        then `team_b` "ours" vs `team_a`) -- "matches still systematically
+        favour side A, without representing a genuine assessment of the
+        matchup": `bring4_search`'s own engine gives "our" side an
+        exhaustive per-turn target search plus a 2-turn lookahead, while
+        the "enemy" side gets only a single greedy guess each turn
+        (`worst_case_targeting`, off by default) -- a real skill gap, not
+        a measure of which team is actually better, so racing this
+        head-to-head only ONE way would silently hand whichever team
+        happens to sort alphabetically first (always `team_a`) that
+        advantage in EVERY pair of the whole round-robin. Each of the two
+        rows still has a single-entry `bring4_rows` (both sides are
+        already exactly 4, so `bring4_search` degenerates to one row).
+        `enemy_roster` is the OTHER team's own best bring-4 (NOT its full
+        roster) -- the actual enemy that row raced against.
     `enemy_roster` is always returned explicitly (rather than left for a
     caller to re-derive) since it differs between the two layers and a
     caller needing it (e.g. `enemy_has_real_tailwind`) shouldn't have to
@@ -9261,7 +9272,23 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
 
         best4_a = list(bring4_rows_ab[0]["bring4"])
         best4_b = list(bring4_rows_ba[0]["bring4"])
-        pair_rows_h2h, bring4_rows_h2h = bring4_search(
+        # SYMMETRIC HEAD-TO-HEAD, not just one direction: `bring4_search`'s
+        # own engine gives "our" side (n1/n2) an exhaustive per-turn target
+        # search plus a 2-turn lookahead, while the "enemy" side (E1/E2) is
+        # a single greedy, unhinted guess each turn (`_best_turn`'s own
+        # `worst_case_targeting`-gated default) -- a real, structural skill
+        # gap, not a measure of which team is actually better. Racing this
+        # head-to-head only ONE way (best4_a always "ours") would silently
+        # hand THAT side the exhaustive-search advantage in EVERY pair of
+        # this round-robin, since `team_a` always sorts alphabetically
+        # before `team_b` -- "matches still systematically favour side A,
+        # without representing a genuine assessment of the matchup." Racing
+        # BOTH directions here, mirroring the "vs_full" layer's own
+        # already-symmetric pattern two blocks up, gives each team a row
+        # where IT gets the exhaustive-search seat -- a caller wanting a
+        # single verdict reads both, not just whichever the alphabetical
+        # sort happened to list first.
+        pair_rows_h2h_ab, bring4_rows_h2h_ab = bring4_search(
             best4_a, best4_b, merged, moves_db, natures, typechart,
             turns=turns, good_threshold=good_threshold,
             item_overrides=a_item, move_overrides=a_moves,
@@ -9271,20 +9298,44 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
             enemy_ability_overrides=b_abil,
             excluded_items=excluded_items, max_focus_sash=max_focus_sash,
             max_life_orb=max_life_orb)
-        yield team_a, team_b, pair_rows_h2h, bring4_rows_h2h, "best4_vs_best4", best4_b
+        yield team_a, team_b, pair_rows_h2h_ab, bring4_rows_h2h_ab, "best4_vs_best4", best4_b
+
+        pair_rows_h2h_ba, bring4_rows_h2h_ba = bring4_search(
+            best4_b, best4_a, merged, moves_db, natures, typechart,
+            turns=turns, good_threshold=good_threshold,
+            item_overrides=b_item, move_overrides=b_moves,
+            evs_overrides=b_evs, nature_overrides=b_nat, ability_overrides=b_abil,
+            enemy_item_overrides=a_item, enemy_move_overrides=a_moves,
+            enemy_evs_overrides=a_evs, enemy_nature_overrides=a_nat,
+            enemy_ability_overrides=a_abil,
+            excluded_items=excluded_items, max_focus_sash=max_focus_sash,
+            max_life_orb=max_life_orb)
+        yield team_b, team_a, pair_rows_h2h_ba, bring4_rows_h2h_ba, "best4_vs_best4", best4_a
 
 
 def _evolve_trial_result(kind, member, removed, added, trial_core, target_name_lists,
                          merged, moves_db, natures, typechart, turns, item_overrides,
                          move_overrides, excluded_items, evs_overrides, nature_overrides,
-                         ability_overrides, max_focus_sash, max_life_orb, good_threshold):
-    """One MOVE-, ITEM-, or MEMBER-swap trial's full `core_deep_dive` +
-    `_evolve_dive_breakdown` result, or `None` when the candidate has no
-    legal set/moveset in this core (`core_deep_dive`'s own `ValueError`,
-    "skip, don't crash the whole search over one bad candidate"). Pure and
-    side-effect-free -- shared by `evolve_from_team`'s serial path and its
-    `jobs`-parallel worker (`_evolve_trial_job` below) so the two can never
-    drift out of sync with each other.
+                         ability_overrides, max_focus_sash, max_life_orb, good_threshold,
+                         enforce_item_clause=False):
+    """One MOVE-, ITEM-, MEMBER-, or MEMBER-PAIR-swap trial's full
+    `core_deep_dive` + `_evolve_dive_breakdown` result, or `None` when the
+    candidate has no legal set/moveset in this core (`core_deep_dive`'s own
+    `ValueError`, "skip, don't crash the whole search over one bad
+    candidate"). Pure and side-effect-free -- shared by `evolve_from_team`'s
+    serial path and its `jobs`-parallel worker (`_evolve_trial_job` below)
+    so the two can never drift out of sync with each other.
+
+    `enforce_item_clause`: passed straight through to `core_deep_dive` --
+    "you also cannot add a member with an item that already exists on the
+    team ... unless it existed on the member being replaced": resolving
+    `trial_core`'s items with VGC's real Item Clause enforced means a
+    departing member's own item is simply available again for the new
+    roster (nothing special-cased here -- `trial_core` no longer contains
+    that member at all by this point, so `_resolve_unique_items` sees an
+    ordinary free slot), while a genuinely NEW duplicate (the incoming
+    candidate's best item colliding with an UNCHANGED teammate's) is
+    exactly what gets excluded.
     """
     try:
         trial_dive = core_deep_dive(
@@ -9292,7 +9343,8 @@ def _evolve_trial_result(kind, member, removed, added, trial_core, target_name_l
             turns=turns, item_overrides=item_overrides, move_overrides=move_overrides,
             excluded_items=excluded_items, evs_overrides=evs_overrides,
             nature_overrides=nature_overrides, ability_overrides=ability_overrides,
-            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
+            enforce_item_clause=enforce_item_clause)
     except ValueError:
         return None
     trial_breakdown = _evolve_dive_breakdown(trial_dive, target_name_lists, good_threshold)
@@ -9332,7 +9384,7 @@ def _evolve_trial_job(job):
     (kind, member, removed, added, trial_core, target_name_lists, turns,
      item_overrides, move_overrides, excluded_items, evs_overrides,
      nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
-     good_threshold) = job
+     good_threshold, enforce_item_clause) = job
     global _EVOLVE_WORKER_WORLD
     if _EVOLVE_WORKER_WORLD is None:
         _evolve_worker_init()
@@ -9342,7 +9394,7 @@ def _evolve_trial_job(job):
         w["merged"], w["moves"], w["natures"], w["typechart"], turns,
         item_overrides, move_overrides, excluded_items, evs_overrides,
         nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
-        good_threshold)
+        good_threshold, enforce_item_clause=enforce_item_clause)
 
 
 def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, typechart,
@@ -9350,7 +9402,8 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
                           excluded_items, evs_overrides, nature_overrides,
                           ability_overrides, max_focus_sash, max_life_orb,
                           good_threshold, jobs, progress_callback, round_num,
-                          allow_member_swaps=True):
+                          allow_member_swaps=True, max_megas=2,
+                          enforce_item_clause=False):
     """One round of `evolve_from_team`'s own greedy hill-climbing: every
     move/item/whole-member swap trial around `core` AS GIVEN (already-
     improved by any earlier round, for round 2+), scored against the SAME
@@ -9400,14 +9453,44 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
       "Dragonite" is already on the team), try replacing it entirely -- the
       trial core's OWN set is searched fresh (a new member needs its own
       real item/moveset, not the departed member's), same as any other
-      `core_deep_dive` call.
+      `core_deep_dive` call. Hard-dropped when the resulting `trial_core`
+      would carry more than `max_megas` Mega-stone holders -- "I cannot
+      have more than 2 megas, so a mega must be switched for a mega."
+    - MEMBER-PAIR SWAPS (only when `allow_member_swaps` AND `core` is
+      already AT `max_megas`): "a mega+non-mega pair jointly switched for
+      a new mega+non-mega pair" -- the ONLY other legal way to bring in a
+      genuinely NEW Mega candidate once already at the cap. A plain single
+      swap offering a non-mega member a Mega-stone candidate would be
+      hard-dropped above (it alone would push the team over `max_megas`);
+      this instead pairs that swap with simultaneously swapping one of
+      the CURRENT Mega holders out for a non-Mega candidate, so the team's
+      total stays at `max_megas` throughout. Greedy hill-climbing can't
+      reach this by chaining two ordinary ROUNDS instead, because "give up
+      an existing Mega for a plain Pokemon" is essentially never a
+      positive-delta move ON ITS OWN (nothing has been gained yet) -- only
+      the COMBINED, simultaneous effect of both halves can be a genuine
+      improvement, so it has to be evaluated as one trial. Bounded by
+      (existing Megas <= `max_megas`) x (existing non-Megas) x (`swap_pool`
+      Megas) x (`swap_pool` non-Megas) -- same "bound `swap_pool` for
+      realistic cost" expectation whole-member swaps already carry, now
+      squared; a caller's own `swap_pool` sizing is what keeps this
+      tractable (the CLI's own `--evolve-pool-size` already defaults to a
+      small 20).
+
+    `enforce_item_clause`: passed straight through to every trial's own
+    `core_deep_dive` call (see `_evolve_trial_result`'s own docstring) --
+    "you also cannot add a member with an item that already exists on the
+    team ... unless it existed on the member being replaced." Applied to
+    THIS round's own baseline dive too, so every trial's score is compared
+    against a baseline that respects the same rule, not a looser one.
     """
     baseline_dive = core_deep_dive(
         core, target_name_lists, merged, moves_db, natures, typechart,
         turns=turns, item_overrides=item_overrides, move_overrides=move_overrides,
         excluded_items=excluded_items, evs_overrides=evs_overrides,
         nature_overrides=nature_overrides, ability_overrides=ability_overrides,
-        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
+        enforce_item_clause=enforce_item_clause)
     baseline_breakdown = _evolve_dive_breakdown(baseline_dive, target_name_lists, good_threshold)
     baseline_score = baseline_breakdown["score"]
     baseline_sets = baseline_dive["sets"]
@@ -9469,8 +9552,43 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
                 trial_core = [candidate if n == member else n for n in core]
                 if _mega_base_overlap(trial_core):
                     continue
+                if (max_megas is not None and
+                        sum(1 for n in trial_core if n.startswith("Mega ")) > max_megas):
+                    continue
                 trial_specs.append(("member", member, member, candidate,
                                     trial_core, item_overrides, move_overrides))
+
+        # MEMBER-PAIR SWAPS (see this function's own docstring) -- only
+        # when the team is already AT the cap, since a mega-for-mega swap
+        # above already covers "replace one Mega with a stronger one" on
+        # its own, at a fraction of the cost.
+        current_megas = [n for n in core if n.startswith("Mega ")]
+        current_non_megas = [n for n in core if not n.startswith("Mega ")]
+        if max_megas is not None and len(current_megas) >= max_megas:
+            pool_megas = [n for n in pool if n.startswith("Mega ")]
+            pool_non_megas = [n for n in pool if not n.startswith("Mega ")]
+            for old_mega in current_megas:
+                for old_non_mega in current_non_megas:
+                    for new_mega in pool_megas:
+                        if new_mega in core:
+                            continue
+                        for new_non_mega in pool_non_megas:
+                            if new_non_mega in core or new_non_mega == new_mega:
+                                continue
+                            trial_core = [
+                                new_non_mega if n == old_mega else
+                                new_mega if n == old_non_mega else n
+                                for n in core]
+                            if _mega_base_overlap(trial_core):
+                                continue
+                            if (sum(1 for n in trial_core if n.startswith("Mega "))
+                                    > max_megas):
+                                continue
+                            pair_removed = f"{old_mega} + {old_non_mega}"
+                            pair_added = f"{new_mega} + {new_non_mega}"
+                            trial_specs.append((
+                                "member_pair", pair_removed, pair_removed, pair_added,
+                                trial_core, item_overrides, move_overrides))
 
     total = len(trial_specs)
     done = 0
@@ -9499,7 +9617,7 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
             (kind, member, removed, added, trial_core, target_name_lists, turns,
              trial_item_ov, trial_move_ov, excluded_items, evs_overrides,
              nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
-             good_threshold)
+             good_threshold, enforce_item_clause)
             for (kind, member, removed, added, trial_core, trial_item_ov, trial_move_ov)
             in trial_specs]
         with cf.ProcessPoolExecutor(
@@ -9518,7 +9636,8 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
                 kind, member, removed, added, trial_core, target_name_lists,
                 merged, moves_db, natures, typechart, turns, trial_item_ov,
                 trial_move_ov, excluded_items, evs_overrides, nature_overrides,
-                ability_overrides, max_focus_sash, max_life_orb, good_threshold))
+                ability_overrides, max_focus_sash, max_life_orb, good_threshold,
+                enforce_item_clause=enforce_item_clause))
 
     results.sort(key=lambda r: -r["delta"])
     return baseline_breakdown, results
@@ -9531,7 +9650,8 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
                      evs_overrides=None, nature_overrides=None, ability_overrides=None,
                      max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
                      max_life_orb=DEFAULT_MAX_LIFE_ORB, jobs=1, progress_callback=None,
-                     max_changes=3, allow_member_swaps=True):
+                     max_changes=3, allow_member_swaps=True, max_megas=2,
+                     enforce_item_clause=True):
     """"If I define one high-performing team ... then try to see if any
     improvements can be made" -- "the --evolve-from-team should iterate for
     multiple improvements ... I need to see the best possible joint impact
@@ -9581,6 +9701,27 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
     itself a real, positive-delta improvement on its own. `True` (the
     default) reproduces the original, unrestricted three-swap-kind
     behaviour.
+
+    `max_megas`: "I cannot have more than 2 megas" -- hard-drops any
+    whole-member-swap trial whose resulting roster would carry more than
+    this many Mega-stone holders, and adds the MEMBER-PAIR swap kind (see
+    `_evolve_run_one_round`'s own docstring) so a team already at the cap
+    can still legally trade an existing Mega+non-Mega pair for a stronger
+    new Mega+non-Mega pair in one combined move. Default 2, matching
+    `--multi-bring4`'s own `--max-megas` default and VGC's real "only one
+    Mega Evolution per team per game" rule. `None` disables the cap
+    entirely (the old, unconstrained behaviour).
+
+    `enforce_item_clause`: "you also cannot add a member with an item that
+    already exists on the team ... unless it existed on the member being
+    replaced" -- passed straight through to every round's own baseline AND
+    every trial's own `core_deep_dive` call, resolving items with VGC's
+    real Item Clause enforced (`_resolve_unique_items`) throughout. `True`
+    by default (UNLIKE `bring4_search`'s own `enforce_item_clause`, which
+    defaults off for search-cost reasons on a much larger pool-wide sweep)
+    -- evolving an already-decided team is a much smaller, already-bounded
+    search (a caller's own `swap_pool`, `--evolve-pool-size` defaulting to
+    just 20), so the extra resolution cost here is not the same concern.
 
     `jobs`: run each round's own trials (move/item/whole-member swap
     candidates) in parallel worker processes instead of one after another
@@ -9639,7 +9780,8 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
             turns, swap_pool, cur_item_overrides, cur_move_overrides, excluded_items,
             evs_overrides, nature_overrides, ability_overrides, max_focus_sash,
             max_life_orb, good_threshold, jobs, progress_callback, round_num,
-            allow_member_swaps=allow_member_swaps)
+            allow_member_swaps=allow_member_swaps, max_megas=max_megas,
+            enforce_item_clause=enforce_item_clause)
         if round_num == 1:
             baseline_breakdown = round_breakdown
         rounds.append(round_results)

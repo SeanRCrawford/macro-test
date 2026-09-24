@@ -2361,11 +2361,18 @@ _EVOLVE_FINAL_TEAM_XLSX_COLUMNS = [
 
 
 def _evolve_changed_member(r):
-    """The member name whose OWN new set (`r["sets"]`) is worth showing --
-    the arriving species for a whole-member swap (the departing one isn't
-    even on the resulting team anymore), else the one member whose move/
-    item actually changed."""
-    return r["added"] if r["kind"] == "member" else r["member"]
+    """The member name(s) whose OWN new set(s) (`r["sets"]`) are worth
+    showing, as a list -- the arriving species for a whole-member swap
+    (the departing one isn't even on the resulting team anymore), the TWO
+    arriving species for a member-pair swap (`r["added"]` is a joined
+    "NewMega + NewNonMega" string there, not a single `r["sets"]` key --
+    see `_evolve_run_one_round`'s own MEMBER-PAIR SWAPS docstring), else
+    the one member whose move/item actually changed."""
+    if r["kind"] == "member":
+        return [r["added"]]
+    if r["kind"] == "member_pair":
+        return r["added"].split(" + ")
+    return [r["member"]]
 
 
 def _evolve_write_round_sheet(ws, results):
@@ -2378,11 +2385,12 @@ def _evolve_write_round_sheet(ws, results):
     _style_header(ws)
     for rank, r in enumerate(results, start=1):
         changed = _evolve_changed_member(r)
-        new_set = r["sets"][changed]
+        new_sets = [r["sets"][n] for n in changed]
         ws.append([
             rank, r["kind"], r["member"], r["removed"], r["added"],
             " / ".join(r["team"]),
-            new_set["item"], ", ".join(new_set["moves"]),
+            " / ".join(s["item"] for s in new_sets),
+            "; ".join(", ".join(s["moves"]) for s in new_sets),
             round(r["baseline_score"], 2), round(r["new_score"], 2),
             round(r["delta"], 2),
             round(r["baseline_win_rate"], 1), round(r["new_win_rate"], 1),
@@ -2426,12 +2434,13 @@ def _write_evolve_from_team_xlsx(path, evolved):
     _style_header(ws_chain)
     for round_num, step in enumerate(evolved["chain"], start=1):
         changed = _evolve_changed_member(step)
-        new_set = step["sets"][changed]
+        new_sets = [step["sets"][n] for n in changed]
         ws_chain.append([
             round_num, step["kind"], step["member"], step["removed"], step["added"],
             round(step["baseline_score"], 2), round(step["new_score"], 2),
             round(step["delta"], 2),
-            new_set["item"], ", ".join(new_set["moves"]),
+            " / ".join(s["item"] for s in new_sets),
+            "; ".join(", ".join(s["moves"]) for s in new_sets),
             " / ".join(step["team"])])
     ws_chain.freeze_panes = "A2"
     ws_chain.auto_filter.ref = ws_chain.dimensions
@@ -2552,7 +2561,8 @@ def _run_evolve_from_team(args):
         max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
         jobs=jobs, progress_callback=_progress,
         max_changes=args.evolve_max_changes,
-        allow_member_swaps=not args.evolve_moves_items_only)
+        allow_member_swaps=not args.evolve_moves_items_only,
+        max_megas=args.max_megas, enforce_item_clause=args.evolve_item_clause)
     print()
     if not evolved["chain"]:
         tried = ("every move/item swap" if args.evolve_moves_items_only
@@ -2573,10 +2583,10 @@ def _run_evolve_from_team(args):
         print(f"  {round_num:>3} {step['kind']:7s} {step['member']:16s} {change[:38]:38s} "
              f"{step['baseline_score']:>7.1f} -> {step['new_score']:>7.1f}  "
              f"{step['delta']:>+6.1f}")
-        changed = _evolve_changed_member(step)
-        new_set = step["sets"][changed]
-        print(f"        {changed} now: {new_set['item']} / "
-             f"{', '.join(new_set['moves'])}")
+        for name in _evolve_changed_member(step):
+            new_set = step["sets"][name]
+            print(f"        {name} now: {new_set['item']} / "
+                 f"{', '.join(new_set['moves'])}")
     print(f"\nFinal team: {' / '.join(evolved['final_team'])}")
     for name in evolved["final_team"]:
         s = evolved["final_sets"][name]
@@ -2729,6 +2739,18 @@ def main():
                          "a turn, even when that refinement is itself a "
                          "genuine, positive-delta improvement on its own. "
                          "Pass this to evolve the SET, not the ROSTER")
+    ap.add_argument("--evolve-item-clause",
+                    action=argparse.BooleanOptionalAction, default=True,
+                    help="--evolve-from-team only: enforce VGC's real Item "
+                         "Clause (no two teammates holding the same item) "
+                         "on every round's baseline AND every trial -- 'you "
+                         "also cannot add a member with an item that "
+                         "already exists on the team ... unless it existed "
+                         "on the member being replaced' (a departing "
+                         "member's own item is simply available again, no "
+                         "special-casing needed). ON by default -- pass "
+                         "--no-evolve-item-clause to search with duplicate "
+                         "items allowed, the old unconstrained behaviour.")
     ap.add_argument("--benchmark-teams", action="store_true",
                     help="--bring4 only: instead of one --our team, run the "
                          "SAME --bring4 search once independently per every "
@@ -2825,7 +2847,15 @@ def main():
                     help="--multi-bring4 only: run against EVERY saved team "
                          "(data/teams.csv plus any pokepaste in data/teams/ "
                          "or data/my_teams/) instead of naming each one with "
-                         "--vs-team -- mutually exclusive with --vs-team")
+                         "--vs-team -- mutually exclusive with --vs-team. "
+                         "Also defaults --max-weak-types to 9 (no more than "
+                         "9 different types may have 2+ members weak to "
+                         "them) unless --max-weak-types is passed "
+                         "explicitly -- combined with --max-weak's own "
+                         "default (2, with its built-in 'one type may "
+                         "reach 3' exception), this matches 'no more than 3 "
+                         "absolute weaknesses, no more than 1 type with 3, "
+                         "no more than 9 types with 2+' without extra flags.")
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="--multi-bring4 only: search N enemy rosters in "
                          "parallel worker processes instead of one after "
@@ -2906,7 +2936,8 @@ def main():
                          "possible bring (itself, 3 pairs), the same "
                          "degenerate case a 4-member core already is")
     ap.add_argument("--max-megas", type=int, default=2, metavar="N",
-                    help="--multi-bring4/--two-two-two only: hard cap on "
+                    help="--multi-bring4/--two-two-two/--evolve-from-team "
+                         "only: hard cap on "
                          "how many Mega-stone-capable members a candidate "
                          "CORE/2-2-2 team may contain (default 2, VGC's "
                          "real team-composition limit -- 'a full team can "
@@ -3270,6 +3301,20 @@ def main():
                          "it already runs against every saved team")
     if args.vs_all_teams and not args.multi_bring4:
         raise SystemExit("--vs-all-teams requires --multi-bring4")
+    # "I want to establish the same default limits applied above [Coverage
+    # Groups], namely no more than 3 absolute weaknesses, no more than 1
+    # type with 3 absolute weaknesses, and no more than 9 types with 2 or
+    # more absolute weaknesses" -- `--max-weak`'s own DEFAULT (2, unchanged
+    # here) already gives "no type over 2, except ONE type may reach
+    # exactly 3 (net weakness <= 1)" via its built-in exception (see its
+    # own help), covering the first two bullets exactly. The one piece
+    # --vs-all-teams didn't already default was the BREADTH cap on 2+
+    # (`--max-weak-types`, otherwise uncapped) -- defaulted to 9 here, but
+    # only when the user hasn't passed their own --max-weak-types (still
+    # None at this point), so an explicit choice is never silently
+    # overridden.
+    if args.vs_all_teams and args.max_weak_types is None:
+        args.max_weak_types = 9
     if args.multi_bring4 and len(args.vs_team) < 1 and not args.vs_all_teams:
         raise SystemExit("--multi-bring4 needs at least one --vs-team "
                          "(or --vs-all-teams)")

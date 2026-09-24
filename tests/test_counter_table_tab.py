@@ -1964,12 +1964,15 @@ class TestRoundRobinMode(unittest.TestCase):
         self.assertTrue(any(m.key == "ct_rr_teams" for m in at.multiselect))
         self.assertTrue(any(b.key == "ct_rr_go" for b in at.button))
 
-    def test_running_it_on_two_teams_renders_all_five_matchups(self):
+    def test_running_it_on_two_teams_renders_all_six_matchups(self):
         """Two teams: the mirrors A-A/B-B (one direction each), the non-
         mirror pair raced BOTH directions (A-B and B-A -- "race both
         directions" so every team's own summary reflects its own real
         performance), plus the "best4 vs best4" head-to-head layer for
-        that same non-mirror pair, rendered in its own section below."""
+        that same non-mirror pair, ALSO raced both directions ("matches
+        still systematically favour side A, without representing a
+        genuine assessment of the matchup" -- see `round_robin_saved_
+        teams`'s own docstring), rendered in its own section below."""
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
         from _harness import load_world
         W = load_world()
@@ -1988,9 +1991,10 @@ class TestRoundRobinMode(unittest.TestCase):
         self.assertIn(f"### {a} vs {b}", headings)
         self.assertIn(f"### {b} vs {a}", headings)
         self.assertIn(f"### {a} best-4 vs {b} best-4", headings)
+        self.assertIn(f"### {b} best-4 vs {a} best-4", headings)
         self.assertIn(f"### {b} vs {b}", headings)
         results = at.session_state["ct_rr_results"]
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), 6)
 
     def test_running_it_also_populates_the_gameplan_cache(self):
         """The same `_cache_gameplans` hook every other Counter Table
