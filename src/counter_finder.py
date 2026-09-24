@@ -162,7 +162,7 @@ from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, Move
 from engine import (FieldState, WEATHER_SETTERS, WEATHER_SPEED_BOOST,
                     TERRAIN_SETTERS, effective_speed)
 from optimize_sets import (best_item, best_moveset, legal_items, team_weather_for,
-                           move_value_table, enemy_individuals)
+                           enemy_individuals, raw_ohko_fraction_table)
 from solver import FIRST_TURN_ONLY_MOVES, build_moveset
 from species_data import NO_MEGA, resolve_team_mega_slot
 
@@ -797,15 +797,23 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     calculation"), computed ONCE and reused by every candidate pair's own
     `_pair_threat_coverage` check instead of re-running per pair.
 
-    Each side's own best single hit is `optimize_sets.move_value_table`'s
-    per-move fraction (already OHKO/priority-aware -- see its own
-    docstring), computed ONCE per name against the WHOLE combined pool+
-    enemy universe in a single call (not once per opposing name), matching
-    `optimize_sets.py`'s own "1v1 damage calculations, not full battles"
-    cost model. Whichever side's best hit clears 100% of the other's max HP
-    wins; if both do, real base Speed (deliberately no item/ability/weather
-    speed modifiers -- this stays a SIMPLE screening pass, not a re-run of
-    `_joint_race`) breaks the tie; if neither does, "no_ko".
+    Each side's own best single hit is `optimize_sets.raw_ohko_fraction_
+    table`'s per-move PURE damage fraction (deliberately NOT `move_value_
+    table`'s own move-SELECTION score -- that adds large priority/Fake-Out/
+    OHKO scoring bonuses on top of real damage, e.g. a resisted 40 BP Fake
+    Out against a Steel-type defender scored ABOVE 1.0 purely from its own
+    "revenge-kill" bonus, reporting a false OHKO -- concretely reported: "no
+    individuals seem to be able to beat Mega Raichu Y, but ground types
+    like excadrill should be able to OHKO it" -- Excadrill's own real
+    Ground-type hit WAS a genuine OHKO; Raichu's inflated Fake Out score
+    was never one, it just won the tiebreak below on speed), computed ONCE
+    per name against the WHOLE combined pool+enemy universe in a single
+    call (not once per opposing name), matching `optimize_sets.py`'s own
+    "1v1 damage calculations, not full battles" cost model. Whichever
+    side's best hit clears 100% of the other's max HP wins; if both do,
+    real base Speed (deliberately no item/ability/weather speed modifiers
+    -- this stays a SIMPLE screening pass, not a re-run of `_joint_race`)
+    breaks the tie; if neither does, "no_ko".
 
     A pool member is never matched against an identical enemy entry of the
     same name (a literal self-mirror isn't a meaningful "does my own team
@@ -814,7 +822,7 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     universe = list(dict.fromkeys(list(pool) + list(enemy_names)))
     offense = {}
     for name in universe:
-        table = move_value_table(name, merged, moves_db, natures, typechart, universe)
+        table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
         offense[name] = {en: max((row.get(en, 0.0) for row in table.values()), default=0.0)
                          for en in universe if en != name}
     matrix = {}

@@ -11022,6 +11022,51 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
         self.assertNotIn("Kingambit", matrix["Kingambit"])
         self.assertIn("Basculegion", matrix["Kingambit"])
 
+    def test_a_real_ohko_is_not_masked_by_the_defenders_own_priority_move(self):
+        """"no individuals seem to be able to beat Mega Raichu Y, but ground
+        types like excadrill should be able to OHKO it" -- `move_value_
+        table`'s own move-SELECTION scoring bonuses (a priority move is
+        worth far more than its raw damage, "revenge-kill" -- see its own
+        docstring) used to leak into this 1v1 read: Mega Raichu Y's Fake
+        Out (Normal, resisted by Excadrill's own Steel typing, genuinely
+        ~6% real damage) scored ABOVE the `>= 1.0` OHKO threshold purely
+        from its own priority/Fake-Out scoring bonuses, a false "their_
+        ohko" that then won the same-turn speed tiebreak (Raichu is much
+        faster) -- reporting "loss" for Excadrill even though its own real
+        Ground-type hit (Ground vs pure Electric, no resistance available)
+        genuinely OHKOs Mega Raichu Y outright. `_one_v_one_matrix` now
+        reads `raw_ohko_fraction_table`'s own PURE damage fraction instead,
+        so only a move that actually does the damage counts."""
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        outcome = cf._one_v_one_outcome(
+            "Excadrill", "Mega Raichu Y", self.merged, moves, natures, typechart)
+        self.assertEqual(outcome, "win")
+
+    def test_raw_ohko_fraction_table_excludes_status_moves(self):
+        from optimize_sets import raw_ohko_fraction_table
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        table = raw_ohko_fraction_table(
+            "Mega Raichu Y", self.merged, moves, natures, typechart, ["Excadrill"])
+        self.assertNotIn("Protect", table)
+
+    def test_raw_ohko_fraction_table_never_exceeds_the_move_value_table_bonus_inflation(self):
+        """Direct proof the two tables disagree exactly the way the bug
+        report described: `move_value_table`'s own Fake Out score against a
+        Steel-type defender clears the OHKO threshold; `raw_ohko_fraction_
+        table`'s own PURE damage fraction for the SAME move/matchup does
+        not."""
+        from optimize_sets import move_value_table, raw_ohko_fraction_table
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        universe = ["Excadrill", "Mega Raichu Y"]
+        scored = move_value_table(
+            "Mega Raichu Y", self.merged, moves, natures, typechart, universe)
+        raw = raw_ohko_fraction_table(
+            "Mega Raichu Y", self.merged, moves, natures, typechart, universe)
+        self.assertIn("Fake Out", scored)
+        self.assertGreaterEqual(scored["Fake Out"]["Excadrill"], 1.0)
+        self.assertIn("Fake Out", raw)
+        self.assertLess(raw["Fake Out"]["Excadrill"], 0.3)
+
     def test_pair_threat_coverage_counts_correctly_on_a_synthetic_matrix(self):
         """Exercises the pure counting logic directly, independent of real
         damage calc, so the coverage arithmetic itself is pinned exactly."""

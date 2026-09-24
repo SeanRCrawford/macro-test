@@ -338,6 +338,52 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
     return table
 
 
+def raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, enemy_names, item=None):
+    """{move_name: {enemy_name: fraction}} -- the PURE damage-roll fraction
+    (average roll) of the defender's max HP this move removes, with NONE of
+    `move_value_table`'s own move-SELECTION scoring bonuses (OHKO/priority/
+    Fake-Out/speed-drop/recoil). Status moves are omitted entirely (0 real
+    damage, not a utility score).
+
+    `move_value_table`'s own bonuses exist to make a moveset SEARCH value
+    genuine utility (a priority move revenge-kills, Fake Out denies a whole
+    turn) properly, even though its raw damage looks weak on paper -- but
+    that means its own per-move "value" is NOT a damage fraction once those
+    bonuses are added, and can clear 1.0 for a move that does nowhere near
+    100% real damage. `_one_v_one_matrix`'s own "does X OHKO Y" 1v1 read
+    needs the genuine fraction instead: reusing `move_value_table`'s output
+    there let a resisted, 40-BP Fake Out (Normal, resisted by a Steel-type
+    Excadrill) register as an OHKO purely from its own +0.30*priority and
+    Fake-Out-specific scoring bonuses, when its real damage was a small
+    fraction of that -- concretely reported: "no individuals seem to be
+    able to beat Mega Raichu Y, but ground types like excadrill should be
+    able to OHKO it" (Excadrill's own real Ground/Steel-boosted Earthquake-
+    family hit WAS a genuine OHKO on the Electric-type Raichu -- Raichu's
+    own Fake Out was never a real answer to it, just an inflated score that
+    won the same-turn speed tiebreak)."""
+    attacker = make_combatant(name, merged, natures, item=item)
+    table = {}
+    for move, _pct in candidate_moves(name, merged, moves_db, item=item):
+        if move.category == "Status":
+            continue
+        atk_key = "atk" if move.category == "Physical" else "spa"
+        def_key = "def" if move.category == "Physical" else "spd"
+        a = effective_stat(attacker.stats[atk_key], 0)
+        if item == "Choice Band" and atk_key == "atk":
+            a *= 1.5
+        if item == "Choice Specs" and atk_key == "spa":
+            a *= 1.5
+        row = {}
+        for en in enemy_names:
+            defender = make_combatant(en, merged, natures)
+            d = effective_stat(defender.stats[def_key], 0)
+            _, _, avg, _eff = damage_roll(50, move.power, a, d, attacker, defender, move, typechart)
+            avg *= hit_count_for(move.name, attacker)
+            row[en] = avg / defender.stats["hp"] if defender.stats["hp"] else 0.0
+        table[move.name] = row
+    return table
+
+
 def best_moveset(name, merged, moves_db, natures, typechart, enemy_names, item=None,
                   slots=4, force_protect=True, forced_candidates=None, evs=None, nature=None,
                   team_weather=None):
