@@ -1925,6 +1925,120 @@ class TestOwnProtectAsAMatchingAnswer(unittest.TestCase):
         self.assertEqual(d["own_protect_outcome"], d["outcome"])
 
 
+class TestOwnProtectMustSurviveRealEnemyTailwind(unittest.TestCase):
+    """"For tailwind safe testing, there should be a check of if the enemy
+    pair has tailwind. If they do have tailwind and click it and it is a
+    loss, then it should be treated as their main strategy and therefore as
+    a regular loss ... unless your lead can match enemy tailwind."
+
+    `tailwind_forced` already promotes a real enemy Tailwind threat to the
+    baseline `outcome` -- but only when the NO-Tailwind race was better
+    than the Tailwind one (`_JOINT_OUTCOME_RANK`'s own floor means "loss"
+    can never be beaten DOWN to something worse). When the baseline is
+    ALREADY a "loss" without Tailwind, `tailwind_forced` has nothing left
+    to promote to, so the real enemy Tailwind threat was silently dropped
+    right as `own_protect`'s "does Protecting save this" check kicked in
+    -- racing Protect at NORMAL speed only, reporting a save that only
+    works if the enemy declines a threat they actually have.
+
+    Real, verified fixture (found via direct user report, confirmed by
+    tracing `_joint_race` turn-by-turn): Mega Charizard Y + Venusaur
+    against Arcanine-Hisui (Focus Sash) + Mega Staraptor (a real Tailwind
+    setter). The plain race is already a loss. Protecting Mega Charizard Y
+    turn 1 at NORMAL speed looks like a save (out_trade) -- Venusaur gets
+    an extra turn of Earth Power in. But Mega Staraptor's own real
+    Tailwind lets Arcanine-Hisui (survived at 1 HP via Focus Sash) and
+    Mega Staraptor outrun BOTH of ours and finish the job anyway, even
+    with Charizard Y protecting turn 1 -- "even if you protect either
+    slot, they also outspeed and KO both."
+    """
+
+    OUR6 = ["Mega Charizard Y", "Venusaur"]
+    TARGETS = ["Arcanine-Hisui", "Mega Staraptor"]
+
+    def _race(self):
+        W = world()
+        merged, moves, natures, typechart = (W["merged"], W["moves"],
+                                             W["natures"], W["typechart"])
+        rows = cf.joint_pool_search(self.OUR6, self.TARGETS, merged, moves,
+                                    natures, typechart, turns=3)
+        return rows[0]["detail"][tuple(self.TARGETS)], rows[0]
+
+    def test_the_fixture_s_preconditions(self):
+        """Mega Staraptor is a real Tailwind threat, the plain race is
+        already a loss without it -- the exact scenario `tailwind_forced`
+        alone can't catch (nothing worse than "loss" to promote to)."""
+        d, _row = self._race()
+        self.assertEqual(d["outcome_without_tailwind"], "loss")
+        self.assertTrue(d["tailwind_is_real_threat"])
+        self.assertFalse(d["tailwind_forced"],
+                         "a baseline that's already a loss has nothing "
+                         "worse to promote to -- own-Protect is what has "
+                         "to catch the real Tailwind threat here")
+
+    def test_own_protect_does_not_falsely_report_a_save(self):
+        """The bug this fixture catches: without accounting for the
+        enemy's real Tailwind, `own_protect_outcome` would read
+        "out_trade" (a false save) instead of the true "loss"."""
+        d, row = self._race()
+        self.assertFalse(d["own_protect_used"])
+        self.assertEqual(d["own_protect_outcome"], "loss")
+        self.assertEqual(d["outcome"], "loss")
+        self.assertEqual(row["pairs_swept"] + row["pairs_traded"], 0)
+
+    def test_protecting_charizard_alone_survives_normal_speed_but_not_tailwind(self):
+        """Direct mechanical check, isolating exactly what changed:
+        Protect-C at normal speed alone looks like a save; the SAME
+        Protect-C race, replayed with Mega Staraptor also opening
+        Tailwind that same turn 1, is still a loss. `own_protect_outcome`
+        must reflect the WORSE (pessimistic) of the two, not just the
+        normal-speed one."""
+        W = world()
+        merged, moves, natures, typechart = (W["merged"], W["moves"],
+                                             W["natures"], W["typechart"])
+        item1, mv1, _ = cf._answer_for("Mega Charizard Y", merged, moves,
+                                       natures, typechart, self.TARGETS)
+        item2, mv2, _ = cf._answer_for("Venusaur", merged, moves, natures,
+                                       typechart, self.TARGETS)
+        our_built = cf._build_forms(
+            self.OUR6, merged, natures, moves,
+            items={"Mega Charizard Y": item1, "Venusaur": item2})
+        m1 = cf._move_infos("Mega Charizard Y", merged, moves, mv1)
+        m2 = cf._move_infos("Venusaur", merged, moves, mv2)
+        enemy_built = cf._build_forms(self.TARGETS, merged, natures, moves)
+        e1item, e1mv, _ = cf._answer_for("Arcanine-Hisui", merged, moves,
+                                         natures, typechart, self.OUR6)
+        e2item, e2mv, _ = cf._answer_for("Mega Staraptor", merged, moves,
+                                         natures, typechart, self.OUR6)
+        e1m = cf._move_infos("Arcanine-Hisui", merged, moves, e1mv)
+        e2m = cf._move_infos("Mega Staraptor", merged, moves, e2mv)
+        _mt, (c1, c2) = list(cf._resolve_forms(
+            tuple(self.OUR6), our_built))[0]
+        _emt, (e1c, e2c) = list(cf._resolve_forms(
+            tuple(self.TARGETS), enemy_built))[0]
+        combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
+        moves_by_role = {"C": m1, "P": m2, "E1": e1m, "E2": e2m}
+        weather = cf._field_weather(combatants)
+        terrain = cf._field_terrain(combatants)
+
+        normal_outcome, *_ = cf._joint_race(
+            combatants, moves_by_role, typechart, weather, 3,
+            first_turn_protected_role="C", terrain=terrain)
+        self.assertEqual(normal_outcome, "out_trade",
+                         "the fixture's own precondition: at normal speed "
+                         "alone, protecting Charizard Y looks like a save")
+
+        under_enemy_tailwind_outcome, *_ = cf._joint_race(
+            combatants, moves_by_role, typechart, weather, 3,
+            first_turn_protected_role="C", first_turn_tailwind_role="E2",
+            enemy_speed_mult=2.0, terrain=terrain)
+        self.assertEqual(under_enemy_tailwind_outcome, "loss",
+                         "the same Protect-C line, once Mega Staraptor "
+                         "actually opens its own real Tailwind, is still "
+                         "a loss -- confirming 'even if you protect "
+                         "either slot, they also outspeed and KO both'")
+
+
 class TestTailwindFocusPool(unittest.TestCase):
     """`tailwind_focus_pool` -- the pool-curation half of `--tailwind-focus`
     (`counter_table.py`): "checks for teams by running tailwind setter
@@ -10615,29 +10729,39 @@ class TestCoreDeepDiveRespectsCustomSets(unittest.TestCase):
         return next(iter(detail.values()))["log"]
 
     def test_without_overrides_reproduces_the_stale_bug_report(self):
-        """No evs/nature/ability/enemy overrides at all: this test's ORIGINAL
-        point (the numbers matched the user's stale usage-default bug
-        report -- Close Combat 142-155-167% -- proving the OLD behaviour
-        really was usage-default stats, not the user's real ones) is now
-        structurally moot twice over: Kingambit and Mega Staraptor are both
-        real default_sets.txt-pinned species, so their own real EVs/Nature/
-        item already supply the DEFAULT (`_build_forms`' own baseline) with
-        no explicit override needed -- AND, since the Intimidate/mega-
-        evolution-timing fix (a real opening-turn Intimidate now correctly
-        resolves against a combatant's PRE-mega ability, not this module's
-        own upfront mega projection -- see `_ability_at_switch_in`), Mega
-        Metagross's Clear Body correctly shields it from Mega Staraptor's
-        own real Intimidate, so Mega Metagross's already-available Psychic
-        Fangs is now a genuine guaranteed KO on turn 1 -- making "Hydreigon
-        Protects while Metagross finishes Staraptor" a real, strictly
-        better-scoring line than trading hits. Mega Staraptor now dies
-        before ever landing Close Combat, so this test checks Psychic
-        Fangs (the move that DOES appear turn 1) instead."""
+        """No evs/nature/ability/enemy overrides at all: this test's
+        ORIGINAL point (the numbers matched the user's stale usage-default
+        bug report -- Close Combat 142-155-167% -- proving the OLD
+        behaviour really was usage-default stats, not the user's real
+        ones) is now structurally moot: Kingambit and Mega Staraptor are
+        both real default_sets.txt-pinned species, so their own real EVs/
+        Nature/item already supply the DEFAULT with no explicit override
+        needed.
+
+        The line this test actually exercises changed again since:
+        "if they do have tailwind and click it and it is a loss, it
+        should be treated as their main strategy... even if you protect
+        either slot" -- `own_protect`'s own real-enemy-Tailwind check
+        (see `_protect_worst_case`) now correctly catches that mega-
+        evolving Metagross here, then having Hydreigon Protect turn 1
+        while Metagross finishes Mega Staraptor, is a false rescue: Mega
+        Staraptor is a real Tailwind setter (usage data), and it doesn't
+        even need to mega-evolve to win THAT line -- staying base and
+        opening Tailwind outspeeds and finishes both of ours regardless
+        of the Protect. Since that's now correctly read as a LOSS at
+        our_mt=True (mega Metagross), the worst-case-enemy-mega search
+        picks the genuinely safer our_mt=False (Metagross stays base)
+        instead, which comes out `out_trade` against EITHER of Mega
+        Staraptor's own mega choices, Tailwind included -- a real, more
+        cautious line the search previously never got to see. Mega
+        Metagross's Psychic Fangs turn 1 is weaker here than the old
+        (buggy) line's number because it's no longer boosted by Tough
+        Claws (Metagross stays base, not mega-evolved)."""
         log = self._first_log(self._dive())
         t1 = log[0]
         psychic_fangs = next(h for _r, _t, h in t1 if h.move_name == "Psychic Fangs")
-        self.assertAlmostEqual(psychic_fangs.lo, 1.11, delta=0.02)
-        self.assertAlmostEqual(psychic_fangs.hi, 1.31, delta=0.02)
+        self.assertAlmostEqual(psychic_fangs.lo, 0.81, delta=0.02)
+        self.assertAlmostEqual(psychic_fangs.hi, 0.96, delta=0.02)
 
     def test_with_overrides_uses_the_real_stats(self):
         """Full overrides given: the damage numbers change to match the

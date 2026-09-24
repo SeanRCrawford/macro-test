@@ -5531,14 +5531,46 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     own_protect_used = False
                     own_protect_outcome = chosen_outcome
                 else:
-                    own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log = _joint_race(
-                        combatants, moves_by_role, typechart, weather, turns,
-                        first_turn_protected_role="C", terrain=terrain,
-                        worst_case_targeting=worst_case_targeting)
-                    own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log = _joint_race(
-                        combatants, moves_by_role, typechart, weather, turns,
-                        first_turn_protected_role="P", terrain=terrain,
-                        worst_case_targeting=worst_case_targeting)
+                    def _protect_worst_case(role):
+                        """A genuine own-Protect save must survive the SAME
+                        real enemy Tailwind threat `tailwind_forced` above
+                        already treats as their main strategy once it's a
+                        loss -- "if they do have tailwind and click it and
+                        it is a loss, it should be treated as their main
+                        strategy... even if you protect either slot, they
+                        also outspeed and KO both" -- a normal-speed-only
+                        Protect race can report a false save that only
+                        works if the enemy declines a real threat they
+                        actually have. Races `role` protecting at normal
+                        speed AND (only when `tailwind_setter_roles` is
+                        non-empty) once per real enemy setter with THAT
+                        role ALSO opening Tailwind the same turn -- the
+                        exact same combination `_joint_race` already
+                        supports (`first_turn_protected_role`/`first_turn_
+                        tailwind_role` are independent, one per side) --
+                        keeping whichever comes out WORSE for us, the same
+                        pessimistic `max`-by-rank shape `tw_outcome` above
+                        already uses. No real enemy setter (`tailwind_
+                        setter_roles` empty) makes this a pure no-op,
+                        identical to the old normal-speed-only race."""
+                        normal = _joint_race(
+                            combatants, moves_by_role, typechart, weather, turns,
+                            first_turn_protected_role=role, terrain=terrain,
+                            worst_case_targeting=worst_case_targeting)
+                        if not tailwind_setter_roles:
+                            return normal
+                        under_tw = max(
+                            (_joint_race(combatants, moves_by_role, typechart, weather,
+                                        turns, first_turn_protected_role=role,
+                                        first_turn_tailwind_role=tw_role,
+                                        enemy_speed_mult=2.0, terrain=terrain,
+                                        worst_case_targeting=worst_case_targeting)
+                             for tw_role in tailwind_setter_roles),
+                            key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                        return max((normal, under_tw), key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+
+                    own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log = _protect_worst_case("C")
+                    own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log = _protect_worst_case("P")
                     (own_protect_outcome, own_protect_turns_used,
                      own_protect_hp, own_protect_log) = min(
                         ((own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log),
