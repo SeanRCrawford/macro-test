@@ -4431,6 +4431,108 @@ def _render_hit_count_matrix_for_bring4_search(bring4_row, target_names, merged,
     _render_crucial_members(result["crucial"])
 
 
+def _damage_hits_df(grid_side, role_name):
+    """One side of `deep_dive`'s own `grid` (`{"ours"|"theirs": {(atk, tgt):
+    Hit}}`) as a plain table -- "see if and how I out-trade (2x2 damage)",
+    every attacker-vs-specific-defender `Hit` on the board, not just
+    whichever line a played-out race happened to take (`_render_pair_
+    matchup_detail`'s own turn-by-turn log only ever shows the moves
+    actually thrown -- a KO'd member's other matchup is invisible there)."""
+    rows = []
+    for (atk, tgt), h in grid_side.items():
+        rows.append({
+            "Attacker": role_name[atk], "Target": role_name[tgt],
+            "Move": h.move_name or "-",
+            "Damage (worst-avg-best)":
+                f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-{h.hi * 100:.0f}%"
+                + (" (spread)" if h.num_targets_hit > 1 else ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_damage_calc_for_pair(our6, vs_roster, merged, moves, natures, typechart,
+                                 turns, excluded_items, key_prefix,
+                                 item_overrides=None, move_overrides=None,
+                                 evs_overrides=None, nature_overrides=None,
+                                 ability_overrides=None, enemy_item_overrides=None,
+                                 enemy_move_overrides=None):
+    """"I want a section to look at damage calcs vs selected enemy pair" --
+    pick any 2 of `our6` and any 2 of `vs_roster`, race just that one 2v2
+    with `deep_dive`'s own `want_grid=True` (the same 2x2 damage grid/OHKO-
+    risk read the CLI's `--deep` mode already shows via `_print_deep`,
+    never previously surfaced for a `bring4_search` result -- its own pair
+    races never pay for a grid nobody would see). Cheap: one pair vs one
+    enemy pair, not a pool-wide sweep, so a fresh race per click is fine."""
+    if len(our6) < 2 or len(vs_roster) < 2:
+        return
+    st.markdown("**Damage calc vs a chosen enemy pair**")
+    st.caption("Pick any 2 of your 6 and any 2 of the enemy roster -- the "
+              "full 2x2 damage grid (every attacker vs every defender, "
+              "worst-avg-best roll), not just whichever moves a played-out "
+              "race happened to throw.")
+    c1, c2 = st.columns(2)
+    our_pair = c1.multiselect("Our pair", our6, default=our6[:2],
+                              key=f"{key_prefix}_our_pair", max_selections=2)
+    enemy_pair = c2.multiselect("Enemy pair", vs_roster, default=vs_roster[:2],
+                                key=f"{key_prefix}_enemy_pair", max_selections=2)
+    worst_case = st.checkbox(
+        "Worst-case enemy targeting", value=True, key=f"{key_prefix}_worst_case",
+        help="ON by default, matching every other deep-dive checkbox -- a "
+             "single 2v2 race is cheap regardless of this setting.")
+    if len(our_pair) != 2 or len(enemy_pair) != 2:
+        st.caption("Pick exactly 2 or your own and 2 of the enemy's.")
+        return
+    if st.button("Show damage calc", key=f"{key_prefix}_go"):
+        from counter_finder import deep_dive
+        item1, item2, detail, _summary = deep_dive(
+            our_pair[0], our_pair[1], enemy_pair, merged, moves, natures,
+            typechart, turns=turns, item_overrides=item_overrides,
+            move_overrides=move_overrides, excluded_items=excluded_items,
+            worst_case_targeting=worst_case, evs_overrides=evs_overrides,
+            nature_overrides=nature_overrides, ability_overrides=ability_overrides,
+            enemy_item_overrides=enemy_item_overrides,
+            enemy_move_overrides=enemy_move_overrides)
+        st.session_state[f"{key_prefix}_result"] = (
+            our_pair, enemy_pair, item1, item2, detail)
+    cached = st.session_state.get(f"{key_prefix}_result")
+    if not cached:
+        return
+    c_our_pair, c_enemy_pair, item1, item2, detail = cached
+    d = detail.get(tuple(c_enemy_pair)) or detail.get(tuple(reversed(c_enemy_pair)))
+    if d is None:
+        return
+    e1, e2 = c_enemy_pair
+    role_name = {"C": c_our_pair[0], "P": c_our_pair[1], "E1": e1, "E2": e2}
+    st.caption(f"{c_our_pair[0]} ({item1 or '-'}) + {c_our_pair[1]} "
+              f"({item2 or '-'}) vs {e1} + {e2}")
+    tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
+    pr = "" if d["protect_safe"] else (
+        f"  [protect: {e1}->{d['protect_outcomes']['E1']}, "
+        f"{e2}->{d['protect_outcomes']['E2']}]")
+    fm = "" if d["follow_me_safe"] else f"  [redirect: {d['follow_me_outcome']}]"
+    st.markdown(f"**{d['outcome'].upper()}** (turn {d['turns_used']}){tw}{pr}{fm}")
+    for r in d["ohko_risk"]:
+        st.warning(f"OHKO RISK: {role_name[r['attacker']]}'s {r['move']} "
+                  f"could one-shot {role_name[r['target']]} "
+                  f"(worst roll {r['hi'] * 100:.0f}%)")
+    grid = d["grid"]
+    st.markdown("*Damage we deal (average roll):*")
+    st.dataframe(_damage_hits_df(grid["ours"], role_name), width='stretch', hide_index=True)
+    st.markdown("*Damage we take (average roll):*")
+    st.dataframe(_damage_hits_df(grid["theirs"], role_name), width='stretch', hide_index=True)
+    lines = []
+    for turn_i, turn_hits in enumerate(d["log"], 1):
+        for role, tgt_role, h in turn_hits:
+            spread = " (spread)" if h.num_targets_hit > 1 else ""
+            lines.append(
+                f"T{turn_i} {role_name[role]} -> {role_name[tgt_role]}: "
+                f"{h.move_name or '-'} {h.lo * 100:.0f}-{h.avg * 100:.0f}-"
+                f"{h.hi * 100:.0f}%{spread}")
+    if lines:
+        st.markdown("*How it plays out:*")
+        st.code("\n".join(lines), language=None)
+
+
 # "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
 # own recorded Choice Scarf usage % must be, AND be that member's single
 # TOP item, before it's worth flagging as a suggestion. A judgment call,
@@ -5333,6 +5435,14 @@ with tab_counter:
                         enemy_move_overrides=enemy_move_overrides,
                         evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                         ability_overrides=ability_overrides)
+                    _render_damage_calc_for_pair(
+                        shown_our6, vs_roster, merged, moves, natures, typechart,
+                        ct_turns, ct_excluded, key_prefix="ct_b4_dmgcalc",
+                        item_overrides=item_overrides, move_overrides=move_overrides,
+                        evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                        ability_overrides=ability_overrides,
+                        enemy_item_overrides=enemy_item_overrides,
+                        enemy_move_overrides=enemy_move_overrides)
                     b4_only_losses = st.checkbox(
                         "Only show enemy pairs each pair loses to",
                         key="ct_b4_best_onlyloss")

@@ -941,6 +941,42 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         shapes = [d.value.shape[0] for d in dfs]
         self.assertIn(15, shapes, "expected a 15-row Stage 1 or Stage 2 table")
 
+    def test_damage_calc_for_a_chosen_pair_renders_a_real_2x2_grid(self):
+        """"I want a section to look at damage calcs vs selected enemy
+        pair" -- the new damage-calc lookup, defaulting to the first 2 of
+        our 6 vs the first 2 of the enemy roster, produces the full 2x2
+        grid (every attacker vs every defender), not just a played-out
+        turn log."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        our_pair_ms = [m for m in at.multiselect if m.key == "ct_b4_dmgcalc_our_pair"][0]
+        enemy_pair_ms = [m for m in at.multiselect
+                        if m.key == "ct_b4_dmgcalc_enemy_pair"][0]
+        self.assertEqual(len(our_pair_ms.value), 2)
+        self.assertEqual(len(enemy_pair_ms.value), 2)
+        at = [b for b in at.button if b.key == "ct_b4_dmgcalc_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        markdowns = [m.value for m in at.markdown]
+        self.assertTrue(any("Damage we deal" in m for m in markdowns))
+        self.assertTrue(any("Damage we take" in m for m in markdowns))
+        our1, our2 = our_pair_ms.value
+        e1, e2 = enemy_pair_ms.value
+        # A robust check that doesn't depend on lining up markdown/
+        # dataframe indices across the whole page: exactly 2 dataframes
+        # among everything rendered carry the "Attacker"/"Target"/"Move"/
+        # "Damage (worst-avg-best)" columns this section's own
+        # `_damage_hits_df` always produces (the "we deal"/"we take" pair).
+        grid_dfs = [d.value for d in at.dataframe
+                   if list(d.value.columns) ==
+                   ["Attacker", "Target", "Move", "Damage (worst-avg-best)"]]
+        self.assertEqual(len(grid_dfs), 2, "expected exactly the 'we deal'/"
+                         "'we take' grid tables")
+        for df in grid_dfs:
+            self.assertEqual(len(df), 4)  # 2 attackers x 2 defenders each side
+            attackers = set(df["Attacker"])
+            self.assertTrue(attackers <= {our1, our2, e1, e2})
+
     def test_a_team_of_three_is_accepted_not_warned_about(self):
         """"I would like to output the best 3-pokemon cores against each
         team" -- the tab's own fixed-team floor relaxed from 4 to 3,
