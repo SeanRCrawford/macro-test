@@ -3081,6 +3081,23 @@ def main():
                          "--vs-team never needs this flag). Ignored under "
                          "--beam, which searches the "
                          "whole pool regardless")
+    ap.add_argument("--required-members", default="", metavar="POKEMON,POKEMON,...",
+                    help="--multi-bring4 only: \"I have a teamsheet of 3 "
+                         "pokemon and I want to maximise wins vs a "
+                         "specific team or vs all teams\" -- 'complete my "
+                         "team': every returned core contains ALL of these "
+                         "names, unconditionally (forwarded straight to "
+                         "multi_bring4_exhaustive/multi_bring4_beam's own "
+                         "hard requirement). Unlike a plain --item/--moves "
+                         "pin, a required member does NOT need to "
+                         "independently clear the --good-threshold/--min-"
+                         "enemies good-pair bar to be searched -- it's "
+                         "unioned straight into the pool either way. Pair "
+                         "with --core-sizes to pick how many MORE members "
+                         "to find (e.g. --core-sizes 6 to fill a 3-Pokemon "
+                         "sheet out to a full team), and with --vs-team "
+                         "(repeatable) or --vs-all-teams for 'vs a "
+                         "specific team' vs 'vs all teams'")
     ap.add_argument("--pair-coverage-top", type=int, default=15, metavar="N",
                     help="--multi-bring4 --xlsx only: how many of the best "
                          "pairs (ranked across every named --vs-team enemy "
@@ -3405,6 +3422,8 @@ def main():
         raise SystemExit("--max-weak-types only applies to --multi-bring4")
     if args.max_net_weak_types != 4 and not args.multi_bring4:
         raise SystemExit("--max-net-weak-types only applies to --multi-bring4")
+    if args.required_members and not args.multi_bring4:
+        raise SystemExit("--required-members only applies to --multi-bring4")
     if args.strict_weak_types is not None and not args.multi_bring4:
         raise SystemExit("--strict-weak-types only applies to --multi-bring4")
     if args.core_sizes != "4,5,6" and not args.multi_bring4:
@@ -3564,6 +3583,20 @@ def main():
     # already include, so e.g. "Gallade=Choice Scarf" is tested even when
     # Gallade wouldn't otherwise have made a --pool-size 40 cut.
     pool = pool + [n for n in overridden if n not in pool and n not in targets]
+    required_members = [n.strip() for n in args.required_members.split(",")
+                        if n.strip()]
+    unknown_required = [n for n in required_members if n not in merged]
+    if unknown_required:
+        raise SystemExit(f"--required-members: unknown Pokemon: "
+                         f"{', '.join(unknown_required)}")
+    # Unioned into the pool unconditionally -- unlike a plain --item/--moves
+    # pin (added above only if the pool didn't already have it), a required
+    # member does NOT need to independently clear the good-pair bar to be
+    # searched, so it must reach Stage A's own pool regardless of whether
+    # --pool-size/--team already included it. Mirrors the Streamlit
+    # "Complete my team" mode's own `_run_multi_bring4_search`.
+    if required_members:
+        pool = sorted(set(pool) | set(required_members))
     if args.partner_item and args.partner_item in BANNED_ITEMS:
         raise SystemExit(f"--partner-item: {args.partner_item!r} is not legal "
                          "in Regulation MB")
@@ -3791,7 +3824,8 @@ def main():
                 beam_width=args.beam_width, max_weak=args.max_weak,
                 type_limits=type_limits, max_megas=args.max_megas,
                 max_weak_types=args.max_weak_types,
-                max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes)
+                max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes,
+                required_members=required_members or None)
             mode_label = f"beam, width {args.beam_width}"
         else:
             try:
@@ -3800,7 +3834,8 @@ def main():
                     max_candidates=args.max_candidates, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
                     max_weak_types=args.max_weak_types,
-                    max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes)
+                    max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes,
+                    required_members=required_members or None)
                 mode_label = "exhaustive"
             except ValueError as e:
                 # "It should be very quick to compute the sets of 4 brings
@@ -3818,7 +3853,8 @@ def main():
                     beam_width=args.beam_width, max_weak=args.max_weak,
                     type_limits=type_limits, max_megas=args.max_megas,
                     max_weak_types=args.max_weak_types,
-                    max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes)
+                    max_net_weak_types=args.max_net_weak_types, core_sizes=core_sizes,
+                    required_members=required_members or None)
                 mode_label = f"beam, width {args.beam_width} (auto-fallback)"
         if args.tailwind_focus:
             # Re-sort what the search already found, ON TOP OF (not instead

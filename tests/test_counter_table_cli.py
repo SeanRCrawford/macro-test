@@ -2906,6 +2906,117 @@ class TestPairsOnlyFlag(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestRequiredMembersFlag(unittest.TestCase):
+    """"I have a teamsheet of 3 pokemon and I want to maximise wins vs a
+    specific team or vs all teams" -- --required-members surfaces
+    multi_bring4_exhaustive/multi_bring4_beam's own `required_members`
+    (already-tested engine feature, see TestRequiredMembersTeamCompletion
+    in test_counter_finder.py) as a CLI flag: every returned core
+    contains ALL of the named Pokemon, unioned into the pool passed to
+    multi_bring4_coverage even when --pool-size wouldn't otherwise have
+    included them."""
+
+    def test_requires_multi_bring4(self):
+        msg, _out = run_main(
+            ["--our", "Garchomp,Incineroar,Gallade,Hydreigon,Whimsicott,"
+                      "Mega Alakazam", "--bring4", "--vs-team", "Golisopod Rain",
+             "--required-members", "Garchomp"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--required-members only applies to --multi-bring4", msg)
+
+    def test_unknown_name_raises_a_clear_error(self):
+        msg, _out = run_main(
+            ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+             "--pool-size", "5", "--required-members", "Not A Real Pokemon"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--required-members", msg)
+        self.assertIn("Not A Real Pokemon", msg)
+
+    def test_threads_into_exhaustive_and_unions_into_the_raced_pool(self):
+        """A tiny --pool-size 3 would never independently include
+        Whimsicott -- capturing the kwarg AND letting the real search run
+        confirms both halves at once: the flag reaches the search
+        function, and the union actually put Whimsicott in the pool
+        `multi_bring4_coverage` raced (real pair data, not just a name)."""
+        seen = []
+        orig = ct.multi_bring4_exhaustive
+        def _capture(*args, **kwargs):
+            seen.append(kwargs.get("required_members"))
+            return orig(*args, **kwargs)
+        ct.multi_bring4_exhaustive = _capture
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--pool-size", "3", "--good-threshold", "0",
+                 "--min-enemies", "1", "--required-members", "Whimsicott",
+                 "--top", "1"])
+        finally:
+            ct.multi_bring4_exhaustive = orig
+        self.assertIsNone(msg, out)
+        self.assertTrue(seen, "expected the search to actually run")
+        self.assertEqual(seen[0], ["Whimsicott"])
+        # "4 of 4" (pool-size 3 + Whimsicott, none dropped) is the union
+        # actually landing in the raced pool -- a plain --pool-size 3 run
+        # would show "3 of 3" here.
+        self.assertIn("Multi-bring4 search: 4 Pokemon vs 1 enemy teams", out)
+
+    def test_threads_into_beam(self):
+        seen = []
+        orig = ct.multi_bring4_beam
+        def _capture(*args, **kwargs):
+            seen.append(kwargs.get("required_members"))
+            return orig(*args, **kwargs)
+        ct.multi_bring4_beam = _capture
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--pool-size", "3", "--good-threshold", "0",
+                 "--min-enemies", "1", "--required-members", "Whimsicott",
+                 "--beam", "--top", "1"])
+        finally:
+            ct.multi_bring4_beam = orig
+        self.assertIsNone(msg, out)
+        self.assertTrue(seen, "expected the search to actually run")
+        self.assertEqual(seen[0], ["Whimsicott"])
+
+    def test_omitted_by_default(self):
+        seen = []
+        orig = ct.multi_bring4_exhaustive
+        def _capture(*args, **kwargs):
+            seen.append(kwargs.get("required_members"))
+            return orig(*args, **kwargs)
+        ct.multi_bring4_exhaustive = _capture
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--pool-size", "3", "--good-threshold", "0",
+                 "--min-enemies", "1", "--top", "1"])
+        finally:
+            ct.multi_bring4_exhaustive = orig
+        self.assertIsNone(msg, out)
+        self.assertTrue(seen, "expected the search to actually run")
+        self.assertIsNone(seen[0])
+
+    def test_multiple_required_members_all_reach_the_kwarg(self):
+        seen = []
+        orig = ct.multi_bring4_exhaustive
+        def _capture(*args, **kwargs):
+            seen.append(kwargs.get("required_members"))
+            return orig(*args, **kwargs)
+        ct.multi_bring4_exhaustive = _capture
+        try:
+            msg, out = run_main(
+                ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                 "--pool-size", "3", "--good-threshold", "0",
+                 "--min-enemies", "1", "--core-sizes", "4,5,6",
+                 "--required-members", "Whimsicott, Sylveon", "--top", "1"])
+        finally:
+            ct.multi_bring4_exhaustive = orig
+        self.assertIsNone(msg, out)
+        self.assertTrue(seen, "expected the search to actually run")
+        self.assertEqual(seen[0], ["Whimsicott", "Sylveon"])
+
+
 class TestXlsxMegaUsedAndSixPairsColumns(unittest.TestCase):
     """"In the xlsx where use of a single mega is enforced when both are
     brought, note which one is used in the cores sheet and the Summary/
