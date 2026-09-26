@@ -4432,21 +4432,25 @@ def _render_hit_count_matrix_for_bring4_search(bring4_row, target_names, merged,
 
 
 def _damage_hits_df(grid_side, role_name):
-    """One side of `deep_dive`'s own `grid` (`{"ours"|"theirs": {(atk, tgt):
-    Hit}}`) as a plain table -- "see if and how I out-trade (2x2 damage)",
-    every attacker-vs-specific-defender `Hit` on the board, not just
-    whichever line a played-out race happened to take (`_render_pair_
-    matchup_detail`'s own turn-by-turn log only ever shows the moves
-    actually thrown -- a KO'd member's other matchup is invisible there)."""
+    """One side of `deep_dive`'s own `grid_all_moves` (`{"ours"|"theirs":
+    {(atk, tgt): [Hit, ...]}}`, every candidate move, worst-damage first)
+    as a plain table -- "in the damage calc I need to see all moves", not
+    just whichever single move `grid` itself would pick, and not just
+    whichever move a played-out race happened to throw (`_render_pair_
+    matchup_detail`'s own turn-by-turn log only shows that -- a KO'd
+    member's other matchup, and a shown member's OTHER moves, are both
+    invisible there). One row per (attacker, target, move), best damage
+    first within each (attacker, target) pair."""
     rows = []
-    for (atk, tgt), h in grid_side.items():
-        rows.append({
-            "Attacker": role_name[atk], "Target": role_name[tgt],
-            "Move": h.move_name or "-",
-            "Damage (worst-avg-best)":
-                f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-{h.hi * 100:.0f}%"
-                + (" (spread)" if h.num_targets_hit > 1 else ""),
-        })
+    for (atk, tgt), hits in grid_side.items():
+        for h in reversed(hits):  # `_grid_hit(return_all=True)`: worst-first
+            rows.append({
+                "Attacker": role_name[atk], "Target": role_name[tgt],
+                "Move": h.move_name or "-",
+                "Damage (worst-avg-best)":
+                    f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-{h.hi * 100:.0f}%"
+                    + (" (spread)" if h.num_targets_hit > 1 else ""),
+            })
     return pd.DataFrame(rows)
 
 
@@ -4458,11 +4462,14 @@ def _render_damage_calc_for_pair(our6, vs_roster, merged, moves, natures, typech
                                  enemy_move_overrides=None):
     """"I want a section to look at damage calcs vs selected enemy pair" --
     pick any 2 of `our6` and any 2 of `vs_roster`, race just that one 2v2
-    with `deep_dive`'s own `want_grid=True` (the same 2x2 damage grid/OHKO-
-    risk read the CLI's `--deep` mode already shows via `_print_deep`,
-    never previously surfaced for a `bring4_search` result -- its own pair
-    races never pay for a grid nobody would see). Cheap: one pair vs one
-    enemy pair, not a pool-wide sweep, so a fresh race per click is fine."""
+    with `deep_dive`'s own `want_grid=True`/`all_moves=True` (the same 2x2
+    damage grid/OHKO-risk read the CLI's `--deep` mode already shows via
+    `_print_deep`, never previously surfaced for a `bring4_search` result
+    -- its own pair races never pay for a grid nobody would see), EVERY
+    candidate move shown per attacker/defender cell ("in the damage calc I
+    need to see all moves"), not just the single one each side would
+    actually pick to play. Cheap: one pair vs one enemy pair, not a pool-
+    wide sweep, so a fresh race per click is fine."""
     if len(our6) < 2 or len(vs_roster) < 2:
         return
     st.markdown("**Damage calc vs a chosen enemy pair**")
@@ -4491,7 +4498,7 @@ def _render_damage_calc_for_pair(our6, vs_roster, merged, moves, natures, typech
             worst_case_targeting=worst_case, evs_overrides=evs_overrides,
             nature_overrides=nature_overrides, ability_overrides=ability_overrides,
             enemy_item_overrides=enemy_item_overrides,
-            enemy_move_overrides=enemy_move_overrides)
+            enemy_move_overrides=enemy_move_overrides, all_moves=True)
         st.session_state[f"{key_prefix}_result"] = (
             our_pair, enemy_pair, item1, item2, detail)
     cached = st.session_state.get(f"{key_prefix}_result")
@@ -4515,10 +4522,10 @@ def _render_damage_calc_for_pair(our6, vs_roster, merged, moves, natures, typech
         st.warning(f"OHKO RISK: {role_name[r['attacker']]}'s {r['move']} "
                   f"could one-shot {role_name[r['target']]} "
                   f"(worst roll {r['hi'] * 100:.0f}%)")
-    grid = d["grid"]
-    st.markdown("*Damage we deal (average roll):*")
+    grid = d["grid_all_moves"]
+    st.markdown("*Damage we deal (average roll, every move):*")
     st.dataframe(_damage_hits_df(grid["ours"], role_name), width='stretch', hide_index=True)
-    st.markdown("*Damage we take (average roll):*")
+    st.markdown("*Damage we take (average roll, every move):*")
     st.dataframe(_damage_hits_df(grid["theirs"], role_name), width='stretch', hide_index=True)
     lines = []
     for turn_i, turn_hits in enumerate(d["log"], 1):

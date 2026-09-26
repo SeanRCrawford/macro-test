@@ -973,9 +973,18 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         self.assertEqual(len(grid_dfs), 2, "expected exactly the 'we deal'/"
                          "'we take' grid tables")
         for df in grid_dfs:
-            self.assertEqual(len(df), 4)  # 2 attackers x 2 defenders each side
+            # "in the damage calc I need to see all moves" -- every
+            # candidate move per cell, not just one row per attacker/
+            # defender pair, so the row count is >= 4 (2 attackers x 2
+            # defenders), never fewer, and can run higher when a member
+            # has more than one usable damaging move against a given
+            # target.
+            self.assertGreaterEqual(len(df), 4)
             attackers = set(df["Attacker"])
             self.assertTrue(attackers <= {our1, our2, e1, e2})
+            cells = set(zip(df["Attacker"], df["Target"]))
+            self.assertEqual(len(cells), 4, "expected exactly the 4 "
+                             "attacker/defender cells of a 2x2 grid")
 
     def test_a_team_of_three_is_accepted_not_warned_about(self):
         """"I would like to output the best 3-pokemon cores against each

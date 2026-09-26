@@ -2501,6 +2501,23 @@ class TestArmorTailAndPriorityBlock(unittest.TestCase):
         grid = cf._grid_hit(attacker, [sucker_punch], target, None, typechart)
         self.assertEqual(grid.frac, 0.0)
 
+    def test_grid_hit_return_all_keeps_the_real_name_of_a_blocked_move(self):
+        """"in the damage calc I need to see all moves" -- a blocked
+        priority move must show its OWN name (Sucker Punch), not the
+        generic `NO_HIT` placeholder's blank one, once `return_all=True`
+        surfaces it directly instead of it only ever losing a best-pick
+        tie-break it could never win on damage alone."""
+        merged, moves = self.W["merged"], self.W["moves"]
+        natures, typechart = self.W["natures"], self.W["typechart"]
+        attacker = cf._build("Kingambit", merged, natures)
+        target = cf._build("Farigiraf", merged, natures)
+        sucker_punch = cf._lookup_move("Sucker Punch", moves)
+        all_hits = cf._grid_hit(attacker, [sucker_punch], target, None,
+                                typechart, return_all=True)
+        self.assertEqual(len(all_hits), 1)
+        self.assertEqual(all_hits[0].move_name, "Sucker Punch")
+        self.assertEqual(all_hits[0].frac, 0.0)
+
     def test_end_to_end_sequential_pair_outcome_partner_armor_tail_blocks_enemy(self):
         """Our PARTNER holding Armor Tail must block a priority move the
         enemy aims at the CANDIDATE too -- the ability protects the whole
@@ -10215,6 +10232,103 @@ class TestIntimidateInTheDamageGrid(unittest.TestCase):
         # the point is a board with NO Intimidate/Defiant/Competitive on it
         # must not be affected by this change at all.
         self.assertIsNotNone(grid["ours"][("C", "E1")])
+
+
+class TestGridHitReturnAll(unittest.TestCase):
+    """"in the damage calc I need to see all moves" -- `_grid_hit`'s
+    `return_all=True`, threaded through `_damage_grid`'s `all_moves=True`
+    and `deep_dive`'s `all_moves=True`: every candidate move's own `Hit`
+    for a cell, not just the single one `_grid_hit`'s own default
+    best-move pick would show."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+
+    def test_return_all_lists_every_candidate_move_worst_first(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        two_moves = cf._move_infos("Garchomp", merged, moves,
+                                   ["Earthquake", "Rock Slide"])
+        all_hits = cf._grid_hit(garchomp, two_moves, target, None, typechart,
+                                return_all=True)
+        self.assertEqual(len(all_hits), 2)
+        self.assertEqual({h.move_name for h in all_hits},
+                         {"Earthquake", "Rock Slide"})
+        self.assertLessEqual(all_hits[0].frac, all_hits[1].frac)
+
+    def test_return_all_last_entry_matches_the_default_best_pick(self):
+        """The two reading modes must never disagree on WHICH move is
+        best -- `return_all`'s own highest-frac entry (list sorted worst-
+        first) is exactly what `_grid_hit`'s default (`return_all=False`)
+        picks."""
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        garchomp = cf._build("Garchomp", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        two_moves = cf._move_infos("Garchomp", merged, moves,
+                                   ["Earthquake", "Rock Slide"])
+        all_hits = cf._grid_hit(garchomp, two_moves, target, None, typechart,
+                                return_all=True)
+        best = cf._grid_hit(garchomp, two_moves, target, None, typechart)
+        self.assertEqual(all_hits[-1].move_name, best.move_name)
+        self.assertAlmostEqual(all_hits[-1].frac, best.frac, places=6)
+
+    def test_return_all_is_empty_not_no_hit_when_nothing_can_land(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        whimsicott = cf._build("Whimsicott", merged, natures)
+        target = cf._build("Milotic", merged, natures)
+        status_only = cf._move_infos("Whimsicott", merged, moves, ["Tailwind"])
+        self.assertEqual(
+            cf._grid_hit(whimsicott, status_only, target, None, typechart,
+                        return_all=True), [])
+
+    def test_damage_grid_all_moves_populates_every_cell_with_a_list(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        c1 = cf._build("Garchomp", merged, natures)
+        c2 = cf._build("Milotic", merged, natures)
+        e1c = cf._build("Sinistcha", merged, natures)
+        e2c = cf._build("Corviknight", merged, natures)
+        m1 = cf._move_infos("Garchomp", merged, moves, ["Earthquake", "Rock Slide"])
+        m2 = cf._move_infos("Milotic", merged, moves, ["Scald"])
+        e1m = cf._move_infos("Sinistcha", merged, moves, ["Shadow Ball"])
+        e2m = cf._move_infos("Corviknight", merged, moves, ["Body Press"])
+        grid = cf._damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart,
+                               None, all_moves=True)
+        for side in ("ours", "theirs"):
+            for cell, hits in grid[side].items():
+                self.assertIsInstance(hits, list, f"{side}{cell} not a list")
+        self.assertEqual(len(grid["ours"][("C", "E1")]), 2)
+
+    def test_deep_dive_all_moves_adds_grid_all_moves_without_touching_grid(self):
+        merged, moves, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        targets = ["Kingambit", "Basculegion"]
+        _i1, _i2, detail_plain, _s = cf.deep_dive(
+            "Incineroar", "Garchomp", targets, merged, moves, natures,
+            typechart, turns=2)
+        _i1, _i2, detail_all, _s = cf.deep_dive(
+            "Incineroar", "Garchomp", targets, merged, moves, natures,
+            typechart, turns=2, all_moves=True)
+        plain = detail_plain[("Kingambit", "Basculegion")]
+        allmv = detail_all[("Kingambit", "Basculegion")]
+        self.assertNotIn("grid_all_moves", plain)
+        self.assertIn("grid_all_moves", allmv)
+        # `grid` itself (the single-best-move reading) must be identical
+        # either way -- `all_moves` only ADDS a second grid, never changes
+        # the first one.
+        self.assertEqual(plain["grid"]["theirs"][("E1", "P")].move_name,
+                         allmv["grid"]["theirs"][("E1", "P")].move_name)
+        for side in ("ours", "theirs"):
+            for cell, hits in allmv["grid_all_moves"][side].items():
+                self.assertIsInstance(hits, list)
+                if hits:
+                    self.assertIn(allmv["grid"][side][cell].move_name,
+                                 {h.move_name for h in hits})
 
 
 class TestBring4FromDeepDive(unittest.TestCase):

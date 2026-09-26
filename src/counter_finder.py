@@ -151,7 +151,7 @@ weather-setting usage rather than a shared 2v2 field -- there is no single
 import copy
 import itertools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, MoveInfo,
@@ -5036,10 +5036,21 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
 
 def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
               auras=None, terrain=None, dmg_mult_by_role=None,
-              attacker_role=None):
+              attacker_role=None, return_all=False):
     """The best `Hit` `attacker`'s own moveset can land on `target`
     SPECIFICALLY -- one cell of the 2x2 damage grid, not the move a
     target-choosing AI would actually pick (that's `_choose_action`).
+
+    `return_all`: "in the damage calc I need to see all moves" -- when
+    True, returns every candidate move's own `Hit` (every damaging,
+    non-Status move in `moves`, INCLUDING one blocked outright by Armor
+    Tail/Dazzling/Queenly Majesty or an off-weather charge move -- both
+    shown at 0 damage under their own real name, never the generic
+    `NO_HIT` placeholder's blank one), worst-damage first, not just the
+    single best one -- so a caller can show the FULL per-move breakdown
+    for this cell instead of only whichever move this function itself
+    would pick to play. `[]` (not `NO_HIT`) when nothing in `moves` could
+    ever land here at all.
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`), same field-wide reading `_choose_action` gets.
@@ -5106,7 +5117,20 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
                              num_targets_hit=got.num_targets_hit)
         candidates.append((mv, got))
     if not candidates:
-        return NO_HIT
+        return [] if return_all else NO_HIT
+    if return_all:
+        # `got.move_name` is `None` whenever `_priority_blocked`/`_raw_hit`
+        # fell back to the generic `NO_HIT` placeholder (a blocked priority
+        # move, an off-weather charge move, ...) -- `return_all=True`
+        # surfaces every one of these candidates directly to a caller
+        # ("in the damage calc I need to see all moves"), so each one
+        # needs ITS OWN real name here, not the placeholder's blank one.
+        # The default best-pick path below never reaches this branch, so
+        # its own tie-break behaviour is completely untouched.
+        return sorted(
+            (got if got.move_name else replace(got, move_name=mv.name)
+             for mv, got in candidates),
+            key=lambda h: h.frac)
     best_follow_up = max(got.frac for _mv, got in candidates)
     best_key, best_hit = None, NO_HIT
     for mv, got in candidates:
@@ -5119,7 +5143,7 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
 
 
 def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather,
-                 terrain=None):
+                 terrain=None, all_moves=False):
     """Every one of the 8 attacker-vs-specific-defender `Hit`s on this board
     -- "see if and how I out-trade (2x2 damage)" asks for the actual numbers,
     not just which line the race happened to choose. Returns {"ours": {("C",
@@ -5131,21 +5155,26 @@ def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather,
     are folded in here too -- "always account for intimidate (as well as
     defiant boosts)" applies to this preview grid just as much as the real
     race, not just a documented gap left for later.
+
+    `all_moves`: "in the damage calc I need to see all moves" -- passed
+    straight through to every `_grid_hit` call as `return_all`, so each
+    cell holds a LIST of every one of the attacker's own candidate moves'
+    `Hit`s (worst-damage first) instead of just the single best one.
     """
     combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
     auras = _active_auras(combatants)
     dmg_mult_by_role = _intimidate_mult_by_role(combatants)
     ours = {
-        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C"),
-        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C"),
-        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P"),
-        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P"),
+        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C", return_all=all_moves),
+        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C", return_all=all_moves),
+        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P", return_all=all_moves),
+        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P", return_all=all_moves),
     }
     theirs = {
-        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1"),
-        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1"),
-        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2"),
-        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2"),
+        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1", return_all=all_moves),
+        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1", return_all=all_moves),
+        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2", return_all=all_moves),
+        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2", return_all=all_moves),
     }
     return {"ours": ours, "theirs": theirs}
 
@@ -5196,7 +5225,8 @@ def _pruned_entry():
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                      turns, want_grid=False, merged=None, prune_below=None,
                      forced_base_names=frozenset(), worst_case_targeting=False,
-                     enemy_pairs=None, check_trick_room=False):
+                     enemy_pairs=None, check_trick_room=False,
+                     want_all_moves_grid=False):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
@@ -5267,6 +5297,15 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     each, cheap for the single fixed pair `--deep` checks but wasted (and
     never displayed) for a pool-wide search, so it defaults OFF and only
     the `--deep` CLI path turns it on.
+
+    `want_all_moves_grid`: only meaningful alongside `want_grid=True` --
+    "in the damage calc I need to see all moves" -- ALSO computes a second
+    grid (`_damage_grid(..., all_moves=True)`), stored as `d["grid_all_
+    moves"]` alongside the existing single-best-move `d["grid"]` (left
+    completely unchanged, so `_ohko_risk`/every existing `d["grid"]`
+    consumer keeps reading exactly the same shape it always has). Off by
+    default -- a second full grid pass, wasted unless a caller actually
+    wants the per-move breakdown.
 
     TAILWIND AS AN ASSUMED THREAT, not just a hypothesis footnote: "If the
     enemy has a tailwind setter and tailwind is a loss, assume they set
@@ -5728,6 +5767,11 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                                m1, m2, e1m, e2m, typechart, weather, terrain=terrain)
             best["grid"] = grid
             best["ohko_risk"] = _ohko_risk(grid)
+            if want_all_moves_grid:
+                best["grid_all_moves"] = _damage_grid(
+                    best["_c1"], best["_c2"], best["_e1c"], best["_e2c"],
+                    m1, m2, e1m, e2m, typechart, weather, terrain=terrain,
+                    all_moves=True)
         for k in ("_c1", "_c2", "_e1c", "_e2c"):
             best.pop(k, None)
         detail[(e1_name, e2_name)] = best
@@ -8772,7 +8816,7 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
              evs_overrides=None, nature_overrides=None, ability_overrides=None,
              enemy_item_overrides=None, enemy_move_overrides=None,
              max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
-             max_life_orb=DEFAULT_MAX_LIFE_ORB):
+             max_life_orb=DEFAULT_MAX_LIFE_ORB, all_moves=False):
     """The full report for ONE SPECIFIC, already-chosen pair (not a pool
     search) against every pair drawn from `target_names`.
 
@@ -8815,9 +8859,16 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     "this must apply to every single team" means every finalized pair/team
     here too, not just the 4-6-member searches.
 
+    `all_moves`: "in the damage calc I need to see all moves" -- passed
+    straight through as `_pair_vs_targets`'s own `want_all_moves_grid`:
+    every detail entry ALSO gets `grid_all_moves` (every candidate move's
+    own `Hit` per attacker/defender cell, not just the single best one
+    `grid` itself always shows). Off by default -- a second full grid
+    pass, wasted unless a caller actually wants the per-move breakdown.
+
     Returns (item1, item2, detail, summary) -- `detail`/`summary` are
     `_pair_vs_targets`'s own shape, `grid`/`ohko_risk` included on every
-    entry.
+    entry, `grid_all_moves` too when `all_moves=True`.
     """
     item_overrides = _resolve_team_items(
         [name1, name2], merged, moves_db, natures, typechart, target_names,
@@ -8848,7 +8899,8 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     detail, summary = _pair_vs_targets(name1, name2, our_built, target_names,
                                        enemy_built, typechart, turns,
                                        want_grid=True, merged=merged,
-                                       worst_case_targeting=worst_case_targeting)
+                                       worst_case_targeting=worst_case_targeting,
+                                       want_all_moves_grid=all_moves)
     return item1, item2, detail, summary
 
 
