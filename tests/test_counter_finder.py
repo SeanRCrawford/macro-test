@@ -11236,6 +11236,45 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
         self.assertNotIn("Kingambit", matrix["Kingambit"])
         self.assertIn("Basculegion", matrix["Kingambit"])
 
+    def test_one_v_one_hit_counts_reads_one_for_a_real_ohko(self):
+        """"I KO very quickly and take little damage, such as OHKO vs
+        4HKO" -- the SAME real OHKO from `test_a_real_ohko_is_not_masked_
+        by_the_defenders_own_priority_move` above must read `our_hits_to_
+        ko == 1` here, not just a "win" verdict."""
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        counts = cf.one_v_one_hit_counts_for_pool(
+            ["Excadrill"], ["Mega Raichu Y"], self.merged, moves, natures, typechart)
+        self.assertEqual(counts["Excadrill"]["Mega Raichu Y"]["our_hits_to_ko"], 1)
+
+    def test_one_v_one_hit_counts_agree_with_the_matrix_verdict(self):
+        """Cross-check against `_one_v_one_matrix`'s own verdict: whichever
+        side has the STRICTLY smaller hits-to-ko count must be the winner
+        the matrix itself reports (same offense table, just read two
+        different ways -- they can never disagree)."""
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        pool = ["Hydreigon", "Metagross"]
+        enemies = ["Kingambit", "Basculegion"]
+        matrix = cf._one_v_one_matrix(pool, enemies, self.merged, moves, natures, typechart)
+        counts = cf.one_v_one_hit_counts_for_pool(pool, enemies, self.merged, moves, natures, typechart)
+        for name in pool:
+            for enemy in enemies:
+                c = counts[name][enemy]
+                our, their = c["our_hits_to_ko"], c["their_hits_to_ko"]
+                verdict = matrix[name][enemy]
+                if our is not None and (their is None or our < their):
+                    self.assertEqual(verdict, "win")
+                elif their is not None and (our is None or their < our):
+                    self.assertEqual(verdict, "loss")
+                elif our is None and their is None:
+                    self.assertEqual(verdict, "no_ko")
+
+    def test_one_v_one_hit_counts_never_self_mirrors(self):
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        counts = cf.one_v_one_hit_counts_for_pool(
+            ["Kingambit"], ["Kingambit", "Basculegion"], self.merged, moves, natures, typechart)
+        self.assertNotIn("Kingambit", counts["Kingambit"])
+        self.assertIn("Basculegion", counts["Kingambit"])
+
     def test_a_real_ohko_is_not_masked_by_the_defenders_own_priority_move(self):
         """"no individuals seem to be able to beat Mega Raichu Y, but ground
         types like excadrill should be able to OHKO it" -- `move_value_

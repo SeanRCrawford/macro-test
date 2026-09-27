@@ -5071,7 +5071,8 @@ with tab_counter:
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
                  "Enemy's best response (to my team)", "Complete my team",
                  "Joint pair search", "2-2-2 teambuilding", "Coverage groups",
-                 "Import pair coverage", "Round-robin (saved teams only)"],
+                 "Import pair coverage", "Round-robin (saved teams only)",
+                 "Matchup finder"],
         key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
@@ -7005,6 +7006,198 @@ with tab_counter:
                         _render_hit_count_matrix_for_bring4_search(
                             bring4_rows[0], enemy_roster, merged, moves, natures, typechart)
                     st.divider()
+
+    elif ct_mode == "Matchup finder":
+        st.caption("\"I want a tool that lets me see 1v1 matchups. For "
+                   "instance, I want a Pokemon that beats incineroar, "
+                   "rillaboom etc. Or to search for individuals too, e.g., "
+                   "a Pokemon that resists fire, ice, is not weak to fairy "
+                   "... I need a way to get this for 2v2s too\" -- name "
+                   "enemies and/or a type profile and search a pool for "
+                   "answers, as individuals (a cheap 1v1 read) or as a "
+                   "real 2v2 pair vs a chosen enemy pair (the same combat "
+                   "engine Bring-4/Joint pair search use).")
+        from species_data import TYPES as _mf_types
+        from team_search import type_matchup
+        mf_kind = st.radio("Search for", ["Individuals (1v1)", "Pairs (2v2)"],
+                          key="ct_mf_kind", horizontal=True)
+        mf_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_mf_include",
+            help="Forced into the search pool even if their own roster.csv "
+                 "Score wouldn't otherwise earn them a spot.")
+
+        if mf_kind == "Individuals (1v1)":
+            mf_pool_size = st.slider(
+                "Search pool size (top-Score Pokemon)", 10, 300, 60,
+                key="ct_mf_pool_ind",
+                help="The 1v1 read is cheap (O(pool), no real combat), so "
+                     "this stays fast even at the top of the range.")
+            mf_enemies = st.multiselect(
+                "Must beat ALL of these 1v1", all_names, key="ct_mf_enemies",
+                help="A cheap 1v1 read (not a full battle), the same one "
+                     "Coverage Groups' own 1v1 threat coverage already "
+                     "uses -- best single hit each way, real Speed breaks "
+                     "a mutual-OHKO tie.")
+            mfc1, mfc2 = st.columns(2)
+            mf_resist = mfc1.multiselect(
+                "Must resist or be immune to", _mf_types, key="ct_mf_resist")
+            mf_not_weak = mfc2.multiselect(
+                "Must NOT be weak to", _mf_types, key="ct_mf_not_weak")
+            if st.button("Search individuals", type="primary", key="ct_mf_ind_go"):
+                pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
+                pool = sorted(set(pool) | set(mf_include))
+                with st.spinner(f"Racing {len(pool)} Pokemon 1v1 against "
+                                f"{len(mf_enemies)} named enem{'y' if len(mf_enemies) == 1 else 'ies'}..."):
+                    matrix = {}
+                    if mf_enemies:
+                        from counter_finder import one_v_one_matrix_for_pool
+                        matrix = one_v_one_matrix_for_pool(
+                            pool, mf_enemies, merged, moves, natures, typechart)
+                    results = []
+                    for name in pool:
+                        if mf_enemies and not all(
+                                matrix.get(name, {}).get(e) == "win" for e in mf_enemies):
+                            continue
+                        if mf_resist and not all(
+                                type_matchup(name, merged, t) in ("resist", "immune")
+                                for t in mf_resist):
+                            continue
+                        if mf_not_weak and any(
+                                type_matchup(name, merged, t) == "weak"
+                                for t in mf_not_weak):
+                            continue
+                        results.append(name)
+                    # "I KO very quickly and take little damage, such as
+                    # OHKO vs 4HKO" -- hits-to-KO each way, scoped to just
+                    # the already-narrowed results (cheap either way, but
+                    # no reason to pay for the whole pool when most of it
+                    # was just filtered out).
+                    hit_counts = {}
+                    if mf_enemies and results:
+                        from counter_finder import one_v_one_hit_counts_for_pool
+                        hit_counts = one_v_one_hit_counts_for_pool(
+                            results, mf_enemies, merged, moves, natures, typechart)
+                st.session_state["ct_mf_ind_results"] = (results, mf_enemies, hit_counts)
+            results_pack = st.session_state.get("ct_mf_ind_results")
+            if results_pack:
+                mf_results, mf_shown_enemies, mf_hit_counts = results_pack
+                if not mf_results:
+                    st.info("No pool member passed every filter -- widen the "
+                           "pool, drop a named enemy, or relax a type filter.")
+                else:
+                    st.caption(f"{len(mf_results)} match(es)."
+                              + (" Sorted most decisive first (fastest KO, "
+                                 "least damage taken, worst case across the "
+                                 "named enemies)." if mf_shown_enemies else ""))
+                    def _decisiveness(name):
+                        # WORST-CASE across the named enemies -- a name
+                        # that's a clean OHKO vs one enemy but only a
+                        # scrappy 3HKO/3HKO vs another is ranked by that
+                        # weaker link, not flattered by its best matchup.
+                        counts = mf_hit_counts.get(name, {})
+                        return min(
+                            (counts[e]["their_hits_to_ko"] or 99)
+                            - (counts[e]["our_hits_to_ko"] or 99)
+                            for e in mf_shown_enemies) if mf_shown_enemies else 0
+                    sort_key = ((lambda n: (-_decisiveness(n), -(merged[n].get("score") or 0)))
+                               if mf_shown_enemies else
+                               (lambda n: -(merged[n].get("score") or 0)))
+                    rows = []
+                    for name in sorted(mf_results, key=sort_key):
+                        row = {"Pokemon": name, "Score": merged[name].get("score"),
+                              "Types": "/".join(merged[name].get("types") or [])}
+                        for e in mf_shown_enemies:
+                            c = mf_hit_counts.get(name, {}).get(e, {})
+                            our_h, their_h = c.get("our_hits_to_ko"), c.get("their_hits_to_ko")
+                            our_s = f"{our_h}HKO" if our_h else "--"
+                            their_s = f"{their_h}HKO" if their_h else "--"
+                            row[f"vs {e}"] = f"{our_s} / {their_s}"
+                        rows.append(row)
+                    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        else:
+            mf_pool_size = st.slider(
+                "Search pool size (top-Score Pokemon)", 10, 150, 34,
+                key="ct_mf_pool_pair",
+                help="A REAL 2v2 combat race for every C(pool,2) pair -- "
+                     "unlike the cheap 1v1 read above, this cost grows "
+                     "with the SQUARE of the pool. Matches Joint Pair "
+                     "Search's own default of 34 (a few tens of seconds); "
+                     "push higher only if you can wait -- 60+ can take "
+                     "minutes.")
+            st.caption(f"~{mf_pool_size * (mf_pool_size - 1) // 2} pairs to "
+                      f"race at this pool size.")
+            mf_enemy_pair = st.multiselect(
+                "Enemy pair to beat", all_names, key="ct_mf_enemy_pair",
+                max_selections=2,
+                help="Exactly 2 -- races every pair drawn from the pool "
+                     "against this ONE real enemy pair (a full doubles "
+                     "matchup, Protect/Tailwind/targeting all accounted "
+                     "for), not a cheap 1v1 coverage read.")
+            mfc1, mfc2 = st.columns(2)
+            mf_resist_p = mfc1.multiselect(
+                "Pair must resist or be immune to (either member)", _mf_types,
+                key="ct_mf_resist_pair")
+            mf_not_weak_p = mfc2.multiselect(
+                "Pair must NOT be weak to (neither member)", _mf_types,
+                key="ct_mf_not_weak_pair")
+            mf_worst_case = st.checkbox(
+                "Worst-case enemy targeting", key="ct_mf_worst_case",
+                help="Off by default -- a real cost (roughly squares the "
+                     "per-turn search on top of the engine's own 2-turn "
+                     "lookahead).")
+            mf_only_wins = st.checkbox(
+                "Only show pairs that actually win", value=True,
+                key="ct_mf_only_wins")
+            if len(mf_enemy_pair) != 2:
+                st.caption("Pick exactly 2 enemies to form the pair to beat.")
+            elif st.button("Search pairs", type="primary", key="ct_mf_pair_go"):
+                pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
+                pool = sorted(set(pool) | set(mf_include))
+                if mf_resist_p:
+                    pool = [n for n in pool if any(
+                        type_matchup(n, merged, t) in ("resist", "immune")
+                        for t in mf_resist_p)]
+                if mf_not_weak_p:
+                    pool = [n for n in pool if not any(
+                        type_matchup(n, merged, t) == "weak" for t in mf_not_weak_p)]
+                with st.spinner(f"Racing every pair drawn from {len(pool)} "
+                                f"Pokemon vs {' + '.join(mf_enemy_pair)}..."):
+                    mf_rows = joint_pool_search(
+                        pool, mf_enemy_pair, merged, moves, natures, typechart,
+                        turns=ct_turns, excluded_items=ct_excluded,
+                        worst_case_targeting=mf_worst_case)
+                st.session_state["ct_mf_pair_results"] = mf_rows
+                st.session_state["ct_mf_pair_enemy_pair"] = mf_enemy_pair
+                _cache_gameplans(mf_rows, "Matchup finder")
+            mf_rows = st.session_state.get("ct_mf_pair_results")
+            if mf_rows is not None:
+                shown_enemy_pair = st.session_state.get(
+                    "ct_mf_pair_enemy_pair", mf_enemy_pair)
+                shown = ([r for r in mf_rows
+                         if r["pairs_swept"] + r["pairs_traded"] >= 1]
+                        if mf_only_wins else mf_rows)
+                if not shown:
+                    st.info("No pair passed every filter -- widen the pool, "
+                           "relax the type filters, or uncheck 'only show "
+                           "wins'.")
+                else:
+                    st.caption(f"{len(shown)} pair(s). Already sorted "
+                              "protect-safe first, then most decisive "
+                              "(\"Clean win\" -- our own retained HP, "
+                              "close to 2.0 for a fast, clean sweep that "
+                              "barely takes damage, lower for a scrappy "
+                              "out-trade).")
+                    st.dataframe(_pair_rows_df(shown), width='stretch', hide_index=True)
+                    mf_only_losses = st.checkbox(
+                        "Only show enemy pairs each pair loses to",
+                        key="ct_mf_pair_onlyloss")
+                    with st.expander(
+                            f"Show gameplans (vs {' + '.join(shown_enemy_pair)})"):
+                        for r in shown:
+                            n1, n2 = r["pair"]
+                            st.markdown(f"**{n1} + {n2}**")
+                            _render_pair_matchup_detail(
+                                n1, n2, r["detail"], mf_only_losses)
 
 
 # ------------------------------------------------------------------ battle

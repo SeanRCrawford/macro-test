@@ -791,6 +791,25 @@ def _pair_offensive_pin(name1, name2, merged, moves_db, typechart):
     return best
 
 
+def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
+    """{name: {other_name: best_frac}} -- every name in `universe`'s own
+    best single real-usage-move damage fraction against every OTHER name
+    in it, via `optimize_sets.raw_ohko_fraction_table` (see `_one_v_one_
+    matrix`'s own docstring for why this, not `move_value_table`, is the
+    correct pure-damage read). Factored out of `_one_v_one_matrix` so
+    `_one_v_one_hit_counts` can reuse the exact same cheap, already-
+    correct offense computation instead of a second copy that could drift
+    -- both only ever need this shared table, differing in what they
+    derive from a fraction (a win/loss verdict vs an actual hits-to-KO
+    count)."""
+    offense = {}
+    for name in universe:
+        table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
+        offense[name] = {en: max((row.get(en, 0.0) for row in table.values()), default=0.0)
+                         for en in universe if en != name}
+    return offense
+
+
 def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
     enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
@@ -819,12 +838,8 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     same name (a literal self-mirror isn't a meaningful "does my own team
     have an answer to this enemy" question for MY OWN pool).
     """
-    universe = list(dict.fromkeys(list(pool) + list(enemy_names)))
-    offense = {}
-    for name in universe:
-        table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
-        offense[name] = {en: max((row.get(en, 0.0) for row in table.values()), default=0.0)
-                         for en in universe if en != name}
+    offense = _one_v_one_offense(list(pool) + list(enemy_names), merged,
+                                 moves_db, natures, typechart)
     matrix = {}
     for name in pool:
         matrix[name] = {}
@@ -866,6 +881,44 @@ def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, type
     level readings -- they can never quietly disagree on what "beats"
     means for the same pool/enemy universe."""
     return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
+
+
+def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart):
+    """{name: {enemy_name: {"our_hits_to_ko", "their_hits_to_ko"}}} for
+    every (pool member, enemy) pair -- "I KO very quickly and take little
+    damage, such as OHKO vs 4HKO" wants the actual hits-to-KO each way,
+    not just `one_v_one_matrix_for_pool`'s own win/loss/no_ko verdict.
+
+    Built from the exact SAME cheap, real-usage-moveset offense table
+    `_one_v_one_matrix` itself uses (`_one_v_one_offense` -- no second,
+    possibly-drifting damage read, and no expensive per-name moveset
+    search): `hits_to_ko = ceil(1/frac)` for whichever side's fraction is
+    being read, `None` when that side can never KO the other at all (a
+    hard type immunity, or a move too weak to ever finish it in a
+    realistic exchange). A pair whose "win"/"loss" verdict came down to
+    a mutual-OHKO speed tie-break still reads a real hits-to-KO of 1 on
+    both sides here -- this only ever reports the two raw counts, never
+    re-derives `_one_v_one_matrix`'s own verdict from them.
+
+    A pool member is never matched against an identical enemy entry of
+    the same name, same as `_one_v_one_matrix`."""
+    offense = _one_v_one_offense(list(pool) + list(enemy_names), merged,
+                                 moves_db, natures, typechart)
+
+    def hits(frac):
+        return math.ceil(1.0 / frac) if frac > 0 else None
+
+    result = {}
+    for name in pool:
+        result[name] = {}
+        for enemy_name in enemy_names:
+            if enemy_name == name:
+                continue
+            result[name][enemy_name] = {
+                "our_hits_to_ko": hits(offense[name][enemy_name]),
+                "their_hits_to_ko": hits(offense[enemy_name][name]),
+            }
+    return result
 
 
 def _pair_threat_coverage(name1, name2, matrix):

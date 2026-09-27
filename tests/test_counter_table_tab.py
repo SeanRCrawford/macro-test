@@ -34,7 +34,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_nine_modes_are_offered(self):
+    def test_the_ten_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
@@ -47,7 +47,8 @@ class TestCounterTableTabExists(unittest.TestCase):
                           "2-2-2 teambuilding",
                           "Coverage groups",
                           "Import pair coverage",
-                          "Round-robin (saved teams only)"})
+                          "Round-robin (saved teams only)",
+                          "Matchup finder"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
         at = app()
@@ -2135,6 +2136,152 @@ class TestRoundRobinMode(unittest.TestCase):
         cache = at.session_state["ct_gameplans"]
         self.assertTrue(any(v["source"].startswith("Round-robin:")
                             for v in cache.values()))
+
+
+class TestMatchupFinderMode(unittest.TestCase):
+    """"I want a tool in the streamlit app that lets me see 1v1 matchups.
+    For instance, I want a Pokemon that beats incineroar, rillaboom etc.
+    Or to search for individuals too, e.g., a Pokemon that resists fire,
+    ice, is not weak to fairy ... I need a way to get this for 2v2s too"
+    -- a new "Matchup finder" mode: individuals via the cheap 1v1 read
+    (`one_v_one_matrix_for_pool`) with type filters, or pairs via a REAL
+    2v2 combat race (`joint_pool_search`) against a chosen enemy pair."""
+
+    def test_switching_to_matchup_finder_mode_renders_its_controls(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(r.key == "ct_mf_kind" for r in at.radio))
+
+    def test_individuals_search_beats_all_named_enemies(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) ==
+              ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        self.assertEqual(len(dfs), 1)
+        df = dfs[0]
+        self.assertTrue(len(df) > 0)
+        # "I KO very quickly and take little damage, such as OHKO vs
+        # 4HKO" -- the column now carries the real hits-to-KO each way,
+        # not just a flat "WIN" -- cross-check every shown name against
+        # the real engine directly (both that it's a genuine win, AND
+        # that its own hits-to-KO reading matches what the table shows).
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import (one_v_one_matrix_for_pool,
+                                    one_v_one_hit_counts_for_pool)
+        W = load_world()
+        names = list(df["Pokemon"])
+        matrix = one_v_one_matrix_for_pool(
+            names, ["Incineroar"], W["merged"], W["moves"], W["natures"], W["typechart"])
+        counts = one_v_one_hit_counts_for_pool(
+            names, ["Incineroar"], W["merged"], W["moves"], W["natures"], W["typechart"])
+        for _, row in df.iterrows():
+            name = row["Pokemon"]
+            self.assertEqual(matrix[name]["Incineroar"], "win")
+            c = counts[name]["Incineroar"]
+            our_s = f"{c['our_hits_to_ko']}HKO" if c["our_hits_to_ko"] else "--"
+            their_s = f"{c['their_hits_to_ko']}HKO" if c["their_hits_to_ko"] else "--"
+            self.assertEqual(row["vs Incineroar"], f"{our_s} / {their_s}")
+
+    def test_individuals_results_are_sorted_most_decisive_first(self):
+        """"It would be good to see the most decisive wins too, i.e., I
+        KO very quickly and take little damage, such as OHKO vs 4HKO" --
+        results rank by (their hits-to-KO minus ours), worst case across
+        the named enemies, most decisive first."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(25).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) ==
+              ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        df = dfs[0]
+        self.assertGreater(len(df), 1, "need at least 2 rows to check ordering")
+
+        def decisiveness(cell):
+            our_s, their_s = cell.split(" / ")
+            our_n = 99 if our_s == "--" else int(our_s.replace("HKO", ""))
+            their_n = 99 if their_s == "--" else int(their_s.replace("HKO", ""))
+            return their_n - our_n
+        scores = [decisiveness(v) for v in df["vs Incineroar"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_individuals_type_filter_excludes_a_known_weak_member(self):
+        """Whimsicott (pure Fairy) is weak to Poison -- requiring "must
+        NOT be weak to Poison" must drop it from a pool it would
+        otherwise appear in ("Always include" forces it into the pool,
+        with no named enemies so only the type filter can exclude it)."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Whimsicott"]).run()
+        [m for m in at.multiselect if m.key == "ct_mf_not_weak"][0].set_value(
+            ["Poison"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Pokemon" in d.value.columns]
+        self.assertTrue(dfs)
+        self.assertNotIn("Whimsicott", set(dfs[0]["Pokemon"]))
+
+    def test_pairs_search_only_returns_real_wins_vs_the_chosen_enemy_pair(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        # `ct_mf_pair_results` in session_state is always the FULL raw
+        # search (the "only show wins" filter is display-only, applied
+        # fresh on every rerun) -- checked here for its own sake (every
+        # race really was against exactly the 1 named enemy pair), not as
+        # a stand-in for what the table actually shows.
+        rows = at.session_state["ct_mf_pair_results"]
+        self.assertTrue(rows)
+        self.assertTrue(all(r["pairs_total"] == 1 for r in rows))  # 1 enemy pair
+        pair_dfs = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        self.assertTrue(pair_dfs)
+        shown = pair_dfs[0]
+        self.assertTrue(len(shown) > 0)
+        self.assertTrue((shown["Beaten"] == "1/1").all())
+
+    def test_pairs_unchecking_only_wins_shows_at_least_as_many_rows(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_dfs = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        wins_only_count = len(pair_dfs[0])
+        at = [c for c in at.checkbox if c.key == "ct_mf_only_wins"][0].set_value(
+            False).run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_dfs2 = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        all_count = len(pair_dfs2[0])
+        self.assertGreaterEqual(all_count, wins_only_count)
 
 
 class TestTrickRoomOptIn(unittest.TestCase):
