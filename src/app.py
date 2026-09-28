@@ -4096,6 +4096,45 @@ def _pair_rows_df(pair_rows, include_total=False):
     return pd.DataFrame(rows)
 
 
+# Intimidate genuinely IGNORES/blocks the Attack drop (true immunity) --
+# `counter_finder.INTIMIDATE_BLOCKED`'s own established list. Defiant/
+# Competitive/Contrary are NOT immune (the drop still applies first) but
+# invert it into a net stat GAIN instead (+2/+2/+1 respectively, per
+# `_intimidate_mult_by_role`'s own real-grid treatment), which is why the
+# user still wants them grouped with the true-immunity abilities for a
+# "does Intimidate actually hurt this Pokemon" filter.
+def _resists_intimidate(name, merged, moves_db):
+    """True if `name` resists Intimidate for a Matchup Finder search: either
+    Intimidate's own Attack drop never touches its real offense (no usage-
+    ranked Physical damaging move at all -- a pure special attacker), or its
+    default ability makes the drop a non-issue (true immunity, or Defiant/
+    Competitive/Contrary's net stat GAIN)."""
+    from counter_finder import INTIMIDATE_BLOCKED, _real_damaging_moves
+    from combatants import _default_ability
+    ability = _default_ability(merged[name].get("abilities_usage") or [])
+    # Defiant/Competitive/Contrary aren't BLOCKED by Intimidate (the drop
+    # still applies) -- they invert it into a net stat GAIN instead (+2 or
+    # +1 respectively), exactly `_intimidate_mult_by_role`'s own real-grid
+    # treatment of these three, so they belong on this "isn't hurt by it"
+    # side of the filter too.
+    if ability in INTIMIDATE_BLOCKED or ability in ("Defiant", "Competitive", "Contrary"):
+        return True
+    return not any(mv.category == "Physical"
+                   for mv in _real_damaging_moves(name, merged, moves_db))
+
+
+def _ignores_fake_out(name, merged):
+    """True if `name` is never flinched by Fake Out: a Ghost type (immune to
+    its Normal typing outright), or its default ability blocks the flinch
+    itself (`lead_sim.FLINCH_PROOF`)."""
+    from lead_sim import FLINCH_PROOF
+    if "Ghost" in (merged[name].get("types") or []):
+        return True
+    from combatants import _default_ability
+    ability = _default_ability(merged[name].get("abilities_usage") or [])
+    return ability in FLINCH_PROOF
+
+
 def _bring4_rows_df(bring4_rows, total):
     """Stage 2's own dataframe shape (Bring-4/Uncovered enemy pairs/Good
     pairs/Worst pair/Worst pair beaten/Mega) -- factored out so `bring4_
@@ -7043,6 +7082,20 @@ with tab_counter:
                 "Must resist or be immune to", _mf_types, key="ct_mf_resist")
             mf_not_weak = mfc2.multiselect(
                 "Must NOT be weak to", _mf_types, key="ct_mf_not_weak")
+            mfc3, mfc4 = st.columns(2)
+            mf_resists_intimidate = mfc3.checkbox(
+                "Resists Intimidate", key="ct_mf_resists_intimidate",
+                help="Special attackers (Intimidate's Attack drop never "
+                     "touches their real offense), or a physical attacker "
+                     "whose own ability makes the drop a non-issue -- true "
+                     "immunity (Inner Focus/Own Tempo/Oblivious/Scrappy/"
+                     "Hyper Cutter/Clear Body/White Smoke/Full Metal Body) "
+                     "or Defiant/Competitive/Contrary's net stat GAIN.")
+            mf_ignores_fake_out = mfc4.checkbox(
+                "Ignores Fake Out", key="ct_mf_ignores_fake_out",
+                help="Ghost types (immune to its Normal typing), or an "
+                     "ability that blocks the flinch itself (Inner Focus/"
+                     "Own Tempo/Oblivious/Scrappy).")
             if st.button("Search individuals", type="primary", key="ct_mf_ind_go"):
                 pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
                 pool = sorted(set(pool) | set(mf_include))
@@ -7065,6 +7118,11 @@ with tab_counter:
                         if mf_not_weak and any(
                                 type_matchup(name, merged, t) == "weak"
                                 for t in mf_not_weak):
+                            continue
+                        if mf_resists_intimidate and not _resists_intimidate(
+                                name, merged, moves):
+                            continue
+                        if mf_ignores_fake_out and not _ignores_fake_out(name, merged):
                             continue
                         results.append(name)
                     # "I KO very quickly and take little damage, such as
@@ -7127,12 +7185,13 @@ with tab_counter:
             st.caption(f"~{mf_pool_size * (mf_pool_size - 1) // 2} pairs to "
                       f"race at this pool size.")
             mf_enemy_pair = st.multiselect(
-                "Enemy pair to beat", all_names, key="ct_mf_enemy_pair",
-                max_selections=2,
-                help="Exactly 2 -- races every pair drawn from the pool "
-                     "against this ONE real enemy pair (a full doubles "
-                     "matchup, Protect/Tailwind/targeting all accounted "
-                     "for), not a cheap 1v1 coverage read.")
+                "Enemy pair(s) to beat", all_names, key="ct_mf_enemy_pair",
+                help="2 or more -- races every pair drawn from the pool "
+                     "against every enemy pair drawn from this list (a "
+                     "full doubles matchup, Protect/Tailwind/targeting all "
+                     "accounted for), not a cheap 1v1 coverage read. Named "
+                     "3+, this is every C(n,2) enemy combination, not just "
+                     "one fixed pair.")
             mfc1, mfc2 = st.columns(2)
             mf_resist_p = mfc1.multiselect(
                 "Pair must resist or be immune to (either member)", _mf_types,
@@ -7148,8 +7207,8 @@ with tab_counter:
             mf_only_wins = st.checkbox(
                 "Only show pairs that actually win", value=True,
                 key="ct_mf_only_wins")
-            if len(mf_enemy_pair) != 2:
-                st.caption("Pick exactly 2 enemies to form the pair to beat.")
+            if len(mf_enemy_pair) < 2:
+                st.caption("Pick at least 2 enemies to form the pair(s) to beat.")
             elif st.button("Search pairs", type="primary", key="ct_mf_pair_go"):
                 pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
                 pool = sorted(set(pool) | set(mf_include))
@@ -7166,6 +7225,19 @@ with tab_counter:
                         pool, mf_enemy_pair, merged, moves, natures, typechart,
                         turns=ct_turns, excluded_items=ct_excluded,
                         worst_case_targeting=mf_worst_case)
+                    # "You also can not have two of your own megas in a
+                    # pair" -- only one Mega Evolution per side per game
+                    # (VGC's real rule), so pairing two DIFFERENT Mega-
+                    # capable picks together always wastes one of the two
+                    # stones as a lead choice; a non-mega + the stronger
+                    # mega is never worse. Same exclusion `find_pair_cores`
+                    # already applies for the identical reason -- a post-
+                    # filter here rather than in `joint_pool_search` itself,
+                    # since Joint Pair Search's own callers may still want
+                    # to see (and knowingly discard) that comparison.
+                    mf_rows = [r for r in mf_rows if not (
+                        r["pair"][0].startswith("Mega ")
+                        and r["pair"][1].startswith("Mega "))]
                 st.session_state["ct_mf_pair_results"] = mf_rows
                 st.session_state["ct_mf_pair_enemy_pair"] = mf_enemy_pair
                 _cache_gameplans(mf_rows, "Matchup finder")

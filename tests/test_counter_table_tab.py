@@ -2283,6 +2283,90 @@ class TestMatchupFinderMode(unittest.TestCase):
         all_count = len(pair_dfs2[0])
         self.assertGreaterEqual(all_count, wins_only_count)
 
+    def test_resists_intimidate_excludes_a_known_mixed_physical_attacker(self):
+        """Incineroar (Intimidate is its OWN ability, irrelevant to whether
+        it resists an OPPOSING Intimidate holder) runs real physical moves
+        (Darkest Lariat/Flare Blitz) and has no Intimidate-proofing ability
+        of its own -- the checkbox must drop it."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Incineroar"]).run()
+        [c for c in at.checkbox if c.key == "ct_mf_resists_intimidate"][0].set_value(
+            True).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) == ["Pokemon", "Score", "Types"]]
+        self.assertTrue(dfs)
+        self.assertNotIn("Incineroar", set(dfs[0]["Pokemon"]))
+
+    def test_ignores_fake_out_excludes_a_non_ghost_non_proof_member(self):
+        """Incineroar is neither Ghost-type nor flinch-proof-abilitied --
+        the checkbox must drop it too."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Incineroar"]).run()
+        [c for c in at.checkbox if c.key == "ct_mf_ignores_fake_out"][0].set_value(
+            True).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) == ["Pokemon", "Score", "Types"]]
+        self.assertTrue(dfs)
+        self.assertNotIn("Incineroar", set(dfs[0]["Pokemon"]))
+
+    def test_pairs_search_accepts_more_than_two_enemies_and_races_every_combo(self):
+        """"can the pair matchup finder also be updated to work vs every
+        pair combination of a given list" -- naming 3 enemies must race
+        every C(3,2)=3 enemy-pair combination, not just the first 2."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom", "Kingambit"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state["ct_mf_pair_results"]
+        self.assertTrue(rows)
+        self.assertTrue(all(r["pairs_total"] == 3 for r in rows))
+        raced = {frozenset(k) for r in rows for k in r["detail"]}
+        self.assertEqual(raced, {frozenset(("Incineroar", "Rillaboom")),
+                                 frozenset(("Incineroar", "Kingambit")),
+                                 frozenset(("Rillaboom", "Kingambit"))})
+
+    def test_pairs_search_never_returns_two_of_our_own_megas(self):
+        """"You also can not have two of your own megas in a pair in the
+        matchup section" -- pairing two DIFFERENT Mega-capable picks
+        together always wastes one of the two stones as a lead choice
+        (only one Mega Evolution per side per game), so no returned pair
+        may have both members starting with "Mega "."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Mega Dragonite", "Mega Garchomp", "Mega Garchomp Z"]).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state["ct_mf_pair_results"]
+        self.assertTrue(rows)
+        self.assertFalse(any(
+            r["pair"][0].startswith("Mega ") and r["pair"][1].startswith("Mega ")
+            for r in rows))
+
 
 class TestTrickRoomOptIn(unittest.TestCase):
     """"avoiding enemy tailwind and trick room may be key for a matchup
