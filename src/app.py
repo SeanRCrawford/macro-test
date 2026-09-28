@@ -7075,8 +7075,23 @@ with tab_counter:
                 "Must beat ALL of these 1v1", all_names, key="ct_mf_enemies",
                 help="A cheap 1v1 read (not a full battle), the same one "
                      "Coverage Groups' own 1v1 threat coverage already "
-                     "uses -- best single hit each way, real Speed breaks "
-                     "a mutual-OHKO tie.")
+                     "uses -- whichever side needs FEWER hits to KO the "
+                     "other wins outright (an OHKO is no longer required); "
+                     "real Speed breaks a tie where both sides would "
+                     "finish on the same hit.")
+            mf_no_hit_limit = st.checkbox(
+                "No hits-to-KO limit (always call a winner)", key="ct_mf_no_hit_limit",
+                help="Off by default: a fight where BOTH sides would need "
+                     "more than the limit below is too slow and "
+                     "inconclusive to call a real win, and reads as no "
+                     "verdict instead. Check this to always resolve by "
+                     "hits-to-KO regardless of how long that takes.")
+            mf_max_hits = st.slider(
+                "Hits-to-KO limit for a decisive win", 1, 8, 4,
+                key="ct_mf_max_hits", disabled=mf_no_hit_limit,
+                help="\"I KO very quickly and take little damage, such as "
+                     "OHKO vs 4HKO\" -- the default (4) matches that. 1 "
+                     "restores the old OHKO-only behavior.")
             mfc1, mfc2 = st.columns(2)
             mf_resist = mfc1.multiselect(
                 "Must resist or be immune to", _mf_types, key="ct_mf_resist")
@@ -7105,7 +7120,8 @@ with tab_counter:
                     if mf_enemies:
                         from counter_finder import one_v_one_matrix_for_pool
                         matrix = one_v_one_matrix_for_pool(
-                            pool, mf_enemies, merged, moves, natures, typechart)
+                            pool, mf_enemies, merged, moves, natures, typechart,
+                            max_hits=None if mf_no_hit_limit else mf_max_hits)
                     results = []
                     for name in pool:
                         if mf_enemies and not all(

@@ -2192,6 +2192,53 @@ class TestMatchupFinderMode(unittest.TestCase):
             their_s = f"{c['their_hits_to_ko']}HKO" if c["their_hits_to_ko"] else "--"
             self.assertEqual(row["vs Incineroar"], f"{our_s} / {their_s}")
 
+    def test_max_hits_slider_narrows_results_to_strict_ohko_at_1(self):
+        """"give a reasonable limit, maybe optional" -- dragging the
+        hits-to-KO limit down to 1 restores the old strict OHKO-only
+        behavior, which can only ever show as many or fewer wins than the
+        default (4)."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(40).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        default_dfs = [d.value for d in at.dataframe
+                      if list(d.value.columns) ==
+                      ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        default_count = len(default_dfs[0])
+        at = [s for s in at.slider if s.key == "ct_mf_max_hits"][0].set_value(1).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        strict_dfs = [d.value for d in at.dataframe
+                     if list(d.value.columns) ==
+                     ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        self.assertLessEqual(len(strict_dfs[0]), default_count)
+
+    def test_no_hit_limit_checkbox_disables_the_slider_and_widens_results(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(40).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        default_dfs = [d.value for d in at.dataframe
+                      if list(d.value.columns) ==
+                      ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        default_count = len(default_dfs[0])
+        at = [c for c in at.checkbox if c.key == "ct_mf_no_hit_limit"][0].set_value(
+            True).run()
+        self.assertTrue(
+            [s for s in at.slider if s.key == "ct_mf_max_hits"][0].disabled)
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        unlimited_dfs = [d.value for d in at.dataframe
+                         if list(d.value.columns) ==
+                         ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        self.assertGreaterEqual(len(unlimited_dfs[0]), default_count)
+
     def test_individuals_results_are_sorted_most_decisive_first(self):
         """"It would be good to see the most decisive wins too, i.e., I
         KO very quickly and take little damage, such as OHKO vs 4HKO" --

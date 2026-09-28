@@ -810,7 +810,20 @@ def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
     return offense
 
 
-def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
+# "Make sure the win does not require an OHKO ... give a reasonable
+# limit, maybe optional, but still a win based on speed" -- the default
+# `max_hits` for `_one_v_one_matrix`. Matches the user's own original
+# example for what counts as a genuinely decisive read ("I KO very
+# quickly ... such as OHKO vs 4HKO"): a side that needs more than this
+# many hits either way is too slow and inconclusive an exchange to call a
+# real win (weather, chip damage, a real turn cap all interfere with a
+# fight that would genuinely take that long) -- `None` removes the cap
+# entirely and always resolves via hits-to-KO, however many hits that is.
+DEFAULT_MAX_HITS_FOR_VERDICT = 4
+
+
+def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
+                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
     """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
     enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
     calculation"), computed ONCE and reused by every candidate pair's own
@@ -828,11 +841,24 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     was never one, it just won the tiebreak below on speed), computed ONCE
     per name against the WHOLE combined pool+enemy universe in a single
     call (not once per opposing name), matching `optimize_sets.py`'s own
-    "1v1 damage calculations, not full battles" cost model. Whichever
-    side's best hit clears 100% of the other's max HP wins; if both do,
-    real base Speed (deliberately no item/ability/weather speed modifiers
-    -- this stays a SIMPLE screening pass, not a re-run of `_joint_race`)
-    breaks the tie; if neither does, "no_ko".
+    "1v1 damage calculations, not full battles" cost model.
+
+    `max_hits`: "only an OHKO counts" was too strict a bar -- most real
+    answers to a bulky threat 2HKO or 3HKO it rather than OHKOing outright,
+    and used to fall into "no_ko" (reported: "only 20/153 beating
+    Incineroar, but Dragonite should be able to"). Generalizes the old
+    OHKO-only rule, which is just this same comparison at `max_hits=1`:
+    whichever side needs FEWER hits to KO the other wins outright (exactly
+    right for the actual turn-by-turn exchange -- the side that finishes
+    first, first, wins, regardless of who's faster, UNLESS both sides
+    would finish on the same hit count, the one case speed actually
+    decides: real base Speed, deliberately no item/ability/weather speed
+    modifiers -- this stays a SIMPLE screening pass, not a re-run of
+    `_joint_race`); "no_ko" only when NEITHER side reaches a real verdict
+    -- neither can ever KO the other at all, or both would take longer
+    than `max_hits` (a side the OTHER side can never KO at all always
+    wins/loses outright regardless of `max_hits` -- there's no time
+    pressure to weigh against an opponent who can never finish the job).
 
     A pool member is never matched against an identical enemy entry of the
     same name (a literal self-mirror isn't a meaningful "does my own team
@@ -840,20 +866,31 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     """
     offense = _one_v_one_offense(list(pool) + list(enemy_names), merged,
                                  moves_db, natures, typechart)
+
+    def hits(frac):
+        return math.ceil(1.0 / frac) if frac > 0 else None
+
     matrix = {}
     for name in pool:
         matrix[name] = {}
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            my_ohko = offense[name][enemy_name] >= 1.0
-            their_ohko = offense[enemy_name][name] >= 1.0
-            if my_ohko and not their_ohko:
-                outcome = "win"
-            elif their_ohko and not my_ohko:
-                outcome = "loss"
-            elif not my_ohko and not their_ohko:
+            my_hits = hits(offense[name][enemy_name])
+            their_hits = hits(offense[enemy_name][name])
+            if my_hits is None and their_hits is None:
                 outcome = "no_ko"
+            elif my_hits is None:
+                outcome = "loss"
+            elif their_hits is None:
+                outcome = "win"
+            elif (max_hits is not None
+                  and my_hits > max_hits and their_hits > max_hits):
+                outcome = "no_ko"
+            elif my_hits < their_hits:
+                outcome = "win"
+            elif their_hits < my_hits:
+                outcome = "loss"
             else:
                 my_spe = merged[name]["base_stats"]["spe"]
                 their_spe = merged[enemy_name]["base_stats"]["spe"]
@@ -862,15 +899,17 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
     return matrix
 
 
-def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart):
+def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart,
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
     """Single-pair convenience wrapper around `_one_v_one_matrix` (same
     logic, no batching) -- for an ad-hoc "does X beat Y" query rather than
     a whole pool's worth."""
     return _one_v_one_matrix([name], [enemy_name], merged, moves_db,
-                             natures, typechart)[name][enemy_name]
+                             natures, typechart, max_hits=max_hits)[name][enemy_name]
 
 
-def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart):
+def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
+                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
     """Public entry point onto `_one_v_one_matrix` -- for a caller outside
     this module (the Streamlit app) wanting to build the SAME cheap 1v1
     read `find_pair_cores`'s own `threat_coverage` already uses, to hand
@@ -879,8 +918,13 @@ def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, type
     Building it once here (rather than `coverage_group_search` building
     its own) means the SAME matrix backs both the pair-level and group-
     level readings -- they can never quietly disagree on what "beats"
-    means for the same pool/enemy universe."""
-    return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
+    means for the same pool/enemy universe.
+
+    `max_hits`: see `_one_v_one_matrix`'s own docstring -- defaults to the
+    same reasonable, non-OHKO-only cap every other caller in this module
+    uses."""
+    return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
+                             max_hits=max_hits)
 
 
 def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart):
@@ -6171,11 +6215,28 @@ def _pair_sort_key(row):
     loss is a more concrete, binary risk than an average-case quality
     difference). Tailwind-safe count is the fourth criterion, and
     follow_me-safe count (beating a real Follow Me/Rage Powder redirector,
-    same always-on treatment as tailwind-safe) is the fifth and final one.
+    same always-on treatment as tailwind-safe) is the fifth.
+
+    SIXTH, and final: the row's own name, alphabetical -- `row["pair"]`
+    for `joint_pool_search`/`bring4_search`'s own two-searched-slots rows,
+    `row["name"]` for `joint_pair_search`'s own one-fixed-partner rows (no
+    "pair" key at all, the partner is fixed outside the row). A genuine
+    5-way tie on every criterion above used to fall back on `sorted`'s own
+    stability -- whatever order the row happened to occupy in its own
+    input list -- which is NOT guaranteed to match between a serial run
+    and a `--jobs`-parallel one (each worker process builds its own
+    `pool`/candidate ordering independently); concretely reported as
+    `--jobs 2` printing a genuinely different "top pairs" list than the
+    same search run serially, on a fixture where several pairs score
+    identically. Sorting by name last makes the full ordering a pure
+    function of each row's OWN content, not of which process (or which
+    order) computed it.
     """
+    identity = (tuple(sorted(row["pair"])) if "pair" in row
+               else (row["name"],) if "name" in row else ())
     return (-row["pairs_protect_safe"], -(row["pairs_swept"] + row["pairs_traded"]),
            -row["pairs_clean_win_total"], -row["pairs_tailwind_safe"],
-           -row["pairs_follow_me_safe"])
+           -row["pairs_follow_me_safe"], identity)
 
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
@@ -6484,8 +6545,11 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
         }
 
     def _worst_case_key(b):
+        # Trailing bring4-name tiebreak, same reasoning as `_total_wins_
+        # key`'s own -- two different bring-4s can still tie on all three
+        # criteria above (e.g. sharing the same worst pair).
         return (len(b["uncovered_enemy_pairs"]), _pair_sort_key(b["worst_pair_row"]),
-                -b["pairs_good"])
+                -b["pairs_good"], tuple(sorted(b["bring4"])))
 
     def _total_wins_key(b):
         # "Maybe the maximin vs max win bring should at least try to make
@@ -6503,7 +6567,15 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
         # best first" convention `_worst_case_key`/`min`/`sort` already use
         # still applies -- `bring4_blended_score` itself is "higher is
         # better."
-        return (len(b["uncovered_enemy_pairs"]), -bring4_blended_score(b))
+        # Final tiebreak, same reasoning as `_pair_sort_key`'s own trailing
+        # pair-name criterion: a genuine tie on both criteria above used to
+        # fall back on `bring4_rows`' own pre-sort list order, not
+        # guaranteed stable across a fresh `merged` dict instance/process
+        # (concretely reported: `--bring4`'s own "top 1" pick, and
+        # therefore its xlsx "Avg Wins/90" cell, varying run to run on an
+        # otherwise-identical search).
+        return (len(b["uncovered_enemy_pairs"]), -bring4_blended_score(b),
+               tuple(sorted(b["bring4"])))
 
     _rank_key = _total_wins_key if rank_by == "total_wins" else _worst_case_key
 
@@ -7892,15 +7964,22 @@ def _pair_coverage_rank_key(pair_key, pair_by_key):
     named-enemy universe rather than just one team, for ranking which
     pairs are worth exporting/importing. A pair absent from every enemy's
     table (never actually raced -- shouldn't happen for a real `pair_by_key`,
-    but keeps this total rather than raising) ranks last."""
+    but keeps this total rather than raising) ranks last. A final, fully
+    deterministic tiebreak (the pair's own name, alphabetical) closes the
+    same gap `_pair_sort_key` had: `top_coverage_pairs`' own `keys` is
+    built from a `set` of `frozenset`s, whose iteration order is NOT
+    guaranteed stable across processes -- without an explicit tiebreak here,
+    a genuine tie on every summed criterion above fell back to that
+    unstable set order."""
     rows = [pbk[pair_key] for pbk in pair_by_key if pair_key in pbk]
     if not rows:
-        return (0, 0, 0.0, 0)
+        return (0, 0, 0.0, 0, tuple(sorted(pair_key)))
     return (
         -sum(r["pairs_protect_safe"] for r in rows),
         -sum(r["pairs_swept"] + r["pairs_traded"] for r in rows),
         -sum(r["pairs_clean_win_total"] for r in rows),
         -sum(r["pairs_tailwind_safe"] for r in rows),
+        tuple(sorted(pair_key)),
     )
 
 

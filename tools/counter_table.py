@@ -3484,6 +3484,20 @@ def main():
 
     from _harness import load_world
     from lead_sim import BANNED_ITEMS
+    # Combatants are memoised by name inside combatants.py, keyed only by
+    # (name, force_base_form) -- nothing ties a cached template to which
+    # `merged` dict instance built it. `_harness.load_world()`'s own
+    # dataset cache (`_dataset_only`) returns a FRESH, separately-unpickled
+    # `merged` object on every call -- harmless on its own (same content),
+    # but a CLI process that calls `main()` more than once (as this
+    # module's own test suite does, one `run_main()` per test, all sharing
+    # one Python process) can otherwise leave a stale-context template
+    # cached from an earlier run's own search reused for a totally
+    # unrelated later one. Same defensive clear `app.py`'s own `load_all`
+    # already does for the same documented reason ("freshly-parsed EVs
+    # would still build stale Pokemon" otherwise).
+    import combatants
+    combatants._TEMPLATE_CACHE.clear()
     W = load_world()
     merged, moves, natures, typechart = (W["merged"], W["moves"], W["natures"],
                                          W["typechart"])
