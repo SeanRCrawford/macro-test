@@ -3574,6 +3574,11 @@ def main():
     banned = [i for i in (item_overrides or {}).values() if i in BANNED_ITEMS]
     if banned:
         raise SystemExit(f"--item: not legal in Regulation MB: {', '.join(banned)}")
+    from optimize_sets import BANNED_MOVES
+    banned_moves = [m for mvs in (move_overrides or {}).values() for m in mvs
+                    if m in BANNED_MOVES]
+    if banned_moves:
+        raise SystemExit(f"--moves: banned move: {', '.join(sorted(set(banned_moves)))}")
     overridden = set(item_overrides or {}) | set(move_overrides or {})
     unknown = [n for n in overridden if n not in merged]
     if unknown:

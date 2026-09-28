@@ -17,16 +17,62 @@ the whole pool. It is a coverage heuristic, not a battle result: it knows
 "this move hits that threat hard" but not "I'd be dead before I used it".
 Treat it as set selection, then let the real solver judge the team.
 """
+import copy
 import itertools
 
 from damage import MoveInfo, effective_stat, damage_roll, hit_count_for, move_from_showdown
 from combatants import make_combatant
+
+
+def _mega_project(c):
+    """`c` as it actually appears once mega-evolved, if it is a Mega pick.
+
+    `make_combatant` always returns a Mega pick in its BASE form -- correct
+    for the real turn-based engine, which waits for an actual send-out
+    event before transforming it (see `engine.mega_evolve`), but this
+    module has no send-out event to wait for: asking "how hard does Mega
+    Raichu Y hit" or "how much does it take" means asking about the MEGA
+    form, not the base Raichu it starts as. Applied unconditionally, same
+    reasoning as `counter_finder._mega_project` (duplicated here rather
+    than imported -- `counter_finder` already imports from this module, so
+    importing back would cycle).
+
+    Concretely, this is why `raw_ohko_fraction_table` -- and therefore the
+    Matchup Finder's whole 1v1 read -- was scoring every Mega pick off its
+    pre-evolution stats/typing on BOTH sides of the matchup (weaker attacks
+    out, and the wrong bulk/typing on defense): reported as "only 20/153
+    beating Incineroar, but Mega Dragonite should" and "Sylveon 4HKO by
+    Mega Raichu Y's 120 BP STAB seems low" -- Mega Raichu Y's own 160 base
+    Special Attack (vs. un-evolved Raichu's much lower one) was never being
+    applied.
+    """
+    if not getattr(c, "is_mega_pick", False) or not c.mega_stats:
+        return c
+    view = copy.copy(c)
+    view.stats = dict(c.mega_stats)
+    view.types = list(c.mega_types) if c.mega_types else c.types
+    if c.mega_ability:
+        view.ability = c.mega_ability
+    if c.mega_weight_kg is not None:
+        view.weight_kg = c.mega_weight_kg
+    view.mega_evolved = True
+    return view
 
 # NOTE: there is deliberately no hardcoded catalogue of "good items" here.
 # Items are restricted to those that actually appear in that Pokemon's Items
 # column in mbsmogon.xlsx -- inventing plausible-sounding items (a Choice Band
 # on something that never runs one) produces sets you cannot actually field.
 MIN_ITEM_USAGE = 0.0   # keep every listed item; raise to prune very rare ones
+
+# "I want to ban explosion from the movepool, it is too strong" -- Explosion
+# (and its exact mechanical twin, Self-Destruct) faints the USER outright,
+# something neither this cheap model nor the real engine simulates at all
+# (there is no "user faints after this hit" field on `MoveInfo` the way
+# `has_crash`/`recoil` exist for OTHER self-cost moves) -- so a search that
+# cannot see that cost scores its raw damage as if it were free, the same
+# "can't model the downside, so don't offer it" reasoning `candidate_moves`
+# already applies to High Jump Kick's crash risk.
+BANNED_MOVES = frozenset({"Explosion", "Self-Destruct"})
 
 # --- Doubles utility values -------------------------------------------------
 # These are on the same scale as the offensive score: "portion of one enemy's
@@ -273,6 +319,8 @@ def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None
         # `_accuracy_ok` already applies to a shaky <80%-accuracy move.
         if mi.has_crash:
             continue
+        if mi.name in BANNED_MOVES:
+            continue
         out.append((mi, pct))
     return out[:max_candidates]
 
@@ -360,8 +408,13 @@ def raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, enemy_na
     able to OHKO it" (Excadrill's own real Ground/Steel-boosted Earthquake-
     family hit WAS a genuine OHKO on the Electric-type Raichu -- Raichu's
     own Fake Out was never a real answer to it, just an inflated score that
-    won the same-turn speed tiebreak)."""
-    attacker = make_combatant(name, merged, natures, item=item)
+    won the same-turn speed tiebreak).
+
+    Both `attacker` and each `defender` are `_mega_project`-ed: a Mega pick
+    is scored in its actual mega form on both sides of the matchup, not the
+    base form `make_combatant` starts it in (see `_mega_project`'s own
+    docstring)."""
+    attacker = _mega_project(make_combatant(name, merged, natures, item=item))
     table = {}
     for move, _pct in candidate_moves(name, merged, moves_db, item=item):
         if move.category == "Status":
@@ -375,7 +428,7 @@ def raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, enemy_na
             a *= 1.5
         row = {}
         for en in enemy_names:
-            defender = make_combatant(en, merged, natures)
+            defender = _mega_project(make_combatant(en, merged, natures))
             d = effective_stat(defender.stats[def_key], 0)
             _, _, avg, _eff = damage_roll(50, move.power, a, d, attacker, defender, move, typechart)
             avg *= hit_count_for(move.name, attacker)

@@ -36,6 +36,7 @@ from damage import (Combatant, MoveInfo, is_spread_move, effective_stat, damage_
 from engine import FieldState, Action, on_switch_in, effective_speed
 from battle import Battle, Side, PROTECT_MOVES, CHOICE_ITEMS, priority_blocked_by_side
 from projection import mega_view, projected_field
+from optimize_sets import BANNED_MOVES
 
 TOP_K_MOVES = 4   # real sets run 4 moves; 3 systematically under-armed the AI
 FIRST_TURN_ONLY_MOVES = {"Fake Out", "First Impression"}
@@ -68,6 +69,8 @@ def build_moveset(pokemon_record: dict, moves_db: dict, top_k: int = TOP_K_MOVES
             continue
         mi = move_from_showdown(moves_db[key])
         if mi.has_crash:
+            continue
+        if mi.name in BANNED_MOVES:
             continue
         out.append((mi, pct))
     if only_moves:

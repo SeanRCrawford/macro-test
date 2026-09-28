@@ -11320,6 +11320,37 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
         self.assertIn("Fake Out", raw)
         self.assertLess(raw["Fake Out"]["Excadrill"], 0.3)
 
+    def test_raw_ohko_fraction_table_uses_the_attackers_mega_stats(self):
+        """"Sylveon being 4HKO by Mega Raichu Y seems off, given Mega
+        Raichu Y uses a 120bp STAB move" -- `make_combatant` always starts
+        a Mega pick in BASE form (correct for the real engine, which waits
+        for an actual send-out event -- see `combatants.py`); this cheap
+        1v1 table has no such event and must treat a Mega pick as already
+        evolved on offense, same as `counter_finder._mega_project` already
+        does elsewhere. Mega Raichu Y's real 160 base Special Attack (vs.
+        un-evolved Raichu's far lower one) must be what scores Zap Cannon
+        -- a false "4HKO" (~32% avg) instead of the real "2HKO" (~51% avg)
+        if this regresses back to base-form stats."""
+        from optimize_sets import raw_ohko_fraction_table
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        table = raw_ohko_fraction_table(
+            "Mega Raichu Y", self.merged, moves, natures, typechart, ["Sylveon"])
+        self.assertGreater(table["Zap Cannon"]["Sylveon"], 0.45)
+
+    def test_raw_ohko_fraction_table_uses_the_defenders_mega_stats(self):
+        """Same gap, defensive side: a Mega pick named as the DEFENDER must
+        be read off its own (mega) bulk, not the base form's. Mega
+        Dragonite's real 115/125 Def/SpD is bulkier than base Dragonite's
+        95/100, so the exact same incoming hit must do LESS to the Mega
+        form."""
+        from optimize_sets import raw_ohko_fraction_table
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        table = raw_ohko_fraction_table(
+            "Incineroar", self.merged, moves, natures, typechart,
+            ["Mega Dragonite", "Dragonite"])
+        self.assertLess(table["Darkest Lariat"]["Mega Dragonite"],
+                        table["Darkest Lariat"]["Dragonite"])
+
     def test_pair_threat_coverage_counts_correctly_on_a_synthetic_matrix(self):
         """Exercises the pure counting logic directly, independent of real
         damage calc, so the coverage arithmetic itself is pinned exactly."""

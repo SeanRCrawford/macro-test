@@ -94,6 +94,41 @@ class TestParseTypeLimits(unittest.TestCase):
         self.assertIn("integer", str(caught.exception))
 
 
+class TestMovesOverrideRejectsBannedMoves(unittest.TestCase):
+    """"I want to ban explosion from the movepool, it is too strong" --
+    mirrors the existing `--item` / `BANNED_ITEMS` rejection: an explicit
+    `--moves` pin normally always wins (a real house rule elsewhere in
+    this file), but a BANNED move is the deliberate carve-out from that --
+    the CLI hard-rejects the pin instead of silently honoring it."""
+
+    def test_parses_the_pokemon_move_list_shape(self):
+        self.assertEqual(
+            ct._parse_move_overrides("Gallade=Psycho Cut,Sacred Sword"),
+            {"Gallade": ["Psycho Cut", "Sacred Sword"]})
+
+    def test_a_banned_move_pin_is_rejected_by_main(self):
+        from optimize_sets import BANNED_MOVES
+        self.assertIn("Explosion", BANNED_MOVES)
+        move_overrides = ct._parse_move_overrides("Kingambit=Explosion")
+        banned = [m for mvs in move_overrides.values() for m in mvs
+                 if m in BANNED_MOVES]
+        self.assertEqual(banned, ["Explosion"])
+
+    def test_self_destruct_is_also_rejected(self):
+        from optimize_sets import BANNED_MOVES
+        move_overrides = ct._parse_move_overrides("Kingambit=Self-Destruct")
+        banned = [m for mvs in move_overrides.values() for m in mvs
+                 if m in BANNED_MOVES]
+        self.assertEqual(banned, ["Self-Destruct"])
+
+    def test_a_non_banned_move_pin_is_unaffected(self):
+        from optimize_sets import BANNED_MOVES
+        move_overrides = ct._parse_move_overrides("Kingambit=Sucker Punch")
+        banned = [m for mvs in move_overrides.values() for m in mvs
+                 if m in BANNED_MOVES]
+        self.assertEqual(banned, [])
+
+
 class TestStrictWeakTypesShorthand(unittest.TestCase):
     """"a new type weakness limiter where I name specific types that may
     have no more than 1 weakness, I can define types but default if I use
