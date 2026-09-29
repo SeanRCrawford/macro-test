@@ -7078,20 +7078,53 @@ with tab_counter:
             help="Forced into the search pool even if their own roster.csv "
                  "Score wouldn't otherwise earn them a spot.")
 
+        def _mf_enemy_team_loader(prefix, target_key):
+            """"Let me load an enemy team as the enemy list" -- a saved-team
+            picker whose Load button replaces `target_key`'s multiselect
+            with that team's roster (names not in this dataset dropped)."""
+            lc1, lc2 = st.columns([4, 1])
+            lc1.selectbox("Load an enemy team into the list below",
+                          [""] + sorted(teams), key=f"{prefix}_team",
+                          format_func=lambda t: t or "(pick a saved team)")
+
+            def _load():
+                picked = st.session_state.get(f"{prefix}_team")
+                if picked:
+                    st.session_state[target_key] = [
+                        n for n in teams[picked] if n in all_names]
+            lc2.button("Load", key=f"{prefix}_team_go", on_click=_load,
+                       width='stretch')
+
         if mf_kind == "Individuals (1v1)":
             mf_pool_size = st.slider(
                 "Search pool size (top-Score Pokemon)", 10, 300, 60,
                 key="ct_mf_pool_ind",
                 help="The 1v1 read is cheap (O(pool), no real combat), so "
                      "this stays fast even at the top of the range.")
+            _mf_enemy_team_loader("ct_mf_ind", "ct_mf_enemies")
             mf_enemies = st.multiselect(
-                "Must beat ALL of these 1v1", all_names, key="ct_mf_enemies",
+                "Enemies to beat 1v1 (all of them unless you allow misses below)",
+                all_names, key="ct_mf_enemies",
                 help="A cheap 1v1 read (not a full battle), the same one "
                      "Coverage Groups' own 1v1 threat coverage already "
                      "uses -- whichever side needs FEWER hits to KO the "
                      "other wins outright (an OHKO is no longer required); "
                      "real Speed breaks a tie where both sides would "
                      "finish on the same hit.")
+            mfm1, mfm2 = st.columns(2)
+            mf_match_mode = mfm1.radio(
+                "Enemies beaten", ["At least", "Only (exactly)"],
+                key="ct_mf_match_mode", horizontal=True,
+                help="\"Many lists of enemies won't be fully beatable\" -- "
+                     "with N misses allowed, 'At least' keeps anyone who "
+                     "beats n-N or more of the named enemies; 'Only "
+                     "(exactly)' keeps just those who beat exactly n-N.")
+            mf_misses = int(mfm2.number_input(
+                "Enemies allowed to go unbeaten (N -> beat n-N)", min_value=0,
+                max_value=20, value=0, step=1, key="ct_mf_misses",
+                help="0 = must beat every named enemy. 1 = n-1, 2 = n-2, "
+                     "... An enemy that is itself a pool member is not "
+                     "counted against that member."))
             mf_no_hit_limit = st.checkbox(
                 "No hits-to-KO limit (always call a winner)", key="ct_mf_no_hit_limit",
                 help="Off by default: a fight where BOTH sides would need "
@@ -7137,9 +7170,14 @@ with tab_counter:
                             max_hits=None if mf_no_hit_limit else mf_max_hits)
                     results = []
                     for name in pool:
-                        if mf_enemies and not all(
-                                matrix.get(name, {}).get(e) == "win" for e in mf_enemies):
-                            continue
+                        if mf_enemies:
+                            opp = [e for e in mf_enemies if e != name]
+                            beaten = sum(matrix.get(name, {}).get(e) == "win"
+                                         for e in opp)
+                            required = max(0, len(opp) - mf_misses)
+                            if (beaten < required if mf_match_mode == "At least"
+                                    else beaten != required):
+                                continue
                         if mf_resist and not all(
                                 type_matchup(name, merged, t) in ("resist", "immune")
                                 for t in mf_resist):
@@ -7174,26 +7212,41 @@ with tab_counter:
                            "pool, drop a named enemy, or relax a type filter.")
                 else:
                     st.caption(f"{len(mf_results)} match(es)."
-                              + (" Sorted most decisive first (fastest KO, "
-                                 "least damage taken, worst case across the "
-                                 "named enemies)." if mf_shown_enemies else ""))
+                              + (" Sorted by enemies beaten, then most decisive "
+                                 "(fastest KO, least damage taken, worst case "
+                                 "across the enemies beaten)."
+                                 if mf_shown_enemies else ""))
+                    def _beaten_by(name):
+                        counts = mf_hit_counts.get(name, {})
+                        return [e for e in mf_shown_enemies
+                                if counts.get(e, {}).get("verdict") == "win"]
+
                     def _decisiveness(name):
-                        # WORST-CASE across the named enemies -- a name
+                        # WORST-CASE across the BEATEN enemies -- a name
                         # that's a clean OHKO vs one enemy but only a
                         # scrappy 3HKO/3HKO vs another is ranked by that
                         # weaker link, not flattered by its best matchup.
                         counts = mf_hit_counts.get(name, {})
-                        return min(
-                            (counts[e]["their_hits_to_ko"] or 99)
-                            - (counts[e]["our_hits_to_ko"] or 99)
-                            for e in mf_shown_enemies) if mf_shown_enemies else 0
-                    sort_key = ((lambda n: (-_decisiveness(n), -(merged[n].get("score") or 0)))
+                        beaten = _beaten_by(name)
+                        return min((counts[e]["their_hits_to_ko"] or 99)
+                                   - (counts[e]["our_hits_to_ko"] or 99)
+                                   for e in beaten) if beaten else 0
+                    sort_key = ((lambda n: (-len(_beaten_by(n)), -_decisiveness(n),
+                                            -(merged[n].get("score") or 0)))
                                if mf_shown_enemies else
                                (lambda n: -(merged[n].get("score") or 0)))
+                    partial = bool(mf_shown_enemies) and any(
+                        len(_beaten_by(n)) < len([e for e in mf_shown_enemies if e != n])
+                        for n in mf_results)
                     rows = []
                     for name in sorted(mf_results, key=sort_key):
                         row = {"Pokemon": name, "Score": merged[name].get("score"),
                               "Types": "/".join(merged[name].get("types") or [])}
+                        if partial:
+                            opp = [e for e in mf_shown_enemies if e != name]
+                            won = _beaten_by(name)
+                            row["Beats"] = f"{len(won)}/{len(opp)}"
+                            row["Not beaten"] = ", ".join(e for e in opp if e not in won) or "--"
                         for e in mf_shown_enemies:
                             c = mf_hit_counts.get(name, {}).get(e, {})
                             our_h, their_h = c.get("our_hits_to_ko"), c.get("their_hits_to_ko")
@@ -7248,6 +7301,7 @@ with tab_counter:
                      "minutes.")
             st.caption(f"~{mf_pool_size * (mf_pool_size - 1) // 2} pairs to "
                       f"race at this pool size.")
+            _mf_enemy_team_loader("ct_mf_pair", "ct_mf_enemy_pair")
             mf_enemy_pair = st.multiselect(
                 "Enemy pair(s) to beat", all_names, key="ct_mf_enemy_pair",
                 help="2 or more -- races every pair drawn from the pool "
@@ -7271,6 +7325,22 @@ with tab_counter:
             mf_only_wins = st.checkbox(
                 "Only show pairs that actually win", value=True,
                 key="ct_mf_only_wins")
+            mf_pair_partial = st.checkbox(
+                "Only show pairs that beat all but N of the enemy pairs",
+                key="ct_mf_pair_partial",
+                help="\"Many lists of enemies won't be fully beatable\" -- "
+                     "filters the already-raced results by how many enemy "
+                     "pairs each of your pairs beats (sweep or out-trade), "
+                     "out of every enemy pair the named list forms.")
+            mfp1, mfp2 = st.columns(2)
+            mf_pair_mode = mfp1.radio(
+                "Enemy pairs beaten", ["At least", "Only (exactly)"],
+                key="ct_mf_pair_match_mode", horizontal=True,
+                disabled=not mf_pair_partial)
+            mf_pair_misses = int(mfp2.number_input(
+                "Enemy pairs allowed to go unbeaten (N -> beat n-N)",
+                min_value=0, max_value=200, value=0, step=1,
+                key="ct_mf_pair_misses", disabled=not mf_pair_partial))
             if len(mf_enemy_pair) < 2:
                 st.caption("Pick at least 2 enemies to form the pair(s) to beat.")
             elif st.button("Search pairs", type="primary", key="ct_mf_pair_go"):
@@ -7312,6 +7382,13 @@ with tab_counter:
                 shown = ([r for r in mf_rows
                          if r["pairs_swept"] + r["pairs_traded"] >= 1]
                         if mf_only_wins else mf_rows)
+                if mf_pair_partial:
+                    def _pair_ok(r):
+                        beaten = r["pairs_swept"] + r["pairs_traded"]
+                        required = max(0, r["pairs_total"] - mf_pair_misses)
+                        return (beaten >= required if mf_pair_mode == "At least"
+                                else beaten == required)
+                    shown = [r for r in shown if _pair_ok(r)]
                 if not shown:
                     st.info("No pair passed every filter -- widen the pool, "
                            "relax the type filters, or uncheck 'only show "
