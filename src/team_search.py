@@ -109,7 +109,13 @@ def build_candidate_pool(merged, top_n=40, prefs=None, min_non_mega_frac=0.6,
 
     scored = [(n, r["score"]) for n, r in merged.items()
               if n not in excluded and r.get("score") is not None]
-    scored.sort(key=lambda x: -x[1])
+    # Name as a final tiebreak: two Score ties used to fall back on
+    # `merged.items()`'s own iteration order, not guaranteed identical
+    # across separately-loaded `merged` dict instances (a fresh process,
+    # or a fresh `load_world()` call within one) -- concretely, which
+    # exact member lands on the top-N cutoff at a tiny --pool-size could
+    # vary run to run for an otherwise-identical command.
+    scored.sort(key=lambda x: (-x[1], x[0]))
 
     non_mega = [n for n, _ in scored if not n.startswith("Mega ")]
     megas = [n for n, _ in scored if n.startswith("Mega ")]

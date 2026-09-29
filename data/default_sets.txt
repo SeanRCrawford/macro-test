@@ -189,3 +189,13 @@ Timid Nature
 - Focus Blast
 - Fake Out
 - Protect
+
+Garchomp @ Garchompite Z
+Ability: Rough Skin
+Level: 50
+EVs: 32 SpA / 2 HP / 32 Spe
+Modest Nature
+- Dragon Pulse
+- Flamethrower
+- Power Gem
+- Protect

@@ -34,7 +34,7 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = app()
         self.assertFalse(at.exception, list(at.exception))
 
-    def test_the_nine_modes_are_offered(self):
+    def test_the_ten_modes_are_offered(self):
         at = app()
         radios = [r for r in at.radio if r.key == "ct_mode"]
         self.assertEqual(len(radios), 1)
@@ -47,7 +47,8 @@ class TestCounterTableTabExists(unittest.TestCase):
                           "2-2-2 teambuilding",
                           "Coverage groups",
                           "Import pair coverage",
-                          "Round-robin (saved teams only)"})
+                          "Round-robin (saved teams only)",
+                          "Matchup finder"})
 
     def test_switching_to_multi_bring4_mode_renders_its_controls(self):
         at = app()
@@ -108,6 +109,56 @@ class TestCounterTableTabExists(unittest.TestCase):
         [r for r in at.radio if r.key == "ct_mode"][0].set_value(
             "Import pair coverage").run()
         self.assertFalse(at.exception, list(at.exception))
+
+    def test_min_offensive_types_and_threat_controls_wire_through(self):
+        """"using the same constraints as the coverage groups" -- Import
+        pair coverage's own filter controls only render once pair_rows are
+        in session state (the file uploader can't be driven via AppTest),
+        so this seeds them directly with a real --pairs-only export, same
+        as a genuine upload would produce."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        import counter_finder as cf
+        import counter_table as ct
+        import tempfile
+        W = load_world()
+        merged, moves = W["merged"], W["moves"]
+        natures, typechart = W["natures"], W["typechart"]
+        pool = ["Garchomp", "Incineroar", "Gallade", "Hydreigon",
+               "Whimsicott", "Mega Alakazam"]
+        vs_teams = [["Kingambit", "Basculegion"]]
+        coverage = cf.multi_bring4_coverage(
+            pool, vs_teams, merged, moves, natures, typechart,
+            good_threshold=0.0, min_enemies=0)
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            ct._write_pairs_only_xlsx(path, coverage, vs_teams, 15)
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        from app import _parse_pair_coverage_xlsx
+        pair_rows, detail_rows, target_name_lists = _parse_pair_coverage_xlsx(file_bytes)
+        self.assertTrue(pair_rows)
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Import pair coverage").run()
+        at.session_state["ct_pc_pair_rows"] = pair_rows
+        at.session_state["ct_pc_detail_rows"] = detail_rows
+        at.session_state["ct_pc_target_name_lists"] = target_name_lists
+        at.run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(c.key == "ct_pc_min_off_on" for c in at.checkbox))
+        self.assertTrue(any(c.key == "ct_pc_threat_on" for c in at.checkbox))
+        [c for c in at.checkbox if c.key == "ct_pc_threat_on"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(s.key == "ct_pc_min_threat_answers" for s in at.slider))
+        at = [b for b in at.button if b.key == "ct_pc_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertIn("ct_pc_results_by_size", at.session_state)
 
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the
@@ -202,6 +253,29 @@ class TestCounterTableTabExists(unittest.TestCase):
         results = at.session_state["ct_cov_results"]
         for row in results[3]["rows"]:
             self.assertEqual(row["threat_coverage"]["uncovered"], [])
+
+    def test_min_threat_answers_slider_raises_the_covered_bar(self):
+        """"it would also be good to filter for having multiple 1v1
+        answers to each enemy, ideally at least two" -- raising "Minimum
+        1v1 answers per enemy" to 2 and capping "Max enemies short of
+        that" at 0 must return only groups where every named enemy has at
+        least 2 independent 1v1 answers, not just one."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Coverage groups").run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        [s for s in at.slider if s.key == "ct_cov_min_threat_answers"][0].set_value(2).run()
+        [c for c in at.checkbox if c.key == "ct_cov_max_uncov_on"][0].set_value(True).run()
+        at = [s for s in at.slider if s.key == "ct_cov_max_uncov"][0].set_value(0).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        results = at.session_state["ct_cov_results"]
+        for row in results[4]["rows"]:
+            tc = row["threat_coverage"]
+            self.assertEqual(tc["uncovered"], [])
+            for count in tc["answer_counts"].values():
+                self.assertGreaterEqual(count, 2)
 
     def test_suggested_pokemon_controls_render_and_apply_quorum(self):
         """"Give a 'suggested' list as well, of which at least 3 (or n,
@@ -867,6 +941,51 @@ class TestBring4ModeRunsEndToEnd(unittest.TestCase):
         # Stage 1 (15 pairs) and Stage 2 (15 bring-4s) tables, at minimum.
         shapes = [d.value.shape[0] for d in dfs]
         self.assertIn(15, shapes, "expected a 15-row Stage 1 or Stage 2 table")
+
+    def test_damage_calc_for_a_chosen_pair_renders_a_real_2x2_grid(self):
+        """"I want a section to look at damage calcs vs selected enemy
+        pair" -- the new damage-calc lookup, defaulting to the first 2 of
+        our 6 vs the first 2 of the enemy roster, produces the full 2x2
+        grid (every attacker vs every defender), not just a played-out
+        turn log."""
+        at = app()
+        at = [b for b in at.button if b.key == "ct_b4_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        our_pair_ms = [m for m in at.multiselect if m.key == "ct_b4_dmgcalc_our_pair"][0]
+        enemy_pair_ms = [m for m in at.multiselect
+                        if m.key == "ct_b4_dmgcalc_enemy_pair"][0]
+        self.assertEqual(len(our_pair_ms.value), 2)
+        self.assertEqual(len(enemy_pair_ms.value), 2)
+        at = [b for b in at.button if b.key == "ct_b4_dmgcalc_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        markdowns = [m.value for m in at.markdown]
+        self.assertTrue(any("Damage we deal" in m for m in markdowns))
+        self.assertTrue(any("Damage we take" in m for m in markdowns))
+        our1, our2 = our_pair_ms.value
+        e1, e2 = enemy_pair_ms.value
+        # A robust check that doesn't depend on lining up markdown/
+        # dataframe indices across the whole page: exactly 2 dataframes
+        # among everything rendered carry the "Attacker"/"Target"/"Move"/
+        # "Damage (worst-avg-best)" columns this section's own
+        # `_damage_hits_df` always produces (the "we deal"/"we take" pair).
+        grid_dfs = [d.value for d in at.dataframe
+                   if list(d.value.columns) ==
+                   ["Attacker", "Target", "Move", "Damage (worst-avg-best)"]]
+        self.assertEqual(len(grid_dfs), 2, "expected exactly the 'we deal'/"
+                         "'we take' grid tables")
+        for df in grid_dfs:
+            # "in the damage calc I need to see all moves" -- every
+            # candidate move per cell, not just one row per attacker/
+            # defender pair, so the row count is >= 4 (2 attackers x 2
+            # defenders), never fewer, and can run higher when a member
+            # has more than one usable damaging move against a given
+            # target.
+            self.assertGreaterEqual(len(df), 4)
+            attackers = set(df["Attacker"])
+            self.assertTrue(attackers <= {our1, our2, e1, e2})
+            cells = set(zip(df["Attacker"], df["Target"]))
+            self.assertEqual(len(cells), 4, "expected exactly the 4 "
+                             "attacker/defender cells of a 2x2 grid")
 
     def test_a_team_of_three_is_accepted_not_warned_about(self):
         """"I would like to output the best 3-pokemon cores against each
@@ -1964,12 +2083,15 @@ class TestRoundRobinMode(unittest.TestCase):
         self.assertTrue(any(m.key == "ct_rr_teams" for m in at.multiselect))
         self.assertTrue(any(b.key == "ct_rr_go" for b in at.button))
 
-    def test_running_it_on_two_teams_renders_all_five_matchups(self):
+    def test_running_it_on_two_teams_renders_all_six_matchups(self):
         """Two teams: the mirrors A-A/B-B (one direction each), the non-
         mirror pair raced BOTH directions (A-B and B-A -- "race both
         directions" so every team's own summary reflects its own real
         performance), plus the "best4 vs best4" head-to-head layer for
-        that same non-mirror pair, rendered in its own section below."""
+        that same non-mirror pair, ALSO raced both directions ("matches
+        still systematically favour side A, without representing a
+        genuine assessment of the matchup" -- see `round_robin_saved_
+        teams`'s own docstring), rendered in its own section below."""
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
         from _harness import load_world
         W = load_world()
@@ -1988,9 +2110,10 @@ class TestRoundRobinMode(unittest.TestCase):
         self.assertIn(f"### {a} vs {b}", headings)
         self.assertIn(f"### {b} vs {a}", headings)
         self.assertIn(f"### {a} best-4 vs {b} best-4", headings)
+        self.assertIn(f"### {b} best-4 vs {a} best-4", headings)
         self.assertIn(f"### {b} vs {b}", headings)
         results = at.session_state["ct_rr_results"]
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), 6)
 
     def test_running_it_also_populates_the_gameplan_cache(self):
         """The same `_cache_gameplans` hook every other Counter Table
@@ -2013,6 +2136,344 @@ class TestRoundRobinMode(unittest.TestCase):
         cache = at.session_state["ct_gameplans"]
         self.assertTrue(any(v["source"].startswith("Round-robin:")
                             for v in cache.values()))
+
+
+class TestMatchupFinderMode(unittest.TestCase):
+    """"I want a tool in the streamlit app that lets me see 1v1 matchups.
+    For instance, I want a Pokemon that beats incineroar, rillaboom etc.
+    Or to search for individuals too, e.g., a Pokemon that resists fire,
+    ice, is not weak to fairy ... I need a way to get this for 2v2s too"
+    -- a new "Matchup finder" mode: individuals via the cheap 1v1 read
+    (`one_v_one_matrix_for_pool`) with type filters, or pairs via a REAL
+    2v2 combat race (`joint_pool_search`) against a chosen enemy pair."""
+
+    def test_switching_to_matchup_finder_mode_renders_its_controls(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(any(r.key == "ct_mf_kind" for r in at.radio))
+
+    def test_individuals_search_beats_all_named_enemies(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) ==
+              ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        self.assertEqual(len(dfs), 1)
+        df = dfs[0]
+        self.assertTrue(len(df) > 0)
+        # "I KO very quickly and take little damage, such as OHKO vs
+        # 4HKO" -- the column now carries the real hits-to-KO each way,
+        # not just a flat "WIN" -- cross-check every shown name against
+        # the real engine directly (both that it's a genuine win, AND
+        # that its own hits-to-KO reading matches what the table shows).
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        from counter_finder import (one_v_one_matrix_for_pool,
+                                    one_v_one_hit_counts_for_pool)
+        W = load_world()
+        names = list(df["Pokemon"])
+        matrix = one_v_one_matrix_for_pool(
+            names, ["Incineroar"], W["merged"], W["moves"], W["natures"], W["typechart"])
+        counts = one_v_one_hit_counts_for_pool(
+            names, ["Incineroar"], W["merged"], W["moves"], W["natures"], W["typechart"])
+        for _, row in df.iterrows():
+            name = row["Pokemon"]
+            self.assertEqual(matrix[name]["Incineroar"], "win")
+            c = counts[name]["Incineroar"]
+            our_s = f"{c['our_hits_to_ko']}HKO" if c["our_hits_to_ko"] else "--"
+            their_s = f"{c['their_hits_to_ko']}HKO" if c["their_hits_to_ko"] else "--"
+            self.assertEqual(row["vs Incineroar"], f"{our_s} / {their_s}")
+
+    def test_max_hits_slider_narrows_results_to_strict_ohko_at_1(self):
+        """"give a reasonable limit, maybe optional" -- dragging the
+        hits-to-KO limit down to 1 restores the old strict OHKO-only
+        behavior, which can only ever show as many or fewer wins than the
+        default (4)."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(40).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        default_dfs = [d.value for d in at.dataframe
+                      if list(d.value.columns) ==
+                      ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        default_count = len(default_dfs[0])
+        at = [s for s in at.slider if s.key == "ct_mf_max_hits"][0].set_value(1).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        strict_dfs = [d.value for d in at.dataframe
+                     if list(d.value.columns) ==
+                     ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        self.assertLessEqual(len(strict_dfs[0]), default_count)
+
+    def test_no_hit_limit_checkbox_disables_the_slider_and_widens_results(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(40).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        default_dfs = [d.value for d in at.dataframe
+                      if list(d.value.columns) ==
+                      ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        default_count = len(default_dfs[0])
+        at = [c for c in at.checkbox if c.key == "ct_mf_no_hit_limit"][0].set_value(
+            True).run()
+        self.assertTrue(
+            [s for s in at.slider if s.key == "ct_mf_max_hits"][0].disabled)
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        unlimited_dfs = [d.value for d in at.dataframe
+                         if list(d.value.columns) ==
+                         ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        self.assertGreaterEqual(len(unlimited_dfs[0]), default_count)
+
+    def test_individuals_show_a_1v1_details_table_with_moves(self):
+        """"I want to be able to see the details of the 1HKO vs 2HKO, what
+        move is used etc"."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if "Our move" in d.value.columns]
+        self.assertEqual(len(dfs), 1)
+        df = dfs[0]
+        self.assertTrue(len(df) > 0)
+        self.assertEqual(
+            list(df.columns),
+            ["Pokemon", "Enemy", "Verdict", "Our move", "Our hits",
+             "Their move", "Their hits", "Speed (us/them)"])
+        self.assertTrue(all(v == "WIN" for v in df["Verdict"]))
+
+    def test_individuals_results_are_sorted_most_decisive_first(self):
+        """"It would be good to see the most decisive wins too, i.e., I
+        KO very quickly and take little damage, such as OHKO vs 4HKO" --
+        results rank by (their hits-to-KO minus ours), worst case across
+        the named enemies, most decisive first."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(25).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) ==
+              ["Pokemon", "Score", "Types", "vs Incineroar"]]
+        df = dfs[0]
+        self.assertGreater(len(df), 1, "need at least 2 rows to check ordering")
+
+        def decisiveness(cell):
+            our_s, their_s = cell.split(" / ")
+            our_n = 99 if our_s == "--" else int(our_s.replace("HKO", ""))
+            their_n = 99 if their_s == "--" else int(their_s.replace("HKO", ""))
+            return their_n - our_n
+        scores = [decisiveness(v) for v in df["vs Incineroar"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_individuals_type_filter_excludes_a_known_weak_member(self):
+        """Whimsicott (pure Fairy) is weak to Poison -- requiring "must
+        NOT be weak to Poison" must drop it from a pool it would
+        otherwise appear in ("Always include" forces it into the pool,
+        with no named enemies so only the type filter can exclude it)."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Whimsicott"]).run()
+        [m for m in at.multiselect if m.key == "ct_mf_not_weak"][0].set_value(
+            ["Poison"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Pokemon" in d.value.columns]
+        self.assertTrue(dfs)
+        self.assertNotIn("Whimsicott", set(dfs[0]["Pokemon"]))
+
+    def test_pairs_search_only_returns_real_wins_vs_the_chosen_enemy_pair(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        # `ct_mf_pair_results` in session_state is always the FULL raw
+        # search (the "only show wins" filter is display-only, applied
+        # fresh on every rerun) -- checked here for its own sake (every
+        # race really was against exactly the 1 named enemy pair), not as
+        # a stand-in for what the table actually shows.
+        rows = at.session_state["ct_mf_pair_results"]
+        self.assertTrue(rows)
+        self.assertTrue(all(r["pairs_total"] == 1 for r in rows))  # 1 enemy pair
+        pair_dfs = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        self.assertTrue(pair_dfs)
+        shown = pair_dfs[0]
+        self.assertTrue(len(shown) > 0)
+        self.assertTrue((shown["Beaten"] == "1/1").all())
+
+    def test_pairs_unchecking_only_wins_shows_at_least_as_many_rows(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_dfs = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        wins_only_count = len(pair_dfs[0])
+        at = [c for c in at.checkbox if c.key == "ct_mf_only_wins"][0].set_value(
+            False).run()
+        self.assertFalse(at.exception, list(at.exception))
+        pair_dfs2 = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        all_count = len(pair_dfs2[0])
+        self.assertGreaterEqual(all_count, wins_only_count)
+
+    def test_resists_intimidate_excludes_a_known_mixed_physical_attacker(self):
+        """Incineroar (Intimidate is its OWN ability, irrelevant to whether
+        it resists an OPPOSING Intimidate holder) runs real physical moves
+        (Darkest Lariat/Flare Blitz) and has no Intimidate-proofing ability
+        of its own -- the checkbox must drop it."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Incineroar"]).run()
+        [c for c in at.checkbox if c.key == "ct_mf_resists_intimidate"][0].set_value(
+            True).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) == ["Pokemon", "Score", "Types"]]
+        self.assertTrue(dfs)
+        self.assertNotIn("Incineroar", set(dfs[0]["Pokemon"]))
+
+    def test_ignores_fake_out_excludes_a_non_ghost_non_proof_member(self):
+        """Incineroar is neither Ghost-type nor flinch-proof-abilitied --
+        the checkbox must drop it too."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Incineroar"]).run()
+        [c for c in at.checkbox if c.key == "ct_mf_ignores_fake_out"][0].set_value(
+            True).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) == ["Pokemon", "Score", "Types"]]
+        self.assertTrue(dfs)
+        self.assertNotIn("Incineroar", set(dfs[0]["Pokemon"]))
+
+    def test_pairs_search_accepts_more_than_two_enemies_and_races_every_combo(self):
+        """"can the pair matchup finder also be updated to work vs every
+        pair combination of a given list" -- naming 3 enemies must race
+        every C(3,2)=3 enemy-pair combination, not just the first 2."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom", "Kingambit"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state["ct_mf_pair_results"]
+        self.assertTrue(rows)
+        self.assertTrue(all(r["pairs_total"] == 3 for r in rows))
+        raced = {frozenset(k) for r in rows for k in r["detail"]}
+        self.assertEqual(raced, {frozenset(("Incineroar", "Rillaboom")),
+                                 frozenset(("Incineroar", "Kingambit")),
+                                 frozenset(("Rillaboom", "Kingambit"))})
+
+    def test_pairs_search_never_returns_two_of_our_own_megas(self):
+        """"You also can not have two of your own megas in a pair in the
+        matchup section" -- pairing two DIFFERENT Mega-capable picks
+        together always wastes one of the two stones as a lead choice
+        (only one Mega Evolution per side per game), so no returned pair
+        may have both members starting with "Mega "."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Mega Dragonite", "Mega Garchomp", "Mega Garchomp Z"]).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        rows = at.session_state["ct_mf_pair_results"]
+        self.assertTrue(rows)
+        self.assertFalse(any(
+            r["pair"][0].startswith("Mega ") and r["pair"][1].startswith("Mega ")
+            for r in rows))
+
+
+class TestPotentialAbilityFilters(unittest.TestCase):
+    """"include pokemon whose base form has ability to learn any of the
+    relevant abilities" -- Mega Metagross (Tough Claws) still resists
+    Intimidate because base Metagross can have Clear Body, and Dragonite/
+    Mega Dragonite can have Inner Focus (both filters)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ast
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        from _harness import load_world
+        cls.W = load_world()
+        tree = ast.parse(open(APP).read())
+        cls.ns = {}
+        for n in tree.body:
+            if isinstance(n, ast.FunctionDef) and n.name in (
+                    "_potential_abilities", "_resists_intimidate", "_ignores_fake_out"):
+                exec(compile(ast.Module([n], []), APP, "exec"), cls.ns)
+
+    def _r(self, n):
+        return self.ns["_resists_intimidate"](n, self.W["merged"], self.W["moves"])
+
+    def _f(self, n):
+        return self.ns["_ignores_fake_out"](n, self.W["merged"])
+
+    def test_mega_metagross_resists_intimidate_via_base_clear_body(self):
+        self.assertTrue(self._r("Mega Metagross"))
+        self.assertFalse(self._f("Mega Metagross"))
+
+    def test_dragonite_and_mega_dragonite_qualify_for_both(self):
+        for n in ("Dragonite", "Mega Dragonite"):
+            self.assertTrue(self._r(n))
+            self.assertTrue(self._f(n))
+
+    def test_incineroar_still_qualifies_for_neither(self):
+        self.assertFalse(self._r("Incineroar"))
+        self.assertFalse(self._f("Incineroar"))
 
 
 class TestTrickRoomOptIn(unittest.TestCase):

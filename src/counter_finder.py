@@ -151,18 +151,18 @@ weather-setting usage rather than a shared 2v2 field -- there is no single
 import copy
 import itertools
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, MoveInfo,
-                    damage_roll, defensive_stat, effective_stat, hit_count_for,
+                    breaks_focus_sash, damage_roll, defensive_stat, effective_stat, hit_count_for,
                     hits_ally, is_spread_move, move_from_showdown,
                     grassy_glide_priority_bonus, type_multiplier,
                     is_grounded, effective_move_target)
 from engine import (FieldState, WEATHER_SETTERS, WEATHER_SPEED_BOOST,
                     TERRAIN_SETTERS, effective_speed)
 from optimize_sets import (best_item, best_moveset, legal_items, team_weather_for,
-                           move_value_table, enemy_individuals)
+                           enemy_individuals, raw_ohko_fraction_table)
 from solver import FIRST_TURN_ONLY_MOVES, build_moveset
 from species_data import NO_MEGA, resolve_team_mega_slot
 
@@ -791,63 +791,151 @@ def _pair_offensive_pin(name1, name2, merged, moves_db, typechart):
     return best
 
 
-def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart):
+def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
+    """{name: {other_name: best_frac}} -- every name in `universe`'s own
+    best single real-usage-move damage fraction against every OTHER name
+    in it, via `optimize_sets.raw_ohko_fraction_table` (see `_one_v_one_
+    matrix`'s own docstring for why this, not `move_value_table`, is the
+    correct pure-damage read). Factored out of `_one_v_one_matrix` so
+    `_one_v_one_hit_counts` can reuse the exact same cheap, already-
+    correct offense computation instead of a second copy that could drift
+    -- both only ever need this shared table, differing in what they
+    derive from a fraction (a win/loss verdict vs an actual hits-to-KO
+    count)."""
+    return {name: {en: fm[0] for en, fm in row.items()}
+            for name, row in _one_v_one_offense_detail(
+                universe, merged, moves_db, natures, typechart).items()}
+
+
+def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart):
+    """{name: {other_name: (best_frac, move_name)}} -- `_one_v_one_offense`'s
+    own table plus WHICH real-usage move produced each best fraction (None
+    when nothing does any damage), so a caller can show the actual move
+    behind a hits-to-KO read instead of just a number."""
+    offense = {}
+    for name in universe:
+        table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
+        row = {}
+        for en in universe:
+            if en == name:
+                continue
+            best_frac, best_move = 0.0, None
+            for mv, fr in table.items():
+                if fr.get(en, 0.0) > best_frac:
+                    best_frac, best_move = fr[en], mv
+            row[en] = (best_frac, best_move)
+        offense[name] = row
+    return offense
+
+
+# "Make sure the win does not require an OHKO ... give a reasonable
+# limit, maybe optional, but still a win based on speed" -- the default
+# `max_hits` for `_one_v_one_matrix`. Matches the user's own original
+# example for what counts as a genuinely decisive read ("I KO very
+# quickly ... such as OHKO vs 4HKO"): a side that needs more than this
+# many hits either way is too slow and inconclusive an exchange to call a
+# real win (weather, chip damage, a real turn cap all interfere with a
+# fight that would genuinely take that long) -- `None` removes the cap
+# entirely and always resolves via hits-to-KO, however many hits that is.
+DEFAULT_MAX_HITS_FOR_VERDICT = 4
+
+
+def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+    """"win"/"loss"/"no_ko" from each side's hits-to-KO (`None` = can never
+    KO) and base Speed -- the one place `_one_v_one_matrix`'s rule lives, so
+    `one_v_one_hit_counts_for_pool`'s displayed verdict can never drift."""
+    if my_hits is None and their_hits is None:
+        return "no_ko"
+    if my_hits is None:
+        return "loss"
+    if their_hits is None:
+        return "win"
+    if max_hits is not None and my_hits > max_hits and their_hits > max_hits:
+        return "no_ko"
+    margin = their_hits - my_hits
+    if margin == 0:
+        return "win" if my_spe >= their_spe else "loss"
+    if abs(margin) >= 2:
+        return "win" if margin > 0 else "loss"
+    if margin > 0:   # we need exactly one fewer hit: only decisive if faster
+        return "win" if my_spe > their_spe else "no_ko"
+    return "loss" if their_spe > my_spe else "no_ko"
+
+
+def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
+                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
     """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
     enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
     calculation"), computed ONCE and reused by every candidate pair's own
     `_pair_threat_coverage` check instead of re-running per pair.
 
-    Each side's own best single hit is `optimize_sets.move_value_table`'s
-    per-move fraction (already OHKO/priority-aware -- see its own
-    docstring), computed ONCE per name against the WHOLE combined pool+
-    enemy universe in a single call (not once per opposing name), matching
-    `optimize_sets.py`'s own "1v1 damage calculations, not full battles"
-    cost model. Whichever side's best hit clears 100% of the other's max HP
-    wins; if both do, real base Speed (deliberately no item/ability/weather
-    speed modifiers -- this stays a SIMPLE screening pass, not a re-run of
-    `_joint_race`) breaks the tie; if neither does, "no_ko".
+    Each side's own best single hit is `optimize_sets.raw_ohko_fraction_
+    table`'s per-move PURE damage fraction (deliberately NOT `move_value_
+    table`'s own move-SELECTION score -- that adds large priority/Fake-Out/
+    OHKO scoring bonuses on top of real damage, e.g. a resisted 40 BP Fake
+    Out against a Steel-type defender scored ABOVE 1.0 purely from its own
+    "revenge-kill" bonus, reporting a false OHKO -- concretely reported: "no
+    individuals seem to be able to beat Mega Raichu Y, but ground types
+    like excadrill should be able to OHKO it" -- Excadrill's own real
+    Ground-type hit WAS a genuine OHKO; Raichu's inflated Fake Out score
+    was never one, it just won the tiebreak below on speed), computed ONCE
+    per name against the WHOLE combined pool+enemy universe in a single
+    call (not once per opposing name), matching `optimize_sets.py`'s own
+    "1v1 damage calculations, not full battles" cost model.
+
+    `max_hits`: "only an OHKO counts" was too strict a bar -- most real
+    answers to a bulky threat 2HKO or 3HKO it rather than OHKOing outright,
+    and used to fall into "no_ko" (reported: "only 20/153 beating
+    Incineroar, but Dragonite should be able to"). Generalizes the old
+    OHKO-only rule, which is just this same comparison at `max_hits=1`:
+    whichever side needs at least TWO fewer hits to KO the other wins
+    outright; a lead of exactly ONE hit (2HKO vs 3HKO) only counts as a
+    win for the side that is also FASTER (otherwise "no_ko" -- not a
+    decisive read for either side, deliberately more conservative than a
+    strict turn-by-turn sim since Protect/chip/rolls erase a one-hit
+    lead); equal hits-to-KO is decided by speed alone -- real base Speed,
+    deliberately no item/ability/weather speed modifiers -- this stays a
+    SIMPLE screening pass, not a re-run of `_joint_race`); "no_ko" only when NEITHER side reaches a real verdict
+    -- neither can ever KO the other at all, or both would take longer
+    than `max_hits` (a side the OTHER side can never KO at all always
+    wins/loses outright regardless of `max_hits` -- there's no time
+    pressure to weigh against an opponent who can never finish the job).
 
     A pool member is never matched against an identical enemy entry of the
     same name (a literal self-mirror isn't a meaningful "does my own team
     have an answer to this enemy" question for MY OWN pool).
     """
-    universe = list(dict.fromkeys(list(pool) + list(enemy_names)))
-    offense = {}
-    for name in universe:
-        table = move_value_table(name, merged, moves_db, natures, typechart, universe)
-        offense[name] = {en: max((row.get(en, 0.0) for row in table.values()), default=0.0)
-                         for en in universe if en != name}
+    offense = _one_v_one_offense(list(pool) + list(enemy_names), merged,
+                                 moves_db, natures, typechart)
+
+    def hits(frac):
+        return math.ceil(1.0 / frac) if frac > 0 else None
+
     matrix = {}
     for name in pool:
         matrix[name] = {}
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            my_ohko = offense[name][enemy_name] >= 1.0
-            their_ohko = offense[enemy_name][name] >= 1.0
-            if my_ohko and not their_ohko:
-                outcome = "win"
-            elif their_ohko and not my_ohko:
-                outcome = "loss"
-            elif not my_ohko and not their_ohko:
-                outcome = "no_ko"
-            else:
-                my_spe = merged[name]["base_stats"]["spe"]
-                their_spe = merged[enemy_name]["base_stats"]["spe"]
-                outcome = "win" if my_spe >= their_spe else "loss"
-            matrix[name][enemy_name] = outcome
+            matrix[name][enemy_name] = _one_v_one_verdict(
+                hits(offense[name][enemy_name]), hits(offense[enemy_name][name]),
+                merged[name]["base_stats"]["spe"],
+                merged[enemy_name]["base_stats"]["spe"], max_hits)
     return matrix
 
 
-def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart):
+def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart,
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
     """Single-pair convenience wrapper around `_one_v_one_matrix` (same
     logic, no batching) -- for an ad-hoc "does X beat Y" query rather than
     a whole pool's worth."""
     return _one_v_one_matrix([name], [enemy_name], merged, moves_db,
-                             natures, typechart)[name][enemy_name]
+                             natures, typechart, max_hits=max_hits)[name][enemy_name]
 
 
-def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart):
+def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
+                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
     """Public entry point onto `_one_v_one_matrix` -- for a caller outside
     this module (the Streamlit app) wanting to build the SAME cheap 1v1
     read `find_pair_cores`'s own `threat_coverage` already uses, to hand
@@ -856,8 +944,61 @@ def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, type
     Building it once here (rather than `coverage_group_search` building
     its own) means the SAME matrix backs both the pair-level and group-
     level readings -- they can never quietly disagree on what "beats"
-    means for the same pool/enemy universe."""
-    return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart)
+    means for the same pool/enemy universe.
+
+    `max_hits`: see `_one_v_one_matrix`'s own docstring -- defaults to the
+    same reasonable, non-OHKO-only cap every other caller in this module
+    uses."""
+    return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
+                             max_hits=max_hits)
+
+
+def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
+                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+    """{name: {enemy_name: {"our_hits_to_ko", "their_hits_to_ko"}}} for
+    every (pool member, enemy) pair -- "I KO very quickly and take little
+    damage, such as OHKO vs 4HKO" wants the actual hits-to-KO each way,
+    not just `one_v_one_matrix_for_pool`'s own win/loss/no_ko verdict.
+
+    Built from the exact SAME cheap, real-usage-moveset offense table
+    `_one_v_one_matrix` itself uses (`_one_v_one_offense` -- no second,
+    possibly-drifting damage read, and no expensive per-name moveset
+    search): `hits_to_ko = ceil(1/frac)` for whichever side's fraction is
+    being read, `None` when that side can never KO the other at all (a
+    hard type immunity, or a move too weak to ever finish it in a
+    realistic exchange). A pair whose "win"/"loss" verdict came down to
+    a mutual-OHKO speed tie-break still reads a real hits-to-KO of 1 on
+    both sides here -- this only ever reports the two raw counts, never
+    re-derives `_one_v_one_matrix`'s own verdict from them.
+
+    A pool member is never matched against an identical enemy entry of
+    the same name, same as `_one_v_one_matrix`."""
+    offense = _one_v_one_offense_detail(list(pool) + list(enemy_names), merged,
+                                        moves_db, natures, typechart)
+
+    def hits(frac):
+        return math.ceil(1.0 / frac) if frac > 0 else None
+
+    result = {}
+    for name in pool:
+        result[name] = {}
+        for enemy_name in enemy_names:
+            if enemy_name == name:
+                continue
+            our_frac, our_move = offense[name][enemy_name]
+            their_frac, their_move = offense[enemy_name][name]
+            our_hits, their_hits = hits(our_frac), hits(their_frac)
+            our_spe = merged[name]["base_stats"]["spe"]
+            their_spe = merged[enemy_name]["base_stats"]["spe"]
+            result[name][enemy_name] = {
+                "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
+                "our_move": our_move, "their_move": their_move,
+                "our_pct": our_frac * 100.0, "their_pct": their_frac * 100.0,
+                "our_speed": our_spe, "their_speed": their_spe,
+                "verdict": _one_v_one_verdict(our_hits, their_hits, our_spe,
+                                              their_spe, max_hits),
+            }
+    return result
 
 
 def _pair_threat_coverage(name1, name2, matrix):
@@ -1101,7 +1242,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           max_weak_types_3=None, moves_db=None,
                           min_special_attackers=None, typechart=None,
                           min_offensive_types=None, one_v_one_matrix=None,
-                          max_uncovered_threats=None):
+                          max_uncovered_threats=None, min_threat_answers=1):
     """"Coverage group finder": every legal group of `group_sizes` members
     (3, 4, and 6 by default) drawn from `pool` (defaults to every name
     appearing in `pair_rows`, i.e. `find_pair_cores`'s own already-scored
@@ -1349,16 +1490,32 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
     even if it wanted to for every candidate. `None` (the default) skips
     this too, same "nothing to check against" reasoning as `typechart`.
     With a matrix given, every row's own `"threat_coverage"` is always
-    populated (`{"covered": int, "total": int, "uncovered": [enemy,
-    ...]}` -- an enemy counts as covered the moment ANY group member
-    beats it 1v1, `uncovered` lists the rest by name so "do we just lose
-    to X" reads directly off the row); `max_uncovered_threats` caps how
-    many may stay uncovered. Also NOT prunable mid-search -- coverage can
-    only ever GROW as members are added (once some member beats an enemy,
-    that stays true for every larger group containing it), so a partial
-    group's own uncovered COUNT can only fall, never rise, meaning an
-    early "still too many uncovered" reading is never a safe reason to
-    prune -- checked at the leaf, same as `min_offensive_types` above.
+    populated (`{"covered": int, "total": int, "uncovered": [enemy, ...],
+    "answer_counts": {enemy: int}}` -- `answer_counts` is how many DIFFERENT
+    group members beat that enemy 1v1, for every enemy in the universe, so
+    "as many as possible, to have redundant answers" reads directly off the
+    row even where the hard floor below doesn't bind); `max_uncovered_
+    threats` caps how many enemies may stay "uncovered" -- see `min_threat_
+    answers` for what "uncovered" means. Also NOT prunable mid-search --
+    coverage can only ever GROW as members are added (once some member
+    beats an enemy, that stays true for every larger group containing it),
+    so a partial group's own uncovered COUNT can only fall, never rise,
+    meaning an early "still too many uncovered" reading is never a safe
+    reason to prune -- checked at the leaf, same as `min_offensive_types`
+    above.
+
+    `min_threat_answers` (default 1): "it would also be good to filter for
+    having multiple 1v1 answers to each enemy, ideally at least two" --
+    raises the bar for what counts as "covered" from "at least ONE member
+    beats it" (the original, default-1 reading) to "at least THIS MANY
+    DIFFERENT members beat it" -- an enemy with exactly one answer on the
+    team is a single point of failure (lose that one member first and the
+    team has no answer left), not genuinely "covered" once redundancy
+    matters. `"uncovered"` (and so `max_uncovered_threats`) is read against
+    THIS bar, not a fixed 1 -- `min_threat_answers=2, max_uncovered_
+    threats=0` is exactly "guarantee every enemy has at least 2 independent
+    answers." Default 1 reproduces the original single-answer-is-enough
+    behaviour unchanged for every existing caller.
 
     Returns {size: {"rows": [...], "seen": int, "aborted": bool}} for each
     `group_sizes`. Each row: {"group": (n1..nk) sorted, "size": int,
@@ -1546,13 +1703,16 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
             threat_coverage = None
             if one_v_one_matrix is not None:
                 enemies = sorted({e for i in pick for e in one_v_one_matrix.get(names[i], {})})
-                uncovered_enemies = [
-                    e for e in enemies
-                    if not any(one_v_one_matrix.get(names[i], {}).get(e) == "win"
-                              for i in pick)]
+                answer_counts = {
+                    e: sum(1 for i in pick
+                          if one_v_one_matrix.get(names[i], {}).get(e) == "win")
+                    for e in enemies}
+                uncovered_enemies = [e for e in enemies
+                                     if answer_counts[e] < min_threat_answers]
                 threat_coverage = {
                     "covered": len(enemies) - len(uncovered_enemies),
                     "total": len(enemies), "uncovered": uncovered_enemies,
+                    "answer_counts": answer_counts,
                 }
             return {
                 "group": group, "size": size,
@@ -4008,7 +4168,8 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
             # tgt_role]` is no longer 1.0, so a second lethal hit this same
             # race correctly finishes it off instead of re-triggering.
             if (new_hp <= 0 and hp[tgt_role] >= 1.0 and target_c.max_hp()
-                    and (target_c.item == "Focus Sash" or target_c.ability == "Sturdy")):
+                    and (target_c.item == "Focus Sash" or target_c.ability == "Sturdy")
+                    and not breaks_focus_sash(mv.name, attacker_c)):
                 new_hp = 1.0 / target_c.max_hp()
             hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))
@@ -5009,10 +5170,21 @@ def _joint_race(combatants, moves_by_role, typechart, weather, turns,
 
 def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
               auras=None, terrain=None, dmg_mult_by_role=None,
-              attacker_role=None):
+              attacker_role=None, return_all=False):
     """The best `Hit` `attacker`'s own moveset can land on `target`
     SPECIFICALLY -- one cell of the 2x2 damage grid, not the move a
     target-choosing AI would actually pick (that's `_choose_action`).
+
+    `return_all`: "in the damage calc I need to see all moves" -- when
+    True, returns every candidate move's own `Hit` (every damaging,
+    non-Status move in `moves`, INCLUDING one blocked outright by Armor
+    Tail/Dazzling/Queenly Majesty or an off-weather charge move -- both
+    shown at 0 damage under their own real name, never the generic
+    `NO_HIT` placeholder's blank one), worst-damage first, not just the
+    single best one -- so a caller can show the FULL per-move breakdown
+    for this cell instead of only whichever move this function itself
+    would pick to play. `[]` (not `NO_HIT`) when nothing in `moves` could
+    ever land here at all.
 
     `auras`: the board's active Fairy Aura/Dark Aura/Aura Break set
     (`_active_auras`), same field-wide reading `_choose_action` gets.
@@ -5079,7 +5251,20 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
                              num_targets_hit=got.num_targets_hit)
         candidates.append((mv, got))
     if not candidates:
-        return NO_HIT
+        return [] if return_all else NO_HIT
+    if return_all:
+        # `got.move_name` is `None` whenever `_priority_blocked`/`_raw_hit`
+        # fell back to the generic `NO_HIT` placeholder (a blocked priority
+        # move, an off-weather charge move, ...) -- `return_all=True`
+        # surfaces every one of these candidates directly to a caller
+        # ("in the damage calc I need to see all moves"), so each one
+        # needs ITS OWN real name here, not the placeholder's blank one.
+        # The default best-pick path below never reaches this branch, so
+        # its own tie-break behaviour is completely untouched.
+        return sorted(
+            (got if got.move_name else replace(got, move_name=mv.name)
+             for mv, got in candidates),
+            key=lambda h: h.frac)
     best_follow_up = max(got.frac for _mv, got in candidates)
     best_key, best_hit = None, NO_HIT
     for mv, got in candidates:
@@ -5092,7 +5277,7 @@ def _grid_hit(attacker, moves, target, other_live, typechart, weather=None,
 
 
 def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather,
-                 terrain=None):
+                 terrain=None, all_moves=False):
     """Every one of the 8 attacker-vs-specific-defender `Hit`s on this board
     -- "see if and how I out-trade (2x2 damage)" asks for the actual numbers,
     not just which line the race happened to choose. Returns {"ours": {("C",
@@ -5104,21 +5289,26 @@ def _damage_grid(c1, c2, e1c, e2c, m1, m2, e1m, e2m, typechart, weather,
     are folded in here too -- "always account for intimidate (as well as
     defiant boosts)" applies to this preview grid just as much as the real
     race, not just a documented gap left for later.
+
+    `all_moves`: "in the damage calc I need to see all moves" -- passed
+    straight through to every `_grid_hit` call as `return_all`, so each
+    cell holds a LIST of every one of the attacker's own candidate moves'
+    `Hit`s (worst-damage first) instead of just the single best one.
     """
     combatants = {"C": c1, "P": c2, "E1": e1c, "E2": e2c}
     auras = _active_auras(combatants)
     dmg_mult_by_role = _intimidate_mult_by_role(combatants)
     ours = {
-        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C"),
-        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C"),
-        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P"),
-        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P"),
+        ("C", "E1"): _grid_hit(c1, m1, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C", return_all=all_moves),
+        ("C", "E2"): _grid_hit(c1, m1, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="C", return_all=all_moves),
+        ("P", "E1"): _grid_hit(c2, m2, e1c, e2c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P", return_all=all_moves),
+        ("P", "E2"): _grid_hit(c2, m2, e2c, e1c, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="P", return_all=all_moves),
     }
     theirs = {
-        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1"),
-        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1"),
-        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2"),
-        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2"),
+        ("E1", "C"): _grid_hit(e1c, e1m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1", return_all=all_moves),
+        ("E1", "P"): _grid_hit(e1c, e1m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E1", return_all=all_moves),
+        ("E2", "C"): _grid_hit(e2c, e2m, c1, c2, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2", return_all=all_moves),
+        ("E2", "P"): _grid_hit(e2c, e2m, c2, c1, typechart, weather, auras=auras, terrain=terrain, dmg_mult_by_role=dmg_mult_by_role, attacker_role="E2", return_all=all_moves),
     }
     return {"ours": ours, "theirs": theirs}
 
@@ -5169,7 +5359,8 @@ def _pruned_entry():
 def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                      turns, want_grid=False, merged=None, prune_below=None,
                      forced_base_names=frozenset(), worst_case_targeting=False,
-                     enemy_pairs=None, check_trick_room=False):
+                     enemy_pairs=None, check_trick_room=False,
+                     want_all_moves_grid=False):
     """(detail, summary) for OUR pair (`n1`, `n2`, drawn from `our_built`, a
     `_build_forms` dict) against every pair drawn from `target_names` -- the
     one place a joint pair is actually raced, so `joint_pair_search`
@@ -5240,6 +5431,15 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
     each, cheap for the single fixed pair `--deep` checks but wasted (and
     never displayed) for a pool-wide search, so it defaults OFF and only
     the `--deep` CLI path turns it on.
+
+    `want_all_moves_grid`: only meaningful alongside `want_grid=True` --
+    "in the damage calc I need to see all moves" -- ALSO computes a second
+    grid (`_damage_grid(..., all_moves=True)`), stored as `d["grid_all_
+    moves"]` alongside the existing single-best-move `d["grid"]` (left
+    completely unchanged, so `_ohko_risk`/every existing `d["grid"]`
+    consumer keeps reading exactly the same shape it always has). Off by
+    default -- a second full grid pass, wasted unless a caller actually
+    wants the per-move breakdown.
 
     TAILWIND AS AN ASSUMED THREAT, not just a hypothesis footnote: "If the
     enemy has a tailwind setter and tailwind is a loss, assume they set
@@ -5531,14 +5731,46 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                     own_protect_used = False
                     own_protect_outcome = chosen_outcome
                 else:
-                    own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log = _joint_race(
-                        combatants, moves_by_role, typechart, weather, turns,
-                        first_turn_protected_role="C", terrain=terrain,
-                        worst_case_targeting=worst_case_targeting)
-                    own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log = _joint_race(
-                        combatants, moves_by_role, typechart, weather, turns,
-                        first_turn_protected_role="P", terrain=terrain,
-                        worst_case_targeting=worst_case_targeting)
+                    def _protect_worst_case(role):
+                        """A genuine own-Protect save must survive the SAME
+                        real enemy Tailwind threat `tailwind_forced` above
+                        already treats as their main strategy once it's a
+                        loss -- "if they do have tailwind and click it and
+                        it is a loss, it should be treated as their main
+                        strategy... even if you protect either slot, they
+                        also outspeed and KO both" -- a normal-speed-only
+                        Protect race can report a false save that only
+                        works if the enemy declines a real threat they
+                        actually have. Races `role` protecting at normal
+                        speed AND (only when `tailwind_setter_roles` is
+                        non-empty) once per real enemy setter with THAT
+                        role ALSO opening Tailwind the same turn -- the
+                        exact same combination `_joint_race` already
+                        supports (`first_turn_protected_role`/`first_turn_
+                        tailwind_role` are independent, one per side) --
+                        keeping whichever comes out WORSE for us, the same
+                        pessimistic `max`-by-rank shape `tw_outcome` above
+                        already uses. No real enemy setter (`tailwind_
+                        setter_roles` empty) makes this a pure no-op,
+                        identical to the old normal-speed-only race."""
+                        normal = _joint_race(
+                            combatants, moves_by_role, typechart, weather, turns,
+                            first_turn_protected_role=role, terrain=terrain,
+                            worst_case_targeting=worst_case_targeting)
+                        if not tailwind_setter_roles:
+                            return normal
+                        under_tw = max(
+                            (_joint_race(combatants, moves_by_role, typechart, weather,
+                                        turns, first_turn_protected_role=role,
+                                        first_turn_tailwind_role=tw_role,
+                                        enemy_speed_mult=2.0, terrain=terrain,
+                                        worst_case_targeting=worst_case_targeting)
+                             for tw_role in tailwind_setter_roles),
+                            key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+                        return max((normal, under_tw), key=lambda r: _JOINT_OUTCOME_RANK[r[0]])
+
+                    own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log = _protect_worst_case("C")
+                    own_pr_p_outcome, own_pr_p_turns, own_pr_p_hp, own_pr_p_log = _protect_worst_case("P")
                     (own_protect_outcome, own_protect_turns_used,
                      own_protect_hp, own_protect_log) = min(
                         ((own_pr_c_outcome, own_pr_c_turns, own_pr_c_hp, own_pr_c_log),
@@ -5669,6 +5901,11 @@ def _pair_vs_targets(n1, n2, our_built, target_names, enemy_built, typechart,
                                m1, m2, e1m, e2m, typechart, weather, terrain=terrain)
             best["grid"] = grid
             best["ohko_risk"] = _ohko_risk(grid)
+            if want_all_moves_grid:
+                best["grid_all_moves"] = _damage_grid(
+                    best["_c1"], best["_c2"], best["_e1c"], best["_e2c"],
+                    m1, m2, e1m, e2m, typechart, weather, terrain=terrain,
+                    all_moves=True)
         for k in ("_c1", "_c2", "_e1c", "_e2c"):
             best.pop(k, None)
         detail[(e1_name, e2_name)] = best
@@ -6015,11 +6252,28 @@ def _pair_sort_key(row):
     loss is a more concrete, binary risk than an average-case quality
     difference). Tailwind-safe count is the fourth criterion, and
     follow_me-safe count (beating a real Follow Me/Rage Powder redirector,
-    same always-on treatment as tailwind-safe) is the fifth and final one.
+    same always-on treatment as tailwind-safe) is the fifth.
+
+    SIXTH, and final: the row's own name, alphabetical -- `row["pair"]`
+    for `joint_pool_search`/`bring4_search`'s own two-searched-slots rows,
+    `row["name"]` for `joint_pair_search`'s own one-fixed-partner rows (no
+    "pair" key at all, the partner is fixed outside the row). A genuine
+    5-way tie on every criterion above used to fall back on `sorted`'s own
+    stability -- whatever order the row happened to occupy in its own
+    input list -- which is NOT guaranteed to match between a serial run
+    and a `--jobs`-parallel one (each worker process builds its own
+    `pool`/candidate ordering independently); concretely reported as
+    `--jobs 2` printing a genuinely different "top pairs" list than the
+    same search run serially, on a fixture where several pairs score
+    identically. Sorting by name last makes the full ordering a pure
+    function of each row's OWN content, not of which process (or which
+    order) computed it.
     """
+    identity = (tuple(sorted(row["pair"])) if "pair" in row
+               else (row["name"],) if "name" in row else ())
     return (-row["pairs_protect_safe"], -(row["pairs_swept"] + row["pairs_traded"]),
            -row["pairs_clean_win_total"], -row["pairs_tailwind_safe"],
-           -row["pairs_follow_me_safe"])
+           -row["pairs_follow_me_safe"], identity)
 
 
 def bring4_search(our6, target_names, merged, moves_db, natures, typechart,
@@ -6328,8 +6582,11 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
         }
 
     def _worst_case_key(b):
+        # Trailing bring4-name tiebreak, same reasoning as `_total_wins_
+        # key`'s own -- two different bring-4s can still tie on all three
+        # criteria above (e.g. sharing the same worst pair).
         return (len(b["uncovered_enemy_pairs"]), _pair_sort_key(b["worst_pair_row"]),
-                -b["pairs_good"])
+                -b["pairs_good"], tuple(sorted(b["bring4"])))
 
     def _total_wins_key(b):
         # "Maybe the maximin vs max win bring should at least try to make
@@ -6347,7 +6604,15 @@ def _bring4_candidates(six, pair_lookup, target_names, good_threshold=1.0,
         # best first" convention `_worst_case_key`/`min`/`sort` already use
         # still applies -- `bring4_blended_score` itself is "higher is
         # better."
-        return (len(b["uncovered_enemy_pairs"]), -bring4_blended_score(b))
+        # Final tiebreak, same reasoning as `_pair_sort_key`'s own trailing
+        # pair-name criterion: a genuine tie on both criteria above used to
+        # fall back on `bring4_rows`' own pre-sort list order, not
+        # guaranteed stable across a fresh `merged` dict instance/process
+        # (concretely reported: `--bring4`'s own "top 1" pick, and
+        # therefore its xlsx "Avg Wins/90" cell, varying run to run on an
+        # otherwise-identical search).
+        return (len(b["uncovered_enemy_pairs"]), -bring4_blended_score(b),
+               tuple(sorted(b["bring4"])))
 
     _rank_key = _total_wins_key if rank_by == "total_wins" else _worst_case_key
 
@@ -7736,15 +8001,22 @@ def _pair_coverage_rank_key(pair_key, pair_by_key):
     named-enemy universe rather than just one team, for ranking which
     pairs are worth exporting/importing. A pair absent from every enemy's
     table (never actually raced -- shouldn't happen for a real `pair_by_key`,
-    but keeps this total rather than raising) ranks last."""
+    but keeps this total rather than raising) ranks last. A final, fully
+    deterministic tiebreak (the pair's own name, alphabetical) closes the
+    same gap `_pair_sort_key` had: `top_coverage_pairs`' own `keys` is
+    built from a `set` of `frozenset`s, whose iteration order is NOT
+    guaranteed stable across processes -- without an explicit tiebreak here,
+    a genuine tie on every summed criterion above fell back to that
+    unstable set order."""
     rows = [pbk[pair_key] for pbk in pair_by_key if pair_key in pbk]
     if not rows:
-        return (0, 0, 0.0, 0)
+        return (0, 0, 0.0, 0, tuple(sorted(pair_key)))
     return (
         -sum(r["pairs_protect_safe"] for r in rows),
         -sum(r["pairs_swept"] + r["pairs_traded"] for r in rows),
         -sum(r["pairs_clean_win_total"] for r in rows),
         -sum(r["pairs_tailwind_safe"] for r in rows),
+        tuple(sorted(pair_key)),
     )
 
 
@@ -7950,7 +8222,9 @@ def merge_named_team_pairs(coverage, named_teams, meta, merged, moves_db,
 def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                         max_megas=2, max_weak_types=None, max_net_weak_types=None,
                         required_techs=None, min_special_attackers=None,
-                        must_include=None, exclude=None, top_n=20):
+                        must_include=None, exclude=None, top_n=20,
+                        min_offensive_types=None, one_v_one_matrix=None,
+                        max_uncovered_threats=None, min_threat_answers=1):
     """Assemble teams of `group_size` (6 by default) as DISJOINT pairs drawn
     from `coverage["pair_by_key"]`'s own KNOWN pairs -- "upload this
     output, and use the streamlit app to try to create the best teams of
@@ -7986,10 +8260,33 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
     team's own composition (typing, tech coverage), never pairwise combat
     data, so they apply identically to a sparse pool.
 
+    `min_offensive_types`/`one_v_one_matrix`/`max_uncovered_threats`/
+    `min_threat_answers`: the SAME "1v1 threat redundancy" and "offensive
+    type coverage" hard filters `coverage_group_search` applies to its own
+    from-scratch groups -- "using the same constraints as the coverage
+    groups" -- read here from the team's own already-known members instead
+    of a fresh DFS. With `coverage["typechart"]` set (always true, see
+    `multi_bring4_coverage`/`coverage_from_pair_rows`), every result's own
+    `"offensive_coverage"` is always populated (which of the 18 defending
+    types the team's real usage movesets collectively hit super-
+    effectively -- `_real_damaging_moves` + `type_multiplier`, the same
+    per-name computation `coverage_group_search` itself uses); `min_
+    offensive_types` additionally makes it a hard floor. `one_v_one_matrix`
+    (the caller's own `one_v_one_matrix_for_pool` result, keyed by every
+    KNOWN pair's member names) turns on `"threat_coverage"`: an enemy only
+    counts as "answered" once at least `min_threat_answers` different team
+    members beat it 1v1 (default 1, "any answer at all"); `max_uncovered_
+    threats` additionally caps how many named enemies may fall short of
+    that bar. `"threat_coverage"` stays `None` when `one_v_one_matrix`
+    isn't given, same "None turns it off" contract `coverage_group_search`
+    already follows.
+
     Returns [{"team": tuple(sorted(names)), "pairs": ((n1, n2), ...) (the
     `group_size // 2` KNOWN pairs used, each sorted), "score": float,
-    "sets": {name: {"item", "moves"}}}, ...], best `top_n` by score
-    descending.
+    "sets": {name: {"item", "moves"}}, "offensive_coverage":
+    {"covered", "uncovered"} or None, "threat_coverage": {"covered",
+    "total", "uncovered", "answer_counts"} or None}, ...], best `top_n` by
+    score descending.
     """
     if group_size % 2 != 0:
         raise ValueError(f"group_size must be even, got {group_size}")
@@ -8005,6 +8302,27 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
     effective_limits = _effective_type_limits(max_weak, type_limits)
     weak_exception_types = _weak_exception_eligible_types(type_limits)
     w_win, w_tw, w_pr, w_fm = _CORE_BLEND_WEIGHTS
+    # Per-name offensive type coverage, computed ONCE over every name that
+    # appears in ANY known pair (a small set here, unlike
+    # `coverage_group_search`'s whole search pool) -- same `_real_damaging_
+    # moves` + `type_multiplier` read that function's own `hit_idx_by_name`
+    # uses, just keyed by name instead of by index since there's no DFS
+    # here to thread an index through.
+    typechart = coverage.get("typechart")
+    hit_types_by_name = None
+    if typechart is not None:
+        from species_data import TYPES
+        hit_types_by_name = {}
+        for pk in known_pairs:
+            for nm in pk:
+                if nm in hit_types_by_name:
+                    continue
+                hit = set()
+                for mv in _real_damaging_moves(nm, merged, moves_db):
+                    for t in TYPES:
+                        if type_multiplier(mv.move_type, [t], typechart) > 1.0:
+                            hit.add(t)
+                hit_types_by_name[nm] = hit
 
     def pair_score(pk):
         rows = [pbk[pk] for pbk in coverage["pair_by_key"] if pk in pbk]
@@ -8040,6 +8358,34 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                 min_special_attackers=min_special_attackers,
                 weak_exception_types=weak_exception_types):
             continue
+        offensive_coverage = None
+        if hit_types_by_name is not None:
+            hit = set()
+            for n in core:
+                hit |= hit_types_by_name.get(n, set())
+            offensive_coverage = {
+                "covered": sorted(hit),
+                "uncovered": sorted(set(TYPES) - hit),
+            }
+            if (min_offensive_types is not None
+                    and len(offensive_coverage["covered"]) < min_offensive_types):
+                continue
+        threat_coverage = None
+        if one_v_one_matrix is not None:
+            enemies = sorted({e for n in core for e in one_v_one_matrix.get(n, {})})
+            answer_counts = {
+                e: sum(1 for n in core if one_v_one_matrix.get(n, {}).get(e) == "win")
+                for e in enemies}
+            uncovered_enemies = [e for e in enemies
+                                 if answer_counts[e] < min_threat_answers]
+            threat_coverage = {
+                "covered": len(enemies) - len(uncovered_enemies),
+                "total": len(enemies), "uncovered": uncovered_enemies,
+                "answer_counts": answer_counts,
+            }
+            if (max_uncovered_threats is not None
+                    and len(uncovered_enemies) > max_uncovered_threats):
+                continue
         score = sum(scored_pairs[pk] for pk in combo) / len(combo)
         results.append({
             "team": core,
@@ -8047,6 +8393,8 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
             "score": score,
             "sets": {n: {"item": coverage["fixed_items"][n],
                         "moves": coverage["fixed_moves"][n]} for n in core},
+            "offensive_coverage": offensive_coverage,
+            "threat_coverage": threat_coverage,
         })
     results.sort(key=lambda r: -r["score"])
     return results[:top_n]
@@ -8637,7 +8985,7 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
              evs_overrides=None, nature_overrides=None, ability_overrides=None,
              enemy_item_overrides=None, enemy_move_overrides=None,
              max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
-             max_life_orb=DEFAULT_MAX_LIFE_ORB):
+             max_life_orb=DEFAULT_MAX_LIFE_ORB, all_moves=False):
     """The full report for ONE SPECIFIC, already-chosen pair (not a pool
     search) against every pair drawn from `target_names`.
 
@@ -8680,9 +9028,16 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     "this must apply to every single team" means every finalized pair/team
     here too, not just the 4-6-member searches.
 
+    `all_moves`: "in the damage calc I need to see all moves" -- passed
+    straight through as `_pair_vs_targets`'s own `want_all_moves_grid`:
+    every detail entry ALSO gets `grid_all_moves` (every candidate move's
+    own `Hit` per attacker/defender cell, not just the single best one
+    `grid` itself always shows). Off by default -- a second full grid
+    pass, wasted unless a caller actually wants the per-move breakdown.
+
     Returns (item1, item2, detail, summary) -- `detail`/`summary` are
     `_pair_vs_targets`'s own shape, `grid`/`ohko_risk` included on every
-    entry.
+    entry, `grid_all_moves` too when `all_moves=True`.
     """
     item_overrides = _resolve_team_items(
         [name1, name2], merged, moves_db, natures, typechart, target_names,
@@ -8713,7 +9068,8 @@ def deep_dive(name1, name2, target_names, merged, moves_db, natures,
     detail, summary = _pair_vs_targets(name1, name2, our_built, target_names,
                                        enemy_built, typechart, turns,
                                        want_grid=True, merged=merged,
-                                       worst_case_targeting=worst_case_targeting)
+                                       worst_case_targeting=worst_case_targeting,
+                                       want_all_moves_grid=all_moves)
     return item1, item2, detail, summary
 
 
@@ -9167,12 +9523,13 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
     has only the one direction and no separate head-to-head to add -- the
     team would just be playing its own best-4 against itself again.
 
-    A round-robin over N teams is N mirrors + 2*C(N,2) directional pairs +
-    C(N,2) head-to-heads = N**2 matchups total -- genuinely expensive for
-    a large `teams` (8 saved teams is 64 matchups), hence `team_names`
-    narrowing here and the caller's own progress reporting (this is a
-    plain generator, so a caller can update a progress bar between
-    `yield`s without this function needing to know about Streamlit).
+    A round-robin over N teams is N mirrors + 2*C(N,2) "vs_full" directional
+    pairs + 2*C(N,2) head-to-heads = N + 4*C(N,2) matchups total --
+    genuinely expensive for a large `teams` (8 saved teams is 116
+    matchups), hence `team_names` narrowing here and the caller's own
+    progress reporting (this is a plain generator, so a caller can update a
+    progress bar between `yield`s without this function needing to know
+    about Streamlit).
 
     Yields (team_a, team_b, pair_rows, bring4_rows, layer, enemy_roster) --
     `bring4_search`'s own two return values, unchanged, plus `layer`, one
@@ -9183,11 +9540,21 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
         `enemy_roster` is `teams[team_b]`, its full roster.
       "best4_vs_best4" -- team_a's and team_b's own best bring-4 (each
         already found from its own "vs_full" rows above) raced directly
-        against each other; team_a is still listed as "ours" for this
-        row's single-entry `bring4_rows` (both sides are already exactly
-        4, so `bring4_search` degenerates to one row). `enemy_roster` is
-        team_b's own best bring-4 (NOT its full roster) -- the actual
-        enemy this row raced against.
+        against each other, BOTH directions (`team_a` "ours" vs `team_b`,
+        then `team_b` "ours" vs `team_a`) -- "matches still systematically
+        favour side A, without representing a genuine assessment of the
+        matchup": `bring4_search`'s own engine gives "our" side an
+        exhaustive per-turn target search plus a 2-turn lookahead, while
+        the "enemy" side gets only a single greedy guess each turn
+        (`worst_case_targeting`, off by default) -- a real skill gap, not
+        a measure of which team is actually better, so racing this
+        head-to-head only ONE way would silently hand whichever team
+        happens to sort alphabetically first (always `team_a`) that
+        advantage in EVERY pair of the whole round-robin. Each of the two
+        rows still has a single-entry `bring4_rows` (both sides are
+        already exactly 4, so `bring4_search` degenerates to one row).
+        `enemy_roster` is the OTHER team's own best bring-4 (NOT its full
+        roster) -- the actual enemy that row raced against.
     `enemy_roster` is always returned explicitly (rather than left for a
     caller to re-derive) since it differs between the two layers and a
     caller needing it (e.g. `enemy_has_real_tailwind`) shouldn't have to
@@ -9229,7 +9596,23 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
 
         best4_a = list(bring4_rows_ab[0]["bring4"])
         best4_b = list(bring4_rows_ba[0]["bring4"])
-        pair_rows_h2h, bring4_rows_h2h = bring4_search(
+        # SYMMETRIC HEAD-TO-HEAD, not just one direction: `bring4_search`'s
+        # own engine gives "our" side (n1/n2) an exhaustive per-turn target
+        # search plus a 2-turn lookahead, while the "enemy" side (E1/E2) is
+        # a single greedy, unhinted guess each turn (`_best_turn`'s own
+        # `worst_case_targeting`-gated default) -- a real, structural skill
+        # gap, not a measure of which team is actually better. Racing this
+        # head-to-head only ONE way (best4_a always "ours") would silently
+        # hand THAT side the exhaustive-search advantage in EVERY pair of
+        # this round-robin, since `team_a` always sorts alphabetically
+        # before `team_b` -- "matches still systematically favour side A,
+        # without representing a genuine assessment of the matchup." Racing
+        # BOTH directions here, mirroring the "vs_full" layer's own
+        # already-symmetric pattern two blocks up, gives each team a row
+        # where IT gets the exhaustive-search seat -- a caller wanting a
+        # single verdict reads both, not just whichever the alphabetical
+        # sort happened to list first.
+        pair_rows_h2h_ab, bring4_rows_h2h_ab = bring4_search(
             best4_a, best4_b, merged, moves_db, natures, typechart,
             turns=turns, good_threshold=good_threshold,
             item_overrides=a_item, move_overrides=a_moves,
@@ -9239,20 +9622,44 @@ def round_robin_saved_teams(teams, meta, merged, moves_db, natures, typechart,
             enemy_ability_overrides=b_abil,
             excluded_items=excluded_items, max_focus_sash=max_focus_sash,
             max_life_orb=max_life_orb)
-        yield team_a, team_b, pair_rows_h2h, bring4_rows_h2h, "best4_vs_best4", best4_b
+        yield team_a, team_b, pair_rows_h2h_ab, bring4_rows_h2h_ab, "best4_vs_best4", best4_b
+
+        pair_rows_h2h_ba, bring4_rows_h2h_ba = bring4_search(
+            best4_b, best4_a, merged, moves_db, natures, typechart,
+            turns=turns, good_threshold=good_threshold,
+            item_overrides=b_item, move_overrides=b_moves,
+            evs_overrides=b_evs, nature_overrides=b_nat, ability_overrides=b_abil,
+            enemy_item_overrides=a_item, enemy_move_overrides=a_moves,
+            enemy_evs_overrides=a_evs, enemy_nature_overrides=a_nat,
+            enemy_ability_overrides=a_abil,
+            excluded_items=excluded_items, max_focus_sash=max_focus_sash,
+            max_life_orb=max_life_orb)
+        yield team_b, team_a, pair_rows_h2h_ba, bring4_rows_h2h_ba, "best4_vs_best4", best4_a
 
 
 def _evolve_trial_result(kind, member, removed, added, trial_core, target_name_lists,
                          merged, moves_db, natures, typechart, turns, item_overrides,
                          move_overrides, excluded_items, evs_overrides, nature_overrides,
-                         ability_overrides, max_focus_sash, max_life_orb, good_threshold):
-    """One MOVE-, ITEM-, or MEMBER-swap trial's full `core_deep_dive` +
-    `_evolve_dive_breakdown` result, or `None` when the candidate has no
-    legal set/moveset in this core (`core_deep_dive`'s own `ValueError`,
-    "skip, don't crash the whole search over one bad candidate"). Pure and
-    side-effect-free -- shared by `evolve_from_team`'s serial path and its
-    `jobs`-parallel worker (`_evolve_trial_job` below) so the two can never
-    drift out of sync with each other.
+                         ability_overrides, max_focus_sash, max_life_orb, good_threshold,
+                         enforce_item_clause=False):
+    """One MOVE-, ITEM-, MEMBER-, or MEMBER-PAIR-swap trial's full
+    `core_deep_dive` + `_evolve_dive_breakdown` result, or `None` when the
+    candidate has no legal set/moveset in this core (`core_deep_dive`'s own
+    `ValueError`, "skip, don't crash the whole search over one bad
+    candidate"). Pure and side-effect-free -- shared by `evolve_from_team`'s
+    serial path and its `jobs`-parallel worker (`_evolve_trial_job` below)
+    so the two can never drift out of sync with each other.
+
+    `enforce_item_clause`: passed straight through to `core_deep_dive` --
+    "you also cannot add a member with an item that already exists on the
+    team ... unless it existed on the member being replaced": resolving
+    `trial_core`'s items with VGC's real Item Clause enforced means a
+    departing member's own item is simply available again for the new
+    roster (nothing special-cased here -- `trial_core` no longer contains
+    that member at all by this point, so `_resolve_unique_items` sees an
+    ordinary free slot), while a genuinely NEW duplicate (the incoming
+    candidate's best item colliding with an UNCHANGED teammate's) is
+    exactly what gets excluded.
     """
     try:
         trial_dive = core_deep_dive(
@@ -9260,7 +9667,8 @@ def _evolve_trial_result(kind, member, removed, added, trial_core, target_name_l
             turns=turns, item_overrides=item_overrides, move_overrides=move_overrides,
             excluded_items=excluded_items, evs_overrides=evs_overrides,
             nature_overrides=nature_overrides, ability_overrides=ability_overrides,
-            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+            max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
+            enforce_item_clause=enforce_item_clause)
     except ValueError:
         return None
     trial_breakdown = _evolve_dive_breakdown(trial_dive, target_name_lists, good_threshold)
@@ -9300,7 +9708,7 @@ def _evolve_trial_job(job):
     (kind, member, removed, added, trial_core, target_name_lists, turns,
      item_overrides, move_overrides, excluded_items, evs_overrides,
      nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
-     good_threshold) = job
+     good_threshold, enforce_item_clause) = job
     global _EVOLVE_WORKER_WORLD
     if _EVOLVE_WORKER_WORLD is None:
         _evolve_worker_init()
@@ -9310,7 +9718,7 @@ def _evolve_trial_job(job):
         w["merged"], w["moves"], w["natures"], w["typechart"], turns,
         item_overrides, move_overrides, excluded_items, evs_overrides,
         nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
-        good_threshold)
+        good_threshold, enforce_item_clause=enforce_item_clause)
 
 
 def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, typechart,
@@ -9318,7 +9726,8 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
                           excluded_items, evs_overrides, nature_overrides,
                           ability_overrides, max_focus_sash, max_life_orb,
                           good_threshold, jobs, progress_callback, round_num,
-                          allow_member_swaps=True):
+                          allow_member_swaps=True, max_megas=2,
+                          enforce_item_clause=False):
     """One round of `evolve_from_team`'s own greedy hill-climbing: every
     move/item/whole-member swap trial around `core` AS GIVEN (already-
     improved by any earlier round, for round 2+), scored against the SAME
@@ -9368,14 +9777,44 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
       "Dragonite" is already on the team), try replacing it entirely -- the
       trial core's OWN set is searched fresh (a new member needs its own
       real item/moveset, not the departed member's), same as any other
-      `core_deep_dive` call.
+      `core_deep_dive` call. Hard-dropped when the resulting `trial_core`
+      would carry more than `max_megas` Mega-stone holders -- "I cannot
+      have more than 2 megas, so a mega must be switched for a mega."
+    - MEMBER-PAIR SWAPS (only when `allow_member_swaps` AND `core` is
+      already AT `max_megas`): "a mega+non-mega pair jointly switched for
+      a new mega+non-mega pair" -- the ONLY other legal way to bring in a
+      genuinely NEW Mega candidate once already at the cap. A plain single
+      swap offering a non-mega member a Mega-stone candidate would be
+      hard-dropped above (it alone would push the team over `max_megas`);
+      this instead pairs that swap with simultaneously swapping one of
+      the CURRENT Mega holders out for a non-Mega candidate, so the team's
+      total stays at `max_megas` throughout. Greedy hill-climbing can't
+      reach this by chaining two ordinary ROUNDS instead, because "give up
+      an existing Mega for a plain Pokemon" is essentially never a
+      positive-delta move ON ITS OWN (nothing has been gained yet) -- only
+      the COMBINED, simultaneous effect of both halves can be a genuine
+      improvement, so it has to be evaluated as one trial. Bounded by
+      (existing Megas <= `max_megas`) x (existing non-Megas) x (`swap_pool`
+      Megas) x (`swap_pool` non-Megas) -- same "bound `swap_pool` for
+      realistic cost" expectation whole-member swaps already carry, now
+      squared; a caller's own `swap_pool` sizing is what keeps this
+      tractable (the CLI's own `--evolve-pool-size` already defaults to a
+      small 20).
+
+    `enforce_item_clause`: passed straight through to every trial's own
+    `core_deep_dive` call (see `_evolve_trial_result`'s own docstring) --
+    "you also cannot add a member with an item that already exists on the
+    team ... unless it existed on the member being replaced." Applied to
+    THIS round's own baseline dive too, so every trial's score is compared
+    against a baseline that respects the same rule, not a looser one.
     """
     baseline_dive = core_deep_dive(
         core, target_name_lists, merged, moves_db, natures, typechart,
         turns=turns, item_overrides=item_overrides, move_overrides=move_overrides,
         excluded_items=excluded_items, evs_overrides=evs_overrides,
         nature_overrides=nature_overrides, ability_overrides=ability_overrides,
-        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb)
+        max_focus_sash=max_focus_sash, max_life_orb=max_life_orb,
+        enforce_item_clause=enforce_item_clause)
     baseline_breakdown = _evolve_dive_breakdown(baseline_dive, target_name_lists, good_threshold)
     baseline_score = baseline_breakdown["score"]
     baseline_sets = baseline_dive["sets"]
@@ -9437,8 +9876,43 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
                 trial_core = [candidate if n == member else n for n in core]
                 if _mega_base_overlap(trial_core):
                     continue
+                if (max_megas is not None and
+                        sum(1 for n in trial_core if n.startswith("Mega ")) > max_megas):
+                    continue
                 trial_specs.append(("member", member, member, candidate,
                                     trial_core, item_overrides, move_overrides))
+
+        # MEMBER-PAIR SWAPS (see this function's own docstring) -- only
+        # when the team is already AT the cap, since a mega-for-mega swap
+        # above already covers "replace one Mega with a stronger one" on
+        # its own, at a fraction of the cost.
+        current_megas = [n for n in core if n.startswith("Mega ")]
+        current_non_megas = [n for n in core if not n.startswith("Mega ")]
+        if max_megas is not None and len(current_megas) >= max_megas:
+            pool_megas = [n for n in pool if n.startswith("Mega ")]
+            pool_non_megas = [n for n in pool if not n.startswith("Mega ")]
+            for old_mega in current_megas:
+                for old_non_mega in current_non_megas:
+                    for new_mega in pool_megas:
+                        if new_mega in core:
+                            continue
+                        for new_non_mega in pool_non_megas:
+                            if new_non_mega in core or new_non_mega == new_mega:
+                                continue
+                            trial_core = [
+                                new_non_mega if n == old_mega else
+                                new_mega if n == old_non_mega else n
+                                for n in core]
+                            if _mega_base_overlap(trial_core):
+                                continue
+                            if (sum(1 for n in trial_core if n.startswith("Mega "))
+                                    > max_megas):
+                                continue
+                            pair_removed = f"{old_mega} + {old_non_mega}"
+                            pair_added = f"{new_mega} + {new_non_mega}"
+                            trial_specs.append((
+                                "member_pair", pair_removed, pair_removed, pair_added,
+                                trial_core, item_overrides, move_overrides))
 
     total = len(trial_specs)
     done = 0
@@ -9467,7 +9941,7 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
             (kind, member, removed, added, trial_core, target_name_lists, turns,
              trial_item_ov, trial_move_ov, excluded_items, evs_overrides,
              nature_overrides, ability_overrides, max_focus_sash, max_life_orb,
-             good_threshold)
+             good_threshold, enforce_item_clause)
             for (kind, member, removed, added, trial_core, trial_item_ov, trial_move_ov)
             in trial_specs]
         with cf.ProcessPoolExecutor(
@@ -9486,7 +9960,8 @@ def _evolve_run_one_round(core, target_name_lists, merged, moves_db, natures, ty
                 kind, member, removed, added, trial_core, target_name_lists,
                 merged, moves_db, natures, typechart, turns, trial_item_ov,
                 trial_move_ov, excluded_items, evs_overrides, nature_overrides,
-                ability_overrides, max_focus_sash, max_life_orb, good_threshold))
+                ability_overrides, max_focus_sash, max_life_orb, good_threshold,
+                enforce_item_clause=enforce_item_clause))
 
     results.sort(key=lambda r: -r["delta"])
     return baseline_breakdown, results
@@ -9499,7 +9974,8 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
                      evs_overrides=None, nature_overrides=None, ability_overrides=None,
                      max_focus_sash=DEFAULT_MAX_FOCUS_SASH,
                      max_life_orb=DEFAULT_MAX_LIFE_ORB, jobs=1, progress_callback=None,
-                     max_changes=3, allow_member_swaps=True):
+                     max_changes=3, allow_member_swaps=True, max_megas=2,
+                     enforce_item_clause=True):
     """"If I define one high-performing team ... then try to see if any
     improvements can be made" -- "the --evolve-from-team should iterate for
     multiple improvements ... I need to see the best possible joint impact
@@ -9549,6 +10025,27 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
     itself a real, positive-delta improvement on its own. `True` (the
     default) reproduces the original, unrestricted three-swap-kind
     behaviour.
+
+    `max_megas`: "I cannot have more than 2 megas" -- hard-drops any
+    whole-member-swap trial whose resulting roster would carry more than
+    this many Mega-stone holders, and adds the MEMBER-PAIR swap kind (see
+    `_evolve_run_one_round`'s own docstring) so a team already at the cap
+    can still legally trade an existing Mega+non-Mega pair for a stronger
+    new Mega+non-Mega pair in one combined move. Default 2, matching
+    `--multi-bring4`'s own `--max-megas` default and VGC's real "only one
+    Mega Evolution per team per game" rule. `None` disables the cap
+    entirely (the old, unconstrained behaviour).
+
+    `enforce_item_clause`: "you also cannot add a member with an item that
+    already exists on the team ... unless it existed on the member being
+    replaced" -- passed straight through to every round's own baseline AND
+    every trial's own `core_deep_dive` call, resolving items with VGC's
+    real Item Clause enforced (`_resolve_unique_items`) throughout. `True`
+    by default (UNLIKE `bring4_search`'s own `enforce_item_clause`, which
+    defaults off for search-cost reasons on a much larger pool-wide sweep)
+    -- evolving an already-decided team is a much smaller, already-bounded
+    search (a caller's own `swap_pool`, `--evolve-pool-size` defaulting to
+    just 20), so the extra resolution cost here is not the same concern.
 
     `jobs`: run each round's own trials (move/item/whole-member swap
     candidates) in parallel worker processes instead of one after another
@@ -9607,7 +10104,8 @@ def evolve_from_team(core, target_name_lists, merged, moves_db, natures, typecha
             turns, swap_pool, cur_item_overrides, cur_move_overrides, excluded_items,
             evs_overrides, nature_overrides, ability_overrides, max_focus_sash,
             max_life_orb, good_threshold, jobs, progress_callback, round_num,
-            allow_member_swaps=allow_member_swaps)
+            allow_member_swaps=allow_member_swaps, max_megas=max_megas,
+            enforce_item_clause=enforce_item_clause)
         if round_num == 1:
             baseline_breakdown = round_breakdown
         rounds.append(round_results)

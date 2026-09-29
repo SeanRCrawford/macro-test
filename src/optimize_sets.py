@@ -17,16 +17,107 @@ the whole pool. It is a coverage heuristic, not a battle result: it knows
 "this move hits that threat hard" but not "I'd be dead before I used it".
 Treat it as set selection, then let the real solver judge the team.
 """
+import copy
 import itertools
 
 from damage import MoveInfo, effective_stat, damage_roll, hit_count_for, move_from_showdown
 from combatants import make_combatant
+
+
+def _mega_project(c):
+    """`c` as it actually appears once mega-evolved, if it is a Mega pick.
+
+    `make_combatant` always returns a Mega pick in its BASE form -- correct
+    for the real turn-based engine, which waits for an actual send-out
+    event before transforming it (see `engine.mega_evolve`), but this
+    module has no send-out event to wait for: asking "how hard does Mega
+    Raichu Y hit" or "how much does it take" means asking about the MEGA
+    form, not the base Raichu it starts as. Applied unconditionally, same
+    reasoning as `counter_finder._mega_project` (duplicated here rather
+    than imported -- `counter_finder` already imports from this module, so
+    importing back would cycle).
+
+    Concretely, this is why `raw_ohko_fraction_table` -- and therefore the
+    Matchup Finder's whole 1v1 read -- was scoring every Mega pick off its
+    pre-evolution stats/typing on BOTH sides of the matchup (weaker attacks
+    out, and the wrong bulk/typing on defense): reported as "only 20/153
+    beating Incineroar, but Mega Dragonite should" and "Sylveon 4HKO by
+    Mega Raichu Y's 120 BP STAB seems low" -- Mega Raichu Y's own 160 base
+    Special Attack (vs. un-evolved Raichu's much lower one) was never being
+    applied.
+    """
+    if not getattr(c, "is_mega_pick", False) or not c.mega_stats:
+        return c
+    view = copy.copy(c)
+    view.stats = dict(c.mega_stats)
+    view.types = list(c.mega_types) if c.mega_types else c.types
+    if c.mega_ability:
+        view.ability = c.mega_ability
+    if c.mega_weight_kg is not None:
+        view.weight_kg = c.mega_weight_kg
+    view.mega_evolved = True
+    return view
+
+
+# Same table `counter_finder.INTIMIDATE_BLOCKED` already uses for the real
+# 2v2 grid -- duplicated here rather than imported (same one-way-import-
+# direction reason as `_mega_project`). Clear Body/White Smoke/Full Metal
+# Body block ANY opponent-inflicted stat drop; Hyper Cutter blocks Attack
+# drops specifically; Inner Focus/Own Tempo/Oblivious/Scrappy block
+# Intimidate specifically.
+INTIMIDATE_BLOCKED = frozenset({"Clear Body", "White Smoke", "Full Metal Body",
+                                "Hyper Cutter", "Inner Focus", "Own Tempo",
+                                "Oblivious", "Scrappy"})
+
+
+def _switch_in_ability(name, merged, natures):
+    """The ability `name` actually has at the moment an opening-turn
+    Intimidate resolves: for a Mega pick, real Mega Evolution happens
+    AFTER switch-in triggers (`battle.py`'s own ordering), so this is
+    always its BASE form's ability, never its mega-exclusive one (Mega
+    Salamence is still judged as Intimidate here, Mega Gyarados as
+    Intimidate not Mold Breaker) -- exactly what `make_combatant` already
+    returns unprojected (a Mega pick starts battle in base form), so this
+    is just that, named for what it means at this one call site."""
+    return make_combatant(name, merged, natures).ability
+
+
+def _intimidate_attack_mult(attacker_ability, move_category, defender_has_intimidate):
+    """The multiplier Intimidate applies to `attacker`'s own `move_category`
+    damage output when it switches in against a live Intimidate holder --
+    same per-ability table `counter_finder._intimidate_mult_by_role` uses
+    for the real 2v2 grid (see its own docstring for the exact reasoning):
+    a -1 Atk stage is x(2/3) on damage, mathematically exact since the
+    formula multiplies by the attack stat directly; `INTIMIDATE_BLOCKED`
+    abilities are unaffected; Defiant/Competitive invert the SAME drop into
+    a real +2 stage (x2.0) SELF-boost instead; Contrary flips it to a +1
+    (x1.5), same magnitude reversed rather than resized."""
+    if not defender_has_intimidate or attacker_ability in INTIMIDATE_BLOCKED:
+        return 1.0
+    if attacker_ability == "Defiant":
+        return 2.0 if move_category == "Physical" else 1.0
+    if attacker_ability == "Competitive":
+        return 2.0 if move_category == "Special" else 1.0
+    if attacker_ability == "Contrary":
+        return 1.5 if move_category == "Physical" else 1.0
+    return 2 / 3 if move_category == "Physical" else 1.0
+
 
 # NOTE: there is deliberately no hardcoded catalogue of "good items" here.
 # Items are restricted to those that actually appear in that Pokemon's Items
 # column in mbsmogon.xlsx -- inventing plausible-sounding items (a Choice Band
 # on something that never runs one) produces sets you cannot actually field.
 MIN_ITEM_USAGE = 0.0   # keep every listed item; raise to prune very rare ones
+
+# "I want to ban explosion from the movepool, it is too strong" -- Explosion
+# (and its exact mechanical twin, Self-Destruct) faints the USER outright,
+# something neither this cheap model nor the real engine simulates at all
+# (there is no "user faints after this hit" field on `MoveInfo` the way
+# `has_crash`/`recoil` exist for OTHER self-cost moves) -- so a search that
+# cannot see that cost scores its raw damage as if it were free, the same
+# "can't model the downside, so don't offer it" reasoning `candidate_moves`
+# already applies to High Jump Kick's crash risk.
+BANNED_MOVES = frozenset({"Explosion", "Self-Destruct"})
 
 # --- Doubles utility values -------------------------------------------------
 # These are on the same scale as the offensive score: "portion of one enemy's
@@ -273,6 +364,8 @@ def candidate_moves(name, merged, moves_db, max_candidates=10, team_weather=None
         # `_accuracy_ok` already applies to a shaky <80%-accuracy move.
         if mi.has_crash:
             continue
+        if mi.name in BANNED_MOVES:
+            continue
         out.append((mi, pct))
     return out[:max_candidates]
 
@@ -289,14 +382,21 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
     evs/nature: optional EV-spread override (see bulk_spread_for) so a
     non-default spread's actual offensive output gets scored, not the
     usage-default spread's.
+
+    Both `attacker` and each `defender` are `_mega_project`-ed -- see its
+    own docstring. This is the CORE move/item auto-search (`best_moveset`/
+    `best_item` both run on top of this table), so every Mega pick's real
+    offense/bulk was silently under/over-scored here too, not just in
+    `raw_ohko_fraction_table`'s 1v1 read.
     """
-    attacker = make_combatant(name, merged, natures, item=item, evs=evs, nature=nature)
+    attacker = _mega_project(make_combatant(name, merged, natures, item=item,
+                                            evs=evs, nature=nature))
     table = {}
     for move, pct in candidate_moves(name, merged, moves_db, item=item,
                                      team_weather=team_weather):
         row = {}
         for en in enemy_names:
-            defender = make_combatant(en, merged, natures)
+            defender = _mega_project(make_combatant(en, merged, natures))
             if move.category == "Status":
                 # Utility value if we know this move matters in doubles, else a small
                 # usage-weighted default. NOT scaled down by usage for the known ones --
@@ -334,6 +434,68 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
             if move.name == "Fake Out":
                 frac += UTILITY_VALUE["Fake Out"]
             row[en] = frac
+        table[move.name] = row
+    return table
+
+
+def raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, enemy_names, item=None):
+    """{move_name: {enemy_name: fraction}} -- the PURE damage-roll fraction
+    (average roll) of the defender's max HP this move removes, with NONE of
+    `move_value_table`'s own move-SELECTION scoring bonuses (OHKO/priority/
+    Fake-Out/speed-drop/recoil). Status moves are omitted entirely (0 real
+    damage, not a utility score).
+
+    `move_value_table`'s own bonuses exist to make a moveset SEARCH value
+    genuine utility (a priority move revenge-kills, Fake Out denies a whole
+    turn) properly, even though its raw damage looks weak on paper -- but
+    that means its own per-move "value" is NOT a damage fraction once those
+    bonuses are added, and can clear 1.0 for a move that does nowhere near
+    100% real damage. `_one_v_one_matrix`'s own "does X OHKO Y" 1v1 read
+    needs the genuine fraction instead: reusing `move_value_table`'s output
+    there let a resisted, 40-BP Fake Out (Normal, resisted by a Steel-type
+    Excadrill) register as an OHKO purely from its own +0.30*priority and
+    Fake-Out-specific scoring bonuses, when its real damage was a small
+    fraction of that -- concretely reported: "no individuals seem to be
+    able to beat Mega Raichu Y, but ground types like excadrill should be
+    able to OHKO it" (Excadrill's own real Ground/Steel-boosted Earthquake-
+    family hit WAS a genuine OHKO on the Electric-type Raichu -- Raichu's
+    own Fake Out was never a real answer to it, just an inflated score that
+    won the same-turn speed tiebreak).
+
+    Both `attacker` and each `defender` are `_mega_project`-ed: a Mega pick
+    is scored in its actual mega form on both sides of the matchup, not the
+    base form `make_combatant` starts it in (see `_mega_project`'s own
+    docstring).
+
+    "Account for intimidate in the 1v1": if `en` has Intimidate active at
+    switch-in (`_switch_in_ability`), `attacker`'s own damage is adjusted
+    by `_intimidate_attack_mult` before the roll -- a real -1 Atk stage
+    (or its Defiant/Competitive/Contrary-inverted equivalent), not just a
+    filter on the results."""
+    attacker = _mega_project(make_combatant(name, merged, natures, item=item))
+    attacker_ability = _switch_in_ability(name, merged, natures)
+    intimidates = {en: _switch_in_ability(en, merged, natures) == "Intimidate"
+                  for en in enemy_names}
+    table = {}
+    for move, _pct in candidate_moves(name, merged, moves_db, item=item):
+        if move.category == "Status":
+            continue
+        atk_key = "atk" if move.category == "Physical" else "spa"
+        def_key = "def" if move.category == "Physical" else "spd"
+        a = effective_stat(attacker.stats[atk_key], 0)
+        if item == "Choice Band" and atk_key == "atk":
+            a *= 1.5
+        if item == "Choice Specs" and atk_key == "spa":
+            a *= 1.5
+        row = {}
+        for en in enemy_names:
+            defender = _mega_project(make_combatant(en, merged, natures))
+            d = effective_stat(defender.stats[def_key], 0)
+            a_en = a * _intimidate_attack_mult(attacker_ability, move.category,
+                                               intimidates[en])
+            _, _, avg, _eff = damage_roll(50, move.power, a_en, d, attacker, defender, move, typechart)
+            avg *= hit_count_for(move.name, attacker)
+            row[en] = avg / defender.stats["hp"] if defender.stats["hp"] else 0.0
         table[move.name] = row
     return table
 
@@ -415,11 +577,12 @@ def incoming_threat(name, merged, moves_db, natures, typechart, enemy_names):
     """For each enemy individual, the fraction of OUR max HP their best move
     removes. Used to give defensive items credit -- without this the optimiser
     just picks Life Orb on everything, because a pure damage-coverage score
-    can never see the value of surviving."""
-    me = make_combatant(name, merged, natures)
+    can never see the value of surviving. Both sides are `_mega_project`-ed,
+    same as `move_value_table`/`raw_ohko_fraction_table`."""
+    me = _mega_project(make_combatant(name, merged, natures))
     out = {}
     for en in enemy_names:
-        foe = make_combatant(en, merged, natures)
+        foe = _mega_project(make_combatant(en, merged, natures))
         worst_phys = worst_spec = 0.0
         for move, pct in candidate_moves(en, merged, moves_db):
             if move.category == "Status":
@@ -506,10 +669,14 @@ def best_item(name, merged, moves_db, natures, typechart, enemy_names, slots=4,
                 sc -= 0.15 * len(enemy_names) * 0.25
 
         if it == "Choice Scarf":
+            # `name` itself is never a Mega pick here (one holds a Mega
+            # Stone, an unconditional `return` above skips this whole
+            # branch for it) -- only the enemy side needs projecting.
             me = make_combatant(name, merged, natures)
             base_spe = me.stats["spe"]
             gained = sum(1 for en in enemy_names
-                          if base_spe < make_combatant(en, merged, natures).stats["spe"] <= base_spe * 1.5)
+                          if base_spe < _mega_project(
+                              make_combatant(en, merged, natures)).stats["spe"] <= base_spe * 1.5)
             sc += 0.6 * gained
         if it.startswith("Choice"):
             # Choice locks you into the first move used. A set containing status /

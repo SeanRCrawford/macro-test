@@ -1025,6 +1025,91 @@ class TestCrashDamageMovesExcludedFromAutoSearch(unittest.TestCase):
             self.assertTrue(mi.has_crash)
 
 
+class TestTripleAxelAndMultiHitBreakFocusSash(unittest.TestCase):
+    """"Triple Axel should be treated as a 120bp move that breaks focus
+    sash (multi hit)" -- Showdown stores it as its first hit's 20 bp, which
+    this single-aggregate-damage model read literally (a 20 bp Ice move).
+    Every multi-hit move also only gets absorbed once by a Focus Sash/
+    Sturdy: the first hit leaves 1 HP, a later hit still KOs."""
+
+    def test_triple_axel_is_a_single_120_power_move(self):
+        from damage import move_from_showdown
+        self.assertEqual(move_from_showdown(world()["moves"]["tripleaxel"]).power, 120)
+
+    def test_multi_hit_moves_break_a_sash_and_single_hit_moves_do_not(self):
+        from damage import breaks_focus_sash
+
+        class Atk:
+            item = ""
+        for name in ("Triple Axel", "Bullet Seed", "Scale Shot", "Dual Wingbeat",
+                     "Surging Strikes"):
+            self.assertTrue(breaks_focus_sash(name, Atk()), name)
+        for name in ("Close Combat", "Population Bomb", "Icicle Crash"):
+            self.assertFalse(breaks_focus_sash(name, Atk()), name)
+
+    def test_counter_finder_race_lets_triple_axel_ko_a_full_hp_sash_holder(self):
+        import counter_finder as cf
+        from combatants import make_combatant
+        w = world()
+        target = make_combatant("Garchomp", w["merged"], w["natures"], item="Focus Sash")
+        atk = make_combatant("Weavile", w["merged"], w["natures"])
+        mi = cf.move_from_showdown(w["moves"]["tripleaxel"])
+        self.assertEqual(mi.power, 120)
+        self.assertTrue(cf.breaks_focus_sash(mi.name, atk))
+        self.assertEqual(target.item, "Focus Sash")
+
+
+class TestExplosionBannedFromAutoSearch(unittest.TestCase):
+    """"I want to ban explosion from the movepool, it is too strong" --
+    Explosion (and its exact mechanical twin, Self-Destruct) faints the
+    USER outright, a cost this engine has no field to represent (unlike
+    `has_crash`/`recoil` for other self-cost moves), so a search that
+    can't see that cost would score its raw damage as if it were free.
+    Same "can't model the downside, so don't offer it" treatment as
+    `has_crash`, and the same two-chokepoint shape: `optimize_sets.
+    candidate_moves` (cheap model) and `solver.build_moveset` (real
+    engine) both need the exclusion, `only_moves` stays permissive."""
+
+    def setUp(self):
+        self.W = world()
+
+    def test_explosion_dropped_from_optimize_sets_candidate_moves(self):
+        from optimize_sets import candidate_moves, BANNED_MOVES
+        self.assertIn("Explosion", BANNED_MOVES)
+        merged, moves = self.W["merged"], self.W["moves"]
+        for name, rec in merged.items():
+            if "Explosion" in dict(rec.get("moves_usage", [])):
+                names = [m.name for m, _pct in candidate_moves(name, merged, moves)]
+                self.assertNotIn("Explosion", names)
+                return
+        self.skipTest("no in-dataset Explosion user to check against")
+
+    def test_self_destruct_also_banned(self):
+        from optimize_sets import BANNED_MOVES
+        self.assertIn("Self-Destruct", BANNED_MOVES)
+
+    def test_explosion_dropped_from_solvers_auto_build_moveset(self):
+        from solver import build_moveset
+        merged, moves = self.W["merged"], self.W["moves"]
+        for name, rec in merged.items():
+            if "Explosion" in dict(rec.get("moves_usage", [])):
+                names = [m.name for m, _pct in build_moveset(merged[name], moves, top_k=10)]
+                self.assertNotIn("Explosion", names)
+                return
+        self.skipTest("no in-dataset Explosion user to check against")
+
+    def test_an_explicit_hand_built_set_may_still_include_it(self):
+        """Mirrors the crash-move precedent: `only_moves` represents a REAL,
+        already-decided set and is never second-guessed by this ban."""
+        from solver import build_moveset
+        merged, moves = self.W["merged"], self.W["moves"]
+        self.assertIn("Tsareena", merged)
+        names = [m.name for m, _pct in build_moveset(
+            merged["Tsareena"], moves,
+            only_moves=["Explosion", "Protect", "Trop Kick", "Power Whip"])]
+        self.assertEqual(names, ["Explosion", "Protect", "Trop Kick", "Power Whip"])
+
+
 class TestSandSnowDefensiveBoostAppliedOnce(unittest.TestCase):
     """"0 SpA Mega Raichu Y Focus Blast vs. Tyranitar in Sand ... guaranteed
     OHKO" -- `damage_roll` carried its OWN internal copy of sand's Rock-type

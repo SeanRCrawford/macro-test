@@ -4096,6 +4096,58 @@ def _pair_rows_df(pair_rows, include_total=False):
     return pd.DataFrame(rows)
 
 
+# Intimidate genuinely IGNORES/blocks the Attack drop (true immunity) --
+# `counter_finder.INTIMIDATE_BLOCKED`'s own established list. Defiant/
+# Competitive/Contrary are NOT immune (the drop still applies first) but
+# invert it into a net stat GAIN instead (+2/+2/+1 respectively, per
+# `_intimidate_mult_by_role`'s own real-grid treatment), which is why the
+# user still wants them grouped with the true-immunity abilities for a
+# "does Intimidate actually hurt this Pokemon" filter.
+def _potential_abilities(name, merged):
+    """Every ability `name` COULD legally have: its own recorded/default
+    ability, its Showdown-legal abilities, and -- for a Mega pick -- its
+    BASE species' too (a Mega Metagross is Tough Claws once evolved, but
+    base Metagross can carry Clear Body, and Intimidate/Fake Out resolve
+    before Mega Evolution, so the base form's options count)."""
+    from combatants import _default_ability
+    from species_data import base_form_name
+    out = set()
+    for n in (name, base_form_name(name)):
+        rec = merged.get(n) if n else None
+        if not rec:
+            continue
+        out.update((rec.get("legal_abilities") or {}).values())
+        out.update(a for a, _p in (rec.get("abilities_usage") or []))
+        out.add(_default_ability(rec.get("abilities_usage") or []))
+    return out
+
+
+def _resists_intimidate(name, merged, moves_db):
+    """True if `name` resists Intimidate for a Matchup Finder search: either
+    Intimidate's own Attack drop never touches its real offense (no usage-
+    ranked Physical damaging move at all -- a pure special attacker), or ANY
+    ability it could have (`_potential_abilities`, base form included) makes
+    the drop a non-issue -- true immunity, or Defiant/Competitive/Contrary's
+    net stat GAIN (`_intimidate_mult_by_role`'s own treatment of these)."""
+    from counter_finder import INTIMIDATE_BLOCKED, _real_damaging_moves
+    if _potential_abilities(name, merged) & (
+            set(INTIMIDATE_BLOCKED) | {"Defiant", "Competitive", "Contrary"}):
+        return True
+    return not any(mv.category == "Physical"
+                   for mv in _real_damaging_moves(name, merged, moves_db))
+
+
+def _ignores_fake_out(name, merged):
+    """True if `name` is never flinched by Fake Out: a Ghost type (immune to
+    its Normal typing outright), or ANY ability it could have
+    (`_potential_abilities`, base form included) blocks the flinch itself
+    (`lead_sim.FLINCH_PROOF`)."""
+    from lead_sim import FLINCH_PROOF
+    if "Ghost" in (merged[name].get("types") or []):
+        return True
+    return bool(_potential_abilities(name, merged) & set(FLINCH_PROOF))
+
+
 def _bring4_rows_df(bring4_rows, total):
     """Stage 2's own dataframe shape (Bring-4/Uncovered enemy pairs/Good
     pairs/Worst pair/Worst pair beaten/Mega) -- factored out so `bring4_
@@ -4431,6 +4483,115 @@ def _render_hit_count_matrix_for_bring4_search(bring4_row, target_names, merged,
     _render_crucial_members(result["crucial"])
 
 
+def _damage_hits_df(grid_side, role_name):
+    """One side of `deep_dive`'s own `grid_all_moves` (`{"ours"|"theirs":
+    {(atk, tgt): [Hit, ...]}}`, every candidate move, worst-damage first)
+    as a plain table -- "in the damage calc I need to see all moves", not
+    just whichever single move `grid` itself would pick, and not just
+    whichever move a played-out race happened to throw (`_render_pair_
+    matchup_detail`'s own turn-by-turn log only shows that -- a KO'd
+    member's other matchup, and a shown member's OTHER moves, are both
+    invisible there). One row per (attacker, target, move), best damage
+    first within each (attacker, target) pair."""
+    rows = []
+    for (atk, tgt), hits in grid_side.items():
+        for h in reversed(hits):  # `_grid_hit(return_all=True)`: worst-first
+            rows.append({
+                "Attacker": role_name[atk], "Target": role_name[tgt],
+                "Move": h.move_name or "-",
+                "Damage (worst-avg-best)":
+                    f"{h.lo * 100:.0f}-{h.avg * 100:.0f}-{h.hi * 100:.0f}%"
+                    + (" (spread)" if h.num_targets_hit > 1 else ""),
+            })
+    return pd.DataFrame(rows)
+
+
+def _render_damage_calc_for_pair(our6, vs_roster, merged, moves, natures, typechart,
+                                 turns, excluded_items, key_prefix,
+                                 item_overrides=None, move_overrides=None,
+                                 evs_overrides=None, nature_overrides=None,
+                                 ability_overrides=None, enemy_item_overrides=None,
+                                 enemy_move_overrides=None):
+    """"I want a section to look at damage calcs vs selected enemy pair" --
+    pick any 2 of `our6` and any 2 of `vs_roster`, race just that one 2v2
+    with `deep_dive`'s own `want_grid=True`/`all_moves=True` (the same 2x2
+    damage grid/OHKO-risk read the CLI's `--deep` mode already shows via
+    `_print_deep`, never previously surfaced for a `bring4_search` result
+    -- its own pair races never pay for a grid nobody would see), EVERY
+    candidate move shown per attacker/defender cell ("in the damage calc I
+    need to see all moves"), not just the single one each side would
+    actually pick to play. Cheap: one pair vs one enemy pair, not a pool-
+    wide sweep, so a fresh race per click is fine."""
+    if len(our6) < 2 or len(vs_roster) < 2:
+        return
+    st.markdown("**Damage calc vs a chosen enemy pair**")
+    st.caption("Pick any 2 of your 6 and any 2 of the enemy roster -- the "
+              "full 2x2 damage grid (every attacker vs every defender, "
+              "worst-avg-best roll), not just whichever moves a played-out "
+              "race happened to throw.")
+    c1, c2 = st.columns(2)
+    our_pair = c1.multiselect("Our pair", our6, default=our6[:2],
+                              key=f"{key_prefix}_our_pair", max_selections=2)
+    enemy_pair = c2.multiselect("Enemy pair", vs_roster, default=vs_roster[:2],
+                                key=f"{key_prefix}_enemy_pair", max_selections=2)
+    worst_case = st.checkbox(
+        "Worst-case enemy targeting", value=True, key=f"{key_prefix}_worst_case",
+        help="ON by default, matching every other deep-dive checkbox -- a "
+             "single 2v2 race is cheap regardless of this setting.")
+    if len(our_pair) != 2 or len(enemy_pair) != 2:
+        st.caption("Pick exactly 2 or your own and 2 of the enemy's.")
+        return
+    if st.button("Show damage calc", key=f"{key_prefix}_go"):
+        from counter_finder import deep_dive
+        item1, item2, detail, _summary = deep_dive(
+            our_pair[0], our_pair[1], enemy_pair, merged, moves, natures,
+            typechart, turns=turns, item_overrides=item_overrides,
+            move_overrides=move_overrides, excluded_items=excluded_items,
+            worst_case_targeting=worst_case, evs_overrides=evs_overrides,
+            nature_overrides=nature_overrides, ability_overrides=ability_overrides,
+            enemy_item_overrides=enemy_item_overrides,
+            enemy_move_overrides=enemy_move_overrides, all_moves=True)
+        st.session_state[f"{key_prefix}_result"] = (
+            our_pair, enemy_pair, item1, item2, detail)
+    cached = st.session_state.get(f"{key_prefix}_result")
+    if not cached:
+        return
+    c_our_pair, c_enemy_pair, item1, item2, detail = cached
+    d = detail.get(tuple(c_enemy_pair)) or detail.get(tuple(reversed(c_enemy_pair)))
+    if d is None:
+        return
+    e1, e2 = c_enemy_pair
+    role_name = {"C": c_our_pair[0], "P": c_our_pair[1], "E1": e1, "E2": e2}
+    st.caption(f"{c_our_pair[0]} ({item1 or '-'}) + {c_our_pair[1]} "
+              f"({item2 or '-'}) vs {e1} + {e2}")
+    tw = "" if d["tailwind_safe"] else f"  [tailwind: {d['tailwind_outcome']}]"
+    pr = "" if d["protect_safe"] else (
+        f"  [protect: {e1}->{d['protect_outcomes']['E1']}, "
+        f"{e2}->{d['protect_outcomes']['E2']}]")
+    fm = "" if d["follow_me_safe"] else f"  [redirect: {d['follow_me_outcome']}]"
+    st.markdown(f"**{d['outcome'].upper()}** (turn {d['turns_used']}){tw}{pr}{fm}")
+    for r in d["ohko_risk"]:
+        st.warning(f"OHKO RISK: {role_name[r['attacker']]}'s {r['move']} "
+                  f"could one-shot {role_name[r['target']]} "
+                  f"(worst roll {r['hi'] * 100:.0f}%)")
+    grid = d["grid_all_moves"]
+    st.markdown("*Damage we deal (average roll, every move):*")
+    st.dataframe(_damage_hits_df(grid["ours"], role_name), width='stretch', hide_index=True)
+    st.markdown("*Damage we take (average roll, every move):*")
+    st.dataframe(_damage_hits_df(grid["theirs"], role_name), width='stretch', hide_index=True)
+    lines = []
+    for turn_i, turn_hits in enumerate(d["log"], 1):
+        for role, tgt_role, h in turn_hits:
+            spread = " (spread)" if h.num_targets_hit > 1 else ""
+            lines.append(
+                f"T{turn_i} {role_name[role]} -> {role_name[tgt_role]}: "
+                f"{h.move_name or '-'} {h.lo * 100:.0f}-{h.avg * 100:.0f}-"
+                f"{h.hi * 100:.0f}%{spread}")
+    if lines:
+        st.markdown("*How it plays out:*")
+        st.code("\n".join(lines), language=None)
+
+
 # "if a member(s) has high choice scarf usage" -- how high mbsmogon.xlsx's
 # own recorded Choice Scarf usage % must be, AND be that member's single
 # TOP item, before it's worth flagging as a suggestion. A judgment call,
@@ -4747,14 +4908,15 @@ def _render_core_deep_dive(core, target_name_lists, shown_vs, turns,
     """
     from counter_finder import core_deep_dive, bring4_from_deep_dive, recommended_lead
     worst_case_targeting = st.checkbox(
-        "Worst-case enemy targeting", key=f"{key_prefix}_worst_case",
-        help="By default the enemy's own per-turn target choice is a "
-             "single greedy guess. Check this to also exhaustively search "
-             "the enemy's OWN targeting each turn and assume whichever "
-             "combo is worst for us -- mirrors the worst-case search "
-             "already done for the enemy's Mega-evolve choice. Real cost: "
-             "roughly squares the per-turn search on top of the engine's "
-             "own 2-turn lookahead.")
+        "Worst-case enemy targeting", value=True, key=f"{key_prefix}_worst_case",
+        help="ON by default (matches the CLI's own --deep-dive-worst-case-"
+             "targeting default): the enemy's own per-turn target choice "
+             "is ALSO exhaustively searched each turn, and whichever "
+             "combo is worst for us is what gets played -- mirrors the "
+             "worst-case search already done for the enemy's Mega-evolve "
+             "choice. Cheap here regardless: the deep dive only ever runs "
+             "on a handful of already-narrowed candidates. Uncheck to "
+             "fall back to a single greedy guess per turn.")
     check_trick_room = st.checkbox(
         "Also check enemy Trick Room", key=f"{key_prefix}_check_tr",
         help="\"avoiding enemy tailwind and trick room may be key for a "
@@ -4961,7 +5123,8 @@ with tab_counter:
         "Mode", ["Bring-4 (one enemy roster)", "Multi-bring4 (several enemy rosters)",
                  "Enemy's best response (to my team)", "Complete my team",
                  "Joint pair search", "2-2-2 teambuilding", "Coverage groups",
-                 "Import pair coverage", "Round-robin (saved teams only)"],
+                 "Import pair coverage", "Round-robin (saved teams only)",
+                 "Matchup finder"],
         key="ct_mode", horizontal=True)
 
     ct_allow_scarf = st.checkbox(
@@ -5242,6 +5405,15 @@ with tab_counter:
                          "turn 1 and see if that flips the outcome, feeding "
                          "the Win conditions table's own Trick Room caveat "
                          "below. Off leaves every result exactly as before.")
+                ct_b4_worst_case = st.checkbox(
+                    "Worst-case enemy targeting", key="ct_b4_worst_case",
+                    help="Off by default -- a real cost (roughly squares "
+                         "the per-turn search on top of the engine's own "
+                         "2-turn lookahead). Check this to also "
+                         "exhaustively search the enemy's own per-turn "
+                         "target choice each turn and assume whichever "
+                         "combo is worst for us, instead of the enemy's "
+                         "usual single greedy guess.")
                 ct_b4_required_techs = _tech_required_multiselect(
                     "Required techs (this bring-4 must have)", "ct_b4_required_techs")
                 ct_b4_min_special = _min_special_attackers_slider("ct_b4_minspecial")
@@ -5275,6 +5447,7 @@ with tab_counter:
                                 enemy_item_overrides=enemy_item_overrides,
                                 enemy_move_overrides=enemy_move_overrides,
                                 check_trick_room=ct_check_tr,
+                                worst_case_targeting=ct_b4_worst_case,
                                 required_techs=ct_b4_required_techs or None,
                                 min_special_attackers=ct_b4_min_special,
                                 rank_by=ct_b4_rank_by)
@@ -5322,6 +5495,14 @@ with tab_counter:
                         enemy_move_overrides=enemy_move_overrides,
                         evs_overrides=evs_overrides, nature_overrides=nature_overrides,
                         ability_overrides=ability_overrides)
+                    _render_damage_calc_for_pair(
+                        shown_our6, vs_roster, merged, moves, natures, typechart,
+                        ct_turns, ct_excluded, key_prefix="ct_b4_dmgcalc",
+                        item_overrides=item_overrides, move_overrides=move_overrides,
+                        evs_overrides=evs_overrides, nature_overrides=nature_overrides,
+                        ability_overrides=ability_overrides,
+                        enemy_item_overrides=enemy_item_overrides,
+                        enemy_move_overrides=enemy_move_overrides)
                     b4_only_losses = st.checkbox(
                         "Only show enemy pairs each pair loses to",
                         key="ct_b4_best_onlyloss")
@@ -5368,12 +5549,14 @@ with tab_counter:
                 allteams_worst_case = st.checkbox(
                     "Worst-case enemy targeting",
                     key="ctb4_dd_all6_allteams_worst_case",
-                    help="Exhaustively search the enemy's OWN per-turn "
-                         "targeting too, assuming whichever combo is worst "
-                         "for us, instead of the enemy's usual single "
-                         "greedy guess. Real cost: roughly squares the "
-                         "per-turn search on top of the engine's own "
-                         "2-turn lookahead.")
+                    help="Off by default here, UNLIKE the other deep-dive "
+                         "checkboxes -- this button already races against "
+                         "EVERY saved team at once (measured ~8 minutes "
+                         "with this off; worst-case roughly squares that "
+                         "per-team cost, pushing a single click well past "
+                         "several minutes). Check it only when you "
+                         "specifically want worst-case rigor here and can "
+                         "afford the wait.")
                 if st.button(f"Full deep dive: all of Our 6 vs ALL "
                             f"{len(teams)} saved enemy teams",
                             key="ctb4_dd_all6_allteams_go"):
@@ -6252,17 +6435,33 @@ with tab_counter:
             cov_min_offensive_types = (
                 st.slider("Minimum types covered", 1, 18, 10, key="ct_cov_min_off")
                 if cov_min_off_on else None)
+            cov_min_threat_answers = st.slider(
+                "Minimum 1v1 answers per enemy", 1, 6, 1,
+                key="ct_cov_min_threat_answers",
+                help="\"it would also be good to filter for having "
+                     "multiple 1v1 answers to each enemy, ideally at "
+                     "least two, but in theory as many as possible to "
+                     "have redundant answers\" -- raises what counts as "
+                     "'covered' below from 'at least one member beats it' "
+                     "to 'at least THIS MANY different members beat it'. "
+                     "An enemy with only one answer is a single point of "
+                     "failure -- lose that one member first and the team "
+                     "has nothing left for it. Leave at 1 for the "
+                     "original 'any answer at all' reading.")
             cov_max_uncovered_on = st.checkbox(
-                "Cap how many named enemies nobody on the group beats 1v1",
+                "Cap how many named enemies fall short of that",
                 key="ct_cov_max_uncov_on",
                 help="\"do all of my team just lose to Kingambit, or "
                      "whatever pokemon are most commonly on enemy teams\" "
                      "-- a cheap 1v1 read (not a full battle) against "
                      "every Pokemon in the 'Enemy universe' selected "
-                     "below. An enemy counts as covered the moment ANY "
-                     "group member beats it.")
+                     "below. An enemy counts as covered once it has at "
+                     "least 'Minimum 1v1 answers per enemy' different "
+                     "group members beating it -- set that to 2 and this "
+                     "to 0 for 'guarantee every enemy has at least 2 "
+                     "independent answers.'")
             cov_max_uncovered_threats = (
-                st.slider("Max enemies with zero answer", 0, 20, 3,
+                st.slider("Max enemies short of the minimum", 0, 20, 3,
                          key="ct_cov_max_uncov")
                 if cov_max_uncovered_on else None)
         cov_cap_on = st.checkbox(
@@ -6371,6 +6570,7 @@ with tab_counter:
                         min_offensive_types=cov_min_offensive_types,
                         one_v_one_matrix=cov_matrix,
                         max_uncovered_threats=cov_max_uncovered_threats,
+                        min_threat_answers=cov_min_threat_answers,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         **cov_search_kwargs,
                         must_include=cov_include, suggested=cov_suggested,
@@ -6514,11 +6714,23 @@ with tab_counter:
                                    if oc["uncovered"] else ""))
                         if row["threat_coverage"] is not None:
                             tc = row["threat_coverage"]
+                            answer_counts = tc.get("answer_counts", {})
+                            zero = sorted(e for e in tc["uncovered"]
+                                         if answer_counts.get(e, 0) == 0)
+                            underredundant = sorted(
+                                (e for e in tc["uncovered"] if answer_counts.get(e, 0) > 0),
+                                key=lambda e: answer_counts[e])
+                            bar = (f" (>= {cov_min_threat_answers} answers)"
+                                  if cov_min_threat_answers > 1 else "")
                             st.caption(
-                                f"1v1 threat coverage: {tc['covered']}/{tc['total']} "
+                                f"1v1 threat coverage{bar}: {tc['covered']}/{tc['total']} "
                                 f"named enemies"
-                                + (f"  |  No answer to: {', '.join(tc['uncovered'])}"
-                                   if tc["uncovered"] else ""))
+                                + (f"  |  No answer at all: {', '.join(zero)}"
+                                   if zero else "")
+                                + ("  |  Single point of failure: " +
+                                   ", ".join(f"{e} ({answer_counts[e]})"
+                                            for e in underredundant)
+                                   if underredundant else ""))
                         if i <= PAIR_DETAIL_TOP and cov_pair_by_key:
                             st.caption("Pair performance (this group's own links):")
                             pair_table = []
@@ -6646,6 +6858,43 @@ with tab_counter:
                          "weakness (weak minus resist) is <= 1.")
                 pc_max_weak = (st.slider("Max absolute weakness", 0, 6, 2, key="ct_pc_max_weak")
                               if pc_abs_cap_on else None)
+                pc_min_off_on = st.checkbox(
+                    "Require a minimum offensive type coverage",
+                    key="ct_pc_min_off_on",
+                    help="How many of the 18 defending types the team can "
+                         "collectively hit for real super-effective damage "
+                         "(ANY member's own real usage move counts). Cheap "
+                         "to check -- no extra racing, unlike the 1v1 "
+                         "check below.")
+                pc_min_offensive_types = (
+                    st.slider("Minimum types covered", 1, 18, 10, key="ct_pc_min_off")
+                    if pc_min_off_on else None)
+                pc_threat_on = st.checkbox(
+                    "Assess 1v1 threat coverage (extra racing)",
+                    key="ct_pc_threat_on",
+                    help="\"using the same constraints as the coverage "
+                         "groups\" -- races every uploaded/named Pokemon "
+                         "1v1 against every enemy named in the uploaded "
+                         "workbook. Cheap per pair, but adds real work on "
+                         "top of the otherwise-instant team assembly below "
+                         "-- off by default to keep this mode lightweight.")
+                pc_min_threat_answers, pc_max_uncovered_threats = 1, None
+                if pc_threat_on:
+                    pc_min_threat_answers = st.slider(
+                        "Minimum 1v1 answers per enemy", 1, 6, 1,
+                        key="ct_pc_min_threat_answers",
+                        help="An enemy only counts as covered once at "
+                             "least this many different team members beat "
+                             "it 1v1 -- raise it to demand redundant "
+                             "answers, not just one. Leave at 1 for 'any "
+                             "answer at all'.")
+                    pc_max_uncov_on = st.checkbox(
+                        "Cap how many named enemies fall short of that",
+                        key="ct_pc_max_uncov_on")
+                    pc_max_uncovered_threats = (
+                        st.slider("Max enemies short of the minimum", 0, 20, 3,
+                                 key="ct_pc_max_uncov")
+                        if pc_max_uncov_on else None)
             pc_top_n = st.slider("Top teams to show", 1, 40, 15, key="ct_pc_top_n")
             if st.button("Find best teams", type="primary", key="ct_pc_go"):
                 merged_teams = {n: list(t) for n, t in teams.items()}
@@ -6659,6 +6908,13 @@ with tab_counter:
                         moves, natures, typechart)
                     merge_named_team_pairs(coverage, merged_teams, team_meta, merged,
                                            moves, natures, typechart)
+                    pc_matrix = None
+                    if pc_threat_on:
+                        from counter_finder import one_v_one_matrix_for_pool
+                        pc_enemy_names = sorted({n for t in target_name_lists for n in t})
+                        pc_matrix = one_v_one_matrix_for_pool(
+                            coverage["candidate_pool"], pc_enemy_names, merged,
+                            moves, natures, typechart)
                     results_by_size = {}
                     for size in (pc_sizes or [6]):
                         results_by_size[size] = pair_coverage_teams(
@@ -6666,7 +6922,11 @@ with tab_counter:
                             required_techs=pc_required_techs or None,
                             min_special_attackers=pc_min_special,
                             must_include=pc_include or None,
-                            exclude=pc_exclude or None, top_n=pc_top_n)
+                            exclude=pc_exclude or None, top_n=pc_top_n,
+                            min_offensive_types=pc_min_offensive_types,
+                            one_v_one_matrix=pc_matrix,
+                            max_uncovered_threats=pc_max_uncovered_threats,
+                            min_threat_answers=pc_min_threat_answers)
                     st.session_state["ct_pc_coverage_pool_size"] = len(coverage["candidate_pool"])
                     st.session_state["ct_pc_results_by_size"] = results_by_size
             results_by_size = st.session_state.get("ct_pc_results_by_size")
@@ -6691,6 +6951,32 @@ with tab_counter:
                                 s = r["sets"][n]
                                 st.markdown(f"**{n}** -- {s['item']}: "
                                           f"{', '.join(s['moves'])}")
+                            if r["offensive_coverage"] is not None:
+                                oc = r["offensive_coverage"]
+                                st.caption(
+                                    f"Offensive coverage: {len(oc['covered'])}/"
+                                    f"{len(oc['covered']) + len(oc['uncovered'])} types"
+                                    + (f"  |  Can't hit: {', '.join(oc['uncovered'])}"
+                                       if oc["uncovered"] else ""))
+                            if r["threat_coverage"] is not None:
+                                tc = r["threat_coverage"]
+                                answer_counts = tc.get("answer_counts", {})
+                                zero = sorted(e for e in tc["uncovered"]
+                                             if answer_counts.get(e, 0) == 0)
+                                underredundant = sorted(
+                                    (e for e in tc["uncovered"] if answer_counts.get(e, 0) > 0),
+                                    key=lambda e: answer_counts[e])
+                                min_ans = pc_min_threat_answers
+                                bar = f" (>= {min_ans} answers)" if min_ans > 1 else ""
+                                st.caption(
+                                    f"1v1 threat coverage{bar}: {tc['covered']}/{tc['total']} "
+                                    f"named enemies"
+                                    + (f"  |  No answer at all: {', '.join(zero)}"
+                                       if zero else "")
+                                    + ("  |  Single point of failure: " +
+                                       ", ".join(f"{e} ({answer_counts[e]})"
+                                                for e in underredundant)
+                                       if underredundant else ""))
                             if st.button("Send to Battle Simulator as opponent",
                                         key=f"ct_pc_sim_{size}_{i}"):
                                 send_to_battle_simulator_as_opponent(r["team"], r["sets"])
@@ -6772,6 +7058,282 @@ with tab_counter:
                         _render_hit_count_matrix_for_bring4_search(
                             bring4_rows[0], enemy_roster, merged, moves, natures, typechart)
                     st.divider()
+
+    elif ct_mode == "Matchup finder":
+        st.caption("\"I want a tool that lets me see 1v1 matchups. For "
+                   "instance, I want a Pokemon that beats incineroar, "
+                   "rillaboom etc. Or to search for individuals too, e.g., "
+                   "a Pokemon that resists fire, ice, is not weak to fairy "
+                   "... I need a way to get this for 2v2s too\" -- name "
+                   "enemies and/or a type profile and search a pool for "
+                   "answers, as individuals (a cheap 1v1 read) or as a "
+                   "real 2v2 pair vs a chosen enemy pair (the same combat "
+                   "engine Bring-4/Joint pair search use).")
+        from species_data import TYPES as _mf_types
+        from team_search import type_matchup
+        mf_kind = st.radio("Search for", ["Individuals (1v1)", "Pairs (2v2)"],
+                          key="ct_mf_kind", horizontal=True)
+        mf_include = st.multiselect(
+            "Always include these Pokemon", all_names, key="ct_mf_include",
+            help="Forced into the search pool even if their own roster.csv "
+                 "Score wouldn't otherwise earn them a spot.")
+
+        if mf_kind == "Individuals (1v1)":
+            mf_pool_size = st.slider(
+                "Search pool size (top-Score Pokemon)", 10, 300, 60,
+                key="ct_mf_pool_ind",
+                help="The 1v1 read is cheap (O(pool), no real combat), so "
+                     "this stays fast even at the top of the range.")
+            mf_enemies = st.multiselect(
+                "Must beat ALL of these 1v1", all_names, key="ct_mf_enemies",
+                help="A cheap 1v1 read (not a full battle), the same one "
+                     "Coverage Groups' own 1v1 threat coverage already "
+                     "uses -- whichever side needs FEWER hits to KO the "
+                     "other wins outright (an OHKO is no longer required); "
+                     "real Speed breaks a tie where both sides would "
+                     "finish on the same hit.")
+            mf_no_hit_limit = st.checkbox(
+                "No hits-to-KO limit (always call a winner)", key="ct_mf_no_hit_limit",
+                help="Off by default: a fight where BOTH sides would need "
+                     "more than the limit below is too slow and "
+                     "inconclusive to call a real win, and reads as no "
+                     "verdict instead. Check this to always resolve by "
+                     "hits-to-KO regardless of how long that takes.")
+            mf_max_hits = st.slider(
+                "Hits-to-KO limit for a decisive win", 1, 8, 4,
+                key="ct_mf_max_hits", disabled=mf_no_hit_limit,
+                help="\"I KO very quickly and take little damage, such as "
+                     "OHKO vs 4HKO\" -- the default (4) matches that. 1 "
+                     "restores the old OHKO-only behavior.")
+            mfc1, mfc2 = st.columns(2)
+            mf_resist = mfc1.multiselect(
+                "Must resist or be immune to", _mf_types, key="ct_mf_resist")
+            mf_not_weak = mfc2.multiselect(
+                "Must NOT be weak to", _mf_types, key="ct_mf_not_weak")
+            mfc3, mfc4 = st.columns(2)
+            mf_resists_intimidate = mfc3.checkbox(
+                "Resists Intimidate", key="ct_mf_resists_intimidate",
+                help="Special attackers (Intimidate's Attack drop never "
+                     "touches their real offense), or a physical attacker "
+                     "whose own ability makes the drop a non-issue -- true "
+                     "immunity (Inner Focus/Own Tempo/Oblivious/Scrappy/"
+                     "Hyper Cutter/Clear Body/White Smoke/Full Metal Body) "
+                     "or Defiant/Competitive/Contrary's net stat GAIN.")
+            mf_ignores_fake_out = mfc4.checkbox(
+                "Ignores Fake Out", key="ct_mf_ignores_fake_out",
+                help="Ghost types (immune to its Normal typing), or an "
+                     "ability that blocks the flinch itself (Inner Focus/"
+                     "Own Tempo/Oblivious/Scrappy).")
+            if st.button("Search individuals", type="primary", key="ct_mf_ind_go"):
+                pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
+                pool = sorted(set(pool) | set(mf_include))
+                with st.spinner(f"Racing {len(pool)} Pokemon 1v1 against "
+                                f"{len(mf_enemies)} named enem{'y' if len(mf_enemies) == 1 else 'ies'}..."):
+                    matrix = {}
+                    if mf_enemies:
+                        from counter_finder import one_v_one_matrix_for_pool
+                        matrix = one_v_one_matrix_for_pool(
+                            pool, mf_enemies, merged, moves, natures, typechart,
+                            max_hits=None if mf_no_hit_limit else mf_max_hits)
+                    results = []
+                    for name in pool:
+                        if mf_enemies and not all(
+                                matrix.get(name, {}).get(e) == "win" for e in mf_enemies):
+                            continue
+                        if mf_resist and not all(
+                                type_matchup(name, merged, t) in ("resist", "immune")
+                                for t in mf_resist):
+                            continue
+                        if mf_not_weak and any(
+                                type_matchup(name, merged, t) == "weak"
+                                for t in mf_not_weak):
+                            continue
+                        if mf_resists_intimidate and not _resists_intimidate(
+                                name, merged, moves):
+                            continue
+                        if mf_ignores_fake_out and not _ignores_fake_out(name, merged):
+                            continue
+                        results.append(name)
+                    # "I KO very quickly and take little damage, such as
+                    # OHKO vs 4HKO" -- hits-to-KO each way, scoped to just
+                    # the already-narrowed results (cheap either way, but
+                    # no reason to pay for the whole pool when most of it
+                    # was just filtered out).
+                    hit_counts = {}
+                    if mf_enemies and results:
+                        from counter_finder import one_v_one_hit_counts_for_pool
+                        hit_counts = one_v_one_hit_counts_for_pool(
+                            results, mf_enemies, merged, moves, natures, typechart,
+                            max_hits=None if mf_no_hit_limit else mf_max_hits)
+                st.session_state["ct_mf_ind_results"] = (results, mf_enemies, hit_counts)
+            results_pack = st.session_state.get("ct_mf_ind_results")
+            if results_pack:
+                mf_results, mf_shown_enemies, mf_hit_counts = results_pack
+                if not mf_results:
+                    st.info("No pool member passed every filter -- widen the "
+                           "pool, drop a named enemy, or relax a type filter.")
+                else:
+                    st.caption(f"{len(mf_results)} match(es)."
+                              + (" Sorted most decisive first (fastest KO, "
+                                 "least damage taken, worst case across the "
+                                 "named enemies)." if mf_shown_enemies else ""))
+                    def _decisiveness(name):
+                        # WORST-CASE across the named enemies -- a name
+                        # that's a clean OHKO vs one enemy but only a
+                        # scrappy 3HKO/3HKO vs another is ranked by that
+                        # weaker link, not flattered by its best matchup.
+                        counts = mf_hit_counts.get(name, {})
+                        return min(
+                            (counts[e]["their_hits_to_ko"] or 99)
+                            - (counts[e]["our_hits_to_ko"] or 99)
+                            for e in mf_shown_enemies) if mf_shown_enemies else 0
+                    sort_key = ((lambda n: (-_decisiveness(n), -(merged[n].get("score") or 0)))
+                               if mf_shown_enemies else
+                               (lambda n: -(merged[n].get("score") or 0)))
+                    rows = []
+                    for name in sorted(mf_results, key=sort_key):
+                        row = {"Pokemon": name, "Score": merged[name].get("score"),
+                              "Types": "/".join(merged[name].get("types") or [])}
+                        for e in mf_shown_enemies:
+                            c = mf_hit_counts.get(name, {}).get(e, {})
+                            our_h, their_h = c.get("our_hits_to_ko"), c.get("their_hits_to_ko")
+                            our_s = f"{our_h}HKO" if our_h else "--"
+                            their_s = f"{their_h}HKO" if their_h else "--"
+                            row[f"vs {e}"] = f"{our_s} / {their_s}"
+                        rows.append(row)
+                    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+                    if mf_shown_enemies:
+                        with st.expander("1v1 details (moves, damage, speed, verdict)"):
+                            st.caption(
+                                "Each side's single best real-usage move (average "
+                                "roll, Intimidate/Mega form applied) and how many "
+                                "hits it takes. A lead of exactly one hit (e.g. "
+                                "2HKO vs 3HKO) is only a win for the faster side; "
+                                "two or more is a win regardless; equal hits "
+                                "goes to the faster side.")
+                            drows = []
+                            for name in sorted(mf_results, key=sort_key):
+                                for e in mf_shown_enemies:
+                                    c = mf_hit_counts.get(name, {}).get(e)
+                                    if not c:
+                                        continue
+                                    def _h(n):
+                                        return f"{n}HKO" if n else "--"
+                                    def _m(mv, pct):
+                                        return f"{mv} ({pct:.0f}%)" if mv else "--"
+                                    ours, theirs = c["our_speed"], c["their_speed"]
+                                    drows.append({
+                                        "Pokemon": name, "Enemy": e,
+                                        "Verdict": {"win": "WIN", "loss": "LOSS",
+                                                    "no_ko": "no verdict"}[c["verdict"]],
+                                        "Our move": _m(c["our_move"], c["our_pct"]),
+                                        "Our hits": _h(c["our_hits_to_ko"]),
+                                        "Their move": _m(c["their_move"], c["their_pct"]),
+                                        "Their hits": _h(c["their_hits_to_ko"]),
+                                        "Speed (us/them)": f"{ours}/{theirs} "
+                                            + ("faster" if ours > theirs else
+                                               "slower" if ours < theirs else "tie"),
+                                    })
+                            st.dataframe(pd.DataFrame(drows), width='stretch',
+                                         hide_index=True)
+        else:
+            mf_pool_size = st.slider(
+                "Search pool size (top-Score Pokemon)", 10, 150, 34,
+                key="ct_mf_pool_pair",
+                help="A REAL 2v2 combat race for every C(pool,2) pair -- "
+                     "unlike the cheap 1v1 read above, this cost grows "
+                     "with the SQUARE of the pool. Matches Joint Pair "
+                     "Search's own default of 34 (a few tens of seconds); "
+                     "push higher only if you can wait -- 60+ can take "
+                     "minutes.")
+            st.caption(f"~{mf_pool_size * (mf_pool_size - 1) // 2} pairs to "
+                      f"race at this pool size.")
+            mf_enemy_pair = st.multiselect(
+                "Enemy pair(s) to beat", all_names, key="ct_mf_enemy_pair",
+                help="2 or more -- races every pair drawn from the pool "
+                     "against every enemy pair drawn from this list (a "
+                     "full doubles matchup, Protect/Tailwind/targeting all "
+                     "accounted for), not a cheap 1v1 coverage read. Named "
+                     "3+, this is every C(n,2) enemy combination, not just "
+                     "one fixed pair.")
+            mfc1, mfc2 = st.columns(2)
+            mf_resist_p = mfc1.multiselect(
+                "Pair must resist or be immune to (either member)", _mf_types,
+                key="ct_mf_resist_pair")
+            mf_not_weak_p = mfc2.multiselect(
+                "Pair must NOT be weak to (neither member)", _mf_types,
+                key="ct_mf_not_weak_pair")
+            mf_worst_case = st.checkbox(
+                "Worst-case enemy targeting", key="ct_mf_worst_case",
+                help="Off by default -- a real cost (roughly squares the "
+                     "per-turn search on top of the engine's own 2-turn "
+                     "lookahead).")
+            mf_only_wins = st.checkbox(
+                "Only show pairs that actually win", value=True,
+                key="ct_mf_only_wins")
+            if len(mf_enemy_pair) < 2:
+                st.caption("Pick at least 2 enemies to form the pair(s) to beat.")
+            elif st.button("Search pairs", type="primary", key="ct_mf_pair_go"):
+                pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
+                pool = sorted(set(pool) | set(mf_include))
+                if mf_resist_p:
+                    pool = [n for n in pool if any(
+                        type_matchup(n, merged, t) in ("resist", "immune")
+                        for t in mf_resist_p)]
+                if mf_not_weak_p:
+                    pool = [n for n in pool if not any(
+                        type_matchup(n, merged, t) == "weak" for t in mf_not_weak_p)]
+                with st.spinner(f"Racing every pair drawn from {len(pool)} "
+                                f"Pokemon vs {' + '.join(mf_enemy_pair)}..."):
+                    mf_rows = joint_pool_search(
+                        pool, mf_enemy_pair, merged, moves, natures, typechart,
+                        turns=ct_turns, excluded_items=ct_excluded,
+                        worst_case_targeting=mf_worst_case)
+                    # "You also can not have two of your own megas in a
+                    # pair" -- only one Mega Evolution per side per game
+                    # (VGC's real rule), so pairing two DIFFERENT Mega-
+                    # capable picks together always wastes one of the two
+                    # stones as a lead choice; a non-mega + the stronger
+                    # mega is never worse. Same exclusion `find_pair_cores`
+                    # already applies for the identical reason -- a post-
+                    # filter here rather than in `joint_pool_search` itself,
+                    # since Joint Pair Search's own callers may still want
+                    # to see (and knowingly discard) that comparison.
+                    mf_rows = [r for r in mf_rows if not (
+                        r["pair"][0].startswith("Mega ")
+                        and r["pair"][1].startswith("Mega "))]
+                st.session_state["ct_mf_pair_results"] = mf_rows
+                st.session_state["ct_mf_pair_enemy_pair"] = mf_enemy_pair
+                _cache_gameplans(mf_rows, "Matchup finder")
+            mf_rows = st.session_state.get("ct_mf_pair_results")
+            if mf_rows is not None:
+                shown_enemy_pair = st.session_state.get(
+                    "ct_mf_pair_enemy_pair", mf_enemy_pair)
+                shown = ([r for r in mf_rows
+                         if r["pairs_swept"] + r["pairs_traded"] >= 1]
+                        if mf_only_wins else mf_rows)
+                if not shown:
+                    st.info("No pair passed every filter -- widen the pool, "
+                           "relax the type filters, or uncheck 'only show "
+                           "wins'.")
+                else:
+                    st.caption(f"{len(shown)} pair(s). Already sorted "
+                              "protect-safe first, then most decisive "
+                              "(\"Clean win\" -- our own retained HP, "
+                              "close to 2.0 for a fast, clean sweep that "
+                              "barely takes damage, lower for a scrappy "
+                              "out-trade).")
+                    st.dataframe(_pair_rows_df(shown), width='stretch', hide_index=True)
+                    mf_only_losses = st.checkbox(
+                        "Only show enemy pairs each pair loses to",
+                        key="ct_mf_pair_onlyloss")
+                    with st.expander(
+                            f"Show gameplans (vs {' + '.join(shown_enemy_pair)})"):
+                        for r in shown:
+                            n1, n2 = r["pair"]
+                            st.markdown(f"**{n1} + {n2}**")
+                            _render_pair_matchup_detail(
+                                n1, n2, r["detail"], mf_only_losses)
 
 
 # ------------------------------------------------------------------ battle
