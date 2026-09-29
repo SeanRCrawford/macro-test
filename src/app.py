@@ -7078,12 +7078,30 @@ with tab_counter:
             help="Forced into the search pool even if their own roster.csv "
                  "Score wouldn't otherwise earn them a spot.")
 
+        def _mf_enemy_team_loader(prefix, target_key):
+            """"Let me load an enemy team as the enemy list" -- a saved-team
+            picker whose Load button replaces `target_key`'s multiselect
+            with that team's roster (names not in this dataset dropped)."""
+            lc1, lc2 = st.columns([4, 1])
+            lc1.selectbox("Load an enemy team into the list below",
+                          [""] + sorted(teams), key=f"{prefix}_team",
+                          format_func=lambda t: t or "(pick a saved team)")
+
+            def _load():
+                picked = st.session_state.get(f"{prefix}_team")
+                if picked:
+                    st.session_state[target_key] = [
+                        n for n in teams[picked] if n in all_names]
+            lc2.button("Load", key=f"{prefix}_team_go", on_click=_load,
+                       width='stretch')
+
         if mf_kind == "Individuals (1v1)":
             mf_pool_size = st.slider(
                 "Search pool size (top-Score Pokemon)", 10, 300, 60,
                 key="ct_mf_pool_ind",
                 help="The 1v1 read is cheap (O(pool), no real combat), so "
                      "this stays fast even at the top of the range.")
+            _mf_enemy_team_loader("ct_mf_ind", "ct_mf_enemies")
             mf_enemies = st.multiselect(
                 "Enemies to beat 1v1 (all of them unless you allow misses below)",
                 all_names, key="ct_mf_enemies",
@@ -7283,6 +7301,7 @@ with tab_counter:
                      "minutes.")
             st.caption(f"~{mf_pool_size * (mf_pool_size - 1) // 2} pairs to "
                       f"race at this pool size.")
+            _mf_enemy_team_loader("ct_mf_pair", "ct_mf_enemy_pair")
             mf_enemy_pair = st.multiselect(
                 "Enemy pair(s) to beat", all_names, key="ct_mf_enemy_pair",
                 help="2 or more -- races every pair drawn from the pool "

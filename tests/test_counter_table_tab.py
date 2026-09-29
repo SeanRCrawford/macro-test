@@ -2279,6 +2279,30 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertTrue(all(b == "1/2" for b in only1["Beats"]))
         self.assertTrue(all(nb != "--" for nb in only1["Not beaten"]))
 
+    def test_loading_a_saved_team_fills_the_enemy_list(self):
+        """"Let me load an enemy team as the enemy list" -- both the 1v1 and
+        the pairs enemy multiselects."""
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        from _harness import load_world
+        W = load_world()
+        name = next(n for n, r in W["teams"].items() if len(r) >= 4)
+        expected = [m for m in W["teams"][name] if m in W["merged"]]
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.selectbox if s.key == "ct_mf_ind_team"][0].set_value(name).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_team_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        got = [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].value
+        self.assertEqual(got, expected)
+        at = [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.selectbox if s.key == "ct_mf_pair_team"][0].set_value(name).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_team_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(
+            [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].value, expected)
+
     def test_individuals_show_a_1v1_details_table_with_moves(self):
         """"I want to be able to see the details of the 1HKO vs 2HKO, what
         move is used etc"."""
