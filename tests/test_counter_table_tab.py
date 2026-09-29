@@ -2415,6 +2415,45 @@ class TestMatchupFinderMode(unittest.TestCase):
             for r in rows))
 
 
+class TestPotentialAbilityFilters(unittest.TestCase):
+    """"include pokemon whose base form has ability to learn any of the
+    relevant abilities" -- Mega Metagross (Tough Claws) still resists
+    Intimidate because base Metagross can have Clear Body, and Dragonite/
+    Mega Dragonite can have Inner Focus (both filters)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ast
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        from _harness import load_world
+        cls.W = load_world()
+        tree = ast.parse(open(APP).read())
+        cls.ns = {}
+        for n in tree.body:
+            if isinstance(n, ast.FunctionDef) and n.name in (
+                    "_potential_abilities", "_resists_intimidate", "_ignores_fake_out"):
+                exec(compile(ast.Module([n], []), APP, "exec"), cls.ns)
+
+    def _r(self, n):
+        return self.ns["_resists_intimidate"](n, self.W["merged"], self.W["moves"])
+
+    def _f(self, n):
+        return self.ns["_ignores_fake_out"](n, self.W["merged"])
+
+    def test_mega_metagross_resists_intimidate_via_base_clear_body(self):
+        self.assertTrue(self._r("Mega Metagross"))
+        self.assertFalse(self._f("Mega Metagross"))
+
+    def test_dragonite_and_mega_dragonite_qualify_for_both(self):
+        for n in ("Dragonite", "Mega Dragonite"):
+            self.assertTrue(self._r(n))
+            self.assertTrue(self._f(n))
+
+    def test_incineroar_still_qualifies_for_neither(self):
+        self.assertFalse(self._r("Incineroar"))
+        self.assertFalse(self._f("Incineroar"))
+
+
 class TestTrickRoomOptIn(unittest.TestCase):
     """"avoiding enemy tailwind and trick room may be key for a matchup
     swinging from a win to a clear loss ... Add it now as an option" --

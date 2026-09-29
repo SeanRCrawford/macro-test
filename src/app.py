@@ -4103,21 +4103,35 @@ def _pair_rows_df(pair_rows, include_total=False):
 # `_intimidate_mult_by_role`'s own real-grid treatment), which is why the
 # user still wants them grouped with the true-immunity abilities for a
 # "does Intimidate actually hurt this Pokemon" filter.
+def _potential_abilities(name, merged):
+    """Every ability `name` COULD legally have: its own recorded/default
+    ability, its Showdown-legal abilities, and -- for a Mega pick -- its
+    BASE species' too (a Mega Metagross is Tough Claws once evolved, but
+    base Metagross can carry Clear Body, and Intimidate/Fake Out resolve
+    before Mega Evolution, so the base form's options count)."""
+    from combatants import _default_ability
+    from species_data import base_form_name
+    out = set()
+    for n in (name, base_form_name(name)):
+        rec = merged.get(n) if n else None
+        if not rec:
+            continue
+        out.update((rec.get("legal_abilities") or {}).values())
+        out.update(a for a, _p in (rec.get("abilities_usage") or []))
+        out.add(_default_ability(rec.get("abilities_usage") or []))
+    return out
+
+
 def _resists_intimidate(name, merged, moves_db):
     """True if `name` resists Intimidate for a Matchup Finder search: either
     Intimidate's own Attack drop never touches its real offense (no usage-
-    ranked Physical damaging move at all -- a pure special attacker), or its
-    default ability makes the drop a non-issue (true immunity, or Defiant/
-    Competitive/Contrary's net stat GAIN)."""
+    ranked Physical damaging move at all -- a pure special attacker), or ANY
+    ability it could have (`_potential_abilities`, base form included) makes
+    the drop a non-issue -- true immunity, or Defiant/Competitive/Contrary's
+    net stat GAIN (`_intimidate_mult_by_role`'s own treatment of these)."""
     from counter_finder import INTIMIDATE_BLOCKED, _real_damaging_moves
-    from combatants import _default_ability
-    ability = _default_ability(merged[name].get("abilities_usage") or [])
-    # Defiant/Competitive/Contrary aren't BLOCKED by Intimidate (the drop
-    # still applies) -- they invert it into a net stat GAIN instead (+2 or
-    # +1 respectively), exactly `_intimidate_mult_by_role`'s own real-grid
-    # treatment of these three, so they belong on this "isn't hurt by it"
-    # side of the filter too.
-    if ability in INTIMIDATE_BLOCKED or ability in ("Defiant", "Competitive", "Contrary"):
+    if _potential_abilities(name, merged) & (
+            set(INTIMIDATE_BLOCKED) | {"Defiant", "Competitive", "Contrary"}):
         return True
     return not any(mv.category == "Physical"
                    for mv in _real_damaging_moves(name, merged, moves_db))
@@ -4125,14 +4139,13 @@ def _resists_intimidate(name, merged, moves_db):
 
 def _ignores_fake_out(name, merged):
     """True if `name` is never flinched by Fake Out: a Ghost type (immune to
-    its Normal typing outright), or its default ability blocks the flinch
-    itself (`lead_sim.FLINCH_PROOF`)."""
+    its Normal typing outright), or ANY ability it could have
+    (`_potential_abilities`, base form included) blocks the flinch itself
+    (`lead_sim.FLINCH_PROOF`)."""
     from lead_sim import FLINCH_PROOF
     if "Ghost" in (merged[name].get("types") or []):
         return True
-    from combatants import _default_ability
-    ability = _default_ability(merged[name].get("abilities_usage") or [])
-    return ability in FLINCH_PROOF
+    return bool(_potential_abilities(name, merged) & set(FLINCH_PROOF))
 
 
 def _bring4_rows_df(bring4_rows, total):
