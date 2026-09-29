@@ -802,11 +802,29 @@ def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
     -- both only ever need this shared table, differing in what they
     derive from a fraction (a win/loss verdict vs an actual hits-to-KO
     count)."""
+    return {name: {en: fm[0] for en, fm in row.items()}
+            for name, row in _one_v_one_offense_detail(
+                universe, merged, moves_db, natures, typechart).items()}
+
+
+def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart):
+    """{name: {other_name: (best_frac, move_name)}} -- `_one_v_one_offense`'s
+    own table plus WHICH real-usage move produced each best fraction (None
+    when nothing does any damage), so a caller can show the actual move
+    behind a hits-to-KO read instead of just a number."""
     offense = {}
     for name in universe:
         table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
-        offense[name] = {en: max((row.get(en, 0.0) for row in table.values()), default=0.0)
-                         for en in universe if en != name}
+        row = {}
+        for en in universe:
+            if en == name:
+                continue
+            best_frac, best_move = 0.0, None
+            for mv, fr in table.items():
+                if fr.get(en, 0.0) > best_frac:
+                    best_frac, best_move = fr[en], mv
+            row[en] = (best_frac, best_move)
+        offense[name] = row
     return offense
 
 
@@ -820,6 +838,29 @@ def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
 # fight that would genuinely take that long) -- `None` removes the cap
 # entirely and always resolves via hits-to-KO, however many hits that is.
 DEFAULT_MAX_HITS_FOR_VERDICT = 4
+
+
+def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+    """"win"/"loss"/"no_ko" from each side's hits-to-KO (`None` = can never
+    KO) and base Speed -- the one place `_one_v_one_matrix`'s rule lives, so
+    `one_v_one_hit_counts_for_pool`'s displayed verdict can never drift."""
+    if my_hits is None and their_hits is None:
+        return "no_ko"
+    if my_hits is None:
+        return "loss"
+    if their_hits is None:
+        return "win"
+    if max_hits is not None and my_hits > max_hits and their_hits > max_hits:
+        return "no_ko"
+    margin = their_hits - my_hits
+    if margin == 0:
+        return "win" if my_spe >= their_spe else "loss"
+    if abs(margin) >= 2:
+        return "win" if margin > 0 else "loss"
+    if margin > 0:   # we need exactly one fewer hit: only decisive if faster
+        return "win" if my_spe > their_spe else "no_ko"
+    return "loss" if their_spe > my_spe else "no_ko"
 
 
 def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
@@ -848,13 +889,14 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     and used to fall into "no_ko" (reported: "only 20/153 beating
     Incineroar, but Dragonite should be able to"). Generalizes the old
     OHKO-only rule, which is just this same comparison at `max_hits=1`:
-    whichever side needs FEWER hits to KO the other wins outright (exactly
-    right for the actual turn-by-turn exchange -- the side that finishes
-    first, first, wins, regardless of who's faster, UNLESS both sides
-    would finish on the same hit count, the one case speed actually
-    decides: real base Speed, deliberately no item/ability/weather speed
-    modifiers -- this stays a SIMPLE screening pass, not a re-run of
-    `_joint_race`); "no_ko" only when NEITHER side reaches a real verdict
+    whichever side needs at least TWO fewer hits to KO the other wins
+    outright; a lead of exactly ONE hit (2HKO vs 3HKO) only counts as a
+    win for the side that is also FASTER (otherwise "no_ko" -- not a
+    decisive read for either side, deliberately more conservative than a
+    strict turn-by-turn sim since Protect/chip/rolls erase a one-hit
+    lead); equal hits-to-KO is decided by speed alone -- real base Speed,
+    deliberately no item/ability/weather speed modifiers -- this stays a
+    SIMPLE screening pass, not a re-run of `_joint_race`); "no_ko" only when NEITHER side reaches a real verdict
     -- neither can ever KO the other at all, or both would take longer
     than `max_hits` (a side the OTHER side can never KO at all always
     wins/loses outright regardless of `max_hits` -- there's no time
@@ -876,26 +918,10 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            my_hits = hits(offense[name][enemy_name])
-            their_hits = hits(offense[enemy_name][name])
-            if my_hits is None and their_hits is None:
-                outcome = "no_ko"
-            elif my_hits is None:
-                outcome = "loss"
-            elif their_hits is None:
-                outcome = "win"
-            elif (max_hits is not None
-                  and my_hits > max_hits and their_hits > max_hits):
-                outcome = "no_ko"
-            elif my_hits < their_hits:
-                outcome = "win"
-            elif their_hits < my_hits:
-                outcome = "loss"
-            else:
-                my_spe = merged[name]["base_stats"]["spe"]
-                their_spe = merged[enemy_name]["base_stats"]["spe"]
-                outcome = "win" if my_spe >= their_spe else "loss"
-            matrix[name][enemy_name] = outcome
+            matrix[name][enemy_name] = _one_v_one_verdict(
+                hits(offense[name][enemy_name]), hits(offense[enemy_name][name]),
+                merged[name]["base_stats"]["spe"],
+                merged[enemy_name]["base_stats"]["spe"], max_hits)
     return matrix
 
 
@@ -927,7 +953,8 @@ def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, type
                              max_hits=max_hits)
 
 
-def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart):
+def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
+                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
     """{name: {enemy_name: {"our_hits_to_ko", "their_hits_to_ko"}}} for
     every (pool member, enemy) pair -- "I KO very quickly and take little
     damage, such as OHKO vs 4HKO" wants the actual hits-to-KO each way,
@@ -946,8 +973,8 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
 
     A pool member is never matched against an identical enemy entry of
     the same name, same as `_one_v_one_matrix`."""
-    offense = _one_v_one_offense(list(pool) + list(enemy_names), merged,
-                                 moves_db, natures, typechart)
+    offense = _one_v_one_offense_detail(list(pool) + list(enemy_names), merged,
+                                        moves_db, natures, typechart)
 
     def hits(frac):
         return math.ceil(1.0 / frac) if frac > 0 else None
@@ -958,9 +985,18 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
+            our_frac, our_move = offense[name][enemy_name]
+            their_frac, their_move = offense[enemy_name][name]
+            our_hits, their_hits = hits(our_frac), hits(their_frac)
+            our_spe = merged[name]["base_stats"]["spe"]
+            their_spe = merged[enemy_name]["base_stats"]["spe"]
             result[name][enemy_name] = {
-                "our_hits_to_ko": hits(offense[name][enemy_name]),
-                "their_hits_to_ko": hits(offense[enemy_name][name]),
+                "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
+                "our_move": our_move, "their_move": their_move,
+                "our_pct": our_frac * 100.0, "their_pct": their_frac * 100.0,
+                "our_speed": our_spe, "their_speed": their_spe,
+                "verdict": _one_v_one_verdict(our_hits, their_hits, our_spe,
+                                              their_spe, max_hits),
             }
     return result
 

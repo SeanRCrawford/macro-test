@@ -2239,6 +2239,28 @@ class TestMatchupFinderMode(unittest.TestCase):
                          ["Pokemon", "Score", "Types", "vs Incineroar"]]
         self.assertGreaterEqual(len(unlimited_dfs[0]), default_count)
 
+    def test_individuals_show_a_1v1_details_table_with_moves(self):
+        """"I want to be able to see the details of the 1HKO vs 2HKO, what
+        move is used etc"."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if "Our move" in d.value.columns]
+        self.assertEqual(len(dfs), 1)
+        df = dfs[0]
+        self.assertTrue(len(df) > 0)
+        self.assertEqual(
+            list(df.columns),
+            ["Pokemon", "Enemy", "Verdict", "Our move", "Our hits",
+             "Their move", "Their hits", "Speed (us/them)"])
+        self.assertTrue(all(v == "WIN" for v in df["Verdict"]))
+
     def test_individuals_results_are_sorted_most_decisive_first(self):
         """"It would be good to see the most decisive wins too, i.e., I
         KO very quickly and take little damage, such as OHKO vs 4HKO" --

@@ -11273,12 +11273,29 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
                 c = counts[name][enemy]
                 our, their = c["our_hits_to_ko"], c["their_hits_to_ko"]
                 verdict = matrix[name][enemy]
-                if our is not None and (their is None or our < their):
+                if our is not None and (their is None or their - our >= 2):
                     self.assertEqual(verdict, "win")
-                elif their is not None and (our is None or their < our):
+                elif their is not None and (our is None or our - their >= 2):
                     self.assertEqual(verdict, "loss")
                 elif our is None and their is None:
                     self.assertEqual(verdict, "no_ko")
+
+    def test_one_v_one_hit_counts_carry_move_damage_speed_and_verdict(self):
+        """"I want to be able to see the details of the 1HKO vs 2HKO, what
+        move is used etc" -- every pair also reports each side's best move,
+        its average-roll damage %, both base Speeds, and the same verdict
+        `_one_v_one_matrix` gives."""
+        moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
+        counts = cf.one_v_one_hit_counts_for_pool(
+            ["Excadrill"], ["Mega Raichu Y"], self.merged, moves, natures, typechart)
+        c = counts["Excadrill"]["Mega Raichu Y"]
+        self.assertEqual(c["our_move"], "High Horsepower")
+        self.assertGreaterEqual(c["our_pct"], 100.0)
+        self.assertEqual(c["their_move"], "Focus Blast")
+        self.assertEqual(c["our_speed"], self.merged["Excadrill"]["base_stats"]["spe"])
+        matrix = cf._one_v_one_matrix(
+            ["Excadrill"], ["Mega Raichu Y"], self.merged, moves, natures, typechart)
+        self.assertEqual(c["verdict"], matrix["Excadrill"]["Mega Raichu Y"])
 
     def test_one_v_one_hit_counts_never_self_mirrors(self):
         moves, natures, typechart = self.W["moves"], self.W["natures"], self.W["typechart"]
@@ -11605,7 +11622,7 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
             "Incineroar", "Mega Dragonite", self.merged, moves, natures, typechart)
         self.assertEqual(outcome2, "loss")
 
-    def test_fewer_hits_wins_regardless_of_speed(self):
+    def test_two_or_more_fewer_hits_wins_regardless_of_speed(self):
         """A synthetic offense table, patched in directly, so the pure
         comparison logic is pinned exactly independent of real damage
         calc: A needs 2 hits, B needs 4 -- A wins even if B is faster."""
@@ -11617,6 +11634,22 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
                      "B": {"base_stats": {"spe": 150}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)
             self.assertEqual(matrix["A"]["B"], "win")
+        finally:
+            cf._one_v_one_offense = real_offense
+
+    def test_a_one_hit_lead_only_wins_if_also_faster(self):
+        """2HKO vs 3HKO is a win only for the 2HKOer if it is faster; the
+        slower 2HKOer (and the faster 3HKOer) get "no_ko" -- not decisive."""
+        real_offense = cf._one_v_one_offense
+        try:
+            cf._one_v_one_offense = lambda *a, **k: {
+                "A": {"B": 0.5}, "B": {"A": 0.34}}  # A: 2HKO, B: 3HKO
+            fast_a = {"A": {"base_stats": {"spe": 150}}, "B": {"base_stats": {"spe": 50}}}
+            slow_a = {"A": {"base_stats": {"spe": 50}}, "B": {"base_stats": {"spe": 150}}}
+            self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], fast_a, None, None, None)["A"]["B"], "win")
+            self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], fast_a, None, None, None)["B"]["A"], "loss")
+            self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], slow_a, None, None, None)["A"]["B"], "no_ko")
+            self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], slow_a, None, None, None)["B"]["A"], "no_ko")
         finally:
             cf._one_v_one_offense = real_offense
 

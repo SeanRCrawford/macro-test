@@ -7163,7 +7163,8 @@ with tab_counter:
                     if mf_enemies and results:
                         from counter_finder import one_v_one_hit_counts_for_pool
                         hit_counts = one_v_one_hit_counts_for_pool(
-                            results, mf_enemies, merged, moves, natures, typechart)
+                            results, mf_enemies, merged, moves, natures, typechart,
+                            max_hits=None if mf_no_hit_limit else mf_max_hits)
                 st.session_state["ct_mf_ind_results"] = (results, mf_enemies, hit_counts)
             results_pack = st.session_state.get("ct_mf_ind_results")
             if results_pack:
@@ -7201,6 +7202,40 @@ with tab_counter:
                             row[f"vs {e}"] = f"{our_s} / {their_s}"
                         rows.append(row)
                     st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+                    if mf_shown_enemies:
+                        with st.expander("1v1 details (moves, damage, speed, verdict)"):
+                            st.caption(
+                                "Each side's single best real-usage move (average "
+                                "roll, Intimidate/Mega form applied) and how many "
+                                "hits it takes. A lead of exactly one hit (e.g. "
+                                "2HKO vs 3HKO) is only a win for the faster side; "
+                                "two or more is a win regardless; equal hits "
+                                "goes to the faster side.")
+                            drows = []
+                            for name in sorted(mf_results, key=sort_key):
+                                for e in mf_shown_enemies:
+                                    c = mf_hit_counts.get(name, {}).get(e)
+                                    if not c:
+                                        continue
+                                    def _h(n):
+                                        return f"{n}HKO" if n else "--"
+                                    def _m(mv, pct):
+                                        return f"{mv} ({pct:.0f}%)" if mv else "--"
+                                    ours, theirs = c["our_speed"], c["their_speed"]
+                                    drows.append({
+                                        "Pokemon": name, "Enemy": e,
+                                        "Verdict": {"win": "WIN", "loss": "LOSS",
+                                                    "no_ko": "no verdict"}[c["verdict"]],
+                                        "Our move": _m(c["our_move"], c["our_pct"]),
+                                        "Our hits": _h(c["our_hits_to_ko"]),
+                                        "Their move": _m(c["their_move"], c["their_pct"]),
+                                        "Their hits": _h(c["their_hits_to_ko"]),
+                                        "Speed (us/them)": f"{ours}/{theirs} "
+                                            + ("faster" if ours > theirs else
+                                               "slower" if ours < theirs else "tie"),
+                                    })
+                            st.dataframe(pd.DataFrame(drows), width='stretch',
+                                         hide_index=True)
         else:
             mf_pool_size = st.slider(
                 "Search pool size (top-Score Pokemon)", 10, 150, 34,
