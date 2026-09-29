@@ -180,7 +180,8 @@ def move_from_showdown(m: dict) -> MoveInfo:
     cached = _MOVE_INFO_CACHE.get(id(m))
     if cached is not None:
         return cached
-    info = MoveInfo(m["name"], m["basePower"], m["type"], m["category"], m["target"],
+    info = MoveInfo(m["name"], AGGREGATE_MULTI_HIT_POWER.get(m["name"], m["basePower"]),
+                    m["type"], m["category"], m["target"],
                     priority=m.get("priority", 0), secondary=m.get("secondary"),
                     self_effect=m.get("self"), boosts=m.get("boosts"),
                     recoil=m.get("recoil"), drain=m.get("drain"),
@@ -561,6 +562,17 @@ MULTI_HIT = {
     "Population Bomb": (1, 10, 1.0),
 }
 
+# Escalating multi-hit moves Showdown stores as their FIRST hit's power
+# (Triple Axel: basePower 20, three hits at 20/40/60): this tool's
+# single-aggregate-damage model needs the TOTAL, so they are read as one hit
+# of that power ("Triple Axel should be treated as a 120bp move").
+AGGREGATE_MULTI_HIT_POWER = {"Triple Axel": 120}
+
+# Multi-hit moves that are NOT in MULTI_HIT (their damage is already
+# aggregated into one power) but still hit more than once, so they break a
+# Focus Sash / Sturdy exactly like the MULTI_HIT family does.
+EXTRA_MULTI_HIT_MOVES = frozenset({"Triple Axel", "Triple Kick", "Surging Strikes"})
+
 # Two-turn (charge) moves that resolve in a single turn under the right weather
 # instead of spending a turn charging first (see battle.py's charge handling and
 # solver.py/fast_eval.py's move-choice filtering, which both key off this).
@@ -640,6 +652,14 @@ def hit_count_for(move_name: str, attacker: "Combatant") -> float:
         return 10 if attacker.item == "Wide Lens" else 1
     entry = MULTI_HIT.get(move_name)
     return entry[2] if entry else 1
+
+
+def breaks_focus_sash(move_name: str, attacker: "Combatant") -> bool:
+    """True if this move hits more than once, so a Focus Sash / Sturdy only
+    absorbs the first hit and a later hit still knocks the holder out --
+    every MULTI_HIT move (Population Bomb only with Wide Lens, same as
+    `hit_count_for`) plus Triple Axel/Triple Kick/Surging Strikes."""
+    return move_name in EXTRA_MULTI_HIT_MOVES or hit_count_for(move_name, attacker) > 1
 
 
 EARTHQUAKE_FAMILY = ("Earthquake", "Bulldoze", "Magnitude")

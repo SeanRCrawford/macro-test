@@ -1025,6 +1025,40 @@ class TestCrashDamageMovesExcludedFromAutoSearch(unittest.TestCase):
             self.assertTrue(mi.has_crash)
 
 
+class TestTripleAxelAndMultiHitBreakFocusSash(unittest.TestCase):
+    """"Triple Axel should be treated as a 120bp move that breaks focus
+    sash (multi hit)" -- Showdown stores it as its first hit's 20 bp, which
+    this single-aggregate-damage model read literally (a 20 bp Ice move).
+    Every multi-hit move also only gets absorbed once by a Focus Sash/
+    Sturdy: the first hit leaves 1 HP, a later hit still KOs."""
+
+    def test_triple_axel_is_a_single_120_power_move(self):
+        from damage import move_from_showdown
+        self.assertEqual(move_from_showdown(world()["moves"]["tripleaxel"]).power, 120)
+
+    def test_multi_hit_moves_break_a_sash_and_single_hit_moves_do_not(self):
+        from damage import breaks_focus_sash
+
+        class Atk:
+            item = ""
+        for name in ("Triple Axel", "Bullet Seed", "Scale Shot", "Dual Wingbeat",
+                     "Surging Strikes"):
+            self.assertTrue(breaks_focus_sash(name, Atk()), name)
+        for name in ("Close Combat", "Population Bomb", "Icicle Crash"):
+            self.assertFalse(breaks_focus_sash(name, Atk()), name)
+
+    def test_counter_finder_race_lets_triple_axel_ko_a_full_hp_sash_holder(self):
+        import counter_finder as cf
+        from combatants import make_combatant
+        w = world()
+        target = make_combatant("Garchomp", w["merged"], w["natures"], item="Focus Sash")
+        atk = make_combatant("Weavile", w["merged"], w["natures"])
+        mi = cf.move_from_showdown(w["moves"]["tripleaxel"])
+        self.assertEqual(mi.power, 120)
+        self.assertTrue(cf.breaks_focus_sash(mi.name, atk))
+        self.assertEqual(target.item, "Focus Sash")
+
+
 class TestExplosionBannedFromAutoSearch(unittest.TestCase):
     """"I want to ban explosion from the movepool, it is too strong" --
     Explosion (and its exact mechanical twin, Self-Destruct) faints the

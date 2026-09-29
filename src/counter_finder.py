@@ -155,7 +155,7 @@ from dataclasses import dataclass, replace
 
 from combatants import make_combatant
 from damage import (AURA_TYPES, CHARGE_WEATHER_SKIP, ZERO_BASE_POWER_MOVES, MoveInfo,
-                    damage_roll, defensive_stat, effective_stat, hit_count_for,
+                    breaks_focus_sash, damage_roll, defensive_stat, effective_stat, hit_count_for,
                     hits_ally, is_spread_move, move_from_showdown,
                     grassy_glide_priority_bonus, type_multiplier,
                     is_grounded, effective_move_target)
@@ -4168,7 +4168,8 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
             # tgt_role]` is no longer 1.0, so a second lethal hit this same
             # race correctly finishes it off instead of re-triggering.
             if (new_hp <= 0 and hp[tgt_role] >= 1.0 and target_c.max_hp()
-                    and (target_c.item == "Focus Sash" or target_c.ability == "Sturdy")):
+                    and (target_c.item == "Focus Sash" or target_c.ability == "Sturdy")
+                    and not breaks_focus_sash(mv.name, attacker_c)):
                 new_hp = 1.0 / target_c.max_hp()
             hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))

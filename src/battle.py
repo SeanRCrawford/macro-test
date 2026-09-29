@@ -28,7 +28,7 @@ import random
 from damage import (BERRY_RESIST_TYPE, Combatant, DRAW_ABILITIES, MoveInfo, is_spread_move,
                     damage_roll, apply_intimidate,
                     defensive_stat, move_from_showdown,
-                     apply_boosts, effective_stat, hit_count_for, CHARGE_WEATHER_SKIP,
+                     apply_boosts, effective_stat, hit_count_for, breaks_focus_sash, CHARGE_WEATHER_SKIP,
                      WEIGHT_BASED_POWER, weight_based_power, DEFENDER_HP_BASED_POWER,
                      defender_hp_based_power, is_grounded, effective_move_target)
 from engine import (FieldState, Action, on_switch_in, turn_order, effective_speed,
@@ -926,7 +926,8 @@ class Battle:
             # Focus Sash / Sturdy: survive a would-be KO at 1 HP, but only from FULL HP.
             sashed = False
             if (dmg >= target.current_hp and target.current_hp == target.max_hp()
-                    and (target.item == "Focus Sash" or target.ability == "Sturdy")):
+                    and (target.item == "Focus Sash" or target.ability == "Sturdy")
+                    and not breaks_focus_sash(move.name, attacker)):
                 dmg = target.current_hp - 1
                 sashed = True
             dmg_applied = min(dmg, target.current_hp)  # recoil/drain scale off damage actually dealt
