@@ -2239,6 +2239,46 @@ class TestMatchupFinderMode(unittest.TestCase):
                          ["Pokemon", "Score", "Types", "vs Incineroar"]]
         self.assertGreaterEqual(len(unlimited_dfs[0]), default_count)
 
+    def _individuals_df(self, at, enemies):
+        cols = ["Pokemon", "Score", "Types"] + [f"vs {e}" for e in enemies]
+        dfs = [d.value for d in at.dataframe
+              if all(c in d.value.columns for c in cols)
+              and "Our move" not in d.value.columns]
+        self.assertEqual(len(dfs), 1)
+        return dfs[0]
+
+    def test_allowing_one_miss_keeps_everyone_who_beats_all_and_more(self):
+        """"Let me search for beats (at least OR only) n-1 or n-2 of enemy
+        selection ... many lists of enemies won't be fully beatable"."""
+        enemies = ["Incineroar", "Kingambit"]
+
+        def run(misses, mode):
+            at = app()
+            [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+                "Matchup finder").run()
+            [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(30).run()
+            [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+                enemies).run()
+            [n for n in at.number_input if n.key == "ct_mf_misses"][0].set_value(
+                misses).run()
+            [r for r in at.radio if r.key == "ct_mf_match_mode"][0].set_value(mode).run()
+            at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+            self.assertFalse(at.exception, list(at.exception))
+            return self._individuals_df(at, enemies)
+        strict = run(0, "At least")
+        loose = run(1, "At least")
+        only1 = run(1, "Only (exactly)")
+        self.assertTrue(set(strict["Pokemon"]) <= set(loose["Pokemon"]))
+        self.assertGreater(len(loose), len(strict))
+        self.assertIn("Beats", loose.columns)
+        self.assertTrue(all(b in ("1/2", "2/2") for b in loose["Beats"]))
+        # Sorted by enemies beaten first.
+        beats = [int(b.split("/")[0]) for b in loose["Beats"]]
+        self.assertEqual(beats, sorted(beats, reverse=True))
+        self.assertTrue(len(only1) > 0)
+        self.assertTrue(all(b == "1/2" for b in only1["Beats"]))
+        self.assertTrue(all(nb != "--" for nb in only1["Not beaten"]))
+
     def test_individuals_show_a_1v1_details_table_with_moves(self):
         """"I want to be able to see the details of the 1HKO vs 2HKO, what
         move is used etc"."""
@@ -2331,6 +2371,33 @@ class TestMatchupFinderMode(unittest.TestCase):
         shown = pair_dfs[0]
         self.assertTrue(len(shown) > 0)
         self.assertTrue((shown["Beaten"] == "1/1").all())
+
+    def test_pairs_partial_filter_keeps_pairs_beating_all_but_n_enemy_pairs(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value(
+            "Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].set_value(
+            ["Incineroar", "Rillaboom", "Kingambit"]).run()  # 3 enemy pairs
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        at = [c for c in at.checkbox if c.key == "ct_mf_pair_partial"][0].set_value(
+            True).run()
+        [n for n in at.number_input if n.key == "ct_mf_pair_misses"][0].set_value(1).run()
+        at = [r for r in at.radio if r.key == "ct_mf_pair_match_mode"][0].set_value(
+            "At least").run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        if dfs:
+            for b in dfs[0]["Beaten"]:
+                self.assertGreaterEqual(int(b.split("/")[0]), 2)
+        at = [r for r in at.radio if r.key == "ct_mf_pair_match_mode"][0].set_value(
+            "Only (exactly)").run()
+        dfs = [d.value for d in at.dataframe if "Pair" in d.value.columns]
+        if dfs:
+            self.assertTrue(all(b == "2/3" for b in dfs[0]["Beaten"]))
 
     def test_pairs_unchecking_only_wins_shows_at_least_as_many_rows(self):
         at = app()
