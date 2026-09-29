@@ -7077,6 +7077,15 @@ with tab_counter:
             "Always include these Pokemon", all_names, key="ct_mf_include",
             help="Forced into the search pool even if their own roster.csv "
                  "Score wouldn't otherwise earn them a spot.")
+        mf_no_megas = st.checkbox(
+            "Exclude my own Megas from the search pool", key="ct_mf_no_megas",
+            help="Drops every \"Mega X\" from the top-Score pool (the pool "
+                 "is filled with the next-best non-Megas instead, so its "
+                 "size holds). Anyone you list under \"Always include\" "
+                 "is still kept -- an explicit pick wins.")
+        mf_pool_source = ({n: r for n, r in merged.items()
+                           if not n.startswith("Mega ")}
+                          if mf_no_megas else merged)
 
         def _mf_enemy_team_loader(prefix, target_key):
             """"Let me load an enemy team as the enemy list" -- a saved-team
@@ -7158,7 +7167,7 @@ with tab_counter:
                      "ability that blocks the flinch itself (Inner Focus/"
                      "Own Tempo/Oblivious/Scrappy).")
             if st.button("Search individuals", type="primary", key="ct_mf_ind_go"):
-                pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
+                pool = build_candidate_pool(mf_pool_source, top_n=mf_pool_size, prefs=prefs)
                 pool = sorted(set(pool) | set(mf_include))
                 with st.spinner(f"Racing {len(pool)} Pokemon 1v1 against "
                                 f"{len(mf_enemies)} named enem{'y' if len(mf_enemies) == 1 else 'ies'}..."):
@@ -7344,7 +7353,7 @@ with tab_counter:
             if len(mf_enemy_pair) < 2:
                 st.caption("Pick at least 2 enemies to form the pair(s) to beat.")
             elif st.button("Search pairs", type="primary", key="ct_mf_pair_go"):
-                pool = build_candidate_pool(merged, top_n=mf_pool_size, prefs=prefs)
+                pool = build_candidate_pool(mf_pool_source, top_n=mf_pool_size, prefs=prefs)
                 pool = sorted(set(pool) | set(mf_include))
                 if mf_resist_p:
                     pool = [n for n in pool if any(

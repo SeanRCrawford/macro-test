@@ -2303,6 +2303,26 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertEqual(
             [m for m in at.multiselect if m.key == "ct_mf_enemy_pair"][0].value, expected)
 
+    def test_exclude_my_megas_drops_megas_but_keeps_explicit_includes(self):
+        """"Let me exclude my own megas too"."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(40).run()
+        [m for m in at.multiselect if m.key == "ct_mf_include"][0].set_value(
+            ["Mega Dragonite"]).run()
+        [c for c in at.checkbox if c.key == "ct_mf_no_megas"][0].set_value(True).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe
+              if list(d.value.columns) == ["Pokemon", "Score", "Types"]]
+        self.assertEqual(len(dfs), 1)
+        names = list(dfs[0]["Pokemon"])
+        self.assertIn("Mega Dragonite", names)  # explicit pick wins
+        self.assertEqual([n for n in names if n.startswith("Mega ")],
+                         ["Mega Dragonite"])
+        self.assertGreater(len(names), 20)  # pool size held with non-Megas
+
     def test_individuals_show_a_1v1_details_table_with_moves(self):
         """"I want to be able to see the details of the 1HKO vs 2HKO, what
         move is used etc"."""
