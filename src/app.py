@@ -7323,15 +7323,13 @@ with tab_counter:
                             st.caption(
                                 "Each side's single best real-usage move (average "
                                 "roll, Intimidate/Mega form applied) and how many "
-                                "hits it takes. A lead of exactly one hit (e.g. "
-                                "2HKO vs 3HKO) is only a win for the faster side; "
-                                "two or more is a win regardless; equal hits "
-                                "goes to the faster side. A side whose KO ends "
-                                "on a PRIORITY move (best hits + a priority "
-                                "move adding to 100%, e.g. Head Smash then "
-                                "Extreme Speed) wins the tie / one-hit lead "
-                                "whatever the Speeds. Focus Sash (if enabled) "
-                                "wins a mutual 1HKO.")
+                                "hits it takes. Needing fewer hits wins (2HKO vs "
+                                "3HKO is a win even if slower); equal hits "
+                                "goes to a side whose KO ends on a PRIORITY "
+                                "move (best hits + a priority move adding to "
+                                "100%, e.g. Head Smash then Extreme Speed), "
+                                "else the faster side. Focus Sash (if "
+                                "enabled) wins a mutual 1HKO.")
                             drows = []
                             for name in sorted(mf_results, key=sort_key):
                                 for e in mf_shown_enemies:

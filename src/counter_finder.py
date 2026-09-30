@@ -881,8 +881,7 @@ def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
 
     `my_prio`/`their_prio`: that side's KO ends on a PRIORITY move
     (`_priority_finisher`), which acts first whatever the Speeds -- breaks
-    an equal-hits tie for the side that has it (both or neither: Speed), and
-    makes a one-hit lead decisive. `my_sash`/`their_sash`: that side holds a
+    an equal-hits tie for the side that has it (both or neither: Speed). `my_sash`/`their_sash`: that side holds a
     Focus Sash that survives the other's OHKO -- in a mutual 1HKO the sash
     holder survives, hits back and wins (both: Speed)."""
     if my_hits is None and their_hits is None:
@@ -900,11 +899,10 @@ def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
         if my_prio != their_prio:
             return "win" if my_prio else "loss"
         return "win" if my_spe >= their_spe else "loss"
-    if abs(margin) >= 2:
-        return "win" if margin > 0 else "loss"
-    if margin > 0:   # we need exactly one fewer hit: decisive if faster / priority last hit
-        return "win" if (my_spe > their_spe or my_prio) else "no_ko"
-    return "loss" if (their_spe > my_spe or their_prio) else "no_ko"
+    # Fewer hits needed always wins: even the slower side's k-th hit lands
+    # before the faster side's (k+1)-th (2HKO vs 3HKO plays out A1 B1 A2 -> B
+    # is dead before its 3rd hit), so Speed only matters on equal hits.
+    return "win" if margin > 0 else "loss"
 
 
 def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
@@ -933,12 +931,9 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     and used to fall into "no_ko" (reported: "only 20/153 beating
     Incineroar, but Dragonite should be able to"). Generalizes the old
     OHKO-only rule, which is just this same comparison at `max_hits=1`:
-    whichever side needs at least TWO fewer hits to KO the other wins
-    outright; a lead of exactly ONE hit (2HKO vs 3HKO) only counts as a
-    win for the side that is also FASTER (otherwise "no_ko" -- not a
-    decisive read for either side, deliberately more conservative than a
-    strict turn-by-turn sim since Protect/chip/rolls erase a one-hit
-    lead); equal hits-to-KO is decided by speed alone -- real base Speed,
+    whichever side needs FEWER hits to KO the other wins (even a slower
+    2HKOer beats a faster 3HKOer: A1 B1 A2 ends it before B's 3rd hit);
+    equal hits-to-KO is decided by a priority finisher, then speed alone -- real base Speed,
     deliberately no item/ability/weather speed modifiers -- this stays a
     SIMPLE screening pass, not a re-run of `_joint_race`); "no_ko" only when NEITHER side reaches a real verdict
     -- neither can ever KO the other at all, or both would take longer

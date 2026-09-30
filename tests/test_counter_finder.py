@@ -11644,15 +11644,11 @@ class TestOneVOneVerdictPriorityAndSash(unittest.TestCase):
              ("B", "A"): (0.7, "Earth Power", 0.35, "Aqua Jet")}
         self.assertEqual(self._matrix(t, 90, 151), ("loss", "win"))
 
-    def test_priority_finisher_makes_a_one_hit_lead_decisive_when_slower(self):
-        # A 2HKO (0.8 + priority), B 3HKO and faster: without priority
-        # this is "no_ko"; with it A wins.
-        t = {("A", "B"): (0.8, "Head Smash", 0.25, "Extreme Speed"),
+    def test_priority_does_not_change_a_one_hit_lead(self):
+        # A 2HKO vs B 3HKO: A wins with or without priority, B faster or not.
+        t = {("A", "B"): (0.8, "Head Smash", 0.0, None),
              ("B", "A"): (0.4, "Earth Power", 0.0, None)}
         self.assertEqual(self._matrix(t, 90, 151), ("win", "loss"))
-        t2 = {("A", "B"): (0.8, "Head Smash", 0.05, "Extreme Speed"),
-              ("B", "A"): (0.4, "Earth Power", 0.0, None)}
-        self.assertEqual(self._matrix(t2, 90, 151), ("no_ko", "no_ko"))
 
     def test_first_hit_ko_needs_no_priority(self):
         # A 1HKO: a priority move is irrelevant to a 1-hit KO.
@@ -11726,19 +11722,19 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
         finally:
             cf._one_v_one_offense_detail = real_offense
 
-    def test_a_one_hit_lead_only_wins_if_also_faster(self):
-        """2HKO vs 3HKO is a win only for the 2HKOer if it is faster; the
-        slower 2HKOer (and the faster 3HKOer) get "no_ko" -- not decisive."""
+    def test_a_one_hit_lead_wins_even_when_slower(self):
+        """2HKO vs 3HKO: the 2HKOer wins whatever the Speeds (A1 B1 A2 ends
+        it before B's 3rd hit) -- reported: Goodra 2HKO'd Rillaboom's 3HKO
+        at 80/85 Speed and read "no verdict"."""
         real_offense = cf._one_v_one_offense_detail
         try:
             cf._one_v_one_offense_detail = _fake_detail({
                 "A": {"B": 0.5}, "B": {"A": 0.34}})  # A: 2HKO, B: 3HKO
             fast_a = {"A": {"base_stats": {"spe": 150}}, "B": {"base_stats": {"spe": 50}}}
             slow_a = {"A": {"base_stats": {"spe": 50}}, "B": {"base_stats": {"spe": 150}}}
-            self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], fast_a, None, None, None)["A"]["B"], "win")
-            self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], fast_a, None, None, None)["B"]["A"], "loss")
-            self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], slow_a, None, None, None)["A"]["B"], "no_ko")
-            self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], slow_a, None, None, None)["B"]["A"], "no_ko")
+            for merged in (fast_a, slow_a):
+                self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)["A"]["B"], "win")
+                self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], merged, None, None, None)["B"]["A"], "loss")
         finally:
             cf._one_v_one_offense_detail = real_offense
 
