@@ -415,7 +415,7 @@ def move_value_table(name, merged, moves_db, natures, typechart, enemy_names, it
                 a *= 1.5
             d = effective_stat(defender.stats[def_key], 0)
             _, _, avg, eff = damage_roll(50, move.power, a, d, attacker, defender, move, typechart)
-            avg *= hit_count_for(move.name, attacker)
+            avg *= hit_count_for(move.name, attacker, move)
             frac = avg / defender.stats["hp"] if defender.stats["hp"] else 0.0
             if frac >= 1.0:
                 frac = 1.0 + 0.5  # OHKO bonus
@@ -494,7 +494,7 @@ def raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, enemy_na
             a_en = a * _intimidate_attack_mult(attacker_ability, move.category,
                                                intimidates[en])
             _, _, avg, _eff = damage_roll(50, move.power, a_en, d, attacker, defender, move, typechart)
-            avg *= hit_count_for(move.name, attacker)
+            avg *= hit_count_for(move.name, attacker, move)
             row[en] = avg / defender.stats["hp"] if defender.stats["hp"] else 0.0
         table[move.name] = row
     return table

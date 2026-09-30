@@ -7310,6 +7310,20 @@ with tab_counter:
                     for name in sorted(mf_results, key=sort_key):
                         row = {"Pokemon": name, "Score": merged[name].get("score"),
                               "Types": "/".join(merged[name].get("types") or [])}
+                        if mf_shown_enemies:
+                            # The capped moveset when a move limit is on
+                            # (identical against every enemy / team),
+                            # otherwise every move it used, most-used first.
+                            cs = list(mf_hit_counts.get(name, {}).values())
+                            chosen = next((c["our_moveset"] for c in cs
+                                           if c.get("our_moveset")), None)
+                            if chosen is None:
+                                tally = {}
+                                for c in cs:
+                                    if c.get("our_move"):
+                                        tally[c["our_move"]] = tally.get(c["our_move"], 0) + 1
+                                chosen = sorted(tally, key=lambda m_: (-tally[m_], m_))
+                            row["Moves used"] = ", ".join(chosen) or "--"
                         if team_mode:
                             for label, group in mf_shown_groups:
                                 opp = [e for e in group if e != name]

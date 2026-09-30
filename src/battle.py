@@ -919,7 +919,7 @@ class Battle:
             )
             # Multi-hit moves (Bullet Seed, Population Bomb, ...): aggregate total
             # damage as hits * single-hit damage rather than simulating each hit.
-            hits = hit_count_for(move.name, attacker)
+            hits = hit_count_for(move.name, attacker, move)
             if hits != 1:
                 mn, mx, avg = mn * hits, mx * hits, avg * hits
             dmg = self._roll(mn, mx, avg)
@@ -927,7 +927,7 @@ class Battle:
             sashed = False
             if (dmg >= target.current_hp and target.current_hp == target.max_hp()
                     and (target.item == "Focus Sash" or target.ability == "Sturdy")
-                    and not breaks_focus_sash(move.name, attacker)):
+                    and not breaks_focus_sash(move.name, attacker, move)):
                 dmg = target.current_hp - 1
                 sashed = True
             dmg_applied = min(dmg, target.current_hp)  # recoil/drain scale off damage actually dealt

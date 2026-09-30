@@ -11792,6 +11792,103 @@ class TestOneVOneMoveLimit(unittest.TestCase):
             self.assertEqual(len(chosen["A"]), k)
 
 
+class TestParentalBond(unittest.TestCase):
+    """Mega Kangaskhan's Parental Bond: a second hit for 25% damage (1.25x
+    total) on single-target single-hit moves, which also breaks a Focus
+    Sash / Sturdy."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+
+    def _atk(self, ability="Parental Bond"):
+        from types import SimpleNamespace
+        return SimpleNamespace(ability=ability, item="")
+
+    def _move(self, name, target="normal", category="Physical"):
+        from damage import MoveInfo
+        return MoveInfo(name, 80, "Normal", category, target)
+
+    def test_single_target_hit_counts_as_1_25(self):
+        from damage import hit_count_for
+        self.assertEqual(hit_count_for("Return", self._atk(), self._move("Return")), 1.25)
+        self.assertEqual(hit_count_for("Return", self._atk("Scrappy"), self._move("Return")), 1)
+
+    def test_spread_multi_hit_status_and_excluded_moves_get_no_second_hit(self):
+        from damage import hit_count_for
+        atk = self._atk()
+        self.assertEqual(hit_count_for("Earthquake", atk, self._move("Earthquake", "allAdjacent")), 1)
+        self.assertEqual(hit_count_for("Snarl", atk, self._move("Snarl", "allAdjacentFoes", "Special")), 1)
+        self.assertEqual(hit_count_for("Bullet Seed", atk, self._move("Bullet Seed")), 3.17)
+        self.assertEqual(hit_count_for("Triple Axel", atk, self._move("Triple Axel")), 1)
+        self.assertEqual(hit_count_for("Explosion", atk, self._move("Explosion")), 1)
+        self.assertEqual(hit_count_for("Protect", atk, self._move("Protect", "self", "Status")), 1)
+
+    def test_parental_bond_breaks_a_focus_sash(self):
+        from damage import breaks_focus_sash
+        mv = self._move("Return")
+        self.assertTrue(breaks_focus_sash("Return", self._atk(), mv))
+        self.assertFalse(breaks_focus_sash("Return", self._atk("Scrappy"), mv))
+        self.assertFalse(breaks_focus_sash(
+            "Earthquake", self._atk(), self._move("Earthquake", "allAdjacent")))
+
+    def test_mega_kangaskhan_hits_1_25x_in_the_1v1_table(self):
+        import optimize_sets as o
+        from combatants import make_combatant
+        W = self.W
+        merged = W["merged"]
+        k = o._mega_project(make_combatant("Mega Kangaskhan", merged, W["natures"]))
+        self.assertEqual(k.ability, "Parental Bond")
+        table = o.raw_ohko_fraction_table("Mega Kangaskhan", merged, W["moves"],
+                                          W["natures"], W["typechart"], ["Incineroar"])
+        import copy
+        plain = copy.copy(k)
+        plain.ability = "Scrappy"
+        orig = o._mega_project
+        try:
+            o._mega_project = lambda c, _o=orig: plain if c.name == "Mega Kangaskhan" or getattr(c, "is_mega_pick", False) and c.mega_ability == "Parental Bond" else _o(c)
+            table_plain = o.raw_ohko_fraction_table(
+                "Mega Kangaskhan", merged, W["moves"], W["natures"], W["typechart"], ["Incineroar"])
+        finally:
+            o._mega_project = orig
+        checked = 0
+        for mv, row in table.items():
+            ratio = row["Incineroar"] / table_plain[mv]["Incineroar"] if table_plain[mv]["Incineroar"] else None
+            if ratio and abs(ratio - 1.25) < 1e-6:
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_a_pb_ohko_beats_a_focus_sash_in_the_1v1_verdict(self):
+        """Rows carry a 5th 'best move breaks a sash' flag: with it, the
+        sash holder does NOT survive, so a slower-than-sash-holder mutual
+        1HKO no longer flips to the sash holder."""
+        merged = {"A": {"base_stats": {"spe": 50}}, "B": {"base_stats": {"spe": 150}}}
+        # A (slower) OHKOs B with a Parental Bond move; B OHKOs A; B holds a sash.
+        detail = {"A": {"B": (1.05, "Return", 0.0, None, True)},
+                  "B": {"A": (1.1, "Earthquake", 0.0, None, False)}}
+        v = cf._pair_verdict("A", "B", detail, merged, 4, {"B"})
+        self.assertEqual(v, "loss")     # sash broken -> plain Speed: B faster wins
+        detail["A"]["B"] = (1.05, "Return", 0.0, None, False)
+        detail["B"]["A"] = (1.1, "Earthquake", 0.0, None, False)
+        merged = {"A": {"base_stats": {"spe": 150}}, "B": {"base_stats": {"spe": 50}}}
+        self.assertEqual(cf._pair_verdict("A", "B", detail, merged, 4, {"B"}), "loss")  # sash saves B, B wins
+        detail["A"]["B"] = (1.05, "Return", 0.0, None, True)
+        self.assertEqual(cf._pair_verdict("A", "B", detail, merged, 4, {"B"}), "win")   # broken: A faster wins
+
+    def test_real_detail_flags_mega_kangaskhan_moves_as_sash_breakers(self):
+        W = self.W
+        tables, breaks = {}, {}
+        cf._one_v_one_offense_detail(["Mega Kangaskhan", "Incineroar"], W["merged"],
+                                     W["moves"], W["natures"], W["typechart"],
+                                     tables_out=tables, breaks_out=breaks)
+        singles = [m for m in breaks["Mega Kangaskhan"]]
+        self.assertTrue(singles, "some Mega Kangaskhan moves must double")
+        # a spread move stays a non-breaker
+        for spread in ("Earthquake", "Rock Slide", "Snarl"):
+            if spread in tables["Mega Kangaskhan"]:
+                self.assertNotIn(spread, breaks["Mega Kangaskhan"])
+
+
 class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
     """"Make sure the win does not require an OHKO (give a reasonable
     limit, maybe optional, but still a win based on speed)" -- the old

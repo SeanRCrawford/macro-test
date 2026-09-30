@@ -808,7 +808,7 @@ def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
 
 
 def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart,
-                              tables_out=None):
+                              tables_out=None, breaks_out=None):
     """{name: {other_name: (best_frac, move_name, prio_frac, prio_move)}} --
     `_one_v_one_offense`'s own table plus WHICH real-usage move produced each
     best fraction (None when nothing does any damage), and the best damaging
@@ -818,12 +818,23 @@ def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart,
 
     `tables_out`: if a dict, filled with each name's full per-move table
     ({name: {move: {enemy: frac}}}) so `_limit_detail_moves` can re-pick a
-    smaller moveset without recomputing the damage."""
+    smaller moveset without recomputing the damage. `breaks_out`: if a dict,
+    filled with {name: {moves that break a Focus Sash for that attacker}}
+    (multi-hit moves, and any move gaining a Parental Bond second hit). Every
+    row's 5th element says whether ITS best move breaks a sash."""
     offense = {}
     for name in universe:
         table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
         if tables_out is not None:
             tables_out[name] = table
+        attacker = _mega_project(make_combatant(name, merged, natures))
+        breakers = set()
+        for mv in table:
+            info = _lookup_move(mv, moves_db)
+            if breaks_focus_sash(mv, attacker, info):
+                breakers.add(mv)
+        if breaks_out is not None:
+            breaks_out[name] = breakers
         prio_moves = []
         for mv in table:
             info = _lookup_move(mv, moves_db)
@@ -841,7 +852,8 @@ def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart,
             for mv in prio_moves:
                 if table[mv].get(en, 0.0) > prio_frac:
                     prio_frac, prio_move = table[mv][en], mv
-            row[en] = (best_frac, best_move, prio_frac, prio_move)
+            row[en] = (best_frac, best_move, prio_frac, prio_move,
+                       best_move in breakers)
         offense[name] = row
     return offense
 
@@ -856,14 +868,19 @@ def _priority_finisher(hits, best_frac, prio_frac):
     return (hits - 1) * best_frac + prio_frac >= 1.0 - 1e-9
 
 
-def _sash_saves(holder, holder_names, attacker_move):
+def _sash_saves(holder, holder_names, attacker_move, breaks=None):
     """True if `holder` (a name) has a Focus Sash that survives a would-be
     OHKO from `attacker_move` -- not against a multi-hit move, which breaks
-    it. `holder_names` is None when the option is off."""
+    it. `breaks`: whether that move breaks a sash for its actual attacker
+    (multi-hit, or a Parental Bond second hit) -- when None (a plain
+    name-only caller) it is read off the move name alone. `holder_names` is
+    None when the option is off."""
     if holder_names is None or holder not in holder_names or attacker_move is None:
         return False
-    from types import SimpleNamespace
-    return not breaks_focus_sash(attacker_move, SimpleNamespace(item=""))
+    if breaks is None:
+        from types import SimpleNamespace
+        breaks = breaks_focus_sash(attacker_move, SimpleNamespace(item=""))
+    return not breaks
 
 
 # "Make sure the win does not require an OHKO ... give a reasonable
@@ -982,12 +999,13 @@ def _detail_with_move_limit(pool, enemy_names, merged, moves_db, natures, typech
         detail = _one_v_one_offense_detail(universe, merged, moves_db, natures,
                                            typechart)
         return detail, detail, {}
-    tables = {}
+    tables, breaks = {}, {}
     detail = _one_v_one_offense_detail(universe, merged, moves_db, natures,
-                                       typechart, tables_out=tables)
+                                       typechart, tables_out=tables,
+                                       breaks_out=breaks)
     our_detail, chosen = _limit_detail_moves(
         detail, tables, pool, enemy_names, merged, moves_db, move_limit,
-        max_hits, sash_holders)
+        max_hits, sash_holders, breaks)
     return detail, our_detail, chosen
 
 
@@ -995,12 +1013,19 @@ def _pair_hits(frac):
     return math.ceil(1.0 / frac) if frac > 0 else None
 
 
+def _row_breaks(row):
+    """A detail row's "best move breaks a Focus Sash" flag, or None when the
+    row (e.g. a hand-built test table) does not carry one."""
+    return row[4] if len(row) > 4 else None
+
+
 def _verdict_from_rows(name, enemy_name, our_row, their_row, merged, max_hits,
                        sash_holders=None):
     """`_one_v_one_verdict` from two `_one_v_one_offense_detail` rows
     ((best_frac, best_move, prio_frac, prio_move) each way)."""
-    our_frac, our_move, our_pf, _pm = our_row
-    their_frac, their_move, their_pf, _tm = their_row
+    our_frac, our_move, our_pf, _pm = our_row[:4]
+    their_frac, their_move, their_pf, _tm = their_row[:4]
+    our_breaks, their_breaks = _row_breaks(our_row), _row_breaks(their_row)
     my_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
     return _one_v_one_verdict(
         my_hits, their_hits,
@@ -1008,8 +1033,8 @@ def _verdict_from_rows(name, enemy_name, our_row, their_row, merged, max_hits,
         max_hits,
         my_prio=_priority_finisher(my_hits, our_frac, our_pf),
         their_prio=_priority_finisher(their_hits, their_frac, their_pf),
-        my_sash=_sash_saves(name, sash_holders, their_move),
-        their_sash=_sash_saves(enemy_name, sash_holders, our_move))
+        my_sash=_sash_saves(name, sash_holders, their_move, their_breaks),
+        their_sash=_sash_saves(enemy_name, sash_holders, our_move, our_breaks))
 
 
 def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None,
@@ -1025,7 +1050,7 @@ def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None,
                               sash_holders)
 
 
-def _rows_for_moves(table, prio_moves, moveset, enemy_names, name):
+def _rows_for_moves(table, prio_moves, moveset, enemy_names, name, breakers=()):
     """`_one_v_one_offense_detail`'s row for one attacker restricted to
     `moveset` (a list of move names from its full `table`)."""
     row = {}
@@ -1040,12 +1065,12 @@ def _rows_for_moves(table, prio_moves, moveset, enemy_names, name):
                 best_frac, best_move = fr, mv
             if mv in prio_moves and fr > prio_frac:
                 prio_frac, prio_move = fr, mv
-        row[en] = (best_frac, best_move, prio_frac, prio_move)
+        row[en] = (best_frac, best_move, prio_frac, prio_move, best_move in breakers)
     return row
 
 
 def _limit_detail_moves(detail, tables, pool, enemy_names, merged, moves_db,
-                        move_limit, max_hits, sash_holders=None):
+                        move_limit, max_hits, sash_holders=None, breaks=None):
     """"Many mons are using >4 moves against enemy members" -- restrict each
     pool member to at most `move_limit` damaging moves, picking the subset
     that MAXIMISES its 1v1 wins over `enemy_names` (then fewest losses, then
@@ -1066,6 +1091,7 @@ def _limit_detail_moves(detail, tables, pool, enemy_names, merged, moves_db,
         if not table or name not in detail:
             continue
         mvs = sorted(table)
+        brk = (breaks or {}).get(name, ())
         prio = set()
         for mv in mvs:
             info = _lookup_move(mv, moves_db)
@@ -1077,7 +1103,7 @@ def _limit_detail_moves(detail, tables, pool, enemy_names, merged, moves_db,
         enemies = [e for e in enemy_names if e != name and e in detail]
         best_key, best_set = None, None
         for combo in combinations(mvs, move_limit):
-            row = _rows_for_moves(table, prio, combo, enemies, name)
+            row = _rows_for_moves(table, prio, combo, enemies, name, brk)
             wins = losses = 0
             dmg = 0.0
             for en in enemies:
@@ -1090,7 +1116,7 @@ def _limit_detail_moves(detail, tables, pool, enemy_names, merged, moves_db,
             if best_key is None or key > best_key:
                 best_key, best_set = key, combo
         chosen[name] = list(best_set)
-        new_detail[name] = _rows_for_moves(table, prio, best_set, enemy_names, name)
+        new_detail[name] = _rows_for_moves(table, prio, best_set, enemy_names, name, brk)
     return new_detail, chosen
 
 
@@ -1156,8 +1182,10 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            our_frac, our_move, our_pf, our_pm = our_offense[name][enemy_name]
-            their_frac, their_move, their_pf, their_pm = offense[enemy_name][name]
+            our_frac, our_move, our_pf, our_pm = our_offense[name][enemy_name][:4]
+            our_breaks = _row_breaks(our_offense[name][enemy_name])
+            their_frac, their_move, their_pf, their_pm = offense[enemy_name][name][:4]
+            their_breaks = _row_breaks(offense[enemy_name][name])
             our_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
             result[name][enemy_name] = {
                 "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
@@ -1170,8 +1198,8 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
                 "their_prio_finisher": _priority_finisher(their_hits, their_frac, their_pf),
                 "our_prio_move": our_pm, "our_prio_pct": our_pf * 100.0,
                 "their_prio_move": their_pm, "their_prio_pct": their_pf * 100.0,
-                "our_sash": _sash_saves(name, sash_holders, their_move),
-                "their_sash": _sash_saves(enemy_name, sash_holders, our_move),
+                "our_sash": _sash_saves(name, sash_holders, their_move, their_breaks),
+                "their_sash": _sash_saves(enemy_name, sash_holders, our_move, our_breaks),
                 "verdict": _pair_verdict(name, enemy_name, offense, merged,
                                          max_hits, sash_holders, our_offense),
             }
@@ -2481,7 +2509,7 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     lo, hi, avg, eff = damage_roll(50, move.power, atk, dfn, dmg_attacker, dmg_defender,
                                    move, typechart, weather=weather, auras=auras,
                                    num_targets_hit=num_targets_hit, terrain=terrain)
-    hits = hit_count_for(move.name, attacker)
+    hits = hit_count_for(move.name, attacker, move)
     cur = defender.current_hp or 1
     lo_f, avg_f, hi_f = (lo * hits) / cur, (avg * hits) / cur, (hi * hits) / cur
     if helping_hand:
@@ -4346,7 +4374,7 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
             # race correctly finishes it off instead of re-triggering.
             if (new_hp <= 0 and hp[tgt_role] >= 1.0 and target_c.max_hp()
                     and (target_c.item == "Focus Sash" or target_c.ability == "Sturdy")
-                    and not breaks_focus_sash(mv.name, attacker_c)):
+                    and not breaks_focus_sash(mv.name, attacker_c, mv)):
                 new_hp = 1.0 / target_c.max_hp()
             hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))

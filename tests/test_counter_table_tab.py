@@ -2165,7 +2165,7 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         dfs = [d.value for d in at.dataframe
               if list(d.value.columns) ==
-              ["Pokemon", "Score", "Types", "vs Incineroar"]]
+              ["Pokemon", "Score", "Types", "Moves used", "vs Incineroar"]]
         self.assertEqual(len(dfs), 1)
         df = dfs[0]
         self.assertTrue(len(df) > 0)
@@ -2206,14 +2206,14 @@ class TestMatchupFinderMode(unittest.TestCase):
         at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
         default_dfs = [d.value for d in at.dataframe
                       if list(d.value.columns) ==
-                      ["Pokemon", "Score", "Types", "vs Incineroar"]]
+                      ["Pokemon", "Score", "Types", "Moves used", "vs Incineroar"]]
         default_count = len(default_dfs[0])
         at = [s for s in at.slider if s.key == "ct_mf_max_hits"][0].set_value(1).run()
         at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         strict_dfs = [d.value for d in at.dataframe
                      if list(d.value.columns) ==
-                     ["Pokemon", "Score", "Types", "vs Incineroar"]]
+                     ["Pokemon", "Score", "Types", "Moves used", "vs Incineroar"]]
         self.assertLessEqual(len(strict_dfs[0]), default_count)
 
     def test_no_hit_limit_checkbox_disables_the_slider_and_widens_results(self):
@@ -2226,7 +2226,7 @@ class TestMatchupFinderMode(unittest.TestCase):
         at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
         default_dfs = [d.value for d in at.dataframe
                       if list(d.value.columns) ==
-                      ["Pokemon", "Score", "Types", "vs Incineroar"]]
+                      ["Pokemon", "Score", "Types", "Moves used", "vs Incineroar"]]
         default_count = len(default_dfs[0])
         at = [c for c in at.checkbox if c.key == "ct_mf_no_hit_limit"][0].set_value(
             True).run()
@@ -2236,11 +2236,11 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         unlimited_dfs = [d.value for d in at.dataframe
                          if list(d.value.columns) ==
-                         ["Pokemon", "Score", "Types", "vs Incineroar"]]
+                         ["Pokemon", "Score", "Types", "Moves used", "vs Incineroar"]]
         self.assertGreaterEqual(len(unlimited_dfs[0]), default_count)
 
     def _individuals_df(self, at, enemies):
-        cols = ["Pokemon", "Score", "Types"] + [f"vs {e}" for e in enemies]
+        cols = ["Pokemon", "Score", "Types", "Moves used"] + [f"vs {e}" for e in enemies]
         dfs = [d.value for d in at.dataframe
               if all(c in d.value.columns for c in cols)
               and "Our move" not in d.value.columns]
@@ -2422,6 +2422,30 @@ class TestMatchupFinderMode(unittest.TestCase):
             used = {m.split(" (")[0] for m in grp["Our move"] if m != "--"}
             self.assertLessEqual(len(used), 3)
 
+    def test_summary_table_lists_moves_used_and_respects_the_cap(self):
+        """"Add moves used into the matchup finder summary table" -- the
+        capped moveset when a limit is on, and it never exceeds the cap."""
+        for choice, cap in (("No limit", None), ("3 max", 3)):
+            at = app()
+            [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+                "Matchup finder").run()
+            [r for r in at.radio if r.key == "ct_mf_move_limit"][0].set_value(choice).run()
+            [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+            [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+                ["Incineroar", "Rillaboom", "Gholdengo"]).run()
+            at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+            self.assertFalse(at.exception, list(at.exception))
+            dfs = [d.value for d in at.dataframe
+                   if "Moves used" in d.value.columns
+                   and "Our move" not in d.value.columns]
+            self.assertEqual(len(dfs), 1)
+            df = dfs[0]
+            self.assertTrue(len(df) > 0)
+            for cell in df["Moves used"]:
+                moves = [m for m in cell.split(", ") if m != "--"]
+                if cap:
+                    self.assertLessEqual(len(moves), cap)
+
     def test_individuals_results_are_sorted_most_decisive_first(self):
         """"It would be good to see the most decisive wins too, i.e., I
         KO very quickly and take little damage, such as OHKO vs 4HKO" --
@@ -2437,7 +2461,7 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertFalse(at.exception, list(at.exception))
         dfs = [d.value for d in at.dataframe
               if list(d.value.columns) ==
-              ["Pokemon", "Score", "Types", "vs Incineroar"]]
+              ["Pokemon", "Score", "Types", "Moves used", "vs Incineroar"]]
         df = dfs[0]
         self.assertGreater(len(df), 1, "need at least 2 rows to check ordering")
 
