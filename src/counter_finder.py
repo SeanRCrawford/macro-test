@@ -480,7 +480,14 @@ def raw_weakness_by_type(core, merged):
 TECH_ABILITIES = {
     "weather": frozenset(WEATHER_SETTERS),
     "terrain": frozenset(TERRAIN_SETTERS),
+    "intimidate": frozenset({"Intimidate"}),
 }
+# Ability techs that count if EITHER form has the ability: Intimidate resolves
+# on switch-in, before Mega Evolution, so a Mega pick whose base form carries
+# it (Mega Salamence / Mega Gyarados / Mega Staraptor are Aerilate / Mold
+# Breaker / Contrary once evolved) still provides it -- and one whose own Mega
+# form has it counts too.
+TECH_ABILITY_EITHER_FORM = frozenset({"intimidate"})
 TECH_MOVES = {
     "fake_out": frozenset({"Fake Out"}),
     "speed_control": frozenset({
@@ -527,6 +534,7 @@ TECH_LABELS = {
     "coaching": "Coaching user", "redirect": "redirector (Follow Me/Rage Powder)",
     "taunt": "Taunt user", "helping_hand": "Helping Hand user",
     "pivot": "pivot/switching move (U-turn, Volt Switch, Parting Shot, ...)",
+    "intimidate": "Intimidate user (base or Mega form)",
 }
 
 
@@ -536,7 +544,16 @@ def _member_has_tech(name, merged, tech):
     rec = merged.get(name) or {}
     if tech in TECH_ABILITIES:
         from combatants import _default_ability
-        return _default_ability(rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]
+        if _default_ability(rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]:
+            return True
+        if tech in TECH_ABILITY_EITHER_FORM:
+            from species_data import base_form_name
+            base = base_form_name(name)
+            base_rec = merged.get(base) if base and base != name else None
+            if base_rec and _default_ability(
+                    base_rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]:
+                return True
+        return False
     move_names = {mv for mv, _pct in (rec.get("moves_usage") or [])}
     return bool(move_names & TECH_MOVES[tech])
 

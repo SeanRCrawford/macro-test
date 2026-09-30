@@ -7496,6 +7496,26 @@ class TestTeamMissingTechs(unittest.TestCase):
             # through `_member_has_tech`'s own move-name lookup.
             cf._member_has_tech("Kingambit", self.merged, tech)
 
+    def test_intimidate_tech_counts_the_base_form_or_the_mega_form(self):
+        """"add intimidate ability to techs ... whether present on the base
+        form or the mega form" -- Incineroar has it outright; Mega Salamence /
+        Mega Gyarados / Mega Staraptor are Aerilate / Mold Breaker / Contrary
+        once evolved but their base form's Intimidate resolves on switch-in."""
+        self.assertIn("intimidate", cf.TECH_LABELS)
+        for name in ("Incineroar", "Mega Salamence", "Mega Gyarados", "Mega Staraptor"):
+            self.assertTrue(cf._member_has_tech(name, self.merged, "intimidate"), name)
+        for name in ("Kingambit", "Pelipper", "Mega Kangaskhan"):
+            self.assertFalse(cf._member_has_tech(name, self.merged, "intimidate"), name)
+        self.assertEqual(cf.team_missing_techs(["Kingambit"], self.merged, ["intimidate"]),
+                         ["intimidate"])
+        self.assertEqual(
+            cf.team_missing_techs(["Kingambit", "Mega Salamence"], self.merged, ["intimidate"]), [])
+
+    def test_weather_terrain_still_read_only_the_default_ability(self):
+        """The either-form rule is Intimidate-only: it must not change how
+        the existing weather/terrain techs resolve."""
+        self.assertEqual(cf.TECH_ABILITY_EITHER_FORM, frozenset({"intimidate"}))
+
     def test_pivot_tech_covers_the_named_switching_moves(self):
         """"Add pivot tech (switching move such as u turn, parting shot,
         flip turn, baton pass, and so on)" -- Incineroar's real usage
