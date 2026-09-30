@@ -11684,6 +11684,83 @@ class TestOneVOneVerdictPriorityAndSash(unittest.TestCase):
         self.assertEqual(self._matrix(t, 50, 150, sash={"A"}), ("loss", "win"))
 
 
+class TestOneVOneMoveLimit(unittest.TestCase):
+    """"Many mons are using >4 moves against enemy members" -- an optional
+    cap of 3 or 4 damaging moves per pool member, chosen to maximise wins."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+        cls.merged = cls.W["merged"]
+        cls.enemies = [e for e in ("Incineroar", "Rillaboom", "Gholdengo",
+                                   "Volcarona", "Kingambit", "Hydreigon")
+                       if e in cls.merged]
+        cls.pool = [n for n in list(cls.merged)[:80] if n not in cls.enemies]
+
+    def _counts(self, limit):
+        W = self.W
+        return cf.one_v_one_hit_counts_for_pool(
+            self.pool, self.enemies, self.merged, W["moves"], W["natures"],
+            W["typechart"], move_limit=limit)
+
+    def _distinct(self, counts, name):
+        return {c["our_move"] for c in counts[name].values() if c["our_move"]}
+
+    def test_no_pokemon_uses_more_moves_than_the_limit(self):
+        full = self._counts(None)
+        self.assertGreater(max(len(self._distinct(full, n)) for n in self.pool), 4,
+                           "fixture should exercise the >4 moves case")
+        for k in (3, 4):
+            lim = self._counts(k)
+            for n in self.pool:
+                self.assertLessEqual(len(self._distinct(lim, n)), k)
+                used = next(iter(lim[n].values()))["our_moveset"]
+                self.assertLessEqual(len(used), k)
+                self.assertTrue(self._distinct(lim, n) <= set(used))
+
+    def test_off_by_default_carries_no_moveset(self):
+        counts = self._counts(None)
+        self.assertTrue(all(c["our_moveset"] is None
+                            for row in counts.values() for c in row.values()))
+
+    def test_limited_wins_never_exceed_unlimited_and_four_matches_well(self):
+        def wins(r):
+            return {n: sum(c["verdict"] == "win" for c in row.values())
+                    for n, row in r.items()}
+        full, four, three = wins(self._counts(None)), wins(self._counts(4)), wins(self._counts(3))
+        for n in self.pool:
+            self.assertLessEqual(four[n], full[n])
+            self.assertLessEqual(three[n], four[n])
+
+    def test_matrix_agrees_with_the_displayed_verdicts(self):
+        W = self.W
+        counts = self._counts(3)
+        matrix = cf.one_v_one_matrix_for_pool(
+            self.pool, self.enemies, self.merged, W["moves"], W["natures"],
+            W["typechart"], move_limit=3)
+        for n in self.pool:
+            for e, c in counts[n].items():
+                self.assertEqual(matrix[n][e], c["verdict"])
+
+    def test_the_picked_subset_maximises_wins_exactly(self):
+        """Synthetic: 5 moves each beating exactly one enemy; a 3-move cap
+        must pick 3 that win 3 enemies, a cap of 4 wins 4."""
+        enemies = ["E1", "E2", "E3", "E4", "E5"]
+        moves = ["M1", "M2", "M3", "M4", "M5"]
+        table = {mv: {e: (1.0 if i == j else 0.1) for j, e in enumerate(enemies)}
+                 for i, mv in enumerate(moves)}
+        detail = {"A": {e: (0.0, None, 0.0, None) for e in enemies}}
+        for e in enemies:
+            detail[e] = {"A": (0.1, "Tap", 0.0, None)}
+        merged = {n: {"base_stats": {"spe": 100}} for n in ["A"] + enemies}
+        for k, expect in ((3, 3), (4, 4)):
+            new, chosen = cf._limit_detail_moves(
+                detail, {"A": table}, ["A"], enemies, merged, {}, k, 4)
+            wins = sum(cf._pair_verdict("A", e, new, merged, 4) == "win" for e in enemies)
+            self.assertEqual(wins, expect)
+            self.assertEqual(len(chosen["A"]), k)
+
+
 class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
     """"Make sure the win does not require an OHKO (give a reasonable
     limit, maybe optional, but still a win based on speed)" -- the old

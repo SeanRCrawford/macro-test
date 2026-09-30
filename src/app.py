@@ -7164,6 +7164,16 @@ with tab_counter:
                      "comes from the sets of the enemy teams picked above "
                      "(an enemy counts as sashed if any picked team gives "
                      "it one), else each Pokemon's default item.")
+            mf_move_choice = st.radio(
+                "Moves per Pokemon", ["No limit", "4 max", "3 max"],
+                key="ct_mf_move_limit", horizontal=True,
+                help="Off by default: each Pokemon may use whichever of its "
+                     "real-usage damaging moves is best against each enemy, "
+                     "which can add up to more than 4. With 4 or 3 max, each "
+                     "Pokemon is limited to that many damaging moves, chosen "
+                     "to maximise its 1v1 wins over the selected enemies "
+                     "(then fewest losses, then most damage).")
+            mf_move_limit = {"No limit": None, "4 max": 4, "3 max": 3}[mf_move_choice]
             mfc1, mfc2 = st.columns(2)
             mf_resist = mfc1.multiselect(
                 "Must resist or be immune to", _mf_types, key="ct_mf_resist")
@@ -7212,7 +7222,8 @@ with tab_counter:
                         matrix = one_v_one_matrix_for_pool(
                             pool, mf_union, merged, moves, natures, typechart,
                             max_hits=None if mf_no_hit_limit else mf_max_hits,
-                            sash_holders=mf_sash)
+                            sash_holders=mf_sash,
+                            move_limit=mf_move_limit)
                     results = []
                     for name in pool:
                         group_ok = True
@@ -7252,7 +7263,8 @@ with tab_counter:
                         hit_counts = one_v_one_hit_counts_for_pool(
                             results, mf_union, merged, moves, natures, typechart,
                             max_hits=None if mf_no_hit_limit else mf_max_hits,
-                            sash_holders=mf_sash)
+                            sash_holders=mf_sash,
+                            move_limit=mf_move_limit)
                 st.session_state["ct_mf_ind_results"] = (
                     results, mf_union, hit_counts, mf_groups)
             results_pack = st.session_state.get("ct_mf_ind_results")
@@ -7352,6 +7364,8 @@ with tab_counter:
                                         "Speed (us/them)": f"{ours}/{theirs} "
                                             + ("faster" if ours > theirs else
                                                "slower" if ours < theirs else "tie"),
+                                        **({"Moves used": ", ".join(c["our_moveset"])}
+                                           if c.get("our_moveset") else {}),
                                         "Notes": "; ".join(filter(None, [
                                             f"we finish with priority {c['our_prio_move']} "
                                             f"({c['our_prio_pct']:.0f}%)"

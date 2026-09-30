@@ -807,16 +807,23 @@ def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
                 universe, merged, moves_db, natures, typechart).items()}
 
 
-def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart):
+def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart,
+                              tables_out=None):
     """{name: {other_name: (best_frac, move_name, prio_frac, prio_move)}} --
     `_one_v_one_offense`'s own table plus WHICH real-usage move produced each
     best fraction (None when nothing does any damage), and the best damaging
     PRIORITY move against that enemy (Fake Out/First Impression excluded --
     turn-one-only, useless as a finisher), so a caller can show the actual
-    move behind a hits-to-KO read and reason about a priority last hit."""
+    move behind a hits-to-KO read and reason about a priority last hit.
+
+    `tables_out`: if a dict, filled with each name's full per-move table
+    ({name: {move: {enemy: frac}}}) so `_limit_detail_moves` can re-pick a
+    smaller moveset without recomputing the damage."""
     offense = {}
     for name in universe:
         table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
+        if tables_out is not None:
+            tables_out[name] = table
         prio_moves = []
         for mv in table:
             info = _lookup_move(mv, moves_db)
@@ -906,7 +913,8 @@ def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
 
 
 def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
-                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
+                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                      move_limit=None):
     """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
     enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
     calculation"), computed ONCE and reused by every candidate pair's own
@@ -941,12 +949,16 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     wins/loses outright regardless of `max_hits` -- there's no time
     pressure to weigh against an opponent who can never finish the job).
 
+    `move_limit` (None = off): cap each pool member at that many damaging
+    moves, chosen to maximise its wins (`_limit_detail_moves`).
+
     A pool member is never matched against an identical enemy entry of the
     same name (a literal self-mirror isn't a meaningful "does my own team
     have an answer to this enemy" question for MY OWN pool).
     """
-    detail = _one_v_one_offense_detail(list(pool) + list(enemy_names), merged,
-                                       moves_db, natures, typechart)
+    detail, _chosen = _detail_with_move_limit(pool, enemy_names, merged, moves_db,
+                                              natures, typechart, max_hits,
+                                              sash_holders, move_limit)
 
     matrix = {}
     for name in pool:
@@ -959,16 +971,31 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     return matrix
 
 
+def _detail_with_move_limit(pool, enemy_names, merged, moves_db, natures, typechart,
+                            max_hits, sash_holders, move_limit):
+    """(`_one_v_one_offense_detail`, {name: chosen moves} or {}) -- the
+    detail restricted per `_limit_detail_moves` when `move_limit` is set."""
+    universe = list(pool) + list(enemy_names)
+    if not move_limit:
+        return _one_v_one_offense_detail(universe, merged, moves_db, natures,
+                                         typechart), {}
+    tables = {}
+    detail = _one_v_one_offense_detail(universe, merged, moves_db, natures,
+                                       typechart, tables_out=tables)
+    return _limit_detail_moves(detail, tables, pool, enemy_names, merged,
+                               moves_db, move_limit, max_hits, sash_holders)
+
+
 def _pair_hits(frac):
     return math.ceil(1.0 / frac) if frac > 0 else None
 
 
-def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None):
-    """`_one_v_one_verdict` for one (name, enemy) pair straight off
-    `_one_v_one_offense_detail`'s table -- shared with the displayed
-    hits-to-KO detail so the two can never disagree."""
-    our_frac, our_move, our_pf, _pm = detail[name][enemy_name]
-    their_frac, their_move, their_pf, _tm = detail[enemy_name][name]
+def _verdict_from_rows(name, enemy_name, our_row, their_row, merged, max_hits,
+                       sash_holders=None):
+    """`_one_v_one_verdict` from two `_one_v_one_offense_detail` rows
+    ((best_frac, best_move, prio_frac, prio_move) each way)."""
+    our_frac, our_move, our_pf, _pm = our_row
+    their_frac, their_move, their_pf, _tm = their_row
     my_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
     return _one_v_one_verdict(
         my_hits, their_hits,
@@ -980,8 +1007,85 @@ def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None)
         their_sash=_sash_saves(enemy_name, sash_holders, our_move))
 
 
+def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None):
+    """`_one_v_one_verdict` for one (name, enemy) pair straight off
+    `_one_v_one_offense_detail`'s table -- shared with the displayed
+    hits-to-KO detail so the two can never disagree."""
+    return _verdict_from_rows(name, enemy_name, detail[name][enemy_name],
+                              detail[enemy_name][name], merged, max_hits,
+                              sash_holders)
+
+
+def _rows_for_moves(table, prio_moves, moveset, enemy_names, name):
+    """`_one_v_one_offense_detail`'s row for one attacker restricted to
+    `moveset` (a list of move names from its full `table`)."""
+    row = {}
+    for en in enemy_names:
+        if en == name:
+            continue
+        best_frac, best_move = 0.0, None
+        prio_frac, prio_move = 0.0, None
+        for mv in moveset:
+            fr = table[mv].get(en, 0.0)
+            if fr > best_frac:
+                best_frac, best_move = fr, mv
+            if mv in prio_moves and fr > prio_frac:
+                prio_frac, prio_move = fr, mv
+        row[en] = (best_frac, best_move, prio_frac, prio_move)
+    return row
+
+
+def _limit_detail_moves(detail, tables, pool, enemy_names, merged, moves_db,
+                        move_limit, max_hits, sash_holders=None):
+    """"Many mons are using >4 moves against enemy members" -- restrict each
+    pool member to at most `move_limit` damaging moves, picking the subset
+    that MAXIMISES its 1v1 wins over `enemy_names` (then fewest losses, then
+    most total damage, then move names -- fully deterministic). Each
+    member's candidate list is <= 10 moves, so every subset of size
+    `move_limit` is tried exactly (C(10,4) = 210). Enemies are untouched.
+
+    Returns (detail', {name: [chosen moves]}) -- `detail'` is a copy with the
+    pool rows replaced; a member with <= `move_limit` damaging moves (or no
+    table, e.g. a patched test double) keeps its full row."""
+    from itertools import combinations
+    new_detail = dict(detail)
+    chosen = {}
+    for name in pool:
+        table = tables.get(name)
+        if not table or name not in detail:
+            continue
+        mvs = sorted(table)
+        prio = set()
+        for mv in mvs:
+            info = _lookup_move(mv, moves_db)
+            if info is not None and info.priority > 0 and mv not in FIRST_TURN_ONLY_MOVES:
+                prio.add(mv)
+        if len(mvs) <= move_limit:
+            chosen[name] = mvs
+            continue
+        enemies = [e for e in enemy_names if e != name and e in detail]
+        best_key, best_set = None, None
+        for combo in combinations(mvs, move_limit):
+            row = _rows_for_moves(table, prio, combo, enemies, name)
+            wins = losses = 0
+            dmg = 0.0
+            for en in enemies:
+                v = _verdict_from_rows(name, en, row[en], detail[en][name],
+                                       merged, max_hits, sash_holders)
+                wins += v == "win"
+                losses += v == "loss"
+                dmg += min(row[en][0], 1.0)
+            key = (wins, -losses, round(dmg, 9))
+            if best_key is None or key > best_key:
+                best_key, best_set = key, combo
+        chosen[name] = list(best_set)
+        new_detail[name] = _rows_for_moves(table, prio, best_set, enemy_names, name)
+    return new_detail, chosen
+
+
 def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart,
-                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                       move_limit=None):
     """Single-pair convenience wrapper around `_one_v_one_matrix` (same
     logic, no batching) -- for an ad-hoc "does X beat Y" query rather than
     a whole pool's worth."""
@@ -991,7 +1095,8 @@ def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart,
 
 
 def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
-                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
+                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                              move_limit=None):
     """Public entry point onto `_one_v_one_matrix` -- for a caller outside
     this module (the Streamlit app) wanting to build the SAME cheap 1v1
     read `find_pair_cores`'s own `threat_coverage` already uses, to hand
@@ -1006,11 +1111,13 @@ def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, type
     same reasonable, non-OHKO-only cap every other caller in this module
     uses."""
     return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
-                             max_hits=max_hits, sash_holders=sash_holders)
+                             max_hits=max_hits, sash_holders=sash_holders,
+                             move_limit=move_limit)
 
 
 def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
-                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
+                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                                  move_limit=None):
     """{name: {enemy_name: {"our_hits_to_ko", "their_hits_to_ko"}}} for
     every (pool member, enemy) pair -- "I KO very quickly and take little
     damage, such as OHKO vs 4HKO" wants the actual hits-to-KO each way,
@@ -1029,8 +1136,9 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
 
     A pool member is never matched against an identical enemy entry of
     the same name, same as `_one_v_one_matrix`."""
-    offense = _one_v_one_offense_detail(list(pool) + list(enemy_names), merged,
-                                        moves_db, natures, typechart)
+    offense, chosen = _detail_with_move_limit(pool, enemy_names, merged, moves_db,
+                                              natures, typechart, max_hits,
+                                              sash_holders, move_limit)
     result = {}
     for name in pool:
         result[name] = {}
@@ -1043,6 +1151,7 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
             result[name][enemy_name] = {
                 "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
                 "our_move": our_move, "their_move": their_move,
+                "our_moveset": chosen.get(name),
                 "our_pct": our_frac * 100.0, "their_pct": their_frac * 100.0,
                 "our_speed": merged[name]["base_stats"]["spe"],
                 "their_speed": merged[enemy_name]["base_stats"]["spe"],

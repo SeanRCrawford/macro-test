@@ -2401,6 +2401,27 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertEqual(len(dfs), 1)
         self.assertIn("Notes", dfs[0].columns)
 
+    def test_move_limit_option_is_off_by_default_and_shows_moves_used(self):
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        radio = [r for r in at.radio if r.key == "ct_mf_move_limit"]
+        self.assertEqual(len(radio), 1)
+        self.assertEqual(radio[0].value, "No limit")
+        radio[0].set_value("3 max").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar", "Rillaboom", "Gholdengo"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Our move" in d.value.columns]
+        self.assertEqual(len(dfs), 1)
+        df = dfs[0]
+        self.assertIn("Moves used", df.columns)
+        for _, grp in df.groupby("Pokemon"):
+            used = {m.split(" (")[0] for m in grp["Our move"] if m != "--"}
+            self.assertLessEqual(len(used), 3)
+
     def test_individuals_results_are_sorted_most_decisive_first(self):
         """"It would be good to see the most decisive wins too, i.e., I
         KO very quickly and take little damage, such as OHKO vs 4HKO" --
