@@ -3951,6 +3951,44 @@ def _min_special_attackers_slider(key):
              "is dropped outright.")
 
 
+def _pair_coverage_xlsx_bytes(pair_rows, detail_rows, target_name_lists):
+    """A workbook `_parse_pair_coverage_xlsx` reads back (and "Import pair
+    coverage" accepts): the "Cores" sheet carries just the enemy rosters (one
+    "Enemy N" column each), then "Pair Coverage" and "Pair Detail" hold the
+    pair rows `counter_finder.pair_rows_from_coverage` produces -- the same
+    layout `counter_table.py --multi-bring4 --xlsx` writes."""
+    import io
+    from openpyxl import Workbook
+    wb = Workbook()
+    cores = wb.active
+    cores.title = "Cores"
+    cores.append(["Rank", "Team"] + [f"Enemy {i}" for i in range(1, len(target_name_lists) + 1)])
+    cores.append([1, ""] + [", ".join(t) for t in target_name_lists])
+    cov = wb.create_sheet("Pair Coverage")
+    cov.append(["Rank", "Pokemon 1", "Pokemon 2", "Enemy #", "Item 1", "Item 2",
+                "Moves 1", "Moves 2", "Swept", "Traded", "Lost", "No KO",
+                "Tailwind-safe", "Protect-safe", "Redirect-safe",
+                "Clean win total", "Total"])
+    rank_of = {}
+    for r in pair_rows:
+        rank = rank_of.setdefault(frozenset(r["pair"]), len(rank_of) + 1)
+        cov.append([rank, r["pair"][0], r["pair"][1], r["enemy_idx"] + 1,
+                    r["item1"], r["item2"], ", ".join(r["moves1"]), ", ".join(r["moves2"]),
+                    r["swept"], r["traded"], r["lost"], r["no_ko"], r["tailwind_safe"],
+                    r["protect_safe"], r["follow_me_safe"], r["clean_win_total"], r["total"]])
+    det = wb.create_sheet("Pair Detail")
+    det.append(["Pokemon 1", "Pokemon 2", "Enemy #", "Enemy 1", "Enemy 2", "Outcome",
+                "Our HP (C)", "Our HP (P)", "Tailwind-safe", "Protect-safe",
+                "Redirect-safe", "Clean win value"])
+    for d in detail_rows:
+        det.append([d["pair"][0], d["pair"][1], d["enemy_idx"] + 1, d["e1"], d["e2"],
+                    d["outcome"], d["our_hp_c"], d["our_hp_p"], d["tailwind_safe"],
+                    d["protect_safe"], d["follow_me_safe"], d["clean_win_value"]])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _parse_pair_coverage_xlsx(file_bytes):
     """Parse a `--multi-bring4 --xlsx`-produced workbook's own "Cores",
     "Pair Coverage", and "Pair Detail" sheets back into the plain-dict
@@ -7470,6 +7508,38 @@ with tab_counter:
                      "minutes.")
             st.caption(f"~{mf_pool_size * (mf_pool_size - 1) // 2} pairs to "
                       f"race at this pool size.")
+            mf_pair_teams = st.multiselect(
+                "Enemy teams (race every pair against each team's own pairs)",
+                list(teams), key="ct_mf_pair_enemy_teams",
+                help="Pick one or more saved teams: each team's own pairs "
+                     "(15 for a team of 6) are raced -- never cross-team "
+                     "pairs, which are never fielded together. A pair of "
+                     "yours is kept if it beats at least the number below "
+                     "on every team (or on at least the number of teams "
+                     "you choose). With 6 teams that is /90 wins in total. "
+                     "Overrides the manual enemy list below while any team "
+                     "is picked, and the results can be exported to build "
+                     "a team of 4 or 6 out of the best pairs.")
+            mf_team_min = 10
+            mf_team_all = True
+            mf_team_count = 1
+            if mf_pair_teams:
+                mtc1, mtc2 = st.columns(2)
+                mf_team_min = int(mtc1.number_input(
+                    "Enemy pairs a pair must beat, per team (of 15)",
+                    min_value=1, max_value=15, value=10, step=1,
+                    key="ct_mf_pair_team_min",
+                    help="Default 10 of 15 (sweep or out-trade). A team "
+                         "with fewer than 6 members has fewer pairs; the "
+                         "bar is then capped at its own total."))
+                mf_team_all = mtc2.checkbox(
+                    "Must reach it on every team", value=True,
+                    key="ct_mf_pair_team_all")
+                if not mf_team_all:
+                    mf_team_count = int(st.number_input(
+                        "...on at least this many teams", min_value=1,
+                        max_value=len(mf_pair_teams), value=1, step=1,
+                        key="ct_mf_pair_team_count"))
             _mf_enemy_team_loader("ct_mf_pair", "ct_mf_enemy_pair")
             mf_enemy_pair = st.multiselect(
                 "Enemy pair(s) to beat", all_names, key="ct_mf_enemy_pair",
@@ -7510,7 +7580,7 @@ with tab_counter:
                 "Enemy pairs allowed to go unbeaten (N -> beat n-N)",
                 min_value=0, max_value=200, value=0, step=1,
                 key="ct_mf_pair_misses", disabled=not mf_pair_partial))
-            if len(mf_enemy_pair) < 2:
+            if not mf_pair_teams and len(mf_enemy_pair) < 2:
                 st.caption("Pick at least 2 enemies to form the pair(s) to beat.")
             elif st.button("Search pairs", type="primary", key="ct_mf_pair_go"):
                 pool = build_candidate_pool(mf_pool_source, top_n=mf_pool_size, prefs=prefs)
@@ -7522,30 +7592,130 @@ with tab_counter:
                 if mf_not_weak_p:
                     pool = [n for n in pool if not any(
                         type_matchup(n, merged, t) == "weak" for t in mf_not_weak_p)]
-                with st.spinner(f"Racing every pair drawn from {len(pool)} "
-                                f"Pokemon vs {' + '.join(mf_enemy_pair)}..."):
-                    mf_rows = joint_pool_search(
-                        pool, mf_enemy_pair, merged, moves, natures, typechart,
-                        turns=ct_turns, excluded_items=ct_excluded,
-                        worst_case_targeting=mf_worst_case)
-                    # "You also can not have two of your own megas in a
-                    # pair" -- only one Mega Evolution per side per game
-                    # (VGC's real rule), so pairing two DIFFERENT Mega-
-                    # capable picks together always wastes one of the two
-                    # stones as a lead choice; a non-mega + the stronger
-                    # mega is never worse. Same exclusion `find_pair_cores`
-                    # already applies for the identical reason -- a post-
-                    # filter here rather than in `joint_pool_search` itself,
-                    # since Joint Pair Search's own callers may still want
-                    # to see (and knowingly discard) that comparison.
-                    mf_rows = [r for r in mf_rows if not (
-                        r["pair"][0].startswith("Mega ")
-                        and r["pair"][1].startswith("Mega "))]
-                st.session_state["ct_mf_pair_results"] = mf_rows
-                st.session_state["ct_mf_pair_enemy_pair"] = mf_enemy_pair
-                _cache_gameplans(mf_rows, "Matchup finder")
+                if mf_pair_teams:
+                    from counter_finder import (multi_bring4_coverage,
+                                                filter_coverage_pairs)
+                    rosters = [list(teams[t]) for t in mf_pair_teams]
+                    totals = [len(r) * (len(r) - 1) // 2 for r in rosters]
+                    required = [min(mf_team_min, t) for t in totals]
+                    need_teams = len(rosters) if mf_team_all else min(mf_team_count, len(rosters))
+                    with st.spinner(f"Racing every pair drawn from {len(pool)} "
+                                    f"Pokemon vs {len(rosters)} enemy team(s)..."):
+                        cov = multi_bring4_coverage(
+                            pool, rosters, merged, moves, natures, typechart,
+                            turns=ct_turns,
+                            # Pruning is only sound when a pair must clear the bar
+                            # on EVERY team; a partial-teams rule needs full rows.
+                            good_threshold=(min(q / t for q, t in zip(required, totals) if t)
+                                            if need_teams == len(rosters) else 0.0),
+                            min_enemies=1, excluded_items=ct_excluded)
+                    keys = {k for pbk in cov["pair_by_key"] for k in pbk
+                            if not all(n.startswith("Mega ") for n in k)}
+                    def _passes(k):
+                        ok = sum(1 for pbk, q in zip(cov["pair_by_key"], required)
+                                 if k in pbk and pbk[k]["pairs_swept"]
+                                 + pbk[k]["pairs_traded"] >= q)
+                        return ok >= need_teams
+                    keep = {k for k in keys if _passes(k)}
+                    st.session_state["ct_mf_pair_team_pack"] = {
+                        "coverage": filter_coverage_pairs(cov, keep),
+                        "teams": list(mf_pair_teams), "totals": totals,
+                        "required": required, "need_teams": need_teams}
+                    st.session_state.pop("ct_mf_pair_results", None)
+                else:
+                    with st.spinner(f"Racing every pair drawn from {len(pool)} "
+                                    f"Pokemon vs {' + '.join(mf_enemy_pair)}..."):
+                        mf_rows = joint_pool_search(
+                            pool, mf_enemy_pair, merged, moves, natures, typechart,
+                            turns=ct_turns, excluded_items=ct_excluded,
+                            worst_case_targeting=mf_worst_case)
+                        # "You also can not have two of your own megas in a
+                        # pair" -- only one Mega Evolution per side per game
+                        # (VGC's real rule), so pairing two DIFFERENT Mega-
+                        # capable picks together always wastes one of the two
+                        # stones as a lead choice; a non-mega + the stronger
+                        # mega is never worse. Same exclusion `find_pair_cores`
+                        # already applies for the identical reason -- a post-
+                        # filter here rather than in `joint_pool_search` itself,
+                        # since Joint Pair Search's own callers may still want
+                        # to see (and knowingly discard) that comparison.
+                        mf_rows = [r for r in mf_rows if not (
+                            r["pair"][0].startswith("Mega ")
+                            and r["pair"][1].startswith("Mega "))]
+                    st.session_state["ct_mf_pair_results"] = mf_rows
+                    st.session_state["ct_mf_pair_enemy_pair"] = mf_enemy_pair
+                    _cache_gameplans(mf_rows, "Matchup finder")
+            mf_pack = st.session_state.get("ct_mf_pair_team_pack") if mf_pair_teams else None
+            if mf_pack:
+                from counter_finder import (top_coverage_pairs,
+                                            pair_rows_from_coverage)
+                mf_cov = mf_pack["coverage"]
+                mf_pack_teams = mf_pack["teams"]
+                mf_pack_keys = [frozenset(p_) for p_ in top_coverage_pairs(mf_cov, top_n=10 ** 6)]
+                grand_total = sum(mf_pack["totals"])
+                if not mf_pack_keys:
+                    st.info("No pair reached the bar -- widen the pool, lower "
+                            "the per-team minimum, or require fewer teams.")
+                else:
+                    st.caption(
+                        f"{len(mf_pack_keys)} pair(s) beat at least "
+                        f"{'/'.join(str(q) for q in mf_pack['required'])} enemy pairs "
+                        f"on {mf_pack['need_teams']} of {len(mf_pack_teams)} team(s). "
+                        f"The total is out of {grand_total} "
+                        f"({' + '.join(str(t) for t in mf_pack['totals'])}). "
+                        "Sorted protect-safe first, then most enemy pairs beaten.")
+                    pack_rows = []
+                    for k in mf_pack_keys:
+                        row = {"Pair": " + ".join(sorted(k))}
+                        beaten_sum = 0
+                        rows_k = []
+                        for ti, pbk in enumerate(mf_cov["pair_by_key"]):
+                            r = pbk.get(k)
+                            if r is None:
+                                row[f"{mf_pack_teams[ti]}"] = "--"
+                                continue
+                            b = r["pairs_swept"] + r["pairs_traded"]
+                            beaten_sum += b
+                            rows_k.append(r)
+                            row[f"{mf_pack_teams[ti]}"] = f"{b}/{r['pairs_total']}"
+                        row = {"Pair": row.pop("Pair"), "Total beaten": f"{beaten_sum}/{grand_total}",
+                               **row,
+                               "Protect-safe": sum(r["pairs_protect_safe"] for r in rows_k),
+                               "Tailwind-safe": sum(r["pairs_tailwind_safe"] for r in rows_k),
+                               "Clean win": round(sum(r["pairs_clean_win_total"] for r in rows_k), 1),
+                               "Sets": "; ".join(
+                                   f"{n} @ {it}: {', '.join(mf_cov['fixed_moves'].get(n, []))}"
+                                   for n, it in zip(rows_k[0]["pair"],
+                                                    (rows_k[0]["item1"], rows_k[0]["item2"]))
+                               ) if rows_k else ""}
+                        pack_rows.append(row)
+                    st.dataframe(pd.DataFrame(pack_rows), width='stretch', hide_index=True)
+                    st.markdown("**Build a team of 4 or 6 from these pairs**")
+                    st.caption("A team is 2 or 3 of these already-raced pairs "
+                               "(disjoint), ranked by wins per 90 -- hand them "
+                               "to Import pair coverage, which also applies "
+                               "type/tech/weakness filters and adds your "
+                               "saved teams' own pairs, or download the "
+                               "workbook to use it later or from the CLI.")
+                    mf_pr, mf_dr, mf_tl = pair_rows_from_coverage(mf_cov)
+
+                    def _send_pairs_to_import(pr, dr, tl):
+                        st.session_state["ct_pc_pair_rows"] = pr
+                        st.session_state["ct_pc_detail_rows"] = dr
+                        st.session_state["ct_pc_target_name_lists"] = tl
+                        st.session_state["ct_mode"] = "Import pair coverage"
+                    xc1, xc2 = st.columns(2)
+                    xc1.button("Send to Import pair coverage (teams of 4/6)",
+                               key="ct_mf_pair_send_import",
+                               on_click=_send_pairs_to_import,
+                               args=(mf_pr, mf_dr, mf_tl))
+                    xc2.download_button(
+                        "Download pairs (.xlsx)", key="ct_mf_pair_download",
+                        data=_pair_coverage_xlsx_bytes(mf_pr, mf_dr, mf_tl),
+                        file_name="matchup_finder_pairs.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             mf_rows = st.session_state.get("ct_mf_pair_results")
-            if mf_rows is not None:
+            if mf_rows is not None and not mf_pair_teams:
                 shown_enemy_pair = st.session_state.get(
                     "ct_mf_pair_enemy_pair", mf_enemy_pair)
                 shown = ([r for r in mf_rows

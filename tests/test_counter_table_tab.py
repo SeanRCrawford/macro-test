@@ -2501,6 +2501,53 @@ class TestMatchupFinderMode(unittest.TestCase):
             for row in rows:
                 self.assertGreaterEqual(len(set(row["group"]) & set(names)), 2)
 
+    def test_pairs_vs_enemy_teams_export_to_import_pair_coverage(self):
+        """"The vs enemy team list should work for 2v2s ... exportable ... to
+        maximise the /90 wins as a team of 4-6" -- race pairs against each
+        picked team's own pairs, keep those beating the per-team bar, then hand
+        them to Import pair coverage (and as a workbook it can re-read)."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [r for r in at.radio if r.key == "ct_mf_kind"][0].set_value("Pairs (2v2)").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_pair"][0].set_value(10).run()
+        team_ms = [m for m in at.multiselect if m.key == "ct_mf_pair_enemy_teams"][0]
+        picked = list(team_ms.options)[:2]
+        team_ms.set_value(picked).run()
+        [n for n in at.number_input if n.key == "ct_mf_pair_team_min"][0].set_value(1).run()
+        at = [b for b in at.button if b.key == "ct_mf_pair_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pack = at.session_state["ct_mf_pair_team_pack"]
+        self.assertEqual(pack["teams"], picked)
+        cov = pack["coverage"]
+        self.assertEqual(len(cov["pair_by_key"]), 2)
+        kept = {k for pbk in cov["pair_by_key"] for k in pbk}
+        self.assertTrue(kept, "expected pairs to clear a bar of 1 enemy pair")
+        for k in kept:   # every kept pair clears the bar on every team
+            for pbk, q in zip(cov["pair_by_key"], pack["required"]):
+                r = pbk[k]
+                self.assertGreaterEqual(r["pairs_swept"] + r["pairs_traded"], q)
+            self.assertFalse(all(n.startswith("Mega ") for n in k))
+        tables = [d.value for d in at.dataframe if "Total beaten" in d.value.columns]
+        self.assertEqual(len(tables), 1)
+        self.assertEqual(len(tables[0]), len(kept))
+        self.assertTrue(all(t in tables[0].columns for t in picked))
+        # workbook export round-trips through the importer's own parser
+        from app import _pair_coverage_xlsx_bytes, _parse_pair_coverage_xlsx
+        import counter_finder as cfm
+        pr, dr, tl = cfm.pair_rows_from_coverage(cov)
+        pr2, dr2, tl2 = _parse_pair_coverage_xlsx(_pair_coverage_xlsx_bytes(pr, dr, tl))
+        self.assertEqual(tl2, tl)
+        self.assertEqual(len(pr2), len(pr))
+        self.assertEqual(len(dr2), len(dr))
+        self.assertEqual({(r["pair"], r["enemy_idx"], r["swept"], r["total"]) for r in pr2},
+                         {(r["pair"], r["enemy_idx"], r["swept"], r["total"]) for r in pr})
+        # hand-off
+        at = [b for b in at.button if b.key == "ct_mf_pair_send_import"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["ct_mode"], "Import pair coverage")
+        self.assertEqual(len(at.session_state["ct_pc_pair_rows"]), len(pr))
+
     def test_individuals_results_are_sorted_most_decisive_first(self):
         """"It would be good to see the most decisive wins too, i.e., I
         KO very quickly and take little damage, such as OHKO vs 4HKO" --

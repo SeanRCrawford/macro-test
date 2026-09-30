@@ -8242,6 +8242,62 @@ def _pair_coverage_rank_key(pair_key, pair_by_key):
     )
 
 
+def filter_coverage_pairs(coverage, keep_keys):
+    """`coverage` (a `multi_bring4_coverage`-shaped dict) restricted to the
+    pairs in `keep_keys` (an iterable of `frozenset` pair keys): every other
+    pair is dropped from `pair_by_key`, `candidate_pool` shrinks to the names
+    in the kept pairs, and the rest (sets, enemy rosters, ...) is shared with
+    the original. What a team builder such as `pair_coverage_teams` should
+    read after a caller has decided which pairs are "good enough"."""
+    keep = set(keep_keys)
+    out = dict(coverage)
+    out["pair_by_key"] = [{k: r for k, r in pbk.items() if k in keep}
+                          for pbk in coverage["pair_by_key"]]
+    out["candidate_pool"] = sorted({n for k in keep for n in k})
+    return out
+
+
+def pair_rows_from_coverage(coverage, keep_keys=None):
+    """(pair_rows, detail_rows, target_name_lists) in the exact plain-dict
+    shape `coverage_from_pair_rows` reads back (and the "Pair Coverage"/
+    "Pair Detail" xlsx sheets carry) -- the inverse of that function, for a
+    live `coverage` dict: real sets included, `keep_keys` (an iterable of
+    `frozenset` pair keys, default every pair) choosing which pairs to
+    export. Lets the Matchup Finder hand its already-raced pairs straight to
+    "Import pair coverage" without a file round trip."""
+    keep = None if keep_keys is None else set(keep_keys)
+    fixed_moves = coverage["fixed_moves"]
+    pair_rows, detail_rows = [], []
+    for ei, pbk in enumerate(coverage["pair_by_key"]):
+        for pk, r in pbk.items():
+            if keep is not None and pk not in keep:
+                continue
+            n1, n2 = r["pair"]
+            pair_rows.append({
+                "pair": (n1, n2), "enemy_idx": ei,
+                "item1": r["item1"], "item2": r["item2"],
+                "moves1": list(fixed_moves.get(n1, [])),
+                "moves2": list(fixed_moves.get(n2, [])),
+                "swept": r["pairs_swept"], "traded": r["pairs_traded"],
+                "lost": r["pairs_lost"], "no_ko": r["pairs_no_ko"],
+                "tailwind_safe": r["pairs_tailwind_safe"],
+                "protect_safe": r["pairs_protect_safe"],
+                "follow_me_safe": r["pairs_follow_me_safe"],
+                "clean_win_total": round(r["pairs_clean_win_total"], 2),
+                "total": r["pairs_total"]})
+            for (e1, e2), d in r["detail"].items():
+                detail_rows.append({
+                    "pair": (n1, n2), "enemy_idx": ei, "e1": e1, "e2": e2,
+                    "outcome": d["outcome"],
+                    "our_hp_c": round(d["our_hp"]["C"], 3),
+                    "our_hp_p": round(d["our_hp"]["P"], 3),
+                    "tailwind_safe": d["tailwind_safe"],
+                    "protect_safe": d["protect_safe"],
+                    "follow_me_safe": d["follow_me_safe"],
+                    "clean_win_value": round(d["clean_win_value"], 2)})
+    return pair_rows, detail_rows, [list(t) for t in coverage["target_name_lists"]]
+
+
 def top_coverage_pairs(coverage, top_n=15):
     """The best `top_n` pairs in `coverage["pair_by_key"]` (a
     `multi_bring4_coverage` result), ranked by `_pair_coverage_rank_key` --

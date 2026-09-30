@@ -11860,6 +11860,58 @@ class TestOneVOneMoveLimit(unittest.TestCase):
             self.assertEqual(len(chosen["A"]), k)
 
 
+class TestPairRowsFromCoverage(unittest.TestCase):
+    """`pair_rows_from_coverage` is the live-dict inverse of
+    `coverage_from_pair_rows`: the Matchup Finder hands its raced pairs to
+    "Import pair coverage" through it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+        W = cls.W
+        cls.rosters = [["Sinistcha", "Milotic", "Corviknight", "Hydreigon"],
+                       ["Kingambit", "Rillaboom", "Gholdengo", "Dragonite"]]
+        cls.cov = cf.multi_bring4_coverage(
+            ["Garchomp", "Incineroar", "Rillaboom", "Kingambit", "Gallade"],
+            cls.rosters, W["merged"], W["moves"], W["natures"], W["typechart"],
+            good_threshold=0.0, min_enemies=1)
+
+    def test_round_trip_preserves_every_pair_row(self):
+        W = self.W
+        pr, dr, tl = cf.pair_rows_from_coverage(self.cov)
+        self.assertEqual(tl, self.rosters)
+        back = cf.coverage_from_pair_rows(pr, dr, tl, W["merged"], W["moves"],
+                                          W["natures"], W["typechart"])
+        for ei, pbk in enumerate(self.cov["pair_by_key"]):
+            self.assertEqual(set(pbk), set(back["pair_by_key"][ei]))
+            for k, r in pbk.items():
+                b = back["pair_by_key"][ei][k]
+                for f in ("pairs_swept", "pairs_traded", "pairs_lost", "pairs_no_ko",
+                          "pairs_total", "pairs_protect_safe", "pairs_tailwind_safe"):
+                    self.assertEqual(r[f], b[f], f)
+                self.assertEqual(set(r["detail"]), set(b["detail"]))
+        self.assertEqual(back["fixed_moves"], {n: self.cov["fixed_moves"][n]
+                                               for n in back["fixed_moves"]})
+
+    def test_filter_coverage_pairs_keeps_only_the_named_pairs(self):
+        keys = sorted({k for pbk in self.cov["pair_by_key"] for k in pbk}, key=sorted)
+        keep = {keys[0]}
+        cov = cf.filter_coverage_pairs(self.cov, keep)
+        self.assertTrue(all(set(pbk) <= keep for pbk in cov["pair_by_key"]))
+        self.assertEqual(cov["candidate_pool"], sorted(keys[0]))
+        pr, _dr, _tl = cf.pair_rows_from_coverage(cov)
+        self.assertTrue(all(frozenset(r["pair"]) in keep for r in pr))
+        # the original is untouched
+        self.assertGreater(len({k for pbk in self.cov["pair_by_key"] for k in pbk}), 1)
+
+    def test_a_filtered_coverage_builds_teams_of_4(self):
+        keys = {k for pbk in self.cov["pair_by_key"] for k in pbk}
+        teams = cf.pair_coverage_teams(cf.filter_coverage_pairs(self.cov, keys),
+                                       group_size=4, top_n=3)
+        for t in teams:
+            self.assertEqual(len(t["team"]), 4)
+
+
 class TestParentalBond(unittest.TestCase):
     """Mega Kangaskhan's Parental Bond: a second hit for 25% damage (1.25x
     total) on single-target single-hit moves, which also breaks a Focus
