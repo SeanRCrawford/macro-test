@@ -11742,6 +11742,36 @@ class TestOneVOneMoveLimit(unittest.TestCase):
             for e, c in counts[n].items():
                 self.assertEqual(matrix[n][e], c["verdict"])
 
+    def test_a_pool_member_that_is_also_an_enemy_keeps_full_moves_as_an_enemy(self):
+        """The reported KeyError: pool and enemy lists overlap (Abomasnow in
+        both) -- the limited row for the pool role must not replace the
+        enemy-role row, and no pair may raise."""
+        W = self.W
+        overlap = [n for n in self.pool[:6]]
+        pool = self.pool[:20]
+        enemies = list(dict.fromkeys(self.enemies + overlap))
+        for k in (3, 4):
+            matrix = cf.one_v_one_matrix_for_pool(
+                pool, enemies, self.merged, W["moves"], W["natures"],
+                W["typechart"], move_limit=k)
+            counts = cf.one_v_one_hit_counts_for_pool(
+                pool, enemies, self.merged, W["moves"], W["natures"],
+                W["typechart"], move_limit=k)
+            for n in pool:
+                for e in enemies:
+                    if e != n:
+                        self.assertEqual(matrix[n][e], counts[n][e]["verdict"])
+        # the enemy side is unrestricted: same their_move as with no cap
+        full = cf.one_v_one_hit_counts_for_pool(
+            pool, enemies, self.merged, W["moves"], W["natures"], W["typechart"])
+        lim = cf.one_v_one_hit_counts_for_pool(
+            pool, enemies, self.merged, W["moves"], W["natures"],
+            W["typechart"], move_limit=3)
+        for n in pool:
+            for e in enemies:
+                if e != n:
+                    self.assertEqual(lim[n][e]["their_move"], full[n][e]["their_move"])
+
     def test_the_picked_subset_maximises_wins_exactly(self):
         """Synthetic: 5 moves each beating exactly one enemy; a 3-move cap
         must pick 3 that win 3 enemies, a cap of 4 wins 4."""
@@ -11756,7 +11786,8 @@ class TestOneVOneMoveLimit(unittest.TestCase):
         for k, expect in ((3, 3), (4, 4)):
             new, chosen = cf._limit_detail_moves(
                 detail, {"A": table}, ["A"], enemies, merged, {}, k, 4)
-            wins = sum(cf._pair_verdict("A", e, new, merged, 4) == "win" for e in enemies)
+            wins = sum(cf._pair_verdict("A", e, detail, merged, 4, None, new) == "win"
+                       for e in enemies)
             self.assertEqual(wins, expect)
             self.assertEqual(len(chosen["A"]), k)
 

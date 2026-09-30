@@ -956,9 +956,9 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     same name (a literal self-mirror isn't a meaningful "does my own team
     have an answer to this enemy" question for MY OWN pool).
     """
-    detail, _chosen = _detail_with_move_limit(pool, enemy_names, merged, moves_db,
-                                              natures, typechart, max_hits,
-                                              sash_holders, move_limit)
+    detail, our_detail, _chosen = _detail_with_move_limit(
+        pool, enemy_names, merged, moves_db, natures, typechart, max_hits,
+        sash_holders, move_limit)
 
     matrix = {}
     for name in pool:
@@ -967,23 +967,28 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
             if enemy_name == name:
                 continue
             matrix[name][enemy_name] = _pair_verdict(
-                name, enemy_name, detail, merged, max_hits, sash_holders)
+                name, enemy_name, detail, merged, max_hits, sash_holders,
+                our_detail)
     return matrix
 
 
 def _detail_with_move_limit(pool, enemy_names, merged, moves_db, natures, typechart,
                             max_hits, sash_holders, move_limit):
-    """(`_one_v_one_offense_detail`, {name: chosen moves} or {}) -- the
-    detail restricted per `_limit_detail_moves` when `move_limit` is set."""
+    """(unrestricted detail, our move-limited detail, {name: chosen moves})
+    -- without `move_limit` the two details are the same object and the
+    chosen map is empty."""
     universe = list(pool) + list(enemy_names)
     if not move_limit:
-        return _one_v_one_offense_detail(universe, merged, moves_db, natures,
-                                         typechart), {}
+        detail = _one_v_one_offense_detail(universe, merged, moves_db, natures,
+                                           typechart)
+        return detail, detail, {}
     tables = {}
     detail = _one_v_one_offense_detail(universe, merged, moves_db, natures,
                                        typechart, tables_out=tables)
-    return _limit_detail_moves(detail, tables, pool, enemy_names, merged,
-                               moves_db, move_limit, max_hits, sash_holders)
+    our_detail, chosen = _limit_detail_moves(
+        detail, tables, pool, enemy_names, merged, moves_db, move_limit,
+        max_hits, sash_holders)
+    return detail, our_detail, chosen
 
 
 def _pair_hits(frac):
@@ -1007,11 +1012,15 @@ def _verdict_from_rows(name, enemy_name, our_row, their_row, merged, max_hits,
         their_sash=_sash_saves(enemy_name, sash_holders, our_move))
 
 
-def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None):
+def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None,
+                  our_detail=None):
     """`_one_v_one_verdict` for one (name, enemy) pair straight off
     `_one_v_one_offense_detail`'s table -- shared with the displayed
-    hits-to-KO detail so the two can never disagree."""
-    return _verdict_from_rows(name, enemy_name, detail[name][enemy_name],
+    hits-to-KO detail so the two can never disagree. `our_detail`: a
+    move-limited copy to read OUR side from (the enemy side always comes
+    from the unrestricted `detail`)."""
+    return _verdict_from_rows(name, enemy_name,
+                              (our_detail or detail)[name][enemy_name],
                               detail[enemy_name][name], merged, max_hits,
                               sash_holders)
 
@@ -1044,8 +1053,10 @@ def _limit_detail_moves(detail, tables, pool, enemy_names, merged, moves_db,
     member's candidate list is <= 10 moves, so every subset of size
     `move_limit` is tried exactly (C(10,4) = 210). Enemies are untouched.
 
-    Returns (detail', {name: [chosen moves]}) -- `detail'` is a copy with the
-    pool rows replaced; a member with <= `move_limit` damaging moves (or no
+    Returns (our_detail, {name: [chosen moves]}) -- `our_detail` is a copy of
+    `detail` with the pool rows replaced (read OUR side from it only: an enemy
+    that is also a pool member keeps its full, unrestricted row in `detail`);
+    a member with <= `move_limit` damaging moves (or no
     table, e.g. a patched test double) keeps its full row."""
     from itertools import combinations
     new_detail = dict(detail)
@@ -1136,16 +1147,16 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
 
     A pool member is never matched against an identical enemy entry of
     the same name, same as `_one_v_one_matrix`."""
-    offense, chosen = _detail_with_move_limit(pool, enemy_names, merged, moves_db,
-                                              natures, typechart, max_hits,
-                                              sash_holders, move_limit)
+    offense, our_offense, chosen = _detail_with_move_limit(
+        pool, enemy_names, merged, moves_db, natures, typechart, max_hits,
+        sash_holders, move_limit)
     result = {}
     for name in pool:
         result[name] = {}
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            our_frac, our_move, our_pf, our_pm = offense[name][enemy_name]
+            our_frac, our_move, our_pf, our_pm = our_offense[name][enemy_name]
             their_frac, their_move, their_pf, their_pm = offense[enemy_name][name]
             our_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
             result[name][enemy_name] = {
@@ -1162,7 +1173,7 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
                 "our_sash": _sash_saves(name, sash_holders, their_move),
                 "their_sash": _sash_saves(enemy_name, sash_holders, our_move),
                 "verdict": _pair_verdict(name, enemy_name, offense, merged,
-                                         max_hits, sash_holders),
+                                         max_hits, sash_holders, our_offense),
             }
     return result
 
