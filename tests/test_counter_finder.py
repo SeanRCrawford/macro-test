@@ -8399,6 +8399,54 @@ class TestGrassyTerrainCheapModel(unittest.TestCase):
         self.assertFalse(race(None))
 
 
+class TestGrassyTerrainHalvesEarthquakeInTheJointRace(unittest.TestCase):
+    """"Counter Table should account for Rillaboom's grassy terrain reducing
+    earthquake damage in evaluating 2v2s" -- end to end through the real
+    turn resolver: a Rillaboom on EITHER side of the board (its Grassy Surge
+    is read by `_field_terrain`) halves Earthquake-family damage against
+    grounded defenders, and leaves airborne ones alone."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _eq_hits(self, rilla_role, defender_name):
+        merged, moves_db, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        chomp = cf._build("Garchomp", merged, natures)
+        target = cf._build(defender_name, merged, natures)
+        # A filler slot holds either Rillaboom (terrain) or Sinistcha (none).
+        filler_name = "Rillaboom" if rilla_role else "Sinistcha"
+        filler = cf._build(filler_name, merged, natures)
+        protect = cf._lookup_move("Protect", moves_db)
+        eq = cf._lookup_move("Earthquake", moves_db)
+        if rilla_role == "ally":
+            combatants = {"C": chomp, "P": filler, "E1": target, "E2": cf._build("Sinistcha", merged, natures)}
+        else:
+            combatants = {"C": chomp, "P": cf._build("Sinistcha", merged, natures),
+                          "E1": target, "E2": filler}
+        terrain = cf._field_terrain(combatants)
+        moves_by_role = {"C": [eq], "P": [protect], "E1": [protect], "E2": [protect]}
+        hp = {r: 1.0 for r in combatants}
+        _hp, log, _ea, _w, _rc = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, None, {"C": "E1"}, terrain=terrain)
+        return terrain, [h for role, tgt, h in log if role == "C" and tgt == "E1"][0]
+
+    def test_terrain_from_either_sides_rillaboom_halves_earthquake(self):
+        _t0, plain = self._eq_hits(None, "Kingambit")
+        for where in ("ally", "enemy"):
+            terrain, hit = self._eq_hits(where, "Kingambit")
+            self.assertEqual(terrain, "grassy")
+            self.assertAlmostEqual(hit.frac / plain.frac, 0.5, places=3, msg=where)
+
+    def test_the_terrain_rule_only_applies_to_grounded_defenders(self):
+        """The halving is gated on `is_grounded(defender)`: Kingambit takes it,
+        an airborne Corviknight would not."""
+        from damage import is_grounded
+        merged, natures = self.W["merged"], self.W["natures"]
+        self.assertFalse(is_grounded(cf._build("Corviknight", merged, natures)))
+        self.assertTrue(is_grounded(cf._build("Kingambit", merged, natures)))
+
+
 class TestPsychicTerrainCheapModel(unittest.TestCase):
     """Indeedee's Psychic Surge: grounded Psychic moves get +50% power,
     priority moves fail outright against a grounded target, and Expanding
