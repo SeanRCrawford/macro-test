@@ -2323,6 +2323,43 @@ class TestMatchupFinderMode(unittest.TestCase):
                          ["Mega Dragonite"])
         self.assertGreater(len(names), 20)  # pool size held with non-Megas
 
+    def test_multiple_enemy_teams_return_the_intersection_of_each_teams_results(self):
+        """"I will add a list of enemy teams, and it will run the 1v1 for
+        all, and get the intersection of results ... members that beat n-1
+        enemy members across all teams"."""
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        from _harness import load_world
+        W = load_world()
+        team_a, team_b = "Golisopod Rain", "Big 6"
+        self.assertIn(team_a, W["teams"])
+        self.assertIn(team_b, W["teams"])
+
+        def run(teams_sel):
+            at = app()
+            [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+                "Matchup finder").run()
+            [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(40).run()
+            [m for m in at.multiselect if m.key == "ct_mf_enemy_teams"][0].set_value(
+                teams_sel).run()
+            [n for n in at.number_input if n.key == "ct_mf_misses"][0].set_value(2).run()
+            at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+            self.assertFalse(at.exception, list(at.exception))
+            dfs = [d.value for d in at.dataframe
+                  if "Pokemon" in d.value.columns and "Our move" not in d.value.columns
+                  and any(c.endswith(": beats") for c in d.value.columns)]
+            return dfs[0] if dfs else None
+        only_a, only_b, both = run([team_a]), run([team_b]), run([team_a, team_b])
+        names = lambda df: set(df["Pokemon"]) if df is not None else set()
+        self.assertEqual(names(both), names(only_a) & names(only_b))
+        self.assertGreater(len(names(only_a)), 0)
+        if both is not None:
+            self.assertIn(f"{team_a}: beats", both.columns)
+            self.assertIn(f"{team_b}: beats", both.columns)
+            for col in (f"{team_a}: beats", f"{team_b}: beats"):
+                for v in both[col]:
+                    k, n = map(int, v.split("/"))
+                    self.assertGreaterEqual(k, n - 2)
+
     def test_individuals_show_a_1v1_details_table_with_moves(self):
         """"I want to be able to see the details of the 1HKO vs 2HKO, what
         move is used etc"."""

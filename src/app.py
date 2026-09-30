@@ -7120,6 +7120,14 @@ with tab_counter:
                      "other wins outright (an OHKO is no longer required); "
                      "real Speed breaks a tie where both sides would "
                      "finish on the same hit.")
+            mf_enemy_teams = st.multiselect(
+                "Enemy teams to beat -- results must pass EVERY team (intersection)",
+                sorted(teams), key="ct_mf_enemy_teams",
+                help="Runs the 1v1 read against each saved team's roster and "
+                     "keeps only Pokemon that pass the beaten-count rule "
+                     "below against every one of them -- e.g. with N=1, "
+                     "those who beat n-1 of EACH team. A list picked above "
+                     "is checked as one more group alongside these teams.")
             mfm1, mfm2 = st.columns(2)
             mf_match_mode = mfm1.radio(
                 "Enemies beaten", ["At least", "Only (exactly)"],
@@ -7169,24 +7177,33 @@ with tab_counter:
             if st.button("Search individuals", type="primary", key="ct_mf_ind_go"):
                 pool = build_candidate_pool(mf_pool_source, top_n=mf_pool_size, prefs=prefs)
                 pool = sorted(set(pool) | set(mf_include))
+                mf_groups = ([("Custom list", list(mf_enemies))] if mf_enemies else []) + [
+                    (t, [n for n in teams[t] if n in all_names])
+                    for t in mf_enemy_teams]
+                mf_union = list(dict.fromkeys(e for _l, g in mf_groups for e in g))
                 with st.spinner(f"Racing {len(pool)} Pokemon 1v1 against "
-                                f"{len(mf_enemies)} named enem{'y' if len(mf_enemies) == 1 else 'ies'}..."):
+                                f"{len(mf_union)} named enem{'y' if len(mf_union) == 1 else 'ies'}"
+                                f" ({len(mf_groups)} group{'s' if len(mf_groups) != 1 else ''})..."):
                     matrix = {}
-                    if mf_enemies:
+                    if mf_union:
                         from counter_finder import one_v_one_matrix_for_pool
                         matrix = one_v_one_matrix_for_pool(
-                            pool, mf_enemies, merged, moves, natures, typechart,
+                            pool, mf_union, merged, moves, natures, typechart,
                             max_hits=None if mf_no_hit_limit else mf_max_hits)
                     results = []
                     for name in pool:
-                        if mf_enemies:
-                            opp = [e for e in mf_enemies if e != name]
+                        group_ok = True
+                        for _label, group in mf_groups:
+                            opp = [e for e in group if e != name]
                             beaten = sum(matrix.get(name, {}).get(e) == "win"
                                          for e in opp)
                             required = max(0, len(opp) - mf_misses)
                             if (beaten < required if mf_match_mode == "At least"
                                     else beaten != required):
-                                continue
+                                group_ok = False
+                                break
+                        if not group_ok:
+                            continue
                         if mf_resist and not all(
                                 type_matchup(name, merged, t) in ("resist", "immune")
                                 for t in mf_resist):
@@ -7207,15 +7224,20 @@ with tab_counter:
                     # no reason to pay for the whole pool when most of it
                     # was just filtered out).
                     hit_counts = {}
-                    if mf_enemies and results:
+                    if mf_union and results:
                         from counter_finder import one_v_one_hit_counts_for_pool
                         hit_counts = one_v_one_hit_counts_for_pool(
-                            results, mf_enemies, merged, moves, natures, typechart,
+                            results, mf_union, merged, moves, natures, typechart,
                             max_hits=None if mf_no_hit_limit else mf_max_hits)
-                st.session_state["ct_mf_ind_results"] = (results, mf_enemies, hit_counts)
+                st.session_state["ct_mf_ind_results"] = (
+                    results, mf_union, hit_counts, mf_groups)
             results_pack = st.session_state.get("ct_mf_ind_results")
             if results_pack:
-                mf_results, mf_shown_enemies, mf_hit_counts = results_pack
+                if len(results_pack) == 3:   # pre-groups session state
+                    results_pack = results_pack + ([("Custom list", list(results_pack[1]))],)
+                mf_results, mf_shown_enemies, mf_hit_counts, mf_shown_groups = results_pack
+                team_mode = len(mf_shown_groups) > 1 or any(
+                    l != "Custom list" for l, _g in mf_shown_groups)
                 if not mf_results:
                     st.info("No pool member passed every filter -- widen the "
                            "pool, drop a named enemy, or relax a type filter.")
@@ -7247,16 +7269,24 @@ with tab_counter:
                     partial = bool(mf_shown_enemies) and any(
                         len(_beaten_by(n)) < len([e for e in mf_shown_enemies if e != n])
                         for n in mf_results)
+                    all_won = {n: set(_beaten_by(n)) for n in mf_results}
                     rows = []
                     for name in sorted(mf_results, key=sort_key):
                         row = {"Pokemon": name, "Score": merged[name].get("score"),
                               "Types": "/".join(merged[name].get("types") or [])}
-                        if partial:
+                        if team_mode:
+                            for label, group in mf_shown_groups:
+                                opp = [e for e in group if e != name]
+                                won = [e for e in opp if e in all_won[name]]
+                                row[f"{label}: beats"] = f"{len(won)}/{len(opp)}"
+                                row[f"{label}: not beaten"] = (
+                                    ", ".join(e for e in opp if e not in won) or "--")
+                        elif partial:
                             opp = [e for e in mf_shown_enemies if e != name]
                             won = _beaten_by(name)
                             row["Beats"] = f"{len(won)}/{len(opp)}"
                             row["Not beaten"] = ", ".join(e for e in opp if e not in won) or "--"
-                        for e in mf_shown_enemies:
+                        for e in ([] if team_mode else mf_shown_enemies):
                             c = mf_hit_counts.get(name, {}).get(e, {})
                             our_h, their_h = c.get("our_hits_to_ko"), c.get("their_hits_to_ko")
                             our_s = f"{our_h}HKO" if our_h else "--"
