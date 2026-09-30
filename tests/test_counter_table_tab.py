@@ -2446,6 +2446,61 @@ class TestMatchupFinderMode(unittest.TestCase):
                 if cap:
                     self.assertLessEqual(len(moves), cap)
 
+    def _matchup_results(self, at):
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        [n for n in at.number_input if n.key == "ct_mf_misses"][0].set_value(1).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        return at, list(at.session_state["ct_mf_ind_results"][0])
+
+    def test_send_results_to_coverage_groups_only_from_the_pool(self):
+        """"import the matches from matchup finder -> coverage groups as a
+        results pool ... create teams of 3,4,6 from that pool"."""
+        at, names = self._matchup_results(app())
+        self.assertGreaterEqual(len(names), 4)
+        at = [b for b in at.button if b.key == "ct_mf_send_only"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual(at.session_state["ct_mode"], "Coverage groups")
+        self.assertEqual(list(at.session_state["ct_cov_results_pool"]), names)
+        self.assertEqual(at.session_state["ct_cov_results_mode"], "Only from this pool")
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([3]).run()
+        [m for m in at.multiselect if m.key == "ct_cov_teams"][0].set_value(
+            [at.multiselect[[m.key for m in at.multiselect].index("ct_cov_teams")].options[0]]).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pool_names = {n for r in at.session_state["ct_cov_pair_rows"] for n in r["pair"]}
+        self.assertTrue(pool_names <= set(names), pool_names - set(names))
+        for meta_rows in at.session_state["ct_cov_results"].values():
+            rows = meta_rows["rows"] if isinstance(meta_rows, dict) else meta_rows
+            self.assertTrue(rows, "expected at least one group from the pool")
+            for row in rows:
+                self.assertTrue(set(row["group"]) <= set(names))
+
+    def test_send_results_to_coverage_groups_with_a_quorum_lets_the_rest_be_anything(self):
+        at, names = self._matchup_results(app())
+        at = [b for b in at.button if b.key == "ct_mf_send_quorum"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertTrue(at.session_state["ct_cov_results_mode"].startswith("At least"))
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        [s for s in at.slider if s.key == "ct_cov_results_min"][0].set_value(2).run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(40).run()
+        [m for m in at.multiselect if m.key == "ct_cov_teams"][0].set_value(
+            [at.multiselect[[m.key for m in at.multiselect].index("ct_cov_teams")].options[0]]).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        pool_names = {n for r in at.session_state["ct_cov_pair_rows"] for n in r["pair"]}
+        self.assertTrue(set(names) <= pool_names, "results pool must reach the search")
+        self.assertTrue(pool_names - set(names), "the rest is free: non-results names too")
+        for meta_rows in at.session_state["ct_cov_results"].values():
+            rows = meta_rows["rows"] if isinstance(meta_rows, dict) else meta_rows
+            self.assertTrue(rows, "expected at least one group")
+            for row in rows:
+                self.assertGreaterEqual(len(set(row["group"]) & set(names)), 2)
+
     def test_individuals_results_are_sorted_most_decisive_first(self):
         """"It would be good to see the most decisive wins too, i.e., I
         KO very quickly and take little damage, such as OHKO vs 4HKO" --

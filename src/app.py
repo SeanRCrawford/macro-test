@@ -6361,6 +6361,41 @@ with tab_counter:
                 "Minimum suggested Pokemon required per group", 1,
                 len(cov_suggested), min(3, len(cov_suggested)),
                 key="ct_cov_suggested_min")
+        cov_results_pool = st.multiselect(
+            "Imported results pool (from Matchup finder)", all_names,
+            key="ct_cov_results_pool",
+            help="Fill this with the Pokemon the Matchup finder found (use "
+                 "its 'Send to Coverage groups' buttons), or pick any names "
+                 "by hand. Choose how it is used just below.")
+        cov_results_mode = "Off"
+        cov_results_min = 0
+        if cov_results_pool:
+            cov_results_mode = st.radio(
+                "Use the results pool as",
+                ["Off", "Only from this pool",
+                 "At least N from this pool, rest from anything"],
+                key="ct_cov_results_mode", horizontal=True,
+                help="'Only from this pool': every group is built purely "
+                     "from the imported names (plus any 'Always include'). "
+                     "'At least N...': the pool above stays your normal "
+                     "top-Score search pool (raise 'Search pool size' or "
+                     "turn on 'Search the full pool' to make the rest "
+                     "truly 'anything'), but a group only survives if at "
+                     "least N of its members come from the imported "
+                     "results. This takes over the 'Suggested Pokemon' "
+                     "quorum below.")
+            if cov_results_mode.startswith("At least"):
+                if len(cov_results_pool) == 1:
+                    cov_results_min = 1
+                else:
+                    cov_results_min = st.slider(
+                        "Minimum members from the results pool", 1,
+                        min(6, len(cov_results_pool)),
+                        min(3, len(cov_results_pool)), key="ct_cov_results_min")
+                if cov_sizes_smaller := [z for z in st.session_state.get(
+                        "ct_cov_sizes", [3, 4, 6]) if z < cov_results_min]:
+                    st.caption(f"Group size(s) {cov_sizes_smaller} are smaller "
+                               f"than {cov_results_min} and will show 0 results.")
         cov_sizes = st.multiselect("Group sizes", [3, 4, 5, 6], default=[3, 4, 6],
                                    key="ct_cov_sizes")
         cc1, cc2, cc3 = st.columns(3)
@@ -6530,7 +6565,10 @@ with tab_counter:
             elif not cov_sizes:
                 st.warning("Pick at least one group size.")
             else:
-                pool = build_candidate_pool(merged, top_n=cov_pool_size, prefs=prefs)
+                cov_only_results = cov_results_mode == "Only from this pool"
+                cov_quorum_results = cov_results_mode.startswith("At least")
+                pool = ([] if cov_only_results else
+                        build_candidate_pool(merged, top_n=cov_pool_size, prefs=prefs))
                 if cov_gen_include:
                     pool = [n for n in pool if generation_map.get(n) in set(cov_gen_include)]
                 if cov_gen_exclude:
@@ -6542,6 +6580,12 @@ with tab_counter:
                 # narrowing later. Also exempt from the generation filter
                 # just above, for the same reason.
                 pool = sorted(set(pool) | set(cov_include) | set(cov_suggested))
+                cov_eff_suggested, cov_eff_suggested_min = cov_suggested, cov_suggested_min
+                if cov_only_results or cov_quorum_results:
+                    pool = sorted(set(pool) | set(cov_results_pool))
+                if cov_quorum_results:
+                    cov_eff_suggested = list(cov_results_pool)
+                    cov_eff_suggested_min = cov_results_min
                 enemy_teams = {n: list(teams[n]) for n in ct_cov_teams}
                 sort_map = {"Perfect links": "perfect", "Mutual coverage": "coverage",
                            "Avg score": "score"}
@@ -6573,8 +6617,8 @@ with tab_counter:
                         min_threat_answers=cov_min_threat_answers,
                         sort_by=sort_map[cov_sort_label], top_n=cov_top_n,
                         **cov_search_kwargs,
-                        must_include=cov_include, suggested=cov_suggested,
-                        suggested_min=cov_suggested_min,
+                        must_include=cov_include, suggested=cov_eff_suggested,
+                        suggested_min=cov_eff_suggested_min,
                         required_cores=cov_required_cores or None,
                         min_member_score=cov_min_member_score,
                         exclude=cov_exclude, required_techs=cov_required_techs or None,
@@ -6587,7 +6631,7 @@ with tab_counter:
                     cov_all_names = sorted({n for r in cov_pair_rows for n in r["pair"]})
                     narrowed_names = narrow_coverage_pool_names(
                         cov_pair_rows, cov_all_names, cov_real_win_names,
-                        must_include=sorted(set(cov_include) | set(cov_suggested)))
+                        must_include=sorted(set(cov_include) | set(cov_eff_suggested)))
                     # Per ENEMY TEAM, not a cross-team union: a "pair" made
                     # of two Pokemon from two DIFFERENT saved teams never
                     # actually gets fielded together, and racing every
@@ -7283,6 +7327,28 @@ with tab_counter:
                                  "(fastest KO, least damage taken, worst case "
                                  "across the enemies beaten)."
                                  if mf_shown_enemies else ""))
+                    def _send_to_coverage(names, mode):
+                        st.session_state["ct_cov_results_pool"] = list(names)
+                        st.session_state["ct_cov_results_mode"] = mode
+                        st.session_state["ct_mode"] = "Coverage groups"
+                    sc1, sc2 = st.columns(2)
+                    sc1.button(
+                        f"Send these {len(mf_results)} to Coverage groups "
+                        "(build teams only from them)",
+                        key="ct_mf_send_only", on_click=_send_to_coverage,
+                        args=(list(mf_results), "Only from this pool"),
+                        help="Opens Coverage groups with these names as the "
+                             "results pool; groups of 3/4/6 are built purely "
+                             "from them.")
+                    sc2.button(
+                        "...or require at least N of them, rest from anything",
+                        key="ct_mf_send_quorum", on_click=_send_to_coverage,
+                        args=(list(mf_results),
+                              "At least N from this pool, rest from anything"),
+                        help="Opens Coverage groups with these names as the "
+                             "results pool and a minimum-from-pool quorum; "
+                             "the remaining seats are filled from the normal "
+                             "search pool.")
                     def _beaten_by(name):
                         counts = mf_hit_counts.get(name, {})
                         return [e for e in mf_shown_enemies
