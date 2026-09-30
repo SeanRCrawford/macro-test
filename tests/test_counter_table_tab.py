@@ -159,6 +159,15 @@ class TestCounterTableTabExists(unittest.TestCase):
         at = [b for b in at.button if b.key == "ct_pc_go"][0].click().run()
         self.assertFalse(at.exception, list(at.exception))
         self.assertIn("ct_pc_results_by_size", at.session_state)
+        # Teams are scored by ALL of their own internal pairs: every result
+        # carries "good_pairs out of C(size, 2)" and a best bring-4.
+        for size, teams in at.session_state["ct_pc_results_by_size"].items():
+            for r in teams:
+                self.assertEqual(r["pairs_total"], size * (size - 1) // 2)
+                self.assertLessEqual(r["good_pairs"], r["known_pairs"])
+                self.assertEqual(len(r["best_bring4"][0]), 4)
+        tables = [d.value for d in at.dataframe if "Good pairs" in d.value.columns]
+        self.assertTrue(all("Best bring-4" in t.columns for t in tables))
 
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the

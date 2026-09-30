@@ -1845,6 +1845,53 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     return path
 
 
+def _pairs_meeting_bar(coverage, min_beaten):
+    """Pair keys (frozensets) that beat at least `min_beaten` enemy pairs --
+    capped at that enemy's own total when it has fewer -- on EVERY enemy
+    roster in `coverage`."""
+    keys = {k for pbk in coverage["pair_by_key"] for k in pbk}
+    keep = set()
+    for k in keys:
+        ok = True
+        for pbk in coverage["pair_by_key"]:
+            r = pbk.get(k)
+            if r is None or (r["pairs_swept"] + r["pairs_traded"]
+                             < min(min_beaten, r["pairs_total"])):
+                ok = False
+                break
+        if ok:
+            keep.add(k)
+    return keep
+
+
+def _print_teams_from_pairs(coverage, sizes_arg, bar, args, type_limits,
+                            required_members):
+    """--build-teams: the best teams of each requested size assembled from
+    `coverage`'s already-filtered pairs (`pair_coverage_teams`,
+    assembly="all_pairs")."""
+    from counter_finder import pair_coverage_teams
+    sizes = [int(p) for p in sizes_arg.split(",") if p.strip()]
+    for size in sizes:
+        rows = pair_coverage_teams(
+            coverage, group_size=size, assembly="all_pairs",
+            good_threshold=bar / 15.0, max_weak=args.max_weak,
+            type_limits=type_limits, max_megas=args.max_megas,
+            max_weak_types=args.max_weak_types,
+            max_net_weak_types=args.max_net_weak_types,
+            must_include=required_members or None, top_n=args.top)
+        print(f"Best teams of {size} (by high-performing internal pairs):")
+        if not rows:
+            print("  none passed every filter\n")
+            continue
+        for i, r in enumerate(rows, start=1):
+            b4, b4_good = r["best_bring4"]
+            print(f"  {i}. {' / '.join(r['team'])}: {r['good_pairs']}/"
+                 f"{r['pairs_total']} good pairs "
+                 f"({r['known_pairs']} raced), score {r['score']:.1f}; "
+                 f"best bring-4 {' / '.join(b4)} ({b4_good}/6)")
+        print()
+
+
 def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n):
     """--pairs-only --xlsx: the lightweight export -- "I just want a
     lighter weight version that just outputs comprehensive 2v2 pairs for
@@ -3107,6 +3154,25 @@ def main():
                          "coverage' upload format: 'I would need all the "
                          "/15 results for every pair vs each enemy team ... "
                          "to reconstruct optimal teams based on conditions'")
+    ap.add_argument("--pair-min-beaten", type=int, default=None, metavar="N",
+                    help="--multi-bring4 --pairs-only only: keep just the "
+                         "pairs that beat at least N enemy pairs (of 15 for "
+                         "a team of 6) on EVERY --vs-team enemy, e.g. 10 -- "
+                         "and export ALL of them (--pair-coverage-top is "
+                         "then ignored) instead of only the top-N. Also "
+                         "the bar for a 'high-performing' pair when "
+                         "--build-teams is given (default 10 there)")
+    ap.add_argument("--build-teams", default="", metavar="N,N,...",
+                    help="--multi-bring4 --pairs-only only: after racing "
+                         "the pairs, assemble the best teams of these "
+                         "sizes (3-6, e.g. \"4,5,6\") straight from them -- "
+                         "a team is scored by ALL of its own C(N,2) "
+                         "internal pairs (15 for a team of 6), ranked by "
+                         "how many are high-performing (see "
+                         "--pair-min-beaten), then by average wins/90; "
+                         "--max-weak/--type-limit/--max-megas/--max-weak-"
+                         "types/--required-members apply. The best bring-4 "
+                         "inside each team (its 6 pairs) is shown too")
     ap.add_argument("--pairs-only", action="store_true",
                     help="--multi-bring4 only: \"the multi-bring4 is taking "
                          "hours, I just want a lighter weight version that "
@@ -3438,6 +3504,18 @@ def main():
         raise SystemExit("--teamsheet-json requires --multi-bring4 or --bring4")
     if args.pairs_only and not args.multi_bring4:
         raise SystemExit("--pairs-only requires --multi-bring4")
+    if (args.pair_min_beaten is not None or args.build_teams) and not args.pairs_only:
+        raise SystemExit("--pair-min-beaten/--build-teams require --multi-bring4 "
+                         "--pairs-only")
+    if args.pair_min_beaten is not None and not 1 <= args.pair_min_beaten <= 15:
+        raise SystemExit("--pair-min-beaten must be 1-15")
+    if args.build_teams:
+        try:
+            _bt = [int(p) for p in args.build_teams.split(",") if p.strip()]
+        except ValueError:
+            raise SystemExit("--build-teams takes comma-separated sizes, e.g. 4,5,6")
+        if not _bt or any(not 3 <= z <= 6 for z in _bt):
+            raise SystemExit("--build-teams sizes must each be 3-6")
     if args.pairs_only and args.deep_dive_core:
         raise SystemExit("--pairs-only skips the core search entirely -- "
                          "--deep-dive-core has no core to dive into")
@@ -3798,6 +3876,12 @@ def main():
             _write_teamsheet_json(args.teamsheet_json, dive)
     elif args.multi_bring4:
         good_threshold = args.good_threshold / 100.0
+        if args.pairs_only and (args.pair_min_beaten is not None or args.build_teams):
+            # Stage A prunes a pair once it can no longer reach this bar, so it
+            # must be the SAME bar the pair filter below applies -- otherwise a
+            # pair that clears N/15 could be cut short by a stricter default.
+            good_threshold = (args.pair_min_beaten
+                              if args.pair_min_beaten is not None else 10) / 15.0
         coverage = multi_bring4_coverage(
             pool, vs_teams, merged, moves, natures, typechart,
             turns=args.turns, good_threshold=good_threshold,
@@ -3821,9 +3905,23 @@ def main():
             # above is already done; stop here instead of running Stage B's
             # team-of-6 core search, which is what actually takes hours on
             # a large pool.
+            export_top = args.pair_coverage_top
+            if args.pair_min_beaten is not None or args.build_teams:
+                from counter_finder import filter_coverage_pairs
+                bar = args.pair_min_beaten if args.pair_min_beaten is not None else 10
+                keep = _pairs_meeting_bar(coverage, bar)
+                coverage = filter_coverage_pairs(coverage, keep)
+                print(f"{len(keep)} pair(s) beat >= {bar} enemy pairs on every "
+                     f"named enemy.\n")
+                if args.pair_min_beaten is not None:
+                    export_top = 10 ** 6
+            if args.build_teams:
+                _print_teams_from_pairs(
+                    coverage, args.build_teams, bar, args, type_limits,
+                    required_members)
             if args.xlsx:
                 path = _write_pairs_only_xlsx(
-                    args.xlsx, coverage, vs_teams, args.pair_coverage_top)
+                    args.xlsx, coverage, vs_teams, export_top)
                 print(f"\nExcel workbook (pairs only, no core search): "
                      f"{os.path.abspath(path)}")
             return

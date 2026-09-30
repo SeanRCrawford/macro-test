@@ -6890,12 +6890,14 @@ with tab_counter:
                    "use the streamlit app to try to create the best teams "
                    "of 6\" -- upload a --multi-bring4 --xlsx export (real "
                    "combat, real sets already decided) and assemble teams "
-                   "of 6 out of its own top pairs, PLUS every saved team's "
+                   "of 4-6 out of its own top pairs, PLUS every saved team's "
                    "own real pairs (always included), without re-running "
-                   "any combat simulation. A team is built from 3 KNOWN, "
-                   "already-raced pairs -- never a new cross-pairing "
-                   "(one member from pair A + one from pair B) this app "
-                   "never actually raced.")
+                   "any combat simulation. A team is scored by ALL of its "
+                   "own internal pairs (15 for a team of 6, each bring-4 "
+                   "inside it using 6 of them): teams rank by how many "
+                   "of those are high-performing, then by average wins "
+                   "per 90. Only pairs this app actually raced count -- "
+                   "an internal pair with no data is never guessed at.")
         up_pc = st.file_uploader(
             "Upload a --multi-bring4 --xlsx export", type=["xlsx"], key="ct_pc_upload")
         if up_pc is not None:
@@ -6926,7 +6928,17 @@ with tab_counter:
                 "Exclude these Pokemon", all_names, key="ct_pc_exclude",
                 help="Any KNOWN pair containing one of these names is "
                      "dropped from consideration entirely.")
-            pc_sizes = st.multiselect("Team size(s)", [4, 6], default=[6], key="ct_pc_sizes")
+            pc_sizes = st.multiselect("Team size(s)", [4, 5, 6], default=[6], key="ct_pc_sizes")
+            pc_good_min = int(st.number_input(
+                "A pair is high-performing if it beats at least this many enemy pairs (of 15), on every team",
+                min_value=1, max_value=15, value=10, step=1, key="ct_pc_good_min",
+                help="A team of N is scored by ALL of its own C(N,2) internal "
+                     "pairs (15 for a team of 6; each bring-4 inside it "
+                     "uses 6 of them): teams rank by how many of those "
+                     "pairs are high-performing under this bar, then by "
+                     "their average wins per 90. Only pairs actually raced "
+                     "(uploaded, or one of a saved team's own pairs) can "
+                     "count -- an internal pair with no data is not good."))
             with st.expander("Advanced: techs, weaknesses, minimum special attackers"):
                 pc_required_techs = _tech_required_multiselect(
                     "Required techs (every returned team must have)",
@@ -7001,6 +7013,7 @@ with tab_counter:
                     for size in (pc_sizes or [6]):
                         results_by_size[size] = pair_coverage_teams(
                             coverage, group_size=size, max_weak=pc_max_weak,
+                            assembly="all_pairs", good_threshold=pc_good_min / 15.0,
                             required_techs=pc_required_techs or None,
                             min_special_attackers=pc_min_special,
                             must_include=pc_include or None,
@@ -7023,8 +7036,11 @@ with tab_counter:
                         continue
                     st.dataframe(pd.DataFrame([
                         {"Team": " / ".join(r["team"]),
-                         "Score": round(r["score"], 1),
-                         "From pairs": ", ".join(f"{a}+{b}" for a, b in r["pairs"])}
+                         "Good pairs": f"{r['good_pairs']}/{r['pairs_total']}",
+                         "Best bring-4": (" / ".join(r["best_bring4"][0])
+                                          + f" ({r['best_bring4'][1]}/6 good)"),
+                         "Raced pairs": f"{r['known_pairs']}/{r['pairs_total']}",
+                         "Score": round(r["score"], 1)}
                         for r in results]), width='stretch', hide_index=True)
                     for i, r in enumerate(results, start=1):
                         with st.expander(f"#{i}: {' / '.join(r['team'])} "
@@ -7691,12 +7707,14 @@ with tab_counter:
                         pack_rows.append(row)
                     st.dataframe(pd.DataFrame(pack_rows), width='stretch', hide_index=True)
                     st.markdown("**Build a team of 4 or 6 from these pairs**")
-                    st.caption("A team is 2 or 3 of these already-raced pairs "
-                               "(disjoint), ranked by wins per 90 -- hand them "
-                               "to Import pair coverage, which also applies "
-                               "type/tech/weakness filters and adds your "
-                               "saved teams' own pairs, or download the "
-                               "workbook to use it later or from the CLI.")
+                    st.caption("Import pair coverage builds teams of 4-6 from "
+                               "these pairs, scored by ALL of a team's own "
+                               "internal pairs (15 for a team of 6) -- as "
+                               "many high-performing pairs as possible -- "
+                               "and also applies type/tech/weakness "
+                               "filters and adds your saved teams' own "
+                               "pairs. Or download the workbook to use it "
+                               "later.")
                     mf_pr, mf_dr, mf_tl = pair_rows_from_coverage(mf_cov)
 
                     def _send_pairs_to_import(pr, dr, tl):

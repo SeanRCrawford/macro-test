@@ -8502,8 +8502,14 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                         required_techs=None, min_special_attackers=None,
                         must_include=None, exclude=None, top_n=20,
                         min_offensive_types=None, one_v_one_matrix=None,
-                        max_uncovered_threats=None, min_threat_answers=1):
-    """Assemble teams of `group_size` (6 by default) as DISJOINT pairs drawn
+                        max_uncovered_threats=None, min_threat_answers=1,
+                        assembly="disjoint", good_threshold=10 / 15,
+                        max_evals=3_000_000):
+    """`assembly="all_pairs"` (see below) scores a team by ALL of its own
+    C(size, 2) internal pairs -- 15 for a team of 6 -- and any size 3-6 is
+    allowed; the default `"disjoint"` is the original reading described next.
+
+    Assemble teams of `group_size` (6 by default) as DISJOINT pairs drawn
     from `coverage["pair_by_key"]`'s own KNOWN pairs -- "upload this
     output, and use the streamlit app to try to create the best teams of
     6." `coverage` is a `multi_bring4_coverage`-shaped dict, live OR
@@ -8559,15 +8565,35 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
     isn't given, same "None turns it off" contract `coverage_group_search`
     already follows.
 
+    `assembly="all_pairs"`: "I would want to have a team with as many
+    high-performing pairs as possible" -- a team of 6 has 15 pairs (and
+    each bring-4 within it 6), so instead of 3 designated disjoint pairs
+    every candidate team (ANY `group_size` 3-6) is scored by all of its own
+    internal pairs. A pair is HIGH-PERFORMING ("good") when it beat at least
+    `good_threshold` (a fraction, default 10/15) of the enemy pairs on EVERY
+    enemy team it was raced against; a pair never raced counts as neither
+    good nor scored (0). Teams rank by (good pairs, then the mean of the
+    internal pairs' own blended /90 scores), and each result also carries
+    "good_pairs", "pairs_total" (C(size, 2)), "known_pairs", and its own
+    "best_bring4" ((four names), good pairs out of 6). The search is
+    exhaustive up to `max_evals` candidate teams and falls back to a wide
+    beam beyond that. `must_include`/`exclude`, every hard filter, and the
+    coverage filters apply exactly as in the disjoint reading.
+
     Returns [{"team": tuple(sorted(names)), "pairs": ((n1, n2), ...) (the
-    `group_size // 2` KNOWN pairs used, each sorted), "score": float,
+    `group_size // 2` KNOWN pairs used, each sorted -- under "all_pairs",
+    every KNOWN internal pair), "score": float,
     "sets": {name: {"item", "moves"}}, "offensive_coverage":
     {"covered", "uncovered"} or None, "threat_coverage": {"covered",
     "total", "uncovered", "answer_counts"} or None}, ...], best `top_n` by
     score descending.
     """
-    if group_size % 2 != 0:
+    if assembly not in ("disjoint", "all_pairs"):
+        raise ValueError(f"unknown assembly {assembly!r}")
+    if assembly == "disjoint" and group_size % 2 != 0:
         raise ValueError(f"group_size must be even, got {group_size}")
+    if assembly == "all_pairs" and not 3 <= group_size <= 6:
+        raise ValueError(f"group_size must be 3-6, got {group_size}")
     n_pairs_needed = group_size // 2
     merged = coverage["merged"]
     moves_db = coverage["moves_db"]
@@ -8619,11 +8645,32 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
         return w_win * win + w_tw * tw + w_pr * pr + w_fm * fm
 
     scored_pairs = {pk: pair_score(pk) for pk in known_pairs}
+
+    def pair_is_good(pk):
+        rows = [pbk[pk] for pbk in coverage["pair_by_key"] if pk in pbk]
+        return bool(rows) and all(
+            r["pairs_total"] and (r["pairs_swept"] + r["pairs_traded"])
+            / r["pairs_total"] >= good_threshold - 1e-9 for r in rows)
+
+    def _disjoint_candidates():
+        for combo in itertools.combinations(known_pairs, n_pairs_needed):
+            names = set().union(*combo)
+            if len(names) != group_size:
+                continue  # two of the chosen pairs share a member -- illegal team
+            yield names, combo, None
+
+    def _all_pairs_candidates():
+        yield from _all_pairs_team_candidates(
+            known_pairs, scored_pairs, pair_is_good, group_size, must_include_set,
+            max_megas, max_evals,
+            top_keep=max(top_n * (200 if (effective_limits or max_weak_types
+                                          or max_net_weak_types or required_techs
+                                          or min_special_attackers) else 40), 400))
+
+    candidates = (_disjoint_candidates() if assembly == "disjoint"
+                  else _all_pairs_candidates())
     results = []
-    for combo in itertools.combinations(known_pairs, n_pairs_needed):
-        names = set().union(*combo)
-        if len(names) != group_size:
-            continue  # two of the chosen pairs share a member -- illegal team
+    for names, combo, all_pairs_info in candidates:
         if must_include_set - names:
             continue
         core = tuple(sorted(names))
@@ -8664,7 +8711,28 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
             if (max_uncovered_threats is not None
                     and len(uncovered_enemies) > max_uncovered_threats):
                 continue
-        score = sum(scored_pairs[pk] for pk in combo) / len(combo)
+        if all_pairs_info is None:
+            score = sum(scored_pairs[pk] for pk in combo) / len(combo)
+            extra = {}
+        else:
+            internal = [frozenset(pr) for pr in itertools.combinations(core, 2)]
+            known = [pk for pk in internal if pk in scored_pairs]
+            good_set = {pk for pk in known if pair_is_good(pk)}
+            score = sum(scored_pairs[pk] for pk in known) / len(internal)
+            best4 = max(
+                (sub for sub in itertools.combinations(core, min(4, len(core)))),
+                key=lambda sub: (
+                    sum(1 for pr in itertools.combinations(sub, 2)
+                        if frozenset(pr) in good_set),
+                    sum(scored_pairs.get(frozenset(pr), 0.0)
+                        for pr in itertools.combinations(sub, 2)),
+                    tuple(-ord(c) for c in "".join(sub))[:8]))
+            best4_good = sum(1 for pr in itertools.combinations(best4, 2)
+                             if frozenset(pr) in good_set)
+            combo = known
+            extra = {"good_pairs": len(good_set), "pairs_total": len(internal),
+                     "known_pairs": len(known),
+                     "best_bring4": (best4, best4_good)}
         results.append({
             "team": core,
             "pairs": tuple(sorted(tuple(sorted(pk)) for pk in combo)),
@@ -8673,9 +8741,101 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                         "moves": coverage["fixed_moves"][n]} for n in core},
             "offensive_coverage": offensive_coverage,
             "threat_coverage": threat_coverage,
+            **extra,
         })
-    results.sort(key=lambda r: -r["score"])
+    if assembly == "all_pairs":
+        results.sort(key=lambda r: (-r["good_pairs"], -r["score"], r["team"]))
+    else:
+        results.sort(key=lambda r: -r["score"])
     return results[:top_n]
+
+
+def _all_pairs_team_candidates(known_pairs, scored_pairs, pair_is_good, size,
+                               must_include, max_megas, max_evals, top_keep=400,
+                               beam_width=400):
+    """Candidate teams for `pair_coverage_teams(assembly="all_pairs")`: every
+    `size`-subset of the names in `known_pairs` (containing `must_include`)
+    ranked by (good internal pairs, summed pair score), best `top_keep`
+    yielded best-first as (names, (), "all_pairs"). Exhaustive while the
+    subset count is within `max_evals`, otherwise a beam that grows teams one
+    name at a time. Never yields a team over the `max_megas` cap or holding a
+    Mega with its own base form; deeper hard filters run in the caller."""
+    import heapq
+    names = sorted({n for pk in known_pairs for n in pk})
+    if any(m not in names for m in must_include):
+        return
+    edge = {}
+    for pk, sc in scored_pairs.items():
+        a, b = sorted(pk)
+        edge[(a, b)] = (1 if pair_is_good(pk) else 0, sc)
+
+    def gain(new, team):
+        g = sc_ = 0.0
+        for old in team:
+            e = edge.get((old, new) if old < new else (new, old))
+            if e:
+                g += e[0]
+                sc_ += e[1]
+        return g, sc_
+
+    def legal(team):
+        return (sum(n.startswith("Mega ") for n in team) <= max_megas
+                and not _mega_base_overlap(tuple(sorted(team))))
+
+    must = sorted(must_include)
+    rest = [n for n in names if n not in set(must)]
+    need = size - len(must)
+    if need < 0:
+        return
+    total_sets = math.comb(len(rest), need) if need <= len(rest) else 0
+    heap = []   # min-heap of (good, score, tiebreak, team)
+
+    def offer(team, good, score):
+        if not legal(team):
+            return
+        item = (good, round(score, 9), tuple(-ord(c) for c in "|".join(sorted(team)))[:24],
+                tuple(sorted(team)))
+        if len(heap) < top_keep:
+            heapq.heappush(heap, item)
+        elif item > heap[0]:
+            heapq.heapreplace(heap, item)
+
+    base_good = base_score = 0.0
+    for i, a in enumerate(must):
+        g, s_ = gain(a, must[:i])
+        base_good += g
+        base_score += s_
+    if total_sets <= max_evals:
+        def dfs(start, team, good, score):
+            if len(team) == size:
+                offer(team, good, score)
+                return
+            remaining = size - len(team)
+            for idx in range(start, len(rest) - remaining + 1):
+                n = rest[idx]
+                g, s_ = gain(n, team)
+                dfs(idx + 1, team + [n], good + g, score + s_)
+        dfs(0, list(must), base_good, base_score)
+    else:
+        frontier = [(base_good, base_score, tuple(must))]
+        if not must:
+            frontier = [(0.0, 0.0, ())]
+        for _ in range(need):
+            grown = {}
+            for good, score, team in frontier:
+                for n in rest:
+                    if n in team:
+                        continue
+                    g, s_ = gain(n, team)
+                    key = tuple(sorted(team + (n,)))
+                    if key not in grown:
+                        grown[key] = (good + g, score + s_)
+            top = heapq.nlargest(beam_width, ((g, s_, k) for k, (g, s_) in grown.items()))
+            frontier = top
+        for good, score, team in frontier:
+            offer(list(team), good, score)
+    for good, _sc, _tb, team in sorted(heap, reverse=True):
+        yield set(team), (), "all_pairs"
 
 
 def _effective_type_limits(max_weak=None, type_limits=None):

@@ -5556,6 +5556,83 @@ class TestPairCoverageTeams(unittest.TestCase):
         self.assertEqual(results, [])
 
 
+class TestPairCoverageTeamsAllPairs(unittest.TestCase):
+    """`assembly="all_pairs"`: "a team of 6 has 15 pairs ... I would want to
+    have a team with as many high-performing pairs as possible" -- teams are
+    scored by ALL C(size, 2) internal pairs, any size 3-6."""
+
+    POOL = TestPairCoverageTeams.POOL
+    ENEMIES = TestPairCoverageTeams.ENEMIES
+
+    def setUp(self):
+        W = world()
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, W["merged"], W["moves"], W["natures"],
+            W["typechart"], good_threshold=0.0, min_enemies=0)
+
+    def _teams(self, size, **kw):
+        return cf.pair_coverage_teams(self.coverage, group_size=size,
+                                      assembly="all_pairs", top_n=20, **kw)
+
+    def test_every_size_from_3_to_6_including_odd_ones(self):
+        for size in (3, 4, 5, 6):
+            teams = self._teams(size, good_threshold=0.0)
+            self.assertTrue(teams, size)
+            for r in teams:
+                self.assertEqual(len(set(r["team"])), size)
+                self.assertEqual(r["pairs_total"], size * (size - 1) // 2)
+                self.assertEqual(len(r["best_bring4"][0]), min(4, size))
+
+    def test_teams_rank_by_good_pairs_then_score(self):
+        teams = self._teams(6, good_threshold=0.5)
+        keys = [(-r["good_pairs"], -r["score"], r["team"]) for r in teams]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_good_pairs_counts_only_pairs_beating_the_bar_on_every_team(self):
+        strict = self._teams(4, good_threshold=1.0)
+        lax = self._teams(4, good_threshold=0.0)
+        self.assertGreaterEqual(max(r["good_pairs"] for r in lax),
+                                max(r["good_pairs"] for r in strict))
+        # threshold 0: every raced pair is good
+        self.assertTrue(all(r["good_pairs"] == r["known_pairs"] for r in lax))
+
+    def test_a_better_connected_team_beats_a_disjoint_pair_pick(self):
+        """Hand-built graph: A-B, A-C, B-C, A-D good; D-X and Y-Z also good but
+        isolated. The best 3-team is A/B/C (3 good pairs), not one that merely
+        contains a disjoint pair."""
+        good = {frozenset(p) for p in (("A", "B"), ("A", "C"), ("B", "C"), ("A", "D"),
+                                       ("D", "X"), ("Y", "Z"))}
+        scored = {k: 10.0 for k in good}
+        cands = list(cf._all_pairs_team_candidates(
+            list(good), scored, lambda pk: pk in good, 3, set(), 2, 10 ** 6))
+        self.assertEqual(sorted(cands[0][0]), ["A", "B", "C"])
+
+    def test_beam_fallback_agrees_with_exhaustive_on_a_small_graph(self):
+        keys = list(self._known_keys())
+        scored = {k: 5.0 for k in keys}
+        exhaustive = list(cf._all_pairs_team_candidates(
+            keys, scored, lambda pk: True, 4, set(), 2, 10 ** 9))
+        beam = list(cf._all_pairs_team_candidates(
+            keys, scored, lambda pk: True, 4, set(), 2, 0))
+        self.assertEqual(sorted(exhaustive[0][0]), sorted(beam[0][0]))
+
+    def _known_keys(self):
+        return {k for pbk in self.coverage["pair_by_key"] for k in pbk}
+
+    def test_must_include_and_exclude_apply(self):
+        teams = self._teams(4, must_include=["Kingambit"], exclude=["Sharpedo"])
+        self.assertTrue(teams)
+        for r in teams:
+            self.assertIn("Kingambit", r["team"])
+            self.assertNotIn("Sharpedo", r["team"])
+
+    def test_bad_arguments(self):
+        with self.assertRaises(ValueError):
+            cf.pair_coverage_teams(self.coverage, group_size=7, assembly="all_pairs")
+        with self.assertRaises(ValueError):
+            cf.pair_coverage_teams(self.coverage, assembly="bogus")
+
+
 class TestPairCoverageTeamsCoverageFilters(unittest.TestCase):
     """"using the same constraints as the coverage groups" -- porting
     `coverage_group_search`'s own `min_offensive_types`/`one_v_one_matrix`/
