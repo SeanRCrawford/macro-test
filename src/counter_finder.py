@@ -808,13 +808,20 @@ def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
 
 
 def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart):
-    """{name: {other_name: (best_frac, move_name)}} -- `_one_v_one_offense`'s
-    own table plus WHICH real-usage move produced each best fraction (None
-    when nothing does any damage), so a caller can show the actual move
-    behind a hits-to-KO read instead of just a number."""
+    """{name: {other_name: (best_frac, move_name, prio_frac, prio_move)}} --
+    `_one_v_one_offense`'s own table plus WHICH real-usage move produced each
+    best fraction (None when nothing does any damage), and the best damaging
+    PRIORITY move against that enemy (Fake Out/First Impression excluded --
+    turn-one-only, useless as a finisher), so a caller can show the actual
+    move behind a hits-to-KO read and reason about a priority last hit."""
     offense = {}
     for name in universe:
         table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
+        prio_moves = []
+        for mv in table:
+            info = _lookup_move(mv, moves_db)
+            if info is not None and info.priority > 0 and mv not in FIRST_TURN_ONLY_MOVES:
+                prio_moves.append(mv)
         row = {}
         for en in universe:
             if en == name:
@@ -823,9 +830,33 @@ def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart):
             for mv, fr in table.items():
                 if fr.get(en, 0.0) > best_frac:
                     best_frac, best_move = fr[en], mv
-            row[en] = (best_frac, best_move)
+            prio_frac, prio_move = 0.0, None
+            for mv in prio_moves:
+                if table[mv].get(en, 0.0) > prio_frac:
+                    prio_frac, prio_move = table[mv][en], mv
+            row[en] = (best_frac, best_move, prio_frac, prio_move)
         offense[name] = row
     return offense
+
+
+def _priority_finisher(hits, best_frac, prio_frac):
+    """True if this side's KO comes with a PRIORITY last hit: (hits-1) of its
+    best hits then one priority move still adds up to 100% -- e.g. Head Smash
+    80% + Extreme Speed 25%. A priority move lands before the opponent's
+    move that turn whatever the Speeds, so it beats the speed tiebreak."""
+    if hits is None or prio_frac <= 0:
+        return False
+    return (hits - 1) * best_frac + prio_frac >= 1.0 - 1e-9
+
+
+def _sash_saves(holder, holder_names, attacker_move):
+    """True if `holder` (a name) has a Focus Sash that survives a would-be
+    OHKO from `attacker_move` -- not against a multi-hit move, which breaks
+    it. `holder_names` is None when the option is off."""
+    if holder_names is None or holder not in holder_names or attacker_move is None:
+        return False
+    from types import SimpleNamespace
+    return not breaks_focus_sash(attacker_move, SimpleNamespace(item=""))
 
 
 # "Make sure the win does not require an OHKO ... give a reasonable
@@ -841,10 +872,19 @@ DEFAULT_MAX_HITS_FOR_VERDICT = 4
 
 
 def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
-                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT,
+                       my_prio=False, their_prio=False,
+                       my_sash=False, their_sash=False):
     """"win"/"loss"/"no_ko" from each side's hits-to-KO (`None` = can never
     KO) and base Speed -- the one place `_one_v_one_matrix`'s rule lives, so
-    `one_v_one_hit_counts_for_pool`'s displayed verdict can never drift."""
+    `one_v_one_hit_counts_for_pool`'s displayed verdict can never drift.
+
+    `my_prio`/`their_prio`: that side's KO ends on a PRIORITY move
+    (`_priority_finisher`), which acts first whatever the Speeds -- breaks
+    an equal-hits tie for the side that has it (both or neither: Speed), and
+    makes a one-hit lead decisive. `my_sash`/`their_sash`: that side holds a
+    Focus Sash that survives the other's OHKO -- in a mutual 1HKO the sash
+    holder survives, hits back and wins (both: Speed)."""
     if my_hits is None and their_hits is None:
         return "no_ko"
     if my_hits is None:
@@ -855,16 +895,20 @@ def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
         return "no_ko"
     margin = their_hits - my_hits
     if margin == 0:
+        if my_hits == 1 and my_sash != their_sash:
+            return "win" if my_sash else "loss"
+        if my_prio != their_prio:
+            return "win" if my_prio else "loss"
         return "win" if my_spe >= their_spe else "loss"
     if abs(margin) >= 2:
         return "win" if margin > 0 else "loss"
-    if margin > 0:   # we need exactly one fewer hit: only decisive if faster
-        return "win" if my_spe > their_spe else "no_ko"
-    return "loss" if their_spe > my_spe else "no_ko"
+    if margin > 0:   # we need exactly one fewer hit: decisive if faster / priority last hit
+        return "win" if (my_spe > their_spe or my_prio) else "no_ko"
+    return "loss" if (their_spe > my_spe or their_prio) else "no_ko"
 
 
 def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
-                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
     """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
     enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
     calculation"), computed ONCE and reused by every candidate pair's own
@@ -906,11 +950,8 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     same name (a literal self-mirror isn't a meaningful "does my own team
     have an answer to this enemy" question for MY OWN pool).
     """
-    offense = _one_v_one_offense(list(pool) + list(enemy_names), merged,
-                                 moves_db, natures, typechart)
-
-    def hits(frac):
-        return math.ceil(1.0 / frac) if frac > 0 else None
+    detail = _one_v_one_offense_detail(list(pool) + list(enemy_names), merged,
+                                       moves_db, natures, typechart)
 
     matrix = {}
     for name in pool:
@@ -918,24 +959,44 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            matrix[name][enemy_name] = _one_v_one_verdict(
-                hits(offense[name][enemy_name]), hits(offense[enemy_name][name]),
-                merged[name]["base_stats"]["spe"],
-                merged[enemy_name]["base_stats"]["spe"], max_hits)
+            matrix[name][enemy_name] = _pair_verdict(
+                name, enemy_name, detail, merged, max_hits, sash_holders)
     return matrix
 
 
+def _pair_hits(frac):
+    return math.ceil(1.0 / frac) if frac > 0 else None
+
+
+def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None):
+    """`_one_v_one_verdict` for one (name, enemy) pair straight off
+    `_one_v_one_offense_detail`'s table -- shared with the displayed
+    hits-to-KO detail so the two can never disagree."""
+    our_frac, our_move, our_pf, _pm = detail[name][enemy_name]
+    their_frac, their_move, their_pf, _tm = detail[enemy_name][name]
+    my_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
+    return _one_v_one_verdict(
+        my_hits, their_hits,
+        merged[name]["base_stats"]["spe"], merged[enemy_name]["base_stats"]["spe"],
+        max_hits,
+        my_prio=_priority_finisher(my_hits, our_frac, our_pf),
+        their_prio=_priority_finisher(their_hits, their_frac, their_pf),
+        my_sash=_sash_saves(name, sash_holders, their_move),
+        their_sash=_sash_saves(enemy_name, sash_holders, our_move))
+
+
 def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart,
-                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
     """Single-pair convenience wrapper around `_one_v_one_matrix` (same
     logic, no batching) -- for an ad-hoc "does X beat Y" query rather than
     a whole pool's worth."""
     return _one_v_one_matrix([name], [enemy_name], merged, moves_db,
-                             natures, typechart, max_hits=max_hits)[name][enemy_name]
+                             natures, typechart, max_hits=max_hits,
+                             sash_holders=sash_holders)[name][enemy_name]
 
 
 def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
-                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
     """Public entry point onto `_one_v_one_matrix` -- for a caller outside
     this module (the Streamlit app) wanting to build the SAME cheap 1v1
     read `find_pair_cores`'s own `threat_coverage` already uses, to hand
@@ -950,11 +1011,11 @@ def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, type
     same reasonable, non-OHKO-only cap every other caller in this module
     uses."""
     return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
-                             max_hits=max_hits)
+                             max_hits=max_hits, sash_holders=sash_holders)
 
 
 def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
-                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None):
     """{name: {enemy_name: {"our_hits_to_ko", "their_hits_to_ko"}}} for
     every (pool member, enemy) pair -- "I KO very quickly and take little
     damage, such as OHKO vs 4HKO" wants the actual hits-to-KO each way,
@@ -975,28 +1036,29 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
     the same name, same as `_one_v_one_matrix`."""
     offense = _one_v_one_offense_detail(list(pool) + list(enemy_names), merged,
                                         moves_db, natures, typechart)
-
-    def hits(frac):
-        return math.ceil(1.0 / frac) if frac > 0 else None
-
     result = {}
     for name in pool:
         result[name] = {}
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            our_frac, our_move = offense[name][enemy_name]
-            their_frac, their_move = offense[enemy_name][name]
-            our_hits, their_hits = hits(our_frac), hits(their_frac)
-            our_spe = merged[name]["base_stats"]["spe"]
-            their_spe = merged[enemy_name]["base_stats"]["spe"]
+            our_frac, our_move, our_pf, our_pm = offense[name][enemy_name]
+            their_frac, their_move, their_pf, their_pm = offense[enemy_name][name]
+            our_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
             result[name][enemy_name] = {
                 "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
                 "our_move": our_move, "their_move": their_move,
                 "our_pct": our_frac * 100.0, "their_pct": their_frac * 100.0,
-                "our_speed": our_spe, "their_speed": their_spe,
-                "verdict": _one_v_one_verdict(our_hits, their_hits, our_spe,
-                                              their_spe, max_hits),
+                "our_speed": merged[name]["base_stats"]["spe"],
+                "their_speed": merged[enemy_name]["base_stats"]["spe"],
+                "our_prio_finisher": _priority_finisher(our_hits, our_frac, our_pf),
+                "their_prio_finisher": _priority_finisher(their_hits, their_frac, their_pf),
+                "our_prio_move": our_pm, "our_prio_pct": our_pf * 100.0,
+                "their_prio_move": their_pm, "their_prio_pct": their_pf * 100.0,
+                "our_sash": _sash_saves(name, sash_holders, their_move),
+                "their_sash": _sash_saves(enemy_name, sash_holders, our_move),
+                "verdict": _pair_verdict(name, enemy_name, offense, merged,
+                                         max_hits, sash_holders),
             }
     return result
 

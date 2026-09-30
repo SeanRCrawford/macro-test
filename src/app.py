@@ -7155,6 +7155,15 @@ with tab_counter:
                 help="\"I KO very quickly and take little damage, such as "
                      "OHKO vs 4HKO\" -- the default (4) matches that. 1 "
                      "restores the old OHKO-only behavior.")
+            mf_use_sash = st.checkbox(
+                "Focus Sash wins 1HKO-vs-1HKO ties", key="ct_mf_use_sash",
+                help="Off by default. In a mutual OHKO the side holding a "
+                     "Focus Sash survives at 1 HP, hits back and wins -- "
+                     "unless the OHKO is a multi-hit move (which breaks "
+                     "it); both sashed falls back to Speed. Who holds one "
+                     "comes from the sets of the enemy teams picked above "
+                     "(an enemy counts as sashed if any picked team gives "
+                     "it one), else each Pokemon's default item.")
             mfc1, mfc2 = st.columns(2)
             mf_resist = mfc1.multiselect(
                 "Must resist or be immune to", _mf_types, key="ct_mf_resist")
@@ -7181,6 +7190,19 @@ with tab_counter:
                     (t, [n for n in teams[t] if n in all_names])
                     for t in mf_enemy_teams]
                 mf_union = list(dict.fromkeys(e for _l, g in mf_groups for e in g))
+                mf_sash = None
+                if mf_use_sash:
+                    explicit = {}
+                    for t in mf_enemy_teams:
+                        for nm, spec in ((team_meta.get(t) or {}).get("sets") or {}).items():
+                            if spec.get("item"):
+                                explicit.setdefault(nm, []).append(
+                                    spec["item"] == "Focus Sash")
+                    mf_sash = {
+                        nm for nm in set(pool) | set(mf_union)
+                        if (any(explicit[nm]) if nm in explicit else
+                            (merged[nm].get("items_usage") or [("", 0)])[0][0]
+                            == "Focus Sash")}
                 with st.spinner(f"Racing {len(pool)} Pokemon 1v1 against "
                                 f"{len(mf_union)} named enem{'y' if len(mf_union) == 1 else 'ies'}"
                                 f" ({len(mf_groups)} group{'s' if len(mf_groups) != 1 else ''})..."):
@@ -7189,7 +7211,8 @@ with tab_counter:
                         from counter_finder import one_v_one_matrix_for_pool
                         matrix = one_v_one_matrix_for_pool(
                             pool, mf_union, merged, moves, natures, typechart,
-                            max_hits=None if mf_no_hit_limit else mf_max_hits)
+                            max_hits=None if mf_no_hit_limit else mf_max_hits,
+                            sash_holders=mf_sash)
                     results = []
                     for name in pool:
                         group_ok = True
@@ -7228,7 +7251,8 @@ with tab_counter:
                         from counter_finder import one_v_one_hit_counts_for_pool
                         hit_counts = one_v_one_hit_counts_for_pool(
                             results, mf_union, merged, moves, natures, typechart,
-                            max_hits=None if mf_no_hit_limit else mf_max_hits)
+                            max_hits=None if mf_no_hit_limit else mf_max_hits,
+                            sash_holders=mf_sash)
                 st.session_state["ct_mf_ind_results"] = (
                     results, mf_union, hit_counts, mf_groups)
             results_pack = st.session_state.get("ct_mf_ind_results")
@@ -7302,7 +7326,12 @@ with tab_counter:
                                 "hits it takes. A lead of exactly one hit (e.g. "
                                 "2HKO vs 3HKO) is only a win for the faster side; "
                                 "two or more is a win regardless; equal hits "
-                                "goes to the faster side.")
+                                "goes to the faster side. A side whose KO ends "
+                                "on a PRIORITY move (best hits + a priority "
+                                "move adding to 100%, e.g. Head Smash then "
+                                "Extreme Speed) wins the tie / one-hit lead "
+                                "whatever the Speeds. Focus Sash (if enabled) "
+                                "wins a mutual 1HKO.")
                             drows = []
                             for name in sorted(mf_results, key=sort_key):
                                 for e in mf_shown_enemies:
@@ -7325,6 +7354,15 @@ with tab_counter:
                                         "Speed (us/them)": f"{ours}/{theirs} "
                                             + ("faster" if ours > theirs else
                                                "slower" if ours < theirs else "tie"),
+                                        "Notes": "; ".join(filter(None, [
+                                            f"we finish with priority {c['our_prio_move']} "
+                                            f"({c['our_prio_pct']:.0f}%)"
+                                            if c["our_prio_finisher"] else "",
+                                            f"they finish with priority {c['their_prio_move']} "
+                                            f"({c['their_prio_pct']:.0f}%)"
+                                            if c["their_prio_finisher"] else "",
+                                            "our Focus Sash survives" if c["our_sash"] else "",
+                                            "their Focus Sash survives" if c["their_sash"] else ""])) or "--",
                                     })
                             st.dataframe(pd.DataFrame(drows), width='stretch',
                                          hide_index=True)

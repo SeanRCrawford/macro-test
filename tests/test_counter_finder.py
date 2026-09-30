@@ -11599,6 +11599,95 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
         self.assertEqual([r["team"] for r in default], [r["team"] for r in explicit_none])
 
 
+def _fake_detail(offense):
+    """A stand-in for `cf._one_v_one_offense_detail` from a plain
+    {name: {other: fraction}} table (no priority moves, no move names)."""
+    table = {n: {e: (f, None, 0.0, None) for e, f in row.items()}
+             for n, row in offense.items()}
+    return lambda *a, **k: table
+
+
+class TestOneVOneVerdictPriorityAndSash(unittest.TestCase):
+    """The priority-finisher and (opt-in) Focus Sash tiebreaks: Arcanine-Hisui
+    (Head Smash 80% + Extreme Speed 29%) beats a faster Mega Garchomp Z that
+    also 2HKOs it, and a mutual 1HKO goes to the Focus Sash holder."""
+
+    def _matrix(self, table, spe_a, spe_b, sash=None, max_hits=4):
+        """table: {(att, tgt): (frac, move, prio_frac, prio_move)}"""
+        detail = {"A": {"B": table[("A", "B")]}, "B": {"A": table[("B", "A")]}}
+        merged = {"A": {"base_stats": {"spe": spe_a}},
+                  "B": {"base_stats": {"spe": spe_b}}}
+        real = cf._one_v_one_offense_detail
+        try:
+            cf._one_v_one_offense_detail = lambda *a, **k: detail
+            return (cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
+                                         max_hits=max_hits, sash_holders=sash)["A"]["B"],
+                    cf._one_v_one_matrix(["B"], ["A"], merged, None, None, None,
+                                         max_hits=max_hits, sash_holders=sash)["B"]["A"])
+        finally:
+            cf._one_v_one_offense_detail = real
+
+    def test_priority_finisher_beats_speed_in_a_tied_hit_count(self):
+        # both 2HKO; B is faster, but A's 0.8 + 0.25 priority finishes.
+        t = {("A", "B"): (0.8, "Head Smash", 0.25, "Extreme Speed"),
+             ("B", "A"): (0.6, "Earth Power", 0.0, None)}
+        self.assertEqual(self._matrix(t, 90, 151), ("win", "loss"))
+
+    def test_priority_only_counts_if_it_completes_the_ko(self):
+        # 0.8 + 0.15 < 1 -> no finisher -> the faster side wins as before.
+        t = {("A", "B"): (0.8, "Head Smash", 0.15, "Extreme Speed"),
+             ("B", "A"): (0.6, "Earth Power", 0.0, None)}
+        self.assertEqual(self._matrix(t, 90, 151), ("loss", "win"))
+
+    def test_both_with_priority_finishers_falls_back_to_speed(self):
+        t = {("A", "B"): (0.8, "Head Smash", 0.25, "Extreme Speed"),
+             ("B", "A"): (0.7, "Earth Power", 0.35, "Aqua Jet")}
+        self.assertEqual(self._matrix(t, 90, 151), ("loss", "win"))
+
+    def test_priority_finisher_makes_a_one_hit_lead_decisive_when_slower(self):
+        # A 2HKO (0.8 + priority), B 3HKO and faster: without priority
+        # this is "no_ko"; with it A wins.
+        t = {("A", "B"): (0.8, "Head Smash", 0.25, "Extreme Speed"),
+             ("B", "A"): (0.4, "Earth Power", 0.0, None)}
+        self.assertEqual(self._matrix(t, 90, 151), ("win", "loss"))
+        t2 = {("A", "B"): (0.8, "Head Smash", 0.05, "Extreme Speed"),
+              ("B", "A"): (0.4, "Earth Power", 0.0, None)}
+        self.assertEqual(self._matrix(t2, 90, 151), ("no_ko", "no_ko"))
+
+    def test_first_hit_ko_needs_no_priority(self):
+        # A 1HKO: a priority move is irrelevant to a 1-hit KO.
+        self.assertFalse(cf._priority_finisher(1, 1.2, 0.3))
+        self.assertTrue(cf._priority_finisher(2, 0.8, 0.25))
+        self.assertFalse(cf._priority_finisher(None, 0.8, 0.25))
+
+    def test_focus_sash_wins_a_mutual_ohko_only_when_enabled(self):
+        t = {("A", "B"): (1.2, "Close Combat", 0.0, None),
+             ("B", "A"): (1.1, "Earthquake", 0.0, None)}
+        # off (default): plain speed -- B is faster.
+        self.assertEqual(self._matrix(t, 50, 150), ("loss", "win"))
+        # A holds a Sash: it survives and wins despite being slower.
+        self.assertEqual(self._matrix(t, 50, 150, sash={"A"}), ("win", "loss"))
+        # B holds it: B wins (as it would on speed anyway).
+        self.assertEqual(self._matrix(t, 50, 150, sash={"B"}), ("loss", "win"))
+        # Both sashed: back to speed.
+        self.assertEqual(self._matrix(t, 50, 150, sash={"A", "B"}), ("loss", "win"))
+
+    def test_a_multi_hit_ohko_breaks_the_sash(self):
+        t = {("A", "B"): (1.2, "Triple Axel", 0.0, None),
+             ("B", "A"): (1.1, "Earthquake", 0.0, None)}
+        # B's Sash does not save it from Triple Axel -> speed decides.
+        self.assertEqual(self._matrix(t, 150, 50, sash={"B"}), ("win", "loss"))
+        t2 = {("A", "B"): (1.2, "Close Combat", 0.0, None),
+              ("B", "A"): (1.1, "Earthquake", 0.0, None)}
+        self.assertEqual(self._matrix(t2, 150, 50, sash={"B"}), ("loss", "win"))
+
+    def test_sash_only_matters_in_a_mutual_one_hit_ko(self):
+        # 2HKO vs 2HKO: a Sash changes nothing.
+        t = {("A", "B"): (0.6, "Close Combat", 0.0, None),
+             ("B", "A"): (0.6, "Earthquake", 0.0, None)}
+        self.assertEqual(self._matrix(t, 50, 150, sash={"A"}), ("loss", "win"))
+
+
 class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
     """"Make sure the win does not require an OHKO (give a reasonable
     limit, maybe optional, but still a win based on speed)" -- the old
@@ -11626,24 +11715,24 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
         """A synthetic offense table, patched in directly, so the pure
         comparison logic is pinned exactly independent of real damage
         calc: A needs 2 hits, B needs 4 -- A wins even if B is faster."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.5}, "B": {"A": 0.26}}  # A: 2HKO, B: 4HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.5}, "B": {"A": 0.26}})  # A: 2HKO, B: 4HKO
             merged = {"A": {"base_stats": {"spe": 50}},
                      "B": {"base_stats": {"spe": 150}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)
             self.assertEqual(matrix["A"]["B"], "win")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_a_one_hit_lead_only_wins_if_also_faster(self):
         """2HKO vs 3HKO is a win only for the 2HKOer if it is faster; the
         slower 2HKOer (and the faster 3HKOer) get "no_ko" -- not decisive."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.5}, "B": {"A": 0.34}}  # A: 2HKO, B: 3HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.5}, "B": {"A": 0.34}})  # A: 2HKO, B: 3HKO
             fast_a = {"A": {"base_stats": {"spe": 150}}, "B": {"base_stats": {"spe": 50}}}
             slow_a = {"A": {"base_stats": {"spe": 50}}, "B": {"base_stats": {"spe": 150}}}
             self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], fast_a, None, None, None)["A"]["B"], "win")
@@ -11651,16 +11740,16 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
             self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], slow_a, None, None, None)["A"]["B"], "no_ko")
             self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], slow_a, None, None, None)["B"]["A"], "no_ko")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_a_tied_hit_count_still_breaks_on_speed(self):
         """The ORIGINAL mutual-OHKO speed tiebreak generalizes: an equal
         hits-to-ko on both sides (not just both 1) is still decided by
         base Speed, exactly as before."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.34}, "B": {"A": 0.34}}  # both 3HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.34}, "B": {"A": 0.34}})  # both 3HKO
             merged = {"A": {"base_stats": {"spe": 150}},
                      "B": {"base_stats": {"spe": 50}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)
@@ -11670,64 +11759,64 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
             matrix2 = cf._one_v_one_matrix(["A"], ["B"], merged2, None, None, None)
             self.assertEqual(matrix2["A"]["B"], "loss")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_beyond_max_hits_on_both_sides_is_still_no_ko(self):
         """"give a reasonable limit" -- a genuinely slow, drawn-out
         exchange (both sides need MORE than `max_hits`) stays "no_ko":
         too inconclusive to call a real win either way."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.15}, "B": {"A": 0.12}}  # 7HKO vs 9HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.15}, "B": {"A": 0.12}})  # 7HKO vs 9HKO
             merged = {"A": {"base_stats": {"spe": 150}},
                      "B": {"base_stats": {"spe": 50}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
                                           max_hits=4)
             self.assertEqual(matrix["A"]["B"], "no_ko")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_max_hits_none_removes_the_cap_entirely(self):
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.15}, "B": {"A": 0.12}}  # 7HKO vs 9HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.15}, "B": {"A": 0.12}})  # 7HKO vs 9HKO
             merged = {"A": {"base_stats": {"spe": 150}},
                      "B": {"base_stats": {"spe": 50}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
                                           max_hits=None)
             self.assertEqual(matrix["A"]["B"], "win")  # 7 < 9, no cap to stop it
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_an_opponent_that_can_never_ko_us_is_always_a_win_past_the_cap(self):
         """Their hits-to-ko is `None` (a hard type immunity/0 real damage)
         -- we always win eventually regardless of how many hits WE need,
         since they can never finish the job. `max_hits` doesn't apply to
         this case at all."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.1}, "B": {"A": 0.0}}  # A: 10HKO, B: can never KO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.1}, "B": {"A": 0.0}})  # A: 10HKO, B: can never KO
             merged = {"A": {"base_stats": {"spe": 50}},
                      "B": {"base_stats": {"spe": 150}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
                                           max_hits=4)
             self.assertEqual(matrix["A"]["B"], "win")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_neither_side_can_ever_ko_is_no_ko(self):
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {"A": {"B": 0.0}, "B": {"A": 0.0}}
+            cf._one_v_one_offense_detail = _fake_detail({"A": {"B": 0.0}, "B": {"A": 0.0}})
             merged = {"A": {"base_stats": {"spe": 50}},
                      "B": {"base_stats": {"spe": 150}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)
             self.assertEqual(matrix["A"]["B"], "no_ko")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_default_max_hits_matches_the_ohko_only_case_exactly(self):
         """At the old, strict boundary (a genuine mutual OHKO -- Excadrill's

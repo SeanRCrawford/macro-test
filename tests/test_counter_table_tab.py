@@ -2379,8 +2379,27 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertEqual(
             list(df.columns),
             ["Pokemon", "Enemy", "Verdict", "Our move", "Our hits",
-             "Their move", "Their hits", "Speed (us/them)"])
+             "Their move", "Their hits", "Speed (us/them)", "Notes"])
         self.assertTrue(all(v == "WIN" for v in df["Verdict"]))
+
+    def test_focus_sash_option_is_off_by_default_and_runs_when_enabled(self):
+        """Focus Sash tiebreak is opt-in: unchecked by default, and turning
+        it on still produces a details table with the Notes column."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value(
+            "Matchup finder").run()
+        box = [c for c in at.checkbox if c.key == "ct_mf_use_sash"]
+        self.assertEqual(len(box), 1)
+        self.assertFalse(box[0].value)
+        box[0].set_value(True).run()
+        [s for s in at.slider if s.key == "ct_mf_pool_ind"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_mf_enemies"][0].set_value(
+            ["Incineroar"]).run()
+        at = [b for b in at.button if b.key == "ct_mf_ind_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        dfs = [d.value for d in at.dataframe if "Our move" in d.value.columns]
+        self.assertEqual(len(dfs), 1)
+        self.assertIn("Notes", dfs[0].columns)
 
     def test_individuals_results_are_sorted_most_decisive_first(self):
         """"It would be good to see the most decisive wins too, i.e., I
