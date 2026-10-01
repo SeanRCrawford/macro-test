@@ -5556,6 +5556,83 @@ class TestPairCoverageTeams(unittest.TestCase):
         self.assertEqual(results, [])
 
 
+class TestPairCoverageTeamsAllPairs(unittest.TestCase):
+    """`assembly="all_pairs"`: "a team of 6 has 15 pairs ... I would want to
+    have a team with as many high-performing pairs as possible" -- teams are
+    scored by ALL C(size, 2) internal pairs, any size 3-6."""
+
+    POOL = TestPairCoverageTeams.POOL
+    ENEMIES = TestPairCoverageTeams.ENEMIES
+
+    def setUp(self):
+        W = world()
+        self.coverage = cf.multi_bring4_coverage(
+            self.POOL, self.ENEMIES, W["merged"], W["moves"], W["natures"],
+            W["typechart"], good_threshold=0.0, min_enemies=0)
+
+    def _teams(self, size, **kw):
+        return cf.pair_coverage_teams(self.coverage, group_size=size,
+                                      assembly="all_pairs", top_n=20, **kw)
+
+    def test_every_size_from_3_to_6_including_odd_ones(self):
+        for size in (3, 4, 5, 6):
+            teams = self._teams(size, good_threshold=0.0)
+            self.assertTrue(teams, size)
+            for r in teams:
+                self.assertEqual(len(set(r["team"])), size)
+                self.assertEqual(r["pairs_total"], size * (size - 1) // 2)
+                self.assertEqual(len(r["best_bring4"][0]), min(4, size))
+
+    def test_teams_rank_by_good_pairs_then_score(self):
+        teams = self._teams(6, good_threshold=0.5)
+        keys = [(-r["good_pairs"], -r["score"], r["team"]) for r in teams]
+        self.assertEqual(keys, sorted(keys))
+
+    def test_good_pairs_counts_only_pairs_beating_the_bar_on_every_team(self):
+        strict = self._teams(4, good_threshold=1.0)
+        lax = self._teams(4, good_threshold=0.0)
+        self.assertGreaterEqual(max(r["good_pairs"] for r in lax),
+                                max(r["good_pairs"] for r in strict))
+        # threshold 0: every raced pair is good
+        self.assertTrue(all(r["good_pairs"] == r["known_pairs"] for r in lax))
+
+    def test_a_better_connected_team_beats_a_disjoint_pair_pick(self):
+        """Hand-built graph: A-B, A-C, B-C, A-D good; D-X and Y-Z also good but
+        isolated. The best 3-team is A/B/C (3 good pairs), not one that merely
+        contains a disjoint pair."""
+        good = {frozenset(p) for p in (("A", "B"), ("A", "C"), ("B", "C"), ("A", "D"),
+                                       ("D", "X"), ("Y", "Z"))}
+        scored = {k: 10.0 for k in good}
+        cands = list(cf._all_pairs_team_candidates(
+            list(good), scored, lambda pk: pk in good, 3, set(), 2, 10 ** 6))
+        self.assertEqual(sorted(cands[0][0]), ["A", "B", "C"])
+
+    def test_beam_fallback_agrees_with_exhaustive_on_a_small_graph(self):
+        keys = list(self._known_keys())
+        scored = {k: 5.0 for k in keys}
+        exhaustive = list(cf._all_pairs_team_candidates(
+            keys, scored, lambda pk: True, 4, set(), 2, 10 ** 9))
+        beam = list(cf._all_pairs_team_candidates(
+            keys, scored, lambda pk: True, 4, set(), 2, 0))
+        self.assertEqual(sorted(exhaustive[0][0]), sorted(beam[0][0]))
+
+    def _known_keys(self):
+        return {k for pbk in self.coverage["pair_by_key"] for k in pbk}
+
+    def test_must_include_and_exclude_apply(self):
+        teams = self._teams(4, must_include=["Kingambit"], exclude=["Sharpedo"])
+        self.assertTrue(teams)
+        for r in teams:
+            self.assertIn("Kingambit", r["team"])
+            self.assertNotIn("Sharpedo", r["team"])
+
+    def test_bad_arguments(self):
+        with self.assertRaises(ValueError):
+            cf.pair_coverage_teams(self.coverage, group_size=7, assembly="all_pairs")
+        with self.assertRaises(ValueError):
+            cf.pair_coverage_teams(self.coverage, assembly="bogus")
+
+
 class TestPairCoverageTeamsCoverageFilters(unittest.TestCase):
     """"using the same constraints as the coverage groups" -- porting
     `coverage_group_search`'s own `min_offensive_types`/`one_v_one_matrix`/
@@ -7496,6 +7573,26 @@ class TestTeamMissingTechs(unittest.TestCase):
             # through `_member_has_tech`'s own move-name lookup.
             cf._member_has_tech("Kingambit", self.merged, tech)
 
+    def test_intimidate_tech_counts_the_base_form_or_the_mega_form(self):
+        """"add intimidate ability to techs ... whether present on the base
+        form or the mega form" -- Incineroar has it outright; Mega Salamence /
+        Mega Gyarados / Mega Staraptor are Aerilate / Mold Breaker / Contrary
+        once evolved but their base form's Intimidate resolves on switch-in."""
+        self.assertIn("intimidate", cf.TECH_LABELS)
+        for name in ("Incineroar", "Mega Salamence", "Mega Gyarados", "Mega Staraptor"):
+            self.assertTrue(cf._member_has_tech(name, self.merged, "intimidate"), name)
+        for name in ("Kingambit", "Pelipper", "Mega Kangaskhan"):
+            self.assertFalse(cf._member_has_tech(name, self.merged, "intimidate"), name)
+        self.assertEqual(cf.team_missing_techs(["Kingambit"], self.merged, ["intimidate"]),
+                         ["intimidate"])
+        self.assertEqual(
+            cf.team_missing_techs(["Kingambit", "Mega Salamence"], self.merged, ["intimidate"]), [])
+
+    def test_weather_terrain_still_read_only_the_default_ability(self):
+        """The either-form rule is Intimidate-only: it must not change how
+        the existing weather/terrain techs resolve."""
+        self.assertEqual(cf.TECH_ABILITY_EITHER_FORM, frozenset({"intimidate"}))
+
     def test_pivot_tech_covers_the_named_switching_moves(self):
         """"Add pivot tech (switching move such as u turn, parting shot,
         flip turn, baton pass, and so on)" -- Incineroar's real usage
@@ -7645,6 +7742,51 @@ class TestWeaknessBreadthCapsAndMinSpecialAttackers(unittest.TestCase):
                         "the cap may be too strict for this pool")
         for row in capped[4]["rows"]:
             self.assertEqual(row["weak_type_breadth_3"], 0)
+
+    def _net_types_fixture(self):
+        from team_search import build_candidate_pool
+        pool = build_candidate_pool(self.merged, top_n=25)
+        enemy = {"Test": self.W["teams"]["Hard Trick Room"]}
+        return cf.find_pair_cores(pool, self.merged, self.moves, self.natures,
+                                  self.typechart, enemy)
+
+    def test_net_weak_types_field_matches_an_independent_count(self):
+        rows = cf.coverage_group_search(
+            self._net_types_fixture(), self.merged, group_sizes=(4,), top_n=20)[4]["rows"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(
+                row["net_weak_types"],
+                cf.net_weak_type_breadth(row["group"], self.merged, threshold=1))
+
+    def test_coverage_group_search_max_net_weak_types_caps_types_with_net_weakness(self):
+        pair_rows = self._net_types_fixture()
+        uncapped = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=500)[4]["rows"]
+        counts = sorted({r["net_weak_types"] for r in uncapped})
+        self.assertGreater(len(counts), 1, "need a spread of values to test a cap")
+        cap = counts[len(counts) // 2]
+        capped = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=500,
+            max_net_weak_types=cap)[4]["rows"]
+        self.assertTrue(capped)
+        self.assertTrue(all(r["net_weak_types"] <= cap for r in capped))
+        # the cap only ever removes groups: every capped group exists uncapped too
+        # unless top_n truncation let a lower-ranked one in, so check the best one
+        self.assertIn(capped[0]["group"],
+                      {r["group"] for r in uncapped if r["net_weak_types"] <= cap})
+        # None = off: nothing dropped
+        off = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=500,
+            max_net_weak_types=None)[4]["rows"]
+        self.assertEqual({r["group"] for r in off}, {r["group"] for r in uncapped})
+
+    def test_a_zero_cap_demands_no_net_weak_type_at_all(self):
+        rows = cf.coverage_group_search(
+            self._net_types_fixture(), self.merged, group_sizes=(4,), top_n=500,
+            max_net_weak_types=0)[4]["rows"]
+        for row in rows:
+            self.assertEqual(row["net_weak_types"], 0)
 
     def test_coverage_group_search_min_special_attackers_drops_groups_below_the_floor(self):
         from team_search import build_candidate_pool
@@ -8377,6 +8519,54 @@ class TestGrassyTerrainCheapModel(unittest.TestCase):
 
         self.assertTrue(race("grassy"))
         self.assertFalse(race(None))
+
+
+class TestGrassyTerrainHalvesEarthquakeInTheJointRace(unittest.TestCase):
+    """"Counter Table should account for Rillaboom's grassy terrain reducing
+    earthquake damage in evaluating 2v2s" -- end to end through the real
+    turn resolver: a Rillaboom on EITHER side of the board (its Grassy Surge
+    is read by `_field_terrain`) halves Earthquake-family damage against
+    grounded defenders, and leaves airborne ones alone."""
+
+    def setUp(self):
+        self.W = world()
+
+    def _eq_hits(self, rilla_role, defender_name):
+        merged, moves_db, natures, typechart = (
+            self.W["merged"], self.W["moves"], self.W["natures"], self.W["typechart"])
+        chomp = cf._build("Garchomp", merged, natures)
+        target = cf._build(defender_name, merged, natures)
+        # A filler slot holds either Rillaboom (terrain) or Sinistcha (none).
+        filler_name = "Rillaboom" if rilla_role else "Sinistcha"
+        filler = cf._build(filler_name, merged, natures)
+        protect = cf._lookup_move("Protect", moves_db)
+        eq = cf._lookup_move("Earthquake", moves_db)
+        if rilla_role == "ally":
+            combatants = {"C": chomp, "P": filler, "E1": target, "E2": cf._build("Sinistcha", merged, natures)}
+        else:
+            combatants = {"C": chomp, "P": cf._build("Sinistcha", merged, natures),
+                          "E1": target, "E2": filler}
+        terrain = cf._field_terrain(combatants)
+        moves_by_role = {"C": [eq], "P": [protect], "E1": [protect], "E2": [protect]}
+        hp = {r: 1.0 for r in combatants}
+        _hp, log, _ea, _w, _rc = cf._resolve_turn(
+            combatants, moves_by_role, hp, typechart, None, {"C": "E1"}, terrain=terrain)
+        return terrain, [h for role, tgt, h in log if role == "C" and tgt == "E1"][0]
+
+    def test_terrain_from_either_sides_rillaboom_halves_earthquake(self):
+        _t0, plain = self._eq_hits(None, "Kingambit")
+        for where in ("ally", "enemy"):
+            terrain, hit = self._eq_hits(where, "Kingambit")
+            self.assertEqual(terrain, "grassy")
+            self.assertAlmostEqual(hit.frac / plain.frac, 0.5, places=3, msg=where)
+
+    def test_the_terrain_rule_only_applies_to_grounded_defenders(self):
+        """The halving is gated on `is_grounded(defender)`: Kingambit takes it,
+        an airborne Corviknight would not."""
+        from damage import is_grounded
+        merged, natures = self.W["merged"], self.W["natures"]
+        self.assertFalse(is_grounded(cf._build("Corviknight", merged, natures)))
+        self.assertTrue(is_grounded(cf._build("Kingambit", merged, natures)))
 
 
 class TestPsychicTerrainCheapModel(unittest.TestCase):
@@ -11599,6 +11789,348 @@ class TestTwoTwoTwoTeambuilding(unittest.TestCase):
         self.assertEqual([r["team"] for r in default], [r["team"] for r in explicit_none])
 
 
+def _fake_detail(offense):
+    """A stand-in for `cf._one_v_one_offense_detail` from a plain
+    {name: {other: fraction}} table (no priority moves, no move names)."""
+    table = {n: {e: (f, None, 0.0, None) for e, f in row.items()}
+             for n, row in offense.items()}
+    return lambda *a, **k: table
+
+
+class TestOneVOneVerdictPriorityAndSash(unittest.TestCase):
+    """The priority-finisher and (opt-in) Focus Sash tiebreaks: Arcanine-Hisui
+    (Head Smash 80% + Extreme Speed 29%) beats a faster Mega Garchomp Z that
+    also 2HKOs it, and a mutual 1HKO goes to the Focus Sash holder."""
+
+    def _matrix(self, table, spe_a, spe_b, sash=None, max_hits=4):
+        """table: {(att, tgt): (frac, move, prio_frac, prio_move)}"""
+        detail = {"A": {"B": table[("A", "B")]}, "B": {"A": table[("B", "A")]}}
+        merged = {"A": {"base_stats": {"spe": spe_a}},
+                  "B": {"base_stats": {"spe": spe_b}}}
+        real = cf._one_v_one_offense_detail
+        try:
+            cf._one_v_one_offense_detail = lambda *a, **k: detail
+            return (cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
+                                         max_hits=max_hits, sash_holders=sash)["A"]["B"],
+                    cf._one_v_one_matrix(["B"], ["A"], merged, None, None, None,
+                                         max_hits=max_hits, sash_holders=sash)["B"]["A"])
+        finally:
+            cf._one_v_one_offense_detail = real
+
+    def test_priority_finisher_beats_speed_in_a_tied_hit_count(self):
+        # both 2HKO; B is faster, but A's 0.8 + 0.25 priority finishes.
+        t = {("A", "B"): (0.8, "Head Smash", 0.25, "Extreme Speed"),
+             ("B", "A"): (0.6, "Earth Power", 0.0, None)}
+        self.assertEqual(self._matrix(t, 90, 151), ("win", "loss"))
+
+    def test_priority_only_counts_if_it_completes_the_ko(self):
+        # 0.8 + 0.15 < 1 -> no finisher -> the faster side wins as before.
+        t = {("A", "B"): (0.8, "Head Smash", 0.15, "Extreme Speed"),
+             ("B", "A"): (0.6, "Earth Power", 0.0, None)}
+        self.assertEqual(self._matrix(t, 90, 151), ("loss", "win"))
+
+    def test_both_with_priority_finishers_falls_back_to_speed(self):
+        t = {("A", "B"): (0.8, "Head Smash", 0.25, "Extreme Speed"),
+             ("B", "A"): (0.7, "Earth Power", 0.35, "Aqua Jet")}
+        self.assertEqual(self._matrix(t, 90, 151), ("loss", "win"))
+
+    def test_priority_does_not_change_a_one_hit_lead(self):
+        # A 2HKO vs B 3HKO: A wins with or without priority, B faster or not.
+        t = {("A", "B"): (0.8, "Head Smash", 0.0, None),
+             ("B", "A"): (0.4, "Earth Power", 0.0, None)}
+        self.assertEqual(self._matrix(t, 90, 151), ("win", "loss"))
+
+    def test_first_hit_ko_needs_no_priority(self):
+        # A 1HKO: a priority move is irrelevant to a 1-hit KO.
+        self.assertFalse(cf._priority_finisher(1, 1.2, 0.3))
+        self.assertTrue(cf._priority_finisher(2, 0.8, 0.25))
+        self.assertFalse(cf._priority_finisher(None, 0.8, 0.25))
+
+    def test_focus_sash_wins_a_mutual_ohko_only_when_enabled(self):
+        t = {("A", "B"): (1.2, "Close Combat", 0.0, None),
+             ("B", "A"): (1.1, "Earthquake", 0.0, None)}
+        # off (default): plain speed -- B is faster.
+        self.assertEqual(self._matrix(t, 50, 150), ("loss", "win"))
+        # A holds a Sash: it survives and wins despite being slower.
+        self.assertEqual(self._matrix(t, 50, 150, sash={"A"}), ("win", "loss"))
+        # B holds it: B wins (as it would on speed anyway).
+        self.assertEqual(self._matrix(t, 50, 150, sash={"B"}), ("loss", "win"))
+        # Both sashed: back to speed.
+        self.assertEqual(self._matrix(t, 50, 150, sash={"A", "B"}), ("loss", "win"))
+
+    def test_a_multi_hit_ohko_breaks_the_sash(self):
+        t = {("A", "B"): (1.2, "Triple Axel", 0.0, None),
+             ("B", "A"): (1.1, "Earthquake", 0.0, None)}
+        # B's Sash does not save it from Triple Axel -> speed decides.
+        self.assertEqual(self._matrix(t, 150, 50, sash={"B"}), ("win", "loss"))
+        t2 = {("A", "B"): (1.2, "Close Combat", 0.0, None),
+              ("B", "A"): (1.1, "Earthquake", 0.0, None)}
+        self.assertEqual(self._matrix(t2, 150, 50, sash={"B"}), ("loss", "win"))
+
+    def test_sash_only_matters_in_a_mutual_one_hit_ko(self):
+        # 2HKO vs 2HKO: a Sash changes nothing.
+        t = {("A", "B"): (0.6, "Close Combat", 0.0, None),
+             ("B", "A"): (0.6, "Earthquake", 0.0, None)}
+        self.assertEqual(self._matrix(t, 50, 150, sash={"A"}), ("loss", "win"))
+
+
+class TestOneVOneMoveLimit(unittest.TestCase):
+    """"Many mons are using >4 moves against enemy members" -- an optional
+    cap of 3 or 4 damaging moves per pool member, chosen to maximise wins."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+        cls.merged = cls.W["merged"]
+        cls.enemies = [e for e in ("Incineroar", "Rillaboom", "Gholdengo",
+                                   "Volcarona", "Kingambit", "Hydreigon")
+                       if e in cls.merged]
+        cls.pool = [n for n in list(cls.merged)[:80] if n not in cls.enemies]
+
+    def _counts(self, limit):
+        W = self.W
+        return cf.one_v_one_hit_counts_for_pool(
+            self.pool, self.enemies, self.merged, W["moves"], W["natures"],
+            W["typechart"], move_limit=limit)
+
+    def _distinct(self, counts, name):
+        return {c["our_move"] for c in counts[name].values() if c["our_move"]}
+
+    def test_no_pokemon_uses_more_moves_than_the_limit(self):
+        full = self._counts(None)
+        self.assertGreater(max(len(self._distinct(full, n)) for n in self.pool), 4,
+                           "fixture should exercise the >4 moves case")
+        for k in (3, 4):
+            lim = self._counts(k)
+            for n in self.pool:
+                self.assertLessEqual(len(self._distinct(lim, n)), k)
+                used = next(iter(lim[n].values()))["our_moveset"]
+                self.assertLessEqual(len(used), k)
+                self.assertTrue(self._distinct(lim, n) <= set(used))
+
+    def test_off_by_default_carries_no_moveset(self):
+        counts = self._counts(None)
+        self.assertTrue(all(c["our_moveset"] is None
+                            for row in counts.values() for c in row.values()))
+
+    def test_limited_wins_never_exceed_unlimited_and_four_matches_well(self):
+        def wins(r):
+            return {n: sum(c["verdict"] == "win" for c in row.values())
+                    for n, row in r.items()}
+        full, four, three = wins(self._counts(None)), wins(self._counts(4)), wins(self._counts(3))
+        for n in self.pool:
+            self.assertLessEqual(four[n], full[n])
+            self.assertLessEqual(three[n], four[n])
+
+    def test_matrix_agrees_with_the_displayed_verdicts(self):
+        W = self.W
+        counts = self._counts(3)
+        matrix = cf.one_v_one_matrix_for_pool(
+            self.pool, self.enemies, self.merged, W["moves"], W["natures"],
+            W["typechart"], move_limit=3)
+        for n in self.pool:
+            for e, c in counts[n].items():
+                self.assertEqual(matrix[n][e], c["verdict"])
+
+    def test_a_pool_member_that_is_also_an_enemy_keeps_full_moves_as_an_enemy(self):
+        """The reported KeyError: pool and enemy lists overlap (Abomasnow in
+        both) -- the limited row for the pool role must not replace the
+        enemy-role row, and no pair may raise."""
+        W = self.W
+        overlap = [n for n in self.pool[:6]]
+        pool = self.pool[:20]
+        enemies = list(dict.fromkeys(self.enemies + overlap))
+        for k in (3, 4):
+            matrix = cf.one_v_one_matrix_for_pool(
+                pool, enemies, self.merged, W["moves"], W["natures"],
+                W["typechart"], move_limit=k)
+            counts = cf.one_v_one_hit_counts_for_pool(
+                pool, enemies, self.merged, W["moves"], W["natures"],
+                W["typechart"], move_limit=k)
+            for n in pool:
+                for e in enemies:
+                    if e != n:
+                        self.assertEqual(matrix[n][e], counts[n][e]["verdict"])
+        # the enemy side is unrestricted: same their_move as with no cap
+        full = cf.one_v_one_hit_counts_for_pool(
+            pool, enemies, self.merged, W["moves"], W["natures"], W["typechart"])
+        lim = cf.one_v_one_hit_counts_for_pool(
+            pool, enemies, self.merged, W["moves"], W["natures"],
+            W["typechart"], move_limit=3)
+        for n in pool:
+            for e in enemies:
+                if e != n:
+                    self.assertEqual(lim[n][e]["their_move"], full[n][e]["their_move"])
+
+    def test_the_picked_subset_maximises_wins_exactly(self):
+        """Synthetic: 5 moves each beating exactly one enemy; a 3-move cap
+        must pick 3 that win 3 enemies, a cap of 4 wins 4."""
+        enemies = ["E1", "E2", "E3", "E4", "E5"]
+        moves = ["M1", "M2", "M3", "M4", "M5"]
+        table = {mv: {e: (1.0 if i == j else 0.1) for j, e in enumerate(enemies)}
+                 for i, mv in enumerate(moves)}
+        detail = {"A": {e: (0.0, None, 0.0, None) for e in enemies}}
+        for e in enemies:
+            detail[e] = {"A": (0.1, "Tap", 0.0, None)}
+        merged = {n: {"base_stats": {"spe": 100}} for n in ["A"] + enemies}
+        for k, expect in ((3, 3), (4, 4)):
+            new, chosen = cf._limit_detail_moves(
+                detail, {"A": table}, ["A"], enemies, merged, {}, k, 4)
+            wins = sum(cf._pair_verdict("A", e, detail, merged, 4, None, new) == "win"
+                       for e in enemies)
+            self.assertEqual(wins, expect)
+            self.assertEqual(len(chosen["A"]), k)
+
+
+class TestPairRowsFromCoverage(unittest.TestCase):
+    """`pair_rows_from_coverage` is the live-dict inverse of
+    `coverage_from_pair_rows`: the Matchup Finder hands its raced pairs to
+    "Import pair coverage" through it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+        W = cls.W
+        cls.rosters = [["Sinistcha", "Milotic", "Corviknight", "Hydreigon"],
+                       ["Kingambit", "Rillaboom", "Gholdengo", "Dragonite"]]
+        cls.cov = cf.multi_bring4_coverage(
+            ["Garchomp", "Incineroar", "Rillaboom", "Kingambit", "Gallade"],
+            cls.rosters, W["merged"], W["moves"], W["natures"], W["typechart"],
+            good_threshold=0.0, min_enemies=1)
+
+    def test_round_trip_preserves_every_pair_row(self):
+        W = self.W
+        pr, dr, tl = cf.pair_rows_from_coverage(self.cov)
+        self.assertEqual(tl, self.rosters)
+        back = cf.coverage_from_pair_rows(pr, dr, tl, W["merged"], W["moves"],
+                                          W["natures"], W["typechart"])
+        for ei, pbk in enumerate(self.cov["pair_by_key"]):
+            self.assertEqual(set(pbk), set(back["pair_by_key"][ei]))
+            for k, r in pbk.items():
+                b = back["pair_by_key"][ei][k]
+                for f in ("pairs_swept", "pairs_traded", "pairs_lost", "pairs_no_ko",
+                          "pairs_total", "pairs_protect_safe", "pairs_tailwind_safe"):
+                    self.assertEqual(r[f], b[f], f)
+                self.assertEqual(set(r["detail"]), set(b["detail"]))
+        self.assertEqual(back["fixed_moves"], {n: self.cov["fixed_moves"][n]
+                                               for n in back["fixed_moves"]})
+
+    def test_filter_coverage_pairs_keeps_only_the_named_pairs(self):
+        keys = sorted({k for pbk in self.cov["pair_by_key"] for k in pbk}, key=sorted)
+        keep = {keys[0]}
+        cov = cf.filter_coverage_pairs(self.cov, keep)
+        self.assertTrue(all(set(pbk) <= keep for pbk in cov["pair_by_key"]))
+        self.assertEqual(cov["candidate_pool"], sorted(keys[0]))
+        pr, _dr, _tl = cf.pair_rows_from_coverage(cov)
+        self.assertTrue(all(frozenset(r["pair"]) in keep for r in pr))
+        # the original is untouched
+        self.assertGreater(len({k for pbk in self.cov["pair_by_key"] for k in pbk}), 1)
+
+    def test_a_filtered_coverage_builds_teams_of_4(self):
+        keys = {k for pbk in self.cov["pair_by_key"] for k in pbk}
+        teams = cf.pair_coverage_teams(cf.filter_coverage_pairs(self.cov, keys),
+                                       group_size=4, top_n=3)
+        for t in teams:
+            self.assertEqual(len(t["team"]), 4)
+
+
+class TestParentalBond(unittest.TestCase):
+    """Mega Kangaskhan's Parental Bond: a second hit for 25% damage (1.25x
+    total) on single-target single-hit moves, which also breaks a Focus
+    Sash / Sturdy."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+
+    def _atk(self, ability="Parental Bond"):
+        from types import SimpleNamespace
+        return SimpleNamespace(ability=ability, item="")
+
+    def _move(self, name, target="normal", category="Physical"):
+        from damage import MoveInfo
+        return MoveInfo(name, 80, "Normal", category, target)
+
+    def test_single_target_hit_counts_as_1_25(self):
+        from damage import hit_count_for
+        self.assertEqual(hit_count_for("Return", self._atk(), self._move("Return")), 1.25)
+        self.assertEqual(hit_count_for("Return", self._atk("Scrappy"), self._move("Return")), 1)
+
+    def test_spread_multi_hit_status_and_excluded_moves_get_no_second_hit(self):
+        from damage import hit_count_for
+        atk = self._atk()
+        self.assertEqual(hit_count_for("Earthquake", atk, self._move("Earthquake", "allAdjacent")), 1)
+        self.assertEqual(hit_count_for("Snarl", atk, self._move("Snarl", "allAdjacentFoes", "Special")), 1)
+        self.assertEqual(hit_count_for("Bullet Seed", atk, self._move("Bullet Seed")), 3.17)
+        self.assertEqual(hit_count_for("Triple Axel", atk, self._move("Triple Axel")), 1)
+        self.assertEqual(hit_count_for("Explosion", atk, self._move("Explosion")), 1)
+        self.assertEqual(hit_count_for("Protect", atk, self._move("Protect", "self", "Status")), 1)
+
+    def test_parental_bond_breaks_a_focus_sash(self):
+        from damage import breaks_focus_sash
+        mv = self._move("Return")
+        self.assertTrue(breaks_focus_sash("Return", self._atk(), mv))
+        self.assertFalse(breaks_focus_sash("Return", self._atk("Scrappy"), mv))
+        self.assertFalse(breaks_focus_sash(
+            "Earthquake", self._atk(), self._move("Earthquake", "allAdjacent")))
+
+    def test_mega_kangaskhan_hits_1_25x_in_the_1v1_table(self):
+        import optimize_sets as o
+        from combatants import make_combatant
+        W = self.W
+        merged = W["merged"]
+        k = o._mega_project(make_combatant("Mega Kangaskhan", merged, W["natures"]))
+        self.assertEqual(k.ability, "Parental Bond")
+        table = o.raw_ohko_fraction_table("Mega Kangaskhan", merged, W["moves"],
+                                          W["natures"], W["typechart"], ["Incineroar"])
+        import copy
+        plain = copy.copy(k)
+        plain.ability = "Scrappy"
+        orig = o._mega_project
+        try:
+            o._mega_project = lambda c, _o=orig: plain if c.name == "Mega Kangaskhan" or getattr(c, "is_mega_pick", False) and c.mega_ability == "Parental Bond" else _o(c)
+            table_plain = o.raw_ohko_fraction_table(
+                "Mega Kangaskhan", merged, W["moves"], W["natures"], W["typechart"], ["Incineroar"])
+        finally:
+            o._mega_project = orig
+        checked = 0
+        for mv, row in table.items():
+            ratio = row["Incineroar"] / table_plain[mv]["Incineroar"] if table_plain[mv]["Incineroar"] else None
+            if ratio and abs(ratio - 1.25) < 1e-6:
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_a_pb_ohko_beats_a_focus_sash_in_the_1v1_verdict(self):
+        """Rows carry a 5th 'best move breaks a sash' flag: with it, the
+        sash holder does NOT survive, so a slower-than-sash-holder mutual
+        1HKO no longer flips to the sash holder."""
+        merged = {"A": {"base_stats": {"spe": 50}}, "B": {"base_stats": {"spe": 150}}}
+        # A (slower) OHKOs B with a Parental Bond move; B OHKOs A; B holds a sash.
+        detail = {"A": {"B": (1.05, "Return", 0.0, None, True)},
+                  "B": {"A": (1.1, "Earthquake", 0.0, None, False)}}
+        v = cf._pair_verdict("A", "B", detail, merged, 4, {"B"})
+        self.assertEqual(v, "loss")     # sash broken -> plain Speed: B faster wins
+        detail["A"]["B"] = (1.05, "Return", 0.0, None, False)
+        detail["B"]["A"] = (1.1, "Earthquake", 0.0, None, False)
+        merged = {"A": {"base_stats": {"spe": 150}}, "B": {"base_stats": {"spe": 50}}}
+        self.assertEqual(cf._pair_verdict("A", "B", detail, merged, 4, {"B"}), "loss")  # sash saves B, B wins
+        detail["A"]["B"] = (1.05, "Return", 0.0, None, True)
+        self.assertEqual(cf._pair_verdict("A", "B", detail, merged, 4, {"B"}), "win")   # broken: A faster wins
+
+    def test_real_detail_flags_mega_kangaskhan_moves_as_sash_breakers(self):
+        W = self.W
+        tables, breaks = {}, {}
+        cf._one_v_one_offense_detail(["Mega Kangaskhan", "Incineroar"], W["merged"],
+                                     W["moves"], W["natures"], W["typechart"],
+                                     tables_out=tables, breaks_out=breaks)
+        singles = [m for m in breaks["Mega Kangaskhan"]]
+        self.assertTrue(singles, "some Mega Kangaskhan moves must double")
+        # a spread move stays a non-breaker
+        for spread in ("Earthquake", "Rock Slide", "Snarl"):
+            if spread in tables["Mega Kangaskhan"]:
+                self.assertNotIn(spread, breaks["Mega Kangaskhan"])
+
+
 class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
     """"Make sure the win does not require an OHKO (give a reasonable
     limit, maybe optional, but still a win based on speed)" -- the old
@@ -11626,41 +12158,41 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
         """A synthetic offense table, patched in directly, so the pure
         comparison logic is pinned exactly independent of real damage
         calc: A needs 2 hits, B needs 4 -- A wins even if B is faster."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.5}, "B": {"A": 0.26}}  # A: 2HKO, B: 4HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.5}, "B": {"A": 0.26}})  # A: 2HKO, B: 4HKO
             merged = {"A": {"base_stats": {"spe": 50}},
                      "B": {"base_stats": {"spe": 150}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)
             self.assertEqual(matrix["A"]["B"], "win")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
-    def test_a_one_hit_lead_only_wins_if_also_faster(self):
-        """2HKO vs 3HKO is a win only for the 2HKOer if it is faster; the
-        slower 2HKOer (and the faster 3HKOer) get "no_ko" -- not decisive."""
-        real_offense = cf._one_v_one_offense
+    def test_a_one_hit_lead_wins_even_when_slower(self):
+        """2HKO vs 3HKO: the 2HKOer wins whatever the Speeds (A1 B1 A2 ends
+        it before B's 3rd hit) -- reported: Goodra 2HKO'd Rillaboom's 3HKO
+        at 80/85 Speed and read "no verdict"."""
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.5}, "B": {"A": 0.34}}  # A: 2HKO, B: 3HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.5}, "B": {"A": 0.34}})  # A: 2HKO, B: 3HKO
             fast_a = {"A": {"base_stats": {"spe": 150}}, "B": {"base_stats": {"spe": 50}}}
             slow_a = {"A": {"base_stats": {"spe": 50}}, "B": {"base_stats": {"spe": 150}}}
-            self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], fast_a, None, None, None)["A"]["B"], "win")
-            self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], fast_a, None, None, None)["B"]["A"], "loss")
-            self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], slow_a, None, None, None)["A"]["B"], "no_ko")
-            self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], slow_a, None, None, None)["B"]["A"], "no_ko")
+            for merged in (fast_a, slow_a):
+                self.assertEqual(cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)["A"]["B"], "win")
+                self.assertEqual(cf._one_v_one_matrix(["B"], ["A"], merged, None, None, None)["B"]["A"], "loss")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_a_tied_hit_count_still_breaks_on_speed(self):
         """The ORIGINAL mutual-OHKO speed tiebreak generalizes: an equal
         hits-to-ko on both sides (not just both 1) is still decided by
         base Speed, exactly as before."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.34}, "B": {"A": 0.34}}  # both 3HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.34}, "B": {"A": 0.34}})  # both 3HKO
             merged = {"A": {"base_stats": {"spe": 150}},
                      "B": {"base_stats": {"spe": 50}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)
@@ -11670,64 +12202,64 @@ class TestOneVOneMatrixNoLongerRequiresAnOHKO(unittest.TestCase):
             matrix2 = cf._one_v_one_matrix(["A"], ["B"], merged2, None, None, None)
             self.assertEqual(matrix2["A"]["B"], "loss")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_beyond_max_hits_on_both_sides_is_still_no_ko(self):
         """"give a reasonable limit" -- a genuinely slow, drawn-out
         exchange (both sides need MORE than `max_hits`) stays "no_ko":
         too inconclusive to call a real win either way."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.15}, "B": {"A": 0.12}}  # 7HKO vs 9HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.15}, "B": {"A": 0.12}})  # 7HKO vs 9HKO
             merged = {"A": {"base_stats": {"spe": 150}},
                      "B": {"base_stats": {"spe": 50}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
                                           max_hits=4)
             self.assertEqual(matrix["A"]["B"], "no_ko")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_max_hits_none_removes_the_cap_entirely(self):
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.15}, "B": {"A": 0.12}}  # 7HKO vs 9HKO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.15}, "B": {"A": 0.12}})  # 7HKO vs 9HKO
             merged = {"A": {"base_stats": {"spe": 150}},
                      "B": {"base_stats": {"spe": 50}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
                                           max_hits=None)
             self.assertEqual(matrix["A"]["B"], "win")  # 7 < 9, no cap to stop it
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_an_opponent_that_can_never_ko_us_is_always_a_win_past_the_cap(self):
         """Their hits-to-ko is `None` (a hard type immunity/0 real damage)
         -- we always win eventually regardless of how many hits WE need,
         since they can never finish the job. `max_hits` doesn't apply to
         this case at all."""
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {
-                "A": {"B": 0.1}, "B": {"A": 0.0}}  # A: 10HKO, B: can never KO
+            cf._one_v_one_offense_detail = _fake_detail({
+                "A": {"B": 0.1}, "B": {"A": 0.0}})  # A: 10HKO, B: can never KO
             merged = {"A": {"base_stats": {"spe": 50}},
                      "B": {"base_stats": {"spe": 150}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None,
                                           max_hits=4)
             self.assertEqual(matrix["A"]["B"], "win")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_neither_side_can_ever_ko_is_no_ko(self):
-        real_offense = cf._one_v_one_offense
+        real_offense = cf._one_v_one_offense_detail
         try:
-            cf._one_v_one_offense = lambda *a, **k: {"A": {"B": 0.0}, "B": {"A": 0.0}}
+            cf._one_v_one_offense_detail = _fake_detail({"A": {"B": 0.0}, "B": {"A": 0.0}})
             merged = {"A": {"base_stats": {"spe": 50}},
                      "B": {"base_stats": {"spe": 150}}}
             matrix = cf._one_v_one_matrix(["A"], ["B"], merged, None, None, None)
             self.assertEqual(matrix["A"]["B"], "no_ko")
         finally:
-            cf._one_v_one_offense = real_offense
+            cf._one_v_one_offense_detail = real_offense
 
     def test_default_max_hits_matches_the_ohko_only_case_exactly(self):
         """At the old, strict boundary (a genuine mutual OHKO -- Excadrill's

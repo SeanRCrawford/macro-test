@@ -257,8 +257,22 @@ BERRY_RESIST_TYPE = {
 }
 
 
+# Scrappy / Mind's Eye: the user's Normal and Fighting moves hit Ghost types
+# (the Ghost's immunity is ignored -- it counts as a neutral x1 against them,
+# so e.g. Close Combat vs Steel/Ghost Gholdengo is a plain 2x, not 0x).
+GHOST_IMMUNITY_IGNORERS = frozenset({"Scrappy", "Mind's Eye"})
+GHOST_IGNORED_MOVE_TYPES = frozenset({"Normal", "Fighting"})
+
+
+def ignores_ghost_immunity(attacker_ability: str | None, move_type: str) -> bool:
+    """True if `attacker_ability` lets a `move_type` move hit Ghost types."""
+    return (attacker_ability in GHOST_IMMUNITY_IGNORERS
+            and move_type in GHOST_IGNORED_MOVE_TYPES)
+
+
 def type_multiplier(move_type: str, defender_types: list, typechart: dict,
-                    move_name: str | None = None) -> float:
+                    move_name: str | None = None,
+                    ignore_ghost_immunity: bool = False) -> float:
     """Type effectiveness, memoised.
 
     A pure function of (move type, defender types, move name) for a fixed
@@ -268,7 +282,8 @@ def type_multiplier(move_type: str, defender_types: list, typechart: dict,
     typechart's identity is part of the key so a caller holding a different
     chart cannot be served another one's answers.
     """
-    key = (id(typechart), move_type, tuple(defender_types), move_name)
+    key = (id(typechart), move_type, tuple(defender_types), move_name,
+           ignore_ghost_immunity)
     hit = _TYPE_MULT_CACHE.get(key)
     if hit is not None:
         return hit
@@ -276,6 +291,8 @@ def type_multiplier(move_type: str, defender_types: list, typechart: dict,
     mult = 1.0
     for dtype in defender_types:
         dkey = dtype.lower()
+        if ignore_ghost_immunity and dkey == "ghost":
+            continue   # Scrappy/Mind's Eye: Ghost is neutral to Normal/Fighting
         if dkey in override:
             mult *= override[dkey]
             continue
@@ -641,25 +658,62 @@ def defender_hp_based_power(defender: "Combatant") -> int:
     return max(1, int(100 * defender.current_hp / max_hp))
 
 
-def hit_count_for(move_name: str, attacker: "Combatant") -> float:
+# Parental Bond (Mega Kangaskhan): a single-target, single-hit damaging move
+# hits a second time for a quarter of the damage (gen 7+), so total damage is
+# 1.25x and -- being two hits -- it breaks a Focus Sash / Sturdy.
+PARENTAL_BOND_TOTAL = 1.25
+# Moves Parental Bond never doubles (they already multi-hit, charge, or
+# self-KO / counter / are otherwise excluded by the game). Spread moves are
+# excluded separately via `MoveInfo.target`.
+PARENTAL_BOND_EXCLUDED = frozenset({
+    "Explosion", "Self-Destruct", "Misty Explosion", "Final Gambit", "Endeavor",
+    "Counter", "Mirror Coat", "Metal Burst", "Bide", "Uproar", "Rollout",
+    "Ice Ball", "Fling", "Solar Beam", "Solar Blade", "Skull Bash", "Sky Attack",
+    "Razor Wind", "Freeze Shock", "Ice Burn", "Geomancy", "Meteor Beam",
+    "Electro Shot", "Sky Drop", "Dig", "Fly", "Bounce", "Dive", "Phantom Force",
+    "Shadow Force", "Focus Punch", "Beak Blast", "Shell Trap", "Last Resort",
+})
+_SPREAD_TARGETS = frozenset({"allAdjacentFoes", "allAdjacent", "all"})
+
+
+def parental_bond_applies(move_name: str, attacker: "Combatant", move=None) -> bool:
+    """True if `attacker` has Parental Bond and `move_name` gets its second
+    hit. `move` (a `MoveInfo`), when given, also rules out status and spread
+    moves -- callers without one only get the name-based exclusions."""
+    if getattr(attacker, "ability", "") != "Parental Bond":
+        return False
+    if (move_name in MULTI_HIT or move_name in EXTRA_MULTI_HIT_MOVES
+            or move_name in PARENTAL_BOND_EXCLUDED):
+        return False
+    if move is not None and (move.category == "Status" or move.target in _SPREAD_TARGETS):
+        return False
+    return True
+
+
+def hit_count_for(move_name: str, attacker: "Combatant", move=None) -> float:
     """How many times this move hits, for this tool's aggregate-damage model
     (total damage = hits * single-hit damage). Population Bomb is a flat 10
     hits with Wide Lens (Skill Link-style guaranteed count), otherwise it's
     too unreliable to plan around and is treated as a single hit -- matching
     it being excluded from candidate movesets without Wide Lens in the first
-    place (optimize_sets.candidate_moves)."""
+    place (optimize_sets.candidate_moves). Parental Bond's second hit counts
+    as 1.25 total (see `parental_bond_applies`)."""
     if move_name == "Population Bomb":
         return 10 if attacker.item == "Wide Lens" else 1
     entry = MULTI_HIT.get(move_name)
-    return entry[2] if entry else 1
+    if entry:
+        return entry[2]
+    return PARENTAL_BOND_TOTAL if parental_bond_applies(move_name, attacker, move) else 1
 
 
-def breaks_focus_sash(move_name: str, attacker: "Combatant") -> bool:
+def breaks_focus_sash(move_name: str, attacker: "Combatant", move=None) -> bool:
     """True if this move hits more than once, so a Focus Sash / Sturdy only
     absorbs the first hit and a later hit still knocks the holder out --
     every MULTI_HIT move (Population Bomb only with Wide Lens, same as
-    `hit_count_for`) plus Triple Axel/Triple Kick/Surging Strikes."""
-    return move_name in EXTRA_MULTI_HIT_MOVES or hit_count_for(move_name, attacker) > 1
+    `hit_count_for`), Triple Axel/Triple Kick/Surging Strikes, and any move
+    that gets a Parental Bond second hit."""
+    return (move_name in EXTRA_MULTI_HIT_MOVES
+            or hit_count_for(move_name, attacker, move) > 1)
 
 
 EARTHQUAKE_FAMILY = ("Earthquake", "Bulldoze", "Magnitude")
@@ -857,7 +911,9 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     def_types = defender.types
     # `move.name` matters here, not just its type: Freeze-Dry is an Ice move
     # that is super effective on Water (TYPE_OVERRIDE_MOVES).
-    type_eff = type_multiplier(move.move_type, def_types, typechart, move.name)
+    type_eff = type_multiplier(
+        move.move_type, def_types, typechart, move.name,
+        ignore_ghost_immunity=ignores_ghost_immunity(attacker.ability, move.move_type))
     modifier *= type_eff
 
     # Ability damage modifiers (Sheer Force, Sharpness, Thick Fat, Filter, ...)

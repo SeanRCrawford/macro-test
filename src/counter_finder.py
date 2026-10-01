@@ -480,7 +480,14 @@ def raw_weakness_by_type(core, merged):
 TECH_ABILITIES = {
     "weather": frozenset(WEATHER_SETTERS),
     "terrain": frozenset(TERRAIN_SETTERS),
+    "intimidate": frozenset({"Intimidate"}),
 }
+# Ability techs that count if EITHER form has the ability: Intimidate resolves
+# on switch-in, before Mega Evolution, so a Mega pick whose base form carries
+# it (Mega Salamence / Mega Gyarados / Mega Staraptor are Aerilate / Mold
+# Breaker / Contrary once evolved) still provides it -- and one whose own Mega
+# form has it counts too.
+TECH_ABILITY_EITHER_FORM = frozenset({"intimidate"})
 TECH_MOVES = {
     "fake_out": frozenset({"Fake Out"}),
     "speed_control": frozenset({
@@ -527,6 +534,7 @@ TECH_LABELS = {
     "coaching": "Coaching user", "redirect": "redirector (Follow Me/Rage Powder)",
     "taunt": "Taunt user", "helping_hand": "Helping Hand user",
     "pivot": "pivot/switching move (U-turn, Volt Switch, Parting Shot, ...)",
+    "intimidate": "Intimidate user (base or Mega form)",
 }
 
 
@@ -536,7 +544,16 @@ def _member_has_tech(name, merged, tech):
     rec = merged.get(name) or {}
     if tech in TECH_ABILITIES:
         from combatants import _default_ability
-        return _default_ability(rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]
+        if _default_ability(rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]:
+            return True
+        if tech in TECH_ABILITY_EITHER_FORM:
+            from species_data import base_form_name
+            base = base_form_name(name)
+            base_rec = merged.get(base) if base and base != name else None
+            if base_rec and _default_ability(
+                    base_rec.get("abilities_usage") or []) in TECH_ABILITIES[tech]:
+                return True
+        return False
     move_names = {mv for mv, _pct in (rec.get("moves_usage") or [])}
     return bool(move_names & TECH_MOVES[tech])
 
@@ -807,14 +824,39 @@ def _one_v_one_offense(universe, merged, moves_db, natures, typechart):
                 universe, merged, moves_db, natures, typechart).items()}
 
 
-def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart):
-    """{name: {other_name: (best_frac, move_name)}} -- `_one_v_one_offense`'s
-    own table plus WHICH real-usage move produced each best fraction (None
-    when nothing does any damage), so a caller can show the actual move
-    behind a hits-to-KO read instead of just a number."""
+def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart,
+                              tables_out=None, breaks_out=None):
+    """{name: {other_name: (best_frac, move_name, prio_frac, prio_move)}} --
+    `_one_v_one_offense`'s own table plus WHICH real-usage move produced each
+    best fraction (None when nothing does any damage), and the best damaging
+    PRIORITY move against that enemy (Fake Out/First Impression excluded --
+    turn-one-only, useless as a finisher), so a caller can show the actual
+    move behind a hits-to-KO read and reason about a priority last hit.
+
+    `tables_out`: if a dict, filled with each name's full per-move table
+    ({name: {move: {enemy: frac}}}) so `_limit_detail_moves` can re-pick a
+    smaller moveset without recomputing the damage. `breaks_out`: if a dict,
+    filled with {name: {moves that break a Focus Sash for that attacker}}
+    (multi-hit moves, and any move gaining a Parental Bond second hit). Every
+    row's 5th element says whether ITS best move breaks a sash."""
     offense = {}
     for name in universe:
         table = raw_ohko_fraction_table(name, merged, moves_db, natures, typechart, universe)
+        if tables_out is not None:
+            tables_out[name] = table
+        attacker = _mega_project(make_combatant(name, merged, natures))
+        breakers = set()
+        for mv in table:
+            info = _lookup_move(mv, moves_db)
+            if breaks_focus_sash(mv, attacker, info):
+                breakers.add(mv)
+        if breaks_out is not None:
+            breaks_out[name] = breakers
+        prio_moves = []
+        for mv in table:
+            info = _lookup_move(mv, moves_db)
+            if info is not None and info.priority > 0 and mv not in FIRST_TURN_ONLY_MOVES:
+                prio_moves.append(mv)
         row = {}
         for en in universe:
             if en == name:
@@ -823,9 +865,39 @@ def _one_v_one_offense_detail(universe, merged, moves_db, natures, typechart):
             for mv, fr in table.items():
                 if fr.get(en, 0.0) > best_frac:
                     best_frac, best_move = fr[en], mv
-            row[en] = (best_frac, best_move)
+            prio_frac, prio_move = 0.0, None
+            for mv in prio_moves:
+                if table[mv].get(en, 0.0) > prio_frac:
+                    prio_frac, prio_move = table[mv][en], mv
+            row[en] = (best_frac, best_move, prio_frac, prio_move,
+                       best_move in breakers)
         offense[name] = row
     return offense
+
+
+def _priority_finisher(hits, best_frac, prio_frac):
+    """True if this side's KO comes with a PRIORITY last hit: (hits-1) of its
+    best hits then one priority move still adds up to 100% -- e.g. Head Smash
+    80% + Extreme Speed 25%. A priority move lands before the opponent's
+    move that turn whatever the Speeds, so it beats the speed tiebreak."""
+    if hits is None or prio_frac <= 0:
+        return False
+    return (hits - 1) * best_frac + prio_frac >= 1.0 - 1e-9
+
+
+def _sash_saves(holder, holder_names, attacker_move, breaks=None):
+    """True if `holder` (a name) has a Focus Sash that survives a would-be
+    OHKO from `attacker_move` -- not against a multi-hit move, which breaks
+    it. `breaks`: whether that move breaks a sash for its actual attacker
+    (multi-hit, or a Parental Bond second hit) -- when None (a plain
+    name-only caller) it is read off the move name alone. `holder_names` is
+    None when the option is off."""
+    if holder_names is None or holder not in holder_names or attacker_move is None:
+        return False
+    if breaks is None:
+        from types import SimpleNamespace
+        breaks = breaks_focus_sash(attacker_move, SimpleNamespace(item=""))
+    return not breaks
 
 
 # "Make sure the win does not require an OHKO ... give a reasonable
@@ -841,10 +913,18 @@ DEFAULT_MAX_HITS_FOR_VERDICT = 4
 
 
 def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
-                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT,
+                       my_prio=False, their_prio=False,
+                       my_sash=False, their_sash=False):
     """"win"/"loss"/"no_ko" from each side's hits-to-KO (`None` = can never
     KO) and base Speed -- the one place `_one_v_one_matrix`'s rule lives, so
-    `one_v_one_hit_counts_for_pool`'s displayed verdict can never drift."""
+    `one_v_one_hit_counts_for_pool`'s displayed verdict can never drift.
+
+    `my_prio`/`their_prio`: that side's KO ends on a PRIORITY move
+    (`_priority_finisher`), which acts first whatever the Speeds -- breaks
+    an equal-hits tie for the side that has it (both or neither: Speed). `my_sash`/`their_sash`: that side holds a
+    Focus Sash that survives the other's OHKO -- in a mutual 1HKO the sash
+    holder survives, hits back and wins (both: Speed)."""
     if my_hits is None and their_hits is None:
         return "no_ko"
     if my_hits is None:
@@ -855,16 +935,20 @@ def _one_v_one_verdict(my_hits, their_hits, my_spe, their_spe,
         return "no_ko"
     margin = their_hits - my_hits
     if margin == 0:
+        if my_hits == 1 and my_sash != their_sash:
+            return "win" if my_sash else "loss"
+        if my_prio != their_prio:
+            return "win" if my_prio else "loss"
         return "win" if my_spe >= their_spe else "loss"
-    if abs(margin) >= 2:
-        return "win" if margin > 0 else "loss"
-    if margin > 0:   # we need exactly one fewer hit: only decisive if faster
-        return "win" if my_spe > their_spe else "no_ko"
-    return "loss" if their_spe > my_spe else "no_ko"
+    # Fewer hits needed always wins: even the slower side's k-th hit lands
+    # before the faster side's (k+1)-th (2HKO vs 3HKO plays out A1 B1 A2 -> B
+    # is dead before its 3rd hit), so Speed only matters on equal hits.
+    return "win" if margin > 0 else "loss"
 
 
 def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
-                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                      max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                      move_limit=None):
     """{name: {enemy_name: "win"/"loss"/"no_ko"}} for every (pool member,
     enemy) pair -- a CHEAP, non-full-engine 1v1 read ("even just simple 1v1
     calculation"), computed ONCE and reused by every candidate pair's own
@@ -889,12 +973,9 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     and used to fall into "no_ko" (reported: "only 20/153 beating
     Incineroar, but Dragonite should be able to"). Generalizes the old
     OHKO-only rule, which is just this same comparison at `max_hits=1`:
-    whichever side needs at least TWO fewer hits to KO the other wins
-    outright; a lead of exactly ONE hit (2HKO vs 3HKO) only counts as a
-    win for the side that is also FASTER (otherwise "no_ko" -- not a
-    decisive read for either side, deliberately more conservative than a
-    strict turn-by-turn sim since Protect/chip/rolls erase a one-hit
-    lead); equal hits-to-KO is decided by speed alone -- real base Speed,
+    whichever side needs FEWER hits to KO the other wins (even a slower
+    2HKOer beats a faster 3HKOer: A1 B1 A2 ends it before B's 3rd hit);
+    equal hits-to-KO is decided by a priority finisher, then speed alone -- real base Speed,
     deliberately no item/ability/weather speed modifiers -- this stays a
     SIMPLE screening pass, not a re-run of `_joint_race`); "no_ko" only when NEITHER side reaches a real verdict
     -- neither can ever KO the other at all, or both would take longer
@@ -902,15 +983,16 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
     wins/loses outright regardless of `max_hits` -- there's no time
     pressure to weigh against an opponent who can never finish the job).
 
+    `move_limit` (None = off): cap each pool member at that many damaging
+    moves, chosen to maximise its wins (`_limit_detail_moves`).
+
     A pool member is never matched against an identical enemy entry of the
     same name (a literal self-mirror isn't a meaningful "does my own team
     have an answer to this enemy" question for MY OWN pool).
     """
-    offense = _one_v_one_offense(list(pool) + list(enemy_names), merged,
-                                 moves_db, natures, typechart)
-
-    def hits(frac):
-        return math.ceil(1.0 / frac) if frac > 0 else None
+    detail, our_detail, _chosen = _detail_with_move_limit(
+        pool, enemy_names, merged, moves_db, natures, typechart, max_hits,
+        sash_holders, move_limit)
 
     matrix = {}
     for name in pool:
@@ -918,24 +1000,157 @@ def _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            matrix[name][enemy_name] = _one_v_one_verdict(
-                hits(offense[name][enemy_name]), hits(offense[enemy_name][name]),
-                merged[name]["base_stats"]["spe"],
-                merged[enemy_name]["base_stats"]["spe"], max_hits)
+            matrix[name][enemy_name] = _pair_verdict(
+                name, enemy_name, detail, merged, max_hits, sash_holders,
+                our_detail)
     return matrix
 
 
+def _detail_with_move_limit(pool, enemy_names, merged, moves_db, natures, typechart,
+                            max_hits, sash_holders, move_limit):
+    """(unrestricted detail, our move-limited detail, {name: chosen moves})
+    -- without `move_limit` the two details are the same object and the
+    chosen map is empty."""
+    universe = list(pool) + list(enemy_names)
+    if not move_limit:
+        detail = _one_v_one_offense_detail(universe, merged, moves_db, natures,
+                                           typechart)
+        return detail, detail, {}
+    tables, breaks = {}, {}
+    detail = _one_v_one_offense_detail(universe, merged, moves_db, natures,
+                                       typechart, tables_out=tables,
+                                       breaks_out=breaks)
+    our_detail, chosen = _limit_detail_moves(
+        detail, tables, pool, enemy_names, merged, moves_db, move_limit,
+        max_hits, sash_holders, breaks)
+    return detail, our_detail, chosen
+
+
+def _pair_hits(frac):
+    return math.ceil(1.0 / frac) if frac > 0 else None
+
+
+def _row_breaks(row):
+    """A detail row's "best move breaks a Focus Sash" flag, or None when the
+    row (e.g. a hand-built test table) does not carry one."""
+    return row[4] if len(row) > 4 else None
+
+
+def _verdict_from_rows(name, enemy_name, our_row, their_row, merged, max_hits,
+                       sash_holders=None):
+    """`_one_v_one_verdict` from two `_one_v_one_offense_detail` rows
+    ((best_frac, best_move, prio_frac, prio_move) each way)."""
+    our_frac, our_move, our_pf, _pm = our_row[:4]
+    their_frac, their_move, their_pf, _tm = their_row[:4]
+    our_breaks, their_breaks = _row_breaks(our_row), _row_breaks(their_row)
+    my_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
+    return _one_v_one_verdict(
+        my_hits, their_hits,
+        merged[name]["base_stats"]["spe"], merged[enemy_name]["base_stats"]["spe"],
+        max_hits,
+        my_prio=_priority_finisher(my_hits, our_frac, our_pf),
+        their_prio=_priority_finisher(their_hits, their_frac, their_pf),
+        my_sash=_sash_saves(name, sash_holders, their_move, their_breaks),
+        their_sash=_sash_saves(enemy_name, sash_holders, our_move, our_breaks))
+
+
+def _pair_verdict(name, enemy_name, detail, merged, max_hits, sash_holders=None,
+                  our_detail=None):
+    """`_one_v_one_verdict` for one (name, enemy) pair straight off
+    `_one_v_one_offense_detail`'s table -- shared with the displayed
+    hits-to-KO detail so the two can never disagree. `our_detail`: a
+    move-limited copy to read OUR side from (the enemy side always comes
+    from the unrestricted `detail`)."""
+    return _verdict_from_rows(name, enemy_name,
+                              (our_detail or detail)[name][enemy_name],
+                              detail[enemy_name][name], merged, max_hits,
+                              sash_holders)
+
+
+def _rows_for_moves(table, prio_moves, moveset, enemy_names, name, breakers=()):
+    """`_one_v_one_offense_detail`'s row for one attacker restricted to
+    `moveset` (a list of move names from its full `table`)."""
+    row = {}
+    for en in enemy_names:
+        if en == name:
+            continue
+        best_frac, best_move = 0.0, None
+        prio_frac, prio_move = 0.0, None
+        for mv in moveset:
+            fr = table[mv].get(en, 0.0)
+            if fr > best_frac:
+                best_frac, best_move = fr, mv
+            if mv in prio_moves and fr > prio_frac:
+                prio_frac, prio_move = fr, mv
+        row[en] = (best_frac, best_move, prio_frac, prio_move, best_move in breakers)
+    return row
+
+
+def _limit_detail_moves(detail, tables, pool, enemy_names, merged, moves_db,
+                        move_limit, max_hits, sash_holders=None, breaks=None):
+    """"Many mons are using >4 moves against enemy members" -- restrict each
+    pool member to at most `move_limit` damaging moves, picking the subset
+    that MAXIMISES its 1v1 wins over `enemy_names` (then fewest losses, then
+    most total damage, then move names -- fully deterministic). Each
+    member's candidate list is <= 10 moves, so every subset of size
+    `move_limit` is tried exactly (C(10,4) = 210). Enemies are untouched.
+
+    Returns (our_detail, {name: [chosen moves]}) -- `our_detail` is a copy of
+    `detail` with the pool rows replaced (read OUR side from it only: an enemy
+    that is also a pool member keeps its full, unrestricted row in `detail`);
+    a member with <= `move_limit` damaging moves (or no
+    table, e.g. a patched test double) keeps its full row."""
+    from itertools import combinations
+    new_detail = dict(detail)
+    chosen = {}
+    for name in pool:
+        table = tables.get(name)
+        if not table or name not in detail:
+            continue
+        mvs = sorted(table)
+        brk = (breaks or {}).get(name, ())
+        prio = set()
+        for mv in mvs:
+            info = _lookup_move(mv, moves_db)
+            if info is not None and info.priority > 0 and mv not in FIRST_TURN_ONLY_MOVES:
+                prio.add(mv)
+        if len(mvs) <= move_limit:
+            chosen[name] = mvs
+            continue
+        enemies = [e for e in enemy_names if e != name and e in detail]
+        best_key, best_set = None, None
+        for combo in combinations(mvs, move_limit):
+            row = _rows_for_moves(table, prio, combo, enemies, name, brk)
+            wins = losses = 0
+            dmg = 0.0
+            for en in enemies:
+                v = _verdict_from_rows(name, en, row[en], detail[en][name],
+                                       merged, max_hits, sash_holders)
+                wins += v == "win"
+                losses += v == "loss"
+                dmg += min(row[en][0], 1.0)
+            key = (wins, -losses, round(dmg, 9))
+            if best_key is None or key > best_key:
+                best_key, best_set = key, combo
+        chosen[name] = list(best_set)
+        new_detail[name] = _rows_for_moves(table, prio, best_set, enemy_names, name, brk)
+    return new_detail, chosen
+
+
 def _one_v_one_outcome(name, enemy_name, merged, moves_db, natures, typechart,
-                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                       max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                       move_limit=None):
     """Single-pair convenience wrapper around `_one_v_one_matrix` (same
     logic, no batching) -- for an ad-hoc "does X beat Y" query rather than
     a whole pool's worth."""
     return _one_v_one_matrix([name], [enemy_name], merged, moves_db,
-                             natures, typechart, max_hits=max_hits)[name][enemy_name]
+                             natures, typechart, max_hits=max_hits,
+                             sash_holders=sash_holders)[name][enemy_name]
 
 
 def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
-                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                              max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                              move_limit=None):
     """Public entry point onto `_one_v_one_matrix` -- for a caller outside
     this module (the Streamlit app) wanting to build the SAME cheap 1v1
     read `find_pair_cores`'s own `threat_coverage` already uses, to hand
@@ -950,11 +1165,13 @@ def one_v_one_matrix_for_pool(pool, enemy_names, merged, moves_db, natures, type
     same reasonable, non-OHKO-only cap every other caller in this module
     uses."""
     return _one_v_one_matrix(pool, enemy_names, merged, moves_db, natures, typechart,
-                             max_hits=max_hits)
+                             max_hits=max_hits, sash_holders=sash_holders,
+                             move_limit=move_limit)
 
 
 def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, typechart,
-                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT):
+                                  max_hits=DEFAULT_MAX_HITS_FOR_VERDICT, sash_holders=None,
+                                  move_limit=None):
     """{name: {enemy_name: {"our_hits_to_ko", "their_hits_to_ko"}}} for
     every (pool member, enemy) pair -- "I KO very quickly and take little
     damage, such as OHKO vs 4HKO" wants the actual hits-to-KO each way,
@@ -973,30 +1190,35 @@ def one_v_one_hit_counts_for_pool(pool, enemy_names, merged, moves_db, natures, 
 
     A pool member is never matched against an identical enemy entry of
     the same name, same as `_one_v_one_matrix`."""
-    offense = _one_v_one_offense_detail(list(pool) + list(enemy_names), merged,
-                                        moves_db, natures, typechart)
-
-    def hits(frac):
-        return math.ceil(1.0 / frac) if frac > 0 else None
-
+    offense, our_offense, chosen = _detail_with_move_limit(
+        pool, enemy_names, merged, moves_db, natures, typechart, max_hits,
+        sash_holders, move_limit)
     result = {}
     for name in pool:
         result[name] = {}
         for enemy_name in enemy_names:
             if enemy_name == name:
                 continue
-            our_frac, our_move = offense[name][enemy_name]
-            their_frac, their_move = offense[enemy_name][name]
-            our_hits, their_hits = hits(our_frac), hits(their_frac)
-            our_spe = merged[name]["base_stats"]["spe"]
-            their_spe = merged[enemy_name]["base_stats"]["spe"]
+            our_frac, our_move, our_pf, our_pm = our_offense[name][enemy_name][:4]
+            our_breaks = _row_breaks(our_offense[name][enemy_name])
+            their_frac, their_move, their_pf, their_pm = offense[enemy_name][name][:4]
+            their_breaks = _row_breaks(offense[enemy_name][name])
+            our_hits, their_hits = _pair_hits(our_frac), _pair_hits(their_frac)
             result[name][enemy_name] = {
                 "our_hits_to_ko": our_hits, "their_hits_to_ko": their_hits,
                 "our_move": our_move, "their_move": their_move,
+                "our_moveset": chosen.get(name),
                 "our_pct": our_frac * 100.0, "their_pct": their_frac * 100.0,
-                "our_speed": our_spe, "their_speed": their_spe,
-                "verdict": _one_v_one_verdict(our_hits, their_hits, our_spe,
-                                              their_spe, max_hits),
+                "our_speed": merged[name]["base_stats"]["spe"],
+                "their_speed": merged[enemy_name]["base_stats"]["spe"],
+                "our_prio_finisher": _priority_finisher(our_hits, our_frac, our_pf),
+                "their_prio_finisher": _priority_finisher(their_hits, their_frac, their_pf),
+                "our_prio_move": our_pm, "our_prio_pct": our_pf * 100.0,
+                "their_prio_move": their_pm, "their_prio_pct": their_pf * 100.0,
+                "our_sash": _sash_saves(name, sash_holders, their_move, their_breaks),
+                "their_sash": _sash_saves(enemy_name, sash_holders, our_move, our_breaks),
+                "verdict": _pair_verdict(name, enemy_name, offense, merged,
+                                         max_hits, sash_holders, our_offense),
             }
     return result
 
@@ -1239,7 +1461,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           must_include=None, suggested=None, suggested_min=0,
                           required_cores=None, min_member_score=None, exclude=None,
                           required_techs=None, max_weak_types=None,
-                          max_weak_types_3=None, moves_db=None,
+                          max_weak_types_3=None, moves_db=None, max_net_weak_types=None,
                           min_special_attackers=None, typechart=None,
                           min_offensive_types=None, one_v_one_matrix=None,
                           max_uncovered_threats=None, min_threat_answers=1):
@@ -1285,6 +1507,15 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         a large, un-narrowed `pool` tractable under a real cap (see
         `max_search_names` below) rather than needing a lossy pool-size
         heuristic to do the pruning instead.
+
+    `max_net_weak_types`: a BREADTH cap on NET weakness -- "max types with at
+    least 1 net weakness": a group is dropped when more than this many
+    DIFFERENT types have net weakness (members weak to it minus members
+    resisting/immune to it) of 1 or more. Like `max_net_weakness` it is NOT
+    growth-monotonic (a later resist can pull a type's net back down), so it
+    is checked once per COMPLETE candidate, never pruned mid-search. `None`
+    (default) checks nothing; 0 demands no type with any net weakness.
+    Every row carries the count as "net_weak_types".
 
     `max_net_weakness`/`min_avg_score` are the two checks that are NOT
     growth-monotonic (a later member's own RESIST can pull a type's net
@@ -1724,6 +1955,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 "weakness": weakness, "worst_weakness": max(weakness.values()),
                 "weak_type_breadth_2": sum(1 for v in weakness.values() if v >= 2),
                 "weak_type_breadth_3": sum(1 for v in weakness.values() if v >= 3),
+                "net_weak_types": sum(1 for v in net_weakness.values() if v >= 1),
                 "offensive_coverage": offensive_coverage,
                 "threat_coverage": threat_coverage,
             }
@@ -1742,6 +1974,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     row["avg_score"] is None or row["avg_score"] < min_avg_score):
                 return False
             if max_net_weakness is not None and row["worst_net_weakness"] > max_net_weakness:
+                return False
+            if max_net_weak_types is not None and row["net_weak_types"] > max_net_weak_types:
                 return False
             if min_offensive_types is not None and row["offensive_coverage"] is not None:
                 if len(row["offensive_coverage"]["covered"]) < min_offensive_types:
@@ -2304,7 +2538,7 @@ def _raw_hit(attacker, move, defender, typechart, weather=None, roll="lo",
     lo, hi, avg, eff = damage_roll(50, move.power, atk, dfn, dmg_attacker, dmg_defender,
                                    move, typechart, weather=weather, auras=auras,
                                    num_targets_hit=num_targets_hit, terrain=terrain)
-    hits = hit_count_for(move.name, attacker)
+    hits = hit_count_for(move.name, attacker, move)
     cur = defender.current_hp or 1
     lo_f, avg_f, hi_f = (lo * hits) / cur, (avg * hits) / cur, (hi * hits) / cur
     if helping_hand:
@@ -4169,7 +4403,7 @@ def _apply_plan(plan, combatants, hp, protected_roles, enemy_speed_mult, field,
             # race correctly finishes it off instead of re-triggering.
             if (new_hp <= 0 and hp[tgt_role] >= 1.0 and target_c.max_hp()
                     and (target_c.item == "Focus Sash" or target_c.ability == "Sturdy")
-                    and not breaks_focus_sash(mv.name, attacker_c)):
+                    and not breaks_focus_sash(mv.name, attacker_c, mv)):
                 new_hp = 1.0 / target_c.max_hp()
             hp[tgt_role] = max(0.0, new_hp)
             log.append((role, tgt_role, got))
@@ -8020,6 +8254,62 @@ def _pair_coverage_rank_key(pair_key, pair_by_key):
     )
 
 
+def filter_coverage_pairs(coverage, keep_keys):
+    """`coverage` (a `multi_bring4_coverage`-shaped dict) restricted to the
+    pairs in `keep_keys` (an iterable of `frozenset` pair keys): every other
+    pair is dropped from `pair_by_key`, `candidate_pool` shrinks to the names
+    in the kept pairs, and the rest (sets, enemy rosters, ...) is shared with
+    the original. What a team builder such as `pair_coverage_teams` should
+    read after a caller has decided which pairs are "good enough"."""
+    keep = set(keep_keys)
+    out = dict(coverage)
+    out["pair_by_key"] = [{k: r for k, r in pbk.items() if k in keep}
+                          for pbk in coverage["pair_by_key"]]
+    out["candidate_pool"] = sorted({n for k in keep for n in k})
+    return out
+
+
+def pair_rows_from_coverage(coverage, keep_keys=None):
+    """(pair_rows, detail_rows, target_name_lists) in the exact plain-dict
+    shape `coverage_from_pair_rows` reads back (and the "Pair Coverage"/
+    "Pair Detail" xlsx sheets carry) -- the inverse of that function, for a
+    live `coverage` dict: real sets included, `keep_keys` (an iterable of
+    `frozenset` pair keys, default every pair) choosing which pairs to
+    export. Lets the Matchup Finder hand its already-raced pairs straight to
+    "Import pair coverage" without a file round trip."""
+    keep = None if keep_keys is None else set(keep_keys)
+    fixed_moves = coverage["fixed_moves"]
+    pair_rows, detail_rows = [], []
+    for ei, pbk in enumerate(coverage["pair_by_key"]):
+        for pk, r in pbk.items():
+            if keep is not None and pk not in keep:
+                continue
+            n1, n2 = r["pair"]
+            pair_rows.append({
+                "pair": (n1, n2), "enemy_idx": ei,
+                "item1": r["item1"], "item2": r["item2"],
+                "moves1": list(fixed_moves.get(n1, [])),
+                "moves2": list(fixed_moves.get(n2, [])),
+                "swept": r["pairs_swept"], "traded": r["pairs_traded"],
+                "lost": r["pairs_lost"], "no_ko": r["pairs_no_ko"],
+                "tailwind_safe": r["pairs_tailwind_safe"],
+                "protect_safe": r["pairs_protect_safe"],
+                "follow_me_safe": r["pairs_follow_me_safe"],
+                "clean_win_total": round(r["pairs_clean_win_total"], 2),
+                "total": r["pairs_total"]})
+            for (e1, e2), d in r["detail"].items():
+                detail_rows.append({
+                    "pair": (n1, n2), "enemy_idx": ei, "e1": e1, "e2": e2,
+                    "outcome": d["outcome"],
+                    "our_hp_c": round(d["our_hp"]["C"], 3),
+                    "our_hp_p": round(d["our_hp"]["P"], 3),
+                    "tailwind_safe": d["tailwind_safe"],
+                    "protect_safe": d["protect_safe"],
+                    "follow_me_safe": d["follow_me_safe"],
+                    "clean_win_value": round(d["clean_win_value"], 2)})
+    return pair_rows, detail_rows, [list(t) for t in coverage["target_name_lists"]]
+
+
 def top_coverage_pairs(coverage, top_n=15):
     """The best `top_n` pairs in `coverage["pair_by_key"]` (a
     `multi_bring4_coverage` result), ranked by `_pair_coverage_rank_key` --
@@ -8224,8 +8514,14 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                         required_techs=None, min_special_attackers=None,
                         must_include=None, exclude=None, top_n=20,
                         min_offensive_types=None, one_v_one_matrix=None,
-                        max_uncovered_threats=None, min_threat_answers=1):
-    """Assemble teams of `group_size` (6 by default) as DISJOINT pairs drawn
+                        max_uncovered_threats=None, min_threat_answers=1,
+                        assembly="disjoint", good_threshold=10 / 15,
+                        max_evals=3_000_000):
+    """`assembly="all_pairs"` (see below) scores a team by ALL of its own
+    C(size, 2) internal pairs -- 15 for a team of 6 -- and any size 3-6 is
+    allowed; the default `"disjoint"` is the original reading described next.
+
+    Assemble teams of `group_size` (6 by default) as DISJOINT pairs drawn
     from `coverage["pair_by_key"]`'s own KNOWN pairs -- "upload this
     output, and use the streamlit app to try to create the best teams of
     6." `coverage` is a `multi_bring4_coverage`-shaped dict, live OR
@@ -8281,15 +8577,35 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
     isn't given, same "None turns it off" contract `coverage_group_search`
     already follows.
 
+    `assembly="all_pairs"`: "I would want to have a team with as many
+    high-performing pairs as possible" -- a team of 6 has 15 pairs (and
+    each bring-4 within it 6), so instead of 3 designated disjoint pairs
+    every candidate team (ANY `group_size` 3-6) is scored by all of its own
+    internal pairs. A pair is HIGH-PERFORMING ("good") when it beat at least
+    `good_threshold` (a fraction, default 10/15) of the enemy pairs on EVERY
+    enemy team it was raced against; a pair never raced counts as neither
+    good nor scored (0). Teams rank by (good pairs, then the mean of the
+    internal pairs' own blended /90 scores), and each result also carries
+    "good_pairs", "pairs_total" (C(size, 2)), "known_pairs", and its own
+    "best_bring4" ((four names), good pairs out of 6). The search is
+    exhaustive up to `max_evals` candidate teams and falls back to a wide
+    beam beyond that. `must_include`/`exclude`, every hard filter, and the
+    coverage filters apply exactly as in the disjoint reading.
+
     Returns [{"team": tuple(sorted(names)), "pairs": ((n1, n2), ...) (the
-    `group_size // 2` KNOWN pairs used, each sorted), "score": float,
+    `group_size // 2` KNOWN pairs used, each sorted -- under "all_pairs",
+    every KNOWN internal pair), "score": float,
     "sets": {name: {"item", "moves"}}, "offensive_coverage":
     {"covered", "uncovered"} or None, "threat_coverage": {"covered",
     "total", "uncovered", "answer_counts"} or None}, ...], best `top_n` by
     score descending.
     """
-    if group_size % 2 != 0:
+    if assembly not in ("disjoint", "all_pairs"):
+        raise ValueError(f"unknown assembly {assembly!r}")
+    if assembly == "disjoint" and group_size % 2 != 0:
         raise ValueError(f"group_size must be even, got {group_size}")
+    if assembly == "all_pairs" and not 3 <= group_size <= 6:
+        raise ValueError(f"group_size must be 3-6, got {group_size}")
     n_pairs_needed = group_size // 2
     merged = coverage["merged"]
     moves_db = coverage["moves_db"]
@@ -8341,11 +8657,32 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
         return w_win * win + w_tw * tw + w_pr * pr + w_fm * fm
 
     scored_pairs = {pk: pair_score(pk) for pk in known_pairs}
+
+    def pair_is_good(pk):
+        rows = [pbk[pk] for pbk in coverage["pair_by_key"] if pk in pbk]
+        return bool(rows) and all(
+            r["pairs_total"] and (r["pairs_swept"] + r["pairs_traded"])
+            / r["pairs_total"] >= good_threshold - 1e-9 for r in rows)
+
+    def _disjoint_candidates():
+        for combo in itertools.combinations(known_pairs, n_pairs_needed):
+            names = set().union(*combo)
+            if len(names) != group_size:
+                continue  # two of the chosen pairs share a member -- illegal team
+            yield names, combo, None
+
+    def _all_pairs_candidates():
+        yield from _all_pairs_team_candidates(
+            known_pairs, scored_pairs, pair_is_good, group_size, must_include_set,
+            max_megas, max_evals,
+            top_keep=max(top_n * (200 if (effective_limits or max_weak_types
+                                          or max_net_weak_types or required_techs
+                                          or min_special_attackers) else 40), 400))
+
+    candidates = (_disjoint_candidates() if assembly == "disjoint"
+                  else _all_pairs_candidates())
     results = []
-    for combo in itertools.combinations(known_pairs, n_pairs_needed):
-        names = set().union(*combo)
-        if len(names) != group_size:
-            continue  # two of the chosen pairs share a member -- illegal team
+    for names, combo, all_pairs_info in candidates:
         if must_include_set - names:
             continue
         core = tuple(sorted(names))
@@ -8386,7 +8723,28 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
             if (max_uncovered_threats is not None
                     and len(uncovered_enemies) > max_uncovered_threats):
                 continue
-        score = sum(scored_pairs[pk] for pk in combo) / len(combo)
+        if all_pairs_info is None:
+            score = sum(scored_pairs[pk] for pk in combo) / len(combo)
+            extra = {}
+        else:
+            internal = [frozenset(pr) for pr in itertools.combinations(core, 2)]
+            known = [pk for pk in internal if pk in scored_pairs]
+            good_set = {pk for pk in known if pair_is_good(pk)}
+            score = sum(scored_pairs[pk] for pk in known) / len(internal)
+            best4 = max(
+                (sub for sub in itertools.combinations(core, min(4, len(core)))),
+                key=lambda sub: (
+                    sum(1 for pr in itertools.combinations(sub, 2)
+                        if frozenset(pr) in good_set),
+                    sum(scored_pairs.get(frozenset(pr), 0.0)
+                        for pr in itertools.combinations(sub, 2)),
+                    tuple(-ord(c) for c in "".join(sub))[:8]))
+            best4_good = sum(1 for pr in itertools.combinations(best4, 2)
+                             if frozenset(pr) in good_set)
+            combo = known
+            extra = {"good_pairs": len(good_set), "pairs_total": len(internal),
+                     "known_pairs": len(known),
+                     "best_bring4": (best4, best4_good)}
         results.append({
             "team": core,
             "pairs": tuple(sorted(tuple(sorted(pk)) for pk in combo)),
@@ -8395,9 +8753,101 @@ def pair_coverage_teams(coverage, group_size=6, max_weak=None, type_limits=None,
                         "moves": coverage["fixed_moves"][n]} for n in core},
             "offensive_coverage": offensive_coverage,
             "threat_coverage": threat_coverage,
+            **extra,
         })
-    results.sort(key=lambda r: -r["score"])
+    if assembly == "all_pairs":
+        results.sort(key=lambda r: (-r["good_pairs"], -r["score"], r["team"]))
+    else:
+        results.sort(key=lambda r: -r["score"])
     return results[:top_n]
+
+
+def _all_pairs_team_candidates(known_pairs, scored_pairs, pair_is_good, size,
+                               must_include, max_megas, max_evals, top_keep=400,
+                               beam_width=400):
+    """Candidate teams for `pair_coverage_teams(assembly="all_pairs")`: every
+    `size`-subset of the names in `known_pairs` (containing `must_include`)
+    ranked by (good internal pairs, summed pair score), best `top_keep`
+    yielded best-first as (names, (), "all_pairs"). Exhaustive while the
+    subset count is within `max_evals`, otherwise a beam that grows teams one
+    name at a time. Never yields a team over the `max_megas` cap or holding a
+    Mega with its own base form; deeper hard filters run in the caller."""
+    import heapq
+    names = sorted({n for pk in known_pairs for n in pk})
+    if any(m not in names for m in must_include):
+        return
+    edge = {}
+    for pk, sc in scored_pairs.items():
+        a, b = sorted(pk)
+        edge[(a, b)] = (1 if pair_is_good(pk) else 0, sc)
+
+    def gain(new, team):
+        g = sc_ = 0.0
+        for old in team:
+            e = edge.get((old, new) if old < new else (new, old))
+            if e:
+                g += e[0]
+                sc_ += e[1]
+        return g, sc_
+
+    def legal(team):
+        return (sum(n.startswith("Mega ") for n in team) <= max_megas
+                and not _mega_base_overlap(tuple(sorted(team))))
+
+    must = sorted(must_include)
+    rest = [n for n in names if n not in set(must)]
+    need = size - len(must)
+    if need < 0:
+        return
+    total_sets = math.comb(len(rest), need) if need <= len(rest) else 0
+    heap = []   # min-heap of (good, score, tiebreak, team)
+
+    def offer(team, good, score):
+        if not legal(team):
+            return
+        item = (good, round(score, 9), tuple(-ord(c) for c in "|".join(sorted(team)))[:24],
+                tuple(sorted(team)))
+        if len(heap) < top_keep:
+            heapq.heappush(heap, item)
+        elif item > heap[0]:
+            heapq.heapreplace(heap, item)
+
+    base_good = base_score = 0.0
+    for i, a in enumerate(must):
+        g, s_ = gain(a, must[:i])
+        base_good += g
+        base_score += s_
+    if total_sets <= max_evals:
+        def dfs(start, team, good, score):
+            if len(team) == size:
+                offer(team, good, score)
+                return
+            remaining = size - len(team)
+            for idx in range(start, len(rest) - remaining + 1):
+                n = rest[idx]
+                g, s_ = gain(n, team)
+                dfs(idx + 1, team + [n], good + g, score + s_)
+        dfs(0, list(must), base_good, base_score)
+    else:
+        frontier = [(base_good, base_score, tuple(must))]
+        if not must:
+            frontier = [(0.0, 0.0, ())]
+        for _ in range(need):
+            grown = {}
+            for good, score, team in frontier:
+                for n in rest:
+                    if n in team:
+                        continue
+                    g, s_ = gain(n, team)
+                    key = tuple(sorted(team + (n,)))
+                    if key not in grown:
+                        grown[key] = (good + g, score + s_)
+            top = heapq.nlargest(beam_width, ((g, s_, k) for k, (g, s_) in grown.items()))
+            frontier = top
+        for good, score, team in frontier:
+            offer(list(team), good, score)
+    for good, _sc, _tb, team in sorted(heap, reverse=True):
+        yield set(team), (), "all_pairs"
 
 
 def _effective_type_limits(max_weak=None, type_limits=None):

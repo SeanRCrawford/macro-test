@@ -2841,6 +2841,59 @@ class TestPairCoverageXlsxExport(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestPairMinBeatenAndBuildTeams(unittest.TestCase):
+    """`--pairs-only --pair-min-beaten N --build-teams 4,5,6`: race 2v2 pairs
+    against several enemy teams, keep (and export ALL of) the pairs that beat
+    at least N enemy pairs on every team, and assemble teams scored by their
+    own internal pairs."""
+
+    BASE = ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+            "--vs-team", "Garchomp,Incineroar", "--pool-size", "10", "--pairs-only"]
+
+    def test_flags_require_pairs_only(self):
+        msg, _out = run_main(["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                              "--pair-min-beaten", "10"])
+        self.assertIsNotNone(msg)
+        self.assertIn("--pairs-only", msg)
+        msg, _out = run_main(["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                              "--build-teams", "6"])
+        self.assertIsNotNone(msg)
+
+    def test_bad_values_are_rejected(self):
+        msg, _ = run_main(self.BASE + ["--pair-min-beaten", "16"])
+        self.assertIn("1-15", msg)
+        msg, _ = run_main(self.BASE + ["--build-teams", "7"])
+        self.assertIn("3-6", msg)
+        msg, _ = run_main(self.BASE + ["--build-teams", "x"])
+        self.assertIn("comma-separated", msg)
+
+    def test_builds_teams_and_exports_every_kept_pair(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main(self.BASE + [
+                "--pair-min-beaten", "1", "--build-teams", "4,5", "--max-weak", "6",
+                "--max-net-weak-types", "18", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            self.assertIn("pair(s) beat >= 1 enemy pairs on every named enemy", out)
+            self.assertIn("Best teams of 4", out)
+            self.assertIn("Best teams of 5", out)
+            self.assertIn("good pairs", out)
+            self.assertTrue(os.path.exists(path))
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+            from app import _parse_pair_coverage_xlsx
+            with open(path, "rb") as fh:
+                pair_rows, _detail, tl = _parse_pair_coverage_xlsx(fh.read())
+            self.assertEqual(len(tl), 2)
+            kept = int(out.split(" pair(s) beat")[0].strip().splitlines()[-1])
+            self.assertEqual(len({frozenset(r["pair"]) for r in pair_rows}), kept)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 class TestPairsOnlyFlag(unittest.TestCase):
     """"the multi-bring4 is taking hours, I just want a lighter weight
     version that just outputs comprehensive 2v2 pairs for use in building
