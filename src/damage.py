@@ -257,8 +257,22 @@ BERRY_RESIST_TYPE = {
 }
 
 
+# Scrappy / Mind's Eye: the user's Normal and Fighting moves hit Ghost types
+# (the Ghost's immunity is ignored -- it counts as a neutral x1 against them,
+# so e.g. Close Combat vs Steel/Ghost Gholdengo is a plain 2x, not 0x).
+GHOST_IMMUNITY_IGNORERS = frozenset({"Scrappy", "Mind's Eye"})
+GHOST_IGNORED_MOVE_TYPES = frozenset({"Normal", "Fighting"})
+
+
+def ignores_ghost_immunity(attacker_ability: str | None, move_type: str) -> bool:
+    """True if `attacker_ability` lets a `move_type` move hit Ghost types."""
+    return (attacker_ability in GHOST_IMMUNITY_IGNORERS
+            and move_type in GHOST_IGNORED_MOVE_TYPES)
+
+
 def type_multiplier(move_type: str, defender_types: list, typechart: dict,
-                    move_name: str | None = None) -> float:
+                    move_name: str | None = None,
+                    ignore_ghost_immunity: bool = False) -> float:
     """Type effectiveness, memoised.
 
     A pure function of (move type, defender types, move name) for a fixed
@@ -268,7 +282,8 @@ def type_multiplier(move_type: str, defender_types: list, typechart: dict,
     typechart's identity is part of the key so a caller holding a different
     chart cannot be served another one's answers.
     """
-    key = (id(typechart), move_type, tuple(defender_types), move_name)
+    key = (id(typechart), move_type, tuple(defender_types), move_name,
+           ignore_ghost_immunity)
     hit = _TYPE_MULT_CACHE.get(key)
     if hit is not None:
         return hit
@@ -276,6 +291,8 @@ def type_multiplier(move_type: str, defender_types: list, typechart: dict,
     mult = 1.0
     for dtype in defender_types:
         dkey = dtype.lower()
+        if ignore_ghost_immunity and dkey == "ghost":
+            continue   # Scrappy/Mind's Eye: Ghost is neutral to Normal/Fighting
         if dkey in override:
             mult *= override[dkey]
             continue
@@ -894,7 +911,9 @@ def damage_roll(level: int, power: int, atk_stat: float, def_stat: float,
     def_types = defender.types
     # `move.name` matters here, not just its type: Freeze-Dry is an Ice move
     # that is super effective on Water (TYPE_OVERRIDE_MOVES).
-    type_eff = type_multiplier(move.move_type, def_types, typechart, move.name)
+    type_eff = type_multiplier(
+        move.move_type, def_types, typechart, move.name,
+        ignore_ghost_immunity=ignores_ghost_immunity(attacker.ability, move.move_type))
     modifier *= type_eff
 
     # Ability damage modifiers (Sheer Force, Sharpness, Thick Fat, Filter, ...)

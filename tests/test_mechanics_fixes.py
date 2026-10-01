@@ -1690,3 +1690,69 @@ class TestStatStagesResetOnSwitchOut(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScrappyHitsGhosts(unittest.TestCase):
+    """"The Scrappy ability allows normal and fighting type moves to hit ghost
+    types. This would e.g. make Lopunny's close combat super effective against
+    gholdengo rather than immune." (Mind's Eye does the same.)"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.W = world()
+
+    def _hit(self, ability, move_name, defender="Gholdengo", attacker="Mega Lopunny"):
+        import copy
+        import counter_finder as cf
+        import optimize_sets as o
+        w = self.W
+        atk = o._mega_project(cf._build(attacker, w["merged"], w["natures"]))
+        atk = copy.copy(atk)
+        atk.ability = ability
+        return cf._raw_hit(atk, cf._lookup_move(move_name, w["moves"]),
+                           cf._build(defender, w["merged"], w["natures"]),
+                           w["typechart"], roll="avg")
+
+    def test_type_multiplier_flag_skips_only_the_ghost_factor(self):
+        tc = self.W["typechart"]
+        self.assertEqual(type_multiplier("Fighting", ["Steel", "Ghost"], tc), 0.0)
+        self.assertEqual(type_multiplier("Fighting", ["Steel", "Ghost"], tc,
+                                         ignore_ghost_immunity=True), 2.0)
+        self.assertEqual(type_multiplier("Normal", ["Ghost"], tc,
+                                         ignore_ghost_immunity=True), 1.0)
+        self.assertEqual(type_multiplier("Normal", ["Steel", "Ghost"], tc,
+                                         ignore_ghost_immunity=True), 0.5)
+        # the flag never changes a non-Ghost matchup
+        self.assertEqual(type_multiplier("Fighting", ["Normal"], tc, None, True),
+                         type_multiplier("Fighting", ["Normal"], tc))
+
+    def test_close_combat_is_super_effective_on_gholdengo_with_scrappy(self):
+        h = self._hit("Scrappy", "Close Combat")
+        self.assertEqual(h.eff, 2.0)
+        self.assertGreater(h.frac, 1.0)
+
+    def test_without_scrappy_close_combat_is_still_immune(self):
+        h = self._hit("Limber", "Close Combat")
+        self.assertEqual(h.eff, 0.0)
+        self.assertEqual(h.frac, 0.0)
+
+    def test_minds_eye_does_the_same(self):
+        self.assertEqual(self._hit("Mind's Eye", "Close Combat").eff, 2.0)
+
+    def test_only_normal_and_fighting_moves_are_affected(self):
+        # Scrappy does not let a non-Normal/Fighting move through (Gholdengo is
+        # Ghost-typed but no such immunity applies to these types anyway); check
+        # the helper directly for an Electric move, and that Normal now connects.
+        from damage import ignores_ghost_immunity
+        self.assertFalse(ignores_ghost_immunity("Scrappy", "Electric"))
+        self.assertTrue(ignores_ghost_immunity("Scrappy", "Normal"))
+        self.assertFalse(ignores_ghost_immunity("Limber", "Fighting"))
+        self.assertGreater(self._hit("Scrappy", "Facade").frac, 0.0)
+        self.assertEqual(self._hit("Limber", "Facade").frac, 0.0)
+
+    def test_the_1v1_table_uses_the_mega_form_scrappy(self):
+        import optimize_sets as o
+        w = self.W
+        tab = o.raw_ohko_fraction_table("Mega Lopunny", w["merged"], w["moves"],
+                                        w["natures"], w["typechart"], ["Gholdengo"])
+        self.assertGreater(tab["Close Combat"]["Gholdengo"], 1.0)
