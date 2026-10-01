@@ -169,6 +169,22 @@ class TestCounterTableTabExists(unittest.TestCase):
         tables = [d.value for d in at.dataframe if "Good pairs" in d.value.columns]
         self.assertTrue(all("Best bring-4" in t.columns for t in tables))
 
+    def test_coverage_groups_net_weak_types_cap(self):
+        """"max types with at least 1 net weakness" slider on Coverage groups."""
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value("Coverage groups").run()
+        self.assertFalse(any(s.key == "ct_cov_net_types" for s in at.slider))
+        [c for c in at.checkbox if c.key == "ct_cov_net_types_on"][0].set_value(True).run()
+        slider = [s for s in at.slider if s.key == "ct_cov_net_types"][0]
+        slider.set_value(8).run()
+        [s for s in at.slider if s.key == "ct_cov_pool"][0].set_value(15).run()
+        [m for m in at.multiselect if m.key == "ct_cov_sizes"][0].set_value([4]).run()
+        at = [b for b in at.button if b.key == "ct_cov_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        for meta in at.session_state["ct_cov_results"].values():
+            for row in (meta["rows"] if isinstance(meta, dict) else meta):
+                self.assertLessEqual(row["net_weak_types"], 8)
+
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the
         top-Score pool cutoff must still show up in the results once

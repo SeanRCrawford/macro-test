@@ -1461,7 +1461,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                           must_include=None, suggested=None, suggested_min=0,
                           required_cores=None, min_member_score=None, exclude=None,
                           required_techs=None, max_weak_types=None,
-                          max_weak_types_3=None, moves_db=None,
+                          max_weak_types_3=None, moves_db=None, max_net_weak_types=None,
                           min_special_attackers=None, typechart=None,
                           min_offensive_types=None, one_v_one_matrix=None,
                           max_uncovered_threats=None, min_threat_answers=1):
@@ -1507,6 +1507,15 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
         a large, un-narrowed `pool` tractable under a real cap (see
         `max_search_names` below) rather than needing a lossy pool-size
         heuristic to do the pruning instead.
+
+    `max_net_weak_types`: a BREADTH cap on NET weakness -- "max types with at
+    least 1 net weakness": a group is dropped when more than this many
+    DIFFERENT types have net weakness (members weak to it minus members
+    resisting/immune to it) of 1 or more. Like `max_net_weakness` it is NOT
+    growth-monotonic (a later resist can pull a type's net back down), so it
+    is checked once per COMPLETE candidate, never pruned mid-search. `None`
+    (default) checks nothing; 0 demands no type with any net weakness.
+    Every row carries the count as "net_weak_types".
 
     `max_net_weakness`/`min_avg_score` are the two checks that are NOT
     growth-monotonic (a later member's own RESIST can pull a type's net
@@ -1946,6 +1955,7 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                 "weakness": weakness, "worst_weakness": max(weakness.values()),
                 "weak_type_breadth_2": sum(1 for v in weakness.values() if v >= 2),
                 "weak_type_breadth_3": sum(1 for v in weakness.values() if v >= 3),
+                "net_weak_types": sum(1 for v in net_weakness.values() if v >= 1),
                 "offensive_coverage": offensive_coverage,
                 "threat_coverage": threat_coverage,
             }
@@ -1964,6 +1974,8 @@ def coverage_group_search(pair_rows, merged, group_sizes=_COVERAGE_GROUP_SIZES,
                     row["avg_score"] is None or row["avg_score"] < min_avg_score):
                 return False
             if max_net_weakness is not None and row["worst_net_weakness"] > max_net_weakness:
+                return False
+            if max_net_weak_types is not None and row["net_weak_types"] > max_net_weak_types:
                 return False
             if min_offensive_types is not None and row["offensive_coverage"] is not None:
                 if len(row["offensive_coverage"]["covered"]) < min_offensive_types:

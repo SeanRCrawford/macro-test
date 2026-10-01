@@ -6565,6 +6565,16 @@ with tab_counter:
             help="Same idea, at a higher bar -- how many DIFFERENT types "
                  "may have 3+ members weak to them.")
         cov_max_weak_types_3 = cov_max_weak_types_3_raw or None
+        cov_net_cap_on = st.checkbox(
+            "Cap how many types have a net weakness", key="ct_cov_net_types_on",
+            help="Net = members weak to a type minus members resisting or "
+                 "immune to it. A BREADTH cap on net weakness: how many "
+                 "DIFFERENT types may be net-weak. Checked on every "
+                 "complete group (a later resist can pull a type back).")
+        cov_max_net_weak_types = (
+            st.slider("Max types with at least 1 net weakness", 0, 18, 6,
+                      key="ct_cov_net_types")
+            if cov_net_cap_on else None)
         cov_real_wins = st.checkbox(
             "Also assess real pair wins (joint-race engine)", key="ct_cov_real_wins",
             help="\"assess all of the pairs in the counter table\" -- runs "
@@ -6648,6 +6658,7 @@ with tab_counter:
                         max_weakness=cov_max_weakness,
                         max_weak_types=cov_max_weak_types,
                         max_weak_types_3=cov_max_weak_types_3,
+                        max_net_weak_types=cov_max_net_weak_types,
                         typechart=typechart, moves_db=moves,
                         min_offensive_types=cov_min_offensive_types,
                         one_v_one_matrix=cov_matrix,
@@ -6786,7 +6797,8 @@ with tab_counter:
                         st.caption(abs_weak_str)
                         st.caption(
                             f"Types with 2+ weak: {row['weak_type_breadth_2']}  |  "
-                            f"Types with 3+ weak: {row['weak_type_breadth_3']}")
+                            f"Types with 3+ weak: {row['weak_type_breadth_3']}  |  "
+                            f"Types with 1+ net weakness: {row['net_weak_types']}")
                         if row["offensive_coverage"] is not None:
                             oc = row["offensive_coverage"]
                             st.caption(

@@ -7743,6 +7743,51 @@ class TestWeaknessBreadthCapsAndMinSpecialAttackers(unittest.TestCase):
         for row in capped[4]["rows"]:
             self.assertEqual(row["weak_type_breadth_3"], 0)
 
+    def _net_types_fixture(self):
+        from team_search import build_candidate_pool
+        pool = build_candidate_pool(self.merged, top_n=25)
+        enemy = {"Test": self.W["teams"]["Hard Trick Room"]}
+        return cf.find_pair_cores(pool, self.merged, self.moves, self.natures,
+                                  self.typechart, enemy)
+
+    def test_net_weak_types_field_matches_an_independent_count(self):
+        rows = cf.coverage_group_search(
+            self._net_types_fixture(), self.merged, group_sizes=(4,), top_n=20)[4]["rows"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(
+                row["net_weak_types"],
+                cf.net_weak_type_breadth(row["group"], self.merged, threshold=1))
+
+    def test_coverage_group_search_max_net_weak_types_caps_types_with_net_weakness(self):
+        pair_rows = self._net_types_fixture()
+        uncapped = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=500)[4]["rows"]
+        counts = sorted({r["net_weak_types"] for r in uncapped})
+        self.assertGreater(len(counts), 1, "need a spread of values to test a cap")
+        cap = counts[len(counts) // 2]
+        capped = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=500,
+            max_net_weak_types=cap)[4]["rows"]
+        self.assertTrue(capped)
+        self.assertTrue(all(r["net_weak_types"] <= cap for r in capped))
+        # the cap only ever removes groups: every capped group exists uncapped too
+        # unless top_n truncation let a lower-ranked one in, so check the best one
+        self.assertIn(capped[0]["group"],
+                      {r["group"] for r in uncapped if r["net_weak_types"] <= cap})
+        # None = off: nothing dropped
+        off = cf.coverage_group_search(
+            pair_rows, self.merged, group_sizes=(4,), top_n=500,
+            max_net_weak_types=None)[4]["rows"]
+        self.assertEqual({r["group"] for r in off}, {r["group"] for r in uncapped})
+
+    def test_a_zero_cap_demands_no_net_weak_type_at_all(self):
+        rows = cf.coverage_group_search(
+            self._net_types_fixture(), self.merged, group_sizes=(4,), top_n=500,
+            max_net_weak_types=0)[4]["rows"]
+        for row in rows:
+            self.assertEqual(row["net_weak_types"], 0)
+
     def test_coverage_group_search_min_special_attackers_drops_groups_below_the_floor(self):
         from team_search import build_candidate_pool
         pool = build_candidate_pool(self.merged, top_n=25)
