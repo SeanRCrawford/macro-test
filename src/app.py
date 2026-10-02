@@ -7134,6 +7134,15 @@ with tab_counter:
                          "Raced pairs": f"{r['known_pairs']}/{r['pairs_total']}",
                          "Score": round(r["score"], 1)}
                         for r in results]), width='stretch', hide_index=True)
+                    import species_data as _sd_all
+                    st.download_button(
+                        f"Download all {len(results)} pokepastes (.txt)",
+                        data="\n\n".join(
+                            f"=== Team {i}: {' / '.join(r['team'])} ===\n\n"
+                            + _sd_all.team_to_showdown_export(list(r["team"]), r["sets"], merged)
+                            for i, r in enumerate(results, start=1)),
+                        file_name=f"pair_coverage_teams_of_{size}.txt", mime="text/plain",
+                        key=f"ct_pc_paste_dl_{size}")
                     for i, r in enumerate(results, start=1):
                         with st.expander(f"#{i}: {' / '.join(r['team'])} "
                                         f"(Score {round(r['score'], 1)})"):
@@ -7141,6 +7150,11 @@ with tab_counter:
                                 s = r["sets"][n]
                                 st.markdown(f"**{n}** -- {s['item']}: "
                                           f"{', '.join(s['moves'])}")
+                            import species_data as _sd
+                            st.caption("Pokepaste (this tool's own EV points; "
+                                       "the sets the pairs were raced with):")
+                            st.code(_sd.team_to_showdown_export(
+                                list(r["team"]), r["sets"], merged), language=None)
                             if r["offensive_coverage"] is not None:
                                 oc = r["offensive_coverage"]
                                 st.caption(

@@ -210,6 +210,16 @@ class TestCounterTableTabExists(unittest.TestCase):
                 self.assertEqual(len(r["per_team"]), 2)
         tables = [d.value for d in at.dataframe if "Enemy teams satisfied" in d.value.columns]
         self.assertTrue(tables)
+        # Every team exposes a pokepaste that round-trips through the parser.
+        import species_data
+        first = next(t for t in by_size.values() if t)[0]
+        paste = species_data.team_to_showdown_export(
+            list(first["team"]), first["sets"], W["merged"])
+        names, _sets = species_data.custom_team_from_export(paste, W["merged"])
+        self.assertEqual(sorted(names), sorted(first["team"]))
+        codes = [c.value for c in at.code]
+        self.assertTrue(any(first["team"][0].split(" ")[-1] in c and "- " in c for c in codes))
+        self.assertTrue(any(d.label.startswith("Download all") for d in at.get("download_button")))
 
     def test_coverage_groups_net_weak_types_cap(self):
         """"max types with at least 1 net weakness" slider on Coverage groups."""
