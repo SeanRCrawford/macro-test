@@ -5171,7 +5171,15 @@ with tab_counter:
              "Choice Specs outright (never offered), and Scarf is legal but "
              "excluded from this search by default (`DEFAULT_EXCLUDED_ITEMS`), "
              "matching the CLI's own default.")
-    ct_excluded = frozenset() if ct_allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    ct_no_sash = st.checkbox(
+        "Never give my team Focus Sash", value=False, key="ct_no_sash",
+        help="Drops Focus Sash from every item search on this tab, so no "
+             "result carries it -- it makes a team look better than it is. "
+             "An item you pin yourself still wins, and enemy teams keep "
+             "the item they really run.")
+    ct_excluded = (frozenset() if ct_allow_scarf else DEFAULT_EXCLUDED_ITEMS)
+    if ct_no_sash:
+        ct_excluded = ct_excluded | {"Focus Sash"}
     ct_turns = st.slider("Turns", 1, 4, 2, key="ct_turns",
                          help="How many turns the joint race is played out for.")
 

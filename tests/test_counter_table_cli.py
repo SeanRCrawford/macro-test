@@ -2965,6 +2965,44 @@ class TestFinalTeamsSheet(unittest.TestCase):
                 os.unlink(path)
 
 
+class TestNoFocusSashFlag(unittest.TestCase):
+    """--no-focus-sash: the team's own item searches never pick Focus Sash."""
+
+    def test_excluded_items_helper(self):
+        import types
+        import counter_table as ct
+        from counter_finder import DEFAULT_EXCLUDED_ITEMS
+        ns = lambda **k: types.SimpleNamespace(**{"allow_scarf": False, "no_focus_sash": False, **k})
+        self.assertEqual(ct._excluded_items(ns()), DEFAULT_EXCLUDED_ITEMS)
+        self.assertEqual(ct._excluded_items(ns(no_focus_sash=True)),
+                         DEFAULT_EXCLUDED_ITEMS | {"Focus Sash"})
+        self.assertEqual(ct._excluded_items(ns(allow_scarf=True, no_focus_sash=True)),
+                         frozenset({"Focus Sash"}))
+
+    def test_pairs_only_export_has_no_focus_sash(self):
+        import tempfile
+        from openpyxl import load_workbook
+
+        def items(extra):
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                path = f.name
+            os.unlink(path)
+            try:
+                msg, out = run_main([
+                    "--multi-bring4", "--vs-team", "Kingambit,Basculegion,Garchomp,Incineroar",
+                    "--pool-size", "40", "--pairs-only", "--good-threshold", "0",
+                    "--min-enemies", "1", "--pair-coverage-top", "500", "--xlsx", path] + extra)
+                self.assertIsNone(msg, out)
+                ws = load_workbook(path)["Pair Coverage"]
+                rows = list(ws.iter_rows(values_only=True))
+                h = list(rows[0])
+                return {r[h.index("Item 1")] for r in rows[1:]} | {r[h.index("Item 2")] for r in rows[1:]}
+            finally:
+                if os.path.exists(path):
+                    os.unlink(path)
+        self.assertNotIn("Focus Sash", items(["--no-focus-sash"]))
+
+
 class TestPairsOnlyFlag(unittest.TestCase):
     """"the multi-bring4 is taking hours, I just want a lighter weight
     version that just outputs comprehensive 2v2 pairs for use in building

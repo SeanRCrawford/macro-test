@@ -12159,6 +12159,23 @@ class TestCoverageUsesTheEnemyTeamsRealSets(unittest.TestCase):
         self.assertEqual(cf._enemy_set_overrides(None, 0), (None, None))
 
 
+class TestExcludingFocusSash(unittest.TestCase):
+    def test_excluded_focus_sash_is_never_picked(self):
+        W = world()
+        en = ["Kingambit", "Basculegion", "Garchomp", "Incineroar"]
+        default = cf._answer_for("Tyranitar", W["merged"], W["moves"], W["natures"],
+                                 W["typechart"], en)[0]
+        self.assertEqual(default, "Focus Sash", "fixture: Tyranitar should pick it")
+        item = cf._answer_for("Tyranitar", W["merged"], W["moves"], W["natures"],
+                              W["typechart"], en,
+                              excluded_items=cf.DEFAULT_EXCLUDED_ITEMS | {"Focus Sash"})[0]
+        self.assertNotEqual(item, "Focus Sash")
+        pinned = cf._answer_for("Tyranitar", W["merged"], W["moves"], W["natures"],
+                                W["typechart"], en, item_overrides={"Tyranitar": "Focus Sash"},
+                                excluded_items=cf.DEFAULT_EXCLUDED_ITEMS | {"Focus Sash"})[0]
+        self.assertEqual(pinned, "Focus Sash")   # an explicit pin still wins
+
+
 class TestPairRowsFromCoverage(unittest.TestCase):
     """`pair_rows_from_coverage` is the live-dict inverse of
     `coverage_from_pair_rows`: the Matchup Finder hands its raced pairs to

@@ -237,6 +237,15 @@ class TestCounterTableTabExists(unittest.TestCase):
             for row in (meta["rows"] if isinstance(meta, dict) else meta):
                 self.assertLessEqual(row["net_weak_types"], 8)
 
+    def test_never_give_my_team_focus_sash_checkbox(self):
+        at = app()
+        box = [c for c in at.checkbox if c.key == "ct_no_sash"]
+        self.assertEqual(len(box), 1)
+        self.assertFalse(box[0].value)
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value("Coverage groups").run()
+        [c for c in at.checkbox if c.key == "ct_no_sash"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
+
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the
         top-Score pool cutoff must still show up in the results once

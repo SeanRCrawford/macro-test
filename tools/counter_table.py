@@ -353,6 +353,13 @@ def _parse_move_overrides(spec):
     return out
 
 
+def _excluded_items(args):
+    """The item set every search leaves out of OUR side: Choice Scarf by
+    default (--allow-scarf lifts it), plus Focus Sash with --no-focus-sash."""
+    out = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    return out | {"Focus Sash"} if args.no_focus_sash else out
+
+
 def _resolve_vs_team(raw, teams, merged):
     """One `--vs-team` value -> its resolved roster (list of names),
     validated. `raw` is EITHER the name of a saved team (a `teams.csv` row,
@@ -2635,7 +2642,7 @@ def _run_evolve_from_team(args):
                              for raw in args.vs_team]
     else:
         target_name_lists = list(W["teams"].values())
-    excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    excluded_items = _excluded_items(args)
     max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
     max_life_orb = None if args.max_life_orb < 0 else args.max_life_orb
     # a named team's own sets go in first (the "sets intact" convention
@@ -3093,6 +3100,14 @@ def main():
                          "Pass this to let the search consider it again; an "
                          "explicit --item pin already bypasses the "
                          "exclusion regardless")
+    ap.add_argument("--no-focus-sash", action="store_true",
+                    help="never give YOUR team a Focus Sash: it is dropped from "
+                         "every item search (alongside the default Choice "
+                         "Scarf exclusion), so no result, export or pokepaste "
+                         "carries one -- Focus Sash makes a team look better "
+                         "than it is. An item pinned explicitly with --item "
+                         "still wins, and the ENEMY teams keep whatever they "
+                         "really run")
     ap.add_argument("--unique-items", action="store_true",
                     help="--bring4/--multi-bring4 only: enforce the VGC "
                          "Item Clause (no two of the team's own Pokemon may "
@@ -3724,7 +3739,7 @@ def main():
 
     item_overrides = _parse_item_overrides(args.item)
     move_overrides = _parse_move_overrides(args.moves)
-    excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    excluded_items = _excluded_items(args)
     max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
     max_life_orb = None if args.max_life_orb < 0 else args.max_life_orb
     type_limits = _parse_type_limits(args.type_limit)
