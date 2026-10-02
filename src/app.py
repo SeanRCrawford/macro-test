@@ -7745,6 +7745,7 @@ with tab_counter:
                             # beaten count shown for such a team is a lower bound.
                             good_threshold=min(q / t for q, t in zip(required, totals) if t),
                             min_enemies=1, excluded_items=ct_excluded,
+                            worst_case_targeting=mf_worst_case,
                             # the saved teams' REAL sets, as Bring-4 mode uses them
                             enemy_sets=[(team_meta.get(t) or {}).get("sets") or {}
                                         for t in mf_pair_teams])

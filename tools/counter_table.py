@@ -3317,11 +3317,11 @@ def main():
                     help="--joint/--deep/--bring4/--multi-bring4 only: how "
                          "many turns to race (default 2)")
     ap.add_argument("--worst-case-targeting", action="store_true",
-                    help="--joint/--deep/--bring4's own Stage 1 pool search "
-                         "only (NOT --multi-bring4's own main coverage/"
-                         "ranking sweep, which stays greedy -- searching the "
-                         "enemy's targeting there too would multiply an "
-                         "already large pool-wide search; the deep-dive-on-"
+                    help="--joint/--deep/--bring4's own Stage 1 pool search, "
+                         "and --multi-bring4's pair-vs-enemy-team racing "
+                         "(including --pairs-only; opt-in there because it "
+                         "makes that already large pool-wide search roughly "
+                         "2.5x slower and stricter; the deep-dive-on-"
                          "top-N follow-up common to --bring4/--multi-bring4 "
                          "has its OWN separate --deep-dive-worst-case-"
                          "targeting, on by default): by default the ENEMY's "
@@ -3978,7 +3978,8 @@ def main():
             turns=args.turns, good_threshold=good_threshold,
             min_enemies=args.min_enemies, item_overrides=item_overrides,
             move_overrides=move_overrides, excluded_items=excluded_items,
-            jobs=args.jobs, enemy_sets=vs_team_sets)
+            jobs=args.jobs, enemy_sets=vs_team_sets,
+            worst_case_targeting=args.worst_case_targeting)
         print(f"Candidate pool (appears in a good pair for >= "
              f"{args.min_enemies} of {len(vs_teams)} enemies): "
              f"{len(coverage['candidate_pool'])} of {len(pool)}\n")

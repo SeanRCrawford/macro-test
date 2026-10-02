@@ -8023,7 +8023,8 @@ def _multi_bring4_coverage_job(job):
     `jobs` > 1 path. Top-level and plain-typed: the pool may use spawn, so
     both ends of this call cross a pickle boundary."""
     (pool, target_names, turns, fixed_items, fixed_moves, excluded_items,
-     good_threshold, pool_megas, enemy_items, enemy_moves) = job
+     good_threshold, pool_megas, enemy_items, enemy_moves,
+     worst_case_targeting) = job
     global _WORKER_WORLD
     if _WORKER_WORLD is None:
         _multi_bring4_worker_init()
@@ -8034,7 +8035,8 @@ def _multi_bring4_coverage_job(job):
                              excluded_items=excluded_items, prune_below=good_threshold,
                              extra_forced_base=pool_megas,
                              enemy_item_overrides=enemy_items,
-                             enemy_move_overrides=enemy_moves)
+                             enemy_move_overrides=enemy_moves,
+                             worst_case_targeting=worst_case_targeting)
 
 
 def _enemy_set_overrides(enemy_sets, i):
@@ -8051,9 +8053,14 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                           typechart, turns=2, good_threshold=1.0,
                           min_enemies=2, item_overrides=None, move_overrides=None,
                           excluded_items=DEFAULT_EXCLUDED_ITEMS, jobs=1,
-                          enemy_sets=None):
+                          enemy_sets=None, worst_case_targeting=False):
     """Stage A, shared by `multi_bring4_exhaustive` and `multi_bring4_beam`:
     run the existing pool-wide pair search once per enemy roster.
+
+    `worst_case_targeting`: opt-in, passed to every `joint_pool_search` race --
+    the enemy's per-turn targeting is searched too and the worst combo for us
+    is played (see `_best_turn`). Roughly 2.5x slower in a measured case, and
+    stricter (fewer pairs count as beaten). Default False = greedy enemy.
 
     `enemy_sets`: optional list aligned with `target_name_lists`, one
     {name: {"item", "moves"}} per enemy team -- a saved team's REAL pinned
@@ -8191,7 +8198,7 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
         import concurrent.futures as cf
         jobs_list = [(pool, target_names, turns, fixed_items, fixed_moves,
                      excluded_items, good_threshold, pool_megas,
-                     *_enemy_set_overrides(enemy_sets, i))
+                     *_enemy_set_overrides(enemy_sets, i), worst_case_targeting)
                     for i, target_names in enumerate(target_name_lists)]
         with cf.ProcessPoolExecutor(
                 max_workers=min(jobs, len(jobs_list)),
@@ -8210,7 +8217,8 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                                            prune_below=good_threshold,
                                            extra_forced_base=pool_megas,
                                            enemy_item_overrides=_enemy_set_overrides(enemy_sets, i)[0],
-                                           enemy_move_overrides=_enemy_set_overrides(enemy_sets, i)[1])
+                                           enemy_move_overrides=_enemy_set_overrides(enemy_sets, i)[1],
+                                           worst_case_targeting=worst_case_targeting)
                         for i, target_names in enumerate(target_name_lists)]
     # Split each enemy's raw rows into the ordinary per-pair table
     # (`per_enemy`/`pair_by_key`, exactly the shape this returned before the

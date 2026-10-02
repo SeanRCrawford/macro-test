@@ -12176,6 +12176,27 @@ class TestExcludingFocusSash(unittest.TestCase):
         self.assertEqual(pinned, "Focus Sash")   # an explicit pin still wins
 
 
+class TestCoverageWorstCaseTargeting(unittest.TestCase):
+    def test_flag_is_passed_through_to_every_race(self):
+        W = world()
+        calls = []
+        real = cf.joint_pool_search
+
+        def spy(*a, **k):
+            calls.append(k.get("worst_case_targeting"))
+            return real(*a, **k)
+        cf.joint_pool_search = spy
+        try:
+            for wc in (False, True):
+                cf.multi_bring4_coverage(
+                    ["Garchomp", "Incineroar", "Kingambit"], [["Sableye", "Ariados"]],
+                    W["merged"], W["moves"], W["natures"], W["typechart"],
+                    good_threshold=0.0, min_enemies=1, worst_case_targeting=wc)
+        finally:
+            cf.joint_pool_search = real
+        self.assertEqual(calls, [False, True])
+
+
 class TestPairRowsFromCoverage(unittest.TestCase):
     """`pair_rows_from_coverage` is the live-dict inverse of
     `coverage_from_pair_rows`: the Matchup Finder hands its raced pairs to
