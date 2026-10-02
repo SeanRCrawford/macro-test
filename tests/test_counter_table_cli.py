@@ -2877,10 +2877,11 @@ class TestPairMinBeatenAndBuildTeams(unittest.TestCase):
                 "--pair-min-beaten", "1", "--build-teams", "4,5", "--max-weak", "6",
                 "--max-net-weak-types", "18", "--xlsx", path])
             self.assertIsNone(msg, out)
-            self.assertIn("pair(s) beat >= 1 enemy pairs on every named enemy", out)
+            self.assertIn("pair(s) beat >= 1 enemy pairs on at least 1 named enemy team(s)", out)
             self.assertIn("Best teams of 4", out)
             self.assertIn("Best teams of 5", out)
             self.assertIn("good pairs", out)
+            self.assertIn("enemy teams covered", out)
             self.assertTrue(os.path.exists(path))
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
             from app import _parse_pair_coverage_xlsx
@@ -2892,6 +2893,34 @@ class TestPairMinBeatenAndBuildTeams(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+
+class TestBuildTeamsPerEnemyBring4(unittest.TestCase):
+    """`--build-teams` defaults to the per-enemy bring-4 reading."""
+
+    BASE = ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+            "--vs-team", "Garchomp,Incineroar", "--pool-size", "10", "--pairs-only",
+            "--pair-min-beaten", "1", "--max-weak", "6", "--max-net-weak-types", "18"]
+
+    def test_default_mode_prints_a_bring4_per_enemy_team(self):
+        msg, out = run_main(self.BASE + ["--build-teams", "6", "--bring4-min-good", "6"])
+        self.assertIsNone(msg, out)
+        self.assertIn("enemy teams covered", out)
+        self.assertIn("vs enemy 1:", out)
+        self.assertIn("vs enemy 2:", out)
+        self.assertIn("at least 1 named enemy team(s)", out)
+
+    def test_all_pairs_mode_and_min_teams(self):
+        msg, out = run_main(self.BASE + ["--build-teams", "4", "--build-mode", "all-pairs",
+                                         "--pair-min-teams", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("at least 2 named enemy team(s)", out)
+        self.assertIn("good pairs", out)
+
+    def test_bring4_mode_rejects_size_3(self):
+        msg, out = run_main(self.BASE + ["--build-teams", "3"])
+        self.assertIsNone(msg, out)
+        self.assertIn("bring4 mode needs a size of 4-6", out)
 
 
 class TestPairsOnlyFlag(unittest.TestCase):

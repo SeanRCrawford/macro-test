@@ -1845,21 +1845,22 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     return path
 
 
-def _pairs_meeting_bar(coverage, min_beaten):
+def _pairs_meeting_bar(coverage, min_beaten, min_teams=None):
     """Pair keys (frozensets) that beat at least `min_beaten` enemy pairs --
-    capped at that enemy's own total when it has fewer -- on EVERY enemy
-    roster in `coverage`."""
+    capped at that enemy's own total when it has fewer -- on at least
+    `min_teams` enemy rosters in `coverage` (None = every roster)."""
     keys = {k for pbk in coverage["pair_by_key"] for k in pbk}
+    n = len(coverage["pair_by_key"])
+    need = n if min_teams is None else max(1, min(min_teams, n))
     keep = set()
     for k in keys:
-        ok = True
+        ok = 0
         for pbk in coverage["pair_by_key"]:
             r = pbk.get(k)
-            if r is None or (r["pairs_swept"] + r["pairs_traded"]
-                             < min(min_beaten, r["pairs_total"])):
-                ok = False
-                break
-        if ok:
+            if r is not None and (r["pairs_swept"] + r["pairs_traded"]
+                                  >= min(min_beaten, r["pairs_total"])):
+                ok += 1
+        if ok >= need:
             keep.add(k)
     return keep
 
@@ -1872,8 +1873,14 @@ def _print_teams_from_pairs(coverage, sizes_arg, bar, args, type_limits,
     from counter_finder import pair_coverage_teams
     sizes = [int(p) for p in sizes_arg.split(",") if p.strip()]
     for size in sizes:
+        per_enemy = args.build_mode == "bring4"
+        if per_enemy and not 4 <= size <= 6:
+            print(f"Best teams of {size}: bring4 mode needs a size of 4-6\n")
+            continue
         rows = pair_coverage_teams(
-            coverage, group_size=size, assembly="all_pairs",
+            coverage, group_size=size,
+            assembly="per_enemy_bring4" if per_enemy else "all_pairs",
+            bring4_min_good=args.bring4_min_good,
             good_threshold=bar / 15.0, max_weak=args.max_weak,
             type_limits=type_limits, max_megas=args.max_megas,
             max_weak_types=args.max_weak_types,
@@ -1884,6 +1891,15 @@ def _print_teams_from_pairs(coverage, sizes_arg, bar, args, type_limits,
             print("  none passed every filter\n")
             continue
         for i, r in enumerate(rows, start=1):
+            if per_enemy:
+                print(f"  {i}. {' / '.join(r['team'])}: "
+                     f"{r['teams_satisfied']}/{r['teams_total']} enemy teams "
+                     f"covered, {r['good_pairs']}/{6 * r['teams_total']} good "
+                     f"pairs, score {r['score']:.1f}")
+                for t in r["per_team"]:
+                    print(f"       vs enemy {t['enemy_idx'] + 1}: "
+                         f"{' / '.join(t['bring4'])} ({t['good']}/6 good)")
+                continue
             b4, b4_good = r["best_bring4"]
             print(f"  {i}. {' / '.join(r['team'])}: {r['good_pairs']}/"
                  f"{r['pairs_total']} good pairs "
@@ -3162,6 +3178,23 @@ def main():
                          "then ignored) instead of only the top-N. Also "
                          "the bar for a 'high-performing' pair when "
                          "--build-teams is given (default 10 there)")
+    ap.add_argument("--pair-min-teams", type=int, default=None, metavar="K",
+                    help="--pairs-only with --pair-min-beaten only: keep a pair "
+                         "if it beats N enemy pairs vs at least K of the "
+                         "--vs-team enemies (default: ALL of them). K=1 keeps "
+                         "any pair that is good against some team -- what "
+                         "--build-teams wants in its default bring-4 mode, "
+                         "where every enemy team uses its own good pairs")
+    ap.add_argument("--build-mode", choices=("bring4", "all-pairs"), default="bring4",
+                    help="--build-teams scoring. bring4 (default): the team "
+                         "must hold, for EACH --vs-team enemy, a bring-4 (6 "
+                         "pairs) whose pairs all beat N of THAT team's pairs "
+                         "(--bring4-min-good relaxes the 6). all-pairs: rank "
+                         "by how many of all C(size,2) pairs are good on "
+                         "every team")
+    ap.add_argument("--bring4-min-good", type=int, default=6, metavar="N",
+                    help="--build-teams bring4 mode: good pairs (of 6) each "
+                         "enemy team's bring-4 needs (default 6)")
     ap.add_argument("--build-teams", default="", metavar="N,N,...",
                     help="--multi-bring4 --pairs-only only: after racing "
                          "the pairs, assemble the best teams of these "
@@ -3909,10 +3942,13 @@ def main():
             if args.pair_min_beaten is not None or args.build_teams:
                 from counter_finder import filter_coverage_pairs
                 bar = args.pair_min_beaten if args.pair_min_beaten is not None else 10
-                keep = _pairs_meeting_bar(coverage, bar)
+                keep = _pairs_meeting_bar(
+                    coverage, bar,
+                    args.pair_min_teams if args.pair_min_teams is not None
+                    else (1 if args.build_teams and args.build_mode == "bring4" else None))
                 coverage = filter_coverage_pairs(coverage, keep)
-                print(f"{len(keep)} pair(s) beat >= {bar} enemy pairs on every "
-                     f"named enemy.\n")
+                print(f"{len(keep)} pair(s) beat >= {bar} enemy pairs on "
+                     f"{'every named enemy' if (args.pair_min_teams is None and not (args.build_teams and args.build_mode == 'bring4')) else 'at least ' + str(args.pair_min_teams if args.pair_min_teams is not None else 1) + ' named enemy team(s)'}.\n")
                 if args.pair_min_beaten is not None:
                     export_top = 10 ** 6
             if args.build_teams:
