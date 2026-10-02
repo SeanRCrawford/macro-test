@@ -7736,7 +7736,10 @@ with tab_counter:
                             # bar on that team -- sound for "good vs this team"; the
                             # beaten count shown for such a team is a lower bound.
                             good_threshold=min(q / t for q, t in zip(required, totals) if t),
-                            min_enemies=1, excluded_items=ct_excluded)
+                            min_enemies=1, excluded_items=ct_excluded,
+                            # the saved teams' REAL sets, as Bring-4 mode uses them
+                            enemy_sets=[(team_meta.get(t) or {}).get("sets") or {}
+                                        for t in mf_pair_teams])
                     keys = {k for pbk in cov["pair_by_key"] for k in pbk
                             if not all(n.startswith("Mega ") for n in k)}
                     def _passes(k):

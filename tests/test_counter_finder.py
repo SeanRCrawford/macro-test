@@ -12106,6 +12106,59 @@ class TestOneVOneMoveLimit(unittest.TestCase):
             self.assertEqual(len(chosen["A"]), k)
 
 
+class TestCoverageUsesTheEnemyTeamsRealSets(unittest.TestCase):
+    """Reported: a team found by the pair search performed completely
+    differently once loaded into the Counter Table. Cause: the pair search
+    raced every enemy with its usage-default set, the app with the saved
+    team's real set. `multi_bring4_coverage(enemy_sets=...)` closes that."""
+
+    ENEMY = "Big 6"
+    OURS = ["Garchomp", "Incineroar", "Rillaboom", "Kingambit"]
+
+    @classmethod
+    def setUpClass(cls):
+        W = cls.W = world()
+        cls.roster = list(W["teams"][cls.ENEMY])
+        cls.sets = (W["meta"].get(cls.ENEMY) or {}).get("sets") or {}
+
+    def _cov(self, enemy_sets):
+        W = self.W
+        return cf.multi_bring4_coverage(
+            self.OURS + ["Gallade", "Hydreigon"], [self.roster], W["merged"], W["moves"],
+            W["natures"], W["typechart"], good_threshold=0.0, min_enemies=1,
+            enemy_sets=enemy_sets)
+
+    @staticmethod
+    def _beaten(cov):
+        return {tuple(sorted(k)): r["pairs_swept"] + r["pairs_traded"]
+                for k, r in cov["pair_by_key"][0].items()}
+
+    def test_real_enemy_sets_change_the_results(self):
+        self.assertTrue(self.sets, "fixture team must carry real sets")
+        self.assertNotEqual(self._beaten(self._cov(None)), self._beaten(self._cov([self.sets])))
+
+    def test_pair_results_match_the_apps_bring4_for_the_same_sets(self):
+        W = self.W
+        cov = self._cov([self.sets])
+        beaten = self._beaten(cov)
+        pair_rows, _b4 = cf.bring4_search(
+            self.OURS, self.roster, W["merged"], W["moves"], W["natures"], W["typechart"],
+            item_overrides={n: cov["fixed_items"][n] for n in self.OURS},
+            move_overrides={n: cov["fixed_moves"][n] for n in self.OURS},
+            enemy_item_overrides={k: v["item"] for k, v in self.sets.items() if v.get("item")},
+            enemy_move_overrides={k: v["moves"] for k, v in self.sets.items() if v.get("moves")})
+        self.assertTrue(pair_rows)
+        for r in pair_rows:
+            self.assertEqual(r["pairs_swept"] + r["pairs_traded"],
+                             beaten[tuple(sorted(r["pair"]))], r["pair"])
+
+    def test_enemy_sets_are_per_team(self):
+        items, moves = cf._enemy_set_overrides([{"A": {"item": "X", "moves": ["M"]}}, {}], 0)
+        self.assertEqual((items, moves), ({"A": "X"}, {"A": ["M"]}))
+        self.assertEqual(cf._enemy_set_overrides([{"A": {"item": "X"}}, {}], 1), (None, None))
+        self.assertEqual(cf._enemy_set_overrides(None, 0), (None, None))
+
+
 class TestPairRowsFromCoverage(unittest.TestCase):
     """`pair_rows_from_coverage` is the live-dict inverse of
     `coverage_from_pair_rows`: the Matchup Finder hands its raced pairs to

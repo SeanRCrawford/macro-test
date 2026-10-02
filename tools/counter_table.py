@@ -1872,6 +1872,7 @@ def _print_teams_from_pairs(coverage, sizes_arg, bar, args, type_limits,
     assembly="all_pairs")."""
     from counter_finder import pair_coverage_teams
     sizes = [int(p) for p in sizes_arg.split(",") if p.strip()]
+    team_rows = {}
     for size in sizes:
         per_enemy = args.build_mode == "bring4"
         if per_enemy and not 4 <= size <= 6:
@@ -1887,6 +1888,7 @@ def _print_teams_from_pairs(coverage, sizes_arg, bar, args, type_limits,
             max_net_weak_types=args.max_net_weak_types,
             must_include=required_members or None, top_n=args.top)
         print(f"Best teams of {size} (by high-performing internal pairs):")
+        team_rows[size] = rows
         if not rows:
             print("  none passed every filter\n")
             continue
@@ -1906,9 +1908,44 @@ def _print_teams_from_pairs(coverage, sizes_arg, bar, args, type_limits,
                  f"({r['known_pairs']} raced), score {r['score']:.1f}; "
                  f"best bring-4 {' / '.join(b4)} ({b4_good}/6)")
         print()
+    return team_rows
 
 
-def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n):
+def _write_final_teams_sheet(wb, team_rows, target_name_lists, merged):
+    """"Final Teams": one row per team `--build-teams` found -- size, rank,
+    members, how many enemy teams it covers, each enemy team's bring-4, and the
+    team's POKEPASTE (the exact sets its pairs were raced with) in one cell."""
+    from export_excel import _autosize, _style_header
+    from species_data import team_to_showdown_export
+    n_enemy = len(target_name_lists)
+    ws = wb.create_sheet("Final Teams")
+    ws.append(["Size", "Rank", "Team", "Enemy teams covered", "Good pairs", "Score"]
+              + [f"Bring-4 vs enemy {i + 1}" for i in range(n_enemy)] + ["Pokepaste"])
+    _style_header(ws)
+    for size, rows in sorted((team_rows or {}).items()):
+        for rank, r in enumerate(rows, start=1):
+            per = r.get("per_team")
+            ws.append([
+                size, rank, " / ".join(r["team"]),
+                f"{r['teams_satisfied']}/{r['teams_total']}" if per else "",
+                (f"{r['good_pairs']}/{6 * r['teams_total']}" if per
+                 else f"{r['good_pairs']}/{r['pairs_total']}"),
+                round(r["score"], 1)]
+                + ([f"{' / '.join(t['bring4'])} ({t['good']}/6 good)" for t in per]
+                   if per else [""] * n_enemy)
+                + [team_to_showdown_export(list(r["team"]), r["sets"], merged)])
+    ws.freeze_panes = "A2"
+    _autosize(ws)
+    paste_col = ws.max_column
+    from openpyxl.styles import Alignment
+    for row in ws.iter_rows(min_row=2, min_col=paste_col, max_col=paste_col):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.column_dimensions[ws.cell(row=1, column=paste_col).column_letter].width = 60
+
+
+def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n,
+                           team_rows=None, merged=None):
     """--pairs-only --xlsx: the lightweight export -- "I just want a
     lighter weight version that just outputs comprehensive 2v2 pairs for
     use in building teams" -- Stage A's own pair-vs-enemy data, with NONE
@@ -1936,6 +1973,8 @@ def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n):
     ws.append([", ".join(names) for names in target_name_lists])
     _autosize(ws)
     _write_pair_coverage_sheets(wb, coverage, top_n)
+    if team_rows:
+        _write_final_teams_sheet(wb, team_rows, target_name_lists, merged)
     wb.save(path)
     return path
 
@@ -3645,10 +3684,14 @@ def main():
         if unknown_bench:
             raise SystemExit(f"unknown Pokemon: {', '.join(unknown_bench)}")
     vs_teams = []
+    vs_team_sets = []   # per enemy team: a saved team's REAL sets ({} for a raw list)
     if args.multi_bring4:
         vs_team_names = list(W["teams"]) if args.vs_all_teams else args.vs_team
         for raw in vs_team_names:
             vs_teams.append(_resolve_vs_team(raw, W["teams"], merged))
+            vs_team_sets.append(
+                ((W["meta"].get(raw.strip()) or {}).get("sets") or {})
+                if raw.strip() in W["teams"] else {})
         if args.min_enemies == 2 and len(vs_teams) < 2:
             # Still at the untouched default -- auto-clamp rather than make
             # a single-roster search jump through an extra flag for it.
@@ -3920,7 +3963,7 @@ def main():
             turns=args.turns, good_threshold=good_threshold,
             min_enemies=args.min_enemies, item_overrides=item_overrides,
             move_overrides=move_overrides, excluded_items=excluded_items,
-            jobs=args.jobs)
+            jobs=args.jobs, enemy_sets=vs_team_sets)
         print(f"Candidate pool (appears in a good pair for >= "
              f"{args.min_enemies} of {len(vs_teams)} enemies): "
              f"{len(coverage['candidate_pool'])} of {len(pool)}\n")
@@ -3951,13 +3994,15 @@ def main():
                      f"{'every named enemy' if (args.pair_min_teams is None and not (args.build_teams and args.build_mode == 'bring4')) else 'at least ' + str(args.pair_min_teams if args.pair_min_teams is not None else 1) + ' named enemy team(s)'}.\n")
                 if args.pair_min_beaten is not None:
                     export_top = 10 ** 6
+            team_rows = None
             if args.build_teams:
-                _print_teams_from_pairs(
+                team_rows = _print_teams_from_pairs(
                     coverage, args.build_teams, bar, args, type_limits,
                     required_members)
             if args.xlsx:
                 path = _write_pairs_only_xlsx(
-                    args.xlsx, coverage, vs_teams, export_top)
+                    args.xlsx, coverage, vs_teams, export_top,
+                    team_rows=team_rows, merged=merged)
                 print(f"\nExcel workbook (pairs only, no core search): "
                      f"{os.path.abspath(path)}")
             return

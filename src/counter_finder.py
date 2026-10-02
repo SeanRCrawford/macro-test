@@ -8023,7 +8023,7 @@ def _multi_bring4_coverage_job(job):
     `jobs` > 1 path. Top-level and plain-typed: the pool may use spawn, so
     both ends of this call cross a pickle boundary."""
     (pool, target_names, turns, fixed_items, fixed_moves, excluded_items,
-     good_threshold, pool_megas) = job
+     good_threshold, pool_megas, enemy_items, enemy_moves) = job
     global _WORKER_WORLD
     if _WORKER_WORLD is None:
         _multi_bring4_worker_init()
@@ -8032,15 +8032,36 @@ def _multi_bring4_coverage_job(job):
                              w["natures"], w["typechart"], turns=turns,
                              item_overrides=fixed_items, move_overrides=fixed_moves,
                              excluded_items=excluded_items, prune_below=good_threshold,
-                             extra_forced_base=pool_megas)
+                             extra_forced_base=pool_megas,
+                             enemy_item_overrides=enemy_items,
+                             enemy_move_overrides=enemy_moves)
+
+
+def _enemy_set_overrides(enemy_sets, i):
+    """(items, moves) pin dicts for enemy team `i` from `enemy_sets` (a list,
+    aligned with the enemy rosters, of {name: {"item", "moves", ...}}), or
+    (None, None) when that team has no pinned sets."""
+    sets = (enemy_sets[i] if enemy_sets and i < len(enemy_sets) else None) or {}
+    items = {n: x["item"] for n, x in sets.items() if x.get("item")}
+    moves = {n: x["moves"] for n, x in sets.items() if x.get("moves")}
+    return (items or None), (moves or None)
 
 
 def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                           typechart, turns=2, good_threshold=1.0,
                           min_enemies=2, item_overrides=None, move_overrides=None,
-                          excluded_items=DEFAULT_EXCLUDED_ITEMS, jobs=1):
+                          excluded_items=DEFAULT_EXCLUDED_ITEMS, jobs=1,
+                          enemy_sets=None):
     """Stage A, shared by `multi_bring4_exhaustive` and `multi_bring4_beam`:
     run the existing pool-wide pair search once per enemy roster.
+
+    `enemy_sets`: optional list aligned with `target_name_lists`, one
+    {name: {"item", "moves"}} per enemy team -- a saved team's REAL pinned
+    sets (`team_meta[team]["sets"]`). Without it every enemy is raced with
+    its usage-default item/moveset, which is NOT what the app's Bring-4 mode
+    does for a saved team (it uses the team's own sets), so results for a
+    named enemy team only agree with the app when this is passed. Per team,
+    because two teams may run the same Pokemon differently.
 
         "I want to look at several 'vs' teams, for instance 3 different
          sets of enemy 6. It will run the best pairs against each separate
@@ -8169,8 +8190,9 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
     if jobs > 1 and len(target_name_lists) > 1:
         import concurrent.futures as cf
         jobs_list = [(pool, target_names, turns, fixed_items, fixed_moves,
-                     excluded_items, good_threshold, pool_megas)
-                    for target_names in target_name_lists]
+                     excluded_items, good_threshold, pool_megas,
+                     *_enemy_set_overrides(enemy_sets, i))
+                    for i, target_names in enumerate(target_name_lists)]
         with cf.ProcessPoolExecutor(
                 max_workers=min(jobs, len(jobs_list)),
                 initializer=_multi_bring4_worker_init) as ex:
@@ -8186,8 +8208,10 @@ def multi_bring4_coverage(pool, target_name_lists, merged, moves_db, natures,
                                            move_overrides=fixed_moves,
                                            excluded_items=excluded_items,
                                            prune_below=good_threshold,
-                                           extra_forced_base=pool_megas)
-                        for target_names in target_name_lists]
+                                           extra_forced_base=pool_megas,
+                                           enemy_item_overrides=_enemy_set_overrides(enemy_sets, i)[0],
+                                           enemy_move_overrides=_enemy_set_overrides(enemy_sets, i)[1])
+                        for i, target_names in enumerate(target_name_lists)]
     # Split each enemy's raw rows into the ordinary per-pair table
     # (`per_enemy`/`pair_by_key`, exactly the shape this returned before the
     # forced-base mega rows existed -- every existing reader, e.g.

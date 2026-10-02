@@ -2923,6 +2923,48 @@ class TestBuildTeamsPerEnemyBring4(unittest.TestCase):
         self.assertIn("bring4 mode needs a size of 4-6", out)
 
 
+class TestFinalTeamsSheet(unittest.TestCase):
+    """--build-teams with --xlsx writes a "Final Teams" sheet carrying each
+    team's pokepaste, and the workbook still loads in Import pair coverage."""
+
+    def test_final_teams_sheet_has_a_pokepaste_per_team(self):
+        import tempfile
+        from openpyxl import load_workbook
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main([
+                "--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                "--vs-team", "Garchomp,Incineroar", "--pool-size", "10", "--pairs-only",
+                "--pair-min-beaten", "1", "--max-weak", "6", "--max-net-weak-types", "18",
+                "--build-teams", "5", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            wb = load_workbook(path)
+            self.assertIn("Final Teams", wb.sheetnames)
+            self.assertIn("Pair Coverage", wb.sheetnames)
+            rows = list(wb["Final Teams"].iter_rows(values_only=True))
+            header = list(rows[0])
+            self.assertEqual(header[-1], "Pokepaste")
+            self.assertIn("Bring-4 vs enemy 1", header)
+            self.assertTrue(len(rows) > 1)
+            for row in rows[1:]:
+                team = row[2].split(" / ")
+                paste = row[-1]
+                self.assertEqual(paste.count(" @ "), len(team))
+                self.assertEqual(paste.count("- "), 4 * len(team))
+                for n in team:   # a Mega is pasted as its base species + stone
+                    base = n[5:].rsplit(" ", 1)[0] if n.startswith("Mega ") and n.endswith((" X", " Y", " Z")) else n.replace("Mega ", "")
+                    self.assertIn(base, paste)
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+            from app import _parse_pair_coverage_xlsx
+            with open(path, "rb") as fh:
+                self.assertTrue(_parse_pair_coverage_xlsx(fh.read())[0])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 class TestPairsOnlyFlag(unittest.TestCase):
     """"the multi-bring4 is taking hours, I just want a lighter weight
     version that just outputs comprehensive 2v2 pairs for use in building
