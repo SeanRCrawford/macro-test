@@ -40,7 +40,13 @@ impl Battle {
         let mut keyed: Vec<(MonRef, i32)> = actives.drain(..).zip(speeds).collect();
         self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
         for (r, _) in keyed {
-            if self.item_of(r) == Some("sitrusberry") {
+            // Abilities (subOrder 7) before items (8): Thermal Exchange cures
+            // burns, Trace keeps looking.
+            if self.ability_is(r, "thermalexchange") && self.mon(r).status == crate::damage::Status::Burn {
+                self.cure_status(r);
+            }
+            self.trace_update(r);
+            if self.item_of(r) == Some("sitrusberry") && !self.unnerved(r) {
                 let m = self.mon(r);
                 if m.hp > 0 && m.hp as u32 * 2 <= m.max_hp() as u32 {
                     let amount = (m.max_hp() / 4) as u32;
@@ -55,8 +61,20 @@ impl Battle {
         }
     }
 
-    /// The Damage event for move damage: Focus Sash.
+    /// A foe's Unnerve: berries can't be eaten (onFoeTryEatItem).
+    pub(super) fn unnerved(&self, r: MonRef) -> bool {
+        self.adjacent_foes(r).into_iter().any(|f| self.ability_is(f, "unnerve"))
+    }
+
+    /// The Damage event for move damage: Sturdy (priority -30), then Focus
+    /// Sash (-40).
     pub(super) fn on_move_damage(&mut self, t: MonRef, damage: u32) -> u32 {
+        let m = self.mon(t);
+        let damage = if self.ability_is(t, "sturdy") && m.hp == m.max_hp() && damage >= m.hp as u32 {
+            m.hp as u32 - 1
+        } else {
+            damage
+        };
         if self.item_of(t) == Some("focussash") {
             let m = self.mon(t);
             if m.hp == m.max_hp() && damage >= m.hp as u32 {
@@ -203,24 +221,89 @@ impl Battle {
         }
     }
 
-    /// DamagingHit for the defenders an attack damaged: Rocky Helmet (order 2)
-    /// for contact moves, then freeze's thaw from Fire attacks.
-    pub(super) fn damaging_hit(&mut self, user: MonRef, damaged: &[MonRef], contact: bool, fire: bool) {
-        let mut helmets: Vec<(MonRef, i32)> = damaged
-            .iter()
-            .filter(|&&t| contact && self.item_of(t) == Some("rockyhelmet"))
-            .map(|&t| (t, self.mon(t).speed))
-            .collect();
-        self.speed_sort(&mut helmets, |a, b| b.1.cmp(&a.1));
-        for _ in helmets {
-            let amount = (self.mon(user).max_hp() / 6) as u32;
-            self.effect_damage(user, amount);
+    /// DamagingHit for the defenders an attack damaged: Rough Skin (order 1),
+    /// Rocky Helmet (2), then by holder Speed the rest (Stamina, Flame Body,
+    /// Weak Armor, Thermal Exchange, Spicy Spray, the attacker's Poison Touch)
+    /// and freeze's thaw from Fire attacks.
+    pub(super) fn damaging_hit(&mut self, user: MonRef, damaged: &[MonRef], data: &crate::dex::MoveData, move_type: crate::dex::TypeId) {
+        #[derive(Clone, Copy, PartialEq)]
+        enum H {
+            Thaw,
+            RoughSkin,
+            RockyHelmet,
+            Stamina,
+            FlameBody,
+            WeakArmor,
+            ThermalExchange,
+            SpicySpray,
+            PoisonTouch,
         }
-        if fire {
-            for &t in damaged {
-                if self.mon(t).status == crate::damage::Status::Freeze {
-                    self.cure_status(t);
+        let dex = Dex::get();
+        let contact = data.flags.has("contact");
+        let fire = move_type == dex.type_id("Fire").expect("Fire");
+        let status_move = data.category == crate::dex::Category::Status;
+        // (holder, target, kind, order, speed, subOrder)
+        let mut hs: Vec<(MonRef, MonRef, H, u64, i32, u8)> = Vec::new();
+        const NONE: u64 = 4_294_967_296;
+        for &t in damaged {
+            let speed = self.mon(t).speed;
+            if self.mon(t).status == crate::damage::Status::Freeze {
+                hs.push((t, t, H::Thaw, NONE, speed, 0));
+            }
+            let ab = match dex.ability(self.mon(t).ability).id.as_str() {
+                "roughskin" => Some((H::RoughSkin, 1)),
+                "stamina" => Some((H::Stamina, NONE)),
+                "flamebody" => Some((H::FlameBody, NONE)),
+                "weakarmor" => Some((H::WeakArmor, NONE)),
+                "thermalexchange" => Some((H::ThermalExchange, NONE)),
+                "spicyspray" => Some((H::SpicySpray, NONE)),
+                _ => None,
+            };
+            if let Some((k, order)) = ab {
+                hs.push((t, t, k, order, speed, 7));
+            }
+            if self.item_of(t) == Some("rockyhelmet") {
+                hs.push((t, t, H::RockyHelmet, 2, speed, 8));
+            }
+            if self.ability_is(user, "poisontouch") {
+                hs.push((user, t, H::PoisonTouch, NONE, self.mon(user).speed, 6));
+            }
+        }
+        self.speed_sort(&mut hs, |a, b| a.3.cmp(&b.3).then(b.4.cmp(&a.4)).then(a.5.cmp(&b.5)));
+        for (_, t, h, _, _, _) in hs {
+            match h {
+                H::Thaw => {
+                    if fire && !status_move && self.mon(t).status == crate::damage::Status::Freeze {
+                        self.cure_status(t);
+                    }
                 }
+                H::RoughSkin if contact => {
+                    let amount = (self.mon(user).max_hp() / 8) as u32;
+                    self.effect_damage(user, amount);
+                }
+                H::RockyHelmet if contact => {
+                    let amount = (self.mon(user).max_hp() / 6) as u32;
+                    self.effect_damage(user, amount);
+                }
+                H::Stamina => {
+                    self.boost(t, &[(1, 1)], Some(user));
+                }
+                H::FlameBody if contact && self.chance.chance(3, 10) => {
+                    self.try_set_status(user, crate::damage::Status::Burn);
+                }
+                H::WeakArmor if data.category == crate::dex::Category::Physical => {
+                    self.boost(t, &[(1, -1), (4, 2)], Some(t));
+                }
+                H::ThermalExchange if fire => {
+                    self.boost(t, &[(0, 1)], Some(user));
+                }
+                H::SpicySpray => {
+                    self.try_set_status(user, crate::damage::Status::Burn);
+                }
+                H::PoisonTouch if contact && self.chance.chance(3, 10) => {
+                    self.try_set_status(t, crate::damage::Status::Poison);
+                }
+                _ => {}
             }
         }
     }
@@ -240,11 +323,13 @@ impl Battle {
             return None;
         }
         let item = m.item?;
-        if !self.can_take(item, checker) {
-            return None;
-        }
+        // The TakeItem event: Unburden's handler (subOrder 7) runs before the
+        // item's own refusal (8).
         if self.ability_is(holder, "unburden") {
             self.add_volatile(holder, VolatileId::Unburden);
+        }
+        if !self.can_take(item, checker) {
+            return None;
         }
         self.mon_mut(holder).item = None;
         Some(item)
@@ -255,8 +340,7 @@ impl Battle {
     fn can_take(&self, item: ItemId, checker: MonRef) -> bool {
         let dex = Dex::get();
         let data = dex.item(item);
-        let base = &dex.species(self.mon(checker).species).base_species;
-        !data.take_forbidden && !data.mega_stone.contains_key(base)
+        !data.take_forbidden && !dex.mega_stone_stays(item, self.mon(checker).species)
     }
 
     /// Trick's onHit: swap items. False when it fails.
@@ -264,11 +348,11 @@ impl Battle {
         // takeItem on each: None = no item, Some(None) = blocked (false).
         let take = |b: &mut Battle, r: MonRef| -> Option<Option<ItemId>> {
             let item = b.mon(r).item?;
-            if !b.can_take(item, r) {
-                return Some(None);
-            }
             if b.ability_is(r, "unburden") {
                 b.add_volatile(r, VolatileId::Unburden);
+            }
+            if !b.can_take(item, r) {
+                return Some(None);
             }
             b.mon_mut(r).item = None;
             Some(Some(item))

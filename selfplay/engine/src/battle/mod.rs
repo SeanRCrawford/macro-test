@@ -286,9 +286,26 @@ impl Battle {
     /// `pokemon.getActionSpeed()`: modified Speed (Trick Room isn't in yet).
     fn action_speed_of(&self, r: MonRef) -> Res<i32> {
         let m = self.mon(r);
+        // An inactive (fainted) Pokemon's ModifySpe event finds no handlers.
+        if !m.is_active {
+            let spe = boosted(m.stats[5], m.boosts[4]).min(10_000) as i32;
+            return Ok(if self.field.trick_room > 0 { -spe } else { spe });
+        }
         // ModifySpe: Choice Scarf and Tailwind chain their modifiers.
         let mut modifier = self.speed_modifier(r);
         if m.volatiles.has(state::VolatileId::Unburden) && m.item.is_none() && self.ability_is(r, "unburden") {
+            modifier = crate::fixed::chain(modifier, 8192);
+        }
+        // Weather Speed abilities.
+        let weather = self.field.weather;
+        let doubled = match Dex::get().ability(m.ability).id.as_str() {
+            "swiftswim" => weather == crate::damage::Weather::Rain,
+            "chlorophyll" => weather == crate::damage::Weather::Sun,
+            "sandrush" => weather == crate::damage::Weather::Sand,
+            "slushrush" => weather == crate::damage::Weather::Snow,
+            _ => false,
+        };
+        if doubled {
             modifier = crate::fixed::chain(modifier, 8192);
         }
         if self.sides[r.side].condition(state::SideCondition::Tailwind) > 0 {
@@ -313,6 +330,11 @@ impl Battle {
             p += 1;
         }
         if data.category == crate::dex::Category::Status && self.ability_is(user, "prankster") {
+            p += 1;
+        }
+        // Gale Wings: Flying moves at full HP.
+        let m = self.mon(user);
+        if data.move_type == Dex::get().type_id("Flying").expect("Flying") && m.hp == m.max_hp() && self.ability_is(user, "galewings") {
             p += 1;
         }
         p
@@ -588,6 +610,13 @@ impl Battle {
                     self.each_update();
                 }
                 self.mon_mut(old).skip_before_switch_out = false;
+                // SwitchOut: Regenerator heals a third.
+                if self.ability_is(old, "regenerator") {
+                    let m = self.mon_mut(old);
+                    if m.hp > 0 && m.hp < m.max_hp() {
+                        m.hp = (m.hp + m.max_hp() / 3).min(m.max_hp());
+                    }
+                }
             }
             let o = self.mon_mut(old);
             // Leaving the field clears volatiles and boosts.
@@ -641,7 +670,10 @@ impl Battle {
         let new_stats = stats::compute_stats(forme, m.set.nature, m.set.points);
         // Showdown keeps HP as is; only the other stats change.
         m.stats = [m.stats[0], new_stats[1], new_stats[2], new_stats[3], new_stats[4], new_stats[5]];
-        m.ability = dex.ability_id(&sp.abilities[0]).expect("mega ability");
+        let mega_ability = dex.ability_id(&sp.abilities[0]).expect("mega ability");
+        m.base_ability = mega_ability;
+        self.set_ability(r, mega_ability);
+        let m = self.mon_mut(r);
         // setAbility runs the new ability's Start.
         if m.hp > 0 {
             if let Some(e) = field::start_effect(&dex.ability(m.ability).id) {
@@ -807,7 +839,14 @@ impl Battle {
                     let id = Dex::get().move_id("struggle").unwrap();
                     moves = vec![choice::MoveOption { slot: 0, id, pp: 0, disabled: false, hidden: false, target: Dex::get().move_data(id).target }];
                 }
-                Some(SlotRequest { moves, struggle, can_mega: m.can_mega_evo.is_some(), trapped: false })
+                // TrapPokemon: a foe's Shadow Tag (Ghost types and other
+                // Shadow Tag users go free).
+                let r = MonRef { side, uid: m.uid };
+                let trapped = !self.ability_is(r, "shadowtag")
+                    && !Dex::get().immune_to("trapped", m.types)
+                    && self.adjacent_foes(r).into_iter().any(|f| self.ability_is(f, "shadowtag"));
+                // Struggling counts as a locked move: no Mega Evolution.
+                Some(SlotRequest { moves, struggle, can_mega: m.can_mega_evo.is_some() && !struggle, trapped })
             });
             self.requests[side] = if slots.iter().any(Option::is_some) { SideRequest::Move(slots) } else { SideRequest::Wait };
         }

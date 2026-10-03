@@ -14,12 +14,28 @@ pub(super) enum StartEffect {
     Intimidate,
     Weather(Weather),
     Terrain(Terrain),
+    /// Heals the ally a quarter (onSwitchInPriority -2).
+    Hospitality,
+    /// Copies a foe's ability.
+    Trace,
+}
+
+impl StartEffect {
+    /// onSwitchInPriority.
+    fn priority(self) -> i8 {
+        match self {
+            StartEffect::Hospitality => -2,
+            _ => 0,
+        }
+    }
 }
 
 /// The abilities whose onStart the engine implements.
 pub(super) fn start_effect(ability: &str) -> Option<StartEffect> {
     Some(match ability {
         "intimidate" => StartEffect::Intimidate,
+        "hospitality" => StartEffect::Hospitality,
+        "trace" => StartEffect::Trace,
         "drought" => StartEffect::Weather(Weather::Sun),
         "drizzle" => StartEffect::Weather(Weather::Rain),
         "sandstream" => StartEffect::Weather(Weather::Sand),
@@ -101,11 +117,31 @@ impl Battle {
                     .filter(|&t| self.mon(t).hp > 0 && !self.mon(t).fainted)
                     .collect();
                 for t in targets {
-                    self.boost(t, &[(0, -1)], Some(r));
+                    self.boost_by(t, &[(0, -1)], Some(r), super::conditions::BoostCause::Intimidate);
                 }
             }
             StartEffect::Weather(w) => {
                 self.set_weather(w, r);
+            }
+            StartEffect::Hospitality => {
+                let side = r.side;
+                let allies: Vec<MonRef> = (0..ACTIVE_PER_SIDE)
+                    .filter_map(|p| self.occupant(side, p))
+                    .filter(|&a| a != r && self.mon(a).hp > 0 && !self.mon(a).fainted)
+                    .collect();
+                for a in allies {
+                    let amount = (self.mon(a).max_hp() / 4) as u32;
+                    self.heal(a, amount);
+                }
+            }
+            StartEffect::Trace => {
+                // seek unless a foe has no ability; then an Update right away.
+                let foes = self.adjacent_foes(r);
+                let seek = !foes.iter().any(|&f| self.ability_is(f, "noability"));
+                self.mon_mut(r).trace_seek = seek;
+                if seek {
+                    self.trace_update(r);
+                }
             }
             StartEffect::Terrain(t) => {
                 self.set_terrain(t, r);
@@ -138,7 +174,7 @@ impl Battle {
                 handlers.push(SwitchIn { mon: r, what: SwitchInKind::ToxicReset, speed, priority: 0, sub_order: 0 });
             }
             if let Some(e) = start_effect(&Dex::get().ability(m.ability).id) {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Ability(e), speed, priority: 0, sub_order: 7 });
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Ability(e), speed, priority: e.priority(), sub_order: 7 });
             }
             if self.item_of(r).is_some_and(|i| i.ends_with("seed")) {
                 handlers.push(SwitchIn { mon: r, what: SwitchInKind::Seed, speed, priority: -1, sub_order: 8 });
@@ -231,6 +267,55 @@ impl Battle {
     /// Psychic Terrain's onTryHit: priority moves fail against grounded foes.
     pub(super) fn psychic_terrain_blocks(&self, user: MonRef, target: MonRef, priority: i8, self_target: bool) -> bool {
         self.field.terrain == Terrain::Psychic && priority > 0 && !self_target && target.side != user.side && self.grounded(target)
+    }
+
+    /// setAbility: the old ability's End (Unburden and Flash Fire drop their
+    /// volatiles), then the new one.
+    pub(super) fn set_ability(&mut self, r: MonRef, ability: crate::dex::AbilityId) {
+        let m = self.mon_mut(r);
+        match Dex::get().ability(m.ability).id.as_str() {
+            "unburden" => {
+                m.volatiles.remove(super::state::VolatileId::Unburden);
+            }
+            "flashfire" => {
+                m.volatiles.remove(super::state::VolatileId::FlashFire);
+            }
+            _ => {}
+        }
+        m.ability = ability;
+    }
+
+    /// `adjacentFoes()`: in doubles, every foe with HP.
+    pub(super) fn adjacent_foes(&self, r: MonRef) -> Vec<MonRef> {
+        let foe = 1 - r.side;
+        (0..ACTIVE_PER_SIDE).filter_map(|p| self.occupant(foe, p)).filter(|&t| self.mon(t).hp > 0 && !self.mon(t).fainted).collect()
+    }
+
+    /// Trace's onUpdate: copy a random foe's (traceable) ability, which then
+    /// starts.
+    pub(super) fn trace_update(&mut self, r: MonRef) {
+        if !self.mon(r).trace_seek || !self.ability_is(r, "trace") {
+            return;
+        }
+        let dex = Dex::get();
+        let options: Vec<MonRef> = self
+            .adjacent_foes(r)
+            .into_iter()
+            .filter(|&f| {
+                let ab = dex.ability(self.mon(f).ability);
+                ab.id != "noability" && !ab.flags.iter().any(|x| x == "notrace")
+            })
+            .collect();
+        if options.is_empty() {
+            return;
+        }
+        let pick = options[self.chance.sample(options.len())];
+        let ability = self.mon(pick).ability;
+        self.set_ability(r, ability);
+        self.mon_mut(r).trace_seek = false;
+        if let Some(e) = start_effect(&dex.ability(ability).id) {
+            self.ability_start(r, e);
+        }
     }
 
     /// `field.clearTerrain`, then eachEvent('TerrainChange').

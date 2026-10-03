@@ -25,6 +25,8 @@ pub(super) struct MoveUse {
     pub priority: i8,
     /// `move.hit`: which hit of a multi-hit move this is.
     pub hit: u8,
+    /// `move.hasBounced`: reflected by Magic Bounce (can't bounce again).
+    pub bounced: bool,
 }
 
 impl MoveUse {
@@ -223,6 +225,7 @@ impl Battle {
                 c.times_attacked = m.times_attacked;
                 c.move_last_turn_failed = m.move_last_turn_result == Some(Some(false));
                 c.volatiles.glaive_rush = m.volatiles.has(VolatileId::GlaiveRush);
+                c.volatiles.flash_fire = m.volatiles.has(VolatileId::FlashFire);
                 c.volatiles.helping_hand =
                     m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
                 out[side * 2 + pos] = Some(c);
@@ -311,6 +314,22 @@ impl Battle {
 
     /// `useMoveInner` for moves that target Pokemon.
     fn use_move(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8) -> Res<bool> {
+        self.use_move_inner(user, move_id, target, priority, false)
+    }
+
+    /// `useMove` for a move Magic Bounce sends back: no PP, no BeforeMove,
+    /// but its result is the bouncer's moveThisTurnResult.
+    fn bounce_move(&mut self, user: MonRef, move_id: MoveId, target: MonRef) -> Res<()> {
+        self.mon_mut(user).move_this_turn_result = None;
+        let r = self.use_move_inner(user, move_id, Some(target), 0, true)?;
+        let m = self.mon_mut(user);
+        if m.move_this_turn_result.is_none() {
+            m.move_this_turn_result = Some(Some(r));
+        }
+        Ok(())
+    }
+
+    fn use_move_inner(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8, bounced: bool) -> Res<bool> {
         let data = Dex::get().move_data(move_id);
         let base_target = data.target;
         // ModifyType / ModifyMove, through the damage module so both agree.
@@ -357,7 +376,7 @@ impl Battle {
         if targets.is_empty() {
             return Ok(false);
         }
-        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority, hit: 1 };
+        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority, hit: 1, bounced };
         let result = self.try_spread_move_hit(user, &mut mv, targets)?;
         // selfBoost (Clanging Scales), once the move worked.
         if let (true, Some(sb)) = (result, data.self_boost.as_ref()) {
@@ -473,11 +492,12 @@ impl Battle {
             "mistyterrain" => self.set_terrain(crate::damage::Terrain::Misty, user),
             "psychicterrain" => self.set_terrain(crate::damage::Terrain::Psychic, user),
             // onHitField: every active Pokemon not already counting down
-            // starts; Good as Gold's TryHit keeps it out (but counts).
+            // starts; Good as Gold and Soundproof (TryHit) keep it out, but
+            // count as a success.
             "perishsong" => {
                 let mut result = false;
                 for r in self.all_active() {
-                    if r != user && self.ability_is(r, "goodasgold") {
+                    if r != user && (self.ability_is(r, "goodasgold") || self.ability_is(r, "soundproof")) {
                         result = true;
                     } else if !self.mon(r).volatiles.has(VolatileId::PerishSong) {
                         self.add_volatile(r, VolatileId::PerishSong);
@@ -500,6 +520,11 @@ impl Battle {
         let data = mv.data;
         let priority = mv.priority;
         let spread_target = mv.am.target;
+        let spread_type = mv.am.move_type;
+        let bounced = mv.bounced;
+        let bounce_move_id = mv.am.id;
+        let mut bounce_err: Option<BattleError> = None;
+        let mut sure_hit = false;
         let mut targets = targets;
         mv.spread = targets.len() > 1;
 
@@ -552,6 +577,20 @@ impl Battle {
             } else if b.protect_blocks(user, t, data) {
                 // Protect and its variants (priority 3).
                 HitRes::NotFail
+            } else if t != user && !bounced && data.flags.has("reflectable") && b.ability_is(t, "magicbounce") {
+                // Magic Bounce (priority 1) sends the move back, there and then.
+                if let Err(e) = b.bounce_move(t, bounce_move_id, user) {
+                    bounce_err.get_or_insert(e);
+                }
+                HitRes::Bool(false)
+            } else if t != user && b.ability_is(t, "flashfire") && spread_type == Dex::get().type_id("Fire").expect("Fire") {
+                // Flash Fire absorbs Fire moves (and sets move.accuracy = true,
+                // so the move can't miss its other targets).
+                b.add_volatile(t, VolatileId::FlashFire);
+                sure_hit = true;
+                HitRes::Bool(false)
+            } else if t != user && data.flags.has("sound") && b.ability_is(t, "soundproof") {
+                HitRes::Bool(false)
             } else if data.category == Category::Status && t != user && b.ability_is(t, "goodasgold") {
                 // Good as Gold (priority 0).
                 HitRes::Bool(false)
@@ -559,6 +598,9 @@ impl Battle {
                 HitRes::Bool(true)
             }
         });
+        if let Some(e) = bounce_err {
+            return Err(e);
+        }
         // hitStepTypeImmunity
         if !targets.is_empty() {
             let view = self.damage_view();
@@ -578,7 +620,7 @@ impl Battle {
             HitRes::Bool(!(powder || prankster))
         });
         // hitStepAccuracy
-        step(self, &mut targets, &mut |b, t| HitRes::Bool(b.accuracy_check(user, t, data)));
+        step(self, &mut targets, &mut |b, t| HitRes::Bool(sure_hit || b.accuracy_check(user, t, data)));
 
         if targets.is_empty() {
             if !failed {
@@ -592,8 +634,9 @@ impl Battle {
     /// hitStepAccuracy for one target.
     fn accuracy_check(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
         let Some(mut acc) = data.accuracy else { return true };
-        // glaiverush's onAccuracy: anything hits its holder.
-        if self.mon(t).volatiles.has(VolatileId::GlaiveRush) {
+        // The Accuracy event: glaiverush (anything hits its holder) and No
+        // Guard (on either side of the move).
+        if self.mon(t).volatiles.has(VolatileId::GlaiveRush) || self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
             return true;
         }
         // onModifyMove: weather-dependent accuracy.
@@ -612,7 +655,11 @@ impl Battle {
         let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5] as i32 };
         let eva_boost = if unaware(self, user) || data.has_key("ignoreEvasion") { 0 } else { self.mon(t).boosts[6] as i32 };
         let boost = (acc_boost.clamp(-6, 6) - eva_boost).clamp(-6, 6);
+        // ModifyAccuracy: Compound Eyes.
         let mut accuracy = acc as u32;
+        if self.ability_is(user, "compoundeyes") {
+            accuracy = crate::fixed::modify(accuracy as u64, 5325) as u32;
+        }
         if boost > 0 {
             accuracy = accuracy * (3 + boost as u32) / 3;
         } else if boost < 0 {
@@ -705,7 +752,10 @@ impl Battle {
             }
         } else if let Some((n, d)) = data.recoil {
             let recoil = ((total as f64 * n as f64 / d as f64).round() as u32).max(1);
-            self.effect_damage(user, recoil);
+            // Rock Head's onDamage stops recoil.
+            if !self.ability_is(user, "rockhead") {
+                self.effect_damage(user, recoil);
+            }
         }
     }
 
@@ -867,8 +917,7 @@ impl Battle {
             let damaged: Vec<MonRef> =
                 (0..targets.len()).filter_map(|i| targets[i].filter(|_| matches!(damage[i], HitRes::Num(_)))).collect();
             if !damaged.is_empty() {
-                let fire = mv.am.move_type == Dex::get().type_id("Fire").expect("Fire") && mv.am.category != Category::Status;
-                self.damaging_hit(user, &damaged, mv.data.flags.has("contact"), fire);
+                self.damaging_hit(user, &damaged, mv.data, mv.am.move_type);
                 // AfterHit: Knock Off takes the item (the champions mod's
                 // spreadMoveHit doesn't need the user to still have HP).
                 if mv.data.id == "knockoff" {
@@ -968,7 +1017,7 @@ impl Battle {
             // onHit: Parting Shot lowers Attack and Sp. Atk, and doesn't
             // switch out if neither drops.
             if primary && mv.data.id == "partingshot" {
-                if !self.boost(t, &[(0, -1), (2, -1)], Some(user)).truthy() {
+                if !self.boost(t, &[(0, -1), (2, -1)], Some(user)).truthy() && !self.ability_is(t, "mirrorarmor") {
                     mv.self_switch = false;
                 }
                 did_something = did_something.combine(HitRes::Bool(true));

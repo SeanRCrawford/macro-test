@@ -496,7 +496,9 @@ function legalChoices(battle, side) {
 				if (r.canMegaEvo) opts.push({s: base + " mega", mega: true});
 			}
 		});
-		if (!r.trapped) for (const i of bench) opts.push({s: `switch ${i + 1}`, sw: i});
+		// Shadow Tag traps "hidden" (not in the last active's request), but
+		// Showdown refuses the switch.
+		if (!r.trapped && !pokemon.trapped) for (const i of bench) opts.push({s: `switch ${i + 1}`, sw: i});
 		return opts;
 	});
 	const out = [];

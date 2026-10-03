@@ -1308,8 +1308,7 @@ impl<'a, 'b> Calc<'a, 'b> {
         if item.take_forbidden {
             return false;
         }
-        let base = &self.dex.species(self.mon(i).species).base_species;
-        !item.mega_stone.contains_key(base)
+        !self.dex.mega_stone_stays(it, self.mon(i).species)
     }
 
     /// ModifyAtk/SpA (target: attacker, source: defender) and ModifyDef/SpD

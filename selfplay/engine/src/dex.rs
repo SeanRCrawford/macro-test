@@ -339,6 +339,8 @@ pub struct AbilityData {
     pub handlers: Handlers,
     /// The volatile the ability creates (Flash Fire's boost).
     pub condition: Handlers,
+    /// Flag names (breakable, notrace, failroleplay...).
+    pub flags: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -751,6 +753,11 @@ impl Dex {
                 nonstandard: str_field(r, "isNonstandard").map(String::from),
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
+                flags: r
+                    .get("flags")
+                    .and_then(Value::as_object)
+                    .map(|f| f.iter().filter(|(_, v)| v.as_i64() == Some(1)).map(|(k, _)| k.clone()).collect())
+                    .unwrap_or_default(),
             });
             ability_index.insert(aid.clone(), AbilityId(i as u16));
         }
@@ -810,6 +817,15 @@ impl Dex {
     /// "powder"): false when any of the types is immune.
     pub fn immune_to(&self, key: &str, types: [TypeId; 2]) -> bool {
         types.iter().any(|t| self.immunities[t.0 as usize].iter().any(|k| k == key))
+    }
+
+    /// A Mega Stone's onTakeItem: it stays with a Pokemon that can use it.
+    /// Most stones check the holder's base species; Floettite and Meowsticite
+    /// check its exact forme against the stone's formes. Either way:
+    pub fn mega_stone_stays(&self, item: ItemId, holder: SpeciesId) -> bool {
+        let stone = &self.item(item).mega_stone;
+        let sp = self.species(holder);
+        stone.contains_key(&sp.base_species) || stone.contains_key(&sp.name) || stone.values().any(|v| *v == sp.name)
     }
 
     pub fn species_id(&self, name: &str) -> Option<SpeciesId> {

@@ -63,6 +63,8 @@ pub enum VolatileId {
     Charging(MoveId),
     /// Hyper Beam and friends: the next turn is lost.
     MustRecharge,
+    /// Flash Fire's boost to Fire moves.
+    FlashFire,
 }
 
 impl VolatileId {
@@ -120,6 +122,7 @@ impl VolatileId {
             VolatileId::TwoTurnMove => "twoturnmove",
             VolatileId::Charging(m) => Dex::get().move_data(m).id.as_str(),
             VolatileId::MustRecharge => "mustrecharge",
+            VolatileId::FlashFire => "flashfire",
         }
     }
 
@@ -150,7 +153,8 @@ impl VolatileId {
             | VolatileId::GlaiveRush
             | VolatileId::Confusion
             | VolatileId::Imprison
-            | VolatileId::Charging(_) => None,
+            | VolatileId::Charging(_)
+            | VolatileId::FlashFire => None,
             VolatileId::TwoTurnMove | VolatileId::MustRecharge => Some(2),
             VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
             VolatileId::Yawn => Some(2),
@@ -232,11 +236,16 @@ pub struct Mon {
     pub hp: u16,
     pub status: Status,
     pub status_state: StatusState,
+    /// Trace is still looking for an ability to copy.
+    pub trace_seek: bool,
     /// The types to restore when Roost ends.
     pub roost_types: Option<[TypeId; 2]>,
     /// atk, def, spa, spd, spe, accuracy, evasion.
     pub boosts: [i8; 7],
     pub ability: AbilityId,
+    /// `baseAbility`: what leaving the field restores (the Mega's ability
+    /// after Mega Evolution).
+    pub base_ability: AbilityId,
     pub item: Option<ItemId>,
     pub moves: Vec<MoveSlot>,
     pub volatiles: Volatiles,
@@ -294,8 +303,10 @@ impl Mon {
             status: Status::None,
             status_state: StatusState::default(),
             roost_types: None,
+            trace_seek: false,
             boosts: [0; 7],
             ability: set.ability,
+            base_ability: set.ability,
             item: set.item,
             moves,
             volatiles: Volatiles::default(),
@@ -363,6 +374,8 @@ impl Mon {
         self.being_called_back = false;
         self.times_attacked = 0;
         self.hurt_this_turn = None;
+        self.trace_seek = false;
+        self.ability = self.base_ability;
         self.switch_flag = None;
         self.force_switch_flag = false;
         // Champions: a Mega stays Mega after fainting or switching.

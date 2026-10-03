@@ -81,6 +81,14 @@ pub fn status_id(s: Status) -> &'static str {
     }
 }
 
+/// What caused a stat change, where an ability cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BoostCause {
+    Intimidate,
+    MirrorArmor,
+    Other,
+}
+
 /// A Residual handler (fieldEvent): whose, what, and its sort keys.
 #[derive(Debug, Clone, Copy)]
 struct Residual {
@@ -94,6 +102,7 @@ struct Residual {
 #[derive(Debug, Clone, Copy)]
 enum ResidualKind {
     WhiteHerb,
+    SpeedBoost,
     Weather,
     Terrain,
     GrassyHeal,
@@ -131,6 +140,12 @@ impl Battle {
         if key == "frz" && self.field.weather == crate::damage::Weather::Sun {
             return false;
         }
+        // Immunity: Sand Rush to sandstorm; TryAddVolatile: Inner Focus to
+        // flinching.
+        let ab = Dex::get().ability(m.ability).id.as_str();
+        if (key == "sandstorm" && ab == "sandrush") || (key == "flinch" && ab == "innerfocus") {
+            return false;
+        }
         key.is_empty() || !Dex::get().immune_to(key, m.types)
     }
 
@@ -158,6 +173,10 @@ impl Battle {
                 return false;
             }
             if self.terrain_blocks_status(t, status) {
+                return false;
+            }
+            // SetStatus: Thermal Exchange can't be burned.
+            if status == Status::Burn && self.ability_is(t, "thermalexchange") {
                 return false;
             }
         }
@@ -423,6 +442,12 @@ impl Battle {
     /// boosted, null if every stage was already capped, true otherwise.
     /// `source` is who caused it (Defiant and Competitive react to foes).
     pub(super) fn boost(&mut self, t: MonRef, boosts: &[(usize, i8)], source: Option<MonRef>) -> HitRes {
+        self.boost_by(t, boosts, source, BoostCause::Other)
+    }
+
+    /// `battle.boost` with the effect behind it (some abilities only react
+    /// to Intimidate, and Mirror Armor doesn't bounce its own reflection).
+    pub(super) fn boost_by(&mut self, t: MonRef, boosts: &[(usize, i8)], source: Option<MonRef>, cause: BoostCause) -> HitRes {
         let m = self.mon(t);
         if m.hp == 0 {
             return HitRes::Num(0);
@@ -433,9 +458,42 @@ impl Battle {
         if self.sides[1 - t.side].pokemon_left == 0 {
             return HitRes::Bool(false);
         }
-        // getCappedBoost, then boostBy one stat at a time.
-        let capped: Vec<(usize, i8)> =
-            boosts.iter().filter(|b| b.1 != 0).map(|&(stat, n)| (stat, (m.boosts[stat] + n).clamp(-6, 6) - m.boosts[stat])).collect();
+        let ability = Dex::get().ability(m.ability).id.as_str();
+        // ChangeBoost: Contrary.
+        let sign = if ability == "contrary" { -1 } else { 1 };
+        // getCappedBoost
+        let mut capped: Vec<(usize, i8)> = boosts
+            .iter()
+            .filter(|b| b.1 != 0)
+            .map(|&(stat, n)| (stat, (m.boosts[stat] + n * sign).clamp(-6, 6) - m.boosts[stat]))
+            .collect();
+        // TryBoost
+        let from_other = source.is_some_and(|s| s != t);
+        match ability {
+            "clearbody" if source != Some(t) => capped.retain(|b| b.1 >= 0),
+            "scrappy" | "innerfocus" | "oblivious" | "owntempo" if cause == BoostCause::Intimidate => {
+                capped.retain(|b| b.0 != 0);
+            }
+            "mirrorarmor" if from_other && cause != BoostCause::MirrorArmor => {
+                let source = source.expect("from_other");
+                let mut kept = Vec::new();
+                let mut bounce = Vec::new();
+                for b in capped {
+                    if b.1 < 0 && self.mon(t).boosts[b.0] != -6 {
+                        bounce.push(b);
+                    } else {
+                        kept.push(b);
+                    }
+                }
+                capped = kept;
+                for b in bounce {
+                    if self.mon(source).hp > 0 {
+                        self.boost_by(source, &[b], Some(t), BoostCause::MirrorArmor);
+                    }
+                }
+            }
+            _ => {}
+        }
         let mut success = HitRes::Null;
         for (stat, n) in capped {
             let m = self.mon_mut(t);
@@ -546,6 +604,9 @@ impl Battle {
                 if let Some(order) = order {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::Status(m.status), order, speed: m.speed, sub_order: 0 });
                 }
+                if self.ability_is(r, "speedboost") {
+                    handlers.push(Residual { mon: Some(r), what: ResidualKind::SpeedBoost, order: 28, speed: m.speed, sub_order: 2 });
+                }
                 if self.item_of(r) == Some("whiteherb") {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::WhiteHerb, order: 29, speed: m.speed, sub_order: 8 });
                 }
@@ -605,6 +666,11 @@ impl Battle {
             match h.what {
                 ResidualKind::TrickRoom | ResidualKind::Side(..) | ResidualKind::Weather | ResidualKind::Terrain => unreachable!(),
                 ResidualKind::WhiteHerb => self.white_herb(h.mon),
+                ResidualKind::SpeedBoost => {
+                    if self.mon(h.mon).active_turns > 0 && self.ability_is(h.mon, "speedboost") {
+                        self.boost(h.mon, &[(4, 1)], Some(h.mon));
+                    }
+                }
                 ResidualKind::GrassyHeal => {
                     if self.field.terrain != crate::damage::Terrain::Grassy {
                         continue;
