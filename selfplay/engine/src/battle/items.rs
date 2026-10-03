@@ -148,7 +148,8 @@ impl Battle {
                 self.mon_mut(r).volatiles.remove(VolatileId::Taunt);
             }
             self.item_update(r);
-            if self.item_of(r) == Some("sitrusberry") && !self.unnerved(r) {
+            // TryEatItem: Unnerve, and Sitrus's TryHeal (Heal Block).
+            if self.item_of(r) == Some("sitrusberry") && !self.unnerved(r) && !self.mon(r).volatiles.has(VolatileId::HealBlock) {
                 let m = self.mon(r);
                 if m.hp > 0 && m.hp as u32 * 2 <= m.max_hp() as u32 {
                     let amount = (m.max_hp() / 4) as u32;
@@ -224,7 +225,7 @@ impl Battle {
         }
         match self.item_of(r) {
             Some("mentalherb") => {
-                let cured = [V::Taunt, V::Encore, V::Disable];
+                let cured = [V::Taunt, V::Encore, V::Disable, V::HealBlock];
                 if cured.iter().any(|&v| m.volatiles.has(v)) && self.consume_item(r) {
                     for v in cured {
                         self.mon_mut(r).volatiles.remove(v);

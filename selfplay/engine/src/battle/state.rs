@@ -70,6 +70,10 @@ pub enum VolatileId {
     /// Dragon Cheer: +1 crit ratio, +2 (`counter` 1) if it started on a
     /// Dragon type.
     DragonCheer,
+    /// Leech Seed; `target_loc` holds the seeder's slot (side * 2 + slot).
+    LeechSeed,
+    /// No healing (Psychic Noise: two turns).
+    HealBlock,
     /// A Gem's boost to this move.
     Gem,
 }
@@ -102,6 +106,8 @@ impl VolatileId {
             "gem" => VolatileId::Gem,
             "focusenergy" => VolatileId::FocusEnergy,
             "dragoncheer" => VolatileId::DragonCheer,
+            "leechseed" => VolatileId::LeechSeed,
+            "healblock" => VolatileId::HealBlock,
             _ => return None,
         })
     }
@@ -136,6 +142,8 @@ impl VolatileId {
             VolatileId::Gem => "gem",
             VolatileId::FocusEnergy => "focusenergy",
             VolatileId::DragonCheer => "dragoncheer",
+            VolatileId::LeechSeed => "leechseed",
+            VolatileId::HealBlock => "healblock",
         }
     }
 
@@ -149,6 +157,8 @@ impl VolatileId {
             VolatileId::Disable => Some(17),
             VolatileId::Yawn => Some(23),
             VolatileId::PerishSong => Some(24),
+            VolatileId::LeechSeed => Some(8),
+            VolatileId::HealBlock => Some(20),
             VolatileId::Roost => Some(25),
             _ => None,
         }
@@ -174,7 +184,9 @@ impl VolatileId {
             | VolatileId::Charging(_)
             | VolatileId::FlashFire
             | VolatileId::FocusEnergy
-            | VolatileId::DragonCheer => None,
+            | VolatileId::DragonCheer
+            | VolatileId::LeechSeed => None,
+            VolatileId::HealBlock => Some(2),
             VolatileId::TwoTurnMove | VolatileId::MustRecharge => Some(2),
             VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
             VolatileId::Yawn => Some(2),
@@ -264,6 +276,9 @@ pub struct Mon {
     pub fallen: u8,
     /// Supersweet Syrup already went off (once per battle).
     pub syrup_triggered: bool,
+    /// A boost raised / lowered a stat this turn.
+    pub stats_raised_this_turn: bool,
+    pub stats_lowered_this_turn: bool,
     /// The types to restore when Roost ends.
     pub roost_types: Option<[TypeId; 2]>,
     /// atk, def, spa, spd, spe, accuracy, evasion.
@@ -336,6 +351,8 @@ impl Mon {
             protean_used: false,
             fallen: 0,
             syrup_triggered: false,
+            stats_raised_this_turn: false,
+            stats_lowered_this_turn: false,
             boosts: [0; 7],
             ability: set.ability,
             base_ability: set.ability,
@@ -410,6 +427,8 @@ impl Mon {
         self.trace_seek = false;
         self.protean_used = false;
         self.fallen = 0;
+        self.stats_raised_this_turn = false;
+        self.stats_lowered_this_turn = false;
         self.ability = self.base_ability;
         self.switch_flag = None;
         self.force_switch_flag = false;

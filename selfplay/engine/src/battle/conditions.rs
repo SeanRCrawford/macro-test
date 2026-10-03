@@ -272,7 +272,7 @@ impl Battle {
             return HitRes::Null;
         }
         // TryAddVolatile: Aroma Veil guards its side (itself included).
-        if matches!(id, VolatileId::Disable | VolatileId::Encore | VolatileId::Taunt)
+        if matches!(id, VolatileId::Disable | VolatileId::Encore | VolatileId::Taunt | VolatileId::HealBlock)
             && (0..ACTIVE_PER_SIDE).any(|p| {
                 self.occupant(t.side, p).is_some_and(|a| self.mon(a).hp > 0 && self.ability_is(a, "aromaveil"))
             })
@@ -443,8 +443,11 @@ impl Battle {
         if v.0.iter().any(|x| x.id == VolatileId::Disable && x.move_id == Some(move_id)) && !data.flags.has("cantusetwice") {
             return false;
         }
-        // throatchop (priority 6): no sound moves.
+        // throatchop (priority 6): no sound moves; healblock: no healing ones.
         if v.has(VolatileId::ThroatChop) && data.flags.has("sound") {
+            return false;
+        }
+        if v.has(VolatileId::HealBlock) && data.flags.has("heal") {
             return false;
         }
         // taunt (priority 5): no status moves.
@@ -571,6 +574,7 @@ impl Battle {
             _ => {}
         }
         let intimidated = capped.iter().any(|b| b.0 == 0 && b.1 != 0);
+        let (raises, lowers) = (capped.iter().any(|b| b.1 > 0), capped.iter().any(|b| b.1 < 0));
         let mut success = HitRes::Null;
         for (stat, n) in capped {
             let m = self.mon_mut(t);
@@ -594,6 +598,11 @@ impl Battle {
                 }
             }
         }
+        if success.truthy() {
+            let m = self.mon_mut(t);
+            m.stats_raised_this_turn |= raises;
+            m.stats_lowered_this_turn |= lowers;
+        }
         // AfterBoost: Rattled answers Intimidate.
         if cause == BoostCause::Intimidate && intimidated && self.ability_is(t, "rattled") {
             self.boost(t, &[(4, 1)], Some(t));
@@ -602,6 +611,32 @@ impl Battle {
     }
 
     // --- HP -------------------------------------------------------------------
+
+    /// leechseed's onResidual: the seeded Pokemon loses an eighth, and
+    /// whoever stands in the seeder's slot gets it (Big Root; Liquid Ooze
+    /// turns it into damage).
+    fn leech_seed(&mut self, r: MonRef) {
+        let Some(v) = self.mon(r).volatiles.0.iter().find(|v| v.id == VolatileId::LeechSeed) else { return };
+        let slot = v.target_loc as usize;
+        let Some(seeder) = self.occupant(slot / 2, slot % 2) else { return };
+        if self.mon(seeder).fainted || self.mon(seeder).hp == 0 {
+            return;
+        }
+        let amount = (self.mon(r).max_hp() / 8) as u32;
+        let HitRes::Num(dealt) = self.effect_damage(r, amount) else { return };
+        if dealt == 0 {
+            return;
+        }
+        let mut heal = dealt;
+        if self.item_of(seeder) == Some("bigroot") {
+            heal = crate::fixed::modify(heal as u64, 5324) as u32;
+        }
+        if self.ability_is(r, "liquidooze") {
+            self.effect_damage(seeder, heal);
+        } else {
+            self.heal(seeder, heal);
+        }
+    }
 
     /// An active Pokemon with HP on `side` has `ability` (Ally events reach
     /// the holder itself too).
@@ -634,6 +669,10 @@ impl Battle {
         }
         let m = self.mon_mut(t);
         if m.hp == 0 || !m.is_active || m.hp >= m.max_hp() {
+            return HitRes::Bool(false);
+        }
+        // TryHeal: Heal Block.
+        if m.volatiles.has(VolatileId::HealBlock) {
             return HitRes::Bool(false);
         }
         let healed = (amount as u16).min(m.max_hp() - m.hp);
@@ -708,7 +747,7 @@ impl Battle {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
                 }
                 for v in &m.volatiles.0 {
-                    if v.duration.is_some() {
+                    if v.duration.is_some() || v.id == VolatileId::LeechSeed {
                         handlers.push(Residual {
                             mon: Some(r),
                             what: ResidualKind::Volatile(v.id),
@@ -794,6 +833,7 @@ impl Battle {
                     }
                     self.leftovers(h.mon);
                 }
+                ResidualKind::Volatile(VolatileId::LeechSeed) => self.leech_seed(h.mon),
                 ResidualKind::Volatile(id) => {
                     let m = self.mon_mut(h.mon);
                     let Some(v) = m.volatiles.get_mut(id) else { continue };

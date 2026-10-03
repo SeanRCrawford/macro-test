@@ -129,6 +129,9 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("stoneaxe", &["onAfterHit", "onAfterSubDamage"]),
     ("ceaselessedge", &["onAfterHit", "onAfterSubDamage"]),
     ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
+    ("endeavor", &["damageCallback", "onTryImmunity"]),
+    ("ragingbull", &["onModifyType", "onTryHit"]),
+    ("leechseed", &["condition.onStart", "condition.onResidual", "onTryImmunity"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
     ("hurricane", &["onModifyMove"]),
@@ -152,12 +155,12 @@ const FIELD_MOVES: &[&str] = &[
 ];
 
 /// Moves whose secondary has an onHit that `moves` implements.
-const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop"];
+const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop", "alluringvoice"];
 
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &[
     "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
-    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer", "leechseed", "healblock",
 ];
 
 pub fn ability_supported(id: &str) -> bool {
@@ -194,7 +197,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         || field_move
         || matches!(m.id.as_str(), "throatchop" | "glaiverush");
     // selfdestruct moves: Final Gambit (ifHit), Explosion and Self-Destruct (always).
-    let selfdestruct_ok = !m.has_key("selfdestruct") || matches!(m.id.as_str(), "finalgambit" | "explosion" | "selfdestruct");
+    let selfdestruct_ok = !m.has_key("selfdestruct") || matches!(m.id.as_str(), "finalgambit" | "memento" | "explosion" | "selfdestruct");
     let target_ok = match m.category {
         Category::Status => matches!(
             m.target,

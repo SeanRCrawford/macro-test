@@ -89,6 +89,10 @@ pub struct Combatant {
     pub fallen: u8,
     /// `moveLastTurnResult === false` (Stomping Tantrum).
     pub move_last_turn_failed: bool,
+    /// Already moved this turn and not newly switched in (Payback doubles).
+    pub moved_this_turn: bool,
+    /// `statsLoweredThisTurn` (Lash Out).
+    pub stats_lowered_this_turn: bool,
 }
 
 impl Combatant {
@@ -110,6 +114,8 @@ impl Combatant {
             times_attacked: 0,
             fallen: 0,
             move_last_turn_failed: false,
+            moved_this_turn: false,
+            stats_lowered_this_turn: false,
         }
     }
 
@@ -331,7 +337,7 @@ fn resist_berry(id: &str) -> Option<&'static str> {
 /// Moves whose own damage handlers (basePowerCallback, onBasePower,
 /// onModifyType, onModifyMove, onEffectiveness) this module implements.
 pub const MOVES_WITH_HANDLERS: &[&str] = &[
-    "acrobatics", "aurawheel", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
+    "acrobatics", "aurawheel", "lashout", "payback", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
     "grassknot", "hardpress", "heatcrash", "heavyslam", "hex", "hurricane", "knockoff", "lastrespects", "lowkick",
     "powertrip", "ragefist", "ragingbull", "reversal", "risingvoltage", "solarbeam", "solarblade", "storedpower",
     "stompingtantrum", "struggle", "temperflare", "terrainpulse", "thunder", "tripleaxel", "venoshock", "waterspout", "watershuriken", "weatherball",
@@ -1074,6 +1080,14 @@ impl<'a, 'b> Calc<'a, 'b> {
             "tripleaxel" => 20 * self.ctx.hit as i64,
             "watershuriken" => bp, // only Ash-Greninja changes it
             // moveLastTurnResult === false
+            // Doubled unless the target is newly switched in or still to move.
+            "payback" => {
+                if defender.moved_this_turn {
+                    bp * 2
+                } else {
+                    bp
+                }
+            }
             "stompingtantrum" | "temperflare" => {
                 if attacker.move_last_turn_failed {
                     bp * 2
@@ -1148,6 +1162,13 @@ impl<'a, 'b> Calc<'a, 'b> {
         self.fold(&refs, bp, |r, _| {
             Ok(match (r.effect, r.hook.as_str()) {
                 (Effect::MoveSelf(_), "onBasePower") => match mv.id.as_str() {
+                    "lashout" => {
+                        if attacker.stats_lowered_this_turn {
+                            Act::Chain(of(2, 1))
+                        } else {
+                            Act::None
+                        }
+                    }
                     "barbbarrage" | "venoshock" => {
                         if matches!(defender.status, Status::Poison | Status::Toxic) {
                             Act::Chain(of(2, 1))

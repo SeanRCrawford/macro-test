@@ -917,6 +917,8 @@ impl Battle {
                 m.move_this_turn_result = None;
                 if self.turn != 1 {
                     m.hurt_this_turn = None;
+                    m.stats_raised_this_turn = false;
+                    m.stats_lowered_this_turn = false;
                 }
                 // DisableMove: Gigaton Hammer and Blood Moon ("cantusetwice")
                 // can't be chosen right after being used.
@@ -933,6 +935,7 @@ impl Battle {
                     .filter(|&e| m.move_slot(e).is_some());
                 let throat_chopped = m.volatiles.has(state::VolatileId::ThroatChop);
                 let taunted = m.volatiles.has(state::VolatileId::Taunt);
+                let heal_blocked = m.volatiles.has(state::VolatileId::HealBlock);
                 let disabled = m.volatiles.0.iter().find(|v| v.id == state::VolatileId::Disable).and_then(|v| v.move_id);
                 for s in m.moves.iter_mut() {
                     let data = Dex::get().move_data(s.id);
@@ -942,6 +945,7 @@ impl Battle {
                         || encored.is_some_and(|e| e != s.id)
                         || (throat_chopped && data.flags.has("sound"))
                         || (taunted && data.category == crate::dex::Category::Status)
+                        || (heal_blocked && data.flags.has("heal"))
                         || disabled == Some(s.id);
                     s.imprisoned = imprisoned.contains(&s.id);
                 }

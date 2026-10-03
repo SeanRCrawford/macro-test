@@ -351,6 +351,8 @@ impl Battle {
                 c.volatiles.flash_fire = m.volatiles.has(VolatileId::FlashFire);
                 c.volatiles.gem = m.volatiles.has(VolatileId::Gem);
                 c.fallen = m.fallen;
+                c.stats_lowered_this_turn = m.stats_lowered_this_turn;
+                c.moved_this_turn = !m.newly_switched && !self.will_move(self.mon_ref(side, pos));
                 c.volatiles.helping_hand =
                     m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
                 out[side * 2 + pos] = Some(c);
@@ -486,6 +488,10 @@ impl Battle {
         // throatchop's onModifyMove (it stops a bounced sound move too) ends
         // ModifyMove before the Choice item's lock.
         if data.flags.has("sound") && self.mon(user).volatiles.has(VolatileId::ThroatChop) {
+            return Ok(false);
+        }
+        // healblock's onModifyMove.
+        if data.flags.has("heal") && self.mon(user).volatiles.has(VolatileId::HealBlock) {
             return Ok(false);
         }
         self.choice_lock(user, move_id);
@@ -928,7 +934,14 @@ impl Battle {
             let types = b.mon(t).types;
             let powder = data.flags.has("powder") && t != user && Dex::get().immune_to("powder", types);
             let prankster = prankster_boosted && t.side != user.side && Dex::get().immune_to("prankster", types);
-            HitRes::Bool(!(powder || prankster))
+            // onTryImmunity: Endeavor needs a target with more HP; Leech
+            // Seed doesn't take on Grass types.
+            let own = match data.id.as_str() {
+                "endeavor" => b.mon(user).hp >= b.mon(t).hp,
+                "leechseed" => b.mon(t).has_type(Dex::get().type_id("Grass").expect("Grass")),
+                _ => false,
+            };
+            HitRes::Bool(!(powder || prankster || own))
         });
         // hitStepAccuracy
         step(self, &mut targets, &mut |b, t| HitRes::Bool(sure_hit || b.accuracy_check(user, t, data)));
@@ -1192,7 +1205,7 @@ impl Battle {
                     "disable" if self.mon(t).last_move.is_none_or(|m| Dex::get().move_data(m).id == "struggle") => {
                         return Ok((vec![HitRes::Bool(false)], targets));
                     }
-                    "psychicfangs" | "brickbreak" => {
+                    "psychicfangs" | "brickbreak" | "ragingbull" => {
                         for c in [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::AuroraVeil] {
                             self.sides[t.side].conditions[c as usize] = 0;
                         }
@@ -1399,6 +1412,7 @@ impl Battle {
                                 self.add_hazard(1 - user.side, SideCondition::Spikes);
                             }
                             "mortalspin" => {
+                                self.mon_mut(user).volatiles.remove(VolatileId::LeechSeed);
                                 for c in SideCondition::ALL.into_iter().filter(|c| c.is_hazard()) {
                                     self.sides[user.side].conditions[c as usize] = 0;
                                 }
@@ -1463,6 +1477,12 @@ impl Battle {
             if let Some(v) = &effect.volatile_status {
                 let id = VolatileId::parse(v).ok_or_else(|| BattleError::Unsupported(format!("volatile {v}")))?;
                 let r = self.add_volatile(t, id);
+                if id == VolatileId::LeechSeed && r.truthy() {
+                    let slot = (user.side * 2 + self.mon(user).position) as i8;
+                    if let Some(v) = self.mon_mut(t).volatiles.get_mut(id) {
+                        v.target_loc = slot;
+                    }
+                }
                 did_something = did_something.combine(r);
             }
             // onHit: Protect and Detect start (or extend) the stall counter.
@@ -1474,6 +1494,10 @@ impl Battle {
             if is_secondary && mv.data.id == "direclaw" {
                 let status = [Status::Poison, Status::Paralysis, Status::Sleep][self.chance.sample(3)];
                 self.try_set_status(t, status);
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
+            if is_secondary && mv.data.id == "alluringvoice" && self.mon(t).stats_raised_this_turn {
+                self.add_volatile(t, VolatileId::Confusion);
                 did_something = did_something.combine(HitRes::Bool(true));
             }
             if is_secondary && mv.data.id == "throatchop" {
@@ -1510,6 +1534,10 @@ impl Battle {
                     mv.self_switch = false;
                 }
                 did_something = did_something.combine(HitRes::Bool(true));
+            }
+            // selfdestruct: 'ifHit' (Memento, Final Gambit).
+            if primary && matches!(mv.data.id.as_str(), "memento" | "finalgambit") && damage[i] != HitRes::Bool(false) {
+                self.faint(user);
             }
             if primary && mv.self_switch {
                 did_something = if self.switchable(user.side).is_empty() {
