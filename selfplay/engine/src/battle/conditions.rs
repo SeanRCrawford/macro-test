@@ -93,6 +93,7 @@ struct Residual {
 
 #[derive(Debug, Clone, Copy)]
 enum ResidualKind {
+    WhiteHerb,
     Weather,
     Terrain,
     GrassyHeal,
@@ -417,6 +418,9 @@ impl Battle {
                 if let Some(order) = order {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::Status(m.status), order, speed: m.speed, sub_order: 0 });
                 }
+                if self.item_of(r) == Some("whiteherb") {
+                    handlers.push(Residual { mon: Some(r), what: ResidualKind::WhiteHerb, order: 29, speed: m.speed, sub_order: 8 });
+                }
                 if self.item_of(r) == Some("leftovers") {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
                 }
@@ -463,6 +467,7 @@ impl Battle {
             }
             match h.what {
                 ResidualKind::TrickRoom | ResidualKind::Side(..) | ResidualKind::Weather | ResidualKind::Terrain => unreachable!(),
+                ResidualKind::WhiteHerb => self.white_herb(h.mon),
                 ResidualKind::GrassyHeal => {
                     if self.field.terrain != crate::damage::Terrain::Grassy {
                         continue;

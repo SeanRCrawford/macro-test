@@ -359,9 +359,16 @@ formula adds stat points after the nature; Showdown adds them before.
   Switch, Flip Turn and Parting Shot. 429 moves supported; by Reg M-C usage,
   83% of move slots, 78% of items and 49% of abilities. Checked on 3,000
   replayed battles (47,466 decisions; 300 committed).
-  Next by usage: Dire Claw, Sucker Punch, Grassy Glide, Encore, Throat Chop,
-  Low Kick, screens, Wide Guard; Unburden, Defiant, Prankster, Good as Gold,
-  Armor Tail; terrain seeds, resist berries, Rocky Helmet, White Herb.
+  Batch 3: Dire Claw, Sucker Punch, Grassy Glide, Encore, Throat Chop, Low
+  Kick/Grass Knot, Reflect/Light Screen (Light Clay), Wide Guard; Unburden,
+  Defiant, Competitive, Prankster, Good as Gold, Armor Tail; terrain seeds,
+  type-resist berries, Rocky Helmet, White Herb. 439 moves supported; by Reg
+  M-C usage, 91% of move slots, 99% of items and 72% of abilities. Checked on
+  3,000 replayed battles (46,972 decisions; 300 committed).
+  Next by usage: Hurricane (confusion), Electro Shot, Perish Song, Knock Off,
+  Stomping Tantrum, Solar Beam; No Guard, Stamina, Shadow Tag, Fairy Aura,
+  Rock Head, Flame Body, Rough Skin, Flash Fire, Swift Swim, Contrary; Eject
+  Button, Wide Lens, Mental Herb.
 - [x] 1f. Turn-level differential tests against Showdown: random battles
   between supported teams, Showdown's PRNG replaced by the threshold policy
   `Chance::Policy` mirrors (`tools/showdown/gen_fixtures.js`,

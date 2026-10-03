@@ -22,7 +22,11 @@ const ABILITIES: &[&str] = &[
 /// Items whose every effect is implemented: damage boosts, Mega Stones and
 /// the items in `items`.
 const ITEMS: &[&str] = &[
-    "blackbelt", "blackglasses", "charcoal", "choicescarf", "focussash", "leftovers", "lifeorb", "lightclay", "sitrusberry", "dragonfang", "expertbelt", "fairyfeather", "hardstone",
+    "blackbelt", "blackglasses", "charcoal", "choicescarf", "focussash", "leftovers", "lifeorb", "lightclay", "sitrusberry",
+    "electricseed", "grassyseed", "mistyseed", "psychicseed", "rockyhelmet", "whiteherb",
+    "babiriberry", "chartiberry", "chopleberry", "cobaberry", "colburberry", "habanberry", "kasibberry", "kebiaberry",
+    "occaberry", "passhoberry", "payapaberry", "rindoberry", "roseliberry", "shucaberry", "tangaberry", "wacanberry",
+    "yacheberry", "dragonfang", "expertbelt", "fairyfeather", "hardstone",
     "lightball", "magnet", "metalcoat", "miracleseed", "muscleband", "mysticwater", "nevermeltice",
     "sharpbeak", "silkscarf", "silverpowder", "softsand", "spelltag", "twistedspoon", "wiseglasses",
 ];

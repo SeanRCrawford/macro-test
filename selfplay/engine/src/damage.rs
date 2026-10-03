@@ -357,6 +357,18 @@ pub fn damage_for(ctx: &DamageCtx, am: &ActiveMove) -> Res<Outcome> {
     calc.get_damage(&mut am, data)
 }
 
+/// Whether the defender eats its type-resist berry (onSourceModifyDamage)
+/// when `am` hits it for damage.
+pub fn eats_resist_berry(ctx: &DamageCtx, am: &ActiveMove) -> Res<bool> {
+    let calc = Calc { ctx, dex: Dex::get() };
+    let d = ctx.defender;
+    let Some(t) = calc.effective_item(d).and_then(resist_berry) else { return Ok(false) };
+    if am.move_type != calc.ty(t) || !calc.can_eat(d) {
+        return Ok(false);
+    }
+    Ok(calc.type_mod(am, calc.dex.move_data(am.id))? > 0)
+}
+
 /// `runImmunity(move)` for the defender in `ctx`.
 pub fn run_immunity(ctx: &DamageCtx, am: &ActiveMove) -> bool {
     Calc { ctx, dex: Dex::get() }.run_immunity(am)

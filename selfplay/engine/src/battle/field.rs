@@ -38,6 +38,7 @@ struct SwitchIn {
     what: SwitchInKind,
     /// `pokemon.speed - speedOrder index / 4`, times 4 to stay integral.
     speed: i64,
+    priority: i8,
     sub_order: u8,
 }
 
@@ -46,6 +47,10 @@ enum SwitchInKind {
     /// tox's onSwitchIn.
     ToxicReset,
     Ability(StartEffect),
+    /// A terrain seed's onStart (onSwitchInPriority -1).
+    Seed,
+    /// White Herb's onAnySwitchIn (priority -2), for every holder.
+    WhiteHerb,
 }
 
 impl Battle {
@@ -73,6 +78,7 @@ impl Battle {
         }
         self.field.terrain = t;
         self.field.terrain_turns = 5;
+        self.terrain_change();
         true
     }
 
@@ -121,19 +127,31 @@ impl Battle {
             let index = order.iter().position(|&o| o == r).unwrap_or(0) as i64;
             let speed = m.speed as i64 * 4 - index;
             if m.status == crate::damage::Status::Toxic {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::ToxicReset, speed, sub_order: 0 });
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::ToxicReset, speed, priority: 0, sub_order: 0 });
             }
             if let Some(e) = start_effect(&Dex::get().ability(m.ability).id) {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Ability(e), speed, sub_order: 7 });
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Ability(e), speed, priority: 0, sub_order: 7 });
+            }
+            if self.item_of(r).is_some_and(|i| i.ends_with("seed")) {
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Seed, speed, priority: -1, sub_order: 8 });
             }
         }
-        self.speed_sort(&mut handlers, |a, b| b.speed.cmp(&a.speed).then(a.sub_order.cmp(&b.sub_order)));
+        for &r in &all {
+            if self.item_of(r) == Some("whiteherb") {
+                let index = order.iter().position(|&o| o == r).unwrap_or(0) as i64;
+                let speed = self.mon(r).speed as i64 * 4 - index;
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::WhiteHerb, speed, priority: -2, sub_order: 8 });
+            }
+        }
+        self.speed_sort(&mut handlers, |a, b| b.priority.cmp(&a.priority).then(b.speed.cmp(&a.speed)).then(a.sub_order.cmp(&b.sub_order)));
         for h in handlers {
             if self.mon(h.mon).fainted {
                 continue;
             }
             match h.what {
                 SwitchInKind::ToxicReset => self.mon_mut(h.mon).status_state.stage = 0,
+                SwitchInKind::Seed => self.try_seed(h.mon),
+                SwitchInKind::WhiteHerb => self.white_herb(h.mon),
                 SwitchInKind::Ability(e) => {
                     if self.mon(h.mon).hp > 0 {
                         self.ability_start(h.mon, e);

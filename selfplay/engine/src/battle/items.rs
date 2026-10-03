@@ -3,7 +3,8 @@
 //! Damage modifiers (Life Orb's boost, type items...) live in `damage`.
 
 use super::conditions::HitRes;
-use super::state::{Volatile, VolatileId};
+use super::state::{Volatile, VolatileId, ACTIVE_PER_SIDE};
+use crate::damage::Terrain;
 use super::{Battle, MonRef};
 use crate::dex::{Dex, MoveId};
 
@@ -124,5 +125,110 @@ impl Battle {
     pub(super) fn leftovers(&mut self, r: MonRef) -> HitRes {
         let amount = (self.mon(r).max_hp() / 16).max(1) as u32;
         self.heal(r, amount)
+    }
+
+    /// A terrain seed's terrain and the stat it raises.
+    fn seed(item: &str) -> Option<(Terrain, usize)> {
+        Some(match item {
+            "electricseed" => (Terrain::Electric, 1),
+            "grassyseed" => (Terrain::Grassy, 1),
+            "mistyseed" => (Terrain::Misty, 3),
+            "psychicseed" => (Terrain::Psychic, 3),
+            _ => return None,
+        })
+    }
+
+    /// A seed's onStart / onTerrainChange: used once its terrain is up.
+    pub(super) fn try_seed(&mut self, r: MonRef) {
+        let Some((terrain, stat)) = self.item_of(r).and_then(Self::seed) else { return };
+        let m = self.mon(r);
+        if self.field.terrain != terrain || m.hp == 0 || !m.is_active {
+            return;
+        }
+        // useItem: the item's boosts, then it's gone.
+        self.boost(r, &[(stat, 1)], Some(r));
+        if self.consume_item(r) {
+            self.after_use_item(r);
+        }
+    }
+
+    /// eachEvent('TerrainChange'): seeds, in Speed order.
+    pub(super) fn terrain_change(&mut self) {
+        let actives = self.all_active();
+        let mut keyed: Vec<(MonRef, i32)> = actives.iter().map(|&r| (r, self.mon(r).speed)).collect();
+        self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
+        for (r, _) in keyed {
+            self.try_seed(r);
+        }
+    }
+
+    /// White Herb's check: clear lowered stats, using the item.
+    pub(super) fn white_herb(&mut self, r: MonRef) {
+        if self.item_of(r) != Some("whiteherb") {
+            return;
+        }
+        let m = self.mon(r);
+        if m.hp == 0 || !m.is_active || !m.boosts.iter().any(|&b| b < 0) {
+            return;
+        }
+        let m = self.mon_mut(r);
+        for b in m.boosts.iter_mut() {
+            if *b < 0 {
+                *b = 0;
+            }
+        }
+        if self.consume_item(r) {
+            self.after_use_item(r);
+        }
+    }
+
+    /// An event's onAny handlers for White Herb (AfterMove, AfterMega): every
+    /// holder among `around`'s allies, itself and its foes, in Speed order.
+    pub(super) fn any_white_herb(&mut self, around: MonRef) {
+        let mut holders: Vec<MonRef> = Vec::new();
+        for side in [around.side, 1 - around.side] {
+            for pos in 0..ACTIVE_PER_SIDE {
+                if let Some(r) = self.occupant(side, pos) {
+                    let m = self.mon(r);
+                    if m.hp > 0 && !m.fainted && self.item_of(r) == Some("whiteherb") {
+                        holders.push(r);
+                    }
+                }
+            }
+        }
+        let mut keyed: Vec<(MonRef, i32)> = holders.iter().map(|&r| (r, self.mon(r).speed)).collect();
+        self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
+        for (r, _) in keyed {
+            self.white_herb(r);
+        }
+    }
+
+    /// DamagingHit for the defenders an attack damaged: Rocky Helmet (order 2)
+    /// for contact moves, then freeze's thaw from Fire attacks.
+    pub(super) fn damaging_hit(&mut self, user: MonRef, damaged: &[MonRef], contact: bool, fire: bool) {
+        let mut helmets: Vec<(MonRef, i32)> = damaged
+            .iter()
+            .filter(|&&t| contact && self.item_of(t) == Some("rockyhelmet"))
+            .map(|&t| (t, self.mon(t).speed))
+            .collect();
+        self.speed_sort(&mut helmets, |a, b| b.1.cmp(&a.1));
+        for _ in helmets {
+            let amount = (self.mon(user).max_hp() / 6) as u32;
+            self.effect_damage(user, amount);
+        }
+        if fire {
+            for &t in damaged {
+                if self.mon(t).status == crate::damage::Status::Freeze {
+                    self.cure_status(t);
+                }
+            }
+        }
+    }
+
+    /// The defender's resist berry, eaten as the damage is calculated.
+    pub(super) fn eat_resist_berry(&mut self, t: MonRef) {
+        if self.consume_item(t) {
+            self.after_use_item(t);
+        }
     }
 }

@@ -254,6 +254,10 @@ impl Battle {
         if m.move_this_turn_result.is_none() {
             m.move_this_turn_result = Some(result);
         }
+        // AfterMove: White Herb's onAnyAfterMove.
+        if self.mon(user).is_active || target.is_some_and(|t| self.mon(t).is_active) {
+            self.any_white_herb(user);
+        }
         self.faint_messages()?;
         Ok(())
     }
@@ -549,6 +553,9 @@ impl Battle {
                 };
                 let ctx = self.damage_ctx(&view, user, t, crit, spread);
                 let outcome = damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
+                if matches!(outcome, Outcome::Damage(_)) && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))? {
+                    self.eat_resist_berry(t);
+                }
                 damage[i] = match outcome {
                     Outcome::Damage(rolls) => HitRes::Num(rolls[self.chance.random(16) as usize]),
                     Outcome::Immune => HitRes::Bool(false),
@@ -622,14 +629,13 @@ impl Battle {
             self.secondaries(&targets, user, mv)?;
         }
 
-        // DamagingHit: a Fire-type attack thaws a frozen target.
-        if !is_secondary && !is_self && mv.am.move_type == Dex::get().type_id("Fire").expect("Fire") && mv.am.category != Category::Status {
-            for i in 0..targets.len() {
-                if let (Some(t), HitRes::Num(_)) = (targets[i], damage[i]) {
-                    if self.mon(t).status == Status::Freeze {
-                        self.cure_status(t);
-                    }
-                }
+        // DamagingHit for the targets that took damage.
+        if !is_secondary && !is_self {
+            let damaged: Vec<MonRef> =
+                (0..targets.len()).filter_map(|i| targets[i].filter(|_| matches!(damage[i], HitRes::Num(_)))).collect();
+            if !damaged.is_empty() {
+                let fire = mv.am.move_type == Dex::get().type_id("Fire").expect("Fire") && mv.am.category != Category::Status;
+                self.damaging_hit(user, &damaged, mv.data.flags.has("contact"), fire);
             }
         }
         Ok((damage, targets))

@@ -645,6 +645,8 @@ impl Battle {
             p.can_mega_evo = None;
         }
         self.mega_used[r.side] = true;
+        // AfterMega: White Herb's onAnyAfterMega.
+        self.any_white_herb(r);
         Ok(())
     }
 
