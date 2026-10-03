@@ -135,6 +135,10 @@ impl Battle {
                     .filter(|&t| self.mon(t).hp > 0 && !self.mon(t).fainted)
                     .collect();
                 for t in targets {
+                    // A substitute keeps Intimidate out.
+                    if self.mon(t).volatiles.has(super::state::VolatileId::Substitute) {
+                        continue;
+                    }
                     self.boost_by(t, &[(0, -1)], Some(r), super::conditions::BoostCause::Intimidate);
                 }
             }
@@ -158,7 +162,9 @@ impl Battle {
                 }
                 self.mon_mut(r).syrup_triggered = true;
                 for t in self.adjacent_foes(r) {
-                    self.boost(t, &[(6, -1)], Some(r));
+                    if !self.mon(t).volatiles.has(super::state::VolatileId::Substitute) {
+                        self.boost(t, &[(6, -1)], Some(r));
+                    }
                 }
             }
             StartEffect::SupremeOverlord => {

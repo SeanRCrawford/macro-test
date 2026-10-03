@@ -157,6 +157,8 @@ pub struct DamageCtx<'a> {
     /// The move got through the defender's protection (Unseen Fist): the
     /// champions mod quarters the damage.
     pub bypass_protect: bool,
+    /// The damage goes to a substitute (resist berries stay out of it).
+    pub hit_sub: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1591,7 +1593,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                 (Effect::Item(it), "onSourceModifyDamage") => {
                     let id = self.dex.item(it).id.as_str();
                     match resist_berry(id) {
-                        Some(t) => yes(am.move_type == self.ty(t) && type_mod > 0 && self.can_eat(d), of(1, 2)),
+                        Some(t) => yes(am.move_type == self.ty(t) && type_mod > 0 && self.can_eat(d) && !self.ctx.hit_sub, of(1, 2)),
                         None => return self.not_implemented(r),
                     }
                 }

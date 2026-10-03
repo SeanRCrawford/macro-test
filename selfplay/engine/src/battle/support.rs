@@ -134,6 +134,8 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("leechseed", &["condition.onStart", "condition.onResidual", "onTryImmunity"]),
     ("doubleshock", &["onTryMove", "self.onHit"]),
     ("batonpass", &["onHit", "self.onHit"]),
+    ("substitute", &["condition.onEnd", "condition.onStart", "condition.onTryPrimaryHit", "onHit", "onTryHit"]),
+    ("shedtail", &["onHit", "onTryHit", "self.onHit"]),
     ("beatup", &["basePowerCallback", "onModifyMove"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
@@ -169,7 +171,7 @@ const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop", "alluringvoice"];
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &[
     "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
-    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer", "leechseed", "healblock", "partiallytrapped",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer", "leechseed", "healblock", "partiallytrapped", "substitute",
 ];
 
 pub fn ability_supported(id: &str) -> bool {
@@ -237,7 +239,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
         && (m.nested_handlers.is_empty()
             || (SECONDARY_ON_HIT.contains(&m.id.as_str()) && m.nested_handlers == ["secondary.onHit"])
-            || (matches!(m.id.as_str(), "batonpass" | "doubleshock") && m.nested_handlers == ["self.onHit"]))
+            || (matches!(m.id.as_str(), "batonpass" | "doubleshock" | "shedtail") && m.nested_handlers == ["self.onHit"]))
         && handlers_ok
         && target_ok
 }

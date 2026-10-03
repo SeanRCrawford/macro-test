@@ -238,7 +238,9 @@ impl Battle {
                 // (keeping Baton Pass as the switch's sourceEffect).
                 let flag = self.sides[side].pokemon[pos].switch_flag.take();
                 if let Some(state::SwitchFlag::Move(m)) = flag {
-                    self.sides[side].pokemon[pos].baton_passing = Dex::get().move_data(m).id == "batonpass";
+                    let id = &Dex::get().move_data(m).id;
+                    self.sides[side].pokemon[pos].baton_passing = id == "batonpass";
+                    self.sides[side].pokemon[pos].shed_tailing = id == "shedtail";
                 }
                 let target = self.mon_ref(side, index as usize);
                 let order = if matches!(self.requests[side], SideRequest::Switch(_)) { 3 } else { 103 };
@@ -785,10 +787,19 @@ impl Battle {
                 // (bar the noCopy ones).
                 if self.mon(old).baton_passing {
                     self.copy_volatiles(old, incoming);
+                } else if self.mon(old).shed_tailing {
+                    // copyVolatileFrom(old, 'shedtail'): only the substitute.
+                    let sub = self.mon(old).volatiles.0.iter().find(|v| v.id == state::VolatileId::Substitute).copied();
+                    let m = self.mon_mut(incoming);
+                    m.clear_volatile();
+                    if let Some(v) = sub {
+                        m.volatiles.0.push(v);
+                    }
                 }
                 let o = self.mon_mut(old);
                 o.clear_volatile();
                 o.baton_passing = false;
+                o.shed_tailing = false;
             }
             let o = self.mon_mut(old);
             o.is_active = false;

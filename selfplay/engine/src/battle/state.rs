@@ -74,6 +74,8 @@ pub enum VolatileId {
     LeechSeed,
     /// No healing (Psychic Noise: two turns).
     HealBlock,
+    /// A substitute; `counter` is its HP.
+    Substitute,
     /// Bound by Infestation and the like: `counter` is the source
     /// (side << 8 | uid), `target_loc` the damage divisor (Binding Band: 6).
     PartiallyTrapped,
@@ -112,6 +114,7 @@ impl VolatileId {
             "leechseed" => VolatileId::LeechSeed,
             "healblock" => VolatileId::HealBlock,
             "partiallytrapped" => VolatileId::PartiallyTrapped,
+            "substitute" => VolatileId::Substitute,
             _ => return None,
         })
     }
@@ -149,6 +152,7 @@ impl VolatileId {
             VolatileId::LeechSeed => "leechseed",
             VolatileId::HealBlock => "healblock",
             VolatileId::PartiallyTrapped => "partiallytrapped",
+            VolatileId::Substitute => "substitute",
         }
     }
 
@@ -191,7 +195,8 @@ impl VolatileId {
             | VolatileId::FlashFire
             | VolatileId::FocusEnergy
             | VolatileId::DragonCheer
-            | VolatileId::LeechSeed => None,
+            | VolatileId::LeechSeed
+            | VolatileId::Substitute => None,
             VolatileId::HealBlock => Some(2),
             // durationCallback: 5 or 6, rolled when it starts.
             VolatileId::PartiallyTrapped => Some(5),
@@ -286,6 +291,8 @@ pub struct Mon {
     pub syrup_triggered: bool,
     /// Leaving by Baton Pass: the replacement copies boosts and volatiles.
     pub baton_passing: bool,
+    /// Leaving by Shed Tail: the replacement gets the substitute.
+    pub shed_tailing: bool,
     /// A boost raised / lowered a stat this turn.
     pub stats_raised_this_turn: bool,
     pub stats_lowered_this_turn: bool,
@@ -364,6 +371,7 @@ impl Mon {
             stats_raised_this_turn: false,
             stats_lowered_this_turn: false,
             baton_passing: false,
+            shed_tailing: false,
             boosts: [0; 7],
             ability: set.ability,
             base_ability: set.ability,

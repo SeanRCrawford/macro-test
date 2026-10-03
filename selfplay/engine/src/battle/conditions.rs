@@ -317,6 +317,14 @@ impl Battle {
         } else {
             counter
         };
+        let counter = if id == VolatileId::Substitute {
+            // substitute's onStart: a quarter of max HP; it frees a bound
+            // Pokemon.
+            self.mon_mut(t).volatiles.remove(VolatileId::PartiallyTrapped);
+            (self.mon(t).max_hp() / 4) as u32
+        } else {
+            counter
+        };
         match id {
             // taunt's onStart: a turn longer if it already acted this turn.
             VolatileId::Taunt if self.mon(t).active_turns > 0 && !self.will_move(t) => duration = Some(4),

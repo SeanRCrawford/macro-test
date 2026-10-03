@@ -400,6 +400,7 @@ impl Battle {
             spread,
             hit: 1,
             bypass_protect: false,
+            hit_sub: false,
         }
     }
 
@@ -1278,6 +1279,19 @@ impl Battle {
                             self.sides[t.side].conditions[c as usize] = 0;
                         }
                     }
+                    // substitute / shedtail's onTryHit (NOT_FAIL).
+                    "substitute" => {
+                        let m = self.mon(t);
+                        if m.volatiles.has(VolatileId::Substitute) || m.hp as u32 * 4 <= m.max_hp() as u32 || m.max_hp() == 1 {
+                            return Ok((vec![HitRes::Bool(false)], targets));
+                        }
+                    }
+                    "shedtail" => {
+                        let m = self.mon(t);
+                        if self.switchable(t.side).is_empty() || m.volatiles.has(VolatileId::Substitute) || m.hp as u32 <= (m.max_hp() as u32).div_ceil(2) {
+                            return Ok((vec![HitRes::Bool(false)], targets));
+                        }
+                    }
                     "clangoroussoul" => {
                         if !self.boost(t, &mv.data.primary.boosts, Some(user)).truthy() {
                             return Ok((vec![HitRes::Bool(false)], targets));
@@ -1302,8 +1316,25 @@ impl Battle {
                 }
             }
         }
+        // TryPrimaryHit: substitute (priority -1) takes the hit; its target
+        // drops out of the rest (Showdown's null target) but still counts for
+        // the user's own effects and secondaries' rolls.
+        let mut subbed = vec![false; targets.len()];
+        if primary && !matches!(mv.am.target, MoveTarget::All | MoveTarget::AllyTeam | MoveTarget::AllySide | MoveTarget::FoeSide) {
+            for i in 0..targets.len() {
+                let Some(t) = targets[i] else { continue };
+                if t == user || !self.mon(t).volatiles.has(VolatileId::Substitute) || mv.data.flags.has("bypasssub") || mv.am.infiltrates {
+                    continue;
+                }
+                if self.hit_substitute(user, t, mv)? {
+                    subbed[i] = true;
+                } else {
+                    damage[i] = HitRes::Null;
+                }
+            }
+        }
         for i in 0..targets.len() {
-            if !damage[i].truthy() {
+            if !damage[i].truthy() || subbed[i] {
                 targets[i] = None;
             }
         }
@@ -1319,49 +1350,7 @@ impl Battle {
                     damage[i] = HitRes::Num(0);
                     continue;
                 }
-                // ModifyCritRatio: Scope Lens, and Leek for Farfetch'd/Sirfetch'd.
-                let mut ratio = mv.data.crit_ratio as i32;
-                if self.mon(user).volatiles.has(VolatileId::FocusEnergy) {
-                    ratio += 2;
-                }
-                if let Some(v) = self.mon(user).volatiles.0.iter().find(|v| v.id == VolatileId::DragonCheer) {
-                    ratio += 1 + v.counter as i32;
-                }
-                match self.item_of(user) {
-                    Some("scopelens") => ratio += 1,
-                    Some("leek") => {
-                        let base = crate::dex::to_id(&Dex::get().species(self.mon(user).species).base_species);
-                        if base == "farfetchd" || base == "sirfetchd" {
-                            ratio += 2;
-                        }
-                    }
-                    _ => {}
-                }
-                let crit_ratio = ratio.clamp(0, 4) as usize;
-                let crit = match mv.data.will_crit {
-                    Some(c) => c,
-                    None => crit_ratio > 0 && self.chance.chance(1, [0, 24, 8, 2, 1][crit_ratio]),
-                };
-                mv.crit_on.retain(|&c| c != t);
-                if crit {
-                    mv.crit_on.push(t);
-                }
-                let mut ctx = self.damage_ctx(&view, user, t, crit, spread);
-                ctx.bypass_protect = mv.bypassed.contains(&t);
-                ctx.hit = mv.hit;
-                let outcome = damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
-                if matches!(outcome, Outcome::Damage(_)) && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))? {
-                    self.eat_resist_berry(t);
-                }
-                // Final Gambit's damageCallback faints its user.
-                if mv.data.id == "finalgambit" && matches!(outcome, Outcome::Damage(_)) {
-                    self.faint(user);
-                }
-                damage[i] = match outcome {
-                    Outcome::Damage(rolls) => HitRes::Num(rolls[self.chance.random(16) as usize]),
-                    Outcome::Immune => HitRes::Bool(false),
-                    Outcome::NoDamage => HitRes::Undefined,
-                };
+                damage[i] = self.get_damage(user, t, mv, &view, spread, false)?;
             }
         } else {
             for i in 0..targets.len() {
@@ -1443,11 +1432,12 @@ impl Battle {
         let sheer_force = mv.am.has_sheer_force && primary;
         if let (Some(self_effect), false) = (effect.self_effect.as_deref(), sheer_force) {
             if !mv.self_dropped {
-                self.self_drops(&targets, user, mv, self_effect, is_secondary)?;
+                let with_subs: Vec<Option<MonRef>> = (0..targets.len()).map(|i| targets[i].or(subbed[i].then_some(user))).collect();
+                self.self_drops(&with_subs, user, mv, self_effect, is_secondary)?;
             }
         }
         if primary {
-            self.secondaries(&targets, user, mv)?;
+            self.secondaries(&targets, &subbed, user, mv)?;
         }
         // forceSwitch: Roar, Whirlwind, Dragon Tail, Circle Throw.
         if primary && mv.data.has_key("forceSwitch") {
@@ -1692,6 +1682,17 @@ impl Battle {
             }
             // Baton Pass's onHit: nobody to pass to (the -fail is NOT_FAIL).
             "batonpass" if self.switchable(user.side).is_empty() => HitRes::NotFail,
+            // substitute / shedtail's onHit (after the volatile is up).
+            "substitute" => {
+                let cost = (self.mon(t).max_hp() / 4).max(1) as u32;
+                self.apply_damage(t, cost);
+                HitRes::Undefined
+            }
+            "shedtail" => {
+                let cost = (self.mon(t).max_hp() as u32).div_ceil(2);
+                self.apply_damage(t, cost);
+                HitRes::Undefined
+            }
             "skillswap" => {
                 let dex = Dex::get();
                 let (sa, ta) = (self.mon(user).ability, self.mon(t).ability);
@@ -1809,6 +1810,123 @@ impl Battle {
         }
     }
 
+    /// `getDamage` for one target: the crit roll, the calculation, a resist
+    /// berry eaten on the way (not when hitting a substitute) and the
+    /// damage roll.
+    #[allow(clippy::too_many_arguments)]
+    fn get_damage(
+        &mut self,
+        user: MonRef,
+        t: MonRef,
+        mv: &mut MoveUse,
+        view: &[Option<Combatant>; 4],
+        spread: bool,
+        hit_sub: bool,
+    ) -> Res<HitRes> {
+        // ModifyCritRatio: Scope Lens, and Leek for Farfetch'd/Sirfetch'd.
+        let mut ratio = mv.data.crit_ratio as i32;
+        if self.mon(user).volatiles.has(VolatileId::FocusEnergy) {
+            ratio += 2;
+        }
+        if let Some(v) = self.mon(user).volatiles.0.iter().find(|v| v.id == VolatileId::DragonCheer) {
+            ratio += 1 + v.counter as i32;
+        }
+        match self.item_of(user) {
+            Some("scopelens") => ratio += 1,
+            Some("leek") => {
+                let base = crate::dex::to_id(&Dex::get().species(self.mon(user).species).base_species);
+                if base == "farfetchd" || base == "sirfetchd" {
+                    ratio += 2;
+                }
+            }
+            _ => {}
+        }
+        let crit_ratio = ratio.clamp(0, 4) as usize;
+        let crit = match mv.data.will_crit {
+            Some(c) => c,
+            None => crit_ratio > 0 && self.chance.chance(1, [0, 24, 8, 2, 1][crit_ratio]),
+        };
+        mv.crit_on.retain(|&c| c != t);
+        if crit {
+            mv.crit_on.push(t);
+        }
+        let mut ctx = self.damage_ctx(view, user, t, crit, spread);
+        ctx.bypass_protect = mv.bypassed.contains(&t);
+        ctx.hit_sub = hit_sub;
+        ctx.hit = mv.hit;
+        let outcome = damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
+        if !hit_sub && matches!(outcome, Outcome::Damage(_)) && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))? {
+            self.eat_resist_berry(t);
+        }
+        // Final Gambit's damageCallback faints its user.
+        if mv.data.id == "finalgambit" && matches!(outcome, Outcome::Damage(_)) {
+            self.faint(user);
+        }
+        Ok(match outcome {
+            Outcome::Damage(rolls) => HitRes::Num(rolls[self.chance.random(16) as usize]),
+            Outcome::Immune => HitRes::Bool(false),
+            Outcome::NoDamage => HitRes::Undefined,
+        })
+    }
+
+    /// substitute's onTryPrimaryHit: the damage goes to the substitute
+    /// (recoil and drain from it, AfterSubDamage). False when the move does
+    /// no damage (a status move), which fails against it.
+    fn hit_substitute(&mut self, user: MonRef, t: MonRef, mv: &mut MoveUse) -> Res<bool> {
+        if mv.data.category == Category::Status {
+            return Ok(false);
+        }
+        let view = self.damage_view();
+        let spread = mv.spread;
+        let HitRes::Num(mut d) = self.get_damage(user, t, mv, &view, spread, true)? else { return Ok(false) };
+        let Some(v) = self.mon_mut(t).volatiles.get_mut(VolatileId::Substitute) else { return Ok(true) };
+        d = d.min(v.counter);
+        v.counter -= d;
+        if v.counter == 0 {
+            self.mon_mut(t).volatiles.remove(VolatileId::Substitute);
+        }
+        if d > 0 {
+            self.apply_recoil(user, mv.data, d);
+        }
+        if let Some((n, den)) = mv.data.drain {
+            let mut amount = (d * n).div_ceil(den);
+            if self.item_of(user) == Some("bigroot") {
+                amount = crate::fixed::modify(amount as u64, 5324) as u32;
+            }
+            if self.ability_is(t, "liquidooze") {
+                self.effect_damage(user, amount);
+            } else {
+                self.heal(user, amount);
+            }
+        }
+        // AfterSubDamage: the move's (Ice Spinner, Steel Roller, Stone Axe,
+        // Ceaseless Edge, Mortal Spin), then Air Balloon's.
+        let user_hp = self.mon(user).hp > 0;
+        match mv.data.id.as_str() {
+            "icespinner" if user_hp => self.clear_terrain(),
+            "steelroller" => self.clear_terrain(),
+            "stoneaxe" if user_hp && !mv.am.has_sheer_force => {
+                self.add_hazard(1 - user.side, SideCondition::StealthRock);
+            }
+            "ceaselessedge" if user_hp && !mv.am.has_sheer_force => {
+                self.add_hazard(1 - user.side, SideCondition::Spikes);
+            }
+            "mortalspin" if user_hp && !mv.am.has_sheer_force => {
+                self.mon_mut(user).volatiles.remove(VolatileId::LeechSeed);
+                for c in SideCondition::ALL.into_iter().filter(|c| c.is_hazard()) {
+                    self.sides[user.side].conditions[c as usize] = 0;
+                }
+                self.mon_mut(user).volatiles.remove(VolatileId::PartiallyTrapped);
+            }
+            _ => {}
+        }
+        if self.item_of(t) == Some("airballoon") {
+            self.mon_mut(t).item = None;
+            self.after_use_item(t);
+        }
+        Ok(true)
+    }
+
     /// `selfDrops`.
     fn self_drops(&mut self, targets: &[Option<MonRef>], user: MonRef, mv: &mut MoveUse, self_effect: &'static HitEffect, is_secondary: bool) -> Res<()> {
         for t in targets {
@@ -1831,10 +1949,24 @@ impl Battle {
     }
 
     /// `secondaries`.
-    fn secondaries(&mut self, targets: &[Option<MonRef>], user: MonRef, mv: &mut MoveUse) -> Res<()> {
-        for &t in targets {
+    fn secondaries(&mut self, targets: &[Option<MonRef>], subbed: &[bool], user: MonRef, mv: &mut MoveUse) -> Res<()> {
+        let secondaries: &[HitEffect] = if mv.am.has_sheer_force { &[] } else { &mv.data.secondaries };
+        for (i, &t) in targets.iter().enumerate() {
+            // A substitute took the hit: each secondary still rolls, and only
+            // its effect on the user (self) happens.
+            if subbed.get(i).copied().unwrap_or(false) {
+                for sec in secondaries {
+                    let roll = self.chance.random(100);
+                    if let (true, Some(se)) = (sec.chance.is_none_or(|c| roll < c as u32), sec.self_effect.as_deref()) {
+                        self.self_drops(&[Some(user)], user, mv, se, true)?;
+                    }
+                }
+                if mv.kings_rock {
+                    self.chance.random(100);
+                }
+                continue;
+            }
             let Some(t) = t else { continue };
-            let secondaries: &[HitEffect] = if mv.am.has_sheer_force { &[] } else { &mv.data.secondaries };
             // ModifySecondaries: Shield Dust keeps only effects on the user.
             let dust = self.ability_is(t, "shielddust");
             for sec in secondaries {

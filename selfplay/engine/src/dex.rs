@@ -682,7 +682,7 @@ impl Dex {
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
                 // true, or Baton Pass's "copyvolatile" (not Shed Tail's).
-                self_switch: matches!(r.get("selfSwitch"), Some(Value::Bool(true))) || r.get("selfSwitch").and_then(|v| v.as_str()) == Some("copyvolatile"),
+                self_switch: matches!(r.get("selfSwitch"), Some(Value::Bool(true))) || matches!(r.get("selfSwitch").and_then(|v| v.as_str()), Some("copyvolatile" | "shedtail")),
                 self_boost: match r.get("selfBoost").and_then(Value::as_object) {
                     Some(o) => Some(HitEffect::parse(o).map_err(ctx)?),
                     None => None,
