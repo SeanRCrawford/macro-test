@@ -2877,10 +2877,11 @@ class TestPairMinBeatenAndBuildTeams(unittest.TestCase):
                 "--pair-min-beaten", "1", "--build-teams", "4,5", "--max-weak", "6",
                 "--max-net-weak-types", "18", "--xlsx", path])
             self.assertIsNone(msg, out)
-            self.assertIn("pair(s) beat >= 1 enemy pairs on every named enemy", out)
+            self.assertIn("pair(s) beat >= 1 enemy pairs on at least 1 named enemy team(s)", out)
             self.assertIn("Best teams of 4", out)
             self.assertIn("Best teams of 5", out)
             self.assertIn("good pairs", out)
+            self.assertIn("enemy teams covered", out)
             self.assertTrue(os.path.exists(path))
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
             from app import _parse_pair_coverage_xlsx
@@ -2892,6 +2893,114 @@ class TestPairMinBeatenAndBuildTeams(unittest.TestCase):
         finally:
             if os.path.exists(path):
                 os.unlink(path)
+
+
+class TestBuildTeamsPerEnemyBring4(unittest.TestCase):
+    """`--build-teams` defaults to the per-enemy bring-4 reading."""
+
+    BASE = ["--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+            "--vs-team", "Garchomp,Incineroar", "--pool-size", "10", "--pairs-only",
+            "--pair-min-beaten", "1", "--max-weak", "6", "--max-net-weak-types", "18"]
+
+    def test_default_mode_prints_a_bring4_per_enemy_team(self):
+        msg, out = run_main(self.BASE + ["--build-teams", "6", "--bring4-min-good", "6"])
+        self.assertIsNone(msg, out)
+        self.assertIn("enemy teams covered", out)
+        self.assertIn("vs enemy 1:", out)
+        self.assertIn("vs enemy 2:", out)
+        self.assertIn("at least 1 named enemy team(s)", out)
+
+    def test_all_pairs_mode_and_min_teams(self):
+        msg, out = run_main(self.BASE + ["--build-teams", "4", "--build-mode", "all-pairs",
+                                         "--pair-min-teams", "2"])
+        self.assertIsNone(msg, out)
+        self.assertIn("at least 2 named enemy team(s)", out)
+        self.assertIn("good pairs", out)
+
+    def test_bring4_mode_rejects_size_3(self):
+        msg, out = run_main(self.BASE + ["--build-teams", "3"])
+        self.assertIsNone(msg, out)
+        self.assertIn("bring4 mode needs a size of 4-6", out)
+
+
+class TestFinalTeamsSheet(unittest.TestCase):
+    """--build-teams with --xlsx writes a "Final Teams" sheet carrying each
+    team's pokepaste, and the workbook still loads in Import pair coverage."""
+
+    def test_final_teams_sheet_has_a_pokepaste_per_team(self):
+        import tempfile
+        from openpyxl import load_workbook
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            path = f.name
+        os.unlink(path)
+        try:
+            msg, out = run_main([
+                "--multi-bring4", "--vs-team", "Kingambit,Basculegion",
+                "--vs-team", "Garchomp,Incineroar", "--pool-size", "10", "--pairs-only",
+                "--pair-min-beaten", "1", "--max-weak", "6", "--max-net-weak-types", "18",
+                "--build-teams", "5", "--xlsx", path])
+            self.assertIsNone(msg, out)
+            wb = load_workbook(path)
+            self.assertIn("Final Teams", wb.sheetnames)
+            self.assertIn("Pair Coverage", wb.sheetnames)
+            rows = list(wb["Final Teams"].iter_rows(values_only=True))
+            header = list(rows[0])
+            self.assertEqual(header[-1], "Pokepaste")
+            self.assertIn("Bring-4 vs enemy 1", header)
+            self.assertTrue(len(rows) > 1)
+            for row in rows[1:]:
+                team = row[2].split(" / ")
+                paste = row[-1]
+                self.assertEqual(paste.count(" @ "), len(team))
+                self.assertEqual(paste.count("- "), 4 * len(team))
+                for n in team:   # a Mega is pasted as its base species + stone
+                    base = n[5:].rsplit(" ", 1)[0] if n.startswith("Mega ") and n.endswith((" X", " Y", " Z")) else n.replace("Mega ", "")
+                    self.assertIn(base, paste)
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+            from app import _parse_pair_coverage_xlsx
+            with open(path, "rb") as fh:
+                self.assertTrue(_parse_pair_coverage_xlsx(fh.read())[0])
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+class TestNoFocusSashFlag(unittest.TestCase):
+    """--no-focus-sash: the team's own item searches never pick Focus Sash."""
+
+    def test_excluded_items_helper(self):
+        import types
+        import counter_table as ct
+        from counter_finder import DEFAULT_EXCLUDED_ITEMS
+        ns = lambda **k: types.SimpleNamespace(**{"allow_scarf": False, "no_focus_sash": False, **k})
+        self.assertEqual(ct._excluded_items(ns()), DEFAULT_EXCLUDED_ITEMS)
+        self.assertEqual(ct._excluded_items(ns(no_focus_sash=True)),
+                         DEFAULT_EXCLUDED_ITEMS | {"Focus Sash"})
+        self.assertEqual(ct._excluded_items(ns(allow_scarf=True, no_focus_sash=True)),
+                         frozenset({"Focus Sash"}))
+
+    def test_pairs_only_export_has_no_focus_sash(self):
+        import tempfile
+        from openpyxl import load_workbook
+
+        def items(extra):
+            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+                path = f.name
+            os.unlink(path)
+            try:
+                msg, out = run_main([
+                    "--multi-bring4", "--vs-team", "Kingambit,Basculegion,Garchomp,Incineroar",
+                    "--pool-size", "40", "--pairs-only", "--good-threshold", "0",
+                    "--min-enemies", "1", "--pair-coverage-top", "500", "--xlsx", path] + extra)
+                self.assertIsNone(msg, out)
+                ws = load_workbook(path)["Pair Coverage"]
+                rows = list(ws.iter_rows(values_only=True))
+                h = list(rows[0])
+                return {r[h.index("Item 1")] for r in rows[1:]} | {r[h.index("Item 2")] for r in rows[1:]}
+            finally:
+                if os.path.exists(path):
+                    os.unlink(path)
+        self.assertNotIn("Focus Sash", items(["--no-focus-sash"]))
 
 
 class TestPairsOnlyFlag(unittest.TestCase):

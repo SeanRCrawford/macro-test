@@ -353,6 +353,13 @@ def _parse_move_overrides(spec):
     return out
 
 
+def _excluded_items(args):
+    """The item set every search leaves out of OUR side: Choice Scarf by
+    default (--allow-scarf lifts it), plus Focus Sash with --no-focus-sash."""
+    out = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    return out | {"Focus Sash"} if args.no_focus_sash else out
+
+
 def _resolve_vs_team(raw, teams, merged):
     """One `--vs-team` value -> its resolved roster (list of names),
     validated. `raw` is EITHER the name of a saved team (a `teams.csv` row,
@@ -1845,21 +1852,22 @@ def _write_multi_bring4_xlsx(path, rows, target_name_lists, merged, moves_db,
     return path
 
 
-def _pairs_meeting_bar(coverage, min_beaten):
+def _pairs_meeting_bar(coverage, min_beaten, min_teams=None):
     """Pair keys (frozensets) that beat at least `min_beaten` enemy pairs --
-    capped at that enemy's own total when it has fewer -- on EVERY enemy
-    roster in `coverage`."""
+    capped at that enemy's own total when it has fewer -- on at least
+    `min_teams` enemy rosters in `coverage` (None = every roster)."""
     keys = {k for pbk in coverage["pair_by_key"] for k in pbk}
+    n = len(coverage["pair_by_key"])
+    need = n if min_teams is None else max(1, min(min_teams, n))
     keep = set()
     for k in keys:
-        ok = True
+        ok = 0
         for pbk in coverage["pair_by_key"]:
             r = pbk.get(k)
-            if r is None or (r["pairs_swept"] + r["pairs_traded"]
-                             < min(min_beaten, r["pairs_total"])):
-                ok = False
-                break
-        if ok:
+            if r is not None and (r["pairs_swept"] + r["pairs_traded"]
+                                  >= min(min_beaten, r["pairs_total"])):
+                ok += 1
+        if ok >= need:
             keep.add(k)
     return keep
 
@@ -1871,28 +1879,80 @@ def _print_teams_from_pairs(coverage, sizes_arg, bar, args, type_limits,
     assembly="all_pairs")."""
     from counter_finder import pair_coverage_teams
     sizes = [int(p) for p in sizes_arg.split(",") if p.strip()]
+    team_rows = {}
     for size in sizes:
+        per_enemy = args.build_mode == "bring4"
+        if per_enemy and not 4 <= size <= 6:
+            print(f"Best teams of {size}: bring4 mode needs a size of 4-6\n")
+            continue
         rows = pair_coverage_teams(
-            coverage, group_size=size, assembly="all_pairs",
+            coverage, group_size=size,
+            assembly="per_enemy_bring4" if per_enemy else "all_pairs",
+            bring4_min_good=args.bring4_min_good,
             good_threshold=bar / 15.0, max_weak=args.max_weak,
             type_limits=type_limits, max_megas=args.max_megas,
             max_weak_types=args.max_weak_types,
             max_net_weak_types=args.max_net_weak_types,
             must_include=required_members or None, top_n=args.top)
         print(f"Best teams of {size} (by high-performing internal pairs):")
+        team_rows[size] = rows
         if not rows:
             print("  none passed every filter\n")
             continue
         for i, r in enumerate(rows, start=1):
+            if per_enemy:
+                print(f"  {i}. {' / '.join(r['team'])}: "
+                     f"{r['teams_satisfied']}/{r['teams_total']} enemy teams "
+                     f"covered, {r['good_pairs']}/{6 * r['teams_total']} good "
+                     f"pairs, score {r['score']:.1f}")
+                for t in r["per_team"]:
+                    print(f"       vs enemy {t['enemy_idx'] + 1}: "
+                         f"{' / '.join(t['bring4'])} ({t['good']}/6 good)")
+                continue
             b4, b4_good = r["best_bring4"]
             print(f"  {i}. {' / '.join(r['team'])}: {r['good_pairs']}/"
                  f"{r['pairs_total']} good pairs "
                  f"({r['known_pairs']} raced), score {r['score']:.1f}; "
                  f"best bring-4 {' / '.join(b4)} ({b4_good}/6)")
         print()
+    return team_rows
 
 
-def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n):
+def _write_final_teams_sheet(wb, team_rows, target_name_lists, merged):
+    """"Final Teams": one row per team `--build-teams` found -- size, rank,
+    members, how many enemy teams it covers, each enemy team's bring-4, and the
+    team's POKEPASTE (the exact sets its pairs were raced with) in one cell."""
+    from export_excel import _autosize, _style_header
+    from species_data import team_to_showdown_export
+    n_enemy = len(target_name_lists)
+    ws = wb.create_sheet("Final Teams")
+    ws.append(["Size", "Rank", "Team", "Enemy teams covered", "Good pairs", "Score"]
+              + [f"Bring-4 vs enemy {i + 1}" for i in range(n_enemy)] + ["Pokepaste"])
+    _style_header(ws)
+    for size, rows in sorted((team_rows or {}).items()):
+        for rank, r in enumerate(rows, start=1):
+            per = r.get("per_team")
+            ws.append([
+                size, rank, " / ".join(r["team"]),
+                f"{r['teams_satisfied']}/{r['teams_total']}" if per else "",
+                (f"{r['good_pairs']}/{6 * r['teams_total']}" if per
+                 else f"{r['good_pairs']}/{r['pairs_total']}"),
+                round(r["score"], 1)]
+                + ([f"{' / '.join(t['bring4'])} ({t['good']}/6 good)" for t in per]
+                   if per else [""] * n_enemy)
+                + [team_to_showdown_export(list(r["team"]), r["sets"], merged)])
+    ws.freeze_panes = "A2"
+    _autosize(ws)
+    paste_col = ws.max_column
+    from openpyxl.styles import Alignment
+    for row in ws.iter_rows(min_row=2, min_col=paste_col, max_col=paste_col):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.column_dimensions[ws.cell(row=1, column=paste_col).column_letter].width = 60
+
+
+def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n,
+                           team_rows=None, merged=None):
     """--pairs-only --xlsx: the lightweight export -- "I just want a
     lighter weight version that just outputs comprehensive 2v2 pairs for
     use in building teams" -- Stage A's own pair-vs-enemy data, with NONE
@@ -1920,6 +1980,8 @@ def _write_pairs_only_xlsx(path, coverage, target_name_lists, top_n):
     ws.append([", ".join(names) for names in target_name_lists])
     _autosize(ws)
     _write_pair_coverage_sheets(wb, coverage, top_n)
+    if team_rows:
+        _write_final_teams_sheet(wb, team_rows, target_name_lists, merged)
     wb.save(path)
     return path
 
@@ -2580,7 +2642,7 @@ def _run_evolve_from_team(args):
                              for raw in args.vs_team]
     else:
         target_name_lists = list(W["teams"].values())
-    excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    excluded_items = _excluded_items(args)
     max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
     max_life_orb = None if args.max_life_orb < 0 else args.max_life_orb
     # a named team's own sets go in first (the "sets intact" convention
@@ -3038,6 +3100,14 @@ def main():
                          "Pass this to let the search consider it again; an "
                          "explicit --item pin already bypasses the "
                          "exclusion regardless")
+    ap.add_argument("--no-focus-sash", action="store_true",
+                    help="never give YOUR team a Focus Sash: it is dropped from "
+                         "every item search (alongside the default Choice "
+                         "Scarf exclusion), so no result, export or pokepaste "
+                         "carries one -- Focus Sash makes a team look better "
+                         "than it is. An item pinned explicitly with --item "
+                         "still wins, and the ENEMY teams keep whatever they "
+                         "really run")
     ap.add_argument("--unique-items", action="store_true",
                     help="--bring4/--multi-bring4 only: enforce the VGC "
                          "Item Clause (no two of the team's own Pokemon may "
@@ -3162,6 +3232,23 @@ def main():
                          "then ignored) instead of only the top-N. Also "
                          "the bar for a 'high-performing' pair when "
                          "--build-teams is given (default 10 there)")
+    ap.add_argument("--pair-min-teams", type=int, default=None, metavar="K",
+                    help="--pairs-only with --pair-min-beaten only: keep a pair "
+                         "if it beats N enemy pairs vs at least K of the "
+                         "--vs-team enemies (default: ALL of them). K=1 keeps "
+                         "any pair that is good against some team -- what "
+                         "--build-teams wants in its default bring-4 mode, "
+                         "where every enemy team uses its own good pairs")
+    ap.add_argument("--build-mode", choices=("bring4", "all-pairs"), default="bring4",
+                    help="--build-teams scoring. bring4 (default): the team "
+                         "must hold, for EACH --vs-team enemy, a bring-4 (6 "
+                         "pairs) whose pairs all beat N of THAT team's pairs "
+                         "(--bring4-min-good relaxes the 6). all-pairs: rank "
+                         "by how many of all C(size,2) pairs are good on "
+                         "every team")
+    ap.add_argument("--bring4-min-good", type=int, default=6, metavar="N",
+                    help="--build-teams bring4 mode: good pairs (of 6) each "
+                         "enemy team's bring-4 needs (default 6)")
     ap.add_argument("--build-teams", default="", metavar="N,N,...",
                     help="--multi-bring4 --pairs-only only: after racing "
                          "the pairs, assemble the best teams of these "
@@ -3230,11 +3317,11 @@ def main():
                     help="--joint/--deep/--bring4/--multi-bring4 only: how "
                          "many turns to race (default 2)")
     ap.add_argument("--worst-case-targeting", action="store_true",
-                    help="--joint/--deep/--bring4's own Stage 1 pool search "
-                         "only (NOT --multi-bring4's own main coverage/"
-                         "ranking sweep, which stays greedy -- searching the "
-                         "enemy's targeting there too would multiply an "
-                         "already large pool-wide search; the deep-dive-on-"
+                    help="--joint/--deep/--bring4's own Stage 1 pool search, "
+                         "and --multi-bring4's pair-vs-enemy-team racing "
+                         "(including --pairs-only; opt-in there because it "
+                         "makes that already large pool-wide search roughly "
+                         "2.5x slower and stricter; the deep-dive-on-"
                          "top-N follow-up common to --bring4/--multi-bring4 "
                          "has its OWN separate --deep-dive-worst-case-"
                          "targeting, on by default): by default the ENEMY's "
@@ -3612,10 +3699,14 @@ def main():
         if unknown_bench:
             raise SystemExit(f"unknown Pokemon: {', '.join(unknown_bench)}")
     vs_teams = []
+    vs_team_sets = []   # per enemy team: a saved team's REAL sets ({} for a raw list)
     if args.multi_bring4:
         vs_team_names = list(W["teams"]) if args.vs_all_teams else args.vs_team
         for raw in vs_team_names:
             vs_teams.append(_resolve_vs_team(raw, W["teams"], merged))
+            vs_team_sets.append(
+                ((W["meta"].get(raw.strip()) or {}).get("sets") or {})
+                if raw.strip() in W["teams"] else {})
         if args.min_enemies == 2 and len(vs_teams) < 2:
             # Still at the untouched default -- auto-clamp rather than make
             # a single-roster search jump through an extra flag for it.
@@ -3648,7 +3739,7 @@ def main():
 
     item_overrides = _parse_item_overrides(args.item)
     move_overrides = _parse_move_overrides(args.moves)
-    excluded_items = frozenset() if args.allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    excluded_items = _excluded_items(args)
     max_focus_sash = None if args.max_focus_sash < 0 else args.max_focus_sash
     max_life_orb = None if args.max_life_orb < 0 else args.max_life_orb
     type_limits = _parse_type_limits(args.type_limit)
@@ -3887,7 +3978,8 @@ def main():
             turns=args.turns, good_threshold=good_threshold,
             min_enemies=args.min_enemies, item_overrides=item_overrides,
             move_overrides=move_overrides, excluded_items=excluded_items,
-            jobs=args.jobs)
+            jobs=args.jobs, enemy_sets=vs_team_sets,
+            worst_case_targeting=args.worst_case_targeting)
         print(f"Candidate pool (appears in a good pair for >= "
              f"{args.min_enemies} of {len(vs_teams)} enemies): "
              f"{len(coverage['candidate_pool'])} of {len(pool)}\n")
@@ -3909,19 +4001,24 @@ def main():
             if args.pair_min_beaten is not None or args.build_teams:
                 from counter_finder import filter_coverage_pairs
                 bar = args.pair_min_beaten if args.pair_min_beaten is not None else 10
-                keep = _pairs_meeting_bar(coverage, bar)
+                keep = _pairs_meeting_bar(
+                    coverage, bar,
+                    args.pair_min_teams if args.pair_min_teams is not None
+                    else (1 if args.build_teams and args.build_mode == "bring4" else None))
                 coverage = filter_coverage_pairs(coverage, keep)
-                print(f"{len(keep)} pair(s) beat >= {bar} enemy pairs on every "
-                     f"named enemy.\n")
+                print(f"{len(keep)} pair(s) beat >= {bar} enemy pairs on "
+                     f"{'every named enemy' if (args.pair_min_teams is None and not (args.build_teams and args.build_mode == 'bring4')) else 'at least ' + str(args.pair_min_teams if args.pair_min_teams is not None else 1) + ' named enemy team(s)'}.\n")
                 if args.pair_min_beaten is not None:
                     export_top = 10 ** 6
+            team_rows = None
             if args.build_teams:
-                _print_teams_from_pairs(
+                team_rows = _print_teams_from_pairs(
                     coverage, args.build_teams, bar, args, type_limits,
                     required_members)
             if args.xlsx:
                 path = _write_pairs_only_xlsx(
-                    args.xlsx, coverage, vs_teams, export_top)
+                    args.xlsx, coverage, vs_teams, export_top,
+                    team_rows=team_rows, merged=merged)
                 print(f"\nExcel workbook (pairs only, no core search): "
                      f"{os.path.abspath(path)}")
             return

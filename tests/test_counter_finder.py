@@ -5633,6 +5633,130 @@ class TestPairCoverageTeamsAllPairs(unittest.TestCase):
             cf.pair_coverage_teams(self.coverage, assembly="bogus")
 
 
+import itertools
+
+
+def _synthetic_coverage(good_by_team, names, total=15):
+    """A hand-built `multi_bring4_coverage`-shaped dict: every pair of `names`
+    is raced against each team; pairs in `good_by_team[t]` beat 12/15, the
+    rest 2/15."""
+    pbk = []
+    for good in good_by_team:
+        d = {}
+        for a, b in itertools.combinations(names, 2):
+            beaten = 12 if frozenset((a, b)) in good else 2
+            d[frozenset((a, b))] = {
+                "pair": (a, b), "item1": "X", "item2": "Y", "detail": {},
+                "pairs_swept": beaten, "pairs_traded": 0, "pairs_lost": total - beaten,
+                "pairs_no_ko": 0, "pairs_tailwind_safe": 0, "pairs_protect_safe": 0,
+                "pairs_follow_me_safe": 0, "pairs_clean_win_total": 0.0,
+                "pairs_damage_output_total": 0.0, "pairs_total": total}
+        pbk.append(d)
+    return {"pair_by_key": pbk, "target_name_lists": [["e"] * 6 for _ in good_by_team],
+            "merged": {n: {"types": ["Normal"], "score": 500} for n in names},
+            "moves_db": {}, "typechart": None,
+            "fixed_items": {n: "I" for n in names},
+            "fixed_moves": {n: ["M"] for n in names}}
+
+
+def _clique(names):
+    return {frozenset(p) for p in itertools.combinations(names, 2)}
+
+
+class TestPairCoverageTeamsPerEnemyBring4(unittest.TestCase):
+    """`assembly="per_enemy_bring4"`: a team of 6 whose best bring-4 vs EACH
+    enemy team (6 pairs) is made of pairs good vs that team."""
+
+    NAMES = list("ABCDEFGHI")
+
+    def _teams(self, good_by_team, **kw):
+        cov = _synthetic_coverage(good_by_team, self.NAMES)
+        kw.setdefault("good_threshold", 10 / 15)
+        return cf.pair_coverage_teams(cov, group_size=kw.pop("group_size", 6),
+                                      assembly="per_enemy_bring4", top_n=50, **kw)
+
+    def test_finds_the_team_whose_bring4s_cover_every_enemy_team(self):
+        r = self._teams([_clique("ABCD"), _clique("CDEF"), _clique("EFAB")])
+        self.assertEqual(r[0]["team"], tuple("ABCDEF"))
+        self.assertEqual(r[0]["teams_satisfied"], 3)
+        self.assertEqual(r[0]["good_pairs"], 18)
+        self.assertEqual([t["bring4"] for t in r[0]["per_team"]],
+                         [tuple("ABCD"), tuple("CDEF"), tuple("ABEF")])
+        for t in r[0]["per_team"]:
+            self.assertTrue(t["satisfied"])
+
+    def test_every_enemy_team_must_be_satisfied_by_default(self):
+        # Team 2's good bring-4 (GHI + ...) needs members that cannot fit in 6
+        # together with the other two teams' bring-4s.
+        r = self._teams([_clique("ABCD"), _clique("EFGH"), _clique("CDGI")])
+        self.assertEqual(r, [])
+
+    def test_teams_needed_allows_a_subset_of_enemy_teams(self):
+        good = [_clique("ABCD"), _clique("EFGH"), _clique("CDGI")]
+        r = self._teams(good, teams_needed=2)
+        self.assertTrue(r)
+        for row in r:
+            self.assertGreaterEqual(row["teams_satisfied"], 2)
+        self.assertEqual(r[0]["teams_satisfied"], 2)
+
+    def test_bring4_min_good_relaxes_the_six_pair_requirement(self):
+        # Team 0's bring-4 ABCD is missing the C-D pair: only 5/6 good.
+        almost = _clique("ABCD") - {frozenset("CD")}
+        self.assertEqual(self._teams([almost, _clique("CDEF")]), [])
+        r = self._teams([almost, _clique("CDEF")], bring4_min_good=5)
+        self.assertTrue(r)
+        self.assertTrue(all(t["satisfied"] for t in r[0]["per_team"]))
+
+    def test_good_is_judged_per_team_not_across_all_teams(self):
+        # Pair A-B is good only vs team 0, C-D only vs team 1 -- under the old
+        # "good on every team" reading neither would count.
+        r = self._teams([_clique("ABCD"), _clique("CDEF")])
+        self.assertTrue(r)
+        self.assertEqual(r[0]["teams_satisfied"], 2)
+
+    def test_threshold_is_per_team_pair_bar(self):
+        good = [_clique("ABCD")]
+        self.assertTrue(self._teams(good, good_threshold=12 / 15))
+        self.assertEqual(self._teams(good, good_threshold=13 / 15), [])
+
+    def test_sizes_4_to_6_and_validation(self):
+        good = [_clique("ABCD"), _clique("ABCD")]
+        for size in (4, 5, 6):
+            r = self._teams(good, group_size=size)
+            self.assertTrue(r)
+            self.assertTrue(all(len(x["team"]) == size for x in r))
+        with self.assertRaises(ValueError):
+            self._teams(good, group_size=3)
+        with self.assertRaises(ValueError):
+            self._teams(good, bring4_min_good=7)
+
+    def test_must_include_exclude_and_member_score(self):
+        good = [_clique("ABCD"), _clique("CDEF")]
+        self.assertTrue(all("G" in x["team"] for x in self._teams(good, must_include=["G"])))
+        self.assertEqual(self._teams(good, exclude=["A"]), [])
+        cov = _synthetic_coverage(good, self.NAMES)
+        cov["merged"]["A"]["score"] = 100
+        r = cf.pair_coverage_teams(cov, group_size=6, assembly="per_enemy_bring4",
+                                   good_threshold=10 / 15, min_member_score=400)
+        self.assertEqual(r, [])
+
+    def test_extra_coverage_group_filters(self):
+        good = [_clique("ABCD"), _clique("CDEF")]
+        cov = _synthetic_coverage(good, self.NAMES)
+        # every member is Normal: a duplicate typing, so the strict cap empties it
+        r = cf.pair_coverage_teams(cov, group_size=6, assembly="per_enemy_bring4",
+                                   good_threshold=10 / 15, no_duplicate_typing=True)
+        self.assertEqual(r, [])
+        r = cf.pair_coverage_teams(cov, group_size=6, assembly="per_enemy_bring4",
+                                   good_threshold=10 / 15, required_cores=[("Fire",)])
+        self.assertEqual(r, [])
+        r = cf.pair_coverage_teams(cov, group_size=6, assembly="per_enemy_bring4",
+                                   good_threshold=10 / 15, required_cores=[("Normal",)],
+                                   max_net_weak_types_1=18, max_weak_types_3=18,
+                                   max_net_weakness=6)
+        self.assertTrue(r)
+
+
 class TestPairCoverageTeamsCoverageFilters(unittest.TestCase):
     """"using the same constraints as the coverage groups" -- porting
     `coverage_group_search`'s own `min_offensive_types`/`one_v_one_matrix`/
@@ -11980,6 +12104,97 @@ class TestOneVOneMoveLimit(unittest.TestCase):
                        for e in enemies)
             self.assertEqual(wins, expect)
             self.assertEqual(len(chosen["A"]), k)
+
+
+class TestCoverageUsesTheEnemyTeamsRealSets(unittest.TestCase):
+    """Reported: a team found by the pair search performed completely
+    differently once loaded into the Counter Table. Cause: the pair search
+    raced every enemy with its usage-default set, the app with the saved
+    team's real set. `multi_bring4_coverage(enemy_sets=...)` closes that."""
+
+    ENEMY = "Big 6"
+    OURS = ["Garchomp", "Incineroar", "Rillaboom", "Kingambit"]
+
+    @classmethod
+    def setUpClass(cls):
+        W = cls.W = world()
+        cls.roster = list(W["teams"][cls.ENEMY])
+        cls.sets = (W["meta"].get(cls.ENEMY) or {}).get("sets") or {}
+
+    def _cov(self, enemy_sets):
+        W = self.W
+        return cf.multi_bring4_coverage(
+            self.OURS + ["Gallade", "Hydreigon"], [self.roster], W["merged"], W["moves"],
+            W["natures"], W["typechart"], good_threshold=0.0, min_enemies=1,
+            enemy_sets=enemy_sets)
+
+    @staticmethod
+    def _beaten(cov):
+        return {tuple(sorted(k)): r["pairs_swept"] + r["pairs_traded"]
+                for k, r in cov["pair_by_key"][0].items()}
+
+    def test_real_enemy_sets_change_the_results(self):
+        self.assertTrue(self.sets, "fixture team must carry real sets")
+        self.assertNotEqual(self._beaten(self._cov(None)), self._beaten(self._cov([self.sets])))
+
+    def test_pair_results_match_the_apps_bring4_for_the_same_sets(self):
+        W = self.W
+        cov = self._cov([self.sets])
+        beaten = self._beaten(cov)
+        pair_rows, _b4 = cf.bring4_search(
+            self.OURS, self.roster, W["merged"], W["moves"], W["natures"], W["typechart"],
+            item_overrides={n: cov["fixed_items"][n] for n in self.OURS},
+            move_overrides={n: cov["fixed_moves"][n] for n in self.OURS},
+            enemy_item_overrides={k: v["item"] for k, v in self.sets.items() if v.get("item")},
+            enemy_move_overrides={k: v["moves"] for k, v in self.sets.items() if v.get("moves")})
+        self.assertTrue(pair_rows)
+        for r in pair_rows:
+            self.assertEqual(r["pairs_swept"] + r["pairs_traded"],
+                             beaten[tuple(sorted(r["pair"]))], r["pair"])
+
+    def test_enemy_sets_are_per_team(self):
+        items, moves = cf._enemy_set_overrides([{"A": {"item": "X", "moves": ["M"]}}, {}], 0)
+        self.assertEqual((items, moves), ({"A": "X"}, {"A": ["M"]}))
+        self.assertEqual(cf._enemy_set_overrides([{"A": {"item": "X"}}, {}], 1), (None, None))
+        self.assertEqual(cf._enemy_set_overrides(None, 0), (None, None))
+
+
+class TestExcludingFocusSash(unittest.TestCase):
+    def test_excluded_focus_sash_is_never_picked(self):
+        W = world()
+        en = ["Kingambit", "Basculegion", "Garchomp", "Incineroar"]
+        default = cf._answer_for("Tyranitar", W["merged"], W["moves"], W["natures"],
+                                 W["typechart"], en)[0]
+        self.assertEqual(default, "Focus Sash", "fixture: Tyranitar should pick it")
+        item = cf._answer_for("Tyranitar", W["merged"], W["moves"], W["natures"],
+                              W["typechart"], en,
+                              excluded_items=cf.DEFAULT_EXCLUDED_ITEMS | {"Focus Sash"})[0]
+        self.assertNotEqual(item, "Focus Sash")
+        pinned = cf._answer_for("Tyranitar", W["merged"], W["moves"], W["natures"],
+                                W["typechart"], en, item_overrides={"Tyranitar": "Focus Sash"},
+                                excluded_items=cf.DEFAULT_EXCLUDED_ITEMS | {"Focus Sash"})[0]
+        self.assertEqual(pinned, "Focus Sash")   # an explicit pin still wins
+
+
+class TestCoverageWorstCaseTargeting(unittest.TestCase):
+    def test_flag_is_passed_through_to_every_race(self):
+        W = world()
+        calls = []
+        real = cf.joint_pool_search
+
+        def spy(*a, **k):
+            calls.append(k.get("worst_case_targeting"))
+            return real(*a, **k)
+        cf.joint_pool_search = spy
+        try:
+            for wc in (False, True):
+                cf.multi_bring4_coverage(
+                    ["Garchomp", "Incineroar", "Kingambit"], [["Sableye", "Ariados"]],
+                    W["merged"], W["moves"], W["natures"], W["typechart"],
+                    good_threshold=0.0, min_enemies=1, worst_case_targeting=wc)
+        finally:
+            cf.joint_pool_search = real
+        self.assertEqual(calls, [False, True])
 
 
 class TestPairRowsFromCoverage(unittest.TestCase):

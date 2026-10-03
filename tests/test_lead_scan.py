@@ -758,6 +758,29 @@ class TestSpeedControlAndItems(unittest.TestCase):
         ls._apply(hp, id(wh), 5.0, sashed)
         self.assertEqual(hp[id(wh)], 0.0)
 
+    def test_a_multi_hit_move_breaks_the_sash(self):
+        """Only the first hit of a multi-hit move is absorbed -- Bullet Seed,
+        Triple Axel and a Parental Bond second hit all KO through a sash."""
+        from damage import MoveInfo
+        from types import SimpleNamespace
+        wh = self._mon("p2", "Whimsicott")
+        sashed = ls.sash_ids([wh])
+        plain = SimpleNamespace(ability="Scrappy", item="")
+        bond = SimpleNamespace(ability="Parental Bond", item="")
+
+        def mv(name, target="normal"):
+            return MoveInfo(name, 80, "Normal", "Physical", target)
+
+        def after(move, attacker):
+            hp = {id(wh): 1.0}
+            ls._apply(hp, id(wh), 5.0, sashed, move=move, attacker=attacker)
+            return hp[id(wh)]
+        self.assertGreater(after(mv("Return"), plain), 0.0)        # single hit: holds
+        self.assertEqual(after(mv("Bullet Seed"), plain), 0.0)     # multi-hit: breaks
+        self.assertEqual(after(mv("Triple Axel"), plain), 0.0)
+        self.assertEqual(after(mv("Return"), bond), 0.0)           # Parental Bond
+        self.assertGreater(after(mv("Earthquake", "allAdjacent"), bond), 0.0)  # spread: no 2nd hit
+
     def test_kingambit_four_times_effective_removes_ninetales_outright(self):
         """A finding, recorded because it contradicts the worked breakdown.
 

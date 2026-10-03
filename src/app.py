@@ -5171,7 +5171,15 @@ with tab_counter:
              "Choice Specs outright (never offered), and Scarf is legal but "
              "excluded from this search by default (`DEFAULT_EXCLUDED_ITEMS`), "
              "matching the CLI's own default.")
-    ct_excluded = frozenset() if ct_allow_scarf else DEFAULT_EXCLUDED_ITEMS
+    ct_no_sash = st.checkbox(
+        "Never give my team Focus Sash", value=False, key="ct_no_sash",
+        help="Drops Focus Sash from every item search on this tab, so no "
+             "result carries it -- it makes a team look better than it is. "
+             "An item you pin yourself still wins, and enemy teams keep "
+             "the item they really run.")
+    ct_excluded = (frozenset() if ct_allow_scarf else DEFAULT_EXCLUDED_ITEMS)
+    if ct_no_sash:
+        ct_excluded = ct_excluded | {"Focus Sash"}
     ct_turns = st.slider("Turns", 1, 4, 2, key="ct_turns",
                          help="How many turns the joint race is played out for.")
 
@@ -6904,12 +6912,11 @@ with tab_counter:
                    "combat, real sets already decided) and assemble teams "
                    "of 4-6 out of its own top pairs, PLUS every saved team's "
                    "own real pairs (always included), without re-running "
-                   "any combat simulation. A team is scored by ALL of its "
-                   "own internal pairs (15 for a team of 6, each bring-4 "
-                   "inside it using 6 of them): teams rank by how many "
-                   "of those are high-performing, then by average wins "
-                   "per 90. Only pairs this app actually raced count -- "
-                   "an internal pair with no data is never guessed at.")
+                   "any combat simulation. By default a team must hold, "
+                   "for EACH enemy team, a bring-4 (6 pairs) whose pairs "
+                   "are good vs that team -- or score by all of its "
+                   "internal pairs instead. Only pairs this app actually "
+                   "raced count -- a pair with no data is never guessed at.")
         up_pc = st.file_uploader(
             "Upload a --multi-bring4 --xlsx export", type=["xlsx"], key="ct_pc_upload")
         if up_pc is not None:
@@ -6942,15 +6949,42 @@ with tab_counter:
                      "dropped from consideration entirely.")
             pc_sizes = st.multiselect("Team size(s)", [4, 5, 6], default=[6], key="ct_pc_sizes")
             pc_good_min = int(st.number_input(
-                "A pair is high-performing if it beats at least this many enemy pairs (of 15), on every team",
+                "A pair is good vs an enemy team if it beats at least this many of that team's pairs (of 15)",
                 min_value=1, max_value=15, value=10, step=1, key="ct_pc_good_min",
-                help="A team of N is scored by ALL of its own C(N,2) internal "
-                     "pairs (15 for a team of 6; each bring-4 inside it "
-                     "uses 6 of them): teams rank by how many of those "
-                     "pairs are high-performing under this bar, then by "
-                     "their average wins per 90. Only pairs actually raced "
-                     "(uploaded, or one of a saved team's own pairs) can "
-                     "count -- an internal pair with no data is not good."))
+                help="The per-team bar. Bring-4 mode: judged against each "
+                     "enemy team separately. All-internal-pairs mode: a "
+                     "pair must clear it on EVERY team. Only pairs actually "
+                     "raced (uploaded, or one of a saved team's own pairs) "
+                     "can count -- a pair with no data is never good."))
+            pc_assembly = st.radio(
+                "Score a team by",
+                ["Bring-4 vs each enemy team", "All internal pairs"],
+                key="ct_pc_assembly", horizontal=True,
+                help="'Bring-4 vs each enemy team': for EVERY enemy team the "
+                     "team must hold a bring-4 (4 members, 6 pairs) whose "
+                     "pairs are good vs THAT team -- judged per team, so a "
+                     "pair only has to be good vs the team it is used "
+                     "against. 'All internal pairs': ranks by how many of "
+                     "all C(N,2) pairs are good on every team at once.")
+            pc_b4_min_good, pc_teams_needed = 6, None
+            if pc_assembly.startswith("Bring-4"):
+                pb1, pb2 = st.columns(2)
+                pc_b4_min_good = int(pb1.slider(
+                    "Good pairs required in each bring-4 (of 6)", 3, 6, 6,
+                    key="ct_pc_b4_min_good",
+                    help="6 = every pair of the bring-4 must beat the bar "
+                         "vs that enemy team; lower to allow a weaker link."))
+                pc_all_teams = pb2.checkbox(
+                    "Must satisfy every enemy team", value=True,
+                    key="ct_pc_all_teams",
+                    help="Untick to only require this many of the enemy "
+                         "teams -- the rest just rank lower.")
+                if not pc_all_teams:
+                    pc_teams_needed = int(st.number_input(
+                        "...at least this many enemy teams", min_value=1,
+                        max_value=max(1, len(target_name_lists)),
+                        value=max(1, len(target_name_lists) - 1), step=1,
+                        key="ct_pc_teams_needed"))
             with st.expander("Advanced: techs, weaknesses, minimum special attackers"):
                 pc_required_techs = _tech_required_multiselect(
                     "Required techs (every returned team must have)",
@@ -6964,6 +6998,38 @@ with tab_counter:
                          "weakness (weak minus resist) is <= 1.")
                 pc_max_weak = (st.slider("Max absolute weakness", 0, 6, 2, key="ct_pc_max_weak")
                               if pc_abs_cap_on else None)
+                pc_max_megas = st.slider(
+                    "Max Mega-stone users in a team", 0, 6, 2, key="ct_pc_max_megas")
+                pc_max_weak_types = st.slider(
+                    "Max types with 2+ absolute weaknesses (0 = no cap)", 0, 18, 0,
+                    key="ct_pc_maxweaktypes2") or None
+                pc_max_weak_types_3 = st.slider(
+                    "Max types with 3+ absolute weaknesses (0 = no cap)", 0, 18, 0,
+                    key="ct_pc_maxweaktypes3") or None
+                pc_net1_on = st.checkbox(
+                    "Cap how many types have a net weakness", key="ct_pc_net_types_on",
+                    help="Net = members weak to a type minus members resisting "
+                         "or immune to it.")
+                pc_max_net_weak_types_1 = (
+                    st.slider("Max types with at least 1 net weakness", 0, 18, 6,
+                              key="ct_pc_net_types") if pc_net1_on else None)
+                pc_net_on = st.checkbox("Cap a team's worst net weakness",
+                                        key="ct_pc_net_cap_on")
+                pc_max_net_weakness = (
+                    st.slider("Max net weakness", 0, 6, 2, key="ct_pc_max_net")
+                    if pc_net_on else None)
+                pc_dup_typing = st.checkbox(
+                    "Prevent duplicate typing", key="ct_pc_dup",
+                    help="No two members may share the exact same typing.")
+                pc_min_score_on = st.checkbox(
+                    "Require a minimum Score for every member", key="ct_pc_min_score_on")
+                pc_min_member_score = (
+                    st.slider("Minimum Score", 200, 650, 400, key="ct_pc_min_score")
+                    if pc_min_score_on else None)
+                pc_core_sel = st.multiselect(
+                    "Must-bring type cores (ALL selected must be covered)",
+                    ["/".join(c) for c in TYPE_CORES], key="ct_pc_required_cores")
+                pc_required_cores = [tuple(c.split("/")) for c in pc_core_sel] or None
                 pc_min_off_on = st.checkbox(
                     "Require a minimum offensive type coverage",
                     key="ct_pc_min_off_on",
@@ -7025,7 +7091,17 @@ with tab_counter:
                     for size in (pc_sizes or [6]):
                         results_by_size[size] = pair_coverage_teams(
                             coverage, group_size=size, max_weak=pc_max_weak,
-                            assembly="all_pairs", good_threshold=pc_good_min / 15.0,
+                            assembly=("per_enemy_bring4" if pc_assembly.startswith("Bring-4")
+                                      else "all_pairs"),
+                            good_threshold=pc_good_min / 15.0,
+                            bring4_min_good=pc_b4_min_good, teams_needed=pc_teams_needed,
+                            max_megas=pc_max_megas, max_weak_types=pc_max_weak_types,
+                            max_weak_types_3=pc_max_weak_types_3,
+                            max_net_weak_types_1=pc_max_net_weak_types_1,
+                            max_net_weakness=pc_max_net_weakness,
+                            no_duplicate_typing=pc_dup_typing,
+                            required_cores=pc_required_cores,
+                            min_member_score=pc_min_member_score,
                             required_techs=pc_required_techs or None,
                             min_special_attackers=pc_min_special,
                             must_include=pc_include or None,
@@ -7046,7 +7122,19 @@ with tab_counter:
                         st.info("No team passed every hard filter -- widen "
                                "the weakness caps or drop a required tech.")
                         continue
-                    st.dataframe(pd.DataFrame([
+                    if "per_team" in results[0]:
+                        rosters = st.session_state.get("ct_pc_target_name_lists") or []
+                        st.dataframe(pd.DataFrame([
+                            {"Team": " / ".join(r["team"]),
+                             "Enemy teams satisfied": f"{r['teams_satisfied']}/{r['teams_total']}",
+                             "Good pairs": f"{r['good_pairs']}/{6 * r['teams_total']}",
+                             **{f"vs {i + 1}: {', '.join(rosters[i][:3]) if i < len(rosters) else ''}...":
+                                f"{' / '.join(t['bring4'])} ({t['good']}/6)"
+                                for i, t in enumerate(r["per_team"])},
+                             "Score": round(r["score"], 1)}
+                            for r in results]), width='stretch', hide_index=True)
+                    else:
+                      st.dataframe(pd.DataFrame([
                         {"Team": " / ".join(r["team"]),
                          "Good pairs": f"{r['good_pairs']}/{r['pairs_total']}",
                          "Best bring-4": (" / ".join(r["best_bring4"][0])
@@ -7054,6 +7142,15 @@ with tab_counter:
                          "Raced pairs": f"{r['known_pairs']}/{r['pairs_total']}",
                          "Score": round(r["score"], 1)}
                         for r in results]), width='stretch', hide_index=True)
+                    import species_data as _sd_all
+                    st.download_button(
+                        f"Download all {len(results)} pokepastes (.txt)",
+                        data="\n\n".join(
+                            f"=== Team {i}: {' / '.join(r['team'])} ===\n\n"
+                            + _sd_all.team_to_showdown_export(list(r["team"]), r["sets"], merged)
+                            for i, r in enumerate(results, start=1)),
+                        file_name=f"pair_coverage_teams_of_{size}.txt", mime="text/plain",
+                        key=f"ct_pc_paste_dl_{size}")
                     for i, r in enumerate(results, start=1):
                         with st.expander(f"#{i}: {' / '.join(r['team'])} "
                                         f"(Score {round(r['score'], 1)})"):
@@ -7061,6 +7158,11 @@ with tab_counter:
                                 s = r["sets"][n]
                                 st.markdown(f"**{n}** -- {s['item']}: "
                                           f"{', '.join(s['moves'])}")
+                            import species_data as _sd
+                            st.caption("Pokepaste (this tool's own EV points; "
+                                       "the sets the pairs were raced with):")
+                            st.code(_sd.team_to_showdown_export(
+                                list(r["team"]), r["sets"], merged), language=None)
                             if r["offensive_coverage"] is not None:
                                 oc = r["offensive_coverage"]
                                 st.caption(
@@ -7543,8 +7645,9 @@ with tab_counter:
                      "(15 for a team of 6) are raced -- never cross-team "
                      "pairs, which are never fielded together. A pair of "
                      "yours is kept if it beats at least the number below "
-                     "on every team (or on at least the number of teams "
-                     "you choose). With 6 teams that is /90 wins in total. "
+                     "on at least the number of teams you choose (default "
+                     "1 = good vs any one team; or tick every team). With "
+                     "6 teams the totals are out of 90. "
                      "Overrides the manual enemy list below while any team "
                      "is picked, and the results can be exported to build "
                      "a team of 4 or 6 out of the best pairs.")
@@ -7561,8 +7664,13 @@ with tab_counter:
                          "with fewer than 6 members has fewer pairs; the "
                          "bar is then capped at its own total."))
                 mf_team_all = mtc2.checkbox(
-                    "Must reach it on every team", value=True,
-                    key="ct_mf_pair_team_all")
+                    "Must reach it on every team", value=False,
+                    key="ct_mf_pair_team_all",
+                    help="Off (default): a pair is kept if it reaches the bar "
+                         "vs at least the number of teams below (1 = good "
+                         "against ANY one team) -- what the team builder "
+                         "wants, since each enemy team then uses its own "
+                         "good pairs. On: only pairs good vs every team.")
                 if not mf_team_all:
                     mf_team_count = int(st.number_input(
                         "...on at least this many teams", min_value=1,
@@ -7632,11 +7740,15 @@ with tab_counter:
                         cov = multi_bring4_coverage(
                             pool, rosters, merged, moves, natures, typechart,
                             turns=ct_turns,
-                            # Pruning is only sound when a pair must clear the bar
-                            # on EVERY team; a partial-teams rule needs full rows.
-                            good_threshold=(min(q / t for q, t in zip(required, totals) if t)
-                                            if need_teams == len(rosters) else 0.0),
-                            min_enemies=1, excluded_items=ct_excluded)
+                            # Racing a pair stops once it provably cannot clear the
+                            # bar on that team -- sound for "good vs this team"; the
+                            # beaten count shown for such a team is a lower bound.
+                            good_threshold=min(q / t for q, t in zip(required, totals) if t),
+                            min_enemies=1, excluded_items=ct_excluded,
+                            worst_case_targeting=mf_worst_case,
+                            # the saved teams' REAL sets, as Bring-4 mode uses them
+                            enemy_sets=[(team_meta.get(t) or {}).get("sets") or {}
+                                        for t in mf_pair_teams])
                     keys = {k for pbk in cov["pair_by_key"] for k in pbk
                             if not all(n.startswith("Mega ") for n in k)}
                     def _passes(k):
@@ -7691,7 +7803,9 @@ with tab_counter:
                         f"on {mf_pack['need_teams']} of {len(mf_pack_teams)} team(s). "
                         f"The total is out of {grand_total} "
                         f"({' + '.join(str(t) for t in mf_pack['totals'])}). "
-                        "Sorted protect-safe first, then most enemy pairs beaten.")
+                        "Sorted protect-safe first, then most enemy pairs beaten. "
+                        "A pair that cannot reach the bar vs a team stops being "
+                        "raced there, so that team's count is a lower bound.")
                     pack_rows = []
                     for k in mf_pack_keys:
                         row = {"Pair": " + ".join(sorted(k))}

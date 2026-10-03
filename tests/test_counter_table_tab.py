@@ -151,6 +151,8 @@ class TestCounterTableTabExists(unittest.TestCase):
         at.session_state["ct_pc_target_name_lists"] = target_name_lists
         at.run()
         self.assertFalse(at.exception, list(at.exception))
+        [r for r in at.radio if r.key == "ct_pc_assembly"][0].set_value(
+            "All internal pairs").run()
         self.assertTrue(any(c.key == "ct_pc_min_off_on" for c in at.checkbox))
         self.assertTrue(any(c.key == "ct_pc_threat_on" for c in at.checkbox))
         [c for c in at.checkbox if c.key == "ct_pc_threat_on"][0].set_value(True).run()
@@ -169,6 +171,56 @@ class TestCounterTableTabExists(unittest.TestCase):
         tables = [d.value for d in at.dataframe if "Good pairs" in d.value.columns]
         self.assertTrue(all("Best bring-4" in t.columns for t in tables))
 
+    def test_import_pair_coverage_bring4_vs_each_enemy_team_mode(self):
+        """Default mode: a team of 6 with a good bring-4 vs EACH enemy team,
+        with the coverage-group filter options present."""
+        from counter_finder import pair_rows_from_coverage, multi_bring4_coverage
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        from _harness import load_world
+        W = load_world()
+        cov = multi_bring4_coverage(
+            ["Garchomp", "Incineroar", "Rillaboom", "Kingambit", "Gallade", "Hydreigon",
+             "Whimsicott"],
+            [["Sableye", "Ariados"], ["Basculegion", "Mega Floette"]],
+            W["merged"], W["moves"], W["natures"], W["typechart"],
+            good_threshold=0.0, min_enemies=1)
+        pr, dr, tl = pair_rows_from_coverage(cov)
+        at = app()
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value("Import pair coverage").run()
+        at.session_state["ct_pc_pair_rows"] = pr
+        at.session_state["ct_pc_detail_rows"] = dr
+        at.session_state["ct_pc_target_name_lists"] = tl
+        at.run()
+        self.assertFalse(at.exception, list(at.exception))
+        self.assertEqual([r for r in at.radio if r.key == "ct_pc_assembly"][0].value,
+                         "Bring-4 vs each enemy team")
+        for key in ("ct_pc_b4_min_good",):
+            self.assertTrue(any(s.key == key for s in at.slider))
+        for key in ("ct_pc_all_teams", "ct_pc_net_types_on", "ct_pc_dup"):
+            self.assertTrue(any(c.key == key for c in at.checkbox), key)
+        [n for n in at.number_input if n.key == "ct_pc_good_min"][0].set_value(1).run()
+        at = [b for b in at.button if b.key == "ct_pc_go"][0].click().run()
+        self.assertFalse(at.exception, list(at.exception))
+        by_size = at.session_state["ct_pc_results_by_size"]
+        self.assertTrue(any(by_size.values()), "expected at least one team")
+        for size, teams in by_size.items():
+            for r in teams:
+                self.assertEqual(r["teams_total"], 2)
+                self.assertEqual(r["teams_satisfied"], 2)
+                self.assertEqual(len(r["per_team"]), 2)
+        tables = [d.value for d in at.dataframe if "Enemy teams satisfied" in d.value.columns]
+        self.assertTrue(tables)
+        # Every team exposes a pokepaste that round-trips through the parser.
+        import species_data
+        first = next(t for t in by_size.values() if t)[0]
+        paste = species_data.team_to_showdown_export(
+            list(first["team"]), first["sets"], W["merged"])
+        names, _sets = species_data.custom_team_from_export(paste, W["merged"])
+        self.assertEqual(sorted(names), sorted(first["team"]))
+        codes = [c.value for c in at.code]
+        self.assertTrue(any(first["team"][0].split(" ")[-1] in c and "- " in c for c in codes))
+        self.assertTrue(any(d.label.startswith("Download all") for d in at.get("download_button")))
+
     def test_coverage_groups_net_weak_types_cap(self):
         """"max types with at least 1 net weakness" slider on Coverage groups."""
         at = app()
@@ -184,6 +236,15 @@ class TestCounterTableTabExists(unittest.TestCase):
         for meta in at.session_state["ct_cov_results"].values():
             for row in (meta["rows"] if isinstance(meta, dict) else meta):
                 self.assertLessEqual(row["net_weak_types"], 8)
+
+    def test_never_give_my_team_focus_sash_checkbox(self):
+        at = app()
+        box = [c for c in at.checkbox if c.key == "ct_no_sash"]
+        self.assertEqual(len(box), 1)
+        self.assertFalse(box[0].value)
+        [r for r in at.radio if r.key == "ct_mode"][0].set_value("Coverage groups").run()
+        [c for c in at.checkbox if c.key == "ct_no_sash"][0].set_value(True).run()
+        self.assertFalse(at.exception, list(at.exception))
 
     def test_always_include_forces_a_name_through_a_tiny_pool(self):
         """"specify individual Pokemon to include" -- a name outside the
@@ -2548,10 +2609,11 @@ class TestMatchupFinderMode(unittest.TestCase):
         self.assertEqual(len(cov["pair_by_key"]), 2)
         kept = {k for pbk in cov["pair_by_key"] for k in pbk}
         self.assertTrue(kept, "expected pairs to clear a bar of 1 enemy pair")
-        for k in kept:   # every kept pair clears the bar on every team
-            for pbk, q in zip(cov["pair_by_key"], pack["required"]):
-                r = pbk[k]
-                self.assertGreaterEqual(r["pairs_swept"] + r["pairs_traded"], q)
+        self.assertEqual(pack["need_teams"], 1)   # default: good vs any one team
+        for k in kept:   # every kept pair clears the bar on at least need_teams
+            ok = sum(1 for pbk, q in zip(cov["pair_by_key"], pack["required"])
+                     if pbk[k]["pairs_swept"] + pbk[k]["pairs_traded"] >= q)
+            self.assertGreaterEqual(ok, pack["need_teams"])
             self.assertFalse(all(n.startswith("Mega ") for n in k))
         tables = [d.value for d in at.dataframe if "Total beaten" in d.value.columns]
         self.assertEqual(len(tables), 1)
