@@ -780,15 +780,11 @@ impl Battle {
                             }
                         }
                     }
-                    "hydration" => {
-                        if self.mon(h.mon).status != Status::None && self.field.weather == crate::damage::Weather::Rain {
-                            self.cure_status(h.mon);
-                        }
+                    "hydration" if self.mon(h.mon).status != Status::None && self.field.weather == crate::damage::Weather::Rain => {
+                        self.cure_status(h.mon);
                     }
-                    "shedskin" => {
-                        if self.mon(h.mon).hp > 0 && self.mon(h.mon).status != Status::None && self.chance.chance(33, 100) {
-                            self.cure_status(h.mon);
-                        }
+                    "shedskin" if self.mon(h.mon).hp > 0 && self.mon(h.mon).status != Status::None && self.chance.chance(33, 100) => {
+                        self.cure_status(h.mon);
                     }
                     _ => {}
                 },
