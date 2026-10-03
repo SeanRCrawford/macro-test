@@ -71,6 +71,7 @@ impl Battle {
                             "item": m.item.map(|i| dex.item(i).id.clone()).unwrap_or_default(),
                             "ability": dex.ability(m.ability).id,
                             "pp": m.moves.iter().map(|s| s.pp).collect::<Vec<_>>(),
+                            "volatiles": sorted_volatiles(m),
                         })
                     })
                     .collect();
@@ -90,4 +91,10 @@ impl Battle {
             "sides": sides,
         })
     }
+}
+
+fn sorted_volatiles(m: &super::state::Mon) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = m.volatiles.0.iter().map(|v| v.id.id()).collect();
+    v.sort();
+    v
 }

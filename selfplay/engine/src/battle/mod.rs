@@ -9,6 +9,7 @@
 //! a battle never silently ignores an effect.
 
 pub mod choice;
+mod conditions;
 pub mod snapshot;
 mod moves;
 pub mod state;
@@ -271,8 +272,17 @@ impl Battle {
     /// `pokemon.getActionSpeed()`: modified Speed (Trick Room isn't in yet).
     fn action_speed_of(&self, r: MonRef) -> Res<i32> {
         let m = self.mon(r);
-        let spe = boosted(m.stats[5], m.boosts[4]);
+        let mut spe = boosted(m.stats[5], m.boosts[4]);
+        // par's onModifySpe (Quick Feet isn't supported).
+        if m.status == crate::damage::Status::Paralysis {
+            spe = spe * 50 / 100;
+        }
         Ok(spe.min(10_000) as i32)
+    }
+
+    /// `queue.willAct()`: a move or switch is still to come this turn.
+    fn will_act(&self) -> bool {
+        self.queue.iter().any(|a| matches!(a.kind, ActionKind::Move { .. } | ActionKind::Switch { .. }))
     }
 
     /// `battle.updateSpeed()`: refresh every active Pokemon's `speed`.
@@ -533,7 +543,14 @@ impl Battle {
             self.queue.remove(0);
             switchers.push(mon);
         }
-        // Switch-in abilities and items are refused by `support` for now.
+        // SwitchIn: tox's onSwitchIn resets the Toxic counter. (Switch-in
+        // abilities and items are refused by `support` for now.)
+        for r in switchers {
+            let m = self.mon_mut(r);
+            if m.status == crate::damage::Status::Toxic {
+                m.status_state.stage = 0;
+            }
+        }
         Ok(())
     }
 
@@ -555,10 +572,6 @@ impl Battle {
         Ok(())
     }
 
-    fn residual(&mut self) -> Res<()> {
-        Ok(())
-    }
-
     /// `faintMessages`: process queued faints, then check for a winner.
     fn faint_messages(&mut self) -> Res<()> {
         if self.faint_queue.is_empty() {
@@ -575,6 +588,10 @@ impl Battle {
             m.fainted = true;
             m.is_active = false;
             m.clear_volatile();
+            // status becomes 'fnt': no paralysis speed drop for its (still
+            // queued, never run) action when the queue re-sorts.
+            m.status = crate::damage::Status::None;
+            m.status_state = state::StatusState::default();
             let side = &mut self.sides[r.side];
             side.pokemon_left = side.pokemon_left.saturating_sub(1);
             if side.total_fainted < 100 {
@@ -618,9 +635,12 @@ impl Battle {
                 }
                 // DisableMove: Gigaton Hammer and Blood Moon ("cantusetwice")
                 // can't be chosen right after being used.
+                // Fake Out's onDisableMove: only usable on the first turn out.
                 let last = m.last_move;
+                let acted = m.active_move_actions > 0;
                 for s in m.moves.iter_mut() {
-                    s.disabled = Dex::get().move_data(s.id).flags.has("cantusetwice") && last == Some(s.id);
+                    let data = Dex::get().move_data(s.id);
+                    s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id)) || (data.id == "fakeout" && acted);
                 }
                 if !m.fainted {
                     m.active_turns += 1;

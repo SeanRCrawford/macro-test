@@ -20,9 +20,78 @@ pub struct MoveSlot {
     pub used: bool,
 }
 
-/// Volatile conditions. Grows as mechanics are added.
+/// The volatile conditions the engine implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolatileId {
+    Flinch,
+    Protect,
+    /// Protect's consecutive-use counter.
+    Stall,
+}
+
+impl VolatileId {
+    pub fn parse(id: &str) -> Option<VolatileId> {
+        Some(match id {
+            "flinch" => VolatileId::Flinch,
+            "protect" => VolatileId::Protect,
+            "stall" => VolatileId::Stall,
+            _ => return None,
+        })
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            VolatileId::Flinch => "flinch",
+            VolatileId::Protect => "protect",
+            VolatileId::Stall => "stall",
+        }
+    }
+
+    /// The condition's `duration`.
+    pub fn duration(self) -> Option<u8> {
+        match self {
+            VolatileId::Flinch | VolatileId::Protect => Some(1),
+            VolatileId::Stall => Some(2),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Volatile {
+    pub id: VolatileId,
+    pub duration: Option<u8>,
+    /// Stall's success counter (1 in `counter`).
+    pub counter: u32,
+}
+
+/// Volatile conditions in the order they were added (Showdown iterates
+/// `pokemon.volatiles` in insertion order, which orders tied handlers).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Volatiles(pub Vec<Volatile>);
+
+impl Volatiles {
+    pub fn has(&self, id: VolatileId) -> bool {
+        self.0.iter().any(|v| v.id == id)
+    }
+
+    pub fn get_mut(&mut self, id: VolatileId) -> Option<&mut Volatile> {
+        self.0.iter_mut().find(|v| v.id == id)
+    }
+
+    /// Returns whether it was there.
+    pub fn remove(&mut self, id: VolatileId) -> bool {
+        let before = self.0.len();
+        self.0.retain(|v| v.id != id);
+        self.0.len() != before
+    }
+}
+
+/// `statusState`: sleep and freeze turns, Toxic's stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Volatiles {}
+pub struct StatusState {
+    pub time: i8,
+    pub stage: u8,
+}
 
 /// Why a Pokemon must leave the field before the turn can continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +113,7 @@ pub struct Mon {
     pub stats: [u16; 6],
     pub hp: u16,
     pub status: Status,
+    pub status_state: StatusState,
     /// atk, def, spa, spd, spe, accuracy, evasion.
     pub boosts: [i8; 7],
     pub ability: AbilityId,
@@ -97,6 +167,7 @@ impl Mon {
             stats,
             hp: stats[0],
             status: Status::None,
+            status_state: StatusState::default(),
             boosts: [0; 7],
             ability: set.ability,
             item: set.item,

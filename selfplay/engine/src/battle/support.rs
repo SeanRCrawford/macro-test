@@ -3,7 +3,7 @@
 //! effect silently missing. Each list grows as mechanics are added (and
 //! checked against Showdown).
 
-use crate::dex::{Category, Dex, MoveData, MoveTarget};
+use crate::dex::{Category, Dex, HitEffect, MoveData, MoveTarget};
 use crate::team::{mega_forme, PokemonSet};
 
 /// Abilities whose every effect is implemented: damage modifiers (handled by
@@ -24,16 +24,27 @@ const ITEMS: &[&str] = &[
     "sharpbeak", "silkscarf", "silverpowder", "softsand", "spelltag", "twistedspoon", "wiseglasses",
 ];
 
-/// Move data keys that add nothing beyond damage.
+/// Move data keys that add nothing beyond what `moves` implements.
 const PLAIN_KEYS: &[&str] = &[
-    "accuracy", "basePower", "category", "critRatio", "flags", "handlers", "ignoreDefensive", "ignoreImmunity",
-    "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat", "overrideOffensivePokemon",
-    "overrideOffensiveStat", "pp", "priority", "secondary", "target", "type", "willCrit",
+    "accuracy", "basePower", "boosts", "category", "critRatio", "drain", "flags", "handlers", "heal",
+    "ignoreDefensive", "ignoreImmunity", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
+    "overrideOffensivePokemon", "overrideOffensiveStat", "pp", "priority", "recoil", "secondary", "secondaries",
+    "self", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
 ];
 
 /// Move handlers the damage module covers (it reports any specific move it
 /// doesn't implement as unsupported when the move is used).
 const DAMAGE_HANDLERS: &[&str] = &["basePowerCallback", "onBasePower", "onModifyType", "onModifyMove", "onEffectiveness"];
+
+/// Moves whose own handlers `moves` implements, and which.
+const MOVE_HANDLERS: &[(&str, &[&str])] = &[
+    ("protect", &["onPrepareHit", "onHit"]),
+    ("detect", &["onPrepareHit", "onHit"]),
+    ("fakeout", &["onTry", "onDisableMove"]),
+];
+
+/// Volatiles a move may add (Protect's own condition is the protect volatile).
+const VOLATILES: &[&str] = &["flinch", "protect"];
 
 pub fn ability_supported(id: &str) -> bool {
     ABILITIES.contains(&id)
@@ -43,17 +54,41 @@ pub fn item_supported(id: &str) -> bool {
     ITEMS.contains(&id) || Dex::get().item_id(id).is_some_and(|i| !Dex::get().item(i).mega_stone.is_empty())
 }
 
-/// A damaging move with no other effect, aimed at Pokemon.
+/// A HitEffect (the move's, a secondary or a `self` part) whose every part is
+/// implemented.
+fn effect_supported(e: &HitEffect, allowed: &[&str]) -> bool {
+    e.keys.iter().all(|k| allowed.contains(&k.as_str()) || ["boosts", "chance", "self", "status", "volatileStatus"].contains(&k.as_str()))
+        && e.volatile_status.as_deref().is_none_or(|v| VOLATILES.contains(&v))
+        && e.self_effect.as_deref().is_none_or(|s| effect_supported(s, &[]))
+}
+
 pub fn move_supported(m: &MoveData) -> bool {
-    m.category != Category::Status
-        && !m.has_secondaries
-        && m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()))
-        && m.handlers.names.iter().all(|h| DAMAGE_HANDLERS.contains(&h.as_str()))
-        && (m.handlers.names.is_empty() || crate::damage::MOVES_WITH_HANDLERS.contains(&m.id.as_str()))
-        && matches!(
+    let special = MOVE_HANDLERS.iter().find(|(id, _)| *id == m.id).map(|(_, h)| *h);
+    let handlers_ok = match special {
+        Some(allowed) => m.handlers.names.iter().all(|h| allowed.contains(&h.as_str())),
+        None => {
+            m.handlers.names.iter().all(|h| DAMAGE_HANDLERS.contains(&h.as_str()))
+                && (m.handlers.names.is_empty() || crate::damage::MOVES_WITH_HANDLERS.contains(&m.id.as_str()))
+        }
+    };
+    // Protect's `condition` is the protect volatile, implemented in `moves`.
+    let condition_ok = !m.has_key("condition") || m.primary.volatile_status.as_deref() == Some("protect");
+    let target_ok = match m.category {
+        Category::Status => matches!(
+            m.target,
+            MoveTarget::SelfTarget | MoveTarget::Normal | MoveTarget::Any | MoveTarget::AdjacentFoe | MoveTarget::AllAdjacentFoes | MoveTarget::AdjacentAlly
+        ),
+        _ => matches!(
             m.target,
             MoveTarget::Normal | MoveTarget::Any | MoveTarget::AdjacentFoe | MoveTarget::AllAdjacentFoes | MoveTarget::AllAdjacent | MoveTarget::RandomNormal
-        )
+        ),
+    };
+    m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok))
+        && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition"]].concat())
+        && m.secondaries.iter().all(|s| effect_supported(s, &[]))
+        && m.nested_handlers.is_empty()
+        && handlers_ok
+        && target_ok
 }
 
 /// Every reason this set can't be played yet; empty means it can.

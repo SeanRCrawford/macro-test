@@ -382,6 +382,50 @@
    "Water": 2
   }
  },
+ "immunities": {
+  "Bug": [],
+  "Dark": [
+   "prankster"
+  ],
+  "Dragon": [],
+  "Electric": [
+   "par"
+  ],
+  "Fairy": [],
+  "Fighting": [],
+  "Fire": [
+   "brn"
+  ],
+  "Flying": [],
+  "Ghost": [
+   "trapped"
+  ],
+  "Grass": [
+   "powder"
+  ],
+  "Ground": [
+   "sandstorm"
+  ],
+  "Ice": [
+   "frz",
+   "hail"
+  ],
+  "Normal": [],
+  "Poison": [
+   "psn",
+   "tox"
+  ],
+  "Psychic": [],
+  "Rock": [
+   "sandstorm"
+  ],
+  "Steel": [
+   "psn",
+   "sandstorm",
+   "tox"
+  ],
+  "Water": []
+ },
  "natures": {
   "adamant": {
    "plus": "atk",

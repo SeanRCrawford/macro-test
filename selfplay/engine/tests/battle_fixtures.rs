@@ -61,7 +61,12 @@ fn battles_match_showdown() {
     let fixtures: Vec<Fixture> = serde_json::from_str(include_str!("fixtures/battles.json")).unwrap();
     let mut failures = Vec::new();
     let mut decisions = 0;
+    // BATTLE=n replays only battle n (with SELFPLAY_TRACE=1 to trace it).
+    let only: Option<usize> = std::env::var("BATTLE").ok().and_then(|v| v.parse().ok());
     'battles: for (n, f) in fixtures.iter().enumerate() {
+        if only.is_some_and(|o| o != n) {
+            continue;
+        }
         let teams = [parse_paste(&f.teams[0]).unwrap(), parse_paste(&f.teams[1]).unwrap()];
         let mut b = match Battle::new(teams, Chance::policy(f.threshold)) {
             Ok(b) => b,

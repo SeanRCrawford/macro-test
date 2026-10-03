@@ -109,12 +109,20 @@ for (const d of types) {
 	const taken = data.TypeChart[d.toLowerCase()].damageTaken;
 	typechart[d] = Object.fromEntries(types.map(a => [a, taken[a]]));
 }
+// The non-type keys a type is immune to (Fire: brn, Grass: powder...), for
+// runStatusImmunity and dex.getImmunity on statuses, weather and powder.
+const immunities = {};
+for (const d of types) {
+	const taken = data.TypeChart[d.toLowerCase()].damageTaken;
+	immunities[d] = Object.keys(taken).filter(k => !types.includes(k) && taken[k] === 3).sort();
+}
 
 const commit = execSync("git rev-parse HEAD", {cwd: showdown}).toString().trim();
 const out = {
 	source: `pokemon-showdown ${commit} mod champions`,
 	types,
 	typechart,
+	immunities,
 	natures: sortedObject(natures),
 	species: sortedObject(species),
 	moves: sortedObject(moves),

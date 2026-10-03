@@ -343,6 +343,18 @@ formula adds stat points after the nature; Showdown adds them before.
   three chance policies: identical state, legal-choice counts and results at
   every decision.
 - [ ] 1e. Mechanics breadth, driven by the coverage report.
+  Batch 1 done (`battle/conditions.rs`, `battle/moves.rs`): the hit steps
+  (Protect's TryHit, type and powder immunity, accuracy), `spreadMoveHit` /
+  `runMoveEffects` with Showdown's `combineResults`, secondaries and self
+  drops, stat stages (`battle.boost`), statuses with the champions changes
+  (1/8 full paralysis, sleep 2-3 turns, freeze thaws within 3), their
+  BeforeMove and Residual handlers in Showdown's handler order, flinch and
+  Fake Out, Protect/Detect with the stall counter, recoil, drain and healing
+  moves. 420 moves supported. Checked on 1,500 replayed battles (21,153
+  decisions; 300 committed). Next: switch-in abilities (Intimidate),
+  weather/terrain setters, common items (Focus Sash, Sitrus, Life Orb,
+  Leftovers, Choice Scarf), Tailwind/Trick Room, redirection, Helping Hand,
+  pivoting moves.
 - [x] 1f. Turn-level differential tests against Showdown: random battles
   between supported teams, Showdown's PRNG replaced by the threshold policy
   `Chance::Policy` mirrors (`tools/showdown/gen_fixtures.js`,

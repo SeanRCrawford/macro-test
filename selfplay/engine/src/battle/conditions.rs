@@ -1,0 +1,381 @@
+//! Statuses, volatiles, stat stages, healing and the residual phase:
+//! Showdown's pokemon.setStatus/addVolatile, battle.boost/heal/damage, the
+//! status and volatile conditions in data/conditions.ts (with the champions
+//! mod's sleep, freeze and paralysis changes) and fieldEvent('Residual').
+
+use super::state::{StatusState, Volatile, VolatileId, ACTIVE_PER_SIDE};
+use super::{Battle, MonRef, Res};
+use crate::damage::Status;
+use crate::dex::{Dex, MoveData};
+use std::cmp::Ordering;
+
+/// Showdown's loosely typed hit results (`number | boolean | null |
+/// undefined | NOT_FAIL`), so `combineResults` can be mirrored exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HitRes {
+    Undefined,
+    /// `NOT_FAIL` (''): nothing happened, but not a failure.
+    NotFail,
+    Null,
+    Bool(bool),
+    Num(u32),
+}
+
+impl HitRes {
+    pub(super) fn truthy(self) -> bool {
+        match self {
+            HitRes::Bool(b) => b,
+            HitRes::Num(n) => n != 0,
+            _ => false,
+        }
+    }
+
+    /// `x || x === 0`: hit, possibly for no damage.
+    pub(super) fn hit(self) -> bool {
+        self.truthy() || self == HitRes::Num(0)
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            HitRes::Undefined => 0,
+            HitRes::NotFail => 1,
+            HitRes::Null => 2,
+            HitRes::Bool(_) => 3,
+            HitRes::Num(_) => 4,
+        }
+    }
+
+    /// `battleActions.combineResults`.
+    pub(super) fn combine(self, right: HitRes) -> HitRes {
+        if self.rank() > right.rank() || (self.truthy() && !right.truthy() && right != HitRes::Num(0)) {
+            self
+        } else if let (HitRes::Num(a), HitRes::Num(b)) = (self, right) {
+            HitRes::Num(a + b)
+        } else {
+            right
+        }
+    }
+}
+
+pub(super) fn status_from_id(id: &str) -> Option<Status> {
+    Some(match id {
+        "brn" => Status::Burn,
+        "par" => Status::Paralysis,
+        "psn" => Status::Poison,
+        "tox" => Status::Toxic,
+        "slp" => Status::Sleep,
+        "frz" => Status::Freeze,
+        _ => return None,
+    })
+}
+
+pub fn status_id(s: Status) -> &'static str {
+    match s {
+        Status::None => "",
+        Status::Burn => "brn",
+        Status::Paralysis => "par",
+        Status::Poison => "psn",
+        Status::Toxic => "tox",
+        Status::Sleep => "slp",
+        Status::Freeze => "frz",
+    }
+}
+
+/// A Residual handler (fieldEvent): whose, what, and its sort keys.
+#[derive(Debug, Clone, Copy)]
+struct Residual {
+    mon: MonRef,
+    what: ResidualKind,
+    order: u64,
+    speed: i32,
+    sub_order: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResidualKind {
+    Status(Status),
+    Volatile(VolatileId),
+}
+
+/// Showdown's comparePriority for event handlers (priority is 0 for every
+/// Residual handler the engine has).
+fn compare_handlers(a: &Residual, b: &Residual) -> Ordering {
+    a.order.cmp(&b.order).then(b.speed.cmp(&a.speed)).then(a.sub_order.cmp(&b.sub_order))
+}
+
+/// Handlers without an order sort after every ordered one.
+const NO_HANDLER_ORDER: u64 = 4_294_967_296;
+
+impl Battle {
+    // --- Statuses -------------------------------------------------------------
+
+    /// `runStatusImmunity` (no supported ability or effect adds an Immunity
+    /// handler yet).
+    pub(super) fn run_status_immunity(&self, t: MonRef, key: &str) -> bool {
+        let m = self.mon(t);
+        if m.fainted {
+            return false;
+        }
+        key.is_empty() || !Dex::get().immune_to(key, m.types)
+    }
+
+    /// `trySetStatus`: fails if the target already has a status.
+    pub(super) fn try_set_status(&mut self, t: MonRef, status: Status) -> bool {
+        let current = self.mon(t).status;
+        self.set_status(t, if current == Status::None { status } else { current })
+    }
+
+    /// `setStatus` (`Status::None` cures).
+    pub(super) fn set_status(&mut self, t: MonRef, status: Status) -> bool {
+        let m = self.mon(t);
+        if m.hp == 0 {
+            return false;
+        }
+        if !m.is_active && status != Status::None {
+            return false;
+        }
+        if m.status == status {
+            return false;
+        }
+        if status != Status::None {
+            let key = if status == Status::Toxic { "psn" } else { status_id(status) };
+            if !self.run_status_immunity(t, key) {
+                return false;
+            }
+        }
+        // onStart
+        let state = match status {
+            Status::Sleep => StatusState { time: [2, 3, 3][self.chance.sample(3)], stage: 0 },
+            Status::Freeze => StatusState { time: 3, stage: 0 },
+            _ => StatusState::default(),
+        };
+        let m = self.mon_mut(t);
+        m.status = status;
+        m.status_state = state;
+        true
+    }
+
+    /// `cureStatus`.
+    pub(super) fn cure_status(&mut self, t: MonRef) -> bool {
+        let m = self.mon(t);
+        if m.hp == 0 || m.status == Status::None {
+            return false;
+        }
+        self.set_status(t, Status::None);
+        true
+    }
+
+    // --- Volatiles ------------------------------------------------------------
+
+    /// `addVolatile`. Returns Showdown's result (false when already present
+    /// and the condition has no onRestart).
+    pub(super) fn add_volatile(&mut self, t: MonRef, id: VolatileId) -> HitRes {
+        if self.mon(t).hp == 0 {
+            return HitRes::Bool(false);
+        }
+        if let Some(v) = self.mon_mut(t).volatiles.get_mut(id) {
+            return match id {
+                // stall's onRestart
+                VolatileId::Stall => {
+                    if v.counter < 729 {
+                        v.counter *= 3;
+                    }
+                    v.duration = Some(2);
+                    HitRes::Bool(true)
+                }
+                _ => HitRes::Bool(false),
+            };
+        }
+        if !self.run_status_immunity(t, id.id()) {
+            return HitRes::Bool(false);
+        }
+        let counter = if id == VolatileId::Stall { 3 } else { 0 };
+        self.mon_mut(t).volatiles.0.push(Volatile { id, duration: id.duration(), counter });
+        HitRes::Bool(true)
+    }
+
+    /// The StallMove event: stall's onStallMove, if the user has it.
+    pub(super) fn stall_move(&mut self, user: MonRef) -> bool {
+        let Some(v) = self.mon_mut(user).volatiles.get_mut(VolatileId::Stall) else { return true };
+        let counter = v.counter.max(1);
+        let success = self.chance.chance(1, counter);
+        if !success {
+            self.mon_mut(user).volatiles.remove(VolatileId::Stall);
+        }
+        success
+    }
+
+    // --- BeforeMove -----------------------------------------------------------
+
+    /// The BeforeMove event: sleep and freeze (priority 10), flinch (8),
+    /// paralysis (1). False: the Pokemon can't move.
+    pub(super) fn before_move(&mut self, user: MonRef, data: &MoveData) -> bool {
+        match self.mon(user).status {
+            Status::Sleep => {
+                let m = self.mon_mut(user);
+                m.status_state.time -= 1;
+                if m.status_state.time <= 0 {
+                    self.cure_status(user);
+                } else if !data.has_key("sleepUsable") {
+                    return false;
+                }
+            }
+            Status::Freeze if !data.flags.has("defrost") => {
+                let m = self.mon_mut(user);
+                m.status_state.time -= 1;
+                if m.status_state.time <= 0 || self.chance.chance(1, 4) {
+                    self.cure_status(user);
+                } else {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        if self.mon(user).volatiles.has(VolatileId::Flinch) {
+            return false;
+        }
+        if self.mon(user).status == Status::Paralysis && self.chance.chance(1, 8) {
+            return false;
+        }
+        true
+    }
+
+    // --- Stat stages ----------------------------------------------------------
+
+    /// `battle.boost`: Num(0) if the target has no HP, false if it can't be
+    /// boosted, null if every stage was already capped, true otherwise.
+    pub(super) fn boost(&mut self, t: MonRef, boosts: &[(usize, i8)]) -> HitRes {
+        let m = self.mon(t);
+        if m.hp == 0 {
+            return HitRes::Num(0);
+        }
+        if !m.is_active {
+            return HitRes::Bool(false);
+        }
+        if self.sides[1 - t.side].pokemon_left == 0 {
+            return HitRes::Bool(false);
+        }
+        let m = self.mon_mut(t);
+        let mut success = HitRes::Null;
+        for &(stat, n) in boosts {
+            if n == 0 {
+                continue;
+            }
+            let cur = m.boosts[stat];
+            let new = (cur + n).clamp(-6, 6);
+            if new != cur {
+                m.boosts[stat] = new;
+                success = HitRes::Bool(true);
+            }
+        }
+        success
+    }
+
+    // --- HP -------------------------------------------------------------------
+
+    /// `battle.heal`.
+    pub(super) fn heal(&mut self, t: MonRef, amount: u32) -> HitRes {
+        let amount = if amount != 0 && amount <= 1 { 1 } else { amount };
+        if amount == 0 {
+            return HitRes::Num(0);
+        }
+        let m = self.mon_mut(t);
+        if m.hp == 0 || !m.is_active || m.hp >= m.max_hp() {
+            return HitRes::Bool(false);
+        }
+        let healed = (amount as u16).min(m.max_hp() - m.hp);
+        m.hp += healed;
+        HitRes::Num(healed as u32)
+    }
+
+    /// `battle.damage` from a non-move effect (residual, recoil): at least 1,
+    /// counts as being hurt this turn.
+    pub(super) fn effect_damage(&mut self, t: MonRef, amount: u32) -> HitRes {
+        let m = self.mon(t);
+        if m.hp == 0 {
+            return HitRes::Num(0);
+        }
+        if !m.is_active {
+            return HitRes::Bool(false);
+        }
+        let d = self.apply_damage(t, amount.max(1));
+        let m = self.mon_mut(t);
+        m.hurt_this_turn = Some(m.hp);
+        HitRes::Num(d)
+    }
+
+    // --- Residual -------------------------------------------------------------
+
+    /// fieldEvent('Residual'): status damage, then volatile durations, in
+    /// handler order; faints are processed after each handler.
+    pub(super) fn residual(&mut self) -> Res<()> {
+        let mut handlers = Vec::new();
+        for side in 0..2 {
+            for pos in 0..ACTIVE_PER_SIDE {
+                let Some(r) = self.occupant(side, pos) else { continue };
+                let m = self.mon(r);
+                let order = match m.status {
+                    Status::Burn => Some(10),
+                    Status::Poison | Status::Toxic => Some(9),
+                    _ => None,
+                };
+                if let Some(order) = order {
+                    handlers.push(Residual { mon: r, what: ResidualKind::Status(m.status), order, speed: m.speed, sub_order: 0 });
+                }
+                for v in &m.volatiles.0 {
+                    if v.duration.is_some() {
+                        handlers.push(Residual {
+                            mon: r,
+                            what: ResidualKind::Volatile(v.id),
+                            order: NO_HANDLER_ORDER,
+                            speed: m.speed,
+                            sub_order: 2,
+                        });
+                    }
+                }
+            }
+        }
+        self.speed_sort(&mut handlers, compare_handlers);
+        for h in handlers {
+            let m = self.mon(h.mon);
+            if m.fainted {
+                continue;
+            }
+            match h.what {
+                ResidualKind::Volatile(id) => {
+                    let m = self.mon_mut(h.mon);
+                    let Some(v) = m.volatiles.get_mut(id) else { continue };
+                    let Some(d) = v.duration.as_mut() else { continue };
+                    *d -= 1;
+                    if *d == 0 {
+                        m.volatiles.remove(id);
+                        continue;
+                    }
+                }
+                ResidualKind::Status(status) => {
+                    if m.status != status {
+                        continue;
+                    }
+                    let max = m.max_hp() as u32;
+                    let amount = match status {
+                        Status::Burn => max / 16,
+                        Status::Poison => max / 8,
+                        _ => {
+                            let m = self.mon_mut(h.mon);
+                            if m.status_state.stage < 15 {
+                                m.status_state.stage += 1;
+                            }
+                            (max / 16).max(1) * m.status_state.stage as u32
+                        }
+                    };
+                    self.effect_damage(h.mon, amount);
+                }
+            }
+            self.faint_messages()?;
+            if self.is_over() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}

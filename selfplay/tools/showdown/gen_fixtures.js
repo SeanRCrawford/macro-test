@@ -525,6 +525,7 @@ function battleSnapshot(battle) {
 				active: p.isActive,
 				boosts: ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"].map(b => p.boosts[b]),
 				item: p.item, ability: p.ability, pp: p.moveSlots.map(m => m.pp),
+				volatiles: Object.keys(p.volatiles).sort(),
 			})),
 		})),
 	};

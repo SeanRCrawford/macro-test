@@ -22,6 +22,8 @@ const DEX_JSON: &str = include_str!("../../data/dex.json");
 
 /// Stat order used everywhere in the engine: HP, Atk, Def, SpA, SpD, Spe.
 pub const STAT_NAMES: [&str; 6] = ["hp", "atk", "def", "spa", "spd", "spe"];
+/// Boost stages, in `Mon::boosts` order.
+pub const BOOST_NAMES: [&str; 7] = ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"];
 pub const HP: usize = 0;
 pub const ATK: usize = 1;
 pub const DEF: usize = 2;
@@ -178,6 +180,55 @@ pub enum IgnoreImmunity {
     Types(u32),
 }
 
+/// Showdown's HitEffect: what a move (or one of its secondaries, or its
+/// `self` part) does to a target besides damage.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HitEffect {
+    /// Percent chance, for secondaries (None: always).
+    pub chance: Option<u8>,
+    /// (index into BOOST_NAMES, stages), in data order.
+    pub boosts: Vec<(usize, i8)>,
+    /// A status id: brn, par, psn, tox, slp, frz.
+    pub status: Option<String>,
+    pub volatile_status: Option<String>,
+    pub self_effect: Option<Box<HitEffect>>,
+    /// Every key of the effect's data, sorted (for `support`).
+    pub keys: Vec<String>,
+}
+
+impl HitEffect {
+    fn parse(r: &serde_json::Map<String, Value>) -> Result<HitEffect, String> {
+        let mut boosts = Vec::new();
+        if let Some(b) = r.get("boosts").and_then(Value::as_object) {
+            // serde_json keeps object keys sorted, not in data order; Showdown
+            // applies boosts in data order, which only matters for effects that
+            // react to each boost (none supported yet). Use BOOST_NAMES order.
+            for (i, name) in BOOST_NAMES.iter().enumerate() {
+                if let Some(n) = b.get(*name).and_then(Value::as_i64) {
+                    boosts.push((i, n as i8));
+                }
+            }
+            if b.len() != boosts.len() {
+                return Err(format!("unknown boost in {b:?}"));
+            }
+        }
+        let self_effect = match r.get("self").and_then(Value::as_object) {
+            Some(o) => Some(Box::new(HitEffect::parse(o)?)),
+            None => None,
+        };
+        let mut keys: Vec<String> = r.keys().cloned().collect();
+        keys.sort();
+        Ok(HitEffect {
+            chance: r.get("chance").and_then(Value::as_u64).map(|c| c.min(255) as u8),
+            boosts,
+            status: r.get("status").and_then(Value::as_str).map(String::from),
+            volatile_status: r.get("volatileStatus").and_then(Value::as_str).map(String::from),
+            self_effect,
+            keys,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixedDamage {
     Level,
@@ -199,6 +250,15 @@ pub struct MoveData {
     pub flags: MoveFlags,
     pub has_secondaries: bool,
     pub has_recoil: bool,
+    /// The move's own hit effect: `boosts`, `status`, `volatileStatus` and
+    /// `self` at the top level of its data.
+    pub primary: HitEffect,
+    /// `secondary`/`secondaries`, each with its chance.
+    pub secondaries: Vec<HitEffect>,
+    /// `recoil`, `drain`, `heal`: fractions (numerator, denominator).
+    pub recoil: Option<(u32, u32)>,
+    pub drain: Option<(u32, u32)>,
+    pub heal: Option<(u32, u32)>,
     pub has_crash_damage: bool,
     pub crit_ratio: u8,
     pub will_crit: Option<bool>,
@@ -223,6 +283,8 @@ pub struct MoveData {
     pub handlers: Handlers,
     /// The move's own condition (Reflect's screen, Helping Hand's boost...).
     pub condition: Handlers,
+    /// Handlers on nested data other than `condition` ("secondary.onHit").
+    pub nested_handlers: Vec<String>,
 }
 
 impl MoveData {
@@ -308,6 +370,8 @@ pub struct Dex {
     /// effectiveness[attacking][defending]: 0 immune, 1 resist, 2 neutral, 4 super.
     /// Stored as multiples of 1/2 so products over two defending types stay integral.
     pub effectiveness: Vec<Vec<u8>>,
+    /// Per type: the non-type keys it's immune to (brn, powder, sandstorm...).
+    pub immunities: Vec<Vec<String>>,
     pub species: Vec<Species>,
     pub moves: Vec<MoveData>,
     pub items: Vec<ItemData>,
@@ -329,6 +393,7 @@ struct RawDex {
     source: String,
     types: Vec<String>,
     typechart: HashMap<String, HashMap<String, u8>>,
+    immunities: HashMap<String, Vec<String>>,
     natures: HashMap<String, RawNature>,
     species: HashMap<String, RawSpecies>,
     moves: HashMap<String, HashMap<String, Value>>,
@@ -403,6 +468,18 @@ fn handlers_of(raw: &HashMap<String, Value>, nested: Option<&str>) -> Handlers {
         }
     }
     h
+}
+
+/// A `[numerator, denominator]` field.
+fn fraction(raw: &HashMap<String, Value>, key: &str) -> Result<Option<(u32, u32)>, String> {
+    match raw.get(key) {
+        None => Ok(None),
+        Some(Value::Array(a)) if a.len() == 2 => match (a[0].as_u64(), a[1].as_u64()) {
+            (Some(n), Some(d)) if d > 0 => Ok(Some((n as u32, d as u32))),
+            _ => Err(format!("{key} {a:?}")),
+        },
+        Some(other) => Err(format!("{key} {other}")),
+    }
 }
 
 fn str_field<'a>(raw: &'a HashMap<String, Value>, key: &str) -> Option<&'a str> {
@@ -525,6 +602,8 @@ impl Dex {
                 Some(other) => return Err(ctx(format!("multihit {other}"))),
             };
             let ignore_immunity = match r.get("ignoreImmunity") {
+                // hitStepTypeImmunity: unset means "ignore" for status moves.
+                None if category == Category::Status => IgnoreImmunity::All,
                 None | Some(Value::Bool(false)) => IgnoreImmunity::No,
                 Some(Value::Bool(true)) => IgnoreImmunity::All,
                 Some(Value::Object(o)) => {
@@ -557,6 +636,21 @@ impl Dex {
                 has_secondaries: r.get("secondary").is_some_and(|v| !v.is_null())
                     || r.get("secondaries").and_then(Value::as_array).is_some_and(|a| !a.is_empty()),
                 has_recoil: r.contains_key("recoil"),
+                primary: HitEffect::parse(&r.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).map_err(ctx)?,
+                secondaries: {
+                    let list: Vec<Value> = match (r.get("secondary"), r.get("secondaries")) {
+                        (_, Some(Value::Array(a))) => a.clone(),
+                        (Some(v @ Value::Object(_)), _) => vec![v.clone()],
+                        _ => Vec::new(),
+                    };
+                    list.iter()
+                        .map(|v| HitEffect::parse(v.as_object().expect("secondary object")))
+                        .collect::<Result<_, _>>()
+                        .map_err(ctx)?
+                },
+                recoil: fraction(r, "recoil").map_err(ctx)?,
+                drain: fraction(r, "drain").map_err(ctx)?,
+                heal: fraction(r, "heal").map_err(ctx)?,
                 has_crash_damage: bool_field(r, "hasCrashDamage"),
                 crit_ratio: num_field(r, "critRatio").unwrap_or(1) as u8,
                 will_crit: r.get("willCrit").and_then(Value::as_bool),
@@ -580,6 +674,17 @@ impl Dex {
                 },
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
+                nested_handlers: r
+                    .get("handlers")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .filter(|n| n.contains('.') && !n.starts_with("condition."))
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             });
             move_index.insert(mid.clone(), MoveId(i as u16));
         }
@@ -667,6 +772,11 @@ impl Dex {
 
         Ok(Dex {
             source: raw.source,
+            immunities: raw
+                .types
+                .iter()
+                .map(|t| raw.immunities.get(t).cloned().unwrap_or_default())
+                .collect(),
             type_names: raw.types,
             effectiveness,
             species,
@@ -684,6 +794,12 @@ impl Dex {
             nature_index,
             type_index,
         })
+    }
+
+    /// `dex.getImmunity(key, types)` for a non-type key (a status, weather or
+    /// "powder"): false when any of the types is immune.
+    pub fn immune_to(&self, key: &str, types: [TypeId; 2]) -> bool {
+        types.iter().any(|t| self.immunities[t.0 as usize].iter().any(|k| k == key))
     }
 
     pub fn species_id(&self, name: &str) -> Option<SpeciesId> {
