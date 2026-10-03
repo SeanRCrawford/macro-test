@@ -86,6 +86,8 @@ pub struct Battle {
     mega_used: [bool; 2],
     /// The six as brought, while team-preview actions pick the four.
     benched: [Vec<Mon>; 2],
+    /// Effects created so far (Showdown's effectOrder counter).
+    effect_order: u64,
 }
 
 impl Battle {
@@ -120,6 +122,7 @@ impl Battle {
             mid_turn: true,
             faint_queue: Vec::new(),
             mega_used: [false; 2],
+            effect_order: 0,
             benched: [Vec::new(), Vec::new()],
         };
         b.push_action(ActionKind::Start);
@@ -288,6 +291,11 @@ impl Battle {
         // getActionSpeed: Trick Room inverts, then `trunc(speed, 13)`.
         let spe = if self.field.trick_room > 0 { 10_000 - spe } else { spe };
         Ok((spe % 8192) as i32)
+    }
+
+    /// `queue.willMove(pokemon)`.
+    fn will_move(&self, r: MonRef) -> bool {
+        !self.mon(r).fainted && self.queue.iter().any(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r))
     }
 
     /// `queue.willAct()`: a move or switch is still to come this turn.

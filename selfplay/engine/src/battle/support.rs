@@ -43,13 +43,16 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("protect", &["onPrepareHit", "onHit"]),
     ("detect", &["onPrepareHit", "onHit"]),
     ("fakeout", &["onTry", "onDisableMove"]),
+    ("followme", &["onTry"]),
+    ("ragepowder", &["onTry"]),
+    ("helpinghand", &["onTryHit"]),
 ];
 
 /// Status moves that set a side or field condition, which `moves` implements.
 const FIELD_MOVES: &[&str] = &["tailwind", "trickroom"];
 
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
-const VOLATILES: &[&str] = &["flinch", "protect"];
+const VOLATILES: &[&str] = &["flinch", "protect", "followme", "ragepowder", "helpinghand"];
 
 pub fn ability_supported(id: &str) -> bool {
     ABILITIES.contains(&id)
@@ -78,7 +81,10 @@ pub fn move_supported(m: &MoveData) -> bool {
     };
     // Protect's `condition` is the protect volatile, implemented in `moves`.
     let field_move = FIELD_MOVES.contains(&m.id.as_str());
-    let condition_ok = !m.has_key("condition") || m.primary.volatile_status.as_deref() == Some("protect") || field_move;
+    // A move's `condition` is the volatile it adds (protect, followme...).
+    let condition_ok = !m.has_key("condition")
+        || m.primary.volatile_status.as_deref().is_some_and(|v| VOLATILES.contains(&v))
+        || field_move;
     let target_ok = match m.category {
         Category::Status => matches!(
             m.target,

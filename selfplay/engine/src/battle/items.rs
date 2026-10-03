@@ -76,7 +76,7 @@ impl Battle {
         if m.hp == 0 || m.volatiles.has(VolatileId::ChoiceLock) {
             return;
         }
-        m.volatiles.0.push(Volatile { id: VolatileId::ChoiceLock, duration: None, counter: 0, move_id: Some(move_id) });
+        m.volatiles.0.push(Volatile { id: VolatileId::ChoiceLock, duration: None, counter: 0, move_id: Some(move_id), effect_order: 0 });
     }
 
     /// choicelock's onBeforeMove. False: the move is blocked.

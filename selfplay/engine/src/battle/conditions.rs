@@ -200,14 +200,25 @@ impl Battle {
                     v.duration = Some(2);
                     HitRes::Bool(true)
                 }
+                // helpinghand's onRestart: the multiplier grows again.
+                VolatileId::HelpingHand => {
+                    v.counter += 1;
+                    HitRes::Bool(true)
+                }
                 _ => HitRes::Bool(false),
             };
         }
         if !self.run_status_immunity(t, id.id()) {
             return HitRes::Bool(false);
         }
-        let counter = if id == VolatileId::Stall { 3 } else { 0 };
-        self.mon_mut(t).volatiles.0.push(Volatile { id, duration: id.duration(), counter, move_id: None });
+        let counter = match id {
+            VolatileId::Stall => 3,
+            VolatileId::HelpingHand => 1,
+            _ => 0,
+        };
+        self.effect_order += 1;
+        let effect_order = self.effect_order;
+        self.mon_mut(t).volatiles.0.push(Volatile { id, duration: id.duration(), counter, move_id: None, effect_order });
         HitRes::Bool(true)
     }
 

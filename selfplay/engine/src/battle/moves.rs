@@ -120,12 +120,43 @@ impl Battle {
                 if needs_retarget {
                     target = self.random_target(user, am.target);
                 }
+                if let Some(t) = target {
+                    target = Some(self.redirect_target(user, am.target, t));
+                }
                 match target {
                     Some(t) if !self.mon(t).fainted => vec![t],
                     _ => Vec::new(),
                 }
             }
         }
+    }
+
+    /// The RedirectTarget event: the first foe with Follow Me or Rage Powder
+    /// (in Speed order, then creation order) that the move could target.
+    fn redirect_target(&mut self, user: MonRef, target_type: MoveTarget, target: MonRef) -> MonRef {
+        let mut handlers: Vec<(MonRef, VolatileId, i32, u64)> = Vec::new();
+        for f in self.foes(user) {
+            let m = self.mon(f);
+            for v in &m.volatiles.0 {
+                if matches!(v.id, VolatileId::FollowMe | VolatileId::RagePowder) {
+                    handlers.push((f, v.id, m.speed, v.effect_order));
+                }
+            }
+        }
+        if handlers.is_empty() {
+            return target;
+        }
+        self.speed_sort(&mut handlers, |a, b| b.2.cmp(&a.2).then(a.3.cmp(&b.3)));
+        let user_pos = self.mon(user).position;
+        for (f, id, _, _) in handlers {
+            if id == VolatileId::RagePowder && !self.run_status_immunity(user, "powder") {
+                continue;
+            }
+            if super::choice::valid_target_loc(self.loc_of(user, f), user_pos, target_type) {
+                return f;
+            }
+        }
+        target
     }
 
     /// A damage-calculation view of the field with `attacker` hitting `defender`.
@@ -145,6 +176,8 @@ impl Battle {
                 c.speed = m.speed;
                 c.active_turns = m.active_turns;
                 c.times_attacked = m.times_attacked;
+                c.volatiles.helping_hand =
+                    m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
                 out[side * 2 + pos] = Some(c);
             }
         }
@@ -422,7 +455,15 @@ impl Battle {
         is_self: bool,
     ) -> Res<(Vec<HitRes>, Vec<Option<MonRef>>)> {
         let mut targets = targets;
-        // TryHit (no supported move has one) and TryPrimaryHit (no handlers).
+        // TryHit: Helping Hand fails on an ally that has already moved.
+        if primary && mv.data.id == "helpinghand" {
+            if let Some(t) = targets[0] {
+                if !self.mon(t).newly_switched && !self.will_move(t) {
+                    return Ok((vec![HitRes::Bool(false)], targets));
+                }
+            }
+        }
+        // TryPrimaryHit (no handlers).
         let mut damage = vec![HitRes::Bool(true); targets.len()];
         for i in 0..targets.len() {
             if !damage[i].truthy() {

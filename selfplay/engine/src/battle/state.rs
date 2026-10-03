@@ -29,6 +29,10 @@ pub enum VolatileId {
     Stall,
     /// Locked into one move by a Choice item.
     ChoiceLock,
+    FollowMe,
+    RagePowder,
+    /// Helping Hand's boost; `counter` is how many times it was used.
+    HelpingHand,
 }
 
 impl VolatileId {
@@ -38,6 +42,9 @@ impl VolatileId {
             "protect" => VolatileId::Protect,
             "stall" => VolatileId::Stall,
             "choicelock" => VolatileId::ChoiceLock,
+            "followme" => VolatileId::FollowMe,
+            "ragepowder" => VolatileId::RagePowder,
+            "helpinghand" => VolatileId::HelpingHand,
             _ => return None,
         })
     }
@@ -48,13 +55,18 @@ impl VolatileId {
             VolatileId::Protect => "protect",
             VolatileId::Stall => "stall",
             VolatileId::ChoiceLock => "choicelock",
+            VolatileId::FollowMe => "followme",
+            VolatileId::RagePowder => "ragepowder",
+            VolatileId::HelpingHand => "helpinghand",
         }
     }
 
     /// The condition's `duration`.
     pub fn duration(self) -> Option<u8> {
         match self {
-            VolatileId::Flinch | VolatileId::Protect => Some(1),
+            VolatileId::Flinch | VolatileId::Protect | VolatileId::FollowMe | VolatileId::RagePowder | VolatileId::HelpingHand => {
+                Some(1)
+            }
             VolatileId::Stall => Some(2),
             VolatileId::ChoiceLock => None,
         }
@@ -69,6 +81,8 @@ pub struct Volatile {
     pub counter: u32,
     /// The move a Choice lock holds the Pokemon to.
     pub move_id: Option<MoveId>,
+    /// Showdown's `effectOrder`: creation order, a tiebreak for redirection.
+    pub effect_order: u64,
 }
 
 /// Volatile conditions in the order they were added (Showdown iterates
