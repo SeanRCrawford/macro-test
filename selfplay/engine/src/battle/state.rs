@@ -397,6 +397,16 @@ impl Mon {
         };
     }
 
+    /// `setType`: the new types; while roosting, Flying is still left out
+    /// (roost's onType filters the current types).
+    pub fn set_types(&mut self, types: [TypeId; 2]) {
+        self.types = types;
+        if self.roost_types.is_some() {
+            let dex = Dex::get();
+            self.start_roost(dex.type_id("Flying").expect("Flying"), dex.type_id("Normal").expect("Normal"));
+        }
+    }
+
     pub fn end_roost(&mut self) {
         if let Some(t) = self.roost_types.take() {
             self.types = t;

@@ -57,7 +57,7 @@ const PLAIN_KEYS: &[&str] = &[
     "ignoreDefensive", "ignoreEvasion", "ignoreImmunity", "multihit", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
     "overrideOffensivePokemon", "overrideOffensiveStat", "pp", "priority", "recoil", "secondary", "secondaries",
     "self", "selfBoost", "selfSwitch", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
-    "breaksProtect", "tracksTarget", "multiaccuracy", "forceSwitch", "hasCrashDamage", "mindBlownRecoil",
+    "breaksProtect", "tracksTarget", "multiaccuracy", "forceSwitch", "hasCrashDamage", "mindBlownRecoil", "ohko",
 ];
 
 /// Move handlers the damage module covers (it reports any specific move it
@@ -207,6 +207,7 @@ pub fn move_supported(m: &MoveData) -> bool {
                 | MoveTarget::AdjacentFoe
                 | MoveTarget::AllAdjacentFoes
                 | MoveTarget::AdjacentAlly
+                | MoveTarget::AdjacentAllyOrSelf
                 | MoveTarget::Allies
         ),
         _ => matches!(

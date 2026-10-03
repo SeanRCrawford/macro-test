@@ -380,7 +380,7 @@ pub fn eats_resist_berry(ctx: &DamageCtx, am: &ActiveMove) -> Res<bool> {
     }
     // Fixed damage (damageCallback, Seismic Toss...) skips ModifyDamage.
     let data = calc.dex.move_data(am.id);
-    if data.handlers.has("damageCallback") || data.fixed_damage.is_some() {
+    if data.handlers.has("damageCallback") || data.fixed_damage.is_some() || data.ohko {
         return Ok(false);
     }
     Ok(calc.type_mod(am, data)? > 0)
@@ -902,8 +902,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         if !self.run_immunity(am) {
             return Ok(Outcome::Immune);
         }
+        // OHKO moves deal the target's max HP.
         if data.ohko {
-            return unsupported(format!("move {}: OHKO", data.id));
+            return Ok(Outcome::Damage([defender.max_hp() as u32; 16]));
         }
         if data.handlers.has("damageCallback") {
             let dmg = match data.id.as_str() {

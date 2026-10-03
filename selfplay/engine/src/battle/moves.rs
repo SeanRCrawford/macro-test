@@ -278,7 +278,7 @@ impl Battle {
         }
         let m = self.mon_mut(user);
         if move_type != damage::TYPELESS && m.types != [move_type, move_type] {
-            m.types = [move_type, move_type];
+            m.set_types([move_type, move_type]);
             m.protean_used = true;
         }
     }
@@ -305,6 +305,7 @@ impl Battle {
             "voltabsorb" if is("Electric") => {}
             "eartheater" if is("Ground") => {}
             "bulletproof" => return data.flags.has("bullet"),
+            "sturdy" => return data.ohko,
             "overcoat" => return data.flags.has("powder") && !dex.immune_to("powder", self.mon(t).types),
             "waterabsorb" if is("Water") => {}
             "sapsipper" if is("Grass") => {
@@ -953,10 +954,12 @@ impl Battle {
                 for v in [VolatileId::Protect, VolatileId::SpikyShield, VolatileId::KingsShield, VolatileId::BanefulBunker] {
                     broke |= m.volatiles.remove(v);
                 }
-                // Quick Guard, Crafty Shield and Mat Block aren't in yet.
-                let wide_guard = &mut self.sides[t.side].conditions[SideCondition::WideGuard as usize];
-                broke |= *wide_guard > 0;
-                *wide_guard = 0;
+                // Crafty Shield and Mat Block aren't in yet.
+                for c in [SideCondition::QuickGuard, SideCondition::WideGuard] {
+                    let guard = &mut self.sides[t.side].conditions[c as usize];
+                    broke |= *guard > 0;
+                    *guard = 0;
+                }
                 if broke {
                     self.mon_mut(t).volatiles.remove(VolatileId::Stall);
                 }
@@ -974,6 +977,19 @@ impl Battle {
 
     /// hitStepAccuracy for one target.
     fn accuracy_check(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
+        // OHKO moves: 30% (Sheer Cold 20% unless the user is Ice), no
+        // modifiers; Sheer Cold can't hit Ice types. All levels are equal.
+        if data.ohko {
+            let ice = Dex::get().type_id("Ice").expect("Ice");
+            if data.id == "sheercold" && self.mon(t).has_type(ice) {
+                return false;
+            }
+            let acc = if data.id == "sheercold" && !self.mon(user).has_type(ice) { 20 } else { 30 };
+            if self.mon(t).volatiles.has(VolatileId::GlaiveRush) || self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
+                return true;
+            }
+            return self.chance.chance(acc, 100);
+        }
         let Some(mut acc) = data.accuracy else { return true };
         // The Accuracy event: glaiverush (anything hits its holder) and No
         // Guard (on either side of the move).
@@ -1707,7 +1723,7 @@ impl Battle {
                 if m.types == [psychic, psychic] {
                     return HitRes::Bool(false);
                 }
-                m.types = [psychic, psychic];
+                m.set_types([psychic, psychic]);
                 HitRes::Undefined
             }
             "soak" => {
@@ -1716,7 +1732,7 @@ impl Battle {
                 if m.types == [water, water] {
                     return HitRes::Null;
                 }
-                m.types = [water, water];
+                m.set_types([water, water]);
                 HitRes::Undefined
             }
             _ => HitRes::Undefined,
