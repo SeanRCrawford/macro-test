@@ -326,7 +326,14 @@ formula adds stat points after the nature; Showdown adds them before.
 - [x] 1a. Workspace scaffold, embedded dex, stat calculation.
 - [x] 1a′. Dex exported from Showdown's champions mod; stats match Showdown exactly.
 - [x] 1b. The damage formula. Exact match with Showdown fixtures over the pool.
-- [ ] 1c. Team construction from Showdown pastes, team validation, team preview.
+- [x] 1c. Team construction from Showdown pastes, team validation, team preview.
+  `engine/src/team.rs`. The parser mirrors Showdown's importer (plus the repo's
+  `Nature: X` lines, which Showdown ignores) and fills missing stat points from
+  the most common usage spread. The validator mirrors Showdown's Reg M-C
+  validator, including its Mega shorthands, plus the usage-stats item rule.
+  Tests: the 17 repo teams parse field for field like Showdown, and 600
+  generated legal and rule-breaking teams get Showdown's verdict. Legality and
+  learnsets come from Showdown (`checkCanLearn`) via the dex export.
 - [ ] 1d. Turn resolution core: ordering, moves, damage, faints, forced switches, end of turn. Random-play smoke test with invariant checks.
 - [ ] 1e. Mechanics breadth, driven by the coverage report.
 - [ ] 1f. Turn-level differential tests against Showdown.

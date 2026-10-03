@@ -74,6 +74,14 @@ pub struct Species {
     pub base_species: String,
     pub forme: Option<String>,
     pub required_item: Option<String>,
+    /// Showdown's `isNonstandard` ("Past", "Future", "CAP"...); None is legal.
+    pub nonstandard: Option<String>,
+    /// e.g. "Mythical", "Restricted Legendary".
+    pub tags: Vec<String>,
+    /// Formes that exist only in battle (Megas): the forme a team must use instead.
+    pub battle_only: Option<String>,
+    /// Moves it can legally have in this format, sorted. Empty when illegal.
+    pub learnset: Vec<MoveId>,
 }
 
 impl Species {
@@ -205,6 +213,7 @@ pub struct MoveData {
     pub ignore_immunity: IgnoreImmunity,
     pub fixed_damage: Option<FixedDamage>,
     pub ohko: bool,
+    pub nonstandard: Option<String>,
     pub handlers: Handlers,
     /// The move's own condition (Reflect's screen, Helping Hand's boost...).
     pub condition: Handlers,
@@ -222,6 +231,7 @@ pub struct ItemData {
     pub ignore_klutz: bool,
     /// Base species name -> Mega forme name, for Mega Stones.
     pub mega_stone: HashMap<String, String>,
+    pub nonstandard: Option<String>,
     pub handlers: Handlers,
 }
 
@@ -236,6 +246,7 @@ pub struct AbilityData {
     pub suppress_weather: bool,
     /// `onCriticalHit: false` (Battle Armor, Shell Armor).
     pub blocks_crit: bool,
+    pub nonstandard: Option<String>,
     pub handlers: Handlers,
     /// The volatile the ability creates (Flash Fire's boost).
     pub condition: Handlers,
@@ -322,6 +333,12 @@ struct RawSpecies {
     base_species: Option<String>,
     forme: Option<String>,
     required_item: Option<String>,
+    is_nonstandard: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    battle_only: Option<Value>,
+    #[serde(default)]
+    learnset: Vec<String>,
 }
 
 /// Showdown's id format: lowercase ASCII letters and digits only.
@@ -445,6 +462,14 @@ impl Dex {
                 base_species: r.base_species.clone().unwrap_or_else(|| r.name.clone()),
                 forme: r.forme.clone(),
                 required_item: r.required_item.clone(),
+                nonstandard: r.is_nonstandard.clone(),
+                tags: r.tags.clone(),
+                battle_only: r.battle_only.as_ref().and_then(|v| match v {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Array(a) => a.first().and_then(Value::as_str).map(String::from),
+                    _ => None,
+                }),
+                learnset: Vec::new(), // filled once moves are indexed
             });
             species_index.insert(sid.clone(), SpeciesId(i as u16));
         }
@@ -523,10 +548,22 @@ impl Dex {
                 ignore_immunity,
                 fixed_damage,
                 ohko: r.get("ohko").is_some_and(|v| v.as_bool() != Some(false)),
+                nonstandard: str_field(r, "isNonstandard").map(String::from),
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
             });
             move_index.insert(mid.clone(), MoveId(i as u16));
+        }
+
+        for (sid, r) in &raw.species {
+            let id = species_index[sid].0 as usize;
+            let mut learnset = r
+                .learnset
+                .iter()
+                .map(|m| move_index.get(m).copied().ok_or_else(|| format!("{sid}: learnset move {m}")))
+                .collect::<Result<Vec<MoveId>, String>>()?;
+            learnset.sort();
+            species[id].learnset = learnset;
         }
 
         let mut items = Vec::new();
@@ -546,6 +583,7 @@ impl Dex {
                 take_forbidden: r.get("onTakeItem").and_then(Value::as_bool) == Some(false),
                 ignore_klutz: bool_field(r, "ignoreKlutz"),
                 mega_stone,
+                nonstandard: str_field(r, "isNonstandard").map(String::from),
                 handlers: handlers_of(r, None),
             });
             item_index.insert(iid.clone(), ItemId(i as u16));
@@ -566,6 +604,7 @@ impl Dex {
                 breakable,
                 suppress_weather: bool_field(r, "suppressWeather"),
                 blocks_crit: r.get("onCriticalHit").and_then(Value::as_bool) == Some(false),
+                nonstandard: str_field(r, "isNonstandard").map(String::from),
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
             });
@@ -716,6 +755,13 @@ mod tests {
         assert_eq!(mega.required_item.as_deref(), Some("Dragoninite"));
         let z = dex.species(dex.species_id("Lucario-Mega-Z").unwrap());
         assert_eq!(z.abilities, vec!["Aura Guard"]);
+        assert_eq!(z.battle_only.as_deref(), Some("Lucario"));
+        let chomp = dex.species(dex.species_id("Garchomp").unwrap());
+        assert!(chomp.nonstandard.is_none());
+        assert!(chomp.learnset.contains(&dex.move_id("Earthquake").unwrap()));
+        assert!(!chomp.learnset.contains(&dex.move_id("Moonblast").unwrap()));
+        let koraidon = dex.species(dex.species_id("Koraidon").unwrap());
+        assert!(koraidon.tags.iter().any(|t| t == "Restricted Legendary"));
         let stone = dex.item(dex.item_id("Salamencite").unwrap());
         assert_eq!(stone.mega_stone.get("Salamence").map(String::as_str), Some("Salamence-Mega"));
     }

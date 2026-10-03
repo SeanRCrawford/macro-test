@@ -19,7 +19,7 @@ if (!fs.existsSync(path.join(showdown, "dist", "sim"))) {
 	console.error("usage: node export_dex.js /path/to/built/pokemon-showdown");
 	process.exit(1);
 }
-const {Dex} = require(path.join(showdown, "dist", "sim"));
+const {Dex, TeamValidator} = require(path.join(showdown, "dist", "sim"));
 const dex = Dex.mod("champions");
 const data = dex.data;
 
@@ -61,7 +61,22 @@ for (const [id, s] of Object.entries(data.Pokedex)) {
 	if (!s.baseStats || !(s.num > 0)) continue;
 	const e = plain(s);
 	e.baseStats = STATS.map(k => s.baseStats[k]);
+	// Legality lives in FormatsData, not the Pokedex entry.
+	const full = dex.species.get(id);
+	e.isNonstandard = full.isNonstandard;
+	e.tags = full.tags;
+	if (full.battleOnly) e.battleOnly = full.battleOnly;
 	species[id] = e;
+}
+
+// Learnsets for species legal in the format, as Showdown's own validator
+// judges them (prevolutions and base formes included).
+const FORMAT = "gen9championsvgc2026regmc";
+const validator = TeamValidator.get(FORMAT);
+const legalMoves = dex.moves.all().filter(m => m.isNonstandard === null);
+for (const s of dex.species.all()) {
+	if (s.isNonstandard !== null || !(s.num > 0) || !species[s.id]) continue;
+	species[s.id].learnset = legalMoves.filter(m => !validator.checkCanLearn(m, s)).map(m => m.id).sort();
 }
 const moves = {};
 for (const [id, m] of Object.entries(data.Moves)) {

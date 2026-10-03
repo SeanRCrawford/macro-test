@@ -263,7 +263,110 @@ function damageFixtures(count, seed) {
 	return cases;
 }
 
+// --- Teams ------------------------------------------------------------------
+//
+// Parsing: Showdown's Teams.import of every repo team. Validation: generated
+// teams, legal or with one deliberate rule break, judged by Showdown's
+// TeamValidator for the format. Teams are stored as export text, so the Rust
+// side parses exactly what Showdown validated.
+
+const {Teams, TeamValidator} = require(path.join(showdown, "dist", "sim"));
+const REPO = path.join(ROOT, "..");
+
+function parseFixtures() {
+	const dir = path.join(REPO, "data", "teams");
+	return fs.readdirSync(dir).sort().map(file => {
+		const text = fs.readFileSync(path.join(dir, file), "utf8");
+		return {
+			file,
+			sets: Teams.import(text).map(set => ({
+				name: set.name, species: toID(set.species), item: toID(set.item), ability: toID(set.ability),
+				nature: toID(set.nature), moves: set.moves.map(toID),
+				points: /EVs:/.test(text) ? STATS.map(st => set.evs[st]) : null,
+			})),
+		};
+	});
+}
+
+function legalSet(rand, entry, usedItems) {
+	let species = champions.species.get(entry.name);
+	let item = null;
+	if (species.battleOnly) {
+		// Usage lists Megas by forme; a team holds the base species and its stone.
+		item = species.requiredItem;
+		species = champions.species.get(species.battleOnly);
+	}
+	const baseEntry = pool.species[species.id];
+	const abilitySource = baseEntry && baseEntry.abilities ? baseEntry.abilities : [[species.abilities[0], 1]];
+	const ability = weightedPick(rand, abilitySource);
+	if (!item) {
+		const options = entry.items.map(([i]) => i).filter(i => !usedItems.has(i) && !champions.items.get(i).megaStone);
+		item = options.length ? pick(rand, options) : pick(rand, pool.items.filter(i => !usedItems.has(i) && !champions.items.get(i).megaStone));
+	}
+	usedItems.add(item);
+	const [nature, points] = weightedPick(rand, entry.spreads.map(([n, p, w]) => [[n, p], w]));
+	const moves = [...new Set(entry.moves.map(([m]) => m))].sort(() => rand() - 0.5).slice(0, 4);
+	return {species: species.name, item, ability, nature, level: 50,
+		evs: Object.fromEntries(STATS.map((st, i) => [st, points[i]])), moves};
+}
+
+function legalTeam(rand) {
+	const team = [];
+	const nums = new Set();
+	const usedItems = new Set();
+	while (team.length < 6) {
+		const e = weightedPick(rand, speciesWeights);
+		const sp = champions.species.get(e.name);
+		if (nums.has(sp.num)) continue;
+		nums.add(sp.num);
+		team.push(legalSet(rand, e, usedItems));
+	}
+	return team;
+}
+
+const MUTATIONS = [
+	["illegal species", (rand, t) => { t[0].species = pick(rand, champions.species.all().filter(s => s.isNonstandard === "Past" && s.num > 0)).name; }],
+	["restricted legendary", (rand, t) => { t[0].species = "Koraidon"; t[0].ability = "Orichalcum Pulse"; }],
+	["battle-only forme", (rand, t) => { t[0].species = "Garchomp-Mega"; t[0].ability = "Sand Force"; t[0].item = "Leftovers"; }],
+	// Valid: Showdown reads a Mega forme holding its stone as the base species.
+	["mega forme with its stone", (rand, t) => {
+		t[0] = {...t[0], species: "Garchomp-Mega", ability: "Sand Force", item: "Garchompite",
+			moves: ["Earthquake", "Dragon Claw", "Protect"]};
+		for (const s of t.slice(1)) if (s.item === "Garchompite" || champions.species.get(s.species).num === 445) s.item = "Leftovers";
+	}],
+	["species clause", (rand, t) => { t[1] = {...t[1], species: t[0].species, ability: t[0].ability, moves: t[0].moves}; }],
+	["item clause", (rand, t) => { t[1].item = t[0].item; }],
+	["illegal item", (rand, t) => { t[0].item = pick(rand, champions.items.all().filter(i => i.isNonstandard === "Past")).name; }],
+	["unused legal item", (rand, t) => { t[0].item = "Focus Band"; }],
+	["wrong ability", (rand, t) => { t[0].ability = "Huge Power"; }],
+	["unlearnable move", (rand, t) => { t[0].moves[0] = "Spore"; }],
+	["duplicate move", (rand, t) => { t[0].moves = [t[0].moves[0], t[0].moves[0]]; }],
+	["too many points in a stat", (rand, t) => { t[0].evs.hp = 33; }],
+	["too many points total", (rand, t) => { t[0].evs = {hp: 32, atk: 32, def: 32, spa: 0, spd: 0, spe: 0}; }],
+	["five pokemon", (rand, t) => { t.pop(); }],
+];
+
+function validationFixtures(count, seed) {
+	const rand = rng(seed);
+	const validator = TeamValidator.get(FORMAT);
+	const cases = [];
+	while (cases.length < count) {
+		const team = legalTeam(rand);
+		let mutation = "none";
+		if (chance(rand, 0.6)) {
+			const [name, apply] = pick(rand, MUTATIONS);
+			mutation = name;
+			apply(rand, team);
+		}
+		const problems = validator.validateTeam(team);
+		cases.push({mutation, text: Teams.export(team), valid: !problems, problems: problems || []});
+	}
+	return cases;
+}
+
 const stats = statFixtures();
 console.log(`${write("stats.json", stats)}: ${stats.length} cases`);
 const damage = damageFixtures(Number(process.env.DAMAGE_CASES || 4000), 20261003);
 console.log(`${write("damage.json", damage)}: ${damage.length} cases`);
+const teams = {parse: parseFixtures(), validate: validationFixtures(600, 7)};
+console.log(`${write("teams.json", teams)}: ${teams.parse.length} repo teams, ${teams.validate.length} validation cases`);
