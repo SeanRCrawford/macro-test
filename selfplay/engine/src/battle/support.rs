@@ -9,7 +9,8 @@ use crate::team::{mega_forme, PokemonSet};
 /// Abilities whose every effect is implemented: damage modifiers (handled by
 /// the damage module, which mirrors Showdown exactly) and Levitate's immunity.
 const ABILITIES: &[&str] = &[
-    "noability", "adaptability", "aerilate", "auraguard", "battlearmor", "blaze", "dragonize", "filter",
+    "noability", "adaptability", "aerilate", "auraguard", "battlearmor", "blaze", "dragonize", "drizzle", "drought",
+    "electricsurge", "filter", "grassysurge", "intimidate", "psychicsurge", "sandstream", "snowwarning",
     "firemane", "fluffy", "friendguard", "furcoat", "grasspelt", "guts", "hugepower", "ironfist", "levitate",
     "lightmetal", "liquidvoice", "marvelscale", "megalauncher", "minus", "multiscale", "overgrow", "pixilate",
     "plus", "punkrock", "purepower", "reckless", "refrigerate", "sharpness", "shellarmor", "sniper", "solidrock",

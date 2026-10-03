@@ -10,6 +10,7 @@
 
 pub mod choice;
 mod conditions;
+mod field;
 mod items;
 pub mod snapshot;
 mod moves;
@@ -559,15 +560,7 @@ impl Battle {
             self.queue.remove(0);
             switchers.push(mon);
         }
-        // SwitchIn: tox's onSwitchIn resets the Toxic counter. (Switch-in
-        // abilities and items are refused by `support` for now.)
-        for r in switchers {
-            let m = self.mon_mut(r);
-            if m.status == crate::damage::Status::Toxic {
-                m.status_state.stage = 0;
-            }
-        }
-        Ok(())
+        self.switch_in_event(&switchers)
     }
 
     fn run_mega_evo(&mut self, r: MonRef) -> Res<()> {
@@ -581,6 +574,12 @@ impl Battle {
         // Showdown keeps HP as is; only the other stats change.
         m.stats = [m.stats[0], new_stats[1], new_stats[2], new_stats[3], new_stats[4], new_stats[5]];
         m.ability = dex.ability_id(&sp.abilities[0]).expect("mega ability");
+        // setAbility runs the new ability's Start.
+        if m.hp > 0 {
+            if let Some(e) = field::start_effect(&dex.ability(m.ability).id) {
+                self.ability_start(r, e);
+            }
+        }
         for p in self.sides[r.side].pokemon.iter_mut() {
             p.can_mega_evo = None;
         }

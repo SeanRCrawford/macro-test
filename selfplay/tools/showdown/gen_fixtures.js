@@ -404,7 +404,8 @@ function supportedSet(rand, entry, usedItems) {
 		item = species.requiredItem;
 		species = champions.species.get(species.battleOnly);
 	}
-	const ability = Object.values(species.abilities).map(toID).find(a => supportedAbilities.has(a)) || "noability";
+	const abilities = Object.values(species.abilities).map(toID).filter(a => supportedAbilities.has(a));
+	const ability = abilities.length ? pick(rand, abilities) : "noability";
 	if (!item && chance(rand, 0.5)) {
 		const options = supportedItems.filter(i => !usedItems.has(i) && !champions.items.get(i).megaStone);
 		item = pick(rand, options);
@@ -523,6 +524,8 @@ function battleSnapshot(battle) {
 		outcome: battle.ended ? (battle.winner ? battle.sides.findIndex(s => s.name === battle.winner) : "tie") : null,
 		weather: battle.field.weather,
 		terrain: battle.field.terrain,
+		weatherTurns: battle.field.weather ? battle.field.weatherState.duration ?? null : null,
+		terrainTurns: battle.field.terrain ? battle.field.terrainState.duration ?? null : null,
 		pseudoWeather: durations(battle.field.pseudoWeather),
 		sides: battle.sides.map(side => ({
 			totalFainted: side.totalFainted,

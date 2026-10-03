@@ -92,6 +92,8 @@ impl Battle {
             },
             "weather": weather_id(self.field.weather),
             "terrain": terrain_id(self.field.terrain),
+            "weatherTurns": if self.field.weather == Weather::None { Value::Null } else { json!(self.field.weather_turns) },
+            "terrainTurns": if self.field.terrain == Terrain::None { Value::Null } else { json!(self.field.terrain_turns) },
             "pseudoWeather": if self.field.trick_room > 0 { json!({"trickroom": self.field.trick_room}) } else { json!({}) },
             "sides": sides,
         })

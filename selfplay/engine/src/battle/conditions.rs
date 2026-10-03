@@ -93,6 +93,9 @@ struct Residual {
 
 #[derive(Debug, Clone, Copy)]
 enum ResidualKind {
+    Weather,
+    Terrain,
+    GrassyHeal,
     TrickRoom,
     Tailwind(usize),
     Leftovers,
@@ -124,6 +127,9 @@ impl Battle {
         if m.fainted {
             return false;
         }
+        if key == "frz" && self.field.weather == crate::damage::Weather::Sun {
+            return false;
+        }
         key.is_empty() || !Dex::get().immune_to(key, m.types)
     }
 
@@ -148,6 +154,9 @@ impl Battle {
         if status != Status::None {
             let key = if status == Status::Toxic { "psn" } else { status_id(status) };
             if !self.run_status_immunity(t, key) {
+                return false;
+            }
+            if self.terrain_blocks_status(t, status) {
                 return false;
             }
         }
@@ -323,6 +332,12 @@ impl Battle {
         if self.field.trick_room > 0 {
             handlers.push(Residual { mon: None, what: ResidualKind::TrickRoom, order: 27, speed: 0, sub_order: 1 });
         }
+        if self.field.weather != crate::damage::Weather::None {
+            handlers.push(Residual { mon: None, what: ResidualKind::Weather, order: 1, speed: 0, sub_order: 5 });
+        }
+        if self.field.terrain != crate::damage::Terrain::None {
+            handlers.push(Residual { mon: None, what: ResidualKind::Terrain, order: 27, speed: 0, sub_order: 7 });
+        }
         for side in 0..2 {
             if self.sides[side].tailwind > 0 {
                 handlers.push(Residual { mon: None, what: ResidualKind::Tailwind(side), order: 26, speed: 0, sub_order: 5 });
@@ -352,6 +367,9 @@ impl Battle {
                         });
                     }
                 }
+                if self.field.terrain == crate::damage::Terrain::Grassy {
+                    handlers.push(Residual { mon: Some(r), what: ResidualKind::GrassyHeal, order: 5, speed: m.speed, sub_order: 2 });
+                }
             }
         }
         self.speed_sort(&mut handlers, compare_handlers);
@@ -359,6 +377,8 @@ impl Battle {
             let Some(mon) = h.mon else {
                 // Field and side conditions: count down, end at zero.
                 match h.what {
+                    ResidualKind::Weather => self.weather_residual(),
+                    ResidualKind::Terrain => self.terrain_residual(),
                     ResidualKind::TrickRoom => self.field.trick_room = self.field.trick_room.saturating_sub(1),
                     ResidualKind::Tailwind(side) => self.sides[side].tailwind = self.sides[side].tailwind.saturating_sub(1),
                     _ => unreachable!(),
@@ -375,7 +395,13 @@ impl Battle {
                 continue;
             }
             match h.what {
-                ResidualKind::TrickRoom | ResidualKind::Tailwind(_) => unreachable!(),
+                ResidualKind::TrickRoom | ResidualKind::Tailwind(_) | ResidualKind::Weather | ResidualKind::Terrain => unreachable!(),
+                ResidualKind::GrassyHeal => {
+                    if self.field.terrain != crate::damage::Terrain::Grassy {
+                        continue;
+                    }
+                    self.grassy_heal(h.mon);
+                }
                 ResidualKind::Leftovers => {
                     if self.item_of(h.mon) != Some("leftovers") {
                         continue;

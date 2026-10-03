@@ -1003,7 +1003,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                     bp
                 }
             }
-            "eruption" | "waterspout" => bp * attacker.hp as i64 / attacker.max_hp() as i64,
+            // A fractional base power is truthy, then clamped to at least 1.
+            "eruption" | "waterspout" => (bp * attacker.hp as i64 / attacker.max_hp() as i64).max(attacker.hp.min(1) as i64),
             "lowkick" | "grassknot" => weight_bp(self.weight(d, am)?),
             "heavyslam" | "heatcrash" => ratio_bp(self.weight(a, am)?, self.weight(d, am)?),
             "hardpress" => {

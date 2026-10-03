@@ -290,9 +290,12 @@ impl Battle {
             });
         };
 
-        // hitStepTryHitEvent: Protect blocks moves with the protect flag.
+        // hitStepTryHitEvent: Psychic Terrain (priority 4) stops priority
+        // moves on grounded foes; Protect blocks moves with the protect flag.
         step(self, &mut targets, &mut |b, t| {
-            if b.mon(t).volatiles.has(VolatileId::Protect) && data.flags.has("protect") {
+            if b.psychic_terrain_blocks(user, t, data.priority, data.target == MoveTarget::SelfTarget) {
+                HitRes::Bool(false)
+            } else if b.mon(t).volatiles.has(VolatileId::Protect) && data.flags.has("protect") {
                 HitRes::NotFail
             } else {
                 HitRes::Bool(true)
@@ -325,7 +328,13 @@ impl Battle {
 
     /// hitStepAccuracy for one target.
     fn accuracy_check(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
-        let Some(acc) = data.accuracy else { return true };
+        let Some(mut acc) = data.accuracy else { return true };
+        // onModifyMove: weather-dependent accuracy.
+        match (data.id.as_str(), self.field.weather) {
+            ("thunder", crate::damage::Weather::Rain) | ("blizzard", crate::damage::Weather::Snow) => return true,
+            ("thunder", crate::damage::Weather::Sun) => acc = 50,
+            _ => {}
+        }
         let always = (data.id == "toxic" && self.mon(user).has_type(Dex::get().type_id("Poison").expect("Poison")))
             || (data.target == MoveTarget::SelfTarget && data.category == Category::Status);
         if always {
