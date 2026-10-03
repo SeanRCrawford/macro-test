@@ -44,6 +44,9 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("fakeout", &["onTry", "onDisableMove"]),
 ];
 
+/// Status moves that set a side or field condition, which `moves` implements.
+const FIELD_MOVES: &[&str] = &["tailwind", "trickroom"];
+
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &["flinch", "protect"];
 
@@ -73,7 +76,8 @@ pub fn move_supported(m: &MoveData) -> bool {
         }
     };
     // Protect's `condition` is the protect volatile, implemented in `moves`.
-    let condition_ok = !m.has_key("condition") || m.primary.volatile_status.as_deref() == Some("protect");
+    let field_move = FIELD_MOVES.contains(&m.id.as_str());
+    let condition_ok = !m.has_key("condition") || m.primary.volatile_status.as_deref() == Some("protect") || field_move;
     let target_ok = match m.category {
         Category::Status => matches!(
             m.target,
@@ -84,8 +88,10 @@ pub fn move_supported(m: &MoveData) -> bool {
             MoveTarget::Normal | MoveTarget::Any | MoveTarget::AdjacentFoe | MoveTarget::AllAdjacentFoes | MoveTarget::AllAdjacent | MoveTarget::RandomNormal
         ),
     };
-    m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok))
-        && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition"]].concat())
+    let target_ok = target_ok || (field_move && matches!(m.target, MoveTarget::All | MoveTarget::AllySide));
+    let field_key = |k: &str| field_move && matches!(k, "sideCondition" | "pseudoWeather");
+    m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok) || field_key(k))
+        && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather"]].concat())
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
         && m.nested_handlers.is_empty()
         && handlers_ok

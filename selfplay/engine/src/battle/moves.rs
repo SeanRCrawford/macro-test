@@ -228,6 +228,9 @@ impl Battle {
             return Ok(false);
         }
         let Some(target) = target else { return Ok(false) };
+        if matches!(am.target, MoveTarget::All | MoveTarget::AllySide | MoveTarget::FoeSide | MoveTarget::AllyTeam) {
+            return Ok(self.try_move_hit(user, data));
+        }
         let targets = self.get_move_targets(user, &am, Some(target));
         if targets.is_empty() {
             return Ok(false);
@@ -239,6 +242,27 @@ impl Battle {
             self.after_move_secondary_self(user, last_target, data.category == Category::Status);
         }
         Ok(result)
+    }
+
+    /// `tryMoveHit` for moves that hit a side or the field: Tailwind and
+    /// Trick Room (runMoveEffects' sideCondition / pseudoWeather).
+    fn try_move_hit(&mut self, user: MonRef, data: &MoveData) -> bool {
+        match data.id.as_str() {
+            "tailwind" => {
+                let side = &mut self.sides[user.side];
+                if side.tailwind > 0 {
+                    return false;
+                }
+                side.tailwind = 4;
+                true
+            }
+            "trickroom" => {
+                // onFieldRestart ends it; using it again succeeds either way.
+                self.field.trick_room = if self.field.trick_room > 0 { 0 } else { 5 };
+                true
+            }
+            other => unreachable!("support lets through side/field move {other}"),
+        }
     }
 
     /// `trySpreadMoveHit` and its hit steps.

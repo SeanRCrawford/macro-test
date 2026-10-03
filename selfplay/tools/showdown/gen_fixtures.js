@@ -505,6 +505,11 @@ function legalChoices(battle, side) {
 	return out;
 }
 
+/** Effect states as {id: remaining duration}. */
+function durations(states) {
+	return Object.fromEntries(Object.entries(states).map(([id, s]) => [id, s.duration ?? null]));
+}
+
 function battleSnapshot(battle) {
 	return {
 		turn: battle.turn,
@@ -518,8 +523,10 @@ function battleSnapshot(battle) {
 		outcome: battle.ended ? (battle.winner ? battle.sides.findIndex(s => s.name === battle.winner) : "tie") : null,
 		weather: battle.field.weather,
 		terrain: battle.field.terrain,
+		pseudoWeather: durations(battle.field.pseudoWeather),
 		sides: battle.sides.map(side => ({
 			totalFainted: side.totalFainted,
+			sideConditions: durations(side.sideConditions),
 			pokemon: side.pokemon.map(p => ({
 				species: p.species.id, hp: p.hp, maxhp: p.maxhp, status: p.fainted ? "fnt" : p.status,
 				active: p.isActive,

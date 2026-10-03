@@ -273,12 +273,20 @@ impl Battle {
     /// `pokemon.getActionSpeed()`: modified Speed (Trick Room isn't in yet).
     fn action_speed_of(&self, r: MonRef) -> Res<i32> {
         let m = self.mon(r);
-        let mut spe = crate::fixed::modify(boosted(m.stats[5], m.boosts[4]) as u64, self.speed_modifier(r)) as u32;
+        // ModifySpe: Choice Scarf and Tailwind chain their modifiers.
+        let mut modifier = self.speed_modifier(r);
+        if self.sides[r.side].tailwind > 0 {
+            modifier = crate::fixed::chain(modifier, 8192);
+        }
+        let mut spe = crate::fixed::modify(boosted(m.stats[5], m.boosts[4]) as u64, modifier) as u32;
         // par's onModifySpe (Quick Feet isn't supported).
         if m.status == crate::damage::Status::Paralysis {
             spe = spe * 50 / 100;
         }
-        Ok(spe.min(10_000) as i32)
+        let spe = spe.min(10_000);
+        // getActionSpeed: Trick Room inverts, then `trunc(speed, 13)`.
+        let spe = if self.field.trick_room > 0 { 10_000 - spe } else { spe };
+        Ok((spe % 8192) as i32)
     }
 
     /// `queue.willAct()`: a move or switch is still to come this turn.

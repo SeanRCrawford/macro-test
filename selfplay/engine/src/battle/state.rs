@@ -244,6 +244,8 @@ pub struct Side {
     /// Showdown's `side.active[slot]` is set: the Pokemon at list position
     /// `slot` occupies it (fainted or not) until replaced.
     pub slot_filled: [bool; ACTIVE_PER_SIDE],
+    /// Tailwind's remaining duration (0: not up).
+    pub tailwind: u8,
 }
 
 impl Side {
@@ -263,4 +265,6 @@ pub struct Field {
     pub weather_turns: u8,
     pub terrain: Terrain,
     pub terrain_turns: u8,
+    /// Trick Room's remaining duration (0: not up).
+    pub trick_room: u8,
 }

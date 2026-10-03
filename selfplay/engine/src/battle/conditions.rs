@@ -84,7 +84,7 @@ pub fn status_id(s: Status) -> &'static str {
 /// A Residual handler (fieldEvent): whose, what, and its sort keys.
 #[derive(Debug, Clone, Copy)]
 struct Residual {
-    mon: MonRef,
+    mon: Option<MonRef>,
     what: ResidualKind,
     order: u64,
     speed: i32,
@@ -93,6 +93,8 @@ struct Residual {
 
 #[derive(Debug, Clone, Copy)]
 enum ResidualKind {
+    TrickRoom,
+    Tailwind(usize),
     Leftovers,
     Status(Status),
     Volatile(VolatileId),
@@ -102,6 +104,11 @@ enum ResidualKind {
 /// Residual handler the engine has).
 fn compare_handlers(a: &Residual, b: &Residual) -> Ordering {
     a.order.cmp(&b.order).then(b.speed.cmp(&a.speed)).then(a.sub_order.cmp(&b.sub_order))
+}
+
+struct ResidualOn {
+    mon: MonRef,
+    what: ResidualKind,
 }
 
 /// Handlers without an order sort after every ordered one.
@@ -312,7 +319,14 @@ impl Battle {
     /// handler order; faints are processed after each handler.
     pub(super) fn residual(&mut self) -> Res<()> {
         let mut handlers = Vec::new();
+        // Field, then each side's conditions followed by its actives.
+        if self.field.trick_room > 0 {
+            handlers.push(Residual { mon: None, what: ResidualKind::TrickRoom, order: 27, speed: 0, sub_order: 1 });
+        }
         for side in 0..2 {
+            if self.sides[side].tailwind > 0 {
+                handlers.push(Residual { mon: None, what: ResidualKind::Tailwind(side), order: 26, speed: 0, sub_order: 5 });
+            }
             for pos in 0..ACTIVE_PER_SIDE {
                 let Some(r) = self.occupant(side, pos) else { continue };
                 let m = self.mon(r);
@@ -322,15 +336,15 @@ impl Battle {
                     _ => None,
                 };
                 if let Some(order) = order {
-                    handlers.push(Residual { mon: r, what: ResidualKind::Status(m.status), order, speed: m.speed, sub_order: 0 });
+                    handlers.push(Residual { mon: Some(r), what: ResidualKind::Status(m.status), order, speed: m.speed, sub_order: 0 });
                 }
                 if self.item_of(r) == Some("leftovers") {
-                    handlers.push(Residual { mon: r, what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
+                    handlers.push(Residual { mon: Some(r), what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
                 }
                 for v in &m.volatiles.0 {
                     if v.duration.is_some() {
                         handlers.push(Residual {
-                            mon: r,
+                            mon: Some(r),
                             what: ResidualKind::Volatile(v.id),
                             order: NO_HANDLER_ORDER,
                             speed: m.speed,
@@ -342,11 +356,26 @@ impl Battle {
         }
         self.speed_sort(&mut handlers, compare_handlers);
         for h in handlers {
+            let Some(mon) = h.mon else {
+                // Field and side conditions: count down, end at zero.
+                match h.what {
+                    ResidualKind::TrickRoom => self.field.trick_room = self.field.trick_room.saturating_sub(1),
+                    ResidualKind::Tailwind(side) => self.sides[side].tailwind = self.sides[side].tailwind.saturating_sub(1),
+                    _ => unreachable!(),
+                }
+                self.faint_messages()?;
+                if self.is_over() {
+                    return Ok(());
+                }
+                continue;
+            };
+            let h = ResidualOn { mon, what: h.what };
             let m = self.mon(h.mon);
             if m.fainted {
                 continue;
             }
             match h.what {
+                ResidualKind::TrickRoom | ResidualKind::Tailwind(_) => unreachable!(),
                 ResidualKind::Leftovers => {
                     if self.item_of(h.mon) != Some("leftovers") {
                         continue;
