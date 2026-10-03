@@ -1004,10 +1004,17 @@ impl Battle {
                 // Shadow Tag users go free).
                 let r = MonRef { side, uid: m.uid };
                 // Shed Shell's onTrapPokemon (priority -10) frees it.
-                let trapped = !self.ability_is(r, "shadowtag")
-                    && self.item_of(r) != Some("shedshell")
-                    && !Dex::get().immune_to("trapped", m.types)
-                    && self.adjacent_foes(r).into_iter().any(|f| self.ability_is(f, "shadowtag"));
+                let shadow_tag = !self.ability_is(r, "shadowtag") && self.adjacent_foes(r).into_iter().any(|f| self.ability_is(f, "shadowtag"));
+                // partiallytrapped's onTrapPokemon: while its source is in.
+                let bound = m
+                    .volatiles
+                    .0
+                    .iter()
+                    .find(|v| v.id == state::VolatileId::PartiallyTrapped)
+                    .and_then(|v| self.trap_source(v.counter))
+                    .is_some_and(|s| self.mon(s).is_active);
+                let trapped =
+                    (shadow_tag || bound) && self.item_of(r) != Some("shedshell") && !Dex::get().immune_to("trapped", m.types);
                 // Struggling counts as a locked move: no Mega Evolution.
                 Some(SlotRequest { moves, struggle, can_mega: m.can_mega_evo.is_some() && !struggle, trapped })
             });

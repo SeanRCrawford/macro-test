@@ -1429,6 +1429,7 @@ impl Battle {
                             }
                             "mortalspin" => {
                                 self.mon_mut(user).volatiles.remove(VolatileId::LeechSeed);
+                                self.mon_mut(user).volatiles.remove(VolatileId::PartiallyTrapped);
                                 for c in SideCondition::ALL.into_iter().filter(|c| c.is_hazard()) {
                                     self.sides[user.side].conditions[c as usize] = 0;
                                 }
@@ -1493,6 +1494,14 @@ impl Battle {
             if let Some(v) = &effect.volatile_status {
                 let id = VolatileId::parse(v).ok_or_else(|| BattleError::Unsupported(format!("volatile {v}")))?;
                 let r = self.add_volatile(t, id);
+                if id == VolatileId::PartiallyTrapped && r.truthy() {
+                    let code = ((user.side as u32) << 8) | self.mon(user).uid as u32;
+                    let divisor = if self.item_of(user) == Some("bindingband") { 6 } else { 8 };
+                    if let Some(v) = self.mon_mut(t).volatiles.get_mut(id) {
+                        v.counter = code;
+                        v.target_loc = divisor;
+                    }
+                }
                 if id == VolatileId::LeechSeed && r.truthy() {
                     let slot = (user.side * 2 + self.mon(user).position) as i8;
                     if let Some(v) = self.mon_mut(t).volatiles.get_mut(id) {

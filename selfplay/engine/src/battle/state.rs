@@ -74,6 +74,9 @@ pub enum VolatileId {
     LeechSeed,
     /// No healing (Psychic Noise: two turns).
     HealBlock,
+    /// Bound by Infestation and the like: `counter` is the source
+    /// (side << 8 | uid), `target_loc` the damage divisor (Binding Band: 6).
+    PartiallyTrapped,
     /// A Gem's boost to this move.
     Gem,
 }
@@ -108,6 +111,7 @@ impl VolatileId {
             "dragoncheer" => VolatileId::DragonCheer,
             "leechseed" => VolatileId::LeechSeed,
             "healblock" => VolatileId::HealBlock,
+            "partiallytrapped" => VolatileId::PartiallyTrapped,
             _ => return None,
         })
     }
@@ -144,6 +148,7 @@ impl VolatileId {
             VolatileId::DragonCheer => "dragoncheer",
             VolatileId::LeechSeed => "leechseed",
             VolatileId::HealBlock => "healblock",
+            VolatileId::PartiallyTrapped => "partiallytrapped",
         }
     }
 
@@ -159,6 +164,7 @@ impl VolatileId {
             VolatileId::PerishSong => Some(24),
             VolatileId::LeechSeed => Some(8),
             VolatileId::HealBlock => Some(20),
+            VolatileId::PartiallyTrapped => Some(13),
             VolatileId::Roost => Some(25),
             _ => None,
         }
@@ -187,6 +193,8 @@ impl VolatileId {
             | VolatileId::DragonCheer
             | VolatileId::LeechSeed => None,
             VolatileId::HealBlock => Some(2),
+            // durationCallback: 5 or 6, rolled when it starts.
+            VolatileId::PartiallyTrapped => Some(5),
             VolatileId::TwoTurnMove | VolatileId::MustRecharge => Some(2),
             VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
             VolatileId::Yawn => Some(2),

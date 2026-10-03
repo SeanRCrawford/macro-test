@@ -160,7 +160,7 @@ const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop", "alluringvoice"];
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &[
     "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
-    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer", "leechseed", "healblock",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer", "leechseed", "healblock", "partiallytrapped",
 ];
 
 pub fn ability_supported(id: &str) -> bool {

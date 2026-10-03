@@ -298,6 +298,10 @@ impl Battle {
             VolatileId::HelpingHand => 1,
             // confusion's onStart: 2-5 turns.
             VolatileId::Confusion => self.chance.random_range(2, 6),
+            VolatileId::PartiallyTrapped => {
+                duration = Some(self.chance.random_range(5, 7) as u8);
+                0
+            }
             _ => 0,
         };
         // focusenergy / dragoncheer's onStart: not both.
@@ -612,6 +616,13 @@ impl Battle {
 
     // --- HP -------------------------------------------------------------------
 
+    /// A partial trap's source, by its (side << 8 | uid) code.
+    pub(super) fn trap_source(&self, code: u32) -> Option<MonRef> {
+        let side = (code >> 8) as usize;
+        let uid = (code & 0xFF) as usize;
+        self.sides[side].pokemon.iter().any(|m| m.uid == uid).then_some(MonRef { side, uid })
+    }
+
     /// leechseed's onResidual: the seeded Pokemon loses an eighth, and
     /// whoever stands in the seeder's slot gets it (Big Root; Liquid Ooze
     /// turns it into damage).
@@ -843,9 +854,25 @@ impl Battle {
                         self.end_volatile(h.mon, id);
                         continue;
                     }
+                    // partiallytrapped's onResidual: ends with its source gone,
+                    // else an eighth (a sixth with Binding Band).
+                    if id == VolatileId::PartiallyTrapped {
+                        let (source, divisor) = (v.counter, v.target_loc as u16);
+                        let gone = self.trap_source(source).is_none_or(|s| {
+                            let s = self.mon(s);
+                            !s.is_active || s.hp == 0 || s.active_turns == 0
+                        });
+                        if gone {
+                            self.mon_mut(h.mon).volatiles.remove(id);
+                        } else {
+                            let amount = (self.mon(h.mon).max_hp() / divisor) as u32;
+                            self.effect_damage(h.mon, amount);
+                        }
+                    }
                     // encore's onResidual: ends once the move is out of PP.
                     if id == VolatileId::Encore {
-                        let mv = v.move_id;
+                        let m = self.mon_mut(h.mon);
+                        let mv = m.volatiles.0.iter().find(|v| v.id == id).and_then(|v| v.move_id);
                         let has_pp = mv.and_then(|mv| m.moves.iter().find(|s| s.id == mv)).is_some_and(|s| s.pp > 0);
                         if !has_pp {
                             m.volatiles.remove(id);
