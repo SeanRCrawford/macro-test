@@ -364,9 +364,214 @@ function validationFixtures(count, seed) {
 	return cases;
 }
 
+// --- Battles ----------------------------------------------------------------
+//
+// Whole battles between random teams the engine supports (data/support.json),
+// played by a random bot. Showdown's PRNG is replaced by the same threshold
+// policy as the engine's Chance::Policy, so both simulators make the same
+// "random" decisions and can be compared decision by decision. At every
+// decision the fixture records Showdown's state, how many legal choices each
+// side had, and the choices made.
+
+const support = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "support.json")));
+const supportedMoves = new Set(support.moves);
+const supportedAbilities = new Set(support.abilities);
+const supportedItems = support.items;
+
+function policyPrng(t) {
+	const idx = n => Math.min(n - 1, Math.max(0, Math.ceil(t * n) - 1));
+	return {
+		random(m, n) {
+			if (m === undefined) return Math.min(t, 0.999999);
+			if (n === undefined) { n = m; m = 0; }
+			return n - m <= 1 ? m : m + idx(n - m);
+		},
+		randomChance(num, den) { return num >= den || num / den >= t; },
+		sample(items) { return items[idx(items.length)]; },
+		shuffle() {},
+		getSeed() { return `policy:${t}`; },
+		get startingSeed() { return `policy:${t}`; },
+		clone() { return this; },
+	};
+}
+
+function supportedSet(rand, entry, usedItems) {
+	let species = champions.species.get(entry.name);
+	let item = "";
+	if (species.battleOnly) {
+		const megaAbility = toID(species.abilities[0]);
+		if (!supportedAbilities.has(megaAbility)) return null;
+		item = species.requiredItem;
+		species = champions.species.get(species.battleOnly);
+	}
+	const ability = Object.values(species.abilities).map(toID).find(a => supportedAbilities.has(a)) || "noability";
+	if (!item && chance(rand, 0.5)) {
+		const options = supportedItems.filter(i => !usedItems.has(i) && !champions.items.get(i).megaStone);
+		item = pick(rand, options);
+	}
+	if (item) usedItems.add(toID(item));
+	const poolMoves = entry.moves.map(([m]) => toID(m)).filter(m => supportedMoves.has(m));
+	let moves = [...new Set(poolMoves)];
+	if (!moves.length) return null;
+	moves = moves.sort(() => rand() - 0.5).slice(0, 4);
+	const [nature, points] = weightedPick(rand, entry.spreads.map(([n, p, w]) => [[n, p], w]));
+	return {species: species.name, ability: champions.abilities.get(ability).name, item, nature, level: 50,
+		evs: Object.fromEntries(STATS.map((st, i) => [st, points[i]])), moves};
+}
+
+function supportedTeam(rand) {
+	const team = [];
+	const nums = new Set();
+	const usedItems = new Set();
+	let tries = 0;
+	while (team.length < 6 && tries++ < 500) {
+		const e = weightedPick(rand, speciesWeights);
+		const num = champions.species.get(e.name).num;
+		if (nums.has(num)) continue;
+		const set = supportedSet(rand, e, usedItems);
+		if (!set) continue;
+		nums.add(num);
+		team.push(set);
+	}
+	return team.length === 6 ? team : null;
+}
+
+const TARGETED = new Set(["normal", "any", "adjacentAlly", "adjacentAllyOrSelf", "adjacentFoe"]);
+
+// Mirrors engine/src/battle/choice.rs valid_target_loc for doubles.
+function validTargetLoc(loc, sourcePos, target) {
+	const sourceLoc = -(sourcePos + 1);
+	const isSelf = loc === sourceLoc;
+	const isFoe = loc > 0;
+	const adjacent = isFoe ? true : Math.abs(loc - sourceLoc) === 1;
+	switch (target) {
+	case "randomNormal": case "scripted": case "normal": return adjacent;
+	case "adjacentAlly": return adjacent && !isFoe;
+	case "adjacentAllyOrSelf": return (adjacent && !isFoe) || isSelf;
+	case "adjacentFoe": return adjacent && isFoe;
+	case "any": return !isSelf;
+	}
+	return false;
+}
+
+function legalChoices(battle, side) {
+	const req = side.activeRequest;
+	if (!req || req.wait) return [];
+	if (req.teamPreview) {
+		const out = [];
+		const n = side.pokemon.length;
+		for (let a = 0; a < n; a++) for (let b = 0; b < n; b++) {
+			if (b === a) continue;
+			const rest = [...Array(n).keys()].filter(x => x !== a && x !== b);
+			for (let i = 0; i < rest.length; i++) for (let j = i + 1; j < rest.length; j++) {
+				out.push(`team ${[a, b, rest[i], rest[j]].map(x => x + 1).join("")}`);
+			}
+		}
+		return out;
+	}
+	const bench = side.pokemon.map((p, i) => i).filter(i => i >= 2 && !side.pokemon[i].fainted);
+	const slotOptions = [0, 1].map(slot => {
+		if (req.forceSwitch) {
+			const opts = req.forceSwitch[slot] ? bench.map(i => ({s: `switch ${i + 1}`, sw: i})) : [];
+			return [...opts, {s: "pass", pass: true, forced: !!req.forceSwitch[slot]}];
+		}
+		const r = req.active[slot];
+		const pokemon = side.active[slot];
+		if (!r || !pokemon || pokemon.fainted) return [{s: "pass", pass: true}];
+		const opts = [];
+		const struggle = r.moves.length === 1 && r.moves[0].id === "struggle";
+		r.moves.forEach((m, j) => {
+			if (m.disabled) return;
+			const targets = TARGETED.has(m.target) && !struggle ?
+				[1, 2, -1, -2].filter(l => validTargetLoc(l, slot, m.target)) : [0];
+			for (const t of targets) {
+				const base = `move ${j + 1}${t ? " " + t : ""}`;
+				opts.push({s: base});
+				if (r.canMegaEvo) opts.push({s: base + " mega", mega: true});
+			}
+		});
+		if (!r.trapped) for (const i of bench) opts.push({s: `switch ${i + 1}`, sw: i});
+		return opts;
+	});
+	const out = [];
+	const need = req.forceSwitch ? req.forceSwitch.filter(Boolean).length : 0;
+	const passesNeeded = Math.max(0, need - bench.length);
+	for (const x of slotOptions[0]) for (const y of slotOptions[1]) {
+		if (x.sw !== undefined && x.sw === y.sw) continue;
+		if (x.mega && y.mega) continue;
+		if (req.forceSwitch && [x, y].filter(o => o.forced).length !== passesNeeded) continue;
+		out.push(`${x.s}, ${y.s}`);
+	}
+	return out;
+}
+
+function battleSnapshot(battle) {
+	return {
+		turn: battle.turn,
+		requests: battle.sides.map(side => {
+			const r = side.activeRequest;
+			if (battle.ended || !r || r.wait) return "wait";
+			if (r.teamPreview) return "teampreview";
+			if (r.forceSwitch) return {switch: [0, 1].map(i => !!r.forceSwitch[i])};
+			return "move";
+		}),
+		outcome: battle.ended ? (battle.winner ? battle.sides.findIndex(s => s.name === battle.winner) : "tie") : null,
+		weather: battle.field.weather,
+		terrain: battle.field.terrain,
+		sides: battle.sides.map(side => ({
+			totalFainted: side.totalFainted,
+			pokemon: side.pokemon.map(p => ({
+				species: p.species.id, hp: p.hp, maxhp: p.maxhp, status: p.fainted ? "fnt" : p.status,
+				active: p.isActive,
+				boosts: ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"].map(b => p.boosts[b]),
+				item: p.item, ability: p.ability, pp: p.moveSlots.map(m => m.pp),
+			})),
+		})),
+	};
+}
+
+function battleFixtures(perPolicy, seed) {
+	const out = [];
+	const rand = rng(seed);
+	for (const threshold of [0.5, 0, 1.01]) {
+		for (let n = 0; n < perPolicy; n++) {
+			const teams = [supportedTeam(rand), supportedTeam(rand)];
+			if (!teams[0] || !teams[1]) { n--; continue; }
+			const battle = new Battle({formatid: FORMAT});
+			battle.prng = policyPrng(threshold);
+			battle.setPlayer("p1", {name: "p1", team: teams[0]});
+			battle.setPlayer("p2", {name: "p2", team: teams[1]});
+			const steps = [];
+			for (let step = 0; step < 80 && !battle.ended; step++) {
+				const snapshot = battleSnapshot(battle);
+				const choices = [null, null];
+				const counts = [null, null];
+				for (const [i, side] of battle.sides.entries()) {
+					const legal = legalChoices(battle, side);
+					if (!legal.length) continue;
+					counts[i] = legal.length;
+					choices[i] = pick(rand, legal);
+				}
+				steps.push({snapshot, counts, choices});
+				for (const [i, side] of battle.sides.entries()) {
+					if (choices[i] === null) continue;
+					if (!battle.choose(side.id, choices[i])) {
+						throw new Error(`Showdown rejected ${choices[i]}: ${side.choice.error}`);
+					}
+				}
+			}
+			out.push({threshold, teams: teams.map(t => Teams.export(t)), steps, final: battleSnapshot(battle)});
+		}
+	}
+	return out;
+}
+
 const stats = statFixtures();
 console.log(`${write("stats.json", stats)}: ${stats.length} cases`);
 const damage = damageFixtures(Number(process.env.DAMAGE_CASES || 4000), 20261003);
 console.log(`${write("damage.json", damage)}: ${damage.length} cases`);
 const teams = {parse: parseFixtures(), validate: validationFixtures(600, 7)};
 console.log(`${write("teams.json", teams)}: ${teams.parse.length} repo teams, ${teams.validate.length} validation cases`);
+const battles = battleFixtures(Number(process.env.BATTLES_PER_POLICY || 40), 99);
+console.log(`${write("battles.json", battles)}: ${battles.length} battles, ` +
+	`${battles.reduce((n, b) => n + b.steps.length, 0)} decisions`);

@@ -564,8 +564,10 @@ impl Battle {
         if self.faint_queue.is_empty() {
             return Ok(());
         }
+        let mut last = None;
         while !self.faint_queue.is_empty() {
             let r = self.faint_queue.remove(0);
+            last = Some(r);
             let m = self.mon_mut(r);
             if m.fainted {
                 continue;
@@ -580,14 +582,16 @@ impl Battle {
             }
             side.fainted_this_turn = true;
         }
-        self.check_win();
+        self.check_win(last);
         Ok(())
     }
 
-    fn check_win(&mut self) {
+    /// `checkWin`. When both sides run out at once, the side whose Pokemon
+    /// fainted last wins (gen 5+).
+    fn check_win(&mut self, last_fainted: Option<MonRef>) {
         let left = [self.sides[0].pokemon_left, self.sides[1].pokemon_left];
         self.outcome = match left {
-            [0, 0] => Some(Outcome::Tie),
+            [0, 0] => Some(last_fainted.map_or(Outcome::Tie, |r| Outcome::Win(r.side))),
             [_, 0] => Some(Outcome::Win(0)),
             [0, _] => Some(Outcome::Win(1)),
             _ => None,
@@ -612,8 +616,11 @@ impl Battle {
                 if self.turn != 1 {
                     m.hurt_this_turn = None;
                 }
+                // DisableMove: Gigaton Hammer and Blood Moon ("cantusetwice")
+                // can't be chosen right after being used.
+                let last = m.last_move;
                 for s in m.moves.iter_mut() {
-                    s.disabled = false;
+                    s.disabled = Dex::get().move_data(s.id).flags.has("cantusetwice") && last == Some(s.id);
                 }
                 if !m.fainted {
                     m.active_turns += 1;

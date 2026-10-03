@@ -334,9 +334,21 @@ formula adds stat points after the nature; Showdown adds them before.
   Tests: the 17 repo teams parse field for field like Showdown, and 600
   generated legal and rule-breaking teams get Showdown's verdict. Legality and
   learnsets come from Showdown (`checkCanLearn`) via the dex export.
-- [ ] 1d. Turn resolution core: ordering, moves, damage, faints, forced switches, end of turn. Random-play smoke test with invariant checks.
+- [x] 1d. Turn resolution core: ordering, moves, damage, faints, forced switches, end of turn. Random-play smoke test with invariant checks.
+  `engine/src/battle/` is a port of Showdown's battle loop: queued actions
+  sorted by order, priority and speed (`speedSort` with tie shuffles),
+  instaswitch, gen-8+ re-sorting after every action, the remaining queue kept
+  in the state. Plain attacks only so far (`support.rs` refuses anything
+  else). Checked by replaying 300 Showdown battles (3,941 decisions) under
+  three chance policies: identical state, legal-choice counts and results at
+  every decision.
 - [ ] 1e. Mechanics breadth, driven by the coverage report.
-- [ ] 1f. Turn-level differential tests against Showdown.
+- [x] 1f. Turn-level differential tests against Showdown: random battles
+  between supported teams, Showdown's PRNG replaced by the threshold policy
+  `Chance::Policy` mirrors (`tools/showdown/gen_fixtures.js`,
+  `engine/tests/battle_fixtures.rs`). Grows with each mechanic: a mechanic
+  joins `support.rs`, `data/support.json` is regenerated, the fixture
+  teams start using it, and the replay must still match.
 - [ ] 1g. Benchmark and speed gate.
 - [ ] 1h. Driving a real Showdown battle (protocol client) from the engine's choices.
 
