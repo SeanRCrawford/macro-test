@@ -80,9 +80,62 @@ Gen 9 Random Battles, singles:
 - **Results:** peak 2557 Elo and 95.3 GXE. The network alone was about 2400 Elo
   on a laptop. Not released.
 
-**The two bots differ in one notable way:** Jaxcalibur feeds damage calcs into
-the network (matchup tokens). mikumiku37 says its network sees no damage
-calculator, speed resolver or usage stats.
+**Nessie123** (Smogon thread 3789213, first post, by nessie_dev), Reg M-C
+Open Team Sheet Bo3 ladder, briefly #1 on 2026-09-28:
+
+- **Goals:** a tool for understanding sound VGC play, built on a hobbyist
+  budget.
+- **Model:** a value network of about 1.5M parameters. Training was search-
+  guided self-play: about 375k games, about 20 hours on an M4 Mac Mini plus
+  $120 of cloud compute. It plays on one CPU core with no GPU.
+- **Teams:** the open team sheets of every 6-2-or-better team from the
+  Baltimore Regional, with some stat points imputed. The ladder pool had
+  about 300 teams. It judged itself slightly behind at team preview on
+  average (about 48–52).
+- **Near-perfect information:** it trains on a variant of the game where
+  stat points are public and, after team preview, the chosen leads and
+  reserves are revealed to the opponent. A crude harness adapts it to the real
+  ladder and doesn't make the best use of hidden information.
+- **Search:**
+  - **Root:** a double oracle seeded with the network's guess of each side's
+    most likely move.
+  - **Chance outcomes:** for each pair of joint actions, it branches on the
+    chance events that matter (rolls that can KO, crits, secondary effects),
+    enumerates the outcomes with their probabilities, evaluates the leaves,
+    and takes the probability-weighted sum as that cell's value. It then
+    solves the matrix game for both sides' equilibrium strategies.
+  - **Deepening:** it expands and solves leaves of the root solve, ordered by
+    roughly (chance of reaching the leaf)² × (entropy of the leaf's static
+    evaluation). The motivation: the KL divergence between the static
+    evaluation and the depth-1 search value was observed to be roughly
+    proportional to the static evaluation's entropy.
+  - It also checks some off-equilibrium moves whose regret is low, and plays
+    by sampling the equilibrium. It makes no attempt at exploitative play.
+  - In many endgames (2v2 or fewer) it effectively solves the game, agreeing
+    within about 0.5% with a strict solver that enumerates every damage roll.
+- **Auxiliary heads:** future weather and terrain, who deals how much damage
+  to whom, each player's next moves, how long each Pokémon survives, game
+  length, and how much entropy collapses next turn.
+- **Diversity:** half of its training games use teams whose stats, abilities,
+  typing, moves or items have been mutated. The author credits search-labelled
+  data, the auxiliary heads and the mutated teams for its sample efficiency.
+  The trade-off is that search-guided games are far more expensive to produce.
+- **Analysis board:** like lichess, with an evaluation bar. You pick each
+  side's moves and the random outcomes, then analyse the resulting position.
+  Release is planned around the end of Reg M-C.
+
+**How the three bots differ:**
+
+- **Damage calcs as inputs:** Jaxcalibur gives its network damage calcs
+  (matchup tokens). mikumiku37 says its network has no damage calculator,
+  speed resolver or usage stats.
+- **Training data:** Jaxcalibur and mikumiku37 train a policy cheaply with PPO
+  on hundreds of millions of games, with no search during training. Nessie
+  trains a small value network on a few hundred thousand search-labelled
+  games.
+- **Search:** Nessie enumerates chance outcomes exactly and solves matrix
+  games at depth. mikumiku37 samples worlds and solves one turn. Jaxcalibur
+  samples rollouts.
 
 ## 2. Architecture
 
@@ -190,14 +243,30 @@ treat every decision point the same way.
   `src/battle.py`, whose default mode is deterministic.
 - Matching Showdown's exact random-number sequence is not a goal. Its
   distributions are the target.
+- **Chance outcomes can be enumerated as well as sampled.** Each random event
+  in a turn goes through one chance interface. A turn can run in three ways:
+  sampled (training), with every outcome forced (tests, and an analysis board
+  that lets the user pick outcomes), or enumerated, returning each distinct
+  outcome with its probability. Enumeration groups the 16 damage rolls into
+  "KOs" and "doesn't KO" bands where the exact roll doesn't change the
+  position class. This is what Nessie's search needs, and what the
+  lead-and-move advice tool needs to show "X% to win if you do this".
 
 ### 4.5 Hidden information
 
 The engine itself sees everything. A per-side observation function hides what
-that player can't see: the opponent's unrevealed moves, items, abilities and
-spreads, and which 4 of the 6 species shown at preview were actually brought.
-In search, sampled worlds fill in the hidden parts from a set prior, built from
-the team corpus and conditioned on what has been revealed.
+that player can't see.
+
+The Reg M-C ladder uses Open Team Sheets, which reveal species, moves, items,
+abilities and Tera types, but not stat points. What stays hidden is the
+opponent's stat points and which 4 of the 6 they brought (and which 2 lead,
+until the battle starts). That is much less than in Random Battles.
+
+Following Nessie, the first training variant can make stat points and the
+brought 4 public as well, so the game has nearly perfect information. The
+observation function then handles the real ladder: sampled worlds fill in
+stat points and the brought 4 from a prior (usage stats now, the team corpus
+later) conditioned on what has been revealed.
 
 ### 4.6 Which mechanics, in what order
 
@@ -288,7 +357,23 @@ Disguise and OHKO moves. The turn engine (1d) supplies that context.
 
 ## 5. Model and training (provisional; settled in phases 2–3)
 
-Start from Jaxcalibur's recipe, adapted to doubles:
+Two recipes have reached #1 in Reg M-C:
+
+- **mikumiku37:** a large policy trained by cheap PPO on a GPU, plus a light
+  one-turn search.
+- **Nessie:** a small value network trained on expensive search-labelled
+  games, plus deep matrix-game search with exact chance enumeration.
+
+The engine supports both: fast sampled turns, plus enumerated chance outcomes
+(4.4). The end goal of showing a player the best leads and moves suits
+Nessie's style, because it gives equilibrium strategies and win
+probabilities you can inspect. The policy network from the PPO recipe is
+still useful there as the move-ordering prior and the double oracle's seed.
+The plan is to build the PPO recipe first, because it's cheaper to iterate
+on with your GPU. Then add Nessie-style search on top, and use search-
+labelled games to fine-tune the value network if the PPO value plateaus.
+
+Starting from Jaxcalibur's recipe, adapted to doubles:
 
 - **Framework:** PyTorch, which supports CUDA natively on Windows.
 - **Network:** a non-causal pre-RMSNorm transformer of about 8–9M parameters,
@@ -307,11 +392,20 @@ Start from Jaxcalibur's recipe, adapted to doubles:
 - **RL:** PPO with GAE, undiscounted reward of 1 for a win and 0 for a loss, an
   entropy bonus plus a zero-avoiding KL-to-uniform term, and a league of past
   versions (as mikumiku37 did).
-- **Auxiliary heads:** win probability (the value); each opposing Pokémon's
-  item, ability, moves and spread; and the opponent's next joint action.
+- **Auxiliary heads:** win probability (the value); the opponent's stat
+  points and brought 4 (the only hidden information under Open Team
+  Sheets); and the opponent's next joint action. Nessie's further heads are
+  cheap to add: damage dealt between each pair of Pokémon, how long each
+  survives, future weather and terrain, game length.
+- **Team diversity:** following Nessie, train half the games on mutated
+  teams (perturbed stats, moves, items, abilities) so the network doesn't
+  overfit the corpus. This needs the engine to accept arbitrary legal-shaped
+  sets, which the data-driven dex already allows.
 - **Search:** mikumiku37's one-turn matrix solve first, because it suits
-  doubles' large joint action space. Jaxcalibur's regret-pUCT is a later
-  option.
+  doubles' large joint action space. Then Nessie's double oracle with chance
+  enumeration and selective deepening. `src/matrix_game.py` already has a
+  double oracle, which can be ported to Rust if it becomes a bottleneck.
+  Jaxcalibur's regret-pUCT is a later option.
 
 ## 6. Decisions and open questions
 
