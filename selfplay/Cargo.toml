@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["engine", "pybind"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
