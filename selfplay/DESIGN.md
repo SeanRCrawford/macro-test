@@ -133,9 +133,9 @@ Each phase has an exit test that has to pass before the next phase starts.
 ### 4.1 Format
 
 **Reg M-C.** Doubles, bring 6 and pick 4, level 50, Mega Evolution (one per
-side per battle), Champions stat points (not EVs). The stat rule follows
-`src/stats.py` and is covered by a parity test (section 4.8). The exact
-formula is checked against Showdown in milestone 1h. Species and item clauses are checked
+side per battle), Champions stat points (not EVs), Open Team Sheets on the
+Showdown ladder. Stats follow Showdown's formula (section 4.8). Species and
+item clauses are checked
 when a team is built. Training games are capped at a fixed number of turns and
 count as a draw (reward 0) if they reach it. Showdown has no such cap, but it
 stops games that would otherwise never end.
@@ -229,26 +229,35 @@ own speed should be measured on the same machine for comparison.
 
 ### 4.8 Validation
 
+**Showdown's source is the rules authority.** Its current `champions` mod
+defines Reg M-C, including the Champions changes: paralysis fully paralyses 1
+time in 8, sleep lasts 2–3 turns, freeze thaws within 3 turns, Unseen Fist and
+Piercing Drill do 1/4 damage through Protect, Aura Guard halves contact damage,
+and moves have new PP and handlers.
+`src/` predates this and is not used as a reference. For example, its stat
+formula adds stat points after the nature; Showdown adds them before.
+
 1. Rust unit tests for each mechanic.
-2. Differential tests against `src/`, the repo's current model of the format,
-   including its house rules. Stats (done), then damage over every
-   attacker, defender and move in the pool, then whole turns in deterministic
-   mode.
-3. Differential tests against Showdown itself, which is the ground truth for a
-   ladder bot. Run the `pokemon-showdown` npm package's `simulate-battle`
-   with the same choices and compare damage ranges and outcomes as
-   distributions.
+2. **Fixtures computed by Showdown's own code** (`tools/showdown/gen_fixtures.js`),
+   committed under `engine/tests/fixtures/`, so `cargo test` needs no Node.
+   Done so far: stats for every pool species and spread (10,175 cases, exact
+   match). Next: damage for every roll, over attacker, defender and move
+   triples sampled from the pool. Then whole turns: the same seeded choices
+   played through both simulators, with the results compared.
+3. Self-play smoke tests: millions of random-action games with invariant
+   checks (HP bounds, legal requests, termination).
 
 ### 4.9 Phase 1 milestones (each about one commit)
 
-- [x] 1a. Workspace scaffold, embedded dex, stat calculation, parity with `src/stats.py`.
-- [ ] 1b. Move data in the dex and the damage formula. Parity with `src/damage.py` over the pool.
+- [x] 1a. Workspace scaffold, embedded dex, stat calculation.
+- [x] 1a′. Dex exported from Showdown's champions mod; stats match Showdown exactly.
+- [ ] 1b. The damage formula. Exact match with Showdown fixtures over the pool.
 - [ ] 1c. Team construction from Showdown pastes, team validation, team preview.
 - [ ] 1d. Turn resolution core: ordering, moves, damage, faints, forced switches, end of turn. Random-play smoke test with invariant checks.
 - [ ] 1e. Mechanics breadth, driven by the coverage report.
-- [ ] 1f. Turn-level differential tests against `src/battle.py`.
+- [ ] 1f. Turn-level differential tests against Showdown.
 - [ ] 1g. Benchmark and speed gate.
-- [ ] 1h. Differential tests against Showdown.
+- [ ] 1h. Driving a real Showdown battle (protocol client) from the engine's choices.
 
 ## 5. Model and training (provisional; settled in phases 2–3)
 
@@ -309,6 +318,6 @@ Open:
 1. **Team corpus.** You will supply it later. Until then, use the 17 teams
    in `data/teams/` and the sets in `default_sets.txt`. Training is blocked on
    the corpus, so it is needed by phase 3.
-2. **Champions mechanics changes.** Any differences from Scarlet and Violet,
-   such as move or ability changes or Mega Evolution details. Showdown's
-   Champions mod is the authority here; checked in milestone 1h.
+2. **`src/` disagrees with Showdown on stats.** `src/stats.py` adds stat
+   points after the nature, so a boosted stat with points in it reads up to 3
+   too low. The existing app and CLI inherit this. Not changed here.
