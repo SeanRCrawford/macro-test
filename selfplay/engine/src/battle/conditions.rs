@@ -215,15 +215,67 @@ impl Battle {
         if id == VolatileId::Encore {
             return self.start_encore(t);
         }
+        // TryAddVolatile: Misty Terrain stops confusion and Electric Terrain
+        // stops Yawn on grounded Pokemon.
+        let terrain = self.field.terrain;
+        if (id == VolatileId::Confusion && terrain == crate::damage::Terrain::Misty)
+            || (id == VolatileId::Yawn && terrain == crate::damage::Terrain::Electric)
+        {
+            if self.grounded(t) {
+                return HitRes::Null;
+            }
+        }
+        let mut duration = id.duration();
+        let mut move_id = None;
         let counter = match id {
             VolatileId::Stall => 3,
             VolatileId::HelpingHand => 1,
+            // confusion's onStart: 2-5 turns.
+            VolatileId::Confusion => self.chance.random_range(2, 6),
             _ => 0,
         };
+        match id {
+            // taunt's onStart: a turn longer if it already acted this turn.
+            VolatileId::Taunt if self.mon(t).active_turns > 0 && !self.will_move(t) => duration = Some(4),
+            // disable's onStart: on the last move, with PP; a turn shorter if
+            // the target is still to move.
+            VolatileId::Disable => {
+                if self.will_move(t) {
+                    duration = Some(4);
+                }
+                let m = self.mon(t);
+                let Some(last) = m.last_move else { return HitRes::Bool(false) };
+                if m.move_slot(last).is_some_and(|s| m.moves[s].pp == 0) {
+                    return HitRes::Bool(false);
+                }
+                move_id = Some(last);
+            }
+            VolatileId::Roost => {
+                let dex = Dex::get();
+                let (flying, normal) = (dex.type_id("Flying").expect("Flying"), dex.type_id("Normal").expect("Normal"));
+                self.mon_mut(t).start_roost(flying, normal);
+            }
+            _ => {}
+        }
         self.effect_order += 1;
         let effect_order = self.effect_order;
-        self.mon_mut(t).volatiles.0.push(Volatile { id, duration: id.duration(), counter, move_id: None, effect_order });
+        self.mon_mut(t).volatiles.0.push(Volatile { id, duration, counter, move_id, effect_order });
         HitRes::Bool(true)
+    }
+
+    /// A volatile's onEnd when its duration runs out in the residual phase.
+    fn end_volatile(&mut self, t: MonRef, id: VolatileId) {
+        self.mon_mut(t).volatiles.remove(id);
+        match id {
+            VolatileId::Roost => self.mon_mut(t).end_roost(),
+            // yawn: the target falls asleep.
+            VolatileId::Yawn => {
+                self.try_set_status(t, Status::Sleep);
+            }
+            // perishsong: the count reached zero.
+            VolatileId::PerishSong => self.faint(t),
+            _ => {}
+        }
     }
 
     /// Encore's onStart: lock the target into its last move, and switch its
@@ -294,18 +346,70 @@ impl Battle {
             }
             _ => {}
         }
-        if self.mon(user).volatiles.has(VolatileId::Flinch) {
+        let v = &self.mon(user).volatiles;
+        if v.has(VolatileId::Flinch) {
+            return false;
+        }
+        // disable (priority 7)
+        if v.0.iter().any(|x| x.id == VolatileId::Disable && x.move_id == Some(move_id)) && !data.flags.has("cantusetwice") {
             return false;
         }
         // throatchop (priority 6): no sound moves.
-        if self.mon(user).volatiles.has(VolatileId::ThroatChop) && data.flags.has("sound") {
+        if v.has(VolatileId::ThroatChop) && data.flags.has("sound") {
             return false;
+        }
+        // taunt (priority 5): no status moves.
+        if v.has(VolatileId::Taunt) && data.category == crate::dex::Category::Status {
+            return false;
+        }
+        // A foe's imprison (priority 4): not the moves it knows too.
+        if data.id != "struggle" && self.imprisoned(user, move_id) {
+            return false;
+        }
+        // confusion (priority 3)
+        if let Some(c) = self.mon_mut(user).volatiles.get_mut(VolatileId::Confusion) {
+            c.counter -= 1;
+            if c.counter == 0 {
+                self.mon_mut(user).volatiles.remove(VolatileId::Confusion);
+            } else if self.chance.chance(33, 100) {
+                self.confusion_self_hit(user);
+                return false;
+            }
         }
         if self.mon(user).status == Status::Paralysis && self.chance.chance(1, 8) {
             return false;
         }
         // choicelock (priority 0)
         self.choice_lock_allows(user, move_id)
+    }
+
+    /// Whether a foe with Imprison knows this move.
+    pub(super) fn imprisoned(&self, user: MonRef, move_id: MoveId) -> bool {
+        let foe = 1 - user.side;
+        (0..ACTIVE_PER_SIDE).filter_map(|p| self.sides[foe].occupant(p)).any(|m| {
+            m.hp > 0 && !m.fainted && m.volatiles.has(VolatileId::Imprison) && m.move_slot(move_id).is_some()
+        })
+    }
+
+    /// Confusion's self-hit: getConfusionDamage (a 40 BP typeless physical
+    /// hit with its own stats), dealt as move damage (Focus Sash applies).
+    fn confusion_self_hit(&mut self, r: MonRef) {
+        let m = self.mon(r);
+        let atk = super::boosted(m.stats[1], m.boosts[0]) as u64;
+        let def = super::boosted(m.stats[2], m.boosts[1]).max(1) as u64;
+        let base = ((22 * 40 * atk) / def) / 50 + 2;
+        let base = base & 0xFFFF;
+        let roll = self.chance.random(16) as u64;
+        let damage = (base * (100 - roll) / 100).max(1) as u32;
+        if self.mon(r).hp == 0 || !self.mon(r).is_active {
+            return;
+        }
+        let d = self.on_move_damage(r, damage).max(1);
+        let dealt = self.apply_damage(r, d);
+        if dealt != 0 {
+            let m = self.mon_mut(r);
+            m.hurt_this_turn = Some(m.hp);
+        }
     }
 
     // --- Stat stages ----------------------------------------------------------
@@ -505,7 +609,7 @@ impl Battle {
                     let Some(d) = v.duration.as_mut() else { continue };
                     *d -= 1;
                     if *d == 0 {
-                        m.volatiles.remove(id);
+                        self.end_volatile(h.mon, id);
                         continue;
                     }
                     // encore's onResidual: ends once the move is out of PP.

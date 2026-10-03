@@ -707,6 +707,13 @@ impl Battle {
                 }
                 let r = self.mon_ref(side, p);
                 let locked = self.choice_locked_move(r);
+                // A foe's imprison: its moves (but Struggle) can't be chosen.
+                let imprisoned: Vec<crate::dex::MoveId> = self.sides[side].pokemon[p]
+                    .moves
+                    .iter()
+                    .map(|s| s.id)
+                    .filter(|&id| Dex::get().move_data(id).id != "struggle" && self.imprisoned(r, id))
+                    .collect();
                 let m = &mut self.sides[side].pokemon[p];
                 m.move_this_turn = None;
                 m.newly_switched = false;
@@ -729,13 +736,18 @@ impl Battle {
                     .and_then(|v| v.move_id)
                     .filter(|&e| m.move_slot(e).is_some());
                 let throat_chopped = m.volatiles.has(state::VolatileId::ThroatChop);
+                let taunted = m.volatiles.has(state::VolatileId::Taunt);
+                let disabled = m.volatiles.0.iter().find(|v| v.id == state::VolatileId::Disable).and_then(|v| v.move_id);
                 for s in m.moves.iter_mut() {
                     let data = Dex::get().move_data(s.id);
                     s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id))
                         || (matches!(data.id.as_str(), "fakeout" | "firstimpression") && acted)
                         || locked.is_some_and(|l| l != s.id)
                         || encored.is_some_and(|e| e != s.id)
-                        || (throat_chopped && data.flags.has("sound"));
+                        || (throat_chopped && data.flags.has("sound"))
+                        || (taunted && data.category == crate::dex::Category::Status)
+                        || disabled == Some(s.id)
+                        || imprisoned.contains(&s.id);
                 }
                 if !m.fainted {
                     m.active_turns += 1;

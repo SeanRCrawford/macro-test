@@ -62,22 +62,30 @@ impl Battle {
     }
 
     /// `field.setWeather` from an ability (5 turns: no rock items supported).
-    pub(super) fn set_weather(&mut self, w: Weather) -> bool {
+    pub(super) fn set_weather(&mut self, w: Weather, source: MonRef) -> bool {
         if self.field.weather == w {
             return false;
         }
+        // durationCallback: the matching rock makes it 8 turns.
+        let rock = match w {
+            Weather::Sun => "heatrock",
+            Weather::Rain => "damprock",
+            Weather::Sand => "smoothrock",
+            Weather::Snow => "icyrock",
+            Weather::None => "",
+        };
         self.field.weather = w;
-        self.field.weather_turns = 5;
+        self.field.weather_turns = if self.item_of(source) == Some(rock) { 8 } else { 5 };
         true
     }
 
-    /// `field.setTerrain` (5 turns: Terrain Extender isn't supported).
-    pub(super) fn set_terrain(&mut self, t: Terrain) -> bool {
+    /// `field.setTerrain` (8 turns with Terrain Extender).
+    pub(super) fn set_terrain(&mut self, t: Terrain, source: MonRef) -> bool {
         if self.field.terrain == t {
             return false;
         }
         self.field.terrain = t;
-        self.field.terrain_turns = 5;
+        self.field.terrain_turns = if self.item_of(source) == Some("terrainextender") { 8 } else { 5 };
         self.terrain_change();
         true
     }
@@ -97,10 +105,10 @@ impl Battle {
                 }
             }
             StartEffect::Weather(w) => {
-                self.set_weather(w);
+                self.set_weather(w, r);
             }
             StartEffect::Terrain(t) => {
-                self.set_terrain(t);
+                self.set_terrain(t, r);
             }
         }
     }

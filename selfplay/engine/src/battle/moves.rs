@@ -230,7 +230,6 @@ impl Battle {
                 reflect: self.sides[s].condition(SideCondition::Reflect) > 0,
                 light_screen: self.sides[s].condition(SideCondition::LightScreen) > 0,
                 aurora_veil: self.sides[s].condition(SideCondition::AuroraVeil) > 0,
-                ..SideState::default()
             }),
             crit,
             spread,
@@ -329,6 +328,37 @@ impl Battle {
         Ok(result)
     }
 
+    /// The protecting volatile's onTryHit: whether it blocks `data` on `t`,
+    /// with the contact punishments of Spiky Shield, King's Shield and
+    /// Baneful Bunker.
+    fn protect_blocks(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
+        let v = &self.mon(t).volatiles;
+        let kind = [VolatileId::Protect, VolatileId::SpikyShield, VolatileId::KingsShield, VolatileId::BanefulBunker]
+            .into_iter()
+            .find(|&k| v.has(k));
+        let Some(kind) = kind else { return false };
+        // checkMoveBypassesProtect (King's Shield lets status moves through).
+        if !data.flags.has("protect") || (kind == VolatileId::KingsShield && data.category == Category::Status) {
+            return false;
+        }
+        if data.flags.has("contact") {
+            match kind {
+                VolatileId::SpikyShield => {
+                    let amount = (self.mon(user).max_hp() / 8) as u32;
+                    self.effect_damage(user, amount);
+                }
+                VolatileId::KingsShield => {
+                    self.boost(user, &[(0, -1)], Some(t));
+                }
+                VolatileId::BanefulBunker => {
+                    self.try_set_status(user, Status::Poison);
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// `tryMoveHit` for moves that hit a side or the field
     /// (runMoveEffects' sideCondition / pseudoWeather, and onHitSide).
     fn try_move_hit(&mut self, user: MonRef, data: &MoveData) -> bool {
@@ -357,6 +387,28 @@ impl Battle {
                 add(self, SideCondition::WideGuard, 1);
                 self.add_volatile(user, VolatileId::Stall);
                 true
+            }
+            "raindance" => self.set_weather(crate::damage::Weather::Rain, user),
+            "sunnyday" => self.set_weather(crate::damage::Weather::Sun, user),
+            "sandstorm" => self.set_weather(crate::damage::Weather::Sand, user),
+            "snowscape" => self.set_weather(crate::damage::Weather::Snow, user),
+            "electricterrain" => self.set_terrain(crate::damage::Terrain::Electric, user),
+            "grassyterrain" => self.set_terrain(crate::damage::Terrain::Grassy, user),
+            "mistyterrain" => self.set_terrain(crate::damage::Terrain::Misty, user),
+            "psychicterrain" => self.set_terrain(crate::damage::Terrain::Psychic, user),
+            // onHitField: every active Pokemon not already counting down
+            // starts; Good as Gold's TryHit keeps it out (but counts).
+            "perishsong" => {
+                let mut result = false;
+                for r in self.all_active() {
+                    if r != user && self.ability_is(r, "goodasgold") {
+                        result = true;
+                    } else if !self.mon(r).volatiles.has(VolatileId::PerishSong) {
+                        self.add_volatile(r, VolatileId::PerishSong);
+                        result = true;
+                    }
+                }
+                result
             }
             "trickroom" => {
                 // onFieldRestart ends it; using it again succeeds either way.
@@ -416,11 +468,13 @@ impl Battle {
             if b.psychic_terrain_blocks(user, t, priority, data.target == MoveTarget::SelfTarget) {
                 HitRes::Bool(false)
             } else if data.flags.has("protect")
-                && ((b.sides[t.side].condition(SideCondition::WideGuard) > 0
-                    && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes))
-                    || b.mon(t).volatiles.has(VolatileId::Protect))
+                && b.sides[t.side].condition(SideCondition::WideGuard) > 0
+                && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes)
             {
-                // Wide Guard (priority 4) and Protect (3).
+                // Wide Guard (priority 4).
+                HitRes::NotFail
+            } else if b.protect_blocks(user, t, data) {
+                // Protect and its variants (priority 3).
                 HitRes::NotFail
             } else if data.category == Category::Status && t != user && b.ability_is(t, "goodasgold") {
                 // Good as Gold (priority 0).
@@ -468,8 +522,8 @@ impl Battle {
         }
         // onModifyMove: weather-dependent accuracy.
         match (data.id.as_str(), self.field.weather) {
-            ("thunder", crate::damage::Weather::Rain) | ("blizzard", crate::damage::Weather::Snow) => return true,
-            ("thunder", crate::damage::Weather::Sun) => acc = 50,
+            ("thunder" | "hurricane", crate::damage::Weather::Rain) | ("blizzard", crate::damage::Weather::Snow) => return true,
+            ("thunder" | "hurricane", crate::damage::Weather::Sun) => acc = 50,
             _ => {}
         }
         let always = (data.id == "toxic" && self.mon(user).has_type(Dex::get().type_id("Poison").expect("Poison")))
@@ -567,6 +621,12 @@ impl Battle {
             if let Some(t) = targets[0] {
                 match mv.data.id.as_str() {
                     "helpinghand" if !self.mon(t).newly_switched && !self.will_move(t) => {
+                        return Ok((vec![HitRes::Bool(false)], targets));
+                    }
+                    "yawn" if self.mon(t).status != Status::None || !self.run_status_immunity(t, "slp") => {
+                        return Ok((vec![HitRes::Bool(false)], targets));
+                    }
+                    "disable" if self.mon(t).last_move.is_none_or(|m| Dex::get().move_data(m).id == "struggle") => {
                         return Ok((vec![HitRes::Bool(false)], targets));
                     }
                     "psychicfangs" | "brickbreak" => {

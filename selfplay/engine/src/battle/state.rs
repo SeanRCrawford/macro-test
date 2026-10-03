@@ -41,6 +41,19 @@ pub enum VolatileId {
     Unburden,
     /// Glaive Rush: hit for sure and for double damage until it moves again.
     GlaiveRush,
+    /// `counter` is the turns of confusion left.
+    Confusion,
+    Yawn,
+    Taunt,
+    /// Disables `move_id`.
+    Disable,
+    /// Flying type lost for the turn.
+    Roost,
+    SpikyShield,
+    KingsShield,
+    BanefulBunker,
+    PerishSong,
+    Imprison,
 }
 
 impl VolatileId {
@@ -57,6 +70,16 @@ impl VolatileId {
             "throatchop" => VolatileId::ThroatChop,
             "unburden" => VolatileId::Unburden,
             "glaiverush" => VolatileId::GlaiveRush,
+            "confusion" => VolatileId::Confusion,
+            "yawn" => VolatileId::Yawn,
+            "taunt" => VolatileId::Taunt,
+            "disable" => VolatileId::Disable,
+            "roost" => VolatileId::Roost,
+            "spikyshield" => VolatileId::SpikyShield,
+            "kingsshield" => VolatileId::KingsShield,
+            "banefulbunker" => VolatileId::BanefulBunker,
+            "perishsong" => VolatileId::PerishSong,
+            "imprison" => VolatileId::Imprison,
             _ => return None,
         })
     }
@@ -74,6 +97,16 @@ impl VolatileId {
             VolatileId::ThroatChop => "throatchop",
             VolatileId::Unburden => "unburden",
             VolatileId::GlaiveRush => "glaiverush",
+            VolatileId::Confusion => "confusion",
+            VolatileId::Yawn => "yawn",
+            VolatileId::Taunt => "taunt",
+            VolatileId::Disable => "disable",
+            VolatileId::Roost => "roost",
+            VolatileId::SpikyShield => "spikyshield",
+            VolatileId::KingsShield => "kingsshield",
+            VolatileId::BanefulBunker => "banefulbunker",
+            VolatileId::PerishSong => "perishsong",
+            VolatileId::Imprison => "imprison",
         }
     }
 
@@ -83,6 +116,11 @@ impl VolatileId {
         match self {
             VolatileId::Encore => Some(16),
             VolatileId::ThroatChop => Some(22),
+            VolatileId::Taunt => Some(15),
+            VolatileId::Disable => Some(17),
+            VolatileId::Yawn => Some(23),
+            VolatileId::PerishSong => Some(24),
+            VolatileId::Roost => Some(25),
             _ => None,
         }
     }
@@ -94,7 +132,16 @@ impl VolatileId {
             }
             VolatileId::Stall | VolatileId::ThroatChop => Some(2),
             VolatileId::Encore => Some(3),
-            VolatileId::ChoiceLock | VolatileId::Unburden | VolatileId::GlaiveRush => None,
+            VolatileId::ChoiceLock
+            | VolatileId::Unburden
+            | VolatileId::GlaiveRush
+            | VolatileId::Confusion
+            | VolatileId::Imprison => None,
+            VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
+            VolatileId::Yawn => Some(2),
+            VolatileId::Taunt => Some(3),
+            VolatileId::PerishSong => Some(4),
+            VolatileId::Disable => Some(5),
         }
     }
 }
@@ -161,6 +208,8 @@ pub struct Mon {
     pub hp: u16,
     pub status: Status,
     pub status_state: StatusState,
+    /// The types to restore when Roost ends.
+    pub roost_types: Option<[TypeId; 2]>,
     /// atk, def, spa, spd, spe, accuracy, evasion.
     pub boosts: [i8; 7],
     pub ability: AbilityId,
@@ -218,6 +267,7 @@ impl Mon {
             hp: stats[0],
             status: Status::None,
             status_state: StatusState::default(),
+            roost_types: None,
             boosts: [0; 7],
             ability: set.ability,
             item: set.item,
@@ -246,6 +296,25 @@ impl Mon {
         }
     }
 
+    /// Roost's onType: the Flying type is gone while it lasts (a pure
+    /// Flying type becomes Normal).
+    pub fn start_roost(&mut self, flying: TypeId, normal: TypeId) {
+        let t = self.types;
+        self.roost_types = Some(t);
+        self.types = match (t[0] == flying, t[1] == flying) {
+            (true, true) => [normal, normal],
+            (true, false) => [t[1], t[1]],
+            (false, true) => [t[0], t[0]],
+            (false, false) => t,
+        };
+    }
+
+    pub fn end_roost(&mut self) {
+        if let Some(t) = self.roost_types.take() {
+            self.types = t;
+        }
+    }
+
     pub fn max_hp(&self) -> u16 {
         self.stats[0]
     }
@@ -256,6 +325,7 @@ impl Mon {
 
     /// `clearVolatile`: what leaving the field (or fainting) resets.
     pub fn clear_volatile(&mut self) {
+        self.end_roost();
         self.boosts = [0; 7];
         self.volatiles = Volatiles::default();
         self.last_move = None;

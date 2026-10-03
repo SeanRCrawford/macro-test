@@ -23,6 +23,7 @@ const ABILITIES: &[&str] = &[
 /// the items in `items`.
 const ITEMS: &[&str] = &[
     "blackbelt", "blackglasses", "charcoal", "choicescarf", "focussash", "leftovers", "lifeorb", "lightclay", "sitrusberry",
+    "damprock", "heatrock", "icyrock", "smoothrock", "terrainextender",
     "electricseed", "grassyseed", "mistyseed", "psychicseed", "rockyhelmet", "whiteherb",
     "babiriberry", "chartiberry", "chopleberry", "cobaberry", "colburberry", "habanberry", "kasibberry", "kebiaberry",
     "occaberry", "passhoberry", "payapaberry", "rindoberry", "roseliberry", "shucaberry", "tangaberry", "wacanberry",
@@ -71,16 +72,29 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("finalgambit", &["damageCallback"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
+    ("hurricane", &["onModifyMove"]),
+    ("perishsong", &["onHitField"]),
+    ("spikyshield", &["onPrepareHit", "onHit"]),
+    ("kingsshield", &["onPrepareHit", "onHit"]),
+    ("banefulbunker", &["onPrepareHit", "onHit"]),
+    ("yawn", &["onTryHit"]),
+    ("disable", &["onTryHit"]),
 ];
 
 /// Status moves that set a side or field condition, which `moves` implements.
-const FIELD_MOVES: &[&str] = &["tailwind", "trickroom", "reflect", "lightscreen", "wideguard", "auroraveil"];
+const FIELD_MOVES: &[&str] = &[
+    "tailwind", "trickroom", "reflect", "lightscreen", "wideguard", "auroraveil", "raindance", "sunnyday", "sandstorm",
+    "snowscape", "electricterrain", "grassyterrain", "mistyterrain", "psychicterrain", "perishsong",
+];
 
 /// Moves whose secondary has an onHit that `moves` implements.
 const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop"];
 
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
-const VOLATILES: &[&str] = &["flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush"];
+const VOLATILES: &[&str] = &[
+    "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison",
+];
 
 pub fn ability_supported(id: &str) -> bool {
     ABILITIES.contains(&id)
@@ -112,6 +126,7 @@ pub fn move_supported(m: &MoveData) -> bool {
     // A move's `condition` is the volatile it adds (protect, followme...).
     let condition_ok = !m.has_key("condition")
         || m.primary.volatile_status.as_deref().is_some_and(|v| VOLATILES.contains(&v))
+        || m.primary.self_effect.as_ref().and_then(|e| e.volatile_status.as_deref()).is_some_and(|v| VOLATILES.contains(&v))
         || field_move
         || matches!(m.id.as_str(), "throatchop" | "glaiverush");
     // Final Gambit is the only selfdestruct move supported.
@@ -133,14 +148,14 @@ pub fn move_supported(m: &MoveData) -> bool {
         ),
     };
     let target_ok = target_ok || (field_move && matches!(m.target, MoveTarget::All | MoveTarget::AllySide));
-    let field_key = |k: &str| field_move && matches!(k, "sideCondition" | "pseudoWeather");
+    let field_key = |k: &str| field_move && matches!(k, "sideCondition" | "pseudoWeather" | "weather" | "terrain");
     let switch_ok = !m.has_key("selfSwitch") || m.self_switch;
     switch_ok
         && selfdestruct_ok
         && m.keys.iter().all(|k| {
             PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok) || field_key(k) || (k == "selfdestruct" && selfdestruct_ok)
         })
-        && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather", "selfdestruct"]].concat())
+        && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather", "selfdestruct", "weather", "terrain"]].concat())
         && m.self_boost.as_ref().is_none_or(|e| effect_supported(e, &[]))
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
         && (m.nested_handlers.is_empty() || (SECONDARY_ON_HIT.contains(&m.id.as_str()) && m.nested_handlers == ["secondary.onHit"]))
