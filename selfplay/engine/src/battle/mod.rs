@@ -88,6 +88,8 @@ pub struct Battle {
     faint_queue: Vec<(MonRef, Option<MonRef>)>,
     /// Set while move damage is dealt: the move's user, for the faint queue.
     move_damage_by: Option<MonRef>,
+    /// A self-destructing move's user, at 0 HP but still attacking.
+    selfdestruct_user: Option<MonRef>,
     mega_used: [bool; 2],
     /// The six as brought, while team-preview actions pick the four.
     benched: [Vec<Mon>; 2],
@@ -127,6 +129,7 @@ impl Battle {
             mid_turn: true,
             faint_queue: Vec::new(),
             move_damage_by: None,
+            selfdestruct_user: None,
             mega_used: [false; 2],
             effect_order: 0,
             benched: [Vec::new(), Vec::new()],

@@ -65,6 +65,8 @@ pub enum VolatileId {
     MustRecharge,
     /// Flash Fire's boost to Fire moves.
     FlashFire,
+    /// Focus Energy: +2 crit ratio.
+    FocusEnergy,
     /// A Gem's boost to this move.
     Gem,
 }
@@ -95,6 +97,7 @@ impl VolatileId {
             "perishsong" => VolatileId::PerishSong,
             "imprison" => VolatileId::Imprison,
             "gem" => VolatileId::Gem,
+            "focusenergy" => VolatileId::FocusEnergy,
             _ => return None,
         })
     }
@@ -127,6 +130,7 @@ impl VolatileId {
             VolatileId::MustRecharge => "mustrecharge",
             VolatileId::FlashFire => "flashfire",
             VolatileId::Gem => "gem",
+            VolatileId::FocusEnergy => "focusenergy",
         }
     }
 
@@ -163,7 +167,8 @@ impl VolatileId {
             | VolatileId::Confusion
             | VolatileId::Imprison
             | VolatileId::Charging(_)
-            | VolatileId::FlashFire => None,
+            | VolatileId::FlashFire
+            | VolatileId::FocusEnergy => None,
             VolatileId::TwoTurnMove | VolatileId::MustRecharge => Some(2),
             VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
             VolatileId::Yawn => Some(2),
@@ -391,7 +396,11 @@ impl Mon {
         self.ability = self.base_ability;
         self.switch_flag = None;
         self.force_switch_flag = false;
-        // Champions: a Mega stays Mega after fainting or switching.
+        // Champions: a Mega stays Mega after fainting or switching, and
+        // setSpecies restores its types and stats (Soak, Speed Swap).
+        self.types = Dex::get().species(self.species).types;
+        let stats = crate::stats::compute_stats(self.species, self.set.nature, self.set.points);
+        self.stats = [self.stats[0], stats[1], stats[2], stats[3], stats[4], stats[5]];
     }
 
     /// `getLockedMove`: a charged move to finish, or a turn to recharge.

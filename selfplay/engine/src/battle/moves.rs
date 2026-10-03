@@ -133,10 +133,17 @@ impl Battle {
     }
 
     /// `getTarget`.
+    /// `move.tracksTarget` (Snipe Shot), or set by Stalwart / Propeller Tail.
+    fn tracks_target(&self, user: MonRef, _target_type: MoveTarget) -> bool {
+        self.ability_is(user, "stalwart")
+            || self.ability_is(user, "propellertail")
+            || self.mon(user).move_this_turn.is_some_and(|m| Dex::get().move_data(m).has_key("tracksTarget"))
+    }
+
     fn get_target(&mut self, user: MonRef, target_type: MoveTarget, loc: i8) -> Option<MonRef> {
         // Stalwart and Propeller Tail follow the original target while it
         // is on the field.
-        if self.ability_is(user, "stalwart") || self.ability_is(user, "propellertail") {
+        if self.tracks_target(user, target_type) {
             if let Some((side, uid)) = self.mon(user).original_target {
                 if let Some(t) = self.all_active().into_iter().find(|&t| t.side == side && self.mon(t).uid == uid && self.mon(t).is_active) {
                     return Some(t);
@@ -189,7 +196,9 @@ impl Battle {
                     target = self.random_target(user, am.target);
                 }
                 // Stalwart and Propeller Tail keep their target.
-                let tracks = self.ability_is(user, "stalwart") || self.ability_is(user, "propellertail");
+                let tracks = self.ability_is(user, "stalwart")
+                    || self.ability_is(user, "propellertail")
+                    || Dex::get().move_data(am.id).has_key("tracksTarget");
                 if let (Some(t), false) = (target, tracks) {
                     target = Some(self.redirect_target(user, am, t));
                 }
@@ -294,7 +303,7 @@ impl Battle {
         for side in 0..2 {
             for pos in 0..ACTIVE_PER_SIDE {
                 let Some(m) = self.sides[side].occupant(pos) else { continue };
-                if m.hp == 0 {
+                if m.hp == 0 && self.selfdestruct_user != Some(self.mon_ref(side, pos)) {
                     continue;
                 }
                 let mut c = Combatant::new(m.species, m.stats, m.ability, m.item);
@@ -477,7 +486,13 @@ impl Battle {
         if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.blocks_priority(f)) {
             return Ok(false);
         }
+        // Explosion: the user faints before the hit (but still attacks).
+        if matches!(data.id.as_str(), "explosion" | "selfdestruct" | "mistyexplosion") {
+            self.faint(user);
+            self.selfdestruct_user = Some(user);
+        }
         if targets.is_empty() {
+            self.selfdestruct_user = None;
             return Ok(false);
         }
         let kings_rock = self.item_of(user) == Some("kingsrock")
@@ -495,7 +510,19 @@ impl Battle {
             kings_rock,
             total_damage: 0,
         };
-        let result = self.try_spread_move_hit(user, &mut mv, targets)?;
+        let result = self.try_spread_move_hit(user, &mut mv, targets);
+        self.selfdestruct_user = None;
+        let result = result?;
+        // MoveFail: High Jump Kick's crash, Steel Beam's recoil.
+        if !result {
+            if data.has_key("hasCrashDamage") {
+                let amount = (self.mon(user).max_hp() / 2) as u32;
+                self.effect_damage(user, amount);
+            } else if data.has_key("mindBlownRecoil") && data.multihit.is_none() {
+                let amount = (self.mon(user).max_hp() as u32).div_ceil(2);
+                self.effect_damage(user, amount);
+            }
+        }
         // selfBoost (Clanging Scales), once the move worked.
         if let (true, Some(sb)) = (result, data.self_boost.as_ref()) {
             self.spread_move_hit(vec![Some(user)], user, &mut mv, sb, false, false, true)?;
@@ -670,6 +697,9 @@ impl Battle {
                 return Ok(false);
             }
         }
+        if data.id == "poltergeist" && self.mon(targets[0]).item.is_none() {
+            return Ok(false);
+        }
         if data.has_key("stallingMove") && !(self.will_act() && self.stall_move(user)) {
             return Ok(false);
         }
@@ -747,6 +777,23 @@ impl Battle {
         });
         // hitStepAccuracy
         step(self, &mut targets, &mut |b, t| HitRes::Bool(sure_hit || b.accuracy_check(user, t, data)));
+        // hitStepBreakProtect: Feint lifts protections.
+        if data.has_key("breaksProtect") {
+            for &t in &targets {
+                let m = self.mon_mut(t);
+                let mut broke = false;
+                for v in [VolatileId::Protect, VolatileId::SpikyShield, VolatileId::KingsShield, VolatileId::BanefulBunker] {
+                    broke |= m.volatiles.remove(v);
+                }
+                // Quick Guard, Crafty Shield and Mat Block aren't in yet.
+                let wide_guard = &mut self.sides[t.side].conditions[SideCondition::WideGuard as usize];
+                broke |= *wide_guard > 0;
+                *wide_guard = 0;
+                if broke {
+                    self.mon_mut(t).volatiles.remove(VolatileId::Stall);
+                }
+            }
+        }
 
         if targets.is_empty() {
             if !failed {
@@ -784,6 +831,47 @@ impl Battle {
         // ModifyAccuracy: Compound Eyes (priority -1), then Wide Lens, Zoom
         // Lens and the target's Bright Powder (-2) by holder Speed, chained.
         let mut accuracy = acc as u32;
+        if let Some(modifier) = self.accuracy_modifier(user, t) {
+            accuracy = crate::fixed::modify(accuracy as u64, modifier) as u32;
+        }
+        if boost > 0 {
+            accuracy = accuracy * (3 + boost as u32) / 3;
+        } else if boost < 0 {
+            accuracy = accuracy * 3 / (3 + (-boost) as u32);
+        }
+        self.chance.chance(accuracy, 100)
+    }
+
+    /// Triple Axel's later hits: boosts on a fractional accuracy, then
+    /// ModifyAccuracy, then the Accuracy event.
+    fn multi_accuracy(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
+        let Some(acc) = data.accuracy else { return true };
+        const TABLE: [f64; 7] = [1.0, 4.0 / 3.0, 5.0 / 3.0, 2.0, 7.0 / 3.0, 8.0 / 3.0, 3.0];
+        let unaware = |b: &Battle, r: MonRef| Dex::get().ability(b.mon(r).ability).id == "unaware";
+        let mut a = acc as f64;
+        let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5].clamp(-6, 6) };
+        a = if acc_boost > 0 { a * TABLE[acc_boost as usize] } else { a / TABLE[(-acc_boost) as usize] };
+        if !data.has_key("ignoreEvasion") && !unaware(self, user) {
+            let eva = self.mon(t).boosts[6].clamp(-6, 6);
+            if eva > 0 {
+                a /= TABLE[eva as usize];
+            } else if eva < 0 {
+                a *= TABLE[(-eva) as usize];
+            }
+        }
+        if let Some(modifier) = self.accuracy_modifier(user, t) {
+            a = (((a * modifier as f64).trunc() + 2047.0) / 4096.0).trunc();
+        }
+        if self.mon(t).volatiles.has(VolatileId::GlaiveRush) || self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
+            return true;
+        }
+        self.chance.chance(a.ceil() as u32, 100)
+    }
+
+    /// The ModifyAccuracy chain, if any handler applies: Compound Eyes and
+    /// Sand Veil (priority -1), then Wide Lens, Zoom Lens and the target's
+    /// Bright Powder (-2), by holder Speed.
+    fn accuracy_modifier(&mut self, user: MonRef, t: MonRef) -> Option<u32> {
         let mut mods: Vec<(i8, i32, u8, u32)> = Vec::new();
         let (us, ts) = (self.mon(user).speed, self.mon(t).speed);
         if self.ability_is(user, "compoundeyes") {
@@ -800,17 +888,11 @@ impl Battle {
         if self.item_of(t) == Some("brightpowder") {
             mods.push((-2, ts, 8, 3686));
         }
-        if !mods.is_empty() {
-            self.speed_sort(&mut mods, |a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-            let modifier = mods.iter().fold(crate::fixed::ONE, |m, x| crate::fixed::chain(m, x.3));
-            accuracy = crate::fixed::modify(accuracy as u64, modifier) as u32;
+        if mods.is_empty() {
+            return None;
         }
-        if boost > 0 {
-            accuracy = accuracy * (3 + boost as u32) / 3;
-        } else if boost < 0 {
-            accuracy = accuracy * 3 / (3 + (-boost) as u32);
-        }
-        self.chance.chance(accuracy, 100)
+        self.speed_sort(&mut mods, |a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+        Some(mods.iter().fold(crate::fixed::ONE, |m, x| crate::fixed::chain(m, x.3)))
     }
 
     /// hitStepMoveHitLoop, for a single hit (multi-hit moves aren't supported).
@@ -837,6 +919,9 @@ impl Battle {
                 break;
             }
             if targets.iter().all(|&t| self.mon(t).hp == 0) {
+                break;
+            }
+            if hit > 1 && mv.data.has_key("multiaccuracy") && !self.multi_accuracy(user, targets[0], mv.data) {
                 break;
             }
             mv.hit = hit;
@@ -890,6 +975,11 @@ impl Battle {
             if self.mon(user).hp > 0 {
                 self.apply_damage(user, recoil);
             }
+        } else if data.has_key("mindBlownRecoil") {
+            // Steel Beam: half max HP (rounded), not 'recoil', so Rock Head
+            // doesn't stop it.
+            let amount = (self.mon(user).max_hp() as u32).div_ceil(2);
+            self.effect_damage(user, amount);
         } else if let Some((n, d)) = data.recoil {
             let recoil = ((total as f64 * n as f64 / d as f64).round() as u32).max(1);
             // Rock Head's onDamage stops recoil.
@@ -978,6 +1068,9 @@ impl Battle {
                 }
                 // ModifyCritRatio: Scope Lens, and Leek for Farfetch'd/Sirfetch'd.
                 let mut ratio = mv.data.crit_ratio as i32;
+                if self.mon(user).volatiles.has(VolatileId::FocusEnergy) {
+                    ratio += 2;
+                }
                 match self.item_of(user) {
                     Some("scopelens") => ratio += 1,
                     Some("leek") => {
@@ -1081,6 +1174,14 @@ impl Battle {
         if primary {
             self.secondaries(&targets, user, mv)?;
         }
+        // forceSwitch: Roar, Whirlwind, Dragon Tail, Circle Throw.
+        if primary && mv.data.has_key("forceSwitch") {
+            for t in targets.iter().flatten() {
+                if self.mon(*t).hp > 0 && self.mon(user).hp > 0 && !self.switchable(t.side).is_empty() {
+                    self.mon_mut(*t).force_switch_flag = true;
+                }
+            }
+        }
 
         // DamagingHit for the targets that took damage.
         if !is_secondary && !is_self {
@@ -1094,6 +1195,10 @@ impl Battle {
                     for &t in &damaged {
                         self.take_item(t, t);
                     }
+                }
+                // Ice Spinner ends the terrain.
+                if mv.data.id == "icespinner" {
+                    self.clear_terrain();
                 }
             }
         }
@@ -1179,6 +1284,9 @@ impl Battle {
                 self.clear_terrain();
                 did_something = did_something.combine(HitRes::Bool(true));
             }
+            if primary {
+                did_something = did_something.combine(self.misc_on_hit(user, t, mv.data.id.as_str()));
+            }
             // onHit: Trick swaps items.
             if primary && mv.data.id == "trick" {
                 let r = self.trick(user, t);
@@ -1210,6 +1318,56 @@ impl Battle {
             self.mon_mut(user).switch_flag = Some(SwitchFlag::Move(mv.data_id()));
         }
         Ok(())
+    }
+
+    /// onHit for Heal Pulse, Psych Up, Speed Swap, Pain Split and Soak.
+    fn misc_on_hit(&mut self, user: MonRef, t: MonRef, id: &str) -> HitRes {
+        match id {
+            "healpulse" => {
+                let max = self.mon(t).max_hp() as u64;
+                let amount = if self.ability_is(user, "megalauncher") { crate::fixed::modify(max, 3072) } else { max.div_ceil(2) };
+                if self.heal(t, amount as u32).truthy() { HitRes::Bool(true) } else { HitRes::NotFail }
+            }
+            "psychup" => {
+                let boosts = self.mon(t).boosts;
+                let focus = self.mon(t).volatiles.has(VolatileId::FocusEnergy);
+                let m = self.mon_mut(user);
+                m.boosts = boosts;
+                m.volatiles.remove(VolatileId::FocusEnergy);
+                if focus {
+                    self.add_volatile(user, VolatileId::FocusEnergy);
+                }
+                HitRes::Undefined
+            }
+            "speedswap" => {
+                let (a, b) = (self.mon(user).stats[5], self.mon(t).stats[5]);
+                self.mon_mut(user).stats[5] = b;
+                self.mon_mut(t).stats[5] = a;
+                HitRes::Undefined
+            }
+            "painsplit" => {
+                let (th, uh) = (self.mon(t).hp as u32, self.mon(user).hp as u32);
+                let average = ((th + uh) / 2).max(1);
+                // sethp: target.hp - (targetHP - average), then the user.
+                for r in [t, user] {
+                    let m = self.mon_mut(r);
+                    if m.hp > 0 {
+                        m.hp = average.clamp(1, m.max_hp() as u32) as u16;
+                    }
+                }
+                HitRes::Undefined
+            }
+            "soak" => {
+                let water = Dex::get().type_id("Water").expect("Water");
+                let m = self.mon_mut(t);
+                if m.types == [water, water] {
+                    return HitRes::Null;
+                }
+                m.types = [water, water];
+                HitRes::Undefined
+            }
+            _ => HitRes::Undefined,
+        }
     }
 
     /// `selfDrops`.

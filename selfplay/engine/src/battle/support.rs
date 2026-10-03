@@ -48,6 +48,7 @@ const PLAIN_KEYS: &[&str] = &[
     "ignoreDefensive", "ignoreEvasion", "ignoreImmunity", "multihit", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
     "overrideOffensivePokemon", "overrideOffensiveStat", "pp", "priority", "recoil", "secondary", "secondaries",
     "self", "selfBoost", "selfSwitch", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
+    "breaksProtect", "tracksTarget", "multiaccuracy", "forceSwitch", "hasCrashDamage", "mindBlownRecoil",
 ];
 
 /// Move handlers the damage module covers (it reports any specific move it
@@ -80,6 +81,21 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("steelroller", &["onTry", "onHit", "onAfterSubDamage"]),
     ("trick", &["onTryImmunity", "onHit"]),
     ("finalgambit", &["damageCallback"]),
+    ("superfang", &["damageCallback"]),
+    ("heavyslam", &["basePowerCallback", "onTryHit"]),
+    ("heatcrash", &["basePowerCallback", "onTryHit"]),
+    ("icespinner", &["onAfterHit", "onAfterSubDamage"]),
+    ("healpulse", &["onHit"]),
+    ("psychup", &["onHit"]),
+    ("speedswap", &["onHit"]),
+    ("painsplit", &["onHit"]),
+    ("soak", &["onHit"]),
+    ("highjumpkick", &["onMoveFail"]),
+    ("supercellslam", &["onMoveFail"]),
+    ("axekick", &["onMoveFail"]),
+    ("steelbeam", &["onMoveFail"]),
+    ("poltergeist", &["onTry", "onTryHit"]),
+    ("focusenergy", &["condition.onModifyCritRatio", "condition.onStart"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
     ("hurricane", &["onModifyMove"]),
@@ -107,7 +123,7 @@ const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop"];
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &[
     "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
-    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy",
 ];
 
 pub fn ability_supported(id: &str) -> bool {
@@ -143,8 +159,8 @@ pub fn move_supported(m: &MoveData) -> bool {
         || m.primary.self_effect.as_ref().and_then(|e| e.volatile_status.as_deref()).is_some_and(|v| VOLATILES.contains(&v))
         || field_move
         || matches!(m.id.as_str(), "throatchop" | "glaiverush");
-    // Final Gambit is the only selfdestruct move supported.
-    let selfdestruct_ok = !m.has_key("selfdestruct") || m.id == "finalgambit";
+    // selfdestruct moves: Final Gambit (ifHit), Explosion and Self-Destruct (always).
+    let selfdestruct_ok = !m.has_key("selfdestruct") || matches!(m.id.as_str(), "finalgambit" | "explosion" | "selfdestruct");
     let target_ok = match m.category {
         Category::Status => matches!(
             m.target,
