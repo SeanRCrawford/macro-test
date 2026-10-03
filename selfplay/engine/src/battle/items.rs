@@ -6,7 +6,7 @@ use super::conditions::HitRes;
 use super::state::{Volatile, VolatileId, ACTIVE_PER_SIDE};
 use crate::damage::Terrain;
 use super::{Battle, MonRef};
-use crate::dex::{Dex, MoveId};
+use crate::dex::{Dex, ItemId, MoveId};
 
 impl Battle {
     /// The held item's id, if any.
@@ -230,5 +230,78 @@ impl Battle {
         if self.consume_item(t) {
             self.after_use_item(t);
         }
+    }
+
+    /// `takeItem`: the TakeItem event lets Mega Stones stay with a Pokemon that
+    /// can use them (`checker` is whose species counts) and Unburden notice.
+    pub(super) fn take_item(&mut self, holder: MonRef, checker: MonRef) -> Option<ItemId> {
+        let m = self.mon(holder);
+        if !m.is_active {
+            return None;
+        }
+        let item = m.item?;
+        if !self.can_take(item, checker) {
+            return None;
+        }
+        if self.ability_is(holder, "unburden") {
+            self.add_volatile(holder, VolatileId::Unburden);
+        }
+        self.mon_mut(holder).item = None;
+        Some(item)
+    }
+
+    /// An item's onTakeItem: some can't be removed, and a Mega Stone stays
+    /// with a Pokemon of the species it evolves.
+    fn can_take(&self, item: ItemId, checker: MonRef) -> bool {
+        let dex = Dex::get();
+        let data = dex.item(item);
+        let base = &dex.species(self.mon(checker).species).base_species;
+        !data.take_forbidden && !data.mega_stone.contains_key(base)
+    }
+
+    /// Trick's onHit: swap items. False when it fails.
+    pub(super) fn trick(&mut self, user: MonRef, target: MonRef) -> bool {
+        // takeItem on each: None = no item, Some(None) = blocked (false).
+        let take = |b: &mut Battle, r: MonRef| -> Option<Option<ItemId>> {
+            let item = b.mon(r).item?;
+            if !b.can_take(item, r) {
+                return Some(None);
+            }
+            if b.ability_is(r, "unburden") {
+                b.add_volatile(r, VolatileId::Unburden);
+            }
+            b.mon_mut(r).item = None;
+            Some(Some(item))
+        };
+        let yours = take(self, target);
+        let mine = take(self, user);
+        let restore = |b: &mut Battle| {
+            if let Some(Some(i)) = yours {
+                b.mon_mut(target).item = Some(i);
+            }
+            if let Some(Some(i)) = mine {
+                b.mon_mut(user).item = Some(i);
+            }
+        };
+        let blocked = yours == Some(None) || mine == Some(None);
+        let (yours, mine) = (yours.flatten(), mine.flatten());
+        if blocked || (yours.is_none() && mine.is_none()) {
+            restore(self);
+            return false;
+        }
+        // The second TakeItem: can the receiver hold it?
+        if mine.is_some_and(|i| !self.can_take(i, target)) || yours.is_some_and(|i| !self.can_take(i, user)) {
+            self.mon_mut(target).item = yours;
+            self.mon_mut(user).item = mine;
+            return false;
+        }
+        // setItem (needs HP and to be active).
+        for (r, item) in [(target, mine), (user, yours)] {
+            let m = self.mon_mut(r);
+            if item.is_some() && m.hp > 0 && m.is_active {
+                m.item = item;
+            }
+        }
+        true
     }
 }

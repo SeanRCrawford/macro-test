@@ -288,6 +288,8 @@ pub struct MoveData {
     /// `selfSwitch: true` (U-turn); Baton Pass's "copyvolatile" and the like
     /// leave it false.
     pub self_switch: bool,
+    /// `selfBoost` (Clanging Scales): applied to the user after the move.
+    pub self_boost: Option<HitEffect>,
 }
 
 impl MoveData {
@@ -678,6 +680,10 @@ impl Dex {
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
                 self_switch: r.get("selfSwitch") == Some(&Value::Bool(true)),
+                self_boost: match r.get("selfBoost").and_then(Value::as_object) {
+                    Some(o) => Some(HitEffect::parse(o).map_err(ctx)?),
+                    None => None,
+                },
                 nested_handlers: r
                     .get("handlers")
                     .and_then(Value::as_array)

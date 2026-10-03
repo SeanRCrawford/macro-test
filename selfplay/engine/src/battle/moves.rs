@@ -70,7 +70,12 @@ impl Battle {
     /// `getRandomTarget`.
     fn random_target(&mut self, user: MonRef, target: MoveTarget) -> Option<MonRef> {
         match target {
-            MoveTarget::SelfTarget | MoveTarget::All | MoveTarget::AllySide | MoveTarget::AllyTeam | MoveTarget::AdjacentAllyOrSelf => Some(user),
+            MoveTarget::SelfTarget
+            | MoveTarget::All
+            | MoveTarget::AllySide
+            | MoveTarget::AllyTeam
+            | MoveTarget::AdjacentAllyOrSelf
+            | MoveTarget::Allies => Some(user),
             MoveTarget::AdjacentAlly => {
                 let allies = self.adjacent_allies(user);
                 if allies.is_empty() {
@@ -130,6 +135,14 @@ impl Battle {
                 t
             }
             MoveTarget::AllAdjacentFoes => self.foes(user),
+            // alliesAndSelf()
+            MoveTarget::Allies => {
+                let side = user.side;
+                (0..ACTIVE_PER_SIDE)
+                    .filter(|&p| self.sides[side].occupant(p).is_some_and(|m| m.hp > 0 && !m.fainted))
+                    .map(|p| self.mon_ref(side, p))
+                    .collect()
+            }
             _ => {
                 let mut target = target;
                 let needs_retarget = match target {
@@ -195,6 +208,8 @@ impl Battle {
                 c.speed = m.speed;
                 c.active_turns = m.active_turns;
                 c.times_attacked = m.times_attacked;
+                c.move_last_turn_failed = m.move_last_turn_result == Some(Some(false));
+                c.volatiles.glaive_rush = m.volatiles.has(VolatileId::GlaiveRush);
                 c.volatiles.helping_hand =
                     m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
                 out[side * 2 + pos] = Some(c);
@@ -214,6 +229,7 @@ impl Battle {
                 fainted: self.sides[s].total_fainted,
                 reflect: self.sides[s].condition(SideCondition::Reflect) > 0,
                 light_screen: self.sides[s].condition(SideCondition::LightScreen) > 0,
+                aurora_veil: self.sides[s].condition(SideCondition::AuroraVeil) > 0,
                 ..SideState::default()
             }),
             crit,
@@ -229,7 +245,7 @@ impl Battle {
         let data = Dex::get().move_data(move_id);
         let target = self.get_target(user, data.target, target_loc);
         if !self.before_move(user, move_id, data) {
-            self.mon_mut(user).move_this_turn_result = Some(false);
+            self.mon_mut(user).move_this_turn_result = Some(Some(false));
             return Ok(());
         }
         let is_struggle = data.id == "struggle";
@@ -238,7 +254,7 @@ impl Battle {
             let s = &mut m.moves[slot];
             s.used = true;
             if s.pp == 0 {
-                m.move_this_turn_result = Some(false);
+                m.move_this_turn_result = Some(Some(false));
                 return Ok(());
             }
             s.pp -= 1;
@@ -252,7 +268,7 @@ impl Battle {
         let result = self.use_move(user, move_id, target, priority)?;
         let m = self.mon_mut(user);
         if m.move_this_turn_result.is_none() {
-            m.move_this_turn_result = Some(result);
+            m.move_this_turn_result = Some(Some(result));
         }
         // AfterMove: White Herb's onAnyAfterMove.
         if self.mon(user).is_active || target.is_some_and(|t| self.mon(t).is_active) {
@@ -303,6 +319,10 @@ impl Battle {
         }
         let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority };
         let result = self.try_spread_move_hit(user, &mut mv, targets)?;
+        // selfBoost (Clanging Scales), once the move worked.
+        if let (true, Some(sb)) = (result, data.self_boost.as_ref()) {
+            self.spread_move_hit(vec![Some(user)], user, &mut mv, sb, false, false, true)?;
+        }
         if result {
             self.after_move_secondary_self(user, last_target, data.category == Category::Status);
         }
@@ -326,6 +346,8 @@ impl Battle {
             "tailwind" => add(self, SideCondition::Tailwind, 4),
             "reflect" => add(self, SideCondition::Reflect, screen_turns),
             "lightscreen" => add(self, SideCondition::LightScreen, screen_turns),
+            // onTry: only in snow.
+            "auroraveil" => self.field.weather == crate::damage::Weather::Snow && add(self, SideCondition::AuroraVeil, screen_turns),
             "wideguard" => {
                 // onTry: fails as the last to act; onHitSide adds stall even
                 // if Wide Guard was already up.
@@ -354,7 +376,16 @@ impl Battle {
         mv.spread = targets.len() > 1;
 
         // Try and PrepareHit
-        if data.id == "fakeout" && self.mon(user).active_move_actions > 1 {
+        if matches!(data.id.as_str(), "fakeout" | "firstimpression") && self.mon(user).active_move_actions > 1 {
+            return Ok(false);
+        }
+        if data.id == "clangoroussoul" {
+            let m = self.mon(user);
+            if m.hp as u32 * 100 <= m.max_hp() as u32 * 33 || m.max_hp() == 1 {
+                return Ok(false);
+            }
+        }
+        if data.id == "steelroller" && self.field.terrain == crate::damage::Terrain::None {
             return Ok(false);
         }
         // Sucker Punch fails unless its target is about to use an attack.
@@ -421,7 +452,7 @@ impl Battle {
 
         if targets.is_empty() {
             if !failed {
-                self.mon_mut(user).move_this_turn_result = None;
+                self.mon_mut(user).move_this_turn_result = Some(None);
             }
             return Ok(false);
         }
@@ -431,6 +462,10 @@ impl Battle {
     /// hitStepAccuracy for one target.
     fn accuracy_check(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
         let Some(mut acc) = data.accuracy else { return true };
+        // glaiverush's onAccuracy: anything hits its holder.
+        if self.mon(t).volatiles.has(VolatileId::GlaiveRush) {
+            return true;
+        }
         // onModifyMove: weather-dependent accuracy.
         match (data.id.as_str(), self.field.weather) {
             ("thunder", crate::damage::Weather::Rain) | ("blizzard", crate::damage::Weather::Snow) => return true,
@@ -445,7 +480,7 @@ impl Battle {
         // ModifyBoost: Unaware ignores the other side's accuracy/evasion.
         let unaware = |b: &Battle, r: MonRef| Dex::get().ability(b.mon(r).ability).id == "unaware";
         let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5] as i32 };
-        let eva_boost = if unaware(self, user) { 0 } else { self.mon(t).boosts[6] as i32 };
+        let eva_boost = if unaware(self, user) || data.has_key("ignoreEvasion") { 0 } else { self.mon(t).boosts[6] as i32 };
         let boost = (acc_boost.clamp(-6, 6) - eva_boost).clamp(-6, 6);
         let mut accuracy = acc as u32;
         if boost > 0 {
@@ -524,11 +559,28 @@ impl Battle {
         is_self: bool,
     ) -> Res<(Vec<HitRes>, Vec<Option<MonRef>>)> {
         let mut targets = targets;
-        // TryHit: Helping Hand fails on an ally that has already moved.
-        if primary && mv.data.id == "helpinghand" {
+        // The move's TryHit. Helping Hand fails on an ally that has already
+        // moved; Psychic Fangs and Brick Break break the target's screens;
+        // Clangorous Soul raises its stats here (or fails).
+        let mut skip_boosts = false;
+        if primary {
             if let Some(t) = targets[0] {
-                if !self.mon(t).newly_switched && !self.will_move(t) {
-                    return Ok((vec![HitRes::Bool(false)], targets));
+                match mv.data.id.as_str() {
+                    "helpinghand" if !self.mon(t).newly_switched && !self.will_move(t) => {
+                        return Ok((vec![HitRes::Bool(false)], targets));
+                    }
+                    "psychicfangs" | "brickbreak" => {
+                        for c in [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::AuroraVeil] {
+                            self.sides[t.side].conditions[c as usize] = 0;
+                        }
+                    }
+                    "clangoroussoul" => {
+                        if !self.boost(t, &mv.data.primary.boosts, Some(user)).truthy() {
+                            return Ok((vec![HitRes::Bool(false)], targets));
+                        }
+                        skip_boosts = true;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -555,6 +607,10 @@ impl Battle {
                 let outcome = damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
                 if matches!(outcome, Outcome::Damage(_)) && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))? {
                     self.eat_resist_berry(t);
+                }
+                // Final Gambit's damageCallback faints its user.
+                if mv.data.id == "finalgambit" && matches!(outcome, Outcome::Damage(_)) {
+                    self.faint(user);
                 }
                 damage[i] = match outcome {
                     Outcome::Damage(rolls) => HitRes::Num(rolls[self.chance.random(16) as usize]),
@@ -613,7 +669,7 @@ impl Battle {
             }
         }
 
-        self.run_move_effects(&mut damage, &targets, mv, user, effect, primary, is_secondary)?;
+        self.run_move_effects(&mut damage, &targets, mv, user, effect, primary && !skip_boosts, primary, is_secondary)?;
         for i in 0..targets.len() {
             if !damage[i].hit() {
                 targets[i] = None;
@@ -636,6 +692,12 @@ impl Battle {
             if !damaged.is_empty() {
                 let fire = mv.am.move_type == Dex::get().type_id("Fire").expect("Fire") && mv.am.category != Category::Status;
                 self.damaging_hit(user, &damaged, mv.data.flags.has("contact"), fire);
+                // AfterHit: Knock Off takes the item.
+                if mv.data.id == "knockoff" && self.mon(user).hp > 0 {
+                    for &t in &damaged {
+                        self.take_item(t, t);
+                    }
+                }
             }
         }
         Ok((damage, targets))
@@ -650,6 +712,7 @@ impl Battle {
         mv: &mut MoveUse,
         user: MonRef,
         effect: &HitEffect,
+        with_boosts: bool,
         primary: bool,
         is_secondary: bool,
     ) -> Res<()> {
@@ -657,7 +720,7 @@ impl Battle {
         for i in 0..targets.len() {
             let Some(t) = targets[i] else { continue };
             let mut did_something = HitRes::Undefined;
-            if !effect.boosts.is_empty() && !self.mon(t).fainted {
+            if (with_boosts || !primary) && !effect.boosts.is_empty() && !self.mon(t).fainted {
                 let r = self.boost(t, &effect.boosts, Some(user));
                 did_something = did_something.combine(r);
             }
@@ -707,6 +770,22 @@ impl Battle {
             if is_secondary && mv.data.id == "throatchop" {
                 self.add_volatile(t, VolatileId::ThroatChop);
                 did_something = did_something.combine(HitRes::Bool(true));
+            }
+            // onHit: Clangorous Soul costs a third of max HP; Steel Roller ends
+            // the terrain.
+            if primary && mv.data.id == "clangoroussoul" {
+                let cost = (self.mon(user).max_hp() as u32 * 33 / 100).max(1);
+                self.apply_damage(user, cost);
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
+            if primary && mv.data.id == "steelroller" {
+                self.clear_terrain();
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
+            // onHit: Trick swaps items.
+            if primary && mv.data.id == "trick" {
+                let r = self.trick(user, t);
+                did_something = did_something.combine(HitRes::Bool(r));
             }
             // onHit: Parting Shot lowers Attack and Sp. Atk, and doesn't
             // switch out if neither drops.

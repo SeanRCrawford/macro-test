@@ -645,6 +645,8 @@ impl Battle {
             p.can_mega_evo = None;
         }
         self.mega_used[r.side] = true;
+        // formeChange: Mega Evolution counts as an action.
+        self.mon_mut(r).move_this_turn_result = Some(Some(true));
         // AfterMega: White Herb's onAnyAfterMega.
         self.any_white_herb(r);
         Ok(())
@@ -730,7 +732,7 @@ impl Battle {
                 for s in m.moves.iter_mut() {
                     let data = Dex::get().move_data(s.id);
                     s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id))
-                        || (data.id == "fakeout" && acted)
+                        || (matches!(data.id.as_str(), "fakeout" | "firstimpression") && acted)
                         || locked.is_some_and(|l| l != s.id)
                         || encored.is_some_and(|e| e != s.id)
                         || (throat_chopped && data.flags.has("sound"));

@@ -87,6 +87,8 @@ pub struct Combatant {
     pub times_attacked: u8,
     /// Supreme Overlord's count of fainted allies, capped at 5.
     pub fallen: u8,
+    /// `moveLastTurnResult === false` (Stomping Tantrum).
+    pub move_last_turn_failed: bool,
 }
 
 impl Combatant {
@@ -107,6 +109,7 @@ impl Combatant {
             active_turns: 1,
             times_attacked: 0,
             fallen: 0,
+            move_last_turn_failed: false,
         }
     }
 
@@ -328,7 +331,7 @@ pub const MOVES_WITH_HANDLERS: &[&str] = &[
     "acrobatics", "aurawheel", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
     "grassknot", "hardpress", "heatcrash", "heavyslam", "hex", "hurricane", "knockoff", "lastrespects", "lowkick",
     "powertrip", "ragefist", "ragingbull", "reversal", "risingvoltage", "solarbeam", "solarblade", "storedpower",
-    "struggle", "terrainpulse", "thunder", "tripleaxel", "venoshock", "waterspout", "watershuriken", "weatherball",
+    "stompingtantrum", "struggle", "temperflare", "terrainpulse", "thunder", "tripleaxel", "venoshock", "waterspout", "watershuriken", "weatherball",
 ];
 
 /// The `???` type (Struggle): no STAB, no immunities, neutral to everything.
@@ -1059,6 +1062,14 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
             "tripleaxel" => 20 * self.ctx.hit as i64,
             "watershuriken" => bp, // only Ash-Greninja changes it
+            // moveLastTurnResult === false
+            "stompingtantrum" | "temperflare" => {
+                if attacker.move_last_turn_failed {
+                    bp * 2
+                } else {
+                    bp
+                }
+            }
             "gyroball" => {
                 let user = self.speed_stat(a)?;
                 let target = self.speed_stat(d)?;

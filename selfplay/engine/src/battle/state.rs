@@ -39,6 +39,8 @@ pub enum VolatileId {
     ThroatChop,
     /// Unburden: doubled Speed once the item is gone.
     Unburden,
+    /// Glaive Rush: hit for sure and for double damage until it moves again.
+    GlaiveRush,
 }
 
 impl VolatileId {
@@ -54,6 +56,7 @@ impl VolatileId {
             "encore" => VolatileId::Encore,
             "throatchop" => VolatileId::ThroatChop,
             "unburden" => VolatileId::Unburden,
+            "glaiverush" => VolatileId::GlaiveRush,
             _ => return None,
         })
     }
@@ -70,6 +73,7 @@ impl VolatileId {
             VolatileId::Encore => "encore",
             VolatileId::ThroatChop => "throatchop",
             VolatileId::Unburden => "unburden",
+            VolatileId::GlaiveRush => "glaiverush",
         }
     }
 
@@ -90,7 +94,7 @@ impl VolatileId {
             }
             VolatileId::Stall | VolatileId::ThroatChop => Some(2),
             VolatileId::Encore => Some(3),
-            VolatileId::ChoiceLock | VolatileId::Unburden => None,
+            VolatileId::ChoiceLock | VolatileId::Unburden | VolatileId::GlaiveRush => None,
         }
     }
 }
@@ -183,9 +187,10 @@ pub struct Mon {
     pub can_mega_evo: Option<SpeciesId>,
     pub last_move: Option<MoveId>,
     pub move_this_turn: Option<MoveId>,
-    /// `moveThisTurnResult`: Some(true) moved, Some(false) failed, None not yet / no result.
-    pub move_this_turn_result: Option<bool>,
-    pub move_last_turn_result: Option<bool>,
+    /// `moveThisTurnResult`: Showdown's `undefined` (None), `null` (Some(None):
+    /// nothing happened, e.g. blocked by Protect) or whether the move worked.
+    pub move_this_turn_result: Option<Option<bool>>,
+    pub move_last_turn_result: Option<Option<bool>>,
     pub times_attacked: u8,
     /// HP after this Pokemon was last damaged this turn (`hurtThisTurn`).
     pub hurt_this_turn: Option<u16>,
@@ -301,11 +306,18 @@ pub enum SideCondition {
     LightScreen,
     Tailwind,
     WideGuard,
+    AuroraVeil,
 }
 
 impl SideCondition {
-    pub const COUNT: usize = 4;
-    pub const ALL: [SideCondition; 4] = [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::Tailwind, SideCondition::WideGuard];
+    pub const COUNT: usize = 5;
+    pub const ALL: [SideCondition; 5] = [
+        SideCondition::Reflect,
+        SideCondition::LightScreen,
+        SideCondition::Tailwind,
+        SideCondition::WideGuard,
+        SideCondition::AuroraVeil,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -313,6 +325,7 @@ impl SideCondition {
             SideCondition::LightScreen => "lightscreen",
             SideCondition::Tailwind => "tailwind",
             SideCondition::WideGuard => "wideguard",
+            SideCondition::AuroraVeil => "auroraveil",
         }
     }
 
@@ -324,6 +337,7 @@ impl SideCondition {
             SideCondition::LightScreen => (26, 2),
             SideCondition::Tailwind => (26, 5),
             SideCondition::WideGuard => (4_294_967_296, 4),
+            SideCondition::AuroraVeil => (26, 10),
         }
     }
 }

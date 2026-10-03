@@ -34,9 +34,9 @@ const ITEMS: &[&str] = &[
 /// Move data keys that add nothing beyond what `moves` implements.
 const PLAIN_KEYS: &[&str] = &[
     "accuracy", "basePower", "boosts", "category", "critRatio", "drain", "flags", "handlers", "heal",
-    "ignoreDefensive", "ignoreImmunity", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
+    "ignoreDefensive", "ignoreEvasion", "ignoreImmunity", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
     "overrideOffensivePokemon", "overrideOffensiveStat", "pp", "priority", "recoil", "secondary", "secondaries",
-    "self", "selfSwitch", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
+    "self", "selfBoost", "selfSwitch", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
 ];
 
 /// Move handlers the damage module covers (it reports any specific move it
@@ -60,16 +60,27 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("direclaw", &[]),
     ("throatchop", &[]),
     ("encore", &[]),
+    ("stompingtantrum", &["basePowerCallback"]),
+    ("knockoff", &["onBasePower", "onAfterHit"]),
+    ("firstimpression", &["onTry", "onDisableMove"]),
+    ("psychicfangs", &["onTryHit"]),
+    ("brickbreak", &["onTryHit"]),
+    ("clangoroussoul", &["onTry", "onTryHit", "onHit"]),
+    ("steelroller", &["onTry", "onHit", "onAfterSubDamage"]),
+    ("trick", &["onTryImmunity", "onHit"]),
+    ("finalgambit", &["damageCallback"]),
+    ("auroraveil", &["onTry"]),
+    ("glaiverush", &[]),
 ];
 
 /// Status moves that set a side or field condition, which `moves` implements.
-const FIELD_MOVES: &[&str] = &["tailwind", "trickroom", "reflect", "lightscreen", "wideguard"];
+const FIELD_MOVES: &[&str] = &["tailwind", "trickroom", "reflect", "lightscreen", "wideguard", "auroraveil"];
 
 /// Moves whose secondary has an onHit that `moves` implements.
 const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop"];
 
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
-const VOLATILES: &[&str] = &["flinch", "protect", "followme", "ragepowder", "helpinghand", "encore"];
+const VOLATILES: &[&str] = &["flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush"];
 
 pub fn ability_supported(id: &str) -> bool {
     ABILITIES.contains(&id)
@@ -102,11 +113,19 @@ pub fn move_supported(m: &MoveData) -> bool {
     let condition_ok = !m.has_key("condition")
         || m.primary.volatile_status.as_deref().is_some_and(|v| VOLATILES.contains(&v))
         || field_move
-        || m.id == "throatchop";
+        || matches!(m.id.as_str(), "throatchop" | "glaiverush");
+    // Final Gambit is the only selfdestruct move supported.
+    let selfdestruct_ok = !m.has_key("selfdestruct") || m.id == "finalgambit";
     let target_ok = match m.category {
         Category::Status => matches!(
             m.target,
-            MoveTarget::SelfTarget | MoveTarget::Normal | MoveTarget::Any | MoveTarget::AdjacentFoe | MoveTarget::AllAdjacentFoes | MoveTarget::AdjacentAlly
+            MoveTarget::SelfTarget
+                | MoveTarget::Normal
+                | MoveTarget::Any
+                | MoveTarget::AdjacentFoe
+                | MoveTarget::AllAdjacentFoes
+                | MoveTarget::AdjacentAlly
+                | MoveTarget::Allies
         ),
         _ => matches!(
             m.target,
@@ -117,8 +136,12 @@ pub fn move_supported(m: &MoveData) -> bool {
     let field_key = |k: &str| field_move && matches!(k, "sideCondition" | "pseudoWeather");
     let switch_ok = !m.has_key("selfSwitch") || m.self_switch;
     switch_ok
-        && m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok) || field_key(k))
-        && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather"]].concat())
+        && selfdestruct_ok
+        && m.keys.iter().all(|k| {
+            PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok) || field_key(k) || (k == "selfdestruct" && selfdestruct_ok)
+        })
+        && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather", "selfdestruct"]].concat())
+        && m.self_boost.as_ref().is_none_or(|e| effect_supported(e, &[]))
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
         && (m.nested_handlers.is_empty() || (SECONDARY_ON_HIT.contains(&m.id.as_str()) && m.nested_handlers == ["secondary.onHit"]))
         && handlers_ok

@@ -219,4 +219,14 @@ impl Battle {
     pub(super) fn psychic_terrain_blocks(&self, user: MonRef, target: MonRef, priority: i8, self_target: bool) -> bool {
         self.field.terrain == Terrain::Psychic && priority > 0 && !self_target && target.side != user.side && self.grounded(target)
     }
+
+    /// `field.clearTerrain`, then eachEvent('TerrainChange').
+    pub(super) fn clear_terrain(&mut self) {
+        if self.field.terrain == Terrain::None {
+            return;
+        }
+        self.field.terrain = Terrain::None;
+        self.field.terrain_turns = 0;
+        self.terrain_change();
+    }
 }

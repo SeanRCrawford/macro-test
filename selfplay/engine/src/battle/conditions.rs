@@ -271,6 +271,8 @@ impl Battle {
     /// The BeforeMove event: sleep and freeze (priority 10), flinch (8),
     /// paralysis (1). False: the Pokemon can't move.
     pub(super) fn before_move(&mut self, user: MonRef, move_id: MoveId, data: &MoveData) -> bool {
+        // glaiverush (priority 100) ends as its user moves again.
+        self.mon_mut(user).volatiles.remove(VolatileId::GlaiveRush);
         match self.mon(user).status {
             Status::Sleep => {
                 let m = self.mon_mut(user);
@@ -352,6 +354,23 @@ impl Battle {
     }
 
     // --- HP -------------------------------------------------------------------
+
+    /// `pokemon.faint()`: HP to 0 and queued to faint.
+    pub(super) fn faint(&mut self, r: MonRef) {
+        let m = self.mon(r);
+        if m.fainted || m.faint_queued {
+            return;
+        }
+        let hp = m.hp as u32;
+        if hp > 0 {
+            self.apply_damage(r, hp);
+        } else {
+            let m = self.mon_mut(r);
+            m.switch_flag = None;
+            m.faint_queued = true;
+            self.faint_queue.push(r);
+        }
+    }
 
     /// `battle.heal`.
     pub(super) fn heal(&mut self, t: MonRef, amount: u32) -> HitRes {
