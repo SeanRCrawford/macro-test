@@ -31,17 +31,58 @@ It reuses `src/` only as a reference to test against.
   going 248–110.
 - The engine and weights are not released. A technical writeup is promised.
 
-**Jaxcalibur** (Smogon thread 3787537, first post), Gen 9 Random Battles:
+**Jaxcalibur** (Smogon thread 3787537 and the writeup at jaxcalibur.github.io),
+Gen 9 Random Battles, singles:
 
-- Self-play RL plus AlphaGo Zero-style pUCT search, built on poke-env and Jax.
-  The search goes 4 plies deep with 20,480 rollouts across 32 sampled worlds.
-- Peaked at 2557 Elo. The network alone was about 2400 Elo on a laptop.
-- More than six months of work on an H100. Not released.
+- **Model:** a non-causal transformer, 8.5M parameters, pre-RMSNorm. It uses a
+  position-based mixture of experts: token positions of different kinds
+  (Pokémon, moves, events) use different MLP weights. Smaller networks trained
+  for longer beat larger ones trained for fewer steps.
+- **Input tokens:** 1 battlefield (weather, hazards and so on), 2 active
+  Pokémon (stats, moves, damage calcs), 5 candidate moves (Struggle gets its
+  own), 6 own team, 6 opposing team (masked until revealed), 16 history
+  tokens for the last 16 events (moves and switch-ins), and 24 matchup tokens
+  with damage calcs for pairs of Pokémon. Each of its Pokémon is matched
+  against 4 of the opponent's. The matchup tokens join the residual stream
+  halfway through the network, so they can use fresh predictions of the
+  opponent's moves, item and ability.
+- **Outputs:** each team position emits a "switch to this slot" logit. Each
+  move position emits two logits: use the move, or Terastallize and use it.
+- **Training:** PPO with generalized advantage estimation. Undiscounted reward:
+  1 for a win, 0 for a loss. Exploration comes from entropy regularization plus
+  a "zero-avoiding" KL term toward the uniform policy, which keeps very
+  situational moves such as Encore from reaching zero probability.
+- **Auxiliary losses:** win probability (this is the value function); each
+  opposing Pokémon's item, ability, moves and Tera type, with item and ability
+  predictions carried across turns; and the opponent's next action. The author
+  says predicting the opponent's next action made the bot substantially
+  stronger.
+- **No search in training.** About 100M self-play games over about a week on
+  one H100.
+- **Engine:** reimplemented in pure JAX, vectorized and run on the GPU. It
+  executes every possible game step each turn and keeps only the relevant
+  results, so every action has the same computational shape.
+- **Search (test time only):** pUCT, with three changes.
+  - Simultaneous moves: edges are sampled with probability proportional to
+    max(Q(s,a) − V(s), 0) + c_puct·P(s,a)/√N(s). As visits grow, this shifts
+    toward regret matching.
+  - Randomness: every rollout is replayed from scratch with a new seed.
+    Statistics are kept in a dictionary keyed by game-state hash rather than in
+    an explicit tree, with HP binned into 10 buckets.
+  - Hidden information: possible "worlds" for the opponent's unknown sets are
+    sampled from the network's predictions. The opponent's search is cut off
+    once Jaxcalibur does something "surprising" (switching to an unrevealed
+    Pokémon, or a move the opponent's view gave under 65%). From that point the
+    opponent uses only the network prior, so search can't leak hidden
+    information to it.
+  - Settings: depth 4 (usually 2 turns), 20,480 rollouts over 32 worlds, a few
+    seconds on a GPU. The author estimates search adds 100–150 Elo.
+- **Results:** peak 2557 Elo and 95.3 GXE. The network alone was about 2400 Elo
+  on a laptop. Not released.
 
-**Not yet read:** the Jaxcalibur technical writeup at jaxcalibur.github.io.
-This environment's network policy blocks it. mikumiku37 says part of its design
-comes from that writeup, so the model and training sections below are
-provisional until it has been read.
+**The two bots differ in one notable way:** Jaxcalibur feeds damage calcs into
+the network (matchup tokens). mikumiku37 says its network sees no damage
+calculator, speed resolver or usage stats.
 
 ## 2. Architecture
 
@@ -54,6 +95,18 @@ provisional until it has been read.
 Why this split: the simulator decides whether training is feasible at all, so
 it has to be compiled code with no Python in the inner loop. Keeping it free of
 PyO3 means `cargo test` and benchmarks run without Python.
+
+**CPU engine, not GPU.** Jaxcalibur ran its engine on the GPU in JAX. We run
+ours on the CPU in Rust, for two reasons:
+
+- JAX has no native CUDA support on Windows; it would need WSL2.
+- A JAX engine has to execute every branch of every turn. That gets
+  expensive with doubles' larger action space and long tail of mechanics.
+
+mikumiku37's rate of about 1,900 games per second is about 20k turns per
+second. A Rust engine at a few microseconds per turn reaches that on one or two
+cores. The design that follows from this: many environments step in parallel
+on CPU threads, and their observations are batched into one GPU forward pass.
 
 ## 3. Phase plan
 
@@ -79,9 +132,10 @@ Each phase has an exit test that has to pass before the next phase starts.
 
 ### 4.1 Format
 
-Doubles, bring 6 and pick 4, level 50, Mega Evolution (one per side per
-battle), Champions stat points. The stat rule follows `src/stats.py` and is
-covered by a parity test (section 4.8). Species and item clauses are checked
+**Reg M-C.** Doubles, bring 6 and pick 4, level 50, Mega Evolution (one per
+side per battle), Champions stat points (not EVs). The stat rule follows
+`src/stats.py` and is covered by a parity test (section 4.8). The exact
+formula is checked against Showdown in milestone 1h. Species and item clauses are checked
 when a team is built. Training games are capped at a fixed number of turns and
 count as a draw (reward 0) if they reach it. Showdown has no such cap, but it
 stops games that would otherwise never end.
@@ -196,19 +250,49 @@ own speed should be measured on the same machine for comparison.
 - [ ] 1g. Benchmark and speed gate.
 - [ ] 1h. Differential tests against Showdown.
 
-## 5. Open questions
+## 5. Model and training (provisional; settled in phases 2–3)
 
-1. **Stat points.** The engine follows `src/stats.py`: a flat +1 per point,
-   added after the formula. It has to match how Showdown's Champions format
-   actually computes stats, since that's where the bot plays. Check before 1h.
-2. **Regulation.** `src/` targets Reg M-B and mikumiku37 played Reg M-C. Which
-   legal pool should the engine and team corpus target?
-3. **Team corpus.** mikumiku37 used about 1,260 public tournament teams. This
-   repo has 17 teams in `data/teams/` and the usage sets in `mbsmogon.xlsx`. A
-   source for a larger corpus is needed by phase 3.
-4. **Champions mechanics changes.** Are there any differences from Scarlet and
-   Violet (move or ability changes, Mega Evolution details)? Showdown's
-   Champions mod is the authority here.
-5. **Training machine.** Operating system and GPU. JAX's GPU support on native
-   Windows is poor, so PyTorch is the default unless training runs on Linux or
-   WSL.
+Start from Jaxcalibur's recipe, adapted to doubles:
+
+- **Framework:** PyTorch, which supports CUDA natively on Windows.
+- **Network:** a non-causal pre-RMSNorm transformer of about 8–9M parameters,
+  with position-based mixture of experts (MLP weights per token kind).
+- **Tokens:** field; 4 active (2 ours, 2 theirs); our active Pokémon's moves;
+  our 4 brought Pokémon; the opponent's 6 from team preview, masked until
+  revealed; and recent events.
+- **Damage calcs as inputs:** Jaxcalibur used them as matchup tokens and
+  mikumiku37 did without. Start without them, as mikumiku37 did, and measure
+  adding them as an experiment.
+- **Action heads:** per active slot, a logit for each (move, target, Mega)
+  combination and each switch, then joint legality masking. Team preview
+  gets its own head. Whether the two slots' joint action is factored
+  autoregressively (slot 1, then slot 2 given slot 1) or scored jointly is an
+  open choice. The one-turn search needs the top-k joint actions either way.
+- **RL:** PPO with GAE, undiscounted reward of 1 for a win and 0 for a loss, an
+  entropy bonus plus a zero-avoiding KL-to-uniform term, and a league of past
+  versions (as mikumiku37 did).
+- **Auxiliary heads:** win probability (the value); each opposing Pokémon's
+  item, ability, moves and spread; and the opponent's next joint action.
+- **Search:** mikumiku37's one-turn matrix solve first, because it suits
+  doubles' large joint action space. Jaxcalibur's regret-pUCT is a later
+  option.
+
+## 6. Decisions and open questions
+
+Decided:
+
+- Rust engine with PyO3 bindings, as a top-level `selfplay/` package.
+- Training on your Windows GPU machine, with PyTorch.
+- Target regulation is Reg M-C.
+- Showdown's Champions format uses stat points, not EVs.
+
+Open:
+
+1. **Team corpus.** You will supply it later. Until then, use the 17 teams
+   in `data/teams/` and the sets in `default_sets.txt`. Training is blocked on
+   the corpus, so it is needed by phase 3.
+2. **Reg M-C legal pool.** `src/` was built for M-B. Which species, items and
+   moves are legal decides what the engine must implement first.
+3. **Champions mechanics changes.** Any differences from Scarlet and Violet,
+   such as move or ability changes or Mega Evolution details. Showdown's
+   Champions mod is the authority here; checked in milestone 1h.
