@@ -268,6 +268,9 @@ pub struct Mon {
     pub faint_queued: bool,
     pub switch_flag: Option<SwitchFlag>,
     pub force_switch_flag: bool,
+    /// The queued move's `originalTarget` (uid of whoever was at its target
+    /// location when the action was resolved), for Stalwart.
+    pub original_target: Option<(usize, usize)>,
     /// BeforeSwitchOut already ran for a pending self-switch.
     pub skip_before_switch_out: bool,
     pub active_turns: u16,
@@ -326,6 +329,7 @@ impl Mon {
             faint_queued: false,
             switch_flag: None,
             force_switch_flag: false,
+            original_target: None,
             skip_before_switch_out: false,
             active_turns: 0,
             active_move_actions: 0,

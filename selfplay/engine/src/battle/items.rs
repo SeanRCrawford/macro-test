@@ -119,6 +119,9 @@ impl Battle {
                 self.cure_status(r);
             }
             self.trace_update(r);
+            if self.ability_is(r, "oblivious") {
+                self.mon_mut(r).volatiles.remove(VolatileId::Taunt);
+            }
             self.item_update(r);
             if self.item_of(r) == Some("sitrusberry") && !self.unnerved(r) {
                 let m = self.mon(r);
@@ -378,6 +381,7 @@ impl Battle {
             WeakArmor,
             ThermalExchange,
             SpicySpray,
+            CursedBody,
             PoisonTouch,
             AirBalloon,
         }
@@ -400,6 +404,7 @@ impl Battle {
                 "weakarmor" => Some((H::WeakArmor, NONE)),
                 "thermalexchange" => Some((H::ThermalExchange, NONE)),
                 "spicyspray" => Some((H::SpicySpray, NONE)),
+                "cursedbody" => Some((H::CursedBody, NONE)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -444,6 +449,17 @@ impl Battle {
                 }
                 H::SpicySpray => {
                     self.try_set_status(user, crate::damage::Status::Burn);
+                }
+                H::CursedBody => {
+                    if !self.mon(user).volatiles.has(VolatileId::Disable) && data.id != "struggle" && self.chance.chance(3, 10) {
+                        // disable's onStart: a turn shorter on the Pokemon
+                        // that is moving now.
+                        if self.add_volatile(user, VolatileId::Disable).truthy() {
+                            if let Some(v) = self.mon_mut(user).volatiles.get_mut(VolatileId::Disable) {
+                                v.duration = Some(4);
+                            }
+                        }
+                    }
                 }
                 H::PoisonTouch if contact && self.chance.chance(3, 10) => {
                     self.try_set_status(t, crate::damage::Status::Poison);

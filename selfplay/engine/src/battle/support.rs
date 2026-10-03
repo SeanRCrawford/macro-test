@@ -21,6 +21,9 @@ const ABILITIES: &[&str] = &[
     "plus", "punkrock", "purepower", "reckless", "refrigerate", "sharpness", "shellarmor", "sniper", "solidrock",
     "stakeout", "steelyspirit", "strongjaw", "swarm", "technician", "thickfat", "torrent", "toughclaws",
     "unaware",
+    "frisk", "oblivious", "pressure", "queenlymajesty", "dazzling", "voltabsorb", "waterabsorb", "sapsipper", "stormdrain",
+    "lightningrod", "hypercutter", "sandveil", "stalwart", "propellertail", "telepathy", "moxie", "cursedbody", "healer",
+    "aromaveil",
 ];
 
 /// Items whose every effect is implemented: damage boosts, Mega Stones and

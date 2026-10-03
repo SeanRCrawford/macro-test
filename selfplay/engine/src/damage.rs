@@ -369,7 +369,12 @@ pub fn eats_resist_berry(ctx: &DamageCtx, am: &ActiveMove) -> Res<bool> {
     if am.move_type != calc.ty(t) || !calc.can_eat(d) {
         return Ok(false);
     }
-    Ok(calc.type_mod(am, calc.dex.move_data(am.id))? > 0)
+    // Fixed damage (damageCallback, Seismic Toss...) skips ModifyDamage.
+    let data = calc.dex.move_data(am.id);
+    if data.handlers.has("damageCallback") || data.fixed_damage.is_some() {
+        return Ok(false);
+    }
+    Ok(calc.type_mod(am, data)? > 0)
 }
 
 /// `runImmunity(move)` for the defender in `ctx`.

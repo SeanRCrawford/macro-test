@@ -68,7 +68,7 @@ pub(super) fn move_for_slot(m: &Mon, slot: usize) -> MoveId {
 
 impl Battle {
     /// Showdown's `getAtLoc` from `user`'s point of view.
-    fn at_loc(&self, user: MonRef, loc: i8) -> Option<MonRef> {
+    pub(super) fn at_loc(&self, user: MonRef, loc: i8) -> Option<MonRef> {
         let side = if loc < 0 { user.side } else { 1 - user.side };
         self.occupant(side, loc.unsigned_abs() as usize - 1)
     }
@@ -87,7 +87,7 @@ impl Battle {
     }
 
     /// `adjacentAllies()`: the other active on the user's side, if it has HP.
-    fn adjacent_allies(&self, user: MonRef) -> Vec<MonRef> {
+    pub(super) fn adjacent_allies(&self, user: MonRef) -> Vec<MonRef> {
         (0..ACTIVE_PER_SIDE)
             .filter(|&p| self.sides[user.side].occupant(p).is_some_and(|m| m.hp > 0 && m.uid != user.uid))
             .map(|p| self.mon_ref(user.side, p))
@@ -134,6 +134,15 @@ impl Battle {
 
     /// `getTarget`.
     fn get_target(&mut self, user: MonRef, target_type: MoveTarget, loc: i8) -> Option<MonRef> {
+        // Stalwart and Propeller Tail follow the original target while it
+        // is on the field.
+        if self.ability_is(user, "stalwart") || self.ability_is(user, "propellertail") {
+            if let Some((side, uid)) = self.mon(user).original_target {
+                if let Some(t) = self.all_active().into_iter().find(|&t| t.side == side && self.mon(t).uid == uid && self.mon(t).is_active) {
+                    return Some(t);
+                }
+            }
+        }
         let self_loc = self.loc_of(user, user);
         if matches!(target_type, MoveTarget::AdjacentAlly | MoveTarget::Any | MoveTarget::Normal) && loc == self_loc {
             return None;
@@ -179,8 +188,10 @@ impl Battle {
                 if needs_retarget {
                     target = self.random_target(user, am.target);
                 }
-                if let Some(t) = target {
-                    target = Some(self.redirect_target(user, am.target, t));
+                // Stalwart and Propeller Tail keep their target.
+                let tracks = self.ability_is(user, "stalwart") || self.ability_is(user, "propellertail");
+                if let (Some(t), false) = (target, tracks) {
+                    target = Some(self.redirect_target(user, am, t));
                 }
                 match target {
                     Some(t) if !self.mon(t).fainted => vec![t],
@@ -192,7 +203,8 @@ impl Battle {
 
     /// The RedirectTarget event: the first foe with Follow Me or Rage Powder
     /// (in Speed order, then creation order) that the move could target.
-    fn redirect_target(&mut self, user: MonRef, target_type: MoveTarget, target: MonRef) -> MonRef {
+    fn redirect_target(&mut self, user: MonRef, am: &ActiveMove, target: MonRef) -> MonRef {
+        let target_type = am.target;
         let mut handlers: Vec<(MonRef, VolatileId, i32, u64)> = Vec::new();
         for f in self.foes(user) {
             let m = self.mon(f);
@@ -202,20 +214,78 @@ impl Battle {
                 }
             }
         }
-        if handlers.is_empty() {
-            return target;
-        }
-        self.speed_sort(&mut handlers, |a, b| b.2.cmp(&a.2).then(a.3.cmp(&b.3)));
         let user_pos = self.mon(user).position;
-        for (f, id, _, _) in handlers {
-            if id == VolatileId::RagePowder && !self.run_status_immunity(user, "powder") {
-                continue;
+        if !handlers.is_empty() {
+            self.speed_sort(&mut handlers, |a, b| b.2.cmp(&a.2).then(a.3.cmp(&b.3)));
+            for (f, id, _, _) in handlers {
+                if id == VolatileId::RagePowder && !self.run_status_immunity(user, "powder") {
+                    continue;
+                }
+                if super::choice::valid_target_loc(self.loc_of(user, f), user_pos, target_type) {
+                    return f;
+                }
             }
-            if super::choice::valid_target_loc(self.loc_of(user, f), user_pos, target_type) {
-                return f;
+        }
+        // onAnyRedirectTarget (priority 0): Lightning Rod and Storm Drain.
+        let dex = Dex::get();
+        let rod = if am.move_type == dex.type_id("Electric").expect("Electric") {
+            "lightningrod"
+        } else if am.move_type == dex.type_id("Water").expect("Water") {
+            "stormdrain"
+        } else {
+            return target;
+        };
+        let mut rods: Vec<(MonRef, i32)> = self.all_active().into_iter().filter(|&r| self.ability_is(r, rod)).map(|r| (r, self.mon(r).speed)).collect();
+        self.speed_sort(&mut rods, |a, b| b.1.cmp(&a.1));
+        let redirect_type = if matches!(target_type, MoveTarget::RandomNormal | MoveTarget::AdjacentFoe) { MoveTarget::Normal } else { target_type };
+        for (r, _) in rods {
+            if r != user && super::choice::valid_target_loc(self.loc_of(user, r), user_pos, redirect_type) {
+                return r;
             }
         }
         target
+    }
+
+    /// onFoeTryMove: Armor Tail, Queenly Majesty, Dazzling.
+    fn blocks_priority(&self, r: MonRef) -> bool {
+        ["armortail", "queenlymajesty", "dazzling"].iter().any(|a| self.ability_is(r, a))
+    }
+
+    /// DeductPP: each targeted foe with Pressure costs a PP more.
+    fn pressure(&mut self, user: MonRef, move_id: MoveId, targets: &[MonRef]) {
+        let extra = targets.iter().filter(|&&t| t.side != user.side && self.ability_is(t, "pressure")).count() as u8;
+        let m = self.mon_mut(user);
+        if let (true, Some(i)) = (extra > 0, m.move_slot(move_id)) {
+            m.moves[i].pp = m.moves[i].pp.saturating_sub(extra);
+        }
+    }
+
+    /// TryHit abilities that take the move in: true stops it on `t`.
+    fn absorbs(&mut self, user: MonRef, t: MonRef, move_type: crate::dex::TypeId, data: &MoveData) -> bool {
+        let dex = Dex::get();
+        let is = |name: &str| move_type == dex.type_id(name).expect("type");
+        match dex.ability(self.mon(t).ability).id.as_str() {
+            "voltabsorb" if is("Electric") => {}
+            "waterabsorb" if is("Water") => {}
+            "sapsipper" if is("Grass") => {
+                self.boost(t, &[(0, 1)], Some(user));
+                return true;
+            }
+            "lightningrod" if is("Electric") => {
+                self.boost(t, &[(2, 1)], Some(user));
+                return true;
+            }
+            "stormdrain" if is("Water") => {
+                self.boost(t, &[(2, 1)], Some(user));
+                return true;
+            }
+            "telepathy" => return t.side == user.side && data.category != Category::Status,
+            "oblivious" => return data.id == "taunt",
+            _ => return false,
+        }
+        let amount = (self.mon(t).max_hp() / 4) as u32;
+        self.heal(t, amount);
+        true
     }
 
     /// A damage-calculation view of the field with `attacker` hitting `defender`.
@@ -361,6 +431,11 @@ impl Battle {
         if data.flags.has("defrost") && self.mon(user).status == Status::Freeze {
             self.cure_status(user);
         }
+        // throatchop's onModifyMove (it stops a bounced sound move too) ends
+        // ModifyMove before the Choice item's lock.
+        if data.flags.has("sound") && self.mon(user).volatiles.has(VolatileId::ThroatChop) {
+            return Ok(false);
+        }
         self.choice_lock(user, move_id);
         let mut target = target;
         if am.target != base_target {
@@ -371,9 +446,23 @@ impl Battle {
         }
         let Some(target) = target else { return Ok(false) };
         if matches!(am.target, MoveTarget::All | MoveTarget::AllySide | MoveTarget::FoeSide | MoveTarget::AllyTeam) {
-            return Ok(self.try_move_hit(user, data));
+            if !bounced && am.target == MoveTarget::All {
+                let foes = self.foes(user);
+                self.pressure(user, move_id, &foes);
+            }
+            // TryMove: Armor Tail and friends let field-wide moves through,
+            // except Perish Song (and Flower Shield, Rototiller).
+            if am.target == MoveTarget::All && priority > 0 && data.id == "perishsong" && self.foes(user).into_iter().any(|f| self.blocks_priority(f)) {
+                return Ok(false);
+            }
+            return Ok(self.try_move_hit(user, data, am.move_type));
         }
         let targets = self.get_move_targets(user, &am, Some(target));
+        // A charged move's second turn comes from lockedmove: no Pressure.
+        if !bounced && self.mon(user).locked_move().is_none() {
+            let pressure_targets = if data.flags.has("mustpressure") { self.foes(user) } else { targets.clone() };
+            self.pressure(user, move_id, &pressure_targets);
+        }
         // useMoveInner aims at the last target (or keeps the chosen one).
         let last_target = targets.last().copied().unwrap_or(target);
         // TryMove: a two-turn move charges now unless its charge is done or
@@ -385,7 +474,7 @@ impl Battle {
             }
         }
         // TryMove: a foe's Armor Tail stops priority moves aimed at its side.
-        if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.ability_is(f, "armortail")) {
+        if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.blocks_priority(f)) {
             return Ok(false);
         }
         if targets.is_empty() {
@@ -485,7 +574,7 @@ impl Battle {
 
     /// `tryMoveHit` for moves that hit a side or the field
     /// (runMoveEffects' sideCondition / pseudoWeather, and onHitSide).
-    fn try_move_hit(&mut self, user: MonRef, data: &MoveData) -> bool {
+    fn try_move_hit(&mut self, user: MonRef, data: &MoveData, move_type: crate::dex::TypeId) -> bool {
         let add = |b: &mut Battle, c: SideCondition, turns: u8| {
             let d = &mut b.sides[user.side].conditions[c as usize];
             if *d > 0 {
@@ -526,7 +615,11 @@ impl Battle {
             "perishsong" => {
                 let mut result = false;
                 for r in self.all_active() {
-                    if r != user && (self.ability_is(r, "goodasgold") || self.ability_is(r, "soundproof")) {
+                    if r != user
+                        && (self.ability_is(r, "goodasgold")
+                            || self.ability_is(r, "soundproof")
+                            || self.absorbs(user, r, move_type, data))
+                    {
                         result = true;
                     } else if !self.mon(r).volatiles.has(VolatileId::PerishSong) {
                         self.add_volatile(r, VolatileId::PerishSong);
@@ -620,6 +713,10 @@ impl Battle {
                 HitRes::Bool(false)
             } else if t != user && data.flags.has("sound") && b.ability_is(t, "soundproof") {
                 HitRes::Bool(false)
+            } else if t != user && b.absorbs(user, t, spread_type, data) {
+                // Volt/Water Absorb, Sap Sipper, Lightning Rod, Storm Drain,
+                // Telepathy, Oblivious (Taunt).
+                HitRes::Bool(false)
             } else if data.category == Category::Status && t != user && b.ability_is(t, "goodasgold") {
                 // Good as Gold (priority 0).
                 HitRes::Bool(false)
@@ -691,6 +788,9 @@ impl Battle {
         let (us, ts) = (self.mon(user).speed, self.mon(t).speed);
         if self.ability_is(user, "compoundeyes") {
             mods.push((-1, us, 7, 5325));
+        }
+        if self.ability_is(t, "sandveil") && self.field.weather == crate::damage::Weather::Sand {
+            mods.push((-1, ts, 7, 3277));
         }
         match self.item_of(user) {
             Some("widelens") => mods.push((-2, us, 8, 4505)),
@@ -941,7 +1041,9 @@ impl Battle {
                 continue;
             }
             let d = if d == 0 { 0 } else { self.on_move_damage(t, d.max(1)).max(1) };
+            self.move_damage_by = Some(user);
             let dealt = self.apply_damage(t, d);
+            self.move_damage_by = None;
             if dealt != 0 {
                 let m = self.mon_mut(t);
                 m.hurt_this_turn = Some(m.hp);
@@ -1163,7 +1265,8 @@ impl Battle {
         if m.hp == 0 && !m.faint_queued {
             m.switch_flag = None;
             m.faint_queued = true;
-            self.faint_queue.push(t);
+            let by = self.move_damage_by;
+            self.faint_queue.push((t, by));
         }
         d as u32
     }

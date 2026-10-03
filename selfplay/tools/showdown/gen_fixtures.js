@@ -420,6 +420,15 @@ function supportedSet(rand, entry, usedItems) {
 		evs: Object.fromEntries(STATS.map((st, i) => [st, points[i]])), moves};
 }
 
+// Teams.export leaves out an all-zero EVs line, which the engine would fill
+// from usage; spell it out.
+function exportTeam(team) {
+	return team.map(set => {
+		const text = Teams.export([set]);
+		return /\nEVs: /.test(text) ? text : text.replace(/(\nLevel: [^\n]*\n)/, "$1EVs: 0 HP  \n");
+	}).join("");
+}
+
 function supportedTeam(rand) {
 	const team = [];
 	const nums = new Set();
@@ -578,7 +587,7 @@ function battleFixtures(perPolicy, seed) {
 					}
 				}
 			}
-			out.push({threshold, teams: teams.map(t => Teams.export(t)), steps, final: battleSnapshot(battle)});
+			out.push({threshold, teams: teams.map(exportTeam), steps, final: battleSnapshot(battle)});
 		}
 	}
 	return out;

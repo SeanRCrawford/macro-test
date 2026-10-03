@@ -109,6 +109,7 @@ enum ResidualKind {
     TrickRoom,
     Side(usize, SideCondition),
     Leftovers,
+    Healer,
     Status(Status),
     Volatile(VolatileId),
 }
@@ -143,7 +144,7 @@ impl Battle {
         // Immunity: Sand Rush to sandstorm; TryAddVolatile: Inner Focus to
         // flinching.
         let ab = Dex::get().ability(m.ability).id.as_str();
-        if (key == "sandstorm" && ab == "sandrush") || (key == "flinch" && ab == "innerfocus") {
+        if (key == "sandstorm" && matches!(ab, "sandrush" | "sandveil")) || (key == "flinch" && ab == "innerfocus") {
             return false;
         }
         key.is_empty() || !Dex::get().immune_to(key, m.types)
@@ -233,6 +234,14 @@ impl Battle {
         }
         if !self.run_status_immunity(t, id.id()) {
             return HitRes::Bool(false);
+        }
+        // TryAddVolatile: Aroma Veil guards its side (itself included).
+        if matches!(id, VolatileId::Disable | VolatileId::Encore | VolatileId::Taunt)
+            && (0..ACTIVE_PER_SIDE).any(|p| {
+                self.occupant(t.side, p).is_some_and(|a| self.mon(a).hp > 0 && self.ability_is(a, "aromaveil"))
+            })
+        {
+            return HitRes::Null;
         }
         if id == VolatileId::Encore {
             return self.start_encore(t);
@@ -325,11 +334,9 @@ impl Battle {
             effect_order,
             target_loc: 0,
         });
-        if queued.is_some_and(|q| q != last) {
-            // changeAction (Mental Herb isn't supported).
-            if self.change_move_action(t, slot).is_err() {
-                return HitRes::Bool(false);
-            }
+        // changeAction, unless a Mental Herb is about to cure it.
+        if queued.is_some_and(|q| q != last) && self.item_of(t) != Some("mentalherb") && self.change_move_action(t, slot).is_err() {
+            return HitRes::Bool(false);
         }
         HitRes::Bool(true)
     }
@@ -474,6 +481,7 @@ impl Battle {
         let from_other = source.is_some_and(|s| s != t);
         match ability {
             "clearbody" if source != Some(t) => capped.retain(|b| b.1 >= 0),
+            "hypercutter" if source != Some(t) => capped.retain(|b| !(b.0 == 0 && b.1 < 0)),
             "scrappy" | "innerfocus" | "oblivious" | "owntempo" if cause == BoostCause::Intimidate => {
                 capped.retain(|b| b.0 != 0);
             }
@@ -538,7 +546,7 @@ impl Battle {
             let m = self.mon_mut(r);
             m.switch_flag = None;
             m.faint_queued = true;
-            self.faint_queue.push(r);
+            self.faint_queue.push((r, None));
         }
     }
 
@@ -613,6 +621,9 @@ impl Battle {
                 if self.item_of(r) == Some("whiteherb") {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::WhiteHerb, order: 29, speed: m.speed, sub_order: 8 });
                 }
+                if self.ability_is(r, "healer") {
+                    handlers.push(Residual { mon: Some(r), what: ResidualKind::Healer, order: 5, speed: m.speed, sub_order: 3 });
+                }
                 if self.item_of(r) == Some("leftovers") {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
                 }
@@ -679,6 +690,13 @@ impl Battle {
                         continue;
                     }
                     self.grassy_heal(h.mon);
+                }
+                ResidualKind::Healer => {
+                    for a in self.adjacent_allies(h.mon) {
+                        if self.mon(a).status != Status::None && self.chance.chance(1, 2) {
+                            self.cure_status(a);
+                        }
+                    }
                 }
                 ResidualKind::Leftovers => {
                     if self.item_of(h.mon) != Some("leftovers") {

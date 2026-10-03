@@ -84,7 +84,10 @@ pub struct Battle {
     pub outcome: Option<Outcome>,
     queue: Vec<Action>,
     mid_turn: bool,
-    faint_queue: Vec<MonRef>,
+    /// Queued faints, with the user of the move that caused each (if any).
+    faint_queue: Vec<(MonRef, Option<MonRef>)>,
+    /// Set while move damage is dealt: the move's user, for the faint queue.
+    move_damage_by: Option<MonRef>,
     mega_used: [bool; 2],
     /// The six as brought, while team-preview actions pick the four.
     benched: [Vec<Mon>; 2],
@@ -123,6 +126,7 @@ impl Battle {
             queue: Vec::new(),
             mid_turn: true,
             faint_queue: Vec::new(),
+            move_damage_by: None,
             mega_used: [false; 2],
             effect_order: 0,
             benched: [Vec::new(), Vec::new()],
@@ -251,6 +255,7 @@ impl Battle {
     /// Showdown's resolveAction + getActionSpeed, appended to the queue.
     fn add_action(&mut self, kind: ActionKind, order: u32, priority: f64) -> Res<()> {
         let fractional = self.fractional_priority(&kind);
+        self.set_original_target(&kind);
         let mut action = Action { kind, order, priority, speed: 1, fractional };
         self.action_speed(&mut action)?;
         self.queue.push(action);
@@ -265,6 +270,15 @@ impl Battle {
             _ => NO_ORDER,
         };
         self.queue.push(Action { kind, order, priority: 0.0, speed: 1, fractional: 0.0 });
+    }
+
+    /// resolveAction's `originalTarget = pokemon.getAtLoc(targetLoc)`.
+    fn set_original_target(&mut self, kind: &ActionKind) {
+        if let ActionKind::Move { mon, target_loc, .. } = *kind {
+            let t = if target_loc == 0 { None } else { self.at_loc(mon, target_loc) };
+            let uid = t.map(|t| (t.side, self.mon(t).uid));
+            self.mon_mut(mon).original_target = uid;
+        }
     }
 
     /// The FractionalPriority event for a move action: Quick Claw.
@@ -422,6 +436,7 @@ impl Battle {
     /// placed where it would sort, ties broken at random.
     fn insert_action(&mut self, kind: ActionKind, order: u32) -> Res<()> {
         let fractional = self.fractional_priority(&kind);
+        self.set_original_target(&kind);
         let mut action = Action { kind, order, priority: 0.0, speed: 1, fractional };
         if let ActionKind::RunSwitch { mon } | ActionKind::Move { mon, .. } = action.kind {
             let s = self.action_speed_of(mon)?;
@@ -741,10 +756,13 @@ impl Battle {
         if self.faint_queue.is_empty() {
             return Ok(());
         }
+        let length = self.faint_queue.len();
         let mut last = None;
+        let mut last_source = None;
         while !self.faint_queue.is_empty() {
-            let r = self.faint_queue.remove(0);
+            let (r, source) = self.faint_queue.remove(0);
             last = Some(r);
+            last_source = source;
             let m = self.mon_mut(r);
             if m.fainted {
                 continue;
@@ -764,6 +782,15 @@ impl Battle {
             side.fainted_this_turn = true;
         }
         self.check_win(last);
+        if self.outcome.is_some() {
+            return Ok(());
+        }
+        // AfterFaint, for the last one only: Moxie (onSourceAfterFaint).
+        if let Some(s) = last_source {
+            if self.ability_is(s, "moxie") && self.mon(s).is_active {
+                self.boost(s, &[(0, length as i8)], Some(s));
+            }
+        }
         Ok(())
     }
 
