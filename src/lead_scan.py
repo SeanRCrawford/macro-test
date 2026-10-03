@@ -979,18 +979,28 @@ def move_plans(actor, moveset, foes, allies, typechart, field, battle):
     return out
 
 
-def _apply(hp, tid, dealt, sashed):
+def _apply(hp, tid, dealt, sashed, move=None, attacker=None):
     """Damage one target, honouring Focus Sash / Sturdy. Returns HP removed.
 
     A sash survivor sits at a hair above zero rather than at zero, so it counts
     as ALIVE for the pin logic -- which is the point: a Pokemon on 1 HP still
     gets its turn, and a plan that assumed it was gone is wrong.
+
+    `move` (a `MoveInfo`, with its `attacker`): a MULTI-HIT move -- Bullet Seed,
+    Triple Axel, a Parental Bond second hit -- only has its first hit absorbed,
+    so a later hit still KOs and the sash does not hold (`damage.
+    breaks_focus_sash`, the same rule the real engines use). Without `move` the
+    hit is treated as a single hit, as before.
     """
     before = hp.get(tid, 0.0)
     if before <= 0:
         return 0.0
     after = before - dealt
-    if after <= 0 and tid in sashed and before >= 1.0:
+    breaks = False
+    if move is not None:
+        from damage import breaks_focus_sash
+        breaks = breaks_focus_sash(move.name, attacker, move)
+    if after <= 0 and tid in sashed and before >= 1.0 and not breaks:
         after = 0.01
     hp[tid] = max(0.0, after)
     return before - hp[tid]
