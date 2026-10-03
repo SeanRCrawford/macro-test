@@ -1014,7 +1014,11 @@ impl Battle {
                     .and_then(|v| self.trap_source(v.counter))
                     .is_some_and(|s| self.mon(s).is_active);
                 let trapped =
-                    (shadow_tag || bound) && self.item_of(r) != Some("shedshell") && !Dex::get().immune_to("trapped", m.types);
+                    // Shed Shell and Run Away (onTrapPokemon, priority -10) free it.
+                    (shadow_tag || bound)
+                        && self.item_of(r) != Some("shedshell")
+                        && !self.ability_is(r, "runaway")
+                        && !Dex::get().immune_to("trapped", m.types);
                 // Struggling counts as a locked move: no Mega Evolution.
                 Some(SlotRequest { moves, struggle, can_mega: m.can_mega_evo.is_some() && !struggle, trapped })
             });

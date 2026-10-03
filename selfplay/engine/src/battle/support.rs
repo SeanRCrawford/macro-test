@@ -142,6 +142,12 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("yawn", &["onTryHit"]),
     ("disable", &["onTryHit"]),
     ("electroshot", &["onTryMove"]),
+    ("phantomforce", &["onTryMove"]),
+    ("shadowforce", &["onTryMove"]),
+    ("fly", &["condition.onInvulnerability", "condition.onSourceModifyDamage", "onTryMove"]),
+    ("bounce", &["condition.onInvulnerability", "condition.onSourceBasePower", "onTryMove"]),
+    ("dig", &["condition.onImmunity", "condition.onInvulnerability", "condition.onSourceModifyDamage", "onTryMove"]),
+    ("dive", &["condition.onImmunity", "condition.onInvulnerability", "condition.onSourceModifyDamage", "onTryMove"]),
     ("meteorbeam", &["onTryMove"]),
     ("solarbeam", &["onTryMove", "onBasePower"]),
     ("solarblade", &["onTryMove", "onBasePower"]),
@@ -195,7 +201,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         || m.primary.volatile_status.as_deref().is_some_and(|v| VOLATILES.contains(&v))
         || m.primary.self_effect.as_ref().and_then(|e| e.volatile_status.as_deref()).is_some_and(|v| VOLATILES.contains(&v))
         || field_move
-        || matches!(m.id.as_str(), "throatchop" | "glaiverush");
+        || matches!(m.id.as_str(), "throatchop" | "glaiverush" | "phantomforce" | "shadowforce" | "fly" | "bounce" | "dig" | "dive");
     // selfdestruct moves: Final Gambit (ifHit), Explosion and Self-Destruct (always).
     let selfdestruct_ok = !m.has_key("selfdestruct") || matches!(m.id.as_str(), "finalgambit" | "memento" | "explosion" | "selfdestruct");
     let target_ok = match m.category {

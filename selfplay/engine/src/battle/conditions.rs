@@ -150,7 +150,9 @@ impl Battle {
         // Immunity: Sand Rush to sandstorm; TryAddVolatile: Inner Focus to
         // flinching.
         let ab = self.ability_id(t);
-        if (key == "sandstorm" && matches!(ab, "sandrush" | "sandveil" | "sandforce" | "overcoat"))
+        // Dig and Dive's onImmunity: no sandstorm underground or underwater.
+        let hidden = super::moves::semi_invulnerable(m).is_some_and(|id| matches!(Dex::get().move_data(id).id.as_str(), "dig" | "dive"));
+        if (key == "sandstorm" && (hidden || matches!(ab, "sandrush" | "sandveil" | "sandforce" | "overcoat")))
             || (key == "powder" && ab == "overcoat")
             || (key == "flinch" && ab == "innerfocus")
         {

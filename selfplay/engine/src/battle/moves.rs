@@ -283,6 +283,26 @@ impl Battle {
         }
     }
 
+    /// The Invulnerability event: `t` is out of reach (charging Fly, Dig,
+    /// Dive, Bounce, Phantom Force or Shadow Force), unless the move reaches
+    /// it or No Guard (onAnyInvulnerability) is in play.
+    fn invulnerable(&self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
+        let Some(charging) = semi_invulnerable(self.mon(t)) else { return false };
+        if self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
+            return false;
+        }
+        if data.id == "toxic" && self.mon(user).has_type(Dex::get().type_id("Poison").expect("Poison")) {
+            return false;
+        }
+        let reaches: &[&str] = match Dex::get().move_data(charging).id.as_str() {
+            "fly" | "bounce" => &["gust", "twister", "skyuppercut", "thunder", "hurricane", "smackdown", "thousandarrows"],
+            "dig" => &["earthquake", "magnitude"],
+            "dive" => &["surf", "whirlpool"],
+            _ => &[],
+        };
+        !reaches.contains(&data.id.as_str())
+    }
+
     /// onFoeTryMove: Armor Tail, Queenly Majesty, Dazzling.
     fn blocks_priority(&self, r: MonRef) -> bool {
         ["armortail", "queenlymajesty", "dazzling"].iter().any(|a| self.ability_is(r, a))
@@ -351,6 +371,7 @@ impl Battle {
                 c.volatiles.glaive_rush = m.volatiles.has(VolatileId::GlaiveRush);
                 c.volatiles.flash_fire = m.volatiles.has(VolatileId::FlashFire);
                 c.volatiles.gem = m.volatiles.has(VolatileId::Gem);
+                c.volatiles.semi_invulnerable = semi_invulnerable(m);
                 c.fallen = m.fallen;
                 c.stats_lowered_this_turn = m.stats_lowered_this_turn;
                 c.moved_this_turn = !m.newly_switched && !self.will_move(self.mon_ref(side, pos));
@@ -606,6 +627,7 @@ impl Battle {
             "electroshot" => (true, weather == crate::damage::Weather::Rain),
             "meteorbeam" => (true, false),
             "solarbeam" | "solarblade" => (false, weather == crate::damage::Weather::Sun),
+            "phantomforce" | "shadowforce" | "fly" | "bounce" | "dig" | "dive" => (false, false),
             _ => return None,
         };
         let m = self.mon(user);
@@ -752,10 +774,14 @@ impl Battle {
             "perishsong" => {
                 let mut result = false;
                 for r in self.all_active() {
-                    if r != user
-                        && (self.ability_is(r, "goodasgold")
-                            || self.ability_is(r, "soundproof")
-                            || self.absorbs(user, r, move_type, data))
+                    // Invulnerability (a miss), then TryHit: either way it
+                    // counts as a success.
+                    let missed = self.invulnerable(user, r, data);
+                    if missed
+                        || (r != user
+                            && (self.ability_is(r, "goodasgold")
+                                || self.ability_is(r, "soundproof")
+                                || self.absorbs(user, r, move_type, data)))
                     {
                         result = true;
                     } else if !self.mon(r).volatiles.has(VolatileId::PerishSong) {
@@ -869,6 +895,12 @@ impl Battle {
             });
         };
 
+        // hitStepInvulnerabilityEvent: a target charging Fly, Dig, Dive,
+        // Bounce, Phantom Force or Shadow Force can't be hit, bar the moves
+        // that reach it and No Guard (onAnyInvulnerability, priority 1).
+        if data.id != "helpinghand" {
+            step(self, &mut targets, &mut |b, t| HitRes::Bool(!b.invulnerable(user, t, data)));
+        }
         // hitStepTryHitEvent: Psychic Terrain (priority 4) stops priority
         // moves on grounded foes; Protect blocks moves with the protect flag.
         step(self, &mut targets, &mut |b, t| {
@@ -1812,4 +1844,16 @@ impl Battle {
         }
         d as u32
     }
+}
+
+/// The semi-invulnerable move a Pokemon is charging, if any.
+pub(super) fn semi_invulnerable(m: &super::state::Mon) -> Option<MoveId> {
+    m.volatiles.0.iter().find_map(|v| match v.id {
+        VolatileId::Charging(id)
+            if matches!(Dex::get().move_data(id).id.as_str(), "phantomforce" | "shadowforce" | "fly" | "bounce" | "dig" | "dive") =>
+        {
+            Some(id)
+        }
+        _ => None,
+    })
 }

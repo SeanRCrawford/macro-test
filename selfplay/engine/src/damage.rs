@@ -62,6 +62,8 @@ pub struct Volatiles {
     pub glaive_rush: bool,
     /// A Gem was consumed for this move.
     pub gem: bool,
+    /// Charging a semi-invulnerable move (Dig, Dive, Fly, Bounce...).
+    pub semi_invulnerable: Option<MoveId>,
 }
 
 /// A Pokemon as the damage calculation sees it.
@@ -231,6 +233,8 @@ enum VolatileKind {
     FlashFire,
     GlaiveRush,
     Gem,
+    /// The charging move's own condition (Dig, Dive, Fly, Bounce).
+    SemiInvulnerable(MoveId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,6 +530,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                 VolatileKind::GlaiveRush => move_cond("glaiverush"),
                 VolatileKind::FlashFire => &d.ability(d.ability_id("flashfire").unwrap()).condition,
                 VolatileKind::Gem => &d.condition(d.condition_id("gem").unwrap()).handlers,
+                VolatileKind::SemiInvulnerable(m) => &d.move_data(m).condition,
             },
             Effect::Weather(w) => {
                 let id = match w {
@@ -621,6 +626,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         }
         if v.gem {
             out.push(Effect::Volatile(VolatileKind::Gem));
+        }
+        if let Some(m) = v.semi_invulnerable {
+            out.push(Effect::Volatile(VolatileKind::SemiInvulnerable(m)));
         }
         out.push(Effect::Ability(m.ability));
         if let Some(it) = m.item {
@@ -1291,6 +1299,14 @@ impl<'a, 'b> Calc<'a, 'b> {
                     }
                     _ => return self.not_implemented(r),
                 },
+                // Gust and Twister on a Bounce user.
+                (Effect::Volatile(VolatileKind::SemiInvulnerable(_)), "onSourceBasePower") => {
+                    if ["gust", "twister"].contains(&mv.id.as_str()) {
+                        Act::Chain(of(2, 1))
+                    } else {
+                        Act::None
+                    }
+                }
                 (Effect::Ability(ab), "onSourceBasePower") => match self.dex.ability(ab).id.as_str() {
                     "dryskin" => {
                         if am.move_type == self.ty("Fire") {
@@ -1576,6 +1592,16 @@ impl<'a, 'b> Calc<'a, 'b> {
                     }
                 }
                 (Effect::Volatile(VolatileKind::GlaiveRush), "onSourceModifyDamage") => Act::Chain(of(2, 1)),
+                // Earthquake on a Dig user, Surf on a Dive user, Gust on Fly.
+                (Effect::Volatile(VolatileKind::SemiInvulnerable(m)), "onSourceModifyDamage") => {
+                    let hits = match self.dex.move_data(m).id.as_str() {
+                        "dig" => ["earthquake", "magnitude"].contains(&mv.id.as_str()),
+                        "dive" => ["surf", "whirlpool"].contains(&mv.id.as_str()),
+                        "fly" => ["gust", "twister"].contains(&mv.id.as_str()),
+                        _ => false,
+                    };
+                    yes(hits, of(2, 1))
+                }
                 (Effect::Screen(s), "onAnyModifyDamage") => {
                     let Holder::Side(side) = r.holder else { unreachable!() };
                     let state = &self.ctx.sides[side];

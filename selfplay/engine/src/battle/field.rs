@@ -376,7 +376,7 @@ impl Battle {
 
     /// Grassy Terrain's per-Pokemon residual heal.
     pub(super) fn grassy_heal(&mut self, r: MonRef) {
-        if self.grounded(r) {
+        if self.grounded(r) && super::moves::semi_invulnerable(self.mon(r)).is_none() {
             let amount = (self.mon(r).max_hp() / 16).max(1) as u32;
             self.heal(r, amount);
         }
