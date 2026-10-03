@@ -507,7 +507,11 @@ impl Battle {
             if am.target == MoveTarget::All && priority > 0 && data.id == "perishsong" && self.foes(user).into_iter().any(|f| self.blocks_priority(f)) {
                 return Ok(false);
             }
-            return Ok(self.try_move_hit(user, data, am.move_type));
+            if !bounced && data.flags.has("mustpressure") {
+                let foes = self.foes(user);
+                self.pressure(user, move_id, &foes);
+            }
+            return self.try_move_hit(user, data, am.move_type, bounced, priority);
         }
         let targets = self.get_move_targets(user, &am, Some(target));
         // A charged move's second turn comes from lockedmove: no Pressure.
@@ -659,7 +663,32 @@ impl Battle {
 
     /// `tryMoveHit` for moves that hit a side or the field
     /// (runMoveEffects' sideCondition / pseudoWeather, and onHitSide).
-    fn try_move_hit(&mut self, user: MonRef, data: &MoveData, move_type: crate::dex::TypeId) -> bool {
+    fn try_move_hit(&mut self, user: MonRef, data: &MoveData, move_type: crate::dex::TypeId, bounced: bool, priority: i8) -> Res<bool> {
+        // Entry hazards: TryHitSide lets a foe's Magic Bounce send them back.
+        let hazard = match data.id.as_str() {
+            "stealthrock" => Some(SideCondition::StealthRock),
+            "spikes" => Some(SideCondition::Spikes),
+            "toxicspikes" => Some(SideCondition::ToxicSpikes),
+            "stickyweb" => Some(SideCondition::StickyWeb),
+            _ => None,
+        };
+        if let Some(c) = hazard {
+            self.protean(user, move_type);
+            if !bounced {
+                let mut bouncers: Vec<(MonRef, i32)> =
+                    self.foes(user).into_iter().filter(|&f| self.ability_is(f, "magicbounce")).map(|f| (f, self.mon(f).speed)).collect();
+                self.speed_sort(&mut bouncers, |a, b| b.1.cmp(&a.1));
+                if let Some(&(holder, _)) = bouncers.first() {
+                    self.bounce_move(holder, Dex::get().move_id(&data.id).expect("move id"), user, priority)?;
+                    return Ok(false);
+                }
+            }
+            return Ok(self.add_hazard(1 - user.side, c));
+        }
+        Ok(self.try_move_hit_inner(user, data, move_type))
+    }
+
+    fn try_move_hit_inner(&mut self, user: MonRef, data: &MoveData, move_type: crate::dex::TypeId) -> bool {
         let add = |b: &mut Battle, c: SideCondition, turns: u8| {
             let d = &mut b.sides[user.side].conditions[c as usize];
             if *d > 0 {
@@ -1357,6 +1386,26 @@ impl Battle {
                 // Ice Spinner ends the terrain.
                 if mv.data.id == "icespinner" {
                     self.clear_terrain();
+                }
+                // Stone Axe and Ceaseless Edge lay hazards; Mortal Spin clears
+                // the user's side (none of them with Sheer Force).
+                if !mv.am.has_sheer_force {
+                    for _ in &damaged {
+                        match mv.data.id.as_str() {
+                            "stoneaxe" => {
+                                self.add_hazard(1 - user.side, SideCondition::StealthRock);
+                            }
+                            "ceaselessedge" => {
+                                self.add_hazard(1 - user.side, SideCondition::Spikes);
+                            }
+                            "mortalspin" => {
+                                for c in SideCondition::ALL.into_iter().filter(|c| c.is_hazard()) {
+                                    self.sides[user.side].conditions[c as usize] = 0;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }

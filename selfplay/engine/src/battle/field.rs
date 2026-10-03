@@ -3,7 +3,7 @@
 //! data/moves.ts), runSwitch's SwitchIn event with Intimidate and the
 //! weather and terrain setters.
 
-use super::state::ACTIVE_PER_SIDE;
+use super::state::{SideCondition, ACTIVE_PER_SIDE};
 use super::{Battle, MonRef, Res};
 use crate::damage::{Terrain, Weather};
 use crate::dex::Dex;
@@ -65,6 +65,8 @@ struct SwitchIn {
     speed: i64,
     priority: i8,
     sub_order: u8,
+    /// effectOrder, the tiebreak for SwitchIn handlers (hazards).
+    effect_order: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +78,8 @@ enum SwitchInKind {
     Seed,
     /// White Herb's onAnySwitchIn (priority -2), for every holder.
     WhiteHerb,
+    /// An entry hazard on the Pokemon's side.
+    Hazard(SideCondition),
 }
 
 impl Battle {
@@ -163,7 +167,7 @@ impl Battle {
             }
             StartEffect::ScreenCleaner => {
                 for side in [r.side, 1 - r.side] {
-                    for c in [super::state::SideCondition::Reflect, super::state::SideCondition::LightScreen, super::state::SideCondition::AuroraVeil] {
+                    for c in [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::AuroraVeil] {
                         self.sides[side].conditions[c as usize] = 0;
                     }
                 }
@@ -205,23 +209,31 @@ impl Battle {
             let index = order.iter().position(|&o| o == r).unwrap_or(0) as i64;
             let speed = m.speed as i64 * 4 - index;
             if m.status == crate::damage::Status::Toxic {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::ToxicReset, speed, priority: 0, sub_order: 0 });
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::ToxicReset, speed, priority: 0, sub_order: 0, effect_order: 0 });
+            }
+            for c in SideCondition::ALL {
+                if c.is_hazard() && self.sides[r.side].condition(c) > 0 {
+                    let effect_order = self.sides[r.side].condition_order[c as usize];
+                    handlers.push(SwitchIn { mon: r, what: SwitchInKind::Hazard(c), speed, priority: 0, sub_order: 4, effect_order });
+                }
             }
             if let Some(e) = start_effect(&Dex::get().ability(m.ability).id) {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Ability(e), speed, priority: e.priority(), sub_order: 7 });
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Ability(e), speed, priority: e.priority(), sub_order: 7, effect_order: 0 });
             }
             if self.item_of(r).is_some_and(|i| i.ends_with("seed")) {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Seed, speed, priority: -1, sub_order: 8 });
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Seed, speed, priority: -1, sub_order: 8, effect_order: 0 });
             }
         }
         for &r in &all {
             if self.item_of(r) == Some("whiteherb") {
                 let index = order.iter().position(|&o| o == r).unwrap_or(0) as i64;
                 let speed = self.mon(r).speed as i64 * 4 - index;
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::WhiteHerb, speed, priority: -2, sub_order: 8 });
+                handlers.push(SwitchIn { mon: r, what: SwitchInKind::WhiteHerb, speed, priority: -2, sub_order: 8, effect_order: 0 });
             }
         }
-        self.speed_sort(&mut handlers, |a, b| b.priority.cmp(&a.priority).then(b.speed.cmp(&a.speed)).then(a.sub_order.cmp(&b.sub_order)));
+        self.speed_sort(&mut handlers, |a, b| {
+            b.priority.cmp(&a.priority).then(b.speed.cmp(&a.speed)).then(a.sub_order.cmp(&b.sub_order)).then(a.effect_order.cmp(&b.effect_order))
+        });
         for h in handlers {
             if self.mon(h.mon).fainted {
                 continue;
@@ -230,6 +242,11 @@ impl Battle {
                 SwitchInKind::ToxicReset => self.mon_mut(h.mon).status_state.stage = 0,
                 SwitchInKind::Seed => self.try_seed(h.mon),
                 SwitchInKind::WhiteHerb => self.white_herb(h.mon),
+                SwitchInKind::Hazard(c) => {
+                    if self.mon(h.mon).hp > 0 && self.sides[h.mon.side].condition(c) > 0 {
+                        self.hazard_switch_in(h.mon, c);
+                    }
+                }
                 SwitchInKind::Ability(e) => {
                     if self.mon(h.mon).hp > 0 {
                         self.ability_start(h.mon, e);
@@ -242,6 +259,61 @@ impl Battle {
             }
         }
         Ok(())
+    }
+
+    /// A hazard's onSwitchIn.
+    fn hazard_switch_in(&mut self, r: MonRef, c: SideCondition) {
+        let dex = Dex::get();
+        let max = self.mon(r).max_hp() as u32;
+        let layers = self.sides[r.side].condition(c) as u32;
+        let foe_lead = self.occupant(1 - r.side, 0);
+        match c {
+            SideCondition::StealthRock => {
+                let rock = dex.type_id("Rock").expect("Rock");
+                let t = self.mon(r).types;
+                let mut type_mod = dex.type_mod(rock, t[0]) as i32;
+                if t[1] != t[0] {
+                    type_mod += dex.type_mod(rock, t[1]) as i32;
+                }
+                let amount = match type_mod.clamp(-6, 6) {
+                    m if m >= 0 => max * (1 << m) / 8,
+                    m => max / (8 << -m),
+                };
+                self.effect_damage(r, amount);
+            }
+            SideCondition::Spikes if self.grounded(r) => {
+                let amount = [0, 3, 4, 6][layers as usize] * max / 24;
+                self.effect_damage(r, amount);
+            }
+            SideCondition::ToxicSpikes if self.grounded(r) => {
+                let m = self.mon(r);
+                if m.has_type(dex.type_id("Poison").expect("Poison")) {
+                    self.sides[r.side].conditions[c as usize] = 0;
+                } else if !m.has_type(dex.type_id("Steel").expect("Steel")) {
+                    let status = if layers >= 2 { crate::damage::Status::Toxic } else { crate::damage::Status::Poison };
+                    self.try_set_status(r, status);
+                }
+            }
+            SideCondition::StickyWeb if self.grounded(r) => {
+                self.boost(r, &[(4, -1)], foe_lead);
+            }
+            _ => {}
+        }
+    }
+
+    /// addSideCondition for a hazard: a new one, or another layer. False if
+    /// it can't stack higher.
+    pub(super) fn add_hazard(&mut self, side: usize, c: SideCondition) -> bool {
+        let cur = self.sides[side].condition(c);
+        if cur >= c.max_layers() {
+            return false;
+        }
+        if cur == 0 {
+            self.effect_order += 1;
+            self.sides[side].condition_order[c as usize] = self.effect_order;
+        }
+        self.sides[side].conditions[c as usize] = cur + 1;
+        true
     }
 
     /// The weather's Residual handler: count down, or deal sandstorm damage

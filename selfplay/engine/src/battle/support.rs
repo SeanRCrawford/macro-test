@@ -32,7 +32,7 @@ const ABILITIES: &[&str] = &[
     "insomnia", "vitalspirit", "limber", "immunity", "overcoat", "keeneye", "illuminate", "steadfast", "static", "gooey",
     "justified", "angerpoint", "raindish", "liquidooze", "stickyhold", "whitesmoke", "quickfeet", "shielddust", "damp",
     "leafguard", "hydration", "shedskin", "earlybird", "guarddog", "rattled", "supersweetsyrup", "sandspit",
-    "tangledfeet", "anticipation", "forewarn", "runaway",
+    "tangledfeet", "anticipation", "forewarn", "runaway", "toxicdebris",
 ];
 
 /// Items whose every effect is implemented: damage boosts, Mega Stones and
@@ -122,6 +122,13 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("lastresort", &["onTry"]),
     ("upperhand", &["onTry"]),
     ("magicpowder", &["onHit"]),
+    ("stealthrock", &["condition.onSideStart", "condition.onSwitchIn"]),
+    ("stickyweb", &["condition.onSideStart", "condition.onSwitchIn"]),
+    ("spikes", &["condition.onSideRestart", "condition.onSideStart", "condition.onSwitchIn"]),
+    ("toxicspikes", &["condition.onSideRestart", "condition.onSideStart", "condition.onSwitchIn"]),
+    ("stoneaxe", &["onAfterHit", "onAfterSubDamage"]),
+    ("ceaselessedge", &["onAfterHit", "onAfterSubDamage"]),
+    ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
     ("hurricane", &["onModifyMove"]),
@@ -141,6 +148,7 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
 const FIELD_MOVES: &[&str] = &[
     "tailwind", "trickroom", "reflect", "lightscreen", "wideguard", "auroraveil", "raindance", "sunnyday", "sandstorm",
     "snowscape", "electricterrain", "grassyterrain", "mistyterrain", "psychicterrain", "perishsong", "quickguard", "haze",
+    "stealthrock", "spikes", "toxicspikes", "stickyweb",
 ];
 
 /// Moves whose secondary has an onHit that `moves` implements.
@@ -203,7 +211,7 @@ pub fn move_supported(m: &MoveData) -> bool {
             MoveTarget::Normal | MoveTarget::Any | MoveTarget::AdjacentFoe | MoveTarget::AllAdjacentFoes | MoveTarget::AllAdjacent | MoveTarget::RandomNormal
         ),
     };
-    let target_ok = target_ok || (field_move && matches!(m.target, MoveTarget::All | MoveTarget::AllySide));
+    let target_ok = target_ok || (field_move && matches!(m.target, MoveTarget::All | MoveTarget::AllySide | MoveTarget::FoeSide));
     let field_key = |k: &str| field_move && matches!(k, "sideCondition" | "pseudoWeather" | "weather" | "terrain");
     let switch_ok = !m.has_key("selfSwitch") || m.self_switch;
     switch_ok

@@ -415,6 +415,7 @@ impl Battle {
             Justified,
             Rattled,
             SandSpit,
+            ToxicDebris,
             PoisonTouch,
             AirBalloon,
         }
@@ -446,6 +447,7 @@ impl Battle {
                 "justified" => Some((H::Justified, NONE)),
                 "rattled" => Some((H::Rattled, NONE)),
                 "sandspit" => Some((H::SandSpit, NONE)),
+                "toxicdebris" => Some((H::ToxicDebris, NONE)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -513,6 +515,11 @@ impl Battle {
                 }
                 H::Rattled if ["Dark", "Bug", "Ghost"].iter().any(|n| move_type == dex.type_id(n).expect("type")) => {
                     self.boost(t, &[(4, 1)], Some(user));
+                }
+                H::ToxicDebris if data.category == crate::dex::Category::Physical => {
+                    // The attacker's side (its foes', if it hit an ally).
+                    let side = if user.side == t.side { 1 - user.side } else { user.side };
+                    self.add_hazard(side, super::state::SideCondition::ToxicSpikes);
                 }
                 H::SandSpit => {
                     self.set_weather(crate::damage::Weather::Sand, t);

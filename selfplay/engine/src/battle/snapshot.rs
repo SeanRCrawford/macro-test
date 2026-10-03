@@ -78,7 +78,13 @@ impl Battle {
                 let mut conditions = serde_json::Map::new();
                 for c in super::state::SideCondition::ALL {
                     if side.condition(c) > 0 {
-                        conditions.insert(c.id().into(), json!(side.condition(c)));
+                        // Hazards: layers (or true for the single-layer ones).
+                        let value = match c {
+                            super::state::SideCondition::Spikes | super::state::SideCondition::ToxicSpikes => json!(side.condition(c)),
+                            _ if c.is_hazard() => json!(true),
+                            _ => json!(side.condition(c)),
+                        };
+                        conditions.insert(c.id().into(), value);
                     }
                 }
                 json!({"totalFainted": side.total_fainted, "sideConditions": conditions, "pokemon": pokemon})

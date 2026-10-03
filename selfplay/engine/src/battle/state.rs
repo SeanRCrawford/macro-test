@@ -453,6 +453,9 @@ pub struct Side {
     /// Each side condition's remaining duration (0: not up), by
     /// `SideCondition as usize`.
     pub conditions: [u8; SideCondition::COUNT],
+    /// Each side condition's effectOrder (creation order), which orders
+    /// hazards' SwitchIn handlers.
+    pub condition_order: [u64; SideCondition::COUNT],
 }
 
 impl Side {
@@ -470,18 +473,41 @@ pub enum SideCondition {
     WideGuard,
     AuroraVeil,
     QuickGuard,
+    /// Entry hazards: the value is the layer count (1 for the single-layer
+    /// ones); they have no duration.
+    StealthRock,
+    Spikes,
+    ToxicSpikes,
+    StickyWeb,
 }
 
 impl SideCondition {
-    pub const COUNT: usize = 6;
-    pub const ALL: [SideCondition; 6] = [
+    pub const COUNT: usize = 10;
+    pub const ALL: [SideCondition; 10] = [
         SideCondition::Reflect,
         SideCondition::LightScreen,
         SideCondition::Tailwind,
         SideCondition::WideGuard,
         SideCondition::AuroraVeil,
         SideCondition::QuickGuard,
+        SideCondition::StealthRock,
+        SideCondition::Spikes,
+        SideCondition::ToxicSpikes,
+        SideCondition::StickyWeb,
     ];
+
+    pub fn is_hazard(self) -> bool {
+        matches!(self, SideCondition::StealthRock | SideCondition::Spikes | SideCondition::ToxicSpikes | SideCondition::StickyWeb)
+    }
+
+    /// Most layers a hazard stacks to.
+    pub fn max_layers(self) -> u8 {
+        match self {
+            SideCondition::Spikes => 3,
+            SideCondition::ToxicSpikes => 2,
+            _ => 1,
+        }
+    }
 
     pub fn id(self) -> &'static str {
         match self {
@@ -491,6 +517,10 @@ impl SideCondition {
             SideCondition::WideGuard => "wideguard",
             SideCondition::AuroraVeil => "auroraveil",
             SideCondition::QuickGuard => "quickguard",
+            SideCondition::StealthRock => "stealthrock",
+            SideCondition::Spikes => "spikes",
+            SideCondition::ToxicSpikes => "toxicspikes",
+            SideCondition::StickyWeb => "stickyweb",
         }
     }
 
@@ -502,6 +532,10 @@ impl SideCondition {
             SideCondition::LightScreen => (26, 2),
             SideCondition::Tailwind => (26, 5),
             SideCondition::WideGuard | SideCondition::QuickGuard => (4_294_967_296, 4),
+            // Hazards have no Residual handler (see `is_hazard`).
+            SideCondition::StealthRock | SideCondition::Spikes | SideCondition::ToxicSpikes | SideCondition::StickyWeb => {
+                (4_294_967_296, 4)
+            }
             SideCondition::AuroraVeil => (26, 10),
         }
     }

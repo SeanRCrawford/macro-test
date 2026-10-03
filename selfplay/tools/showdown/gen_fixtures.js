@@ -523,8 +523,14 @@ function legalChoices(battle, side) {
 }
 
 /** Effect states as {id: remaining duration}. */
+// Side conditions: their duration, or a hazard's layers (true for the
+// single-layer ones). Volatiles and the field use durations.
 function durations(states) {
-	return Object.fromEntries(Object.entries(states).map(([id, s]) => [id, s.duration ?? null]));
+	return Object.fromEntries(Object.entries(states).map(([id, s]) => [id, s.duration ?? s.layers ?? null]));
+}
+
+function sideDurations(states) {
+	return Object.fromEntries(Object.entries(states).map(([id, s]) => [id, s.duration ?? s.layers ?? true]));
 }
 
 function battleSnapshot(battle) {
@@ -545,7 +551,7 @@ function battleSnapshot(battle) {
 		pseudoWeather: durations(battle.field.pseudoWeather),
 		sides: battle.sides.map(side => ({
 			totalFainted: side.totalFainted,
-			sideConditions: durations(side.sideConditions),
+			sideConditions: sideDurations(side.sideConditions),
 			pokemon: side.pokemon.map(p => ({
 				species: p.species.id, hp: p.hp, maxhp: p.maxhp, status: p.fainted ? "fnt" : p.status,
 				active: p.isActive,

@@ -679,7 +679,7 @@ impl Battle {
         }
         for side in 0..2 {
             for c in SideCondition::ALL {
-                if self.sides[side].condition(c) > 0 {
+                if self.sides[side].condition(c) > 0 && !c.is_hazard() {
                     let (order, sub_order) = c.residual_order();
                     handlers.push(Residual { mon: None, what: ResidualKind::Side(side, c), order, speed: 0, sub_order });
                 }
