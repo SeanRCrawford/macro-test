@@ -252,6 +252,10 @@ pub struct Mon {
     pub status_state: StatusState,
     /// Trace is still looking for an ability to copy.
     pub trace_seek: bool,
+    /// Protean / Libero already changed its type since switching in.
+    pub protean_used: bool,
+    /// Supreme Overlord's count of fallen allies, taken on start.
+    pub fallen: u8,
     /// The types to restore when Roost ends.
     pub roost_types: Option<[TypeId; 2]>,
     /// atk, def, spa, spd, spe, accuracy, evasion.
@@ -321,6 +325,8 @@ impl Mon {
             status_state: StatusState::default(),
             roost_types: None,
             trace_seek: false,
+            protean_used: false,
+            fallen: 0,
             boosts: [0; 7],
             ability: set.ability,
             base_ability: set.ability,
@@ -393,6 +399,8 @@ impl Mon {
         self.times_attacked = 0;
         self.hurt_this_turn = None;
         self.trace_seek = false;
+        self.protean_used = false;
+        self.fallen = 0;
         self.ability = self.base_ability;
         self.switch_flag = None;
         self.force_switch_flag = false;

@@ -90,6 +90,9 @@ pub struct Battle {
     move_damage_by: Option<MonRef>,
     /// A self-destructing move's user, at 0 HP but still attacking.
     selfdestruct_user: Option<MonRef>,
+    /// The user of a move with ignoreAbility (Mold Breaker), while it runs:
+    /// other Pokemon's breakable abilities are suppressed.
+    mold_breaker: Option<MonRef>,
     mega_used: [bool; 2],
     /// The six as brought, while team-preview actions pick the four.
     benched: [Vec<Mon>; 2],
@@ -130,6 +133,7 @@ impl Battle {
             faint_queue: Vec::new(),
             move_damage_by: None,
             selfdestruct_user: None,
+            mold_breaker: None,
             mega_used: [false; 2],
             effect_order: 0,
             benched: [Vec::new(), Vec::new()],
@@ -378,7 +382,17 @@ impl Battle {
     }
 
     pub(crate) fn ability_is(&self, r: MonRef, id: &str) -> bool {
-        Dex::get().ability(self.mon(r).ability).id == id
+        self.ability_id(r) == id
+    }
+
+    /// The ability's id as events see it: "" while a Mold Breaker move
+    /// suppresses it (`suppressingAbility`).
+    pub(crate) fn ability_id(&self, r: MonRef) -> &'static str {
+        let ab = Dex::get().ability(self.mon(r).ability);
+        if ab.breakable && self.mold_breaker.is_some_and(|u| u != r) {
+            return "";
+        }
+        ab.id.as_str()
     }
 
     /// The move a Pokemon's queued Move action will use (`queue.willMove`).

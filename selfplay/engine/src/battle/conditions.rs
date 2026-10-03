@@ -143,7 +143,7 @@ impl Battle {
         }
         // Immunity: Sand Rush to sandstorm; TryAddVolatile: Inner Focus to
         // flinching.
-        let ab = Dex::get().ability(m.ability).id.as_str();
+        let ab = self.ability_id(t);
         if (key == "sandstorm" && matches!(ab, "sandrush" | "sandveil" | "sandforce")) || (key == "flinch" && ab == "innerfocus") {
             return false;
         }
@@ -182,6 +182,10 @@ impl Battle {
                 return false;
             }
             if status == Status::Sleep && self.side_has_ability(t.side, "sweetveil") {
+                return false;
+            }
+            // Purifying Salt: no status at all.
+            if self.ability_is(t, "purifyingsalt") {
                 return false;
             }
         }
@@ -242,7 +246,7 @@ impl Battle {
         // TryAddVolatile: Own Tempo (confusion), Sweet Veil (Yawn, for its
         // side).
         if (id == VolatileId::Confusion && self.ability_is(t, "owntempo"))
-            || (id == VolatileId::Yawn && self.side_has_ability(t.side, "sweetveil"))
+            || (id == VolatileId::Yawn && (self.side_has_ability(t.side, "sweetveil") || self.ability_is(t, "purifyingsalt")))
         {
             return HitRes::Null;
         }
@@ -479,7 +483,7 @@ impl Battle {
         if self.sides[1 - t.side].pokemon_left == 0 {
             return HitRes::Bool(false);
         }
-        let ability = Dex::get().ability(m.ability).id.as_str();
+        let ability = self.ability_id(t);
         // ChangeBoost: Contrary.
         let sign = if ability == "contrary" { -1 } else { 1 };
         // getCappedBoost

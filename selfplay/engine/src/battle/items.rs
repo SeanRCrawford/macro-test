@@ -43,6 +43,7 @@ impl Battle {
             Thaw,
             EjectButton,
             RedCard,
+            Pickpocket,
         }
         // (holder, kind, priority, speed, subOrder)
         let mut hs: Vec<(MonRef, H, i32, i32, u8)> = Vec::new();
@@ -50,6 +51,9 @@ impl Battle {
             let speed = self.mon(t).speed;
             if self.mon(t).status == crate::damage::Status::Freeze {
                 hs.push((t, H::Thaw, 0, speed, 0));
+            }
+            if self.ability_is(t, "pickpocket") {
+                hs.push((t, H::Pickpocket, 0, speed, 7));
             }
             match self.item_of(t) {
                 Some("ejectbutton") => hs.push((t, H::EjectButton, 2, speed, 8)),
@@ -80,6 +84,22 @@ impl Battle {
                     self.mon_mut(t).switch_flag = Some(SwitchFlag::Replace);
                     if !self.use_item(t) {
                         self.mon_mut(t).switch_flag = None;
+                    }
+                }
+                H::Pickpocket => {
+                    let m = self.mon(t);
+                    if user == t || !data.flags.has("contact") || m.item.is_some() || m.switch_flag.is_some() || m.force_switch_flag {
+                        continue;
+                    }
+                    if self.mon(user).switch_flag == Some(SwitchFlag::Replace) {
+                        continue;
+                    }
+                    let Some(item) = self.take_item(user, user) else { continue };
+                    // setItem fails on a Pokemon with no HP: the item goes back.
+                    if self.mon(t).hp == 0 || !self.mon(t).is_active {
+                        self.mon_mut(user).item = Some(item);
+                    } else {
+                        self.mon_mut(t).item = Some(item);
                     }
                 }
                 H::RedCard => {
@@ -386,6 +406,8 @@ impl Battle {
             SpicySpray,
             CursedBody,
             PoisonPoint,
+            SeedSower,
+            Mummy,
             PoisonTouch,
             AirBalloon,
         }
@@ -401,7 +423,7 @@ impl Battle {
             if self.mon(t).status == crate::damage::Status::Freeze {
                 hs.push((t, t, H::Thaw, NONE, speed, 0));
             }
-            let ab = match dex.ability(self.mon(t).ability).id.as_str() {
+            let ab = match self.ability_id(t) {
                 "roughskin" => Some((H::RoughSkin, 1)),
                 "stamina" => Some((H::Stamina, NONE)),
                 "flamebody" => Some((H::FlameBody, NONE)),
@@ -410,6 +432,8 @@ impl Battle {
                 "spicyspray" => Some((H::SpicySpray, NONE)),
                 "cursedbody" => Some((H::CursedBody, NONE)),
                 "poisonpoint" => Some((H::PoisonPoint, NONE)),
+                "seedsower" => Some((H::SeedSower, NONE)),
+                "mummy" => Some((H::Mummy, NONE)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -464,6 +488,16 @@ impl Battle {
                                 v.duration = Some(4);
                             }
                         }
+                    }
+                }
+                H::SeedSower => {
+                    self.set_terrain(Terrain::Grassy, t);
+                }
+                H::Mummy if contact => {
+                    let dex = Dex::get();
+                    let ab = dex.ability(self.mon(user).ability);
+                    if ab.id != "mummy" && !ab.flags.iter().any(|f| f == "cantsuppress") {
+                        self.set_ability(user, self.mon(t).ability);
                     }
                 }
                 H::PoisonPoint if contact && self.chance.chance(3, 10) => {

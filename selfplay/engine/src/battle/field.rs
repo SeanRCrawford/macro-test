@@ -20,6 +20,8 @@ pub(super) enum StartEffect {
     Trace,
     /// Clears Reflect, Light Screen and Aurora Veil from both sides.
     ScreenCleaner,
+    /// Counts the side's fallen (up to 5).
+    SupremeOverlord,
 }
 
 impl StartEffect {
@@ -39,6 +41,7 @@ pub(super) fn start_effect(ability: &str) -> Option<StartEffect> {
         "hospitality" => StartEffect::Hospitality,
         "trace" => StartEffect::Trace,
         "screencleaner" => StartEffect::ScreenCleaner,
+        "supremeoverlord" => StartEffect::SupremeOverlord,
         "drought" => StartEffect::Weather(Weather::Sun),
         "drizzle" => StartEffect::Weather(Weather::Rain),
         "sandstream" => StartEffect::Weather(Weather::Sand),
@@ -81,7 +84,7 @@ impl Battle {
         if item == Some("ironball") {
             return true;
         }
-        let ability = dex.ability(m.ability).id.as_str();
+        let ability = self.ability_id(r);
         !m.has_type(dex.type_id("Flying").expect("Flying")) && ability != "levitate" && ability != "eelevate" && item != Some("airballoon")
     }
 
@@ -141,6 +144,10 @@ impl Battle {
                     let amount = (self.mon(a).max_hp() / 4) as u32;
                     self.heal(a, amount);
                 }
+            }
+            StartEffect::SupremeOverlord => {
+                let fallen = self.sides[r.side].total_fainted.min(5);
+                self.mon_mut(r).fallen = fallen;
             }
             StartEffect::ScreenCleaner => {
                 for side in [r.side, 1 - r.side] {
@@ -317,6 +324,9 @@ impl Battle {
             _ => {}
         }
         m.ability = ability;
+        // A fresh abilityState.
+        m.protean_used = false;
+        m.fallen = 0;
     }
 
     /// `adjacentFoes()`: in doubles, every foe with HP.

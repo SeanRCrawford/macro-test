@@ -27,6 +27,8 @@ const ABILITIES: &[&str] = &[
     "sandforce", "waterbubble", "solarpower", "dryskin", "heatproof", "eelevate", "megasol", "surgesurfer", "unseenfist",
     "skilllink", "owntempo", "snowcloak", "icebody", "poisonpoint", "naturalcure", "magicguard", "quickdraw",
     "screencleaner", "sweetveil",
+    "sheerforce", "bulletproof", "eartheater", "seedsower", "purifyingsalt", "pickpocket", "protean", "libero", "mummy",
+    "moldbreaker", "supremeoverlord",
 ];
 
 /// Items whose every effect is implemented: damage boosts, Mega Stones and

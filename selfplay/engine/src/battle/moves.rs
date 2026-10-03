@@ -268,6 +268,19 @@ impl Battle {
         }
     }
 
+    /// Protean / Libero's onPrepareHit: once per switch-in, the user becomes
+    /// the move's type.
+    fn protean(&mut self, user: MonRef, move_type: crate::dex::TypeId) {
+        if !(self.ability_is(user, "protean") || self.ability_is(user, "libero")) || self.mon(user).protean_used {
+            return;
+        }
+        let m = self.mon_mut(user);
+        if move_type != damage::TYPELESS && m.types != [move_type, move_type] {
+            m.types = [move_type, move_type];
+            m.protean_used = true;
+        }
+    }
+
     /// onFoeTryMove: Armor Tail, Queenly Majesty, Dazzling.
     fn blocks_priority(&self, r: MonRef) -> bool {
         ["armortail", "queenlymajesty", "dazzling"].iter().any(|a| self.ability_is(r, a))
@@ -286,8 +299,10 @@ impl Battle {
     fn absorbs(&mut self, user: MonRef, t: MonRef, move_type: crate::dex::TypeId, data: &MoveData) -> bool {
         let dex = Dex::get();
         let is = |name: &str| move_type == dex.type_id(name).expect("type");
-        match dex.ability(self.mon(t).ability).id.as_str() {
+        match self.ability_id(t) {
             "voltabsorb" if is("Electric") => {}
+            "eartheater" if is("Ground") => {}
+            "bulletproof" => return data.flags.has("bullet"),
             "waterabsorb" if is("Water") => {}
             "sapsipper" if is("Grass") => {
                 self.boost(t, &[(0, 1)], Some(user));
@@ -332,6 +347,7 @@ impl Battle {
                 c.volatiles.glaive_rush = m.volatiles.has(VolatileId::GlaiveRush);
                 c.volatiles.flash_fire = m.volatiles.has(VolatileId::FlashFire);
                 c.volatiles.gem = m.volatiles.has(VolatileId::Gem);
+                c.fallen = m.fallen;
                 c.volatiles.helping_hand =
                     m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
                 out[side * 2 + pos] = Some(c);
@@ -439,6 +455,13 @@ impl Battle {
     }
 
     fn use_move_inner(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8, bounced: bool) -> Res<bool> {
+        let saved = self.mold_breaker;
+        let r = self.use_move_body(user, move_id, target, priority, bounced);
+        self.mold_breaker = saved;
+        r
+    }
+
+    fn use_move_body(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8, bounced: bool) -> Res<bool> {
         let data = Dex::get().move_data(move_id);
         let base_target = data.target;
         // ModifyType / ModifyMove, through the damage module so both agree.
@@ -451,6 +474,8 @@ impl Battle {
             .unwrap_or(user);
         let ctx = self.damage_ctx(&view, user, defender, false, false);
         let am = damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
+        // Mold Breaker's onModifyMove: the move ignores breakable abilities.
+        self.mold_breaker = am.ignore_ability.then_some(user);
         // frz's onModifyMove: a defrosting move thaws its user.
         if data.flags.has("defrost") && self.mon(user).status == Status::Freeze {
             self.cure_status(user);
@@ -510,9 +535,11 @@ impl Battle {
             self.selfdestruct_user = None;
             return Ok(false);
         }
+        // King's Rock's onModifyMove (after Sheer Force drops the move's
+        // secondaries) adds a flinch unless one is there.
         let kings_rock = self.item_of(user) == Some("kingsrock")
             && data.category != Category::Status
-            && !data.secondaries.iter().any(|s| s.volatile_status.as_deref() == Some("flinch"));
+            && (am.has_sheer_force || !data.secondaries.iter().any(|s| s.volatile_status.as_deref() == Some("flinch")));
         let mut mv = MoveUse {
             am,
             data,
@@ -543,7 +570,8 @@ impl Battle {
         if let (true, Some(sb)) = (result, data.self_boost.as_ref()) {
             self.spread_move_hit(vec![Some(user)], user, &mut mv, sb, false, false, true)?;
         }
-        if result {
+        // AfterMoveSecondarySelf doesn't run for a Sheer Force move.
+        if result && !(mv.am.has_sheer_force && self.ability_is(user, "sheerforce")) {
             self.after_move_secondary_self(user, last_target, data.category == Category::Status, mv.total_damage);
         }
         Ok(result)
@@ -630,6 +658,15 @@ impl Battle {
             *d = turns;
             true
         };
+        // onTry, then PrepareHit (Protean, Libero).
+        let try_ok = match data.id.as_str() {
+            "auroraveil" => self.field.weather == crate::damage::Weather::Snow,
+            "wideguard" => self.will_act(),
+            _ => true,
+        };
+        if try_ok {
+            self.protean(user, move_type);
+        }
         // Reflect and Light Screen's durationCallback: Light Clay makes 8.
         let screen_turns = if self.item_of(user) == Some("lightclay") { 8 } else { 5 };
         match data.id.as_str() {
@@ -722,6 +759,10 @@ impl Battle {
         }
         if data.has_key("stallingMove") && !(self.will_act() && self.stall_move(user)) {
             return Ok(false);
+        }
+        // PrepareHit: Protean and Libero.
+        if !bounced {
+            self.protean(user, spread_type);
         }
 
         // HitProtect: Unseen Fist's contact moves get through Protect and
@@ -861,7 +902,7 @@ impl Battle {
             return true;
         }
         // ModifyBoost: Unaware ignores the other side's accuracy/evasion.
-        let unaware = |b: &Battle, r: MonRef| Dex::get().ability(b.mon(r).ability).id == "unaware";
+        let unaware = |b: &Battle, r: MonRef| b.ability_is(r, "unaware");
         let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5] as i32 };
         let eva_boost = if unaware(self, user) || data.has_key("ignoreEvasion") { 0 } else { self.mon(t).boosts[6] as i32 };
         let boost = (acc_boost.clamp(-6, 6) - eva_boost).clamp(-6, 6);
@@ -884,7 +925,7 @@ impl Battle {
     fn multi_accuracy(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
         let Some(acc) = data.accuracy else { return true };
         const TABLE: [f64; 7] = [1.0, 4.0 / 3.0, 5.0 / 3.0, 2.0, 7.0 / 3.0, 8.0 / 3.0, 3.0];
-        let unaware = |b: &Battle, r: MonRef| Dex::get().ability(b.mon(r).ability).id == "unaware";
+        let unaware = |b: &Battle, r: MonRef| b.ability_is(r, "unaware");
         let mut a = acc as f64;
         let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5].clamp(-6, 6) };
         a = if acc_boost > 0 { a * TABLE[acc_boost as usize] } else { a / TABLE[(-acc_boost) as usize] };
@@ -1213,7 +1254,9 @@ impl Battle {
             }
         }
 
-        if let Some(self_effect) = effect.self_effect.as_deref() {
+        // Sheer Force deleted the move's `self` along with its secondaries.
+        let sheer_force = mv.am.has_sheer_force && primary;
+        if let (Some(self_effect), false) = (effect.self_effect.as_deref(), sheer_force) {
             if !mv.self_dropped {
                 self.self_drops(&targets, user, mv, self_effect, is_secondary)?;
             }
@@ -1442,7 +1485,8 @@ impl Battle {
     fn secondaries(&mut self, targets: &[Option<MonRef>], user: MonRef, mv: &mut MoveUse) -> Res<()> {
         for &t in targets {
             let Some(t) = t else { continue };
-            for sec in &mv.data.secondaries {
+            let secondaries: &[HitEffect] = if mv.am.has_sheer_force { &[] } else { &mv.data.secondaries };
+            for sec in secondaries {
                 let roll = self.chance.random(100);
                 if sec.chance.is_none_or(|c| roll < c as u32) {
                     self.spread_move_hit(vec![Some(t)], user, mv, sec, false, true, false)?;
