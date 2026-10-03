@@ -221,6 +221,8 @@ impl Battle {
         match choice {
             SlotChoice::Pass => {}
             SlotChoice::Switch { index } => {
+                // resolveAction clears the switch flag once the switch is queued.
+                self.sides[side].pokemon[pos].switch_flag = None;
                 let target = self.mon_ref(side, index as usize);
                 let order = if matches!(self.requests[side], SideRequest::Switch(_)) { 3 } else { 103 };
                 self.add_action(ActionKind::Switch { mon, target }, order, 0.0)?;
@@ -471,6 +473,14 @@ impl Battle {
                 }
             } else if switches[side] {
                 any = true;
+                // BeforeSwitchOut (no handlers yet) runs now for a Pokemon
+                // leaving by its own move, not again when it switches.
+                for p in 0..ACTIVE_PER_SIDE.min(self.sides[side].pokemon.len()) {
+                    let m = &mut self.sides[side].pokemon[p];
+                    if self.sides[side].slot_filled[p] && m.hp > 0 && m.switch_flag.is_some() && !m.skip_before_switch_out {
+                        m.skip_before_switch_out = true;
+                    }
+                }
             }
         }
         if any {
@@ -527,7 +537,10 @@ impl Battle {
             if o.hp > 0 {
                 o.being_called_back = true;
                 // BeforeSwitchOut, then Update (Sitrus can still trigger).
-                self.each_update();
+                if !o.skip_before_switch_out {
+                    self.each_update();
+                }
+                self.mon_mut(old).skip_before_switch_out = false;
             }
             let o = self.mon_mut(old);
             // Leaving the field clears volatiles and boosts.

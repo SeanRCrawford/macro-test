@@ -350,11 +350,18 @@ formula adds stat points after the nature; Showdown adds them before.
   (1/8 full paralysis, sleep 2-3 turns, freeze thaws within 3), their
   BeforeMove and Residual handlers in Showdown's handler order, flinch and
   Fake Out, Protect/Detect with the stall counter, recoil, drain and healing
-  moves. 420 moves supported. Checked on 1,500 replayed battles (21,153
-  decisions; 300 committed). Next: switch-in abilities (Intimidate),
-  weather/terrain setters, common items (Focus Sash, Sitrus, Life Orb,
-  Leftovers, Choice Scarf), Tailwind/Trick Room, redirection, Helping Hand,
-  pivoting moves.
+  moves. Checked on 1,500 replayed battles.
+  Batch 2: Focus Sash, Sitrus Berry (Showdown's Update events), Life Orb,
+  Leftovers, Choice Scarf and its lock (`battle/items.rs`); Tailwind and
+  Trick Room; Intimidate and the weather/terrain-setting abilities with
+  weather and terrain residuals and their status/priority/accuracy effects
+  (`battle/field.rs`); Follow Me, Rage Powder, Helping Hand; U-turn, Volt
+  Switch, Flip Turn and Parting Shot. 429 moves supported; by Reg M-C usage,
+  83% of move slots, 78% of items and 49% of abilities. Checked on 3,000
+  replayed battles (47,466 decisions; 300 committed).
+  Next by usage: Dire Claw, Sucker Punch, Grassy Glide, Encore, Throat Chop,
+  Low Kick, screens, Wide Guard; Unburden, Defiant, Prankster, Good as Gold,
+  Armor Tail; terrain seeds, resist berries, Rocky Helmet, White Herb.
 - [x] 1f. Turn-level differential tests against Showdown: random battles
   between supported teams, Showdown's PRNG replaced by the threshold policy
   `Chance::Policy` mirrors (`tools/showdown/gen_fixtures.js`,

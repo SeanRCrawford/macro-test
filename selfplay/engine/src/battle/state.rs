@@ -151,6 +151,8 @@ pub struct Mon {
     pub faint_queued: bool,
     pub switch_flag: Option<SwitchFlag>,
     pub force_switch_flag: bool,
+    /// BeforeSwitchOut already ran for a pending self-switch.
+    pub skip_before_switch_out: bool,
     pub active_turns: u16,
     pub active_move_actions: u16,
     pub newly_switched: bool,
@@ -201,6 +203,7 @@ impl Mon {
             faint_queued: false,
             switch_flag: None,
             force_switch_flag: false,
+            skip_before_switch_out: false,
             active_turns: 0,
             active_move_actions: 0,
             newly_switched: false,

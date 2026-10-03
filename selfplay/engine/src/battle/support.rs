@@ -31,7 +31,7 @@ const PLAIN_KEYS: &[&str] = &[
     "accuracy", "basePower", "boosts", "category", "critRatio", "drain", "flags", "handlers", "heal",
     "ignoreDefensive", "ignoreImmunity", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
     "overrideOffensivePokemon", "overrideOffensiveStat", "pp", "priority", "recoil", "secondary", "secondaries",
-    "self", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
+    "self", "selfSwitch", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
 ];
 
 /// Move handlers the damage module covers (it reports any specific move it
@@ -46,6 +46,7 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("followme", &["onTry"]),
     ("ragepowder", &["onTry"]),
     ("helpinghand", &["onTryHit"]),
+    ("partingshot", &["onHit"]),
 ];
 
 /// Status moves that set a side or field condition, which `moves` implements.
@@ -97,7 +98,9 @@ pub fn move_supported(m: &MoveData) -> bool {
     };
     let target_ok = target_ok || (field_move && matches!(m.target, MoveTarget::All | MoveTarget::AllySide));
     let field_key = |k: &str| field_move && matches!(k, "sideCondition" | "pseudoWeather");
-    m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok) || field_key(k))
+    let switch_ok = !m.has_key("selfSwitch") || m.self_switch;
+    switch_ok
+        && m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok) || field_key(k))
         && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather"]].concat())
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
         && m.nested_handlers.is_empty()

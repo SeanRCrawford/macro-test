@@ -6,7 +6,7 @@
 //! healing.
 
 use super::conditions::{status_from_id, HitRes};
-use super::state::{Mon, VolatileId, ACTIVE_PER_SIDE};
+use super::state::{Mon, SwitchFlag, VolatileId, ACTIVE_PER_SIDE};
 use super::{Battle, BattleError, MonRef, Res};
 use crate::damage::{self, ActiveMove, Combatant, DamageCtx, Outcome, SideState, Status};
 use crate::dex::{Category, Dex, HitEffect, MoveData, MoveId, MoveTarget};
@@ -19,6 +19,14 @@ pub(super) struct MoveUse {
     pub self_dropped: bool,
     /// `move.spreadHit`: aimed at more than one target (spread damage).
     pub spread: bool,
+    /// `move.selfSwitch` (U-turn, Parting Shot...), which Parting Shot can drop.
+    pub self_switch: bool,
+}
+
+impl MoveUse {
+    fn data_id(&self) -> MoveId {
+        self.am.id
+    }
 }
 
 /// The move a queued Move action uses: Struggle when the slot is `usize::MAX`.
@@ -269,7 +277,7 @@ impl Battle {
             return Ok(false);
         }
         let last_target = *targets.last().expect("targets");
-        let mut mv = MoveUse { am, data, self_dropped: false, spread: false };
+        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch };
         let result = self.try_spread_move_hit(user, &mut mv, targets)?;
         if result {
             self.after_move_secondary_self(user, last_target, data.category == Category::Status);
@@ -541,7 +549,7 @@ impl Battle {
             }
         }
 
-        self.run_move_effects(&mut damage, &targets, mv, effect, primary)?;
+        self.run_move_effects(&mut damage, &targets, mv, user, effect, primary)?;
         for i in 0..targets.len() {
             if !damage[i].hit() {
                 targets[i] = None;
@@ -575,7 +583,8 @@ impl Battle {
         &mut self,
         damage: &mut [HitRes],
         targets: &[Option<MonRef>],
-        mv: &MoveUse,
+        mv: &mut MoveUse,
+        user: MonRef,
         effect: &HitEffect,
         primary: bool,
     ) -> Res<()> {
@@ -624,11 +633,30 @@ impl Battle {
                 self.add_volatile(t, VolatileId::Stall);
                 did_something = did_something.combine(HitRes::Bool(true));
             }
+            // onHit: Parting Shot lowers Attack and Sp. Atk, and doesn't
+            // switch out if neither drops.
+            if primary && mv.data.id == "partingshot" {
+                if !self.boost(t, &[(0, -1), (2, -1)]).truthy() {
+                    mv.self_switch = false;
+                }
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
+            if primary && mv.self_switch {
+                did_something = if self.switchable(user.side).is_empty() {
+                    did_something.combine(HitRes::Bool(false))
+                } else {
+                    HitRes::Bool(true)
+                };
+            }
             if did_something == HitRes::Undefined {
                 did_something = HitRes::Bool(true);
             }
             damage[i] = damage[i].combine(if did_something == HitRes::Null { HitRes::Bool(false) } else { did_something });
             did_anything = did_anything.combine(did_something);
+        }
+        let failed = !did_anything.truthy() && did_anything != HitRes::Num(0) && effect.self_effect.is_none();
+        if !failed && mv.self_switch && self.mon(user).hp > 0 {
+            self.mon_mut(user).switch_flag = Some(SwitchFlag::Move(mv.data_id()));
         }
         Ok(())
     }

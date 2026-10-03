@@ -285,6 +285,9 @@ pub struct MoveData {
     pub condition: Handlers,
     /// Handlers on nested data other than `condition` ("secondary.onHit").
     pub nested_handlers: Vec<String>,
+    /// `selfSwitch: true` (U-turn); Baton Pass's "copyvolatile" and the like
+    /// leave it false.
+    pub self_switch: bool,
 }
 
 impl MoveData {
@@ -674,6 +677,7 @@ impl Dex {
                 },
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
+                self_switch: r.get("selfSwitch") == Some(&Value::Bool(true)),
                 nested_handlers: r
                     .get("handlers")
                     .and_then(Value::as_array)
