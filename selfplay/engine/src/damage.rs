@@ -875,6 +875,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                     }
                     // Accuracy, hit count or target tracking only.
                     "skilllink" | "keeneye" | "illuminate" | "stalwart" => {}
+                    // Aegislash's forme change; the battle does it first.
+                    "stancechange" => {}
                     _ => return self.not_implemented(&r),
                 },
                 // Choice lock, extra flinch chance.
@@ -1164,6 +1166,11 @@ impl<'a, 'b> Calc<'a, 'b> {
     }
 
     /// The CriticalHit event: Battle Armor / Shell Armor stop crits.
+    /// Mimikyu with its disguise still up.
+    fn disguised(&self, i: usize) -> bool {
+        self.dex.species(self.mon(i).species).name == "Mimikyu"
+    }
+
     fn critical_hit(&self, am: &ActiveMove) -> Res<bool> {
         let d = self.ctx.defender;
         let ab = self.dex.ability(self.mon(d).ability);
@@ -1171,7 +1178,13 @@ impl<'a, 'b> Calc<'a, 'b> {
             return Ok(false);
         }
         if let Some(r) = self.collect("CriticalHit", d, None, am, false).first() {
-            return self.not_implemented(r);
+            return match (r.effect, r.hook.as_str()) {
+                // Disguise: no crit on an intact disguise.
+                (Effect::Ability(ab), "onCriticalHit") if self.dex.ability(ab).id == "disguise" => {
+                    Ok(!(self.disguised(d) && !self.ctx.hit_sub && self.run_immunity(am)))
+                }
+                _ => self.not_implemented(r),
+            };
         }
         Ok(true)
     }
@@ -1542,6 +1555,12 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
             for r in &refs {
                 match (r.effect, r.hook.as_str()) {
+                    // Disguise: an intact disguise takes everything neutrally.
+                    (Effect::Ability(ab), "onEffectiveness") if self.dex.ability(ab).id == "disguise" => {
+                        if am.category != Category::Status && self.disguised(d) && !self.ctx.hit_sub && self.run_immunity(am) {
+                            m = 0;
+                        }
+                    }
                     (Effect::Item(it), "onEffectiveness") if self.dex.item(it).id == "ironball" => {
                         if am.move_type == self.ty("Ground") && defender.has_type(self.ty("Flying")) {
                             m = 0;

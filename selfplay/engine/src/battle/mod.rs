@@ -790,6 +790,7 @@ impl Battle {
                     if dex.species(m.species).name == "Palafin" {
                         let hero = dex.species_id("Palafin-Hero").expect("Palafin-Hero");
                         m.species = hero;
+                        m.base_species = hero;
                         m.types = dex.species(hero).types;
                     }
                 }
@@ -867,6 +868,7 @@ impl Battle {
         let m = self.mon_mut(r);
         let sp = dex.species(forme);
         m.species = forme;
+        m.base_species = forme;
         m.types = sp.types;
         let new_stats = stats::compute_stats(forme, m.set.nature, m.set.points);
         // Showdown keeps HP as is; only the other stats change.

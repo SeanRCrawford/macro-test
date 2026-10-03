@@ -290,6 +290,11 @@ pub struct Mon {
     pub set: PokemonSet,
     /// Current species (changes on Mega Evolution).
     pub species: SpeciesId,
+    /// `baseSpecies`: the forme leaving the field returns to (Mega, Hero
+    /// and Busted formes are permanent; Stance Change's aren't).
+    pub base_species: SpeciesId,
+    /// Disguise took a hit and busts at the next Update.
+    pub disguise_busted: bool,
     pub types: [TypeId; 2],
     /// Stored stats for the current species; [HP] is max HP.
     pub stats: [u16; 6],
@@ -373,6 +378,8 @@ impl Mon {
         Mon {
             set: set.clone(),
             species: set.species,
+            base_species: set.species,
+            disguise_busted: false,
             types: dex.species(set.species).types,
             stats,
             hp: stats[0],
@@ -477,7 +484,9 @@ impl Mon {
         self.switch_flag = None;
         self.force_switch_flag = false;
         // Champions: a Mega stays Mega after fainting or switching, and
-        // setSpecies restores its types and stats (Soak, Speed Swap).
+        // setSpecies restores its types and stats (Soak, Speed Swap, Stance
+        // Change).
+        self.species = self.base_species;
         self.types = Dex::get().species(self.species).types;
         let stats = crate::stats::compute_stats(self.species, self.set.nature, self.set.points);
         self.stats = [self.stats[0], stats[1], stats[2], stats[3], stats[4], stats[5]];

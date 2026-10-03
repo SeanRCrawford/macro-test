@@ -517,6 +517,27 @@ impl Battle {
         let am = damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
         // Mold Breaker's onModifyMove: the move ignores breakable abilities.
         self.mold_breaker = am.ignore_ability.then_some(user);
+        // Stance Change (onModifyMove priority 1): Blade to attack, Shield
+        // for King's Shield (not permanent).
+        if self.ability_is(user, "stancechange") && Dex::get().species(self.mon(user).species).base_species == "Aegislash" {
+            let forme = match (data.category, data.id.as_str()) {
+                (_, "kingsshield") => Some("Aegislash"),
+                (Category::Status, _) => None,
+                _ => Some("Aegislash-Blade"),
+            };
+            if let Some(name) = forme {
+                let dex = Dex::get();
+                let id = dex.species_id(name).expect("Aegislash forme");
+                let m = self.mon_mut(user);
+                if m.species != id {
+                    // formeChange -> setSpecies: the forme's types and stats.
+                    m.species = id;
+                    m.set_types(dex.species(id).types);
+                    let stats = crate::stats::compute_stats(id, m.set.nature, m.set.points);
+                    m.stats = [m.stats[0], stats[1], stats[2], stats[3], stats[4], stats[5]];
+                }
+            }
+        }
         // frz's onModifyMove: a defrosting move thaws its user.
         if data.flags.has("defrost") && self.mon(user).status == Status::Freeze {
             self.cure_status(user);
@@ -1452,7 +1473,13 @@ impl Battle {
                 damage[i] = HitRes::Bool(false);
                 continue;
             }
-            let d = if d == 0 { 0 } else { self.on_move_damage(t, d.max(1)).max(1) };
+            // Disguise can bring it to 0 (still a hit for DamagingHit).
+            let d = if d == 0 {
+                0
+            } else {
+                let d = self.on_move_damage(t, d.max(1));
+                if self.mon(t).disguise_busted { d } else { d.max(1) }
+            };
             self.move_damage_by = Some(user);
             let dealt = self.apply_damage(t, d);
             self.move_damage_by = None;

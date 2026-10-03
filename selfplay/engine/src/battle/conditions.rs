@@ -510,7 +510,9 @@ impl Battle {
         if self.mon(r).hp == 0 || !self.mon(r).is_active {
             return;
         }
-        let d = self.on_move_damage(r, damage).max(1);
+        let d = self.on_move_damage(r, damage);
+        // Disguise takes it (0); otherwise at least 1.
+        let d = if self.mon(r).disguise_busted { d } else { d.max(1) };
         let dealt = self.apply_damage(r, d);
         if dealt != 0 {
             let m = self.mon_mut(r);

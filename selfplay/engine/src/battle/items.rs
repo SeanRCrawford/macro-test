@@ -140,6 +140,18 @@ impl Battle {
             if (self.ability_is(r, "thermalexchange") || self.ability_is(r, "waterbubble")) && self.mon(r).status == crate::damage::Status::Burn {
                 self.cure_status(r);
             }
+            // Disguise's onUpdate: Mimikyu-Busted for good, at an eighth's cost.
+            if self.mon(r).disguise_busted && self.ability_is(r, "disguise") {
+                let dex = Dex::get();
+                let busted = dex.species_id("Mimikyu-Busted").expect("Mimikyu-Busted");
+                let m = self.mon_mut(r);
+                m.disguise_busted = false;
+                m.species = busted;
+                m.base_species = busted;
+                m.set_types(dex.species(busted).types);
+                let amount = (self.mon(r).max_hp() / 8) as u32;
+                self.effect_damage(r, amount);
+            }
             if self.ability_is(r, "owntempo") {
                 self.mon_mut(r).volatiles.remove(VolatileId::Confusion);
             }
@@ -172,6 +184,11 @@ impl Battle {
     /// The Damage event for move damage: Sturdy (priority -30), then Focus
     /// Sash (-40).
     pub(super) fn on_move_damage(&mut self, t: MonRef, damage: u32) -> u32 {
+        // Disguise (onDamage priority 1): the disguise takes it all.
+        if self.ability_is(t, "disguise") && Dex::get().species(self.mon(t).species).name == "Mimikyu" {
+            self.mon_mut(t).disguise_busted = true;
+            return 0;
+        }
         let m = self.mon(t);
         let damage = if self.ability_is(t, "sturdy") && m.hp == m.max_hp() && damage >= m.hp as u32 {
             m.hp as u32 - 1
