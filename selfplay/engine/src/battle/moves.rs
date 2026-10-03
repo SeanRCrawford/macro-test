@@ -374,6 +374,8 @@ impl Battle {
                 c.volatiles.semi_invulnerable = semi_invulnerable(m);
                 c.fallen = m.fallen;
                 c.stats_lowered_this_turn = m.stats_lowered_this_turn;
+                // getStat('spe'): the action speed without Trick Room's sign.
+                c.spe_stat = self.action_speed_of(self.mon_ref(side, pos)).map_or(0, |s| s.unsigned_abs());
                 c.moved_this_turn = !m.newly_switched && !self.will_move(self.mon_ref(side, pos));
                 c.volatiles.helping_hand =
                     m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
@@ -558,8 +560,13 @@ impl Battle {
                 return Ok(false);
             }
         }
-        // Double Shock's onTryMove: only an Electric type can use it.
-        if data.id == "doubleshock" && !self.mon(user).has_type(Dex::get().type_id("Electric").expect("Electric")) {
+        // Double Shock / Burn Up's onTryMove: only an Electric / Fire type.
+        let needs = match data.id.as_str() {
+            "doubleshock" => Some("Electric"),
+            "burnup" => Some("Fire"),
+            _ => None,
+        };
+        if needs.is_some_and(|t| !self.mon(user).has_type(Dex::get().type_id(t).expect("type"))) {
             return Ok(false);
         }
         // TryMove: a foe's Armor Tail stops priority moves aimed at its side.
@@ -619,6 +626,10 @@ impl Battle {
         }
         // AfterMoveSecondarySelf doesn't run for a Sheer Force move.
         if result && !(mv.am.has_sheer_force && self.ability_is(user, "sheerforce")) {
+            // Fell Stinger (the move's own handler first).
+            if data.id == "fellstinger" && (self.mon(last_target).fainted || self.mon(last_target).hp == 0) {
+                self.boost(user, &[(0, 3)], Some(user));
+            }
             self.after_move_secondary_self(user, last_target, data.category == Category::Status, mv.total_damage);
         }
         Ok(result)
@@ -759,6 +770,31 @@ impl Battle {
                 self.add_volatile(user, VolatileId::Stall);
                 true
             }
+            "courtchange" => {
+                // Swap the sides' screens, Tailwind and hazards (state and all).
+                let swap = [
+                    SideCondition::LightScreen,
+                    SideCondition::Reflect,
+                    SideCondition::Spikes,
+                    SideCondition::Tailwind,
+                    SideCondition::ToxicSpikes,
+                    SideCondition::StealthRock,
+                    SideCondition::StickyWeb,
+                    SideCondition::AuroraVeil,
+                ];
+                let mut success = false;
+                for c in swap {
+                    let i = c as usize;
+                    success |= self.sides[0].conditions[i] > 0 || self.sides[1].conditions[i] > 0;
+                    let (a, b) = (self.sides[0].conditions[i], self.sides[1].conditions[i]);
+                    self.sides[0].conditions[i] = b;
+                    self.sides[1].conditions[i] = a;
+                    let (a, b) = (self.sides[0].condition_order[i], self.sides[1].condition_order[i]);
+                    self.sides[0].condition_order[i] = b;
+                    self.sides[1].condition_order[i] = a;
+                }
+                success
+            }
             "haze" => {
                 for r in self.all_active() {
                     self.mon_mut(r).boosts = [0; 7];
@@ -856,6 +892,7 @@ impl Battle {
                     return Ok(false);
                 }
             }
+            "noretreat" if self.mon(user).volatiles.has(VolatileId::NoRetreat) => return Ok(false),
             "upperhand" => {
                 let ok = self.queued_move_priority(targets[0])
                     .is_some_and(|(m, p)| p > 0.1 && Dex::get().move_data(m).category != Category::Status);
@@ -977,6 +1014,7 @@ impl Battle {
             let own = match data.id.as_str() {
                 "endeavor" => b.mon(user).hp >= b.mon(t).hp,
                 "leechseed" => b.mon(t).has_type(Dex::get().type_id("Grass").expect("Grass")),
+                "worryseed" => matches!(Dex::get().ability(b.mon(t).ability).id.as_str(), "truant" | "insomnia"),
                 _ => false,
             };
             HitRes::Bool(!(powder || prankster || own))
@@ -1292,6 +1330,16 @@ impl Battle {
                             return Ok((vec![HitRes::Bool(false)], targets));
                         }
                     }
+                    "roleplay" => {
+                        let dex = Dex::get();
+                        let (ta, sa) = (dex.ability(self.mon(t).ability), dex.ability(self.mon(user).ability));
+                        if ta.id == sa.id || ta.flags.iter().any(|f| f == "failroleplay") || sa.flags.iter().any(|f| f == "cantsuppress") {
+                            return Ok((vec![HitRes::Bool(false)], targets));
+                        }
+                    }
+                    "worryseed" if Dex::get().ability(self.mon(t).ability).flags.iter().any(|f| f == "cantsuppress") => {
+                        return Ok((vec![HitRes::Bool(false)], targets));
+                    }
                     "clangoroussoul" => {
                         if !self.boost(t, &mv.data.primary.boosts, Some(user)).truthy() {
                             return Ok((vec![HitRes::Bool(false)], targets));
@@ -1416,10 +1464,10 @@ impl Battle {
 
         self.run_move_effects(&mut damage, &targets, mv, user, effect, primary && !skip_boosts, primary, is_secondary)?;
         // Double Shock's self.onHit: Electric becomes "???".
-        if is_self && mv.data.id == "doubleshock" {
-            let electric = Dex::get().type_id("Electric").expect("Electric");
+        if is_self && matches!(mv.data.id.as_str(), "doubleshock" | "burnup") {
+            let lost = Dex::get().type_id(if mv.data.id == "burnup" { "Fire" } else { "Electric" }).expect("type");
             let m = self.mon_mut(user);
-            let t = m.types.map(|t| if t == electric { damage::TYPELESS } else { t });
+            let t = m.types.map(|t| if t == lost { damage::TYPELESS } else { t });
             m.set_types(t);
         }
         for i in 0..targets.len() {
@@ -1570,6 +1618,18 @@ impl Battle {
                 self.try_set_status(t, status);
                 did_something = did_something.combine(HitRes::Bool(true));
             }
+            if is_secondary && mv.data.id == "burningjealousy" && self.mon(t).stats_raised_this_turn {
+                self.try_set_status(t, Status::Burn);
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
+            // Eerie Spell: the target's last move loses 3 PP.
+            if is_secondary && mv.data.id == "eeriespell" && self.mon(t).hp > 0 {
+                let m = self.mon_mut(t);
+                if let Some(i) = m.last_move.and_then(|l| m.move_slot(l)) {
+                    m.moves[i].pp = m.moves[i].pp.saturating_sub(3);
+                }
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
             if is_secondary && mv.data.id == "alluringvoice" && self.mon(t).stats_raised_this_turn {
                 self.add_volatile(t, VolatileId::Confusion);
                 did_something = did_something.combine(HitRes::Bool(true));
@@ -1597,7 +1657,7 @@ impl Battle {
                 self.boost(t, &[(0, 12)], Some(t));
             }
             // onHit: Trick swaps items.
-            if primary && mv.data.id == "trick" {
+            if primary && matches!(mv.data.id.as_str(), "trick" | "switcheroo") {
                 let r = self.trick(user, t);
                 did_something = did_something.combine(HitRes::Bool(r));
             }
@@ -1693,6 +1753,35 @@ impl Battle {
                 self.apply_damage(t, cost);
                 HitRes::Undefined
             }
+            "clearsmog" => {
+                self.mon_mut(t).boosts = [0; 7];
+                HitRes::Undefined
+            }
+            "worryseed" => {
+                let insomnia = Dex::get().ability_id("insomnia").expect("insomnia");
+                self.set_ability(t, insomnia);
+                if self.mon(t).status == Status::Sleep {
+                    self.cure_status(t);
+                }
+                HitRes::Undefined
+            }
+            "roleplay" => {
+                let a = self.mon(t).ability;
+                self.set_ability(user, a);
+                if let Some(e) = super::field::start_effect(&Dex::get().ability(a).id) {
+                    self.ability_start(user, e);
+                }
+                HitRes::Undefined
+            }
+            "acupressure" => {
+                let stats: Vec<usize> = (0..7).filter(|&s| self.mon(t).boosts[s] < 6).collect();
+                if stats.is_empty() {
+                    return HitRes::Bool(false);
+                }
+                let s = stats[self.chance.sample(stats.len())];
+                self.boost(t, &[(s, 2)], Some(user));
+                HitRes::Undefined
+            }
             "skillswap" => {
                 let dex = Dex::get();
                 let (sa, ta) = (self.mon(user).ability, self.mon(t).ability);
@@ -1750,7 +1839,7 @@ impl Battle {
                 }
                 HitRes::Undefined
             }
-            "moonlight" | "synthesis" => {
+            "moonlight" | "synthesis" | "morningsun" => {
                 use crate::damage::Weather;
                 let factor = match self.move_weather(t) {
                     Weather::Sun => 2732,

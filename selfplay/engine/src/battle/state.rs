@@ -76,6 +76,10 @@ pub enum VolatileId {
     HealBlock,
     /// A substitute; `counter` is its HP.
     Substitute,
+    /// Salt Cure: an eighth (Water/Steel) or a sixteenth each turn.
+    SaltCure,
+    /// No Retreat: can't switch out.
+    NoRetreat,
     /// Bound by Infestation and the like: `counter` is the source
     /// (side << 8 | uid), `target_loc` the damage divisor (Binding Band: 6).
     PartiallyTrapped,
@@ -115,6 +119,8 @@ impl VolatileId {
             "healblock" => VolatileId::HealBlock,
             "partiallytrapped" => VolatileId::PartiallyTrapped,
             "substitute" => VolatileId::Substitute,
+            "saltcure" => VolatileId::SaltCure,
+            "noretreat" => VolatileId::NoRetreat,
             _ => return None,
         })
     }
@@ -153,6 +159,8 @@ impl VolatileId {
             VolatileId::HealBlock => "healblock",
             VolatileId::PartiallyTrapped => "partiallytrapped",
             VolatileId::Substitute => "substitute",
+            VolatileId::SaltCure => "saltcure",
+            VolatileId::NoRetreat => "noretreat",
         }
     }
 
@@ -168,7 +176,7 @@ impl VolatileId {
             VolatileId::PerishSong => Some(24),
             VolatileId::LeechSeed => Some(8),
             VolatileId::HealBlock => Some(20),
-            VolatileId::PartiallyTrapped => Some(13),
+            VolatileId::PartiallyTrapped | VolatileId::SaltCure => Some(13),
             VolatileId::Roost => Some(25),
             _ => None,
         }
@@ -196,7 +204,9 @@ impl VolatileId {
             | VolatileId::FocusEnergy
             | VolatileId::DragonCheer
             | VolatileId::LeechSeed
-            | VolatileId::Substitute => None,
+            | VolatileId::Substitute
+            | VolatileId::SaltCure
+            | VolatileId::NoRetreat => None,
             VolatileId::HealBlock => Some(2),
             // durationCallback: 5 or 6, rolled when it starts.
             VolatileId::PartiallyTrapped => Some(5),

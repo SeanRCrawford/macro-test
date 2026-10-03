@@ -768,7 +768,7 @@ impl Battle {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
                 }
                 for v in &m.volatiles.0 {
-                    if v.duration.is_some() || v.id == VolatileId::LeechSeed {
+                    if v.duration.is_some() || matches!(v.id, VolatileId::LeechSeed | VolatileId::SaltCure) {
                         handlers.push(Residual {
                             mon: Some(r),
                             what: ResidualKind::Volatile(v.id),
@@ -855,6 +855,13 @@ impl Battle {
                     self.leftovers(h.mon);
                 }
                 ResidualKind::Volatile(VolatileId::LeechSeed) => self.leech_seed(h.mon),
+                ResidualKind::Volatile(VolatileId::SaltCure) => {
+                    let dex = Dex::get();
+                    let m = self.mon(h.mon);
+                    let hard = m.has_type(dex.type_id("Water").expect("Water")) || m.has_type(dex.type_id("Steel").expect("Steel"));
+                    let amount = (m.max_hp() / if hard { 8 } else { 16 }) as u32;
+                    self.effect_damage(h.mon, amount);
+                }
                 ResidualKind::Volatile(id) => {
                     let m = self.mon_mut(h.mon);
                     let Some(v) = m.volatiles.get_mut(id) else { continue };

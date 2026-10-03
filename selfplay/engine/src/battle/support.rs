@@ -57,7 +57,7 @@ const PLAIN_KEYS: &[&str] = &[
     "ignoreDefensive", "ignoreEvasion", "ignoreImmunity", "multihit", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
     "overrideOffensivePokemon", "overrideOffensiveStat", "pp", "priority", "recoil", "secondary", "secondaries",
     "self", "selfBoost", "selfSwitch", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
-    "breaksProtect", "tracksTarget", "multiaccuracy", "forceSwitch", "hasCrashDamage", "mindBlownRecoil", "ohko",
+    "breaksProtect", "tracksTarget", "multiaccuracy", "forceSwitch", "hasCrashDamage", "mindBlownRecoil", "ohko", "damage",
 ];
 
 /// Move handlers the damage module covers (it reports any specific move it
@@ -136,6 +136,17 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("batonpass", &["onHit", "self.onHit"]),
     ("substitute", &["condition.onEnd", "condition.onStart", "condition.onTryPrimaryHit", "onHit", "onTryHit"]),
     ("shedtail", &["onHit", "onTryHit", "self.onHit"]),
+    ("switcheroo", &["onHit", "onTryImmunity"]),
+    ("morningsun", &["onHit"]),
+    ("clearsmog", &["onHit"]),
+    ("worryseed", &["onHit", "onTryHit", "onTryImmunity"]),
+    ("saltcure", &["condition.onEnd", "condition.onResidual", "condition.onStart"]),
+    ("burnup", &["onTryMove", "self.onHit"]),
+    ("fellstinger", &["onAfterMoveSecondarySelf"]),
+    ("roleplay", &["onHit", "onTryHit"]),
+    ("noretreat", &["condition.onStart", "condition.onTrapPokemon", "onTry"]),
+    ("acupressure", &["onHit"]),
+    ("courtchange", &["onHitField"]),
     ("beatup", &["basePowerCallback", "onModifyMove"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
@@ -161,17 +172,17 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
 /// Status moves that set a side or field condition, which `moves` implements.
 const FIELD_MOVES: &[&str] = &[
     "tailwind", "trickroom", "reflect", "lightscreen", "wideguard", "auroraveil", "raindance", "sunnyday", "sandstorm",
-    "snowscape", "electricterrain", "grassyterrain", "mistyterrain", "psychicterrain", "perishsong", "quickguard", "haze",
+    "snowscape", "electricterrain", "grassyterrain", "mistyterrain", "psychicterrain", "perishsong", "quickguard", "haze", "courtchange",
     "stealthrock", "spikes", "toxicspikes", "stickyweb",
 ];
 
 /// Moves whose secondary has an onHit that `moves` implements.
-const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop", "alluringvoice"];
+const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop", "alluringvoice", "burningjealousy", "eeriespell"];
 
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &[
     "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
-    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer", "leechseed", "healblock", "partiallytrapped", "substitute",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer", "leechseed", "healblock", "partiallytrapped", "substitute", "saltcure", "noretreat",
 ];
 
 pub fn ability_supported(id: &str) -> bool {
@@ -239,7 +250,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
         && (m.nested_handlers.is_empty()
             || (SECONDARY_ON_HIT.contains(&m.id.as_str()) && m.nested_handlers == ["secondary.onHit"])
-            || (matches!(m.id.as_str(), "batonpass" | "doubleshock" | "shedtail") && m.nested_handlers == ["self.onHit"]))
+            || (matches!(m.id.as_str(), "batonpass" | "doubleshock" | "shedtail" | "burnup") && m.nested_handlers == ["self.onHit"]))
         && handlers_ok
         && target_ok
 }

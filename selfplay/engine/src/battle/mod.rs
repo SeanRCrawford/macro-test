@@ -1054,9 +1054,10 @@ impl Battle {
                     .find(|v| v.id == state::VolatileId::PartiallyTrapped)
                     .and_then(|v| self.trap_source(v.counter))
                     .is_some_and(|s| self.mon(s).is_active);
+                let no_retreat = m.volatiles.has(state::VolatileId::NoRetreat);
                 let trapped =
                     // Shed Shell and Run Away (onTrapPokemon, priority -10) free it.
-                    (shadow_tag || bound)
+                    (shadow_tag || bound || no_retreat)
                         && self.item_of(r) != Some("shedshell")
                         && !self.ability_is(r, "runaway")
                         && !Dex::get().immune_to("trapped", m.types);

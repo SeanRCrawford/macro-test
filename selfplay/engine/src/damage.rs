@@ -95,6 +95,8 @@ pub struct Combatant {
     pub moved_this_turn: bool,
     /// `statsLoweredThisTurn` (Lash Out).
     pub stats_lowered_this_turn: bool,
+    /// `getStat('spe')`: boosted and modified Speed (Gyro Ball).
+    pub spe_stat: u32,
 }
 
 impl Combatant {
@@ -118,6 +120,7 @@ impl Combatant {
             move_last_turn_failed: false,
             moved_this_turn: false,
             stats_lowered_this_turn: false,
+            spe_stat: stats[5] as u32,
         }
     }
 
@@ -343,7 +346,7 @@ fn resist_berry(id: &str) -> Option<&'static str> {
 /// Moves whose own damage handlers (basePowerCallback, onBasePower,
 /// onModifyType, onModifyMove, onEffectiveness) this module implements.
 pub const MOVES_WITH_HANDLERS: &[&str] = &[
-    "acrobatics", "aurawheel", "beatup", "lashout", "payback", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
+    "acrobatics", "aurawheel", "beatup", "gyroball", "lashout", "payback", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
     "grassknot", "hardpress", "heatcrash", "heavyslam", "hex", "hurricane", "knockoff", "lastrespects", "lowkick",
     "powertrip", "ragefist", "ragingbull", "reversal", "risingvoltage", "solarbeam", "solarblade", "storedpower",
     "stompingtantrum", "struggle", "temperflare", "terrainpulse", "thunder", "tripleaxel", "venoshock", "waterspout", "watershuriken", "weatherball",
@@ -1126,7 +1129,7 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// `getStat('spe')` for Gyro Ball: boosted Speed. Speed modifiers
     /// (Choice Scarf, paralysis, Tailwind...) aren't modelled here yet.
     fn speed_stat(&self, i: usize) -> Res<u64> {
-        unsupported(format!("Gyro Ball speed of slot {i}"))
+        Ok(self.mon(i).spe_stat as u64)
     }
 
     /// The ModifyBoost event for `stat_user`'s stage in `stat`: Unaware
@@ -1491,7 +1494,8 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// STAB as a 4096-based modifier, after ModifySTAB (Adaptability).
     fn stab(&self, am: &ActiveMove) -> Res<u32> {
         let a = self.ctx.attacker;
-        let is_stab = self.attacker().has_type(am.move_type);
+        // "???" never gets STAB.
+        let is_stab = am.move_type != TYPELESS && self.attacker().has_type(am.move_type);
         let mut stab: u32 = if is_stab { of(3, 2) } else { ONE };
         for r in self.collect("ModifySTAB", a, Some(self.ctx.defender), am, false) {
             match (r.effect, r.hook.as_str()) {

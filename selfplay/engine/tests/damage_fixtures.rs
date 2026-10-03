@@ -83,6 +83,7 @@ fn combatant(m: &Mon) -> Combatant {
         other => panic!("status {other}"),
     };
     c.speed = m.speed;
+    c.spe_stat = m.speed.unsigned_abs();
     c.volatiles = Volatiles {
         helping_hand: m.helping_hand,
         charge: m.volatiles.iter().any(|v| v == "charge"),
