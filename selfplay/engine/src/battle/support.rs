@@ -17,9 +17,10 @@ const ABILITIES: &[&str] = &[
     "unaware",
 ];
 
-/// Items whose every effect is implemented: damage boosts and Mega Stones.
+/// Items whose every effect is implemented: damage boosts, Mega Stones and
+/// the items in `items`.
 const ITEMS: &[&str] = &[
-    "blackbelt", "blackglasses", "charcoal", "dragonfang", "expertbelt", "fairyfeather", "hardstone",
+    "blackbelt", "blackglasses", "charcoal", "choicescarf", "focussash", "leftovers", "lifeorb", "sitrusberry", "dragonfang", "expertbelt", "fairyfeather", "hardstone",
     "lightball", "magnet", "metalcoat", "miracleseed", "muscleband", "mysticwater", "nevermeltice",
     "sharpbeak", "silkscarf", "silverpowder", "softsand", "spelltag", "twistedspoon", "wiseglasses",
 ];

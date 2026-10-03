@@ -171,7 +171,7 @@ impl Battle {
         let move_id = move_for_slot(self.mon(user), slot);
         let data = Dex::get().move_data(move_id);
         let target = self.get_target(user, data.target, target_loc);
-        if !self.before_move(user, data) {
+        if !self.before_move(user, move_id, data) {
             self.mon_mut(user).move_this_turn_result = Some(false);
             return Ok(());
         }
@@ -219,6 +219,7 @@ impl Battle {
         if data.flags.has("defrost") && self.mon(user).status == Status::Freeze {
             self.cure_status(user);
         }
+        self.choice_lock(user, move_id);
         let mut target = target;
         if am.target != base_target {
             target = self.random_target(user, am.target);
@@ -231,8 +232,13 @@ impl Battle {
         if targets.is_empty() {
             return Ok(false);
         }
+        let last_target = *targets.last().expect("targets");
         let mut mv = MoveUse { am, data, self_dropped: false, spread: false };
-        self.try_spread_move_hit(user, &mut mv, targets)
+        let result = self.try_spread_move_hit(user, &mut mv, targets)?;
+        if result {
+            self.after_move_secondary_self(user, last_target, data.category == Category::Status);
+        }
+        Ok(result)
     }
 
     /// `trySpreadMoveHit` and its hit steps.
@@ -328,6 +334,7 @@ impl Battle {
                 total += n;
             }
         }
+        self.each_update();
         self.faint_messages()?;
         if total > 0 {
             self.apply_recoil(user, mv.data, total);
@@ -340,6 +347,7 @@ impl Battle {
                 }
             }
         }
+        self.each_update();
         // afterMoveSecondaryEvent: frz's onAfterMoveSecondary thaws the target.
         if mv.data.has_key("thawsTarget") {
             for t in hit_targets.into_iter().flatten() {
@@ -439,7 +447,8 @@ impl Battle {
                 damage[i] = HitRes::Bool(false);
                 continue;
             }
-            let dealt = self.apply_damage(t, if d == 0 { 0 } else { d.max(1) });
+            let d = if d == 0 { 0 } else { self.on_move_damage(t, d.max(1)).max(1) };
+            let dealt = self.apply_damage(t, d);
             if dealt != 0 {
                 let m = self.mon_mut(t);
                 m.hurt_this_turn = Some(m.hp);

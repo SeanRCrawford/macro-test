@@ -6,7 +6,7 @@
 use super::state::{StatusState, Volatile, VolatileId, ACTIVE_PER_SIDE};
 use super::{Battle, MonRef, Res};
 use crate::damage::Status;
-use crate::dex::{Dex, MoveData};
+use crate::dex::{Dex, MoveData, MoveId};
 use std::cmp::Ordering;
 
 /// Showdown's loosely typed hit results (`number | boolean | null |
@@ -93,6 +93,7 @@ struct Residual {
 
 #[derive(Debug, Clone, Copy)]
 enum ResidualKind {
+    Leftovers,
     Status(Status),
     Volatile(VolatileId),
 }
@@ -190,7 +191,7 @@ impl Battle {
             return HitRes::Bool(false);
         }
         let counter = if id == VolatileId::Stall { 3 } else { 0 };
-        self.mon_mut(t).volatiles.0.push(Volatile { id, duration: id.duration(), counter });
+        self.mon_mut(t).volatiles.0.push(Volatile { id, duration: id.duration(), counter, move_id: None });
         HitRes::Bool(true)
     }
 
@@ -209,7 +210,7 @@ impl Battle {
 
     /// The BeforeMove event: sleep and freeze (priority 10), flinch (8),
     /// paralysis (1). False: the Pokemon can't move.
-    pub(super) fn before_move(&mut self, user: MonRef, data: &MoveData) -> bool {
+    pub(super) fn before_move(&mut self, user: MonRef, move_id: MoveId, data: &MoveData) -> bool {
         match self.mon(user).status {
             Status::Sleep => {
                 let m = self.mon_mut(user);
@@ -237,7 +238,8 @@ impl Battle {
         if self.mon(user).status == Status::Paralysis && self.chance.chance(1, 8) {
             return false;
         }
-        true
+        // choicelock (priority 0)
+        self.choice_lock_allows(user, move_id)
     }
 
     // --- Stat stages ----------------------------------------------------------
@@ -322,6 +324,9 @@ impl Battle {
                 if let Some(order) = order {
                     handlers.push(Residual { mon: r, what: ResidualKind::Status(m.status), order, speed: m.speed, sub_order: 0 });
                 }
+                if self.item_of(r) == Some("leftovers") {
+                    handlers.push(Residual { mon: r, what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
+                }
                 for v in &m.volatiles.0 {
                     if v.duration.is_some() {
                         handlers.push(Residual {
@@ -342,6 +347,12 @@ impl Battle {
                 continue;
             }
             match h.what {
+                ResidualKind::Leftovers => {
+                    if self.item_of(h.mon) != Some("leftovers") {
+                        continue;
+                    }
+                    self.leftovers(h.mon);
+                }
                 ResidualKind::Volatile(id) => {
                     let m = self.mon_mut(h.mon);
                     let Some(v) = m.volatiles.get_mut(id) else { continue };

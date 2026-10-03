@@ -27,6 +27,8 @@ pub enum VolatileId {
     Protect,
     /// Protect's consecutive-use counter.
     Stall,
+    /// Locked into one move by a Choice item.
+    ChoiceLock,
 }
 
 impl VolatileId {
@@ -35,6 +37,7 @@ impl VolatileId {
             "flinch" => VolatileId::Flinch,
             "protect" => VolatileId::Protect,
             "stall" => VolatileId::Stall,
+            "choicelock" => VolatileId::ChoiceLock,
             _ => return None,
         })
     }
@@ -44,6 +47,7 @@ impl VolatileId {
             VolatileId::Flinch => "flinch",
             VolatileId::Protect => "protect",
             VolatileId::Stall => "stall",
+            VolatileId::ChoiceLock => "choicelock",
         }
     }
 
@@ -52,6 +56,7 @@ impl VolatileId {
         match self {
             VolatileId::Flinch | VolatileId::Protect => Some(1),
             VolatileId::Stall => Some(2),
+            VolatileId::ChoiceLock => None,
         }
     }
 }
@@ -62,6 +67,8 @@ pub struct Volatile {
     pub duration: Option<u8>,
     /// Stall's success counter (1 in `counter`).
     pub counter: u32,
+    /// The move a Choice lock holds the Pokemon to.
+    pub move_id: Option<MoveId>,
 }
 
 /// Volatile conditions in the order they were added (Showdown iterates

@@ -10,6 +10,7 @@
 
 pub mod choice;
 mod conditions;
+mod items;
 pub mod snapshot;
 mod moves;
 pub mod state;
@@ -272,7 +273,7 @@ impl Battle {
     /// `pokemon.getActionSpeed()`: modified Speed (Trick Room isn't in yet).
     fn action_speed_of(&self, r: MonRef) -> Res<i32> {
         let m = self.mon(r);
-        let mut spe = boosted(m.stats[5], m.boosts[4]);
+        let mut spe = crate::fixed::modify(boosted(m.stats[5], m.boosts[4]) as u64, self.speed_modifier(r)) as u32;
         // par's onModifySpe (Quick Feet isn't supported).
         if m.status == crate::damage::Status::Paralysis {
             spe = spe * 50 / 100;
@@ -376,6 +377,7 @@ impl Battle {
         if std::env::var_os("SELFPLAY_TRACE").is_some() {
             eprintln!("turn {} run {:?} | queue {:?}", self.turn, action.kind, self.queue.iter().map(|a| &a.kind).collect::<Vec<_>>());
         }
+        let is_start = matches!(action.kind, ActionKind::Start);
         match action.kind {
             ActionKind::Team { side, index, uid } => {
                 if index == 0 {
@@ -436,6 +438,9 @@ impl Battle {
         } else if self.queue.first().is_some_and(|a| matches!(a.kind, ActionKind::Switch { .. }) && a.order == 3) {
             // More forced switches (instaswitch) already queued.
             return Ok(false);
+        }
+        if !is_start {
+            self.each_update();
         }
 
         let switches: Vec<bool> = (0..2)
@@ -504,7 +509,10 @@ impl Battle {
             let o = self.mon_mut(old);
             if o.hp > 0 {
                 o.being_called_back = true;
+                // BeforeSwitchOut, then Update (Sitrus can still trigger).
+                self.each_update();
             }
+            let o = self.mon_mut(old);
             // Leaving the field clears volatiles and boosts.
             if o.hp > 0 {
                 self.queue.retain(|a| !action_belongs_to(a, old));
@@ -625,6 +633,8 @@ impl Battle {
                 if !self.sides[side].slot_filled[p] {
                     continue;
                 }
+                let r = self.mon_ref(side, p);
+                let locked = self.choice_locked_move(r);
                 let m = &mut self.sides[side].pokemon[p];
                 m.move_this_turn = None;
                 m.newly_switched = false;
@@ -640,7 +650,9 @@ impl Battle {
                 let acted = m.active_move_actions > 0;
                 for s in m.moves.iter_mut() {
                     let data = Dex::get().move_data(s.id);
-                    s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id)) || (data.id == "fakeout" && acted);
+                    s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id))
+                        || (data.id == "fakeout" && acted)
+                        || locked.is_some_and(|l| l != s.id);
                 }
                 if !m.fainted {
                     m.active_turns += 1;
