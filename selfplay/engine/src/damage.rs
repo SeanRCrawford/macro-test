@@ -341,7 +341,7 @@ fn resist_berry(id: &str) -> Option<&'static str> {
 /// Moves whose own damage handlers (basePowerCallback, onBasePower,
 /// onModifyType, onModifyMove, onEffectiveness) this module implements.
 pub const MOVES_WITH_HANDLERS: &[&str] = &[
-    "acrobatics", "aurawheel", "lashout", "payback", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
+    "acrobatics", "aurawheel", "beatup", "lashout", "payback", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
     "grassknot", "hardpress", "heatcrash", "heavyslam", "hex", "hurricane", "knockoff", "lastrespects", "lowkick",
     "powertrip", "ragefist", "ragingbull", "reversal", "risingvoltage", "solarbeam", "solarblade", "storedpower",
     "stompingtantrum", "struggle", "temperflare", "terrainpulse", "thunder", "tripleaxel", "venoshock", "waterspout", "watershuriken", "weatherball",
@@ -815,6 +815,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                 }
                 // Accuracy only.
                 "hurricane" | "thunder" | "blizzard" => {}
+                // The hit count; the battle sets each hit's power.
+                "beatup" => {}
                 "struggle" => am.move_type = TYPELESS,
                 other => return unsupported(format!("move {other}.onModifyMove")),
             }
@@ -1087,6 +1089,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                 }
             }
             "tripleaxel" => 20 * self.ctx.hit as i64,
+            // The battle sets each hit's power from that ally's base Attack.
+            "beatup" => am.base_power as i64,
             "watershuriken" => bp, // only Ash-Greninja changes it
             // moveLastTurnResult === false
             // Doubled unless the target is newly switched in or still to move.

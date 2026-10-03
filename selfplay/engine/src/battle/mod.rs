@@ -234,8 +234,12 @@ impl Battle {
         match choice {
             SlotChoice::Pass => {}
             SlotChoice::Switch { index } => {
-                // resolveAction clears the switch flag once the switch is queued.
-                self.sides[side].pokemon[pos].switch_flag = None;
+                // resolveAction clears the switch flag once the switch is queued
+                // (keeping Baton Pass as the switch's sourceEffect).
+                let flag = self.sides[side].pokemon[pos].switch_flag.take();
+                if let Some(state::SwitchFlag::Move(m)) = flag {
+                    self.sides[side].pokemon[pos].baton_passing = Dex::get().move_data(m).id == "batonpass";
+                }
                 let target = self.mon_ref(side, index as usize);
                 let order = if matches!(self.requests[side], SideRequest::Switch(_)) { 3 } else { 103 };
                 self.add_action(ActionKind::Switch { mon, target }, order, 0.0)?;
@@ -706,6 +710,26 @@ impl Battle {
         }
     }
 
+    /// `copyVolatileFrom(old, 'copyvolatile')`.
+    fn copy_volatiles(&mut self, from: MonRef, to: MonRef) {
+        use state::VolatileId as V;
+        let src = self.mon(from).clone();
+        let m = self.mon_mut(to);
+        m.clear_volatile();
+        m.boosts = src.boosts;
+        for v in &src.volatiles.0 {
+            if matches!(v.id, V::ChoiceLock | V::Encore | V::GlaiveRush | V::Yawn | V::Disable | V::Imprison | V::FlashFire) {
+                continue;
+            }
+            m.volatiles.0.push(*v);
+        }
+        // roost's onType applies to the new Pokemon too.
+        if m.volatiles.has(V::Roost) {
+            let dex = Dex::get();
+            m.start_roost(dex.type_id("Flying").expect("Flying"), dex.type_id("Normal").expect("Normal"));
+        }
+    }
+
     /// `dragIn`: a random bench Pokemon replaces the one at `pos`.
     fn drag_in(&mut self, side: usize, pos: usize) -> Res<()> {
         let bench = self.switchable(side);
@@ -757,8 +781,14 @@ impl Battle {
             // Leaving the field clears volatiles and boosts.
             if o.hp > 0 {
                 self.queue.retain(|a| !action_belongs_to(a, old));
+                // copyVolatileFrom: Baton Pass hands over boosts and volatiles
+                // (bar the noCopy ones).
+                if self.mon(old).baton_passing {
+                    self.copy_volatiles(old, incoming);
+                }
                 let o = self.mon_mut(old);
                 o.clear_volatile();
+                o.baton_passing = false;
             }
             let o = self.mon_mut(old);
             o.is_active = false;

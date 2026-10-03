@@ -557,6 +557,10 @@ impl Battle {
                 return Ok(false);
             }
         }
+        // Double Shock's onTryMove: only an Electric type can use it.
+        if data.id == "doubleshock" && !self.mon(user).has_type(Dex::get().type_id("Electric").expect("Electric")) {
+            return Ok(false);
+        }
         // TryMove: a foe's Armor Tail stops priority moves aimed at its side.
         if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.blocks_priority(f)) {
             return Ok(false);
@@ -1126,7 +1130,20 @@ impl Battle {
     fn move_hit_loop(&mut self, user: MonRef, mv: &mut MoveUse, targets: Vec<MonRef>) -> Res<bool> {
         let effect = &mv.data.primary;
         // How many hits: fixed, or 2-5 weighted (no Loaded Dice / Skill Link).
+        // Beat Up's onModifyMove: a hit per able ally (the user always
+        // counts), in party order; each hit's power from its base Attack.
+        let beat_up: Vec<u32> = if mv.data.id == "beatup" {
+            self.sides[user.side]
+                .pokemon
+                .iter()
+                .filter(|a| a.uid == self.mon(user).uid || (!a.fainted && a.status == Status::None))
+                .map(|a| 5 + Dex::get().species(a.set.species).base_stats[1] as u32 / 10)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let target_hits = match mv.data.multihit {
+            _ if !beat_up.is_empty() => beat_up.len() as u8,
             None => 1,
             Some((a, b)) if a == b => a,
             // Skill Link: the most hits.
@@ -1158,6 +1175,9 @@ impl Battle {
                 break;
             }
             mv.hit = hit;
+            if let Some(&bp) = beat_up.get(hit as usize - 1) {
+                mv.am.base_power = bp;
+            }
             let (md, tc) = self.spread_move_hit(targets.iter().map(|&t| Some(t)).collect(), user, mv, effect, true, false, false)?;
             move_damage = md;
             hit_targets = tc;
@@ -1406,6 +1426,13 @@ impl Battle {
         }
 
         self.run_move_effects(&mut damage, &targets, mv, user, effect, primary && !skip_boosts, primary, is_secondary)?;
+        // Double Shock's self.onHit: Electric becomes "???".
+        if is_self && mv.data.id == "doubleshock" {
+            let electric = Dex::get().type_id("Electric").expect("Electric");
+            let m = self.mon_mut(user);
+            let t = m.types.map(|t| if t == electric { damage::TYPELESS } else { t });
+            m.set_types(t);
+        }
         for i in 0..targets.len() {
             if !damage[i].hit() {
                 targets[i] = None;
@@ -1663,6 +1690,8 @@ impl Battle {
                 }
                 HitRes::Undefined
             }
+            // Baton Pass's onHit: nobody to pass to (the -fail is NOT_FAIL).
+            "batonpass" if self.switchable(user.side).is_empty() => HitRes::NotFail,
             "skillswap" => {
                 let dex = Dex::get();
                 let (sa, ta) = (self.mon(user).ability, self.mon(t).ability);

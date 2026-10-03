@@ -132,6 +132,9 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("endeavor", &["damageCallback", "onTryImmunity"]),
     ("ragingbull", &["onModifyType", "onTryHit"]),
     ("leechseed", &["condition.onStart", "condition.onResidual", "onTryImmunity"]),
+    ("doubleshock", &["onTryMove", "self.onHit"]),
+    ("batonpass", &["onHit", "self.onHit"]),
+    ("beatup", &["basePowerCallback", "onModifyMove"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
     ("hurricane", &["onModifyMove"]),
@@ -232,7 +235,9 @@ pub fn move_supported(m: &MoveData) -> bool {
         && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather", "selfdestruct", "weather", "terrain"]].concat())
         && m.self_boost.as_ref().is_none_or(|e| effect_supported(e, &[]))
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
-        && (m.nested_handlers.is_empty() || (SECONDARY_ON_HIT.contains(&m.id.as_str()) && m.nested_handlers == ["secondary.onHit"]))
+        && (m.nested_handlers.is_empty()
+            || (SECONDARY_ON_HIT.contains(&m.id.as_str()) && m.nested_handlers == ["secondary.onHit"])
+            || (matches!(m.id.as_str(), "batonpass" | "doubleshock") && m.nested_handlers == ["self.onHit"]))
         && handlers_ok
         && target_ok
 }

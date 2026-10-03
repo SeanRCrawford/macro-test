@@ -681,7 +681,8 @@ impl Dex {
                 },
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
-                self_switch: r.get("selfSwitch") == Some(&Value::Bool(true)),
+                // true, or Baton Pass's "copyvolatile" (not Shed Tail's).
+                self_switch: matches!(r.get("selfSwitch"), Some(Value::Bool(true))) || r.get("selfSwitch").and_then(|v| v.as_str()) == Some("copyvolatile"),
                 self_boost: match r.get("selfBoost").and_then(Value::as_object) {
                     Some(o) => Some(HitEffect::parse(o).map_err(ctx)?),
                     None => None,
@@ -816,7 +817,8 @@ impl Dex {
     /// `dex.getImmunity(key, types)` for a non-type key (a status, weather or
     /// "powder"): false when any of the types is immune.
     pub fn immune_to(&self, key: &str, types: [TypeId; 2]) -> bool {
-        types.iter().any(|t| self.immunities[t.0 as usize].iter().any(|k| k == key))
+        // The typeless "???" type (TypeId(255)) has no immunities.
+        types.iter().any(|t| self.immunities.get(t.0 as usize).is_some_and(|im| im.iter().any(|k| k == key)))
     }
 
     /// A Mega Stone's onTakeItem: it stays with a Pokemon that can use it.
@@ -877,19 +879,18 @@ impl Dex {
     /// Effectiveness of an `attacking`-type move against a defender with
     /// `defending` types, in quarters: 0, 1 (x0.25), 2 (x0.5), 4, 8, 16 (x4).
     pub fn effectiveness_quarters(&self, attacking: TypeId, defending: [TypeId; 2]) -> u8 {
-        let row = &self.effectiveness[attacking.0 as usize];
-        let a = row[defending[0].0 as usize];
+        let a = self.eff(attacking, defending[0]);
         if defending[0] == defending[1] {
             a * 2
         } else {
-            a * row[defending[1].0 as usize]
+            a * self.eff(attacking, defending[1])
         }
     }
 
     /// Showdown's per-type effectiveness step for one defending type:
     /// +1 super effective, 0 neutral or immune, -1 resisted.
     pub fn type_mod(&self, attacking: TypeId, defending: TypeId) -> i8 {
-        match self.effectiveness[attacking.0 as usize][defending.0 as usize] {
+        match self.eff(attacking, defending) {
             4 => 1,
             1 => -1,
             _ => 0,
@@ -898,7 +899,12 @@ impl Dex {
 
     /// True if `defending` is immune to `attacking` by the type chart alone.
     pub fn type_immune(&self, attacking: TypeId, defending: TypeId) -> bool {
-        self.effectiveness[attacking.0 as usize][defending.0 as usize] == 0
+        self.eff(attacking, defending) == 0
+    }
+
+    /// One type-chart cell; the typeless "???" type is neutral either way.
+    fn eff(&self, attacking: TypeId, defending: TypeId) -> u8 {
+        self.effectiveness.get(attacking.0 as usize).and_then(|row| row.get(defending.0 as usize)).copied().unwrap_or(2)
     }
 }
 

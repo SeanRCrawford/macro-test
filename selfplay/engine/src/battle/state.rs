@@ -284,6 +284,8 @@ pub struct Mon {
     pub fallen: u8,
     /// Supersweet Syrup already went off (once per battle).
     pub syrup_triggered: bool,
+    /// Leaving by Baton Pass: the replacement copies boosts and volatiles.
+    pub baton_passing: bool,
     /// A boost raised / lowered a stat this turn.
     pub stats_raised_this_turn: bool,
     pub stats_lowered_this_turn: bool,
@@ -361,6 +363,7 @@ impl Mon {
             syrup_triggered: false,
             stats_raised_this_turn: false,
             stats_lowered_this_turn: false,
+            baton_passing: false,
             boosts: [0; 7],
             ability: set.ability,
             base_ability: set.ability,
