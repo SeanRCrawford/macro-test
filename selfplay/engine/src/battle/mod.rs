@@ -263,7 +263,7 @@ impl Battle {
             ActionKind::Move { mon, slot, .. } => {
                 let m = self.mon(*mon);
                 let id = moves::move_for_slot(m, *slot);
-                action.priority = Dex::get().move_data(id).priority as f64;
+                action.priority = self.move_priority(*mon, id) as f64;
                 Some(*mon)
             }
             ActionKind::MegaEvo { mon } | ActionKind::Switch { mon, .. } | ActionKind::RunSwitch { mon } => Some(*mon),
@@ -281,7 +281,7 @@ impl Battle {
         let m = self.mon(r);
         // ModifySpe: Choice Scarf and Tailwind chain their modifiers.
         let mut modifier = self.speed_modifier(r);
-        if self.sides[r.side].tailwind > 0 {
+        if self.sides[r.side].condition(state::SideCondition::Tailwind) > 0 {
             modifier = crate::fixed::chain(modifier, 8192);
         }
         let mut spe = crate::fixed::modify(boosted(m.stats[5], m.boosts[4]) as u64, modifier) as u32;
@@ -293,6 +293,36 @@ impl Battle {
         // getActionSpeed: Trick Room inverts, then `trunc(speed, 13)`.
         let spe = if self.field.trick_room > 0 { 10_000 - spe } else { spe };
         Ok((spe % 8192) as i32)
+    }
+
+    /// The ModifyPriority events for a move: Grassy Glide.
+    pub(crate) fn move_priority(&self, user: MonRef, move_id: crate::dex::MoveId) -> i8 {
+        let data = Dex::get().move_data(move_id);
+        let mut p = data.priority;
+        if data.id == "grassyglide" && self.field.terrain == crate::damage::Terrain::Grassy && self.grounded(user) {
+            p += 1;
+        }
+        p
+    }
+
+    /// The move a Pokemon's queued Move action will use (`queue.willMove`).
+    fn queued_move(&self, r: MonRef) -> Option<crate::dex::MoveId> {
+        if self.mon(r).fainted {
+            return None;
+        }
+        self.queue.iter().find_map(|a| match a.kind {
+            ActionKind::Move { mon, slot, .. } if mon == r => Some(moves::move_for_slot(self.mon(r), slot)),
+            _ => None,
+        })
+    }
+
+    /// `queue.changeAction`: replace a Pokemon's queued actions with a move
+    /// (Encore), aimed at a random target and inserted by priority.
+    fn change_move_action(&mut self, r: MonRef, slot: usize) -> Res<()> {
+        self.queue.retain(|a| !action_belongs_to(a, r));
+        let move_id = moves::move_for_slot(self.mon(r), slot);
+        let target_loc = self.random_target_loc(r, move_id);
+        self.insert_action(ActionKind::Move { mon: r, slot, target_loc }, 200)
     }
 
     /// `queue.willMove(pokemon)`.
@@ -342,7 +372,7 @@ impl Battle {
     /// placed where it would sort, ties broken at random.
     fn insert_action(&mut self, kind: ActionKind, order: u32) -> Res<()> {
         let mut action = Action { kind, order, priority: 0.0, speed: 1 };
-        if let ActionKind::RunSwitch { mon } = action.kind {
+        if let ActionKind::RunSwitch { mon } | ActionKind::Move { mon, .. } = action.kind {
             let s = self.action_speed_of(mon)?;
             self.mon_mut(mon).speed = s;
         }
@@ -428,7 +458,7 @@ impl Battle {
                 if !m.is_active || m.fainted {
                     return Ok(false);
                 }
-                self.run_move(mon, slot, target_loc)?;
+                self.run_move(mon, slot, target_loc, action.priority as i8)?;
             }
             ActionKind::MegaEvo { mon } => self.run_mega_evo(mon)?,
             ActionKind::Switch { mon, target } => {
@@ -674,13 +704,24 @@ impl Battle {
                 // DisableMove: Gigaton Hammer and Blood Moon ("cantusetwice")
                 // can't be chosen right after being used.
                 // Fake Out's onDisableMove: only usable on the first turn out.
+                // Encore and Throat Chop's onDisableMove.
                 let last = m.last_move;
                 let acted = m.active_move_actions > 0;
+                let encored = m
+                    .volatiles
+                    .0
+                    .iter()
+                    .find(|v| v.id == state::VolatileId::Encore)
+                    .and_then(|v| v.move_id)
+                    .filter(|&e| m.move_slot(e).is_some());
+                let throat_chopped = m.volatiles.has(state::VolatileId::ThroatChop);
                 for s in m.moves.iter_mut() {
                     let data = Dex::get().move_data(s.id);
                     s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id))
                         || (data.id == "fakeout" && acted)
-                        || locked.is_some_and(|l| l != s.id);
+                        || locked.is_some_and(|l| l != s.id)
+                        || encored.is_some_and(|e| e != s.id)
+                        || (throat_chopped && data.flags.has("sound"));
                 }
                 if !m.fainted {
                     m.active_turns += 1;

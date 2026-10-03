@@ -6,7 +6,7 @@
 //! healing.
 
 use super::conditions::{status_from_id, HitRes};
-use super::state::{Mon, SwitchFlag, VolatileId, ACTIVE_PER_SIDE};
+use super::state::{Mon, SideCondition, SwitchFlag, VolatileId, ACTIVE_PER_SIDE};
 use super::{Battle, BattleError, MonRef, Res};
 use crate::damage::{self, ActiveMove, Combatant, DamageCtx, Outcome, SideState, Status};
 use crate::dex::{Category, Dex, HitEffect, MoveData, MoveId, MoveTarget};
@@ -21,6 +21,8 @@ pub(super) struct MoveUse {
     pub spread: bool,
     /// `move.selfSwitch` (U-turn, Parting Shot...), which Parting Shot can drop.
     pub self_switch: bool,
+    /// The move's priority as last sorted (after ModifyPriority).
+    pub priority: i8,
 }
 
 impl MoveUse {
@@ -86,6 +88,15 @@ impl Battle {
                     Some(foes[self.chance.sample(foes.len())])
                 }
             }
+        }
+    }
+
+    /// resolveAction for a move with no target: `getRandomTarget`'s location.
+    pub(super) fn random_target_loc(&mut self, user: MonRef, move_id: MoveId) -> i8 {
+        let target = Dex::get().move_data(move_id).target;
+        match self.random_target(user, target) {
+            Some(t) => self.loc_of(user, t),
+            None => 0,
         }
     }
 
@@ -199,7 +210,12 @@ impl Battle {
             defender: defender.side * 2 + self.mon(defender).position,
             weather: self.field.weather,
             terrain: self.field.terrain,
-            sides: [0, 1].map(|s| SideState { fainted: self.sides[s].total_fainted, ..SideState::default() }),
+            sides: [0, 1].map(|s| SideState {
+                fainted: self.sides[s].total_fainted,
+                reflect: self.sides[s].condition(SideCondition::Reflect) > 0,
+                light_screen: self.sides[s].condition(SideCondition::LightScreen) > 0,
+                ..SideState::default()
+            }),
             crit,
             spread,
             hit: 1,
@@ -207,7 +223,7 @@ impl Battle {
     }
 
     /// `runMove`.
-    pub(super) fn run_move(&mut self, user: MonRef, slot: usize, target_loc: i8) -> Res<()> {
+    pub(super) fn run_move(&mut self, user: MonRef, slot: usize, target_loc: i8, priority: i8) -> Res<()> {
         self.mon_mut(user).active_move_actions += 1;
         let move_id = move_for_slot(self.mon(user), slot);
         let data = Dex::get().move_data(move_id);
@@ -233,7 +249,7 @@ impl Battle {
 
         // useMove
         m.move_this_turn_result = None;
-        let result = self.use_move(user, move_id, target)?;
+        let result = self.use_move(user, move_id, target, priority)?;
         let m = self.mon_mut(user);
         if m.move_this_turn_result.is_none() {
             m.move_this_turn_result = Some(result);
@@ -243,7 +259,7 @@ impl Battle {
     }
 
     /// `useMoveInner` for moves that target Pokemon.
-    fn use_move(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>) -> Res<bool> {
+    fn use_move(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8) -> Res<bool> {
         let data = Dex::get().move_data(move_id);
         let base_target = data.target;
         // ModifyType / ModifyMove, through the damage module so both agree.
@@ -277,7 +293,7 @@ impl Battle {
             return Ok(false);
         }
         let last_target = *targets.last().expect("targets");
-        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch };
+        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority };
         let result = self.try_spread_move_hit(user, &mut mv, targets)?;
         if result {
             self.after_move_secondary_self(user, last_target, data.category == Category::Status);
@@ -285,16 +301,31 @@ impl Battle {
         Ok(result)
     }
 
-    /// `tryMoveHit` for moves that hit a side or the field: Tailwind and
-    /// Trick Room (runMoveEffects' sideCondition / pseudoWeather).
+    /// `tryMoveHit` for moves that hit a side or the field
+    /// (runMoveEffects' sideCondition / pseudoWeather, and onHitSide).
     fn try_move_hit(&mut self, user: MonRef, data: &MoveData) -> bool {
+        let add = |b: &mut Battle, c: SideCondition, turns: u8| {
+            let d = &mut b.sides[user.side].conditions[c as usize];
+            if *d > 0 {
+                return false;
+            }
+            *d = turns;
+            true
+        };
+        // Reflect and Light Screen's durationCallback: Light Clay makes 8.
+        let screen_turns = if self.item_of(user) == Some("lightclay") { 8 } else { 5 };
         match data.id.as_str() {
-            "tailwind" => {
-                let side = &mut self.sides[user.side];
-                if side.tailwind > 0 {
+            "tailwind" => add(self, SideCondition::Tailwind, 4),
+            "reflect" => add(self, SideCondition::Reflect, screen_turns),
+            "lightscreen" => add(self, SideCondition::LightScreen, screen_turns),
+            "wideguard" => {
+                // onTry: fails as the last to act; onHitSide adds stall even
+                // if Wide Guard was already up.
+                if !self.will_act() {
                     return false;
                 }
-                side.tailwind = 4;
+                add(self, SideCondition::WideGuard, 1);
+                self.add_volatile(user, VolatileId::Stall);
                 true
             }
             "trickroom" => {
@@ -309,12 +340,21 @@ impl Battle {
     /// `trySpreadMoveHit` and its hit steps.
     fn try_spread_move_hit(&mut self, user: MonRef, mv: &mut MoveUse, targets: Vec<MonRef>) -> Res<bool> {
         let data = mv.data;
+        let priority = mv.priority;
+        let spread_target = mv.am.target;
         let mut targets = targets;
         mv.spread = targets.len() > 1;
 
         // Try and PrepareHit
         if data.id == "fakeout" && self.mon(user).active_move_actions > 1 {
             return Ok(false);
+        }
+        // Sucker Punch fails unless its target is about to use an attack.
+        if data.id == "suckerpunch" {
+            let attacking = self.queued_move(targets[0]).is_some_and(|m| Dex::get().move_data(m).category != Category::Status);
+            if !attacking {
+                return Ok(false);
+            }
         }
         if data.has_key("stallingMove") && !(self.will_act() && self.stall_move(user)) {
             return Ok(false);
@@ -334,8 +374,13 @@ impl Battle {
         // hitStepTryHitEvent: Psychic Terrain (priority 4) stops priority
         // moves on grounded foes; Protect blocks moves with the protect flag.
         step(self, &mut targets, &mut |b, t| {
-            if b.psychic_terrain_blocks(user, t, data.priority, data.target == MoveTarget::SelfTarget) {
+            if b.psychic_terrain_blocks(user, t, priority, data.target == MoveTarget::SelfTarget) {
                 HitRes::Bool(false)
+            } else if b.sides[t.side].condition(SideCondition::WideGuard) > 0
+                && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes)
+                && data.flags.has("protect")
+            {
+                HitRes::NotFail
             } else if b.mon(t).volatiles.has(VolatileId::Protect) && data.flags.has("protect") {
                 HitRes::NotFail
             } else {
@@ -549,7 +594,7 @@ impl Battle {
             }
         }
 
-        self.run_move_effects(&mut damage, &targets, mv, user, effect, primary)?;
+        self.run_move_effects(&mut damage, &targets, mv, user, effect, primary, is_secondary)?;
         for i in 0..targets.len() {
             if !damage[i].hit() {
                 targets[i] = None;
@@ -587,6 +632,7 @@ impl Battle {
         user: MonRef,
         effect: &HitEffect,
         primary: bool,
+        is_secondary: bool,
     ) -> Res<()> {
         let mut did_anything = damage.iter().copied().reduce(HitRes::combine).unwrap_or(HitRes::Undefined);
         for i in 0..targets.len() {
@@ -631,6 +677,16 @@ impl Battle {
             // onHit: Protect and Detect start (or extend) the stall counter.
             if primary && mv.data.has_key("stallingMove") {
                 self.add_volatile(t, VolatileId::Stall);
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
+            // Secondaries' onHit: Dire Claw's random status, Throat Chop.
+            if is_secondary && mv.data.id == "direclaw" {
+                let status = [Status::Poison, Status::Paralysis, Status::Sleep][self.chance.sample(3)];
+                self.try_set_status(t, status);
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
+            if is_secondary && mv.data.id == "throatchop" {
+                self.add_volatile(t, VolatileId::ThroatChop);
                 did_something = did_something.combine(HitRes::Bool(true));
             }
             // onHit: Parting Shot lowers Attack and Sp. Atk, and doesn't

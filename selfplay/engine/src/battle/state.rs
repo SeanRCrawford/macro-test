@@ -33,6 +33,10 @@ pub enum VolatileId {
     RagePowder,
     /// Helping Hand's boost; `counter` is how many times it was used.
     HelpingHand,
+    /// Locked into `move_id` for a few turns.
+    Encore,
+    /// No sound moves for two turns.
+    ThroatChop,
 }
 
 impl VolatileId {
@@ -45,6 +49,8 @@ impl VolatileId {
             "followme" => VolatileId::FollowMe,
             "ragepowder" => VolatileId::RagePowder,
             "helpinghand" => VolatileId::HelpingHand,
+            "encore" => VolatileId::Encore,
+            "throatchop" => VolatileId::ThroatChop,
             _ => return None,
         })
     }
@@ -58,16 +64,28 @@ impl VolatileId {
             VolatileId::FollowMe => "followme",
             VolatileId::RagePowder => "ragepowder",
             VolatileId::HelpingHand => "helpinghand",
+            VolatileId::Encore => "encore",
+            VolatileId::ThroatChop => "throatchop",
         }
     }
 
     /// The condition's `duration`.
+    /// onResidualOrder (None: no order, sorts last).
+    pub fn residual_order(self) -> Option<u64> {
+        match self {
+            VolatileId::Encore => Some(16),
+            VolatileId::ThroatChop => Some(22),
+            _ => None,
+        }
+    }
+
     pub fn duration(self) -> Option<u8> {
         match self {
             VolatileId::Flinch | VolatileId::Protect | VolatileId::FollowMe | VolatileId::RagePowder | VolatileId::HelpingHand => {
                 Some(1)
             }
-            VolatileId::Stall => Some(2),
+            VolatileId::Stall | VolatileId::ThroatChop => Some(2),
+            VolatileId::Encore => Some(3),
             VolatileId::ChoiceLock => None,
         }
     }
@@ -261,8 +279,49 @@ pub struct Side {
     /// Showdown's `side.active[slot]` is set: the Pokemon at list position
     /// `slot` occupies it (fainted or not) until replaced.
     pub slot_filled: [bool; ACTIVE_PER_SIDE],
-    /// Tailwind's remaining duration (0: not up).
-    pub tailwind: u8,
+    /// Each side condition's remaining duration (0: not up), by
+    /// `SideCondition as usize`.
+    pub conditions: [u8; SideCondition::COUNT],
+}
+
+impl Side {
+    pub fn condition(&self, c: SideCondition) -> u8 {
+        self.conditions[c as usize]
+    }
+}
+
+/// The side conditions the engine implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideCondition {
+    Reflect,
+    LightScreen,
+    Tailwind,
+    WideGuard,
+}
+
+impl SideCondition {
+    pub const COUNT: usize = 4;
+    pub const ALL: [SideCondition; 4] = [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::Tailwind, SideCondition::WideGuard];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            SideCondition::Reflect => "reflect",
+            SideCondition::LightScreen => "lightscreen",
+            SideCondition::Tailwind => "tailwind",
+            SideCondition::WideGuard => "wideguard",
+        }
+    }
+
+    /// onSideResidualOrder and SubOrder (no order: last; subOrder 4 is the
+    /// side-condition default).
+    pub fn residual_order(self) -> (u64, u8) {
+        match self {
+            SideCondition::Reflect => (26, 1),
+            SideCondition::LightScreen => (26, 2),
+            SideCondition::Tailwind => (26, 5),
+            SideCondition::WideGuard => (4_294_967_296, 4),
+        }
+    }
 }
 
 impl Side {

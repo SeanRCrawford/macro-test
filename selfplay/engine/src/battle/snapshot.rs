@@ -76,8 +76,10 @@ impl Battle {
                     })
                     .collect();
                 let mut conditions = serde_json::Map::new();
-                if side.tailwind > 0 {
-                    conditions.insert("tailwind".into(), json!(side.tailwind));
+                for c in super::state::SideCondition::ALL {
+                    if side.condition(c) > 0 {
+                        conditions.insert(c.id().into(), json!(side.condition(c)));
+                    }
                 }
                 json!({"totalFainted": side.total_fainted, "sideConditions": conditions, "pokemon": pokemon})
             })

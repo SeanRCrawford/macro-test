@@ -3,7 +3,7 @@
 //! status and volatile conditions in data/conditions.ts (with the champions
 //! mod's sleep, freeze and paralysis changes) and fieldEvent('Residual').
 
-use super::state::{StatusState, Volatile, VolatileId, ACTIVE_PER_SIDE};
+use super::state::{SideCondition, StatusState, Volatile, VolatileId, ACTIVE_PER_SIDE};
 use super::{Battle, MonRef, Res};
 use crate::damage::Status;
 use crate::dex::{Dex, MoveData, MoveId};
@@ -97,7 +97,7 @@ enum ResidualKind {
     Terrain,
     GrassyHeal,
     TrickRoom,
-    Tailwind(usize),
+    Side(usize, SideCondition),
     Leftovers,
     Status(Status),
     Volatile(VolatileId),
@@ -211,6 +211,9 @@ impl Battle {
         if !self.run_status_immunity(t, id.id()) {
             return HitRes::Bool(false);
         }
+        if id == VolatileId::Encore {
+            return self.start_encore(t);
+        }
         let counter = match id {
             VolatileId::Stall => 3,
             VolatileId::HelpingHand => 1,
@@ -219,6 +222,35 @@ impl Battle {
         self.effect_order += 1;
         let effect_order = self.effect_order;
         self.mon_mut(t).volatiles.0.push(Volatile { id, duration: id.duration(), counter, move_id: None, effect_order });
+        HitRes::Bool(true)
+    }
+
+    /// Encore's onStart: lock the target into its last move, and switch its
+    /// queued move to that one (or last a turn longer if it won't move).
+    fn start_encore(&mut self, t: MonRef) -> HitRes {
+        let m = self.mon(t);
+        let Some(last) = m.last_move else { return HitRes::Bool(false) };
+        let Some(slot) = m.move_slot(last) else { return HitRes::Bool(false) };
+        if Dex::get().move_data(last).flags.has("failencore") || m.moves[slot].pp == 0 {
+            return HitRes::Bool(false);
+        }
+        self.effect_order += 1;
+        let effect_order = self.effect_order;
+        let queued = self.queued_move(t);
+        let duration = if queued.is_none() { 4 } else { 3 };
+        self.mon_mut(t).volatiles.0.push(Volatile {
+            id: VolatileId::Encore,
+            duration: Some(duration),
+            counter: 0,
+            move_id: Some(last),
+            effect_order,
+        });
+        if queued.is_some_and(|q| q != last) {
+            // changeAction (Mental Herb isn't supported).
+            if self.change_move_action(t, slot).is_err() {
+                return HitRes::Bool(false);
+            }
+        }
         HitRes::Bool(true)
     }
 
@@ -260,6 +292,10 @@ impl Battle {
             _ => {}
         }
         if self.mon(user).volatiles.has(VolatileId::Flinch) {
+            return false;
+        }
+        // throatchop (priority 6): no sound moves.
+        if self.mon(user).volatiles.has(VolatileId::ThroatChop) && data.flags.has("sound") {
             return false;
         }
         if self.mon(user).status == Status::Paralysis && self.chance.chance(1, 8) {
@@ -350,8 +386,11 @@ impl Battle {
             handlers.push(Residual { mon: None, what: ResidualKind::Terrain, order: 27, speed: 0, sub_order: 7 });
         }
         for side in 0..2 {
-            if self.sides[side].tailwind > 0 {
-                handlers.push(Residual { mon: None, what: ResidualKind::Tailwind(side), order: 26, speed: 0, sub_order: 5 });
+            for c in SideCondition::ALL {
+                if self.sides[side].condition(c) > 0 {
+                    let (order, sub_order) = c.residual_order();
+                    handlers.push(Residual { mon: None, what: ResidualKind::Side(side, c), order, speed: 0, sub_order });
+                }
             }
             for pos in 0..ACTIVE_PER_SIDE {
                 let Some(r) = self.occupant(side, pos) else { continue };
@@ -372,7 +411,7 @@ impl Battle {
                         handlers.push(Residual {
                             mon: Some(r),
                             what: ResidualKind::Volatile(v.id),
-                            order: NO_HANDLER_ORDER,
+                            order: v.id.residual_order().unwrap_or(NO_HANDLER_ORDER),
                             speed: m.speed,
                             sub_order: 2,
                         });
@@ -391,7 +430,10 @@ impl Battle {
                     ResidualKind::Weather => self.weather_residual(),
                     ResidualKind::Terrain => self.terrain_residual(),
                     ResidualKind::TrickRoom => self.field.trick_room = self.field.trick_room.saturating_sub(1),
-                    ResidualKind::Tailwind(side) => self.sides[side].tailwind = self.sides[side].tailwind.saturating_sub(1),
+                    ResidualKind::Side(side, c) => {
+                        let d = &mut self.sides[side].conditions[c as usize];
+                        *d = d.saturating_sub(1);
+                    }
                     _ => unreachable!(),
                 }
                 self.faint_messages()?;
@@ -406,7 +448,7 @@ impl Battle {
                 continue;
             }
             match h.what {
-                ResidualKind::TrickRoom | ResidualKind::Tailwind(_) | ResidualKind::Weather | ResidualKind::Terrain => unreachable!(),
+                ResidualKind::TrickRoom | ResidualKind::Side(..) | ResidualKind::Weather | ResidualKind::Terrain => unreachable!(),
                 ResidualKind::GrassyHeal => {
                     if self.field.terrain != crate::damage::Terrain::Grassy {
                         continue;
@@ -427,6 +469,14 @@ impl Battle {
                     if *d == 0 {
                         m.volatiles.remove(id);
                         continue;
+                    }
+                    // encore's onResidual: ends once the move is out of PP.
+                    if id == VolatileId::Encore {
+                        let mv = v.move_id;
+                        let has_pp = mv.and_then(|mv| m.moves.iter().find(|s| s.id == mv)).is_some_and(|s| s.pp > 0);
+                        if !has_pp {
+                            m.volatiles.remove(id);
+                        }
                     }
                 }
                 ResidualKind::Status(status) => {

@@ -21,7 +21,7 @@ const ABILITIES: &[&str] = &[
 /// Items whose every effect is implemented: damage boosts, Mega Stones and
 /// the items in `items`.
 const ITEMS: &[&str] = &[
-    "blackbelt", "blackglasses", "charcoal", "choicescarf", "focussash", "leftovers", "lifeorb", "sitrusberry", "dragonfang", "expertbelt", "fairyfeather", "hardstone",
+    "blackbelt", "blackglasses", "charcoal", "choicescarf", "focussash", "leftovers", "lifeorb", "lightclay", "sitrusberry", "dragonfang", "expertbelt", "fairyfeather", "hardstone",
     "lightball", "magnet", "metalcoat", "miracleseed", "muscleband", "mysticwater", "nevermeltice",
     "sharpbeak", "silkscarf", "silverpowder", "softsand", "spelltag", "twistedspoon", "wiseglasses",
 ];
@@ -47,13 +47,24 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("ragepowder", &["onTry"]),
     ("helpinghand", &["onTryHit"]),
     ("partingshot", &["onHit"]),
+    ("suckerpunch", &["onTry"]),
+    ("grassyglide", &["onModifyPriority"]),
+    ("wideguard", &["onTry", "onHitSide"]),
+    ("lowkick", &["basePowerCallback", "onTryHit"]),
+    ("grassknot", &["basePowerCallback", "onTryHit"]),
+    ("direclaw", &[]),
+    ("throatchop", &[]),
+    ("encore", &[]),
 ];
 
 /// Status moves that set a side or field condition, which `moves` implements.
-const FIELD_MOVES: &[&str] = &["tailwind", "trickroom"];
+const FIELD_MOVES: &[&str] = &["tailwind", "trickroom", "reflect", "lightscreen", "wideguard"];
+
+/// Moves whose secondary has an onHit that `moves` implements.
+const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop"];
 
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
-const VOLATILES: &[&str] = &["flinch", "protect", "followme", "ragepowder", "helpinghand"];
+const VOLATILES: &[&str] = &["flinch", "protect", "followme", "ragepowder", "helpinghand", "encore"];
 
 pub fn ability_supported(id: &str) -> bool {
     ABILITIES.contains(&id)
@@ -85,7 +96,8 @@ pub fn move_supported(m: &MoveData) -> bool {
     // A move's `condition` is the volatile it adds (protect, followme...).
     let condition_ok = !m.has_key("condition")
         || m.primary.volatile_status.as_deref().is_some_and(|v| VOLATILES.contains(&v))
-        || field_move;
+        || field_move
+        || m.id == "throatchop";
     let target_ok = match m.category {
         Category::Status => matches!(
             m.target,
@@ -103,7 +115,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         && m.keys.iter().all(|k| PLAIN_KEYS.contains(&k.as_str()) || (k == "condition" && condition_ok) || field_key(k))
         && effect_supported(&m.primary, &[PLAIN_KEYS, &["condition", "sideCondition", "pseudoWeather"]].concat())
         && m.secondaries.iter().all(|s| effect_supported(s, &[]))
-        && m.nested_handlers.is_empty()
+        && (m.nested_handlers.is_empty() || (SECONDARY_ON_HIT.contains(&m.id.as_str()) && m.nested_handlers == ["secondary.onHit"]))
         && handlers_ok
         && target_ok
 }
