@@ -572,15 +572,24 @@ impl Battle {
         for h in handlers {
             let Some(mon) = h.mon else {
                 // Field and side conditions: count down, end at zero.
-                match h.what {
+                // A condition whose duration ran out ends without the
+                // faint check that follows other handlers.
+                let ended = match h.what {
                     ResidualKind::Weather => self.weather_residual(),
                     ResidualKind::Terrain => self.terrain_residual(),
-                    ResidualKind::TrickRoom => self.field.trick_room = self.field.trick_room.saturating_sub(1),
+                    ResidualKind::TrickRoom => {
+                        self.field.trick_room = self.field.trick_room.saturating_sub(1);
+                        self.field.trick_room == 0
+                    }
                     ResidualKind::Side(side, c) => {
                         let d = &mut self.sides[side].conditions[c as usize];
                         *d = d.saturating_sub(1);
+                        *d == 0
                     }
                     _ => unreachable!(),
+                };
+                if ended {
+                    continue;
                 }
                 self.faint_messages()?;
                 if self.is_over() {

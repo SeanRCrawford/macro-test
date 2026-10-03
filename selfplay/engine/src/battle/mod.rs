@@ -299,10 +299,10 @@ impl Battle {
         if m.status == crate::damage::Status::Paralysis {
             spe = spe * 50 / 100;
         }
-        let spe = spe.min(10_000);
-        // getActionSpeed: Trick Room inverts, then `trunc(speed, 13)`.
-        let spe = if self.field.trick_room > 0 { 10_000 - spe } else { spe };
-        Ok((spe % 8192) as i32)
+        let spe = spe.min(10_000) as i32;
+        // The champions mod's getActionSpeed: Trick Room negates (no 13-bit
+        // truncation).
+        Ok(if self.field.trick_room > 0 { -spe } else { spe })
     }
 
     /// The ModifyPriority events for a move: Grassy Glide.

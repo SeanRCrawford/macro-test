@@ -176,11 +176,12 @@ impl Battle {
 
     /// The weather's Residual handler: count down, or deal sandstorm damage
     /// (eachEvent('Weather') in Speed order) and run Update.
-    pub(super) fn weather_residual(&mut self) {
+    /// Returns true when the weather ended.
+    pub(super) fn weather_residual(&mut self) -> bool {
         self.field.weather_turns = self.field.weather_turns.saturating_sub(1);
         if self.field.weather_turns == 0 {
             self.field.weather = Weather::None;
-            return;
+            return true;
         }
         let actives = self.all_active();
         let mut keyed: Vec<(MonRef, i32)> = actives.iter().map(|&r| (r, self.mon(r).speed)).collect();
@@ -195,14 +196,18 @@ impl Battle {
             }
         }
         self.each_update();
+        false
     }
 
     /// The terrain's duration countdown.
-    pub(super) fn terrain_residual(&mut self) {
+    /// Returns true when the terrain ended.
+    pub(super) fn terrain_residual(&mut self) -> bool {
         self.field.terrain_turns = self.field.terrain_turns.saturating_sub(1);
         if self.field.terrain_turns == 0 {
-            self.field.terrain = Terrain::None;
+            self.clear_terrain();
+            return true;
         }
+        false
     }
 
     /// Grassy Terrain's per-Pokemon residual heal.

@@ -253,11 +253,15 @@ impl Battle {
     /// `runMove`.
     pub(super) fn run_move(&mut self, user: MonRef, slot: usize, target_loc: i8, priority: i8) -> Res<()> {
         self.mon_mut(user).active_move_actions += 1;
-        // A recharge turn: mustrecharge's BeforeMove (priority 11) ends it.
-        if slot == LOCKED_SLOT && self.mon(user).locked_move() == Some(LockedMove::Recharge) {
+        // A recharge turn: mustrecharge's BeforeMove (priority 11) stops
+        // whatever move comes (Encore may have swapped one in).
+        if self.mon(user).volatiles.has(VolatileId::MustRecharge) {
             let m = self.mon_mut(user);
             m.volatiles.remove(VolatileId::GlaiveRush);
             m.volatiles.remove(VolatileId::MustRecharge);
+            if m.volatiles.remove(VolatileId::TwoTurnMove) {
+                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+            }
             m.move_this_turn_result = Some(None);
             return Ok(());
         }
@@ -515,7 +519,7 @@ impl Battle {
         // Sucker Punch fails unless its target is about to use an attack.
         if data.id == "suckerpunch" {
             let attacking = self.queued_move(targets[0]).is_some_and(|m| Dex::get().move_data(m).category != Category::Status);
-            if !attacking {
+            if !attacking || self.mon(targets[0]).volatiles.has(VolatileId::MustRecharge) {
                 return Ok(false);
             }
         }
@@ -865,8 +869,9 @@ impl Battle {
             if !damaged.is_empty() {
                 let fire = mv.am.move_type == Dex::get().type_id("Fire").expect("Fire") && mv.am.category != Category::Status;
                 self.damaging_hit(user, &damaged, mv.data.flags.has("contact"), fire);
-                // AfterHit: Knock Off takes the item.
-                if mv.data.id == "knockoff" && self.mon(user).hp > 0 {
+                // AfterHit: Knock Off takes the item (the champions mod's
+                // spreadMoveHit doesn't need the user to still have HP).
+                if mv.data.id == "knockoff" {
                     for &t in &damaged {
                         self.take_item(t, t);
                     }

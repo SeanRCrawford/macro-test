@@ -362,6 +362,7 @@ impl Mon {
         self.newly_switched = true;
         self.being_called_back = false;
         self.times_attacked = 0;
+        self.hurt_this_turn = None;
         self.switch_flag = None;
         self.force_switch_flag = false;
         // Champions: a Mega stays Mega after fainting or switching.
