@@ -95,7 +95,7 @@ impl Battle {
                     if self.mon(user).switch_flag == Some(SwitchFlag::Replace) {
                         continue;
                     }
-                    let Some(item) = self.take_item(user, user) else { continue };
+                    let Some(item) = self.take_item(user, t) else { continue };
                     // setItem fails on a Pokemon with no HP: the item goes back.
                     if self.mon(t).hp == 0 || !self.mon(t).is_active {
                         self.mon_mut(user).item = Some(item);
@@ -111,7 +111,8 @@ impl Battle {
                     if !u.is_active || self.switchable(user.side).is_empty() || u.force_switch_flag || m.force_switch_flag {
                         continue;
                     }
-                    if self.use_item(t) {
+                    // DragOut: Guard Dog stays.
+                    if self.use_item(t) && !self.ability_is(user, "guarddog") {
                         self.mon_mut(user).force_switch_flag = true;
                     }
                 }
@@ -409,6 +410,11 @@ impl Battle {
             PoisonPoint,
             SeedSower,
             Mummy,
+            Static,
+            Gooey,
+            Justified,
+            Rattled,
+            SandSpit,
             PoisonTouch,
             AirBalloon,
         }
@@ -435,6 +441,11 @@ impl Battle {
                 "poisonpoint" => Some((H::PoisonPoint, NONE)),
                 "seedsower" => Some((H::SeedSower, NONE)),
                 "mummy" => Some((H::Mummy, NONE)),
+                "static" => Some((H::Static, NONE)),
+                "gooey" => Some((H::Gooey, NONE)),
+                "justified" => Some((H::Justified, NONE)),
+                "rattled" => Some((H::Rattled, NONE)),
+                "sandspit" => Some((H::SandSpit, NONE)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -445,7 +456,7 @@ impl Battle {
                 Some("airballoon") => hs.push((t, t, H::AirBalloon, NONE, speed, 8)),
                 _ => {}
             }
-            if self.ability_is(user, "poisontouch") {
+            if self.ability_is(user, "poisontouch") && !self.ability_is(t, "shielddust") && self.item_of(t) != Some("covertcloak") {
                 hs.push((user, t, H::PoisonTouch, NONE, self.mon(user).speed, 6));
             }
         }
@@ -491,6 +502,21 @@ impl Battle {
                         }
                     }
                 }
+                H::Static if contact && self.chance.chance(3, 10) => {
+                    self.try_set_status(user, crate::damage::Status::Paralysis);
+                }
+                H::Gooey if contact => {
+                    self.boost(user, &[(4, -1)], Some(t));
+                }
+                H::Justified if move_type == dex.type_id("Dark").expect("Dark") => {
+                    self.boost(t, &[(0, 1)], Some(user));
+                }
+                H::Rattled if ["Dark", "Bug", "Ghost"].iter().any(|n| move_type == dex.type_id(n).expect("type")) => {
+                    self.boost(t, &[(4, 1)], Some(user));
+                }
+                H::SandSpit => {
+                    self.set_weather(crate::damage::Weather::Sand, t);
+                }
                 H::SeedSower => {
                     self.set_terrain(Terrain::Grassy, t);
                 }
@@ -526,7 +552,7 @@ impl Battle {
 
     /// `takeItem`: the TakeItem event lets Mega Stones stay with a Pokemon that
     /// can use them (`checker` is whose species counts) and Unburden notice.
-    pub(super) fn take_item(&mut self, holder: MonRef, checker: MonRef) -> Option<ItemId> {
+    pub(super) fn take_item(&mut self, holder: MonRef, taker: MonRef) -> Option<ItemId> {
         let m = self.mon(holder);
         if !m.is_active {
             return None;
@@ -537,7 +563,12 @@ impl Battle {
         if self.ability_is(holder, "unburden") {
             self.add_volatile(holder, VolatileId::Unburden);
         }
-        if !self.can_take(item, checker) {
+        if !self.can_take(item, holder) {
+            return None;
+        }
+        // Sticky Hold: nobody else takes it while it has HP (Knock Off passes
+        // its user as the taker).
+        if self.ability_is(holder, "stickyhold") && self.mon(holder).hp > 0 && taker != holder {
             return None;
         }
         self.mon_mut(holder).item = None;
@@ -561,6 +592,10 @@ impl Battle {
                 b.add_volatile(r, VolatileId::Unburden);
             }
             if !b.can_take(item, r) {
+                return Some(None);
+            }
+            // Sticky Hold keeps the target's item from Trick.
+            if r == target && b.ability_is(r, "stickyhold") && b.mon(r).hp > 0 {
                 return Some(None);
             }
             b.mon_mut(r).item = None;

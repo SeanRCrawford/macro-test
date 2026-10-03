@@ -29,6 +29,10 @@ const ABILITIES: &[&str] = &[
     "screencleaner", "sweetveil",
     "sheerforce", "bulletproof", "eartheater", "seedsower", "purifyingsalt", "pickpocket", "protean", "libero", "mummy",
     "moldbreaker", "supremeoverlord", "simple",
+    "insomnia", "vitalspirit", "limber", "immunity", "overcoat", "keeneye", "illuminate", "steadfast", "static", "gooey",
+    "justified", "angerpoint", "raindish", "liquidooze", "stickyhold", "whitesmoke", "quickfeet", "shielddust", "damp",
+    "leafguard", "hydration", "shedskin", "earlybird", "guarddog", "rattled", "supersweetsyrup", "sandspit",
+    "tangledfeet", "anticipation", "forewarn", "runaway",
 ];
 
 /// Items whose every effect is implemented: damage boosts, Mega Stones and

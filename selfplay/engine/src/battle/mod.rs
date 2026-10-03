@@ -344,6 +344,10 @@ impl Battle {
             "sandrush" => weather == crate::damage::Weather::Sand,
             "slushrush" => weather == crate::damage::Weather::Snow,
             "surgesurfer" => self.field.terrain == crate::damage::Terrain::Electric,
+            "quickfeet" if m.status != crate::damage::Status::None => {
+                modifier = crate::fixed::chain(modifier, 6144);
+                false
+            }
             _ => false,
         };
         if doubled {
@@ -354,7 +358,8 @@ impl Battle {
         }
         let mut spe = crate::fixed::modify(boosted(m.stats[5], m.boosts[4]) as u64, modifier) as u32;
         // par's onModifySpe (Quick Feet isn't supported).
-        if m.status == crate::damage::Status::Paralysis {
+        // par's onModifySpe, unless Quick Feet.
+        if m.status == crate::damage::Status::Paralysis && !self.ability_is(r, "quickfeet") {
             spe = spe * 50 / 100;
         }
         let spe = spe.min(10_000) as i32;
@@ -708,6 +713,10 @@ impl Battle {
             return Ok(());
         }
         let i = bench[self.chance.sample(bench.len())];
+        // DragOut: Guard Dog stays.
+        if self.occupant(side, pos).is_some_and(|o| self.ability_is(o, "guarddog")) {
+            return Ok(());
+        }
         let r = self.mon_ref(side, i);
         self.switch_in_inner(r, pos, true)
     }

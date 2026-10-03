@@ -22,6 +22,8 @@ pub(super) enum StartEffect {
     ScreenCleaner,
     /// Counts the side's fallen (up to 5).
     SupremeOverlord,
+    /// Lowers the foes' evasion, once per battle.
+    SupersweetSyrup,
 }
 
 impl StartEffect {
@@ -42,6 +44,7 @@ pub(super) fn start_effect(ability: &str) -> Option<StartEffect> {
         "trace" => StartEffect::Trace,
         "screencleaner" => StartEffect::ScreenCleaner,
         "supremeoverlord" => StartEffect::SupremeOverlord,
+        "supersweetsyrup" => StartEffect::SupersweetSyrup,
         "drought" => StartEffect::Weather(Weather::Sun),
         "drizzle" => StartEffect::Weather(Weather::Rain),
         "sandstream" => StartEffect::Weather(Weather::Sand),
@@ -143,6 +146,15 @@ impl Battle {
                 for a in allies {
                     let amount = (self.mon(a).max_hp() / 4) as u32;
                     self.heal(a, amount);
+                }
+            }
+            StartEffect::SupersweetSyrup => {
+                if self.mon(r).syrup_triggered {
+                    return;
+                }
+                self.mon_mut(r).syrup_triggered = true;
+                for t in self.adjacent_foes(r) {
+                    self.boost(t, &[(6, -1)], Some(r));
                 }
             }
             StartEffect::SupremeOverlord => {
@@ -265,6 +277,9 @@ impl Battle {
                 }
                 ("dryskin", Weather::Rain) => {
                     self.heal(r, max / 8);
+                }
+                ("raindish", Weather::Rain) => {
+                    self.heal(r, max / 16);
                 }
                 ("icebody", Weather::Snow) => {
                     self.heal(r, max / 16);

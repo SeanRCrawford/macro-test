@@ -262,6 +262,8 @@ pub struct Mon {
     pub protean_used: bool,
     /// Supreme Overlord's count of fallen allies, taken on start.
     pub fallen: u8,
+    /// Supersweet Syrup already went off (once per battle).
+    pub syrup_triggered: bool,
     /// The types to restore when Roost ends.
     pub roost_types: Option<[TypeId; 2]>,
     /// atk, def, spa, spd, spe, accuracy, evasion.
@@ -333,6 +335,7 @@ impl Mon {
             trace_seek: false,
             protean_used: false,
             fallen: 0,
+            syrup_triggered: false,
             boosts: [0; 7],
             ability: set.ability,
             base_ability: set.ability,

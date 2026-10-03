@@ -150,7 +150,10 @@ impl Battle {
         // Immunity: Sand Rush to sandstorm; TryAddVolatile: Inner Focus to
         // flinching.
         let ab = self.ability_id(t);
-        if (key == "sandstorm" && matches!(ab, "sandrush" | "sandveil" | "sandforce")) || (key == "flinch" && ab == "innerfocus") {
+        if (key == "sandstorm" && matches!(ab, "sandrush" | "sandveil" | "sandforce" | "overcoat"))
+            || (key == "powder" && ab == "overcoat")
+            || (key == "flinch" && ab == "innerfocus")
+        {
             return false;
         }
         key.is_empty() || !Dex::get().immune_to(key, m.types)
@@ -190,8 +193,17 @@ impl Battle {
             if status == Status::Sleep && self.side_has_ability(t.side, "sweetveil") {
                 return false;
             }
-            // Purifying Salt: no status at all.
-            if self.ability_is(t, "purifyingsalt") {
+            // Purifying Salt: no status at all; Insomnia, Vital Spirit,
+            // Limber and Immunity each keep one out; Leaf Guard in sun.
+            let blocked = match self.ability_id(t) {
+                "purifyingsalt" => true,
+                "insomnia" | "vitalspirit" => status == Status::Sleep,
+                "limber" => status == Status::Paralysis,
+                "immunity" => matches!(status, Status::Poison | Status::Toxic),
+                "leafguard" => self.field.weather == crate::damage::Weather::Sun,
+                _ => false,
+            };
+            if blocked {
                 return false;
             }
         }
@@ -252,7 +264,10 @@ impl Battle {
         // TryAddVolatile: Own Tempo (confusion), Sweet Veil (Yawn, for its
         // side).
         if (id == VolatileId::Confusion && self.ability_is(t, "owntempo"))
-            || (id == VolatileId::Yawn && (self.side_has_ability(t.side, "sweetveil") || self.ability_is(t, "purifyingsalt")))
+            || (id == VolatileId::Yawn
+                && (self.side_has_ability(t.side, "sweetveil")
+                    || matches!(self.ability_id(t), "purifyingsalt" | "insomnia" | "vitalspirit")
+                    || (self.ability_is(t, "leafguard") && self.field.weather == crate::damage::Weather::Sun)))
         {
             return HitRes::Null;
         }
@@ -393,7 +408,11 @@ impl Battle {
         self.mon_mut(user).volatiles.remove(VolatileId::GlaiveRush);
         match self.mon(user).status {
             Status::Sleep => {
+                let early = self.ability_is(user, "earlybird");
                 let m = self.mon_mut(user);
+                if early {
+                    m.status_state.time -= 1;
+                }
                 m.status_state.time -= 1;
                 if m.status_state.time <= 0 {
                     self.cure_status(user);
@@ -412,10 +431,14 @@ impl Battle {
             }
             _ => {}
         }
-        let v = &self.mon(user).volatiles;
-        if v.has(VolatileId::Flinch) {
+        if self.mon(user).volatiles.has(VolatileId::Flinch) {
+            // The Flinch event: Steadfast.
+            if self.ability_is(user, "steadfast") {
+                self.boost(user, &[(4, 1)], Some(user));
+            }
             return false;
         }
+        let v = &self.mon(user).volatiles;
         // disable (priority 7)
         if v.0.iter().any(|x| x.id == VolatileId::Disable && x.move_id == Some(move_id)) && !data.flags.has("cantusetwice") {
             return false;
@@ -516,7 +539,13 @@ impl Battle {
         // TryBoost
         let from_other = source.is_some_and(|s| s != t);
         match ability {
-            "clearbody" if source != Some(t) => capped.retain(|b| b.1 >= 0),
+            "clearbody" | "whitesmoke" if source != Some(t) => capped.retain(|b| b.1 >= 0),
+            "keeneye" | "illuminate" if source != Some(t) => capped.retain(|b| !(b.0 == 5 && b.1 < 0)),
+            // Guard Dog (TryBoost priority 2): Intimidate raises Attack instead.
+            "guarddog" if cause == BoostCause::Intimidate && capped.iter().any(|b| b.0 == 0) => {
+                capped.retain(|b| b.0 != 0);
+                self.boost(t, &[(0, 1)], Some(t));
+            }
             "hypercutter" if source != Some(t) => capped.retain(|b| !(b.0 == 0 && b.1 < 0)),
             "scrappy" | "innerfocus" | "oblivious" | "owntempo" if cause == BoostCause::Intimidate => {
                 capped.retain(|b| b.0 != 0);
@@ -541,6 +570,7 @@ impl Battle {
             }
             _ => {}
         }
+        let intimidated = capped.iter().any(|b| b.0 == 0 && b.1 != 0);
         let mut success = HitRes::Null;
         for (stat, n) in capped {
             let m = self.mon_mut(t);
@@ -563,6 +593,10 @@ impl Battle {
                     _ => {}
                 }
             }
+        }
+        // AfterBoost: Rattled answers Intimidate.
+        if cause == BoostCause::Intimidate && intimidated && self.ability_is(t, "rattled") {
+            self.boost(t, &[(4, 1)], Some(t));
         }
         success
     }
@@ -667,7 +701,7 @@ impl Battle {
                 if self.item_of(r) == Some("whiteherb") {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::WhiteHerb, order: 29, speed: m.speed, sub_order: 8 });
                 }
-                if self.ability_is(r, "healer") {
+                if matches!(self.ability_id(r), "healer" | "hydration" | "shedskin") {
                     handlers.push(Residual { mon: Some(r), what: ResidualKind::Healer, order: 5, speed: m.speed, sub_order: 3 });
                 }
                 if self.item_of(r) == Some("leftovers") {
@@ -737,13 +771,27 @@ impl Battle {
                     }
                     self.grassy_heal(h.mon);
                 }
-                ResidualKind::Healer => {
-                    for a in self.adjacent_allies(h.mon) {
-                        if self.mon(a).status != Status::None && self.chance.chance(1, 2) {
-                            self.cure_status(a);
+                // Healer, Hydration, Shed Skin (order 5, subOrder 3).
+                ResidualKind::Healer => match self.ability_id(h.mon) {
+                    "healer" => {
+                        for a in self.adjacent_allies(h.mon) {
+                            if self.mon(a).status != Status::None && self.chance.chance(1, 2) {
+                                self.cure_status(a);
+                            }
                         }
                     }
-                }
+                    "hydration" => {
+                        if self.mon(h.mon).status != Status::None && self.field.weather == crate::damage::Weather::Rain {
+                            self.cure_status(h.mon);
+                        }
+                    }
+                    "shedskin" => {
+                        if self.mon(h.mon).hp > 0 && self.mon(h.mon).status != Status::None && self.chance.chance(33, 100) {
+                            self.cure_status(h.mon);
+                        }
+                    }
+                    _ => {}
+                },
                 ResidualKind::Leftovers => {
                     if self.item_of(h.mon) != Some("leftovers") {
                         continue;

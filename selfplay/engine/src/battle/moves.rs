@@ -32,6 +32,8 @@ pub(super) struct MoveUse {
     /// Targets whose protection the move got through (getMoveHitData's
     /// bypassProtect).
     pub bypassed: Vec<MonRef>,
+    /// Targets this hit landed a critical hit on (getMoveHitData's crit).
+    pub crit_on: Vec<MonRef>,
     /// `move.totalDamage` (Shell Bell).
     pub total_damage: u32,
 }
@@ -303,6 +305,7 @@ impl Battle {
             "voltabsorb" if is("Electric") => {}
             "eartheater" if is("Ground") => {}
             "bulletproof" => return data.flags.has("bullet"),
+            "overcoat" => return data.flags.has("powder") && !dex.immune_to("powder", self.mon(t).types),
             "waterabsorb" if is("Water") => {}
             "sapsipper" if is("Grass") => {
                 self.boost(t, &[(0, 1)], Some(user));
@@ -526,8 +529,14 @@ impl Battle {
         if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.blocks_priority(f)) {
             return Ok(false);
         }
+        let explodes = matches!(data.id.as_str(), "explosion" | "selfdestruct" | "mistyexplosion");
+        // TryMove: Damp (onAnyTryMove) stops them.
+        if explodes && self.all_active().into_iter().any(|r| self.ability_is(r, "damp")) {
+            self.selfdestruct_user = None;
+            return Ok(false);
+        }
         // Explosion: the user faints before the hit (but still attacks).
-        if matches!(data.id.as_str(), "explosion" | "selfdestruct" | "mistyexplosion") {
+        if explodes {
             self.faint(user);
             self.selfdestruct_user = Some(user);
         }
@@ -552,6 +561,7 @@ impl Battle {
             kings_rock,
             total_damage: 0,
             bypassed: Vec::new(),
+            crit_on: Vec::new(),
         };
         let result = self.try_spread_move_hit(user, &mut mv, targets);
         self.selfdestruct_user = None;
@@ -767,7 +777,7 @@ impl Battle {
         match data.id.as_str() {
             "rest" => {
                 let m = self.mon(user);
-                if m.status == Status::Sleep || m.hp >= m.max_hp() {
+                if m.status == Status::Sleep || m.hp >= m.max_hp() || matches!(self.ability_id(user), "insomnia" | "vitalspirit") {
                     return Ok(false);
                 }
             }
@@ -942,7 +952,7 @@ impl Battle {
         // ModifyBoost: Unaware ignores the other side's accuracy/evasion.
         let unaware = |b: &Battle, r: MonRef| b.ability_is(r, "unaware");
         let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5] as i32 };
-        let eva_boost = if unaware(self, user) || data.has_key("ignoreEvasion") { 0 } else { self.mon(t).boosts[6] as i32 };
+        let eva_boost = if unaware(self, user) || self.ignores_evasion(user, data) { 0 } else { self.mon(t).boosts[6] as i32 };
         let boost = (acc_boost.clamp(-6, 6) - eva_boost).clamp(-6, 6);
         // ModifyAccuracy: Compound Eyes (priority -1), then Wide Lens, Zoom
         // Lens and the target's Bright Powder (-2) by holder Speed, chained.
@@ -967,7 +977,7 @@ impl Battle {
         let mut a = acc as f64;
         let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5].clamp(-6, 6) };
         a = if acc_boost > 0 { a * TABLE[acc_boost as usize] } else { a / TABLE[(-acc_boost) as usize] };
-        if !data.has_key("ignoreEvasion") && !unaware(self, user) {
+        if !self.ignores_evasion(user, data) && !unaware(self, user) {
             let eva = self.mon(t).boosts[6].clamp(-6, 6);
             if eva > 0 {
                 a /= TABLE[eva as usize];
@@ -984,6 +994,11 @@ impl Battle {
         self.chance.chance(a.ceil() as u32, 100)
     }
 
+    /// `move.ignoreEvasion`: the move's own, or Keen Eye / Illuminate's.
+    fn ignores_evasion(&self, user: MonRef, data: &MoveData) -> bool {
+        data.has_key("ignoreEvasion") || self.ability_is(user, "keeneye") || self.ability_is(user, "illuminate")
+    }
+
     /// The ModifyAccuracy chain, if any handler applies: Compound Eyes and
     /// Sand Veil (priority -1), then Wide Lens, Zoom Lens and the target's
     /// Bright Powder (-2), by holder Speed.
@@ -998,6 +1013,9 @@ impl Battle {
             || (self.ability_is(t, "snowcloak") && weather == crate::damage::Weather::Snow)
         {
             mods.push((-1, ts, 7, 3277));
+        }
+        if self.ability_is(t, "tangledfeet") && self.mon(t).volatiles.has(VolatileId::Confusion) {
+            mods.push((-1, ts, 7, 2048));
         }
         match self.item_of(user) {
             Some("widelens") => mods.push((-2, us, 8, 4505)),
@@ -1214,6 +1232,10 @@ impl Battle {
                     Some(c) => c,
                     None => crit_ratio > 0 && self.chance.chance(1, [0, 24, 8, 2, 1][crit_ratio]),
                 };
+                mv.crit_on.retain(|&c| c != t);
+                if crit {
+                    mv.crit_on.push(t);
+                }
                 let mut ctx = self.damage_ctx(&view, user, t, crit, spread);
                 ctx.bypass_protect = mv.bypassed.contains(&t);
                 ctx.hit = mv.hit;
@@ -1278,7 +1300,12 @@ impl Battle {
                     if self.item_of(user) == Some("bigroot") {
                         amount = crate::fixed::modify(amount as u64, 5324) as u32;
                     }
-                    self.heal(user, amount);
+                    // Liquid Ooze (onSourceTryHeal) turns it into damage.
+                    if self.ability_is(t, "liquidooze") {
+                        self.effect_damage(user, amount);
+                    } else {
+                        self.heal(user, amount);
+                    }
                 }
             }
         }
@@ -1308,7 +1335,7 @@ impl Battle {
         // forceSwitch: Roar, Whirlwind, Dragon Tail, Circle Throw.
         if primary && mv.data.has_key("forceSwitch") {
             for t in targets.iter().flatten() {
-                if self.mon(*t).hp > 0 && self.mon(user).hp > 0 && !self.switchable(t.side).is_empty() {
+                if self.mon(*t).hp > 0 && self.mon(user).hp > 0 && !self.switchable(t.side).is_empty() && !self.ability_is(*t, "guarddog") {
                     self.mon_mut(*t).force_switch_flag = true;
                 }
             }
@@ -1324,7 +1351,7 @@ impl Battle {
                 // spreadMoveHit doesn't need the user to still have HP).
                 if mv.data.id == "knockoff" {
                     for &t in &damaged {
-                        self.take_item(t, t);
+                        self.take_item(t, user);
                     }
                 }
                 // Ice Spinner ends the terrain.
@@ -1417,6 +1444,10 @@ impl Battle {
             }
             if primary {
                 did_something = did_something.combine(self.misc_on_hit(user, t, mv.data.id.as_str()));
+            }
+            // The Hit event: Anger Point after a critical hit.
+            if primary && mv.crit_on.contains(&t) && self.mon(t).hp > 0 && self.ability_is(t, "angerpoint") {
+                self.boost(t, &[(0, 12)], Some(t));
             }
             // onHit: Trick swaps items.
             if primary && mv.data.id == "trick" {
@@ -1585,7 +1616,13 @@ impl Battle {
                 let success = self.boost(t, &[(0, -1)], Some(user)).truthy();
                 // TryHeal: Big Root.
                 let amount = if self.item_of(user) == Some("bigroot") { crate::fixed::modify(atk as u64, 5324) as u32 } else { atk };
-                HitRes::Bool(self.heal(user, amount).truthy() || success)
+                let healed = if self.ability_is(t, "liquidooze") {
+                    self.effect_damage(user, amount);
+                    false
+                } else {
+                    self.heal(user, amount).truthy()
+                };
+                HitRes::Bool(healed || success)
             }
             "magicpowder" => {
                 let psychic = Dex::get().type_id("Psychic").expect("Psychic");
@@ -1635,14 +1672,19 @@ impl Battle {
         for &t in targets {
             let Some(t) = t else { continue };
             let secondaries: &[HitEffect] = if mv.am.has_sheer_force { &[] } else { &mv.data.secondaries };
+            // ModifySecondaries: Shield Dust keeps only effects on the user.
+            let dust = self.ability_is(t, "shielddust");
             for sec in secondaries {
+                if dust && sec.self_effect.is_none() {
+                    continue;
+                }
                 let roll = self.chance.random(100);
                 if sec.chance.is_none_or(|c| roll < c as u32) {
                     self.spread_move_hit(vec![Some(t)], user, mv, sec, false, true, false)?;
                 }
             }
             // King's Rock's onModifyMove adds a 10% flinch.
-            if mv.kings_rock {
+            if mv.kings_rock && !dust {
                 let roll = self.chance.random(100);
                 if roll < 10 {
                     self.spread_move_hit(vec![Some(t)], user, mv, &KINGS_ROCK_FLINCH, false, true, false)?;
