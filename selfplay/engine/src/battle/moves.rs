@@ -661,7 +661,7 @@ impl Battle {
         // onTry, then PrepareHit (Protean, Libero).
         let try_ok = match data.id.as_str() {
             "auroraveil" => self.field.weather == crate::damage::Weather::Snow,
-            "wideguard" => self.will_act(),
+            "wideguard" | "quickguard" => self.will_act(),
             _ => true,
         };
         if try_ok {
@@ -675,14 +675,21 @@ impl Battle {
             "lightscreen" => add(self, SideCondition::LightScreen, screen_turns),
             // onTry: only in snow.
             "auroraveil" => self.field.weather == crate::damage::Weather::Snow && add(self, SideCondition::AuroraVeil, screen_turns),
-            "wideguard" => {
+            "wideguard" | "quickguard" => {
                 // onTry: fails as the last to act; onHitSide adds stall even
-                // if Wide Guard was already up.
+                // if the guard was already up.
                 if !self.will_act() {
                     return false;
                 }
-                add(self, SideCondition::WideGuard, 1);
+                let c = if data.id == "wideguard" { SideCondition::WideGuard } else { SideCondition::QuickGuard };
+                add(self, c, 1);
                 self.add_volatile(user, VolatileId::Stall);
+                true
+            }
+            "haze" => {
+                for r in self.all_active() {
+                    self.mon_mut(r).boosts = [0; 7];
+                }
                 true
             }
             "raindance" => self.set_weather(crate::damage::Weather::Rain, user),
@@ -757,6 +764,30 @@ impl Battle {
         if data.id == "poltergeist" && self.mon(targets[0]).item.is_none() {
             return Ok(false);
         }
+        match data.id.as_str() {
+            "rest" => {
+                let m = self.mon(user);
+                if m.status == Status::Sleep || m.hp >= m.max_hp() {
+                    return Ok(false);
+                }
+            }
+            "lastresort" => {
+                let m = self.mon(user);
+                let has = m.moves.iter().any(|s| Dex::get().move_data(s.id).id == "lastresort");
+                let others_used = m.moves.iter().all(|s| Dex::get().move_data(s.id).id == "lastresort" || s.used);
+                if m.moves.len() < 2 || !has || !others_used {
+                    return Ok(false);
+                }
+            }
+            "upperhand" => {
+                let ok = self.queued_move_priority(targets[0])
+                    .is_some_and(|(m, p)| p > 0.1 && Dex::get().move_data(m).category != Category::Status);
+                if !ok {
+                    return Ok(false);
+                }
+            }
+            _ => {}
+        }
         if data.has_key("stallingMove") && !(self.will_act() && self.stall_move(user)) {
             return Ok(false);
         }
@@ -803,6 +834,13 @@ impl Battle {
                 && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes)
             {
                 // Wide Guard (priority 4).
+                HitRes::NotFail
+            } else if priority > 0
+                && data.flags.has("protect")
+                && !(data.flags.has("contact") && b.ability_is(user, "unseenfist"))
+                && b.sides[t.side].condition(SideCondition::QuickGuard) > 0
+            {
+                // Quick Guard (priority 4).
                 HitRes::NotFail
             } else if b.protect_blocks(user, t, data) {
                 // Protect and its variants (priority 3).
@@ -1158,6 +1196,9 @@ impl Battle {
                 if self.mon(user).volatiles.has(VolatileId::FocusEnergy) {
                     ratio += 2;
                 }
+                if let Some(v) = self.mon(user).volatiles.0.iter().find(|v| v.id == VolatileId::DragonCheer) {
+                    ratio += 1 + v.counter as i32;
+                }
                 match self.item_of(user) {
                     Some("scopelens") => ratio += 1,
                     Some("leek") => {
@@ -1419,11 +1460,21 @@ impl Battle {
                 if self.heal(t, amount as u32).truthy() { HitRes::Bool(true) } else { HitRes::NotFail }
             }
             "psychup" => {
+                // Copy the boosts, then Dragon Cheer and Focus Energy (Dragon
+                // Cheer keeps the target's hasDragonType).
                 let boosts = self.mon(t).boosts;
+                let cheer = self.mon(t).volatiles.0.iter().find(|v| v.id == VolatileId::DragonCheer).map(|v| v.counter);
                 let focus = self.mon(t).volatiles.has(VolatileId::FocusEnergy);
                 let m = self.mon_mut(user);
                 m.boosts = boosts;
+                m.volatiles.remove(VolatileId::DragonCheer);
                 m.volatiles.remove(VolatileId::FocusEnergy);
+                if let Some(c) = cheer {
+                    self.add_volatile(user, VolatileId::DragonCheer);
+                    if let Some(v) = self.mon_mut(user).volatiles.get_mut(VolatileId::DragonCheer) {
+                        v.counter = c;
+                    }
+                }
                 if focus {
                     self.add_volatile(user, VolatileId::FocusEnergy);
                 }
@@ -1445,6 +1496,104 @@ impl Battle {
                         m.hp = average.clamp(1, m.max_hp() as u32) as u16;
                     }
                 }
+                HitRes::Undefined
+            }
+            "skillswap" => {
+                let dex = Dex::get();
+                let (sa, ta) = (self.mon(user).ability, self.mon(t).ability);
+                let fails = |a: crate::dex::AbilityId| dex.ability(a).flags.iter().any(|f| f == "failskillswap");
+                if self.mon(user).fainted || self.mon(t).fainted || fails(sa) || fails(ta) {
+                    return HitRes::Bool(false);
+                }
+                self.set_ability(user, ta);
+                self.set_ability(t, sa);
+                for (r, a) in [(t, sa), (user, ta)] {
+                    if let Some(e) = super::field::start_effect(&dex.ability(a).id) {
+                        self.ability_start(r, e);
+                    }
+                }
+                HitRes::Undefined
+            }
+            "simplebeam" | "entrainment" => {
+                let dex = Dex::get();
+                let new = if id == "simplebeam" { dex.ability_id("simple").expect("simple") } else { self.mon(user).ability };
+                let cur = dex.ability(self.mon(t).ability);
+                let cant = cur.flags.iter().any(|f| f == "cantsuppress") || cur.id == "truant";
+                let bad = if id == "simplebeam" {
+                    cant || cur.id == "simple"
+                } else {
+                    t == user || self.mon(t).ability == new || cant || dex.ability(new).flags.iter().any(|f| f == "noentrain")
+                };
+                if bad || self.mon(t).hp == 0 {
+                    return HitRes::Bool(false);
+                }
+                self.set_ability(t, new);
+                if let Some(e) = super::field::start_effect(&dex.ability(new).id) {
+                    self.ability_start(t, e);
+                }
+                HitRes::Undefined
+            }
+            "quash" => HitRes::Bool(self.quash(t)).or_undefined(),
+            "afteryou" => HitRes::Bool(self.after_you(t)).or_undefined(),
+            "bellydrum" => {
+                let m = self.mon(t);
+                let max = m.max_hp() as u32;
+                if m.hp as u32 * 2 <= max || m.boosts[0] >= 6 || max == 1 {
+                    return HitRes::Bool(false);
+                }
+                self.apply_damage(t, (max / 2).max(1));
+                self.boost(t, &[(0, 12)], Some(t));
+                HitRes::Undefined
+            }
+            "topsyturvy" => {
+                let m = self.mon_mut(t);
+                if m.boosts.iter().all(|&b| b == 0) {
+                    return HitRes::Bool(false);
+                }
+                for b in m.boosts.iter_mut() {
+                    *b = -*b;
+                }
+                HitRes::Undefined
+            }
+            "moonlight" | "synthesis" => {
+                use crate::damage::Weather;
+                let factor = match self.move_weather(t) {
+                    Weather::Sun => 2732,
+                    Weather::Rain | Weather::Sand | Weather::Snow => 1024,
+                    _ => 2048,
+                };
+                let amount = crate::fixed::modify(self.mon(t).max_hp() as u64, factor) as u32;
+                if self.heal(t, amount).truthy() { HitRes::Bool(true) } else { HitRes::NotFail }
+            }
+            "rest" => {
+                if !self.set_status(t, Status::Sleep) {
+                    return HitRes::Bool(false);
+                }
+                if self.mon(t).status == Status::Sleep {
+                    self.mon_mut(t).status_state.time = 3;
+                }
+                let max = self.mon(t).max_hp() as u32;
+                self.heal(t, max);
+                HitRes::Undefined
+            }
+            "strengthsap" => {
+                let m = self.mon(t);
+                if m.boosts[0] == -6 {
+                    return HitRes::Bool(false);
+                }
+                let atk = super::boosted(m.stats[1], m.boosts[0]);
+                let success = self.boost(t, &[(0, -1)], Some(user)).truthy();
+                // TryHeal: Big Root.
+                let amount = if self.item_of(user) == Some("bigroot") { crate::fixed::modify(atk as u64, 5324) as u32 } else { atk };
+                HitRes::Bool(self.heal(user, amount).truthy() || success)
+            }
+            "magicpowder" => {
+                let psychic = Dex::get().type_id("Psychic").expect("Psychic");
+                let m = self.mon_mut(t);
+                if m.types == [psychic, psychic] {
+                    return HitRes::Bool(false);
+                }
+                m.types = [psychic, psychic];
                 HitRes::Undefined
             }
             "soak" => {

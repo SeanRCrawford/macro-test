@@ -22,6 +22,12 @@ pub(super) enum HitRes {
 }
 
 impl HitRes {
+    /// An onHit returning nothing on success (undefined) and false on
+    /// failure.
+    pub(super) fn or_undefined(self) -> HitRes {
+        if self == HitRes::Bool(true) { HitRes::Undefined } else { self }
+    }
+
     pub(super) fn truthy(self) -> bool {
         match self {
             HitRes::Bool(b) => b,
@@ -279,6 +285,17 @@ impl Battle {
             VolatileId::Confusion => self.chance.random_range(2, 6),
             _ => 0,
         };
+        // focusenergy / dragoncheer's onStart: not both.
+        if (id == VolatileId::FocusEnergy && self.mon(t).volatiles.has(VolatileId::DragonCheer))
+            || (id == VolatileId::DragonCheer && self.mon(t).volatiles.has(VolatileId::FocusEnergy))
+        {
+            return HitRes::Bool(false);
+        }
+        let counter = if id == VolatileId::DragonCheer {
+            self.mon(t).has_type(Dex::get().type_id("Dragon").expect("Dragon")) as u32
+        } else {
+            counter
+        };
         match id {
             // taunt's onStart: a turn longer if it already acted this turn.
             VolatileId::Taunt if self.mon(t).active_turns > 0 && !self.will_move(t) => duration = Some(4),
@@ -484,8 +501,12 @@ impl Battle {
             return HitRes::Bool(false);
         }
         let ability = self.ability_id(t);
-        // ChangeBoost: Contrary.
-        let sign = if ability == "contrary" { -1 } else { 1 };
+        // ChangeBoost: Contrary, Simple.
+        let sign = match ability {
+            "contrary" => -1,
+            "simple" => 2,
+            _ => 1,
+        };
         // getCappedBoost
         let mut capped: Vec<(usize, i8)> = boosts
             .iter()

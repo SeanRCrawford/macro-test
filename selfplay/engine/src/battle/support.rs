@@ -28,7 +28,7 @@ const ABILITIES: &[&str] = &[
     "skilllink", "owntempo", "snowcloak", "icebody", "poisonpoint", "naturalcure", "magicguard", "quickdraw",
     "screencleaner", "sweetveil",
     "sheerforce", "bulletproof", "eartheater", "seedsower", "purifyingsalt", "pickpocket", "protean", "libero", "mummy",
-    "moldbreaker", "supremeoverlord",
+    "moldbreaker", "supremeoverlord", "simple",
 ];
 
 /// Items whose every effect is implemented: damage boosts, Mega Stones and
@@ -101,6 +101,23 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("steelbeam", &["onMoveFail"]),
     ("poltergeist", &["onTry", "onTryHit"]),
     ("focusenergy", &["condition.onModifyCritRatio", "condition.onStart"]),
+    ("dragoncheer", &["condition.onModifyCritRatio", "condition.onStart"]),
+    ("skillswap", &["onHit"]),
+    ("quash", &["onHit"]),
+    ("afteryou", &["onHit"]),
+    ("quickguard", &["condition.onSideStart", "condition.onTryHit", "onHitSide", "onTry"]),
+    ("bellydrum", &["onHit"]),
+    ("haze", &["onHitField"]),
+    ("topsyturvy", &["onHit"]),
+    ("simplebeam", &["onHit", "onTryHit"]),
+    ("entrainment", &["onHit", "onTryHit"]),
+    ("moonlight", &["onHit"]),
+    ("synthesis", &["onHit"]),
+    ("rest", &["onHit", "onTry"]),
+    ("strengthsap", &["onHit"]),
+    ("lastresort", &["onTry"]),
+    ("upperhand", &["onTry"]),
+    ("magicpowder", &["onHit"]),
     ("auroraveil", &["onTry"]),
     ("glaiverush", &[]),
     ("hurricane", &["onModifyMove"]),
@@ -119,7 +136,7 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
 /// Status moves that set a side or field condition, which `moves` implements.
 const FIELD_MOVES: &[&str] = &[
     "tailwind", "trickroom", "reflect", "lightscreen", "wideguard", "auroraveil", "raindance", "sunnyday", "sandstorm",
-    "snowscape", "electricterrain", "grassyterrain", "mistyterrain", "psychicterrain", "perishsong",
+    "snowscape", "electricterrain", "grassyterrain", "mistyterrain", "psychicterrain", "perishsong", "quickguard", "haze",
 ];
 
 /// Moves whose secondary has an onHit that `moves` implements.
@@ -128,7 +145,7 @@ const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop"];
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &[
     "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
-    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge", "focusenergy", "dragoncheer",
 ];
 
 pub fn ability_supported(id: &str) -> bool {

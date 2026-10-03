@@ -67,6 +67,9 @@ pub enum VolatileId {
     FlashFire,
     /// Focus Energy: +2 crit ratio.
     FocusEnergy,
+    /// Dragon Cheer: +1 crit ratio, +2 (`counter` 1) if it started on a
+    /// Dragon type.
+    DragonCheer,
     /// A Gem's boost to this move.
     Gem,
 }
@@ -98,6 +101,7 @@ impl VolatileId {
             "imprison" => VolatileId::Imprison,
             "gem" => VolatileId::Gem,
             "focusenergy" => VolatileId::FocusEnergy,
+            "dragoncheer" => VolatileId::DragonCheer,
             _ => return None,
         })
     }
@@ -131,6 +135,7 @@ impl VolatileId {
             VolatileId::FlashFire => "flashfire",
             VolatileId::Gem => "gem",
             VolatileId::FocusEnergy => "focusenergy",
+            VolatileId::DragonCheer => "dragoncheer",
         }
     }
 
@@ -168,7 +173,8 @@ impl VolatileId {
             | VolatileId::Imprison
             | VolatileId::Charging(_)
             | VolatileId::FlashFire
-            | VolatileId::FocusEnergy => None,
+            | VolatileId::FocusEnergy
+            | VolatileId::DragonCheer => None,
             VolatileId::TwoTurnMove | VolatileId::MustRecharge => Some(2),
             VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
             VolatileId::Yawn => Some(2),
@@ -460,16 +466,18 @@ pub enum SideCondition {
     Tailwind,
     WideGuard,
     AuroraVeil,
+    QuickGuard,
 }
 
 impl SideCondition {
-    pub const COUNT: usize = 5;
-    pub const ALL: [SideCondition; 5] = [
+    pub const COUNT: usize = 6;
+    pub const ALL: [SideCondition; 6] = [
         SideCondition::Reflect,
         SideCondition::LightScreen,
         SideCondition::Tailwind,
         SideCondition::WideGuard,
         SideCondition::AuroraVeil,
+        SideCondition::QuickGuard,
     ];
 
     pub fn id(self) -> &'static str {
@@ -479,6 +487,7 @@ impl SideCondition {
             SideCondition::Tailwind => "tailwind",
             SideCondition::WideGuard => "wideguard",
             SideCondition::AuroraVeil => "auroraveil",
+            SideCondition::QuickGuard => "quickguard",
         }
     }
 
@@ -489,7 +498,7 @@ impl SideCondition {
             SideCondition::Reflect => (26, 1),
             SideCondition::LightScreen => (26, 2),
             SideCondition::Tailwind => (26, 5),
-            SideCondition::WideGuard => (4_294_967_296, 4),
+            SideCondition::WideGuard | SideCondition::QuickGuard => (4_294_967_296, 4),
             SideCondition::AuroraVeil => (26, 10),
         }
     }

@@ -420,6 +420,44 @@ impl Battle {
         !self.mon(r).fainted && self.queue.iter().any(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r))
     }
 
+    /// The integer priority (`action.move.priority`) and move of a queued
+    /// Move action.
+    fn queued_move_priority(&self, r: MonRef) -> Option<(crate::dex::MoveId, f64)> {
+        if self.mon(r).fainted {
+            return None;
+        }
+        self.queue.iter().find_map(|a| match a.kind {
+            ActionKind::Move { mon, slot, .. } if mon == r => Some((moves::move_for_slot(self.mon(r), slot), a.priority - a.fractional)),
+            _ => None,
+        })
+    }
+
+    /// Quash: the target's move goes last (order 201).
+    fn quash(&mut self, r: MonRef) -> bool {
+        if self.mon(r).fainted {
+            return false;
+        }
+        match self.queue.iter_mut().find(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r)) {
+            Some(a) => {
+                a.order = 201;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// After You: `prioritizeAction` puts the target's move next (order 3).
+    fn after_you(&mut self, r: MonRef) -> bool {
+        if self.mon(r).fainted {
+            return false;
+        }
+        let Some(i) = self.queue.iter().position(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r)) else { return false };
+        let mut a = self.queue.remove(i);
+        a.order = 3;
+        self.queue.insert(0, a);
+        true
+    }
+
     /// `queue.willAct()`: a move or switch is still to come this turn.
     fn will_act(&self) -> bool {
         self.queue.iter().any(|a| matches!(a.kind, ActionKind::Move { .. } | ActionKind::Switch { .. }))

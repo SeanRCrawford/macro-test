@@ -52,7 +52,8 @@ impl Battle {
             if self.mon(t).status == crate::damage::Status::Freeze {
                 hs.push((t, H::Thaw, 0, speed, 0));
             }
-            if self.ability_is(t, "pickpocket") {
+            // ignoringAbility: a fainted (inactive) Pokemon's ability does nothing.
+            if self.ability_is(t, "pickpocket") && self.mon(t).is_active {
                 hs.push((t, H::Pickpocket, 0, speed, 7));
             }
             match self.item_of(t) {
