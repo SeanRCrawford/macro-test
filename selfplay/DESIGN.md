@@ -257,8 +257,8 @@ treat every decision point the same way.
 The engine itself sees everything. A per-side observation function hides what
 that player can't see.
 
-The Reg M-C ladder uses Open Team Sheets, which reveal species, moves, items,
-abilities and Tera types, but not stat points. What stays hidden is the
+The Reg M-C ladder uses Open Team Sheets, which reveal species, moves, items
+and abilities, but not stat points. (Champions has no Terastallization.) What stays hidden is the
 opponent's stat points and which 4 of the 6 they brought (and which 2 lead,
 until the battle starts). That is much less than in Random Battles.
 
