@@ -27,7 +27,19 @@ pub(super) struct MoveUse {
     pub hit: u8,
     /// `move.hasBounced`: reflected by Magic Bounce (can't bounce again).
     pub bounced: bool,
+    /// King's Rock added a 10% flinch secondary.
+    pub kings_rock: bool,
+    /// `move.totalDamage` (Shell Bell).
+    pub total_damage: u32,
 }
+
+/// The secondary King's Rock adds.
+static KINGS_ROCK_FLINCH: std::sync::LazyLock<HitEffect> = std::sync::LazyLock::new(|| HitEffect {
+    chance: Some(10),
+    volatile_status: Some("flinch".into()),
+    keys: vec!["chance".into(), "volatileStatus".into()],
+    ..HitEffect::default()
+});
 
 impl MoveUse {
     fn data_id(&self) -> MoveId {
@@ -226,6 +238,7 @@ impl Battle {
                 c.move_last_turn_failed = m.move_last_turn_result == Some(Some(false));
                 c.volatiles.glaive_rush = m.volatiles.has(VolatileId::GlaiveRush);
                 c.volatiles.flash_fire = m.volatiles.has(VolatileId::FlashFire);
+                c.volatiles.gem = m.volatiles.has(VolatileId::Gem);
                 c.volatiles.helping_hand =
                     m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
                 out[side * 2 + pos] = Some(c);
@@ -319,9 +332,11 @@ impl Battle {
 
     /// `useMove` for a move Magic Bounce sends back: no PP, no BeforeMove,
     /// but its result is the bouncer's moveThisTurnResult.
-    fn bounce_move(&mut self, user: MonRef, move_id: MoveId, target: MonRef) -> Res<()> {
+    /// The bounced move keeps the original's priority (useMoveInner copies
+    /// `activeMove.priority`), which Armor Tail and Psychic Terrain see.
+    fn bounce_move(&mut self, user: MonRef, move_id: MoveId, target: MonRef, priority: i8) -> Res<()> {
         self.mon_mut(user).move_this_turn_result = None;
-        let r = self.use_move_inner(user, move_id, Some(target), 0, true)?;
+        let r = self.use_move_inner(user, move_id, Some(target), priority, true)?;
         let m = self.mon_mut(user);
         if m.move_this_turn_result.is_none() {
             m.move_this_turn_result = Some(Some(r));
@@ -376,14 +391,28 @@ impl Battle {
         if targets.is_empty() {
             return Ok(false);
         }
-        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority, hit: 1, bounced };
+        let kings_rock = self.item_of(user) == Some("kingsrock")
+            && data.category != Category::Status
+            && !data.secondaries.iter().any(|s| s.volatile_status.as_deref() == Some("flinch"));
+        let mut mv = MoveUse {
+            am,
+            data,
+            self_dropped: false,
+            spread: false,
+            self_switch: data.self_switch,
+            priority,
+            hit: 1,
+            bounced,
+            kings_rock,
+            total_damage: 0,
+        };
         let result = self.try_spread_move_hit(user, &mut mv, targets)?;
         // selfBoost (Clanging Scales), once the move worked.
         if let (true, Some(sb)) = (result, data.self_boost.as_ref()) {
             self.spread_move_hit(vec![Some(user)], user, &mut mv, sb, false, false, true)?;
         }
         if result {
-            self.after_move_secondary_self(user, last_target, data.category == Category::Status);
+            self.after_move_secondary_self(user, last_target, data.category == Category::Status, mv.total_damage);
         }
         Ok(result)
     }
@@ -579,7 +608,7 @@ impl Battle {
                 HitRes::NotFail
             } else if t != user && !bounced && data.flags.has("reflectable") && b.ability_is(t, "magicbounce") {
                 // Magic Bounce (priority 1) sends the move back, there and then.
-                if let Err(e) = b.bounce_move(t, bounce_move_id, user) {
+                if let Err(e) = b.bounce_move(t, bounce_move_id, user, priority) {
                     bounce_err.get_or_insert(e);
                 }
                 HitRes::Bool(false)
@@ -655,10 +684,26 @@ impl Battle {
         let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5] as i32 };
         let eva_boost = if unaware(self, user) || data.has_key("ignoreEvasion") { 0 } else { self.mon(t).boosts[6] as i32 };
         let boost = (acc_boost.clamp(-6, 6) - eva_boost).clamp(-6, 6);
-        // ModifyAccuracy: Compound Eyes.
+        // ModifyAccuracy: Compound Eyes (priority -1), then Wide Lens, Zoom
+        // Lens and the target's Bright Powder (-2) by holder Speed, chained.
         let mut accuracy = acc as u32;
+        let mut mods: Vec<(i8, i32, u8, u32)> = Vec::new();
+        let (us, ts) = (self.mon(user).speed, self.mon(t).speed);
         if self.ability_is(user, "compoundeyes") {
-            accuracy = crate::fixed::modify(accuracy as u64, 5325) as u32;
+            mods.push((-1, us, 7, 5325));
+        }
+        match self.item_of(user) {
+            Some("widelens") => mods.push((-2, us, 8, 4505)),
+            Some("zoomlens") if !self.will_move(t) => mods.push((-2, us, 8, 4915)),
+            _ => {}
+        }
+        if self.item_of(t) == Some("brightpowder") {
+            mods.push((-2, ts, 8, 3686));
+        }
+        if !mods.is_empty() {
+            self.speed_sort(&mut mods, |a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+            let modifier = mods.iter().fold(crate::fixed::ONE, |m, x| crate::fixed::chain(m, x.3));
+            accuracy = crate::fixed::modify(accuracy as u64, modifier) as u32;
         }
         if boost > 0 {
             accuracy = accuracy * (3 + boost as u32) / 3;
@@ -717,6 +762,7 @@ impl Battle {
         if hit == 1 {
             return Ok(false);
         }
+        mv.total_damage = total;
         self.faint_messages()?;
         if total > 0 {
             self.apply_recoil(user, mv.data, total);
@@ -730,14 +776,8 @@ impl Battle {
             }
         }
         self.each_update();
-        // afterMoveSecondaryEvent: frz's onAfterMoveSecondary thaws the target.
-        if mv.data.has_key("thawsTarget") {
-            for t in hit_targets.into_iter().flatten() {
-                if self.mon(t).status == Status::Freeze {
-                    self.cure_status(t);
-                }
-            }
-        }
+        let targets: Vec<MonRef> = hit_targets.into_iter().flatten().collect();
+        self.after_move_secondary(&targets, user, mv.data);
         Ok(true)
     }
 
@@ -805,8 +845,20 @@ impl Battle {
                 }
             }
         }
-        // TryPrimaryHit (no handlers).
+        // TryPrimaryHit: the user's Normal Gem.
         let mut damage = vec![HitRes::Bool(true); targets.len()];
+        if primary {
+            for t in targets.iter().flatten() {
+                if *t != user
+                    && mv.am.category != Category::Status
+                    && mv.am.move_type == Dex::get().type_id("Normal").expect("Normal")
+                    && self.item_of(user) == Some("normalgem")
+                    && self.use_item(user)
+                {
+                    self.add_volatile(user, VolatileId::Gem);
+                }
+            }
+        }
         for i in 0..targets.len() {
             if !damage[i].truthy() {
                 targets[i] = None;
@@ -824,7 +876,19 @@ impl Battle {
                     damage[i] = HitRes::Num(0);
                     continue;
                 }
-                let crit_ratio = mv.data.crit_ratio.clamp(0, 4) as usize;
+                // ModifyCritRatio: Scope Lens, and Leek for Farfetch'd/Sirfetch'd.
+                let mut ratio = mv.data.crit_ratio as i32;
+                match self.item_of(user) {
+                    Some("scopelens") => ratio += 1,
+                    Some("leek") => {
+                        let base = crate::dex::to_id(&Dex::get().species(self.mon(user).species).base_species);
+                        if base == "farfetchd" || base == "sirfetchd" {
+                            ratio += 2;
+                        }
+                    }
+                    _ => {}
+                }
+                let crit_ratio = ratio.clamp(0, 4) as usize;
                 let crit = match mv.data.will_crit {
                     Some(c) => c,
                     None => crit_ratio > 0 && self.chance.chance(1, [0, 24, 8, 2, 1][crit_ratio]),
@@ -885,7 +949,11 @@ impl Battle {
             damage[i] = HitRes::Num(dealt);
             if dealt > 0 {
                 if let Some((n, den)) = mv.data.drain {
-                    let amount = (dealt as f64 * n as f64 / den as f64).round() as u32;
+                    let mut amount = (dealt as f64 * n as f64 / den as f64).round() as u32;
+                    // TryHeal: Big Root.
+                    if self.item_of(user) == Some("bigroot") {
+                        amount = crate::fixed::modify(amount as u64, 5324) as u32;
+                    }
                     self.heal(user, amount);
                 }
             }
@@ -1071,6 +1139,13 @@ impl Battle {
                 let roll = self.chance.random(100);
                 if sec.chance.is_none_or(|c| roll < c as u32) {
                     self.spread_move_hit(vec![Some(t)], user, mv, sec, false, true, false)?;
+                }
+            }
+            // King's Rock's onModifyMove adds a 10% flinch.
+            if mv.kings_rock {
+                let roll = self.chance.random(100);
+                if roll < 10 {
+                    self.spread_move_hit(vec![Some(t)], user, mv, &KINGS_ROCK_FLINCH, false, true, false)?;
                 }
             }
         }

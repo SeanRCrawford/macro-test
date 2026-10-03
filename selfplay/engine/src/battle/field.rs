@@ -74,7 +74,11 @@ impl Battle {
     pub(super) fn grounded(&self, r: MonRef) -> bool {
         let m = self.mon(r);
         let dex = Dex::get();
-        !m.has_type(dex.type_id("Flying").expect("Flying")) && dex.ability(m.ability).id != "levitate"
+        let item = self.item_of(r);
+        if item == Some("ironball") {
+            return true;
+        }
+        !m.has_type(dex.type_id("Flying").expect("Flying")) && dex.ability(m.ability).id != "levitate" && item != Some("airballoon")
     }
 
     /// `field.setWeather` from an ability (5 turns: no rock items supported).

@@ -65,6 +65,8 @@ pub enum VolatileId {
     MustRecharge,
     /// Flash Fire's boost to Fire moves.
     FlashFire,
+    /// A Gem's boost to this move.
+    Gem,
 }
 
 impl VolatileId {
@@ -92,6 +94,7 @@ impl VolatileId {
             "banefulbunker" => VolatileId::BanefulBunker,
             "perishsong" => VolatileId::PerishSong,
             "imprison" => VolatileId::Imprison,
+            "gem" => VolatileId::Gem,
             _ => return None,
         })
     }
@@ -123,6 +126,7 @@ impl VolatileId {
             VolatileId::Charging(m) => Dex::get().move_data(m).id.as_str(),
             VolatileId::MustRecharge => "mustrecharge",
             VolatileId::FlashFire => "flashfire",
+            VolatileId::Gem => "gem",
         }
     }
 
@@ -143,7 +147,12 @@ impl VolatileId {
 
     pub fn duration(self) -> Option<u8> {
         match self {
-            VolatileId::Flinch | VolatileId::Protect | VolatileId::FollowMe | VolatileId::RagePowder | VolatileId::HelpingHand => {
+            VolatileId::Flinch
+            | VolatileId::Protect
+            | VolatileId::FollowMe
+            | VolatileId::RagePowder
+            | VolatileId::HelpingHand
+            | VolatileId::Gem => {
                 Some(1)
             }
             VolatileId::Stall | VolatileId::ThroatChop => Some(2),

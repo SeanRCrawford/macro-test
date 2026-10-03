@@ -189,6 +189,9 @@ impl Battle {
         let m = self.mon_mut(t);
         m.status = status;
         m.status_state = state;
+        if status != Status::None {
+            self.after_set_status(t);
+        }
         true
     }
 

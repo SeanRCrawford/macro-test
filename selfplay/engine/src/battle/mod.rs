@@ -67,6 +67,8 @@ struct Action {
     order: u32,
     priority: f64,
     speed: i32,
+    /// FractionalPriority, rolled once as the action is resolved.
+    fractional: f64,
 }
 
 /// Showdown's default order when an action has none.
@@ -248,7 +250,8 @@ impl Battle {
 
     /// Showdown's resolveAction + getActionSpeed, appended to the queue.
     fn add_action(&mut self, kind: ActionKind, order: u32, priority: f64) -> Res<()> {
-        let mut action = Action { kind, order, priority, speed: 1 };
+        let fractional = self.fractional_priority(&kind);
+        let mut action = Action { kind, order, priority, speed: 1, fractional };
         self.action_speed(&mut action)?;
         self.queue.push(action);
         Ok(())
@@ -261,7 +264,15 @@ impl Battle {
             ActionKind::Residual => 300,
             _ => NO_ORDER,
         };
-        self.queue.push(Action { kind, order, priority: 0.0, speed: 1 });
+        self.queue.push(Action { kind, order, priority: 0.0, speed: 1, fractional: 0.0 });
+    }
+
+    /// The FractionalPriority event for a move action: Quick Claw.
+    fn fractional_priority(&mut self, kind: &ActionKind) -> f64 {
+        match *kind {
+            ActionKind::Move { mon, .. } if self.item_of(mon) == Some("quickclaw") && self.chance.chance(1, 5) => 0.1,
+            _ => 0.0,
+        }
     }
 
     /// `getActionSpeed`: a move's priority, and the acting Pokemon's speed.
@@ -270,7 +281,7 @@ impl Battle {
             ActionKind::Move { mon, slot, .. } => {
                 let m = self.mon(*mon);
                 let id = moves::move_for_slot(m, *slot);
-                action.priority = self.move_priority(*mon, id) as f64;
+                action.priority = self.move_priority(*mon, id) as f64 + action.fractional;
                 Some(*mon)
             }
             ActionKind::MegaEvo { mon } | ActionKind::Switch { mon, .. } | ActionKind::RunSwitch { mon } => Some(*mon),
@@ -410,7 +421,8 @@ impl Battle {
     /// `queue.insertChoice` for an action created mid-turn (runSwitch):
     /// placed where it would sort, ties broken at random.
     fn insert_action(&mut self, kind: ActionKind, order: u32) -> Res<()> {
-        let mut action = Action { kind, order, priority: 0.0, speed: 1 };
+        let fractional = self.fractional_priority(&kind);
+        let mut action = Action { kind, order, priority: 0.0, speed: 1, fractional };
         if let ActionKind::RunSwitch { mon } | ActionKind::Move { mon, .. } = action.kind {
             let s = self.action_speed_of(mon)?;
             self.mon_mut(mon).speed = s;
@@ -516,6 +528,20 @@ impl Battle {
             }
         }
 
+        // Phazing: Red Card drags in a random replacement.
+        for side in 0..2 {
+            for pos in 0..ACTIVE_PER_SIDE {
+                let Some(r) = self.occupant(side, pos) else { continue };
+                if self.mon(r).force_switch_flag {
+                    if self.mon(r).hp > 0 {
+                        self.drag_in(side, pos)?;
+                    }
+                    if let Some(r) = self.occupant(side, pos) {
+                        self.mon_mut(r).force_switch_flag = false;
+                    }
+                }
+            }
+        }
         self.clear_force_switch_flags();
         self.faint_messages()?;
         if self.is_over() {
@@ -596,8 +622,23 @@ impl Battle {
         }
     }
 
+    /// `dragIn`: a random bench Pokemon replaces the one at `pos`.
+    fn drag_in(&mut self, side: usize, pos: usize) -> Res<()> {
+        let bench = self.switchable(side);
+        if bench.is_empty() {
+            return Ok(());
+        }
+        let i = bench[self.chance.sample(bench.len())];
+        let r = self.mon_ref(side, i);
+        self.switch_in_inner(r, pos, true)
+    }
+
     /// Showdown's switchIn. `incoming` takes list position `pos`.
     fn switch_in(&mut self, incoming: MonRef, pos: usize) -> Res<()> {
+        self.switch_in_inner(incoming, pos, false)
+    }
+
+    fn switch_in_inner(&mut self, incoming: MonRef, pos: usize, is_drag: bool) -> Res<()> {
         let side = incoming.side;
         let new_pos = self.mon(incoming).position;
         let old_active = self.occupant(side, pos);
@@ -606,7 +647,7 @@ impl Battle {
             if o.hp > 0 {
                 o.being_called_back = true;
                 // BeforeSwitchOut, then Update (Sitrus can still trigger).
-                if !o.skip_before_switch_out {
+                if !o.skip_before_switch_out && !is_drag {
                     self.each_update();
                 }
                 self.mon_mut(old).skip_before_switch_out = false;
@@ -645,6 +686,10 @@ impl Battle {
         m.newly_switched = true;
         for s in m.moves.iter_mut() {
             s.used = false;
+        }
+        if is_drag {
+            // runSwitch happens at once for a drag.
+            return self.run_switch(incoming);
         }
         self.insert_action(ActionKind::RunSwitch { mon: incoming }, 101)?;
         Ok(())
@@ -842,7 +887,9 @@ impl Battle {
                 // TrapPokemon: a foe's Shadow Tag (Ghost types and other
                 // Shadow Tag users go free).
                 let r = MonRef { side, uid: m.uid };
+                // Shed Shell's onTrapPokemon (priority -10) frees it.
                 let trapped = !self.ability_is(r, "shadowtag")
+                    && self.item_of(r) != Some("shedshell")
                     && !Dex::get().immune_to("trapped", m.types)
                     && self.adjacent_foes(r).into_iter().any(|f| self.ability_is(f, "shadowtag"));
                 // Struggling counts as a locked move: no Mega Evolution.

@@ -34,6 +34,9 @@ const ITEMS: &[&str] = &[
     "yacheberry", "dragonfang", "expertbelt", "fairyfeather", "hardstone",
     "lightball", "magnet", "metalcoat", "miracleseed", "muscleband", "mysticwater", "nevermeltice",
     "sharpbeak", "silkscarf", "silverpowder", "softsand", "spelltag", "twistedspoon", "wiseglasses",
+    "widelens", "zoomlens", "brightpowder", "scopelens", "leek", "bigroot", "kingsrock", "shellbell", "ironball",
+    "airballoon", "lumberry", "chestoberry", "leppaberry", "mentalherb", "shedshell", "normalgem", "ejectbutton",
+    "redcard", "quickclaw", "bindingband",
 ];
 
 /// Move data keys that add nothing beyond what `moves` implements.

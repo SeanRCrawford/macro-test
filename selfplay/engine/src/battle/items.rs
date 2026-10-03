@@ -3,7 +3,7 @@
 //! Damage modifiers (Life Orb's boost, type items...) live in `damage`.
 
 use super::conditions::HitRes;
-use super::state::{Volatile, VolatileId, ACTIVE_PER_SIDE};
+use super::state::{SwitchFlag, Volatile, VolatileId, ACTIVE_PER_SIDE};
 use crate::damage::Terrain;
 use super::{Battle, MonRef};
 use crate::dex::{Dex, ItemId, MoveId};
@@ -23,6 +23,79 @@ impl Battle {
         }
         m.item = None;
         true
+    }
+
+    /// `useItem` with its AfterUseItem.
+    pub(super) fn use_item(&mut self, r: MonRef) -> bool {
+        if !self.consume_item(r) {
+            return false;
+        }
+        self.after_use_item(r);
+        true
+    }
+
+    /// AfterMoveSecondary on the move's targets, all handlers sorted
+    /// together: frz thaws a target (thawsTarget), Eject Button (priority 2),
+    /// Red Card.
+    pub(super) fn after_move_secondary(&mut self, targets: &[MonRef], user: MonRef, data: &crate::dex::MoveData) {
+        #[derive(Clone, Copy)]
+        enum H {
+            Thaw,
+            EjectButton,
+            RedCard,
+        }
+        // (holder, kind, priority, speed, subOrder)
+        let mut hs: Vec<(MonRef, H, i32, i32, u8)> = Vec::new();
+        for &t in targets {
+            let speed = self.mon(t).speed;
+            if self.mon(t).status == crate::damage::Status::Freeze {
+                hs.push((t, H::Thaw, 0, speed, 0));
+            }
+            match self.item_of(t) {
+                Some("ejectbutton") => hs.push((t, H::EjectButton, 2, speed, 8)),
+                Some("redcard") => hs.push((t, H::RedCard, 0, speed, 8)),
+                _ => {}
+            }
+        }
+        self.speed_sort(&mut hs, |a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)).then(a.4.cmp(&b.4)));
+        let attack = data.category != crate::dex::Category::Status;
+        for (t, h, _, _, _) in hs {
+            match h {
+                H::Thaw => {
+                    if data.has_key("thawsTarget") && self.mon(t).status == crate::damage::Status::Freeze {
+                        self.cure_status(t);
+                    }
+                }
+                H::EjectButton => {
+                    if user == t || self.mon(t).hp == 0 || !attack || self.item_of(t) != Some("ejectbutton") {
+                        continue;
+                    }
+                    let m = self.mon(t);
+                    if self.switchable(t.side).is_empty() || m.force_switch_flag || m.being_called_back {
+                        continue;
+                    }
+                    if self.all_active().iter().any(|&a| self.mon(a).switch_flag == Some(SwitchFlag::Replace)) {
+                        continue;
+                    }
+                    self.mon_mut(t).switch_flag = Some(SwitchFlag::Replace);
+                    if !self.use_item(t) {
+                        self.mon_mut(t).switch_flag = None;
+                    }
+                }
+                H::RedCard => {
+                    if user == t || self.mon(user).hp == 0 || self.mon(t).hp == 0 || !attack || self.item_of(t) != Some("redcard") {
+                        continue;
+                    }
+                    let (u, m) = (self.mon(user), self.mon(t));
+                    if !u.is_active || self.switchable(user.side).is_empty() || u.force_switch_flag || m.force_switch_flag {
+                        continue;
+                    }
+                    if self.use_item(t) {
+                        self.mon_mut(user).force_switch_flag = true;
+                    }
+                }
+            }
+        }
     }
 
     /// AfterUseItem: Unburden.
@@ -46,6 +119,7 @@ impl Battle {
                 self.cure_status(r);
             }
             self.trace_update(r);
+            self.item_update(r);
             if self.item_of(r) == Some("sitrusberry") && !self.unnerved(r) {
                 let m = self.mon(r);
                 if m.hp > 0 && m.hp as u32 * 2 <= m.max_hp() as u32 {
@@ -89,10 +163,78 @@ impl Battle {
     }
 
     /// AfterMoveSecondarySelf: Life Orb's recoil after an attack.
-    pub(super) fn after_move_secondary_self(&mut self, user: MonRef, target: MonRef, is_status: bool) {
-        if self.item_of(user) == Some("lifeorb") && user != target && !is_status && !self.mon(user).force_switch_flag {
-            let amount = (self.mon(user).max_hp() / 10) as u32;
-            self.effect_damage(user, amount);
+    /// Life Orb's recoil (priority 0) or Shell Bell's heal (-1).
+    pub(super) fn after_move_secondary_self(&mut self, user: MonRef, target: MonRef, is_status: bool, total_damage: u32) {
+        match self.item_of(user) {
+            Some("lifeorb") if user != target && !is_status && !self.mon(user).force_switch_flag => {
+                let amount = (self.mon(user).max_hp() / 10) as u32;
+                self.effect_damage(user, amount);
+            }
+            Some("shellbell") if total_damage > 0 && !self.mon(user).force_switch_flag => {
+                // heal(totalDamage / 8): a fraction rounds up to 1, else down.
+                self.heal(user, (total_damage / 8).max(1));
+            }
+            _ => {}
+        }
+    }
+
+    /// `eatItem` for a berry: Unnerve stops it; then the item is gone.
+    fn eat_berry(&mut self, r: MonRef) -> bool {
+        if self.unnerved(r) || !self.consume_item(r) {
+            return false;
+        }
+        true
+    }
+
+    /// Update for status-curing and PP items: Mental Herb, Lum, Chesto, Leppa.
+    fn item_update(&mut self, r: MonRef) {
+        use super::state::VolatileId as V;
+        use crate::damage::Status;
+        let m = self.mon(r);
+        if m.hp == 0 {
+            return;
+        }
+        match self.item_of(r) {
+            Some("mentalherb") => {
+                let cured = [V::Taunt, V::Encore, V::Disable];
+                if cured.iter().any(|&v| m.volatiles.has(v)) && self.consume_item(r) {
+                    for v in cured {
+                        self.mon_mut(r).volatiles.remove(v);
+                    }
+                    self.after_use_item(r);
+                }
+            }
+            Some("lumberry") if m.status != Status::None || m.volatiles.has(V::Confusion) => {
+                if self.eat_berry(r) {
+                    self.cure_status(r);
+                    self.mon_mut(r).volatiles.remove(V::Confusion);
+                    self.after_use_item(r);
+                }
+            }
+            Some("chestoberry") if m.status == Status::Sleep => {
+                if self.eat_berry(r) {
+                    self.cure_status(r);
+                    self.after_use_item(r);
+                }
+            }
+            Some("leppaberry") if m.moves.iter().any(|s| s.pp == 0) && self.eat_berry(r) => {
+                let m = self.mon_mut(r);
+                let slot = m.moves.iter().position(|s| s.pp == 0).or_else(|| m.moves.iter().position(|s| s.pp < s.max_pp));
+                if let Some(i) = slot {
+                    m.moves[i].pp = (m.moves[i].pp + 10).min(m.moves[i].max_pp);
+                }
+                self.after_use_item(r);
+            }
+            _ => {}
+        }
+    }
+
+    /// AfterSetStatus: Lum Berry cures the status at once.
+    pub(super) fn after_set_status(&mut self, r: MonRef) {
+        if self.item_of(r) == Some("lumberry") && self.eat_berry(r) {
+            self.cure_status(r);
+            self.mon_mut(r).volatiles.remove(super::state::VolatileId::Confusion);
+            self.after_use_item(r);
         }
     }
 
@@ -132,10 +274,10 @@ impl Battle {
 
     /// Choice Scarf's onModifySpe, as a modifier (4096 = none).
     pub(super) fn speed_modifier(&self, r: MonRef) -> u32 {
-        if self.item_of(r) == Some("choicescarf") {
-            6144
-        } else {
-            4096
+        match self.item_of(r) {
+            Some("choicescarf") => 6144,
+            Some("ironball") => 2048,
+            _ => 4096,
         }
     }
 
@@ -237,6 +379,7 @@ impl Battle {
             ThermalExchange,
             SpicySpray,
             PoisonTouch,
+            AirBalloon,
         }
         let dex = Dex::get();
         let contact = data.flags.has("contact");
@@ -262,8 +405,10 @@ impl Battle {
             if let Some((k, order)) = ab {
                 hs.push((t, t, k, order, speed, 7));
             }
-            if self.item_of(t) == Some("rockyhelmet") {
-                hs.push((t, t, H::RockyHelmet, 2, speed, 8));
+            match self.item_of(t) {
+                Some("rockyhelmet") => hs.push((t, t, H::RockyHelmet, 2, speed, 8)),
+                Some("airballoon") => hs.push((t, t, H::AirBalloon, NONE, speed, 8)),
+                _ => {}
             }
             if self.ability_is(user, "poisontouch") {
                 hs.push((user, t, H::PoisonTouch, NONE, self.mon(user).speed, 6));
@@ -302,6 +447,11 @@ impl Battle {
                 }
                 H::PoisonTouch if contact && self.chance.chance(3, 10) => {
                     self.try_set_status(t, crate::damage::Status::Poison);
+                }
+                H::AirBalloon => {
+                    // The balloon pops: the item is simply gone.
+                    self.mon_mut(t).item = None;
+                    self.after_use_item(t);
                 }
                 _ => {}
             }
