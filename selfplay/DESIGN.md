@@ -240,10 +240,15 @@ formula adds stat points after the nature; Showdown adds them before.
 1. Rust unit tests for each mechanic.
 2. **Fixtures computed by Showdown's own code** (`tools/showdown/gen_fixtures.js`),
    committed under `engine/tests/fixtures/`, so `cargo test` needs no Node.
-   Done so far: stats for every pool species and spread (10,175 cases, exact
-   match). Next: damage for every roll, over attacker, defender and move
-   triples sampled from the pool. Then whole turns: the same seeded choices
-   played through both simulators, with the results compared.
+   Done so far:
+   - Stats for every pool species and spread: 10,175 cases, exact match.
+   - Damage for all 16 rolls: 4,000 random doubles situations built from
+     usage stats, with random weather, terrain, screens, boosts, statuses,
+     HP, Helping Hand, crits and spread hits. 3,973 match exactly, none
+     mismatch, and 27 are reported unsupported (see 4.10).
+
+   Next: whole turns, with the same seeded choices played through both
+   simulators and the results compared.
 3. Self-play smoke tests: millions of random-action games with invariant
    checks (HP bounds, legal requests, termination).
 
@@ -251,13 +256,35 @@ formula adds stat points after the nature; Showdown adds them before.
 
 - [x] 1a. Workspace scaffold, embedded dex, stat calculation.
 - [x] 1a′. Dex exported from Showdown's champions mod; stats match Showdown exactly.
-- [ ] 1b. The damage formula. Exact match with Showdown fixtures over the pool.
+- [x] 1b. The damage formula. Exact match with Showdown fixtures over the pool.
 - [ ] 1c. Team construction from Showdown pastes, team validation, team preview.
 - [ ] 1d. Turn resolution core: ordering, moves, damage, faints, forced switches, end of turn. Random-play smoke test with invariant checks.
 - [ ] 1e. Mechanics breadth, driven by the coverage report.
 - [ ] 1f. Turn-level differential tests against Showdown.
 - [ ] 1g. Benchmark and speed gate.
 - [ ] 1h. Driving a real Showdown battle (protocol client) from the engine's choices.
+
+### 4.10 How the damage code mirrors Showdown
+
+`engine/src/damage.rs` follows `getDamage` and the champions mod's
+`modifyDamage` step by step, including the 4096-based fixed-point rounding
+(`engine/src/fixed.rs`).
+
+Modifiers come from event handlers, collected the way Showdown's `runEvent`
+collects them: the attacker, the defender, both allies, screens, weather,
+terrain and the move itself. They are sorted by Showdown's keys (order,
+priority, holder speed, effect kind) and applied in that order, because
+chained modifiers round at every step. Handler priorities come from the
+dex. The fixture generator avoids exact speed ties, which Showdown breaks at
+random.
+
+The dex lists every handler each effect has, so an effect whose handler
+isn't implemented returns `Unsupported` rather than a wrong number. The
+current unsupported cases need battle history the damage function doesn't
+have: whether the user's last move failed (Stomping Tantrum, Temper Flare),
+whether the target has moved (Payback, Round), stats lowered this turn (Lash
+Out), modified Speed (Gyro Ball). Also unsupported so far: Stance Change,
+Disguise and OHKO moves. The turn engine (1d) supplies that context.
 
 ## 5. Model and training (provisional; settled in phases 2–3)
 

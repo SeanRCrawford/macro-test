@@ -216,6 +216,10 @@ pub struct ItemData {
     pub name: String,
     pub num: i32,
     pub is_berry: bool,
+    /// `onTakeItem: false`: Knock Off and similar can't remove it.
+    pub take_forbidden: bool,
+    /// Still works for a Klutz holder.
+    pub ignore_klutz: bool,
     /// Base species name -> Mega forme name, for Mega Stones.
     pub mega_stone: HashMap<String, String>,
     pub handlers: Handlers,
@@ -230,7 +234,11 @@ pub struct AbilityData {
     pub breakable: bool,
     /// Cloud Nine / Air Lock.
     pub suppress_weather: bool,
+    /// `onCriticalHit: false` (Battle Armor, Shell Armor).
+    pub blocks_crit: bool,
     pub handlers: Handlers,
+    /// The volatile the ability creates (Flash Fire's boost).
+    pub condition: Handlers,
 }
 
 #[derive(Debug)]
@@ -535,6 +543,8 @@ impl Dex {
                 name: str_field(r, "name").unwrap_or(iid).to_string(),
                 num: num_field(r, "num").unwrap_or(0) as i32,
                 is_berry: bool_field(r, "isBerry"),
+                take_forbidden: r.get("onTakeItem").and_then(Value::as_bool) == Some(false),
+                ignore_klutz: bool_field(r, "ignoreKlutz"),
                 mega_stone,
                 handlers: handlers_of(r, None),
             });
@@ -555,7 +565,9 @@ impl Dex {
                 num: num_field(r, "num").unwrap_or(0) as i32,
                 breakable,
                 suppress_weather: bool_field(r, "suppressWeather"),
+                blocks_crit: r.get("onCriticalHit").and_then(Value::as_bool) == Some(false),
                 handlers: handlers_of(r, None),
+                condition: handlers_of(r, Some("condition")),
             });
             ability_index.insert(aid.clone(), AbilityId(i as u16));
         }
@@ -722,6 +734,9 @@ mod tests {
         let multiscale = dex.ability(dex.ability_id("Multiscale").unwrap());
         assert!(multiscale.breakable && multiscale.handlers.has("onSourceModifyDamage"));
         assert!(dex.ability(dex.ability_id("Cloud Nine").unwrap()).suppress_weather);
+        assert!(dex.ability(dex.ability_id("Shell Armor").unwrap()).blocks_crit);
+        let flash_fire = dex.ability(dex.ability_id("Flash Fire").unwrap());
+        assert_eq!(flash_fire.condition.hook("onModifyAtkPriority"), 5);
         let reflect = dex.move_data(dex.move_id("Reflect").unwrap());
         assert!(reflect.condition.has("onAnyModifyDamage"));
         let sand = dex.condition(dex.condition_id("sandstorm").unwrap());
