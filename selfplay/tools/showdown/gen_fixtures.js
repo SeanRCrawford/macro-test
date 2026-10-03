@@ -481,10 +481,13 @@ function legalChoices(battle, side) {
 		if (!r || !pokemon || pokemon.fainted) return [{s: "pass", pass: true}];
 		const opts = [];
 		const struggle = r.moves.length === 1 && r.moves[0].id === "struggle";
+		// Imprison disables "hidden": the last active's request shows the move
+		// as usable, but Showdown refuses it, unless every move is disabled,
+		// when any of them becomes Struggle.
+		const hidden = m => pokemon.moveSlots.find(s => s.id === m.id)?.disabled === "hidden";
+		const realExists = r.moves.some(m => !m.disabled && !hidden(m));
 		r.moves.forEach((m, j) => {
-			// Imprison disables "hidden": the last active's request shows the move
-			// as usable, but Showdown refuses it.
-			if (m.disabled || pokemon.moveSlots.find(s => s.id === m.id)?.disabled) return;
+			if (m.disabled || (realExists && hidden(m))) return;
 			const targets = TARGETED.has(m.target) && !struggle ?
 				[1, 2, -1, -2].filter(l => validTargetLoc(l, slot, m.target)) : [0];
 			for (const t of targets) {

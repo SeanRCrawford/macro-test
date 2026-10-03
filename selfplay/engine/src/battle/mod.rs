@@ -232,7 +232,14 @@ impl Battle {
                     self.add_action(ActionKind::MegaEvo { mon }, 104, 0.0)?;
                 }
                 let m = self.mon(mon);
-                let slot = if m.moves.iter().any(|s| s.pp > 0 && !s.disabled) { slot as usize } else { usize::MAX };
+                // A locked move aims where it was aimed before.
+                if m.locked_move().is_some() {
+                    let charged = m.volatiles.0.iter().find(|v| matches!(v.id, state::VolatileId::Charging(_))).map(|v| v.target_loc);
+                    let target_loc = charged.filter(|&l| l != 0).unwrap_or(m.last_move_target_loc);
+                    self.add_action(ActionKind::Move { mon, slot: moves::LOCKED_SLOT, target_loc }, 200, 0.0)?;
+                    return Ok(());
+                }
+                let slot = if m.moves.iter().any(|s| s.pp > 0 && !s.disabled && !s.imprisoned) { slot as usize } else { usize::MAX };
                 self.add_action(ActionKind::Move { mon, slot, target_loc: target }, 200, 0.0)?;
             }
         }
@@ -746,8 +753,8 @@ impl Battle {
                         || encored.is_some_and(|e| e != s.id)
                         || (throat_chopped && data.flags.has("sound"))
                         || (taunted && data.category == crate::dex::Category::Status)
-                        || disabled == Some(s.id)
-                        || imprisoned.contains(&s.id);
+                        || disabled == Some(s.id);
+                    s.imprisoned = imprisoned.contains(&s.id);
                 }
                 if !m.fainted {
                     m.active_turns += 1;
@@ -768,22 +775,37 @@ impl Battle {
                 if m.fainted {
                     return None;
                 }
+                // Locked (charging or recharging): one option, no switching.
+                if let Some(locked) = m.locked_move() {
+                    let id = match locked {
+                        state::LockedMove::Move(id) => id,
+                        state::LockedMove::Recharge => Dex::get().move_id("struggle").unwrap(),
+                    };
+                    let only = choice::MoveOption { slot: 0, id, pp: 0, disabled: false, hidden: false, target: crate::dex::MoveTarget::SelfTarget };
+                    return Some(SlotRequest { moves: vec![only], struggle: false, can_mega: false, trapped: true });
+                }
+                // isLastActive: no unfainted active after it on its side.
+                let last_active = (p + 1..ACTIVE_PER_SIDE).all(|q| self.sides[side].occupant(q).is_none_or(|o| o.fainted));
                 let mut moves: Vec<choice::MoveOption> = m
                     .moves
                     .iter()
                     .enumerate()
-                    .map(|(i, s)| choice::MoveOption {
-                        slot: i as u8,
-                        id: s.id,
-                        pp: s.pp,
-                        disabled: s.disabled || s.pp == 0,
-                        target: Dex::get().move_data(s.id).target,
+                    .map(|(i, s)| {
+                        let off = s.disabled || s.pp == 0;
+                        choice::MoveOption {
+                            slot: i as u8,
+                            id: s.id,
+                            pp: s.pp,
+                            disabled: off || (s.imprisoned && !last_active),
+                            hidden: !off && s.imprisoned && last_active,
+                            target: Dex::get().move_data(s.id).target,
+                        }
                     })
                     .collect();
                 let struggle = moves.iter().all(|o| o.disabled);
                 if struggle {
                     let id = Dex::get().move_id("struggle").unwrap();
-                    moves = vec![choice::MoveOption { slot: 0, id, pp: 0, disabled: false, target: Dex::get().move_data(id).target }];
+                    moves = vec![choice::MoveOption { slot: 0, id, pp: 0, disabled: false, hidden: false, target: Dex::get().move_data(id).target }];
                 }
                 Some(SlotRequest { moves, struggle, can_mega: m.can_mega_evo.is_some(), trapped: false })
             });

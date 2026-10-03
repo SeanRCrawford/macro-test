@@ -218,12 +218,11 @@ impl Battle {
         // TryAddVolatile: Misty Terrain stops confusion and Electric Terrain
         // stops Yawn on grounded Pokemon.
         let terrain = self.field.terrain;
-        if (id == VolatileId::Confusion && terrain == crate::damage::Terrain::Misty)
-            || (id == VolatileId::Yawn && terrain == crate::damage::Terrain::Electric)
+        if ((id == VolatileId::Confusion && terrain == crate::damage::Terrain::Misty)
+            || (id == VolatileId::Yawn && terrain == crate::damage::Terrain::Electric))
+            && self.grounded(t)
         {
-            if self.grounded(t) {
-                return HitRes::Null;
-            }
+            return HitRes::Null;
         }
         let mut duration = id.duration();
         let mut move_id = None;
@@ -259,7 +258,7 @@ impl Battle {
         }
         self.effect_order += 1;
         let effect_order = self.effect_order;
-        self.mon_mut(t).volatiles.0.push(Volatile { id, duration, counter, move_id, effect_order });
+        self.mon_mut(t).volatiles.0.push(Volatile { id, duration, counter, move_id, effect_order, target_loc: 0 });
         HitRes::Bool(true)
     }
 
@@ -268,6 +267,11 @@ impl Battle {
         self.mon_mut(t).volatiles.remove(id);
         match id {
             VolatileId::Roost => self.mon_mut(t).end_roost(),
+            // twoturnmove's onEnd drops the charging move's volatile.
+            VolatileId::TwoTurnMove => {
+                let m = self.mon_mut(t);
+                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+            }
             // yawn: the target falls asleep.
             VolatileId::Yawn => {
                 self.try_set_status(t, Status::Sleep);
@@ -297,6 +301,7 @@ impl Battle {
             counter: 0,
             move_id: Some(last),
             effect_order,
+            target_loc: 0,
         });
         if queued.is_some_and(|q| q != last) {
             // changeAction (Mental Herb isn't supported).

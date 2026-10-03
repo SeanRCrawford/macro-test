@@ -6,7 +6,7 @@
 //! healing.
 
 use super::conditions::{status_from_id, HitRes};
-use super::state::{Mon, SideCondition, SwitchFlag, VolatileId, ACTIVE_PER_SIDE};
+use super::state::{LockedMove, Mon, SideCondition, SwitchFlag, Volatile, VolatileId, ACTIVE_PER_SIDE};
 use super::{Battle, BattleError, MonRef, Res};
 use crate::damage::{self, ActiveMove, Combatant, DamageCtx, Outcome, SideState, Status};
 use crate::dex::{Category, Dex, HitEffect, MoveData, MoveId, MoveTarget};
@@ -23,6 +23,8 @@ pub(super) struct MoveUse {
     pub self_switch: bool,
     /// The move's priority as last sorted (after ModifyPriority).
     pub priority: i8,
+    /// `move.hit`: which hit of a multi-hit move this is.
+    pub hit: u8,
 }
 
 impl MoveUse {
@@ -32,7 +34,18 @@ impl MoveUse {
 }
 
 /// The move a queued Move action uses: Struggle when the slot is `usize::MAX`.
+/// A Move action's slot for the move the Pokemon is locked into.
+pub(super) const LOCKED_SLOT: usize = usize::MAX - 1;
+
+/// The move a queued Move action uses: Struggle when the slot is `usize::MAX`
+/// (and, as a stand-in with the same priority and category, for a recharge
+/// turn); the locked move for `LOCKED_SLOT`.
 pub(super) fn move_for_slot(m: &Mon, slot: usize) -> MoveId {
+    if slot == LOCKED_SLOT {
+        if let Some(LockedMove::Move(id)) = m.locked_move() {
+            return id;
+        }
+    }
     match m.moves.get(slot) {
         Some(s) => s.id,
         None => Dex::get().move_id("struggle").expect("Struggle"),
@@ -240,15 +253,29 @@ impl Battle {
     /// `runMove`.
     pub(super) fn run_move(&mut self, user: MonRef, slot: usize, target_loc: i8, priority: i8) -> Res<()> {
         self.mon_mut(user).active_move_actions += 1;
+        // A recharge turn: mustrecharge's BeforeMove (priority 11) ends it.
+        if slot == LOCKED_SLOT && self.mon(user).locked_move() == Some(LockedMove::Recharge) {
+            let m = self.mon_mut(user);
+            m.volatiles.remove(VolatileId::GlaiveRush);
+            m.volatiles.remove(VolatileId::MustRecharge);
+            m.move_this_turn_result = Some(None);
+            return Ok(());
+        }
         let move_id = move_for_slot(self.mon(user), slot);
         let data = Dex::get().move_data(move_id);
         let target = self.get_target(user, data.target, target_loc);
         if !self.before_move(user, move_id, data) {
-            self.mon_mut(user).move_this_turn_result = Some(Some(false));
+            // MoveAborted: twoturnmove ends (and with it the charge).
+            let m = self.mon_mut(user);
+            if m.volatiles.remove(VolatileId::TwoTurnMove) {
+                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+            }
+            m.move_this_turn_result = Some(Some(false));
             return Ok(());
         }
         let is_struggle = data.id == "struggle";
-        if !is_struggle {
+        // A locked move (the second turn of a charge) uses no PP.
+        if !is_struggle && self.mon(user).locked_move().is_none() {
             let m = self.mon_mut(user);
             let s = &mut m.moves[slot];
             s.used = true;
@@ -260,6 +287,7 @@ impl Battle {
         }
         let m = self.mon_mut(user);
         m.last_move = Some(move_id);
+        m.last_move_target_loc = target_loc;
         m.move_this_turn = Some(move_id);
 
         // useMove
@@ -308,15 +336,24 @@ impl Battle {
             return Ok(self.try_move_hit(user, data));
         }
         let targets = self.get_move_targets(user, &am, Some(target));
-        if targets.is_empty() {
-            return Ok(false);
+        // useMoveInner aims at the last target (or keeps the chosen one).
+        let last_target = targets.last().copied().unwrap_or(target);
+        // TryMove: a two-turn move charges now unless its charge is done or
+        // the weather lets it fire at once.
+        if let Some(fire_now) = self.charge_move(user, move_id, data) {
+            if !fire_now {
+                self.mon_mut(user).move_this_turn_result = Some(None);
+                return Ok(false);
+            }
         }
-        let last_target = *targets.last().expect("targets");
         // TryMove: a foe's Armor Tail stops priority moves aimed at its side.
         if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.ability_is(f, "armortail")) {
             return Ok(false);
         }
-        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority };
+        if targets.is_empty() {
+            return Ok(false);
+        }
+        let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority, hit: 1 };
         let result = self.try_spread_move_hit(user, &mut mv, targets)?;
         // selfBoost (Clanging Scales), once the move worked.
         if let (true, Some(sb)) = (result, data.self_boost.as_ref()) {
@@ -326,6 +363,41 @@ impl Battle {
             self.after_move_secondary_self(user, last_target, data.category == Category::Status);
         }
         Ok(result)
+    }
+
+    /// A charge move's onTryMove. None: not a charge move. Some(true): it
+    /// hits this turn; Some(false): it started charging.
+    fn charge_move(&mut self, user: MonRef, move_id: MoveId, data: &MoveData) -> Option<bool> {
+        let weather = self.field.weather;
+        let (boosts, instant) = match data.id.as_str() {
+            "electroshot" => (true, weather == crate::damage::Weather::Rain),
+            "meteorbeam" => (true, false),
+            "solarbeam" | "solarblade" => (false, weather == crate::damage::Weather::Sun),
+            _ => return None,
+        };
+        let m = self.mon(user);
+        if m.volatiles.has(VolatileId::Charging(move_id)) {
+            self.mon_mut(user).volatiles.remove(VolatileId::Charging(move_id));
+            return Some(true);
+        }
+        if boosts {
+            self.boost(user, &[(2, 1)], Some(user));
+        }
+        if instant {
+            return Some(true);
+        }
+        // addVolatile('twoturnmove'): its onStart adds the move's own volatile
+        // holding the target.
+        let target_loc = self.mon(user).last_move_target_loc;
+        for (id, mv) in [(VolatileId::TwoTurnMove, Some(move_id)), (VolatileId::Charging(move_id), None)] {
+            if self.mon(user).volatiles.has(id) {
+                continue;
+            }
+            self.effect_order += 1;
+            let effect_order = self.effect_order;
+            self.mon_mut(user).volatiles.0.push(Volatile { id, duration: id.duration(), counter: 0, move_id: mv, effect_order, target_loc });
+        }
+        Some(false)
     }
 
     /// The protecting volatile's onTryHit: whether it blocks `data` on `t`,
@@ -548,17 +620,52 @@ impl Battle {
     /// hitStepMoveHitLoop, for a single hit (multi-hit moves aren't supported).
     fn move_hit_loop(&mut self, user: MonRef, mv: &mut MoveUse, targets: Vec<MonRef>) -> Res<bool> {
         let effect = &mv.data.primary;
-        let (move_damage, hit_targets) = self.spread_move_hit(targets.iter().map(|&t| Some(t)).collect(), user, mv, effect, true, false, false)?;
-        if move_damage.iter().all(|&d| d == HitRes::Bool(false)) {
+        // How many hits: fixed, or 2-5 weighted (no Loaded Dice / Skill Link).
+        let target_hits = match mv.data.multihit {
+            None => 1,
+            Some((a, b)) if a == b => a,
+            Some((2, 5)) => [2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5][self.chance.sample(20)],
+            Some((a, b)) => self.chance.random_range(a as u32, b as u32 + 1) as u8,
+        };
+        let n = targets.len();
+        let mut damage = vec![HitRes::Num(0); n];
+        let mut move_damage = Vec::new();
+        let mut hit_targets = Vec::new();
+        let mut total = 0u32;
+        let mut hit: u8 = 1;
+        while hit <= target_hits {
+            if damage.contains(&HitRes::Bool(false)) {
+                break;
+            }
+            if hit > 1 && self.mon(user).status == Status::Sleep && !mv.data.has_key("sleepUsable") {
+                break;
+            }
+            if targets.iter().all(|&t| self.mon(t).hp == 0) {
+                break;
+            }
+            mv.hit = hit;
+            let (md, tc) = self.spread_move_hit(targets.iter().map(|&t| Some(t)).collect(), user, mv, effect, true, false, false)?;
+            move_damage = md;
+            hit_targets = tc;
+            if move_damage.iter().all(|&d| d == HitRes::Bool(false)) {
+                break;
+            }
+            for (i, &md) in move_damage.iter().enumerate() {
+                damage[i] = if md == HitRes::Bool(true) || !md.truthy() { HitRes::Num(0) } else { md };
+                if let HitRes::Num(x) = damage[i] {
+                    total += x;
+                }
+            }
+            self.each_update();
+            if self.mon(user).hp == 0 && n == 1 {
+                hit += 1;
+                break;
+            }
+            hit += 1;
+        }
+        if hit == 1 {
             return Ok(false);
         }
-        let mut total = 0u32;
-        for &d in &move_damage {
-            if let HitRes::Num(n) = d {
-                total += n;
-            }
-        }
-        self.each_update();
         self.faint_messages()?;
         if total > 0 {
             self.apply_recoil(user, mv.data, total);
@@ -567,7 +674,7 @@ impl Battle {
             if let Some(t) = *t {
                 if t != user && matches!(move_damage[i], HitRes::Num(_)) {
                     let m = self.mon_mut(t);
-                    m.times_attacked = m.times_attacked.saturating_add(1);
+                    m.times_attacked = m.times_attacked.saturating_add(hit - 1);
                 }
             }
         }
@@ -658,12 +765,18 @@ impl Battle {
             let view = self.damage_view();
             for i in 0..targets.len() {
                 let Some(t) = targets[i] else { continue };
+                // A target already at 0 HP (from an earlier hit) takes nothing.
+                if self.mon(t).hp == 0 {
+                    damage[i] = HitRes::Num(0);
+                    continue;
+                }
                 let crit_ratio = mv.data.crit_ratio.clamp(0, 4) as usize;
                 let crit = match mv.data.will_crit {
                     Some(c) => c,
                     None => crit_ratio > 0 && self.chance.chance(1, [0, 24, 8, 2, 1][crit_ratio]),
                 };
-                let ctx = self.damage_ctx(&view, user, t, crit, spread);
+                let mut ctx = self.damage_ctx(&view, user, t, crit, spread);
+                ctx.hit = mv.hit;
                 let outcome = damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
                 if matches!(outcome, Outcome::Damage(_)) && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))? {
                     self.eat_resist_berry(t);

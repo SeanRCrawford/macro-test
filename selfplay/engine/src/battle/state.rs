@@ -16,6 +16,9 @@ pub struct MoveSlot {
     pub pp: u8,
     pub max_pp: u8,
     pub disabled: bool,
+    /// Disabled by a foe's Imprison ("hidden": the last active Pokemon's
+    /// request still shows it).
+    pub imprisoned: bool,
     /// Used since the Pokemon last switched in (Last Resort).
     pub used: bool,
 }
@@ -54,6 +57,12 @@ pub enum VolatileId {
     BanefulBunker,
     PerishSong,
     Imprison,
+    /// Charging a two-turn move (`twoturnmove`): locks the next turn's move.
+    TwoTurnMove,
+    /// The charging move's own volatile (id: the move), holding its target.
+    Charging(MoveId),
+    /// Hyper Beam and friends: the next turn is lost.
+    MustRecharge,
 }
 
 impl VolatileId {
@@ -70,6 +79,7 @@ impl VolatileId {
             "throatchop" => VolatileId::ThroatChop,
             "unburden" => VolatileId::Unburden,
             "glaiverush" => VolatileId::GlaiveRush,
+            "mustrecharge" => VolatileId::MustRecharge,
             "confusion" => VolatileId::Confusion,
             "yawn" => VolatileId::Yawn,
             "taunt" => VolatileId::Taunt,
@@ -107,6 +117,9 @@ impl VolatileId {
             VolatileId::BanefulBunker => "banefulbunker",
             VolatileId::PerishSong => "perishsong",
             VolatileId::Imprison => "imprison",
+            VolatileId::TwoTurnMove => "twoturnmove",
+            VolatileId::Charging(m) => Dex::get().move_data(m).id.as_str(),
+            VolatileId::MustRecharge => "mustrecharge",
         }
     }
 
@@ -136,7 +149,9 @@ impl VolatileId {
             | VolatileId::Unburden
             | VolatileId::GlaiveRush
             | VolatileId::Confusion
-            | VolatileId::Imprison => None,
+            | VolatileId::Imprison
+            | VolatileId::Charging(_) => None,
+            VolatileId::TwoTurnMove | VolatileId::MustRecharge => Some(2),
             VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
             VolatileId::Yawn => Some(2),
             VolatileId::Taunt => Some(3),
@@ -156,6 +171,8 @@ pub struct Volatile {
     pub move_id: Option<MoveId>,
     /// Showdown's `effectOrder`: creation order, a tiebreak for redirection.
     pub effect_order: u64,
+    /// A charging move's target location.
+    pub target_loc: i8,
 }
 
 /// Volatile conditions in the order they were added (Showdown iterates
@@ -185,6 +202,13 @@ impl Volatiles {
 pub struct StatusState {
     pub time: i8,
     pub stage: u8,
+}
+
+/// A move the Pokemon is locked into this turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockedMove {
+    Move(MoveId),
+    Recharge,
 }
 
 /// Why a Pokemon must leave the field before the turn can continue.
@@ -235,6 +259,8 @@ pub struct Mon {
     /// The Mega forme this Pokemon can still become.
     pub can_mega_evo: Option<SpeciesId>,
     pub last_move: Option<MoveId>,
+    /// `lastMoveTargetLoc`: where the last move was aimed.
+    pub last_move_target_loc: i8,
     pub move_this_turn: Option<MoveId>,
     /// `moveThisTurnResult`: Showdown's `undefined` (None), `null` (Some(None):
     /// nothing happened, e.g. blocked by Protect) or whether the move worked.
@@ -256,7 +282,7 @@ impl Mon {
             .iter()
             .map(|&id| {
                 let pp = dex.move_data(id).max_pp();
-                MoveSlot { id, pp, max_pp: pp, disabled: false, used: false }
+                MoveSlot { id, pp, max_pp: pp, disabled: false, imprisoned: false, used: false }
             })
             .collect();
         Mon {
@@ -287,6 +313,7 @@ impl Mon {
             being_called_back: false,
             can_mega_evo: mega_forme(set),
             last_move: None,
+            last_move_target_loc: 0,
             move_this_turn: None,
             move_this_turn_result: None,
             move_last_turn_result: None,
@@ -338,6 +365,18 @@ impl Mon {
         self.switch_flag = None;
         self.force_switch_flag = false;
         // Champions: a Mega stays Mega after fainting or switching.
+    }
+
+    /// `getLockedMove`: a charged move to finish, or a turn to recharge.
+    pub fn locked_move(&self) -> Option<LockedMove> {
+        for v in &self.volatiles.0 {
+            match v.id {
+                VolatileId::TwoTurnMove => return v.move_id.map(LockedMove::Move),
+                VolatileId::MustRecharge => return Some(LockedMove::Recharge),
+                _ => {}
+            }
+        }
+        None
     }
 
     pub fn move_slot(&self, id: MoveId) -> Option<usize> {

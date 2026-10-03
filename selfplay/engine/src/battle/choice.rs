@@ -30,6 +30,9 @@ pub struct MoveOption {
     pub id: MoveId,
     pub pp: u8,
     pub disabled: bool,
+    /// Shown as usable but refused (Imprison on the last active Pokemon),
+    /// unless no other move is usable, when choosing it means Struggle.
+    pub hidden: bool,
     pub target: MoveTarget,
 }
 
@@ -190,8 +193,9 @@ impl Battle {
                     out.push(SlotChoice::Pass);
                     return out;
                 };
+                let real_exists = req.moves.iter().any(|m| !m.disabled && !m.hidden);
                 for m in &req.moves {
-                    if m.disabled {
+                    if m.disabled || (real_exists && m.hidden) {
                         continue;
                     }
                     let targets: Vec<i8> = if needs_target(m.target) && !req.struggle {

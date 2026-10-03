@@ -34,8 +34,8 @@ const ITEMS: &[&str] = &[
 
 /// Move data keys that add nothing beyond what `moves` implements.
 const PLAIN_KEYS: &[&str] = &[
-    "accuracy", "basePower", "boosts", "category", "critRatio", "drain", "flags", "handlers", "heal",
-    "ignoreDefensive", "ignoreEvasion", "ignoreImmunity", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
+    "accuracy", "basePower", "boosts", "category", "critRatio", "drain", "flags", "handlers", "hasSheerForceBoost", "heal",
+    "ignoreDefensive", "ignoreEvasion", "ignoreImmunity", "multihit", "isNonstandard", "name", "noPPBoosts", "num", "overrideDefensiveStat",
     "overrideOffensivePokemon", "overrideOffensiveStat", "pp", "priority", "recoil", "secondary", "secondaries",
     "self", "selfBoost", "selfSwitch", "stallingMove", "status", "target", "thawsTarget", "type", "volatileStatus", "willCrit",
 ];
@@ -79,6 +79,10 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("banefulbunker", &["onPrepareHit", "onHit"]),
     ("yawn", &["onTryHit"]),
     ("disable", &["onTryHit"]),
+    ("electroshot", &["onTryMove"]),
+    ("meteorbeam", &["onTryMove"]),
+    ("solarbeam", &["onTryMove", "onBasePower"]),
+    ("solarblade", &["onTryMove", "onBasePower"]),
 ];
 
 /// Status moves that set a side or field condition, which `moves` implements.
@@ -93,7 +97,7 @@ const SECONDARY_ON_HIT: &[&str] = &["direclaw", "throatchop"];
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
 const VOLATILES: &[&str] = &[
     "flinch", "protect", "followme", "ragepowder", "helpinghand", "encore", "glaiverush", "confusion", "yawn", "taunt",
-    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison",
+    "disable", "roost", "spikyshield", "kingsshield", "banefulbunker", "imprison", "mustrecharge",
 ];
 
 pub fn ability_supported(id: &str) -> bool {
