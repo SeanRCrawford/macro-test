@@ -13,7 +13,8 @@ impl Battle {
         self.mon(r).item.map(|i| Dex::get().item(i).id.as_str())
     }
 
-    /// `useItem` / `eatItem` once the item's own condition passed.
+    /// `useItem` / `eatItem` once the item's own condition passed. The
+    /// caller runs the item's effect, then `after_use_item`.
     fn consume_item(&mut self, r: MonRef) -> bool {
         let m = self.mon_mut(r);
         if m.hp == 0 || !m.is_active || m.item.is_none() {
@@ -21,6 +22,13 @@ impl Battle {
         }
         m.item = None;
         true
+    }
+
+    /// AfterUseItem: Unburden.
+    pub(super) fn after_use_item(&mut self, r: MonRef) {
+        if self.ability_is(r, "unburden") {
+            self.add_volatile(r, VolatileId::Unburden);
+        }
     }
 
     /// `eachEvent('Update')`: actives in Speed order; Sitrus Berry is the only
@@ -39,6 +47,7 @@ impl Battle {
                     // zero amount fails.
                     if amount > 0 && self.consume_item(r) {
                         self.heal(r, amount);
+                        self.after_use_item(r);
                     }
                 }
             }
@@ -52,6 +61,7 @@ impl Battle {
             if m.hp == m.max_hp() && damage >= m.hp as u32 {
                 let hp = m.hp as u32;
                 if self.consume_item(t) {
+                    self.after_use_item(t);
                     return hp - 1;
                 }
             }

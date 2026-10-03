@@ -87,7 +87,7 @@ impl Battle {
                     .filter(|&t| self.mon(t).hp > 0 && !self.mon(t).fainted)
                     .collect();
                 for t in targets {
-                    self.boost(t, &[(0, -1)]);
+                    self.boost(t, &[(0, -1)], Some(r));
                 }
             }
             StartEffect::Weather(w) => {

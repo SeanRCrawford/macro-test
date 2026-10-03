@@ -293,6 +293,10 @@ impl Battle {
             return Ok(false);
         }
         let last_target = *targets.last().expect("targets");
+        // TryMove: a foe's Armor Tail stops priority moves aimed at its side.
+        if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.ability_is(f, "armortail")) {
+            return Ok(false);
+        }
         let mut mv = MoveUse { am, data, self_dropped: false, spread: false, self_switch: data.self_switch, priority };
         let result = self.try_spread_move_hit(user, &mut mv, targets)?;
         if result {
@@ -376,13 +380,16 @@ impl Battle {
         step(self, &mut targets, &mut |b, t| {
             if b.psychic_terrain_blocks(user, t, priority, data.target == MoveTarget::SelfTarget) {
                 HitRes::Bool(false)
-            } else if b.sides[t.side].condition(SideCondition::WideGuard) > 0
-                && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes)
-                && data.flags.has("protect")
+            } else if data.flags.has("protect")
+                && ((b.sides[t.side].condition(SideCondition::WideGuard) > 0
+                    && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes))
+                    || b.mon(t).volatiles.has(VolatileId::Protect))
             {
+                // Wide Guard (priority 4) and Protect (3).
                 HitRes::NotFail
-            } else if b.mon(t).volatiles.has(VolatileId::Protect) && data.flags.has("protect") {
-                HitRes::NotFail
+            } else if data.category == Category::Status && t != user && b.ability_is(t, "goodasgold") {
+                // Good as Gold (priority 0).
+                HitRes::Bool(false)
             } else {
                 HitRes::Bool(true)
             }
@@ -396,9 +403,14 @@ impl Battle {
                 HitRes::Bool(damage::run_immunity(&ctx, &am))
             });
         }
-        // hitStepTryImmunity: powder moves don't affect Grass types.
+        // hitStepTryImmunity: powder moves don't affect Grass types, and
+        // Prankster-boosted moves don't affect Dark-type foes.
+        let prankster_boosted = data.category == Category::Status && self.ability_is(user, "prankster");
         step(self, &mut targets, &mut |b, t| {
-            HitRes::Bool(!(data.flags.has("powder") && t != user && Dex::get().immune_to("powder", b.mon(t).types)))
+            let types = b.mon(t).types;
+            let powder = data.flags.has("powder") && t != user && Dex::get().immune_to("powder", types);
+            let prankster = prankster_boosted && t.side != user.side && Dex::get().immune_to("prankster", types);
+            HitRes::Bool(!(powder || prankster))
         });
         // hitStepAccuracy
         step(self, &mut targets, &mut |b, t| HitRes::Bool(b.accuracy_check(user, t, data)));
@@ -624,6 +636,7 @@ impl Battle {
     }
 
     /// `runMoveEffects`.
+    #[allow(clippy::too_many_arguments)]
     fn run_move_effects(
         &mut self,
         damage: &mut [HitRes],
@@ -639,7 +652,7 @@ impl Battle {
             let Some(t) = targets[i] else { continue };
             let mut did_something = HitRes::Undefined;
             if !effect.boosts.is_empty() && !self.mon(t).fainted {
-                let r = self.boost(t, &effect.boosts);
+                let r = self.boost(t, &effect.boosts, Some(user));
                 did_something = did_something.combine(r);
             }
             if let (true, Some((n, d))) = (primary, mv.data.heal) {
@@ -692,7 +705,7 @@ impl Battle {
             // onHit: Parting Shot lowers Attack and Sp. Atk, and doesn't
             // switch out if neither drops.
             if primary && mv.data.id == "partingshot" {
-                if !self.boost(t, &[(0, -1), (2, -1)]).truthy() {
+                if !self.boost(t, &[(0, -1), (2, -1)], Some(user)).truthy() {
                     mv.self_switch = false;
                 }
                 did_something = did_something.combine(HitRes::Bool(true));

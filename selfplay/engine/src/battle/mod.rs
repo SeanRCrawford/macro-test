@@ -281,6 +281,9 @@ impl Battle {
         let m = self.mon(r);
         // ModifySpe: Choice Scarf and Tailwind chain their modifiers.
         let mut modifier = self.speed_modifier(r);
+        if m.volatiles.has(state::VolatileId::Unburden) && m.item.is_none() && self.ability_is(r, "unburden") {
+            modifier = crate::fixed::chain(modifier, 8192);
+        }
         if self.sides[r.side].condition(state::SideCondition::Tailwind) > 0 {
             modifier = crate::fixed::chain(modifier, 8192);
         }
@@ -302,7 +305,14 @@ impl Battle {
         if data.id == "grassyglide" && self.field.terrain == crate::damage::Terrain::Grassy && self.grounded(user) {
             p += 1;
         }
+        if data.category == crate::dex::Category::Status && self.ability_is(user, "prankster") {
+            p += 1;
+        }
         p
+    }
+
+    pub(crate) fn ability_is(&self, r: MonRef, id: &str) -> bool {
+        Dex::get().ability(self.mon(r).ability).id == id
     }
 
     /// The move a Pokemon's queued Move action will use (`queue.willMove`).

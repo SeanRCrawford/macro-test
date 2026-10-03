@@ -37,6 +37,8 @@ pub enum VolatileId {
     Encore,
     /// No sound moves for two turns.
     ThroatChop,
+    /// Unburden: doubled Speed once the item is gone.
+    Unburden,
 }
 
 impl VolatileId {
@@ -51,6 +53,7 @@ impl VolatileId {
             "helpinghand" => VolatileId::HelpingHand,
             "encore" => VolatileId::Encore,
             "throatchop" => VolatileId::ThroatChop,
+            "unburden" => VolatileId::Unburden,
             _ => return None,
         })
     }
@@ -66,6 +69,7 @@ impl VolatileId {
             VolatileId::HelpingHand => "helpinghand",
             VolatileId::Encore => "encore",
             VolatileId::ThroatChop => "throatchop",
+            VolatileId::Unburden => "unburden",
         }
     }
 
@@ -86,7 +90,7 @@ impl VolatileId {
             }
             VolatileId::Stall | VolatileId::ThroatChop => Some(2),
             VolatileId::Encore => Some(3),
-            VolatileId::ChoiceLock => None,
+            VolatileId::ChoiceLock | VolatileId::Unburden => None,
         }
     }
 }

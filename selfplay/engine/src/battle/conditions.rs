@@ -309,7 +309,8 @@ impl Battle {
 
     /// `battle.boost`: Num(0) if the target has no HP, false if it can't be
     /// boosted, null if every stage was already capped, true otherwise.
-    pub(super) fn boost(&mut self, t: MonRef, boosts: &[(usize, i8)]) -> HitRes {
+    /// `source` is who caused it (Defiant and Competitive react to foes).
+    pub(super) fn boost(&mut self, t: MonRef, boosts: &[(usize, i8)], source: Option<MonRef>) -> HitRes {
         let m = self.mon(t);
         if m.hp == 0 {
             return HitRes::Num(0);
@@ -320,17 +321,30 @@ impl Battle {
         if self.sides[1 - t.side].pokemon_left == 0 {
             return HitRes::Bool(false);
         }
-        let m = self.mon_mut(t);
+        // getCappedBoost, then boostBy one stat at a time.
+        let capped: Vec<(usize, i8)> =
+            boosts.iter().filter(|b| b.1 != 0).map(|&(stat, n)| (stat, (m.boosts[stat] + n).clamp(-6, 6) - m.boosts[stat])).collect();
         let mut success = HitRes::Null;
-        for &(stat, n) in boosts {
-            if n == 0 {
-                continue;
-            }
+        for (stat, n) in capped {
+            let m = self.mon_mut(t);
             let cur = m.boosts[stat];
             let new = (cur + n).clamp(-6, 6);
-            if new != cur {
-                m.boosts[stat] = new;
-                success = HitRes::Bool(true);
+            if new == cur {
+                continue;
+            }
+            m.boosts[stat] = new;
+            success = HitRes::Bool(true);
+            // AfterEachBoost: Defiant / Competitive answer a foe's drop.
+            if n < 0 && source.is_some_and(|s| s.side != t.side) {
+                match Dex::get().ability(self.mon(t).ability).id.as_str() {
+                    "defiant" => {
+                        self.boost(t, &[(0, 2)], Some(t));
+                    }
+                    "competitive" => {
+                        self.boost(t, &[(2, 2)], Some(t));
+                    }
+                    _ => {}
+                }
             }
         }
         success
