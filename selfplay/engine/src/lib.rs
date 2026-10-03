@@ -3,6 +3,11 @@
 //! Pure Rust with no Python dependency, so `cargo test` and benchmarks run on
 //! their own; `selfplay-pybind` exposes it to Python. See ../DESIGN.md.
 
+// Loops over side indices mirror Showdown's code; iterator forms obscure that.
+#![allow(clippy::needless_range_loop)]
+
+pub mod battle;
+pub mod chance;
 pub mod damage;
 pub mod dex;
 pub mod fixed;

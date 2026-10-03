@@ -214,9 +214,31 @@ pub struct MoveData {
     pub fixed_damage: Option<FixedDamage>,
     pub ohko: bool,
     pub nonstandard: Option<String>,
+    /// Base PP after the champions mod's cap of 20.
+    pub pp: u8,
+    pub no_pp_boosts: bool,
+    /// Every data key the move has (sorted), so the engine can tell which
+    /// effects (secondary, self, boosts, status, drain...) it would need.
+    pub keys: Vec<String>,
     pub handlers: Handlers,
     /// The move's own condition (Reflect's screen, Helping Hand's boost...).
     pub condition: Handlers,
+}
+
+impl MoveData {
+    pub fn has_key(&self, key: &str) -> bool {
+        self.keys.binary_search_by(|k| k.as_str().cmp(key)).is_ok()
+    }
+
+    /// PP in battle: the champions mod's `calculatePP`, (pp / 5 + 1) * 4
+    /// (always "3 PP Ups"), unless the move can't be boosted.
+    pub fn max_pp(&self) -> u8 {
+        if self.no_pp_boosts {
+            self.pp
+        } else {
+            (self.pp / 5 + 1) * 4
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -549,6 +571,13 @@ impl Dex {
                 fixed_damage,
                 ohko: r.get("ohko").is_some_and(|v| v.as_bool() != Some(false)),
                 nonstandard: str_field(r, "isNonstandard").map(String::from),
+                pp: num_field(r, "pp").unwrap_or(0) as u8,
+                no_pp_boosts: bool_field(r, "noPPBoosts"),
+                keys: {
+                    let mut k: Vec<String> = r.keys().cloned().collect();
+                    k.sort();
+                    k
+                },
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
             });

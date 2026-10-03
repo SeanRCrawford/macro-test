@@ -86725,6 +86725,13 @@
     "onSwitchIn"
    ]
   },
+  "noability": {
+   "isNonstandard": "Past",
+   "flags": {},
+   "name": "No Ability",
+   "rating": 0.1,
+   "num": 0
+  },
   "noguard": {
    "onAnyInvulnerabilityPriority": 1,
    "flags": {},

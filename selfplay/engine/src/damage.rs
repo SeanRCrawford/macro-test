@@ -322,9 +322,44 @@ fn resist_berry(id: &str) -> Option<&'static str> {
     })
 }
 
+/// Moves whose own damage handlers (basePowerCallback, onBasePower,
+/// onModifyType, onModifyMove, onEffectiveness) this module implements.
+pub const MOVES_WITH_HANDLERS: &[&str] = &[
+    "acrobatics", "aurawheel", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
+    "grassknot", "hardpress", "heatcrash", "heavyslam", "hex", "hurricane", "knockoff", "lastrespects", "lowkick",
+    "powertrip", "ragefist", "ragingbull", "reversal", "risingvoltage", "solarbeam", "solarblade", "storedpower",
+    "struggle", "terrainpulse", "thunder", "tripleaxel", "venoshock", "waterspout", "watershuriken", "weatherball",
+];
+
+/// The `???` type (Struggle): no STAB, no immunities, neutral to everything.
+pub const TYPELESS: TypeId = TypeId(u8::MAX);
+
 /// Calculate damage for every roll.
 pub fn calculate(ctx: &DamageCtx, move_id: MoveId) -> Res<Outcome> {
-    Calc { ctx, dex: Dex::get() }.run(move_id)
+    let am = prepare_move(ctx, move_id)?;
+    damage_for(ctx, &am)
+}
+
+/// The move as it will be used: useMoveInner's ModifyType and ModifyMove.
+pub fn prepare_move(ctx: &DamageCtx, move_id: MoveId) -> Res<ActiveMove> {
+    let calc = Calc { ctx, dex: Dex::get() };
+    let data = calc.dex.move_data(move_id);
+    let mut am = ActiveMove::new(move_id, data);
+    calc.modify_type_and_move(&mut am, data)?;
+    Ok(am)
+}
+
+/// `getDamage` for a move already prepared by `prepare_move`.
+pub fn damage_for(ctx: &DamageCtx, am: &ActiveMove) -> Res<Outcome> {
+    let calc = Calc { ctx, dex: Dex::get() };
+    let mut am = am.clone();
+    let data = calc.dex.move_data(am.id);
+    calc.get_damage(&mut am, data)
+}
+
+/// `runImmunity(move)` for the defender in `ctx`.
+pub fn run_immunity(ctx: &DamageCtx, am: &ActiveMove) -> bool {
+    Calc { ctx, dex: Dex::get() }.run_immunity(am)
 }
 
 struct Calc<'a, 'b> {
@@ -681,13 +716,6 @@ impl<'a, 'b> Calc<'a, 'b> {
 
     // --- The calculation -------------------------------------------------
 
-    fn run(&self, move_id: MoveId) -> Res<Outcome> {
-        let data = self.dex.move_data(move_id);
-        let mut am = ActiveMove::new(move_id, data);
-        self.modify_type_and_move(&mut am, data)?;
-        self.get_damage(&mut am, data)
-    }
-
     /// useMoveInner: the move's own ModifyType/ModifyMove, then everyone's.
     fn modify_type_and_move(&self, am: &mut ActiveMove, data: &MoveData) -> Res<()> {
         let a = self.ctx.attacker;
@@ -750,6 +778,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                 }
                 // Accuracy only.
                 "hurricane" | "thunder" | "blizzard" => {}
+                "struggle" => am.move_type = TYPELESS,
                 other => return unsupported(format!("move {other}.onModifyMove")),
             }
         }
@@ -811,6 +840,9 @@ impl<'a, 'b> Calc<'a, 'b> {
 
     /// `runImmunity(move)`: false if the defender is immune by type.
     fn run_immunity(&self, am: &ActiveMove) -> bool {
+        if am.move_type == TYPELESS {
+            return true;
+        }
         match am.ignore_immunity {
             IgnoreImmunity::All => return true,
             IgnoreImmunity::Types(bits) if bits & (1 << am.move_type.0) != 0 => return true,
@@ -1405,6 +1437,9 @@ impl<'a, 'b> Calc<'a, 'b> {
             types.push(defender.types[1]);
         }
         let refs = self.collect("Effectiveness", d, None, am, false);
+        if am.move_type == TYPELESS {
+            return Ok(0);
+        }
         let mut total = 0i32;
         for t in types {
             let mut m = self.dex.type_mod(am.move_type, t) as i32;

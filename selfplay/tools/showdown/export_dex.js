@@ -88,7 +88,7 @@ for (const [id, it] of Object.entries(data.Items)) {
 }
 const abilities = {};
 for (const [id, a] of Object.entries(data.Abilities)) {
-	if (a.num > 0) abilities[id] = plain(a);
+	if (a.num > 0 || id === "noability") abilities[id] = plain(a);
 }
 // Shared conditions: weather, terrains, statuses and volatiles (Helping Hand,
 // Flash Fire...). Conditions that belong to one move (Reflect, Tailwind) live
