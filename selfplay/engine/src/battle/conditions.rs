@@ -144,7 +144,7 @@ impl Battle {
         if m.fainted {
             return false;
         }
-        if key == "frz" && self.field.weather == crate::damage::Weather::Sun {
+        if key == "frz" && self.effective_weather() == crate::damage::Weather::Sun {
             return false;
         }
         // Immunity: Sand Rush to sandstorm; TryAddVolatile: Inner Focus to
@@ -202,7 +202,7 @@ impl Battle {
                 "insomnia" | "vitalspirit" => status == Status::Sleep,
                 "limber" => status == Status::Paralysis,
                 "immunity" => matches!(status, Status::Poison | Status::Toxic),
-                "leafguard" => self.field.weather == crate::damage::Weather::Sun,
+                "leafguard" => self.effective_weather() == crate::damage::Weather::Sun,
                 _ => false,
             };
             if blocked {
@@ -269,7 +269,7 @@ impl Battle {
             || (id == VolatileId::Yawn
                 && (self.side_has_ability(t.side, "sweetveil")
                     || matches!(self.ability_id(t), "purifyingsalt" | "insomnia" | "vitalspirit")
-                    || (self.ability_is(t, "leafguard") && self.field.weather == crate::damage::Weather::Sun)))
+                    || (self.ability_is(t, "leafguard") && self.effective_weather() == crate::damage::Weather::Sun)))
         {
             return HitRes::Null;
         }
@@ -840,7 +840,7 @@ impl Battle {
                             }
                         }
                     }
-                    "hydration" if self.mon(h.mon).status != Status::None && self.field.weather == crate::damage::Weather::Rain => {
+                    "hydration" if self.mon(h.mon).status != Status::None && self.effective_weather() == crate::damage::Weather::Rain => {
                         self.cure_status(h.mon);
                     }
                     "shedskin" if self.mon(h.mon).hp > 0 && self.mon(h.mon).status != Status::None && self.chance.chance(33, 100) => {

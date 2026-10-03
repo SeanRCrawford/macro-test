@@ -80,6 +80,8 @@ pub enum VolatileId {
     SaltCure,
     /// No Retreat: can't switch out.
     NoRetreat,
+    /// Charge: the next Electric move has double power.
+    Charge,
     /// Bound by Infestation and the like: `counter` is the source
     /// (side << 8 | uid), `target_loc` the damage divisor (Binding Band: 6).
     PartiallyTrapped,
@@ -121,6 +123,7 @@ impl VolatileId {
             "substitute" => VolatileId::Substitute,
             "saltcure" => VolatileId::SaltCure,
             "noretreat" => VolatileId::NoRetreat,
+            "charge" => VolatileId::Charge,
             _ => return None,
         })
     }
@@ -161,6 +164,7 @@ impl VolatileId {
             VolatileId::Substitute => "substitute",
             VolatileId::SaltCure => "saltcure",
             VolatileId::NoRetreat => "noretreat",
+            VolatileId::Charge => "charge",
         }
     }
 
@@ -206,7 +210,8 @@ impl VolatileId {
             | VolatileId::LeechSeed
             | VolatileId::Substitute
             | VolatileId::SaltCure
-            | VolatileId::NoRetreat => None,
+            | VolatileId::NoRetreat
+            | VolatileId::Charge => None,
             VolatileId::HealBlock => Some(2),
             // durationCallback: 5 or 6, rolled when it starts.
             VolatileId::PartiallyTrapped => Some(5),

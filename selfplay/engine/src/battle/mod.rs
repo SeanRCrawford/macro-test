@@ -343,7 +343,7 @@ impl Battle {
             modifier = crate::fixed::chain(modifier, 8192);
         }
         // Weather Speed abilities.
-        let weather = self.field.weather;
+        let weather = self.effective_weather();
         let doubled = match Dex::get().ability(m.ability).id.as_str() {
             "swiftswim" => weather == crate::damage::Weather::Rain,
             "chlorophyll" => weather == crate::damage::Weather::Sun,
@@ -390,6 +390,17 @@ impl Battle {
             p += 1;
         }
         p
+    }
+
+    /// `field.effectiveWeather()`: none while a Cloud Nine or Air Lock
+    /// Pokemon is out (its suppressWeather flag; Mold Breaker can't touch it).
+    pub(crate) fn effective_weather(&self) -> crate::damage::Weather {
+        let suppressed = self.all_active().into_iter().any(|r| Dex::get().ability(self.mon(r).ability).suppress_weather);
+        if suppressed {
+            crate::damage::Weather::None
+        } else {
+            self.field.weather
+        }
     }
 
     pub(crate) fn ability_is(&self, r: MonRef, id: &str) -> bool {
@@ -770,6 +781,16 @@ impl Battle {
                     let m = self.mon_mut(old);
                     if m.hp > 0 && m.hp < m.max_hp() {
                         m.hp = (m.hp + m.max_hp() / 3).min(m.max_hp());
+                    }
+                }
+                // Zero to Hero: Palafin leaves as Palafin-Hero for good.
+                if self.ability_is(old, "zerotohero") {
+                    let dex = Dex::get();
+                    let m = self.mon_mut(old);
+                    if dex.species(m.species).name == "Palafin" {
+                        let hero = dex.species_id("Palafin-Hero").expect("Palafin-Hero");
+                        m.species = hero;
+                        m.types = dex.species(hero).types;
                     }
                 }
                 // Natural Cure: clearStatus.

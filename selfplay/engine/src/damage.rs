@@ -199,6 +199,8 @@ pub struct ActiveMove {
     pub has_sheer_force: bool,
     /// The -ate ability that changed this move's type (and boosts it).
     pub type_changer: Option<AbilityId>,
+    /// Parental Bond made this a two-hit move (the second hit does 1/4).
+    pub parental_bond: bool,
 }
 
 impl ActiveMove {
@@ -214,6 +216,7 @@ impl ActiveMove {
             infiltrates: false,
             has_sheer_force: false,
             type_changer: None,
+            parental_bond: false,
         }
     }
 }
@@ -984,6 +987,8 @@ impl<'a, 'b> Calc<'a, 'b> {
         let mut dmg = base + 2;
         if self.ctx.spread {
             dmg = modify(dmg, of(3, 4));
+        } else if am.parental_bond && self.ctx.hit > 1 {
+            dmg = modify(dmg, of(1, 4));
         }
         dmg = self.weather_modify_damage(am, dmg);
         if crit {

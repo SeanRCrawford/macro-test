@@ -417,6 +417,7 @@ impl Battle {
             Rattled,
             SandSpit,
             ToxicDebris,
+            Electromorphosis,
             PoisonTouch,
             AirBalloon,
         }
@@ -449,6 +450,7 @@ impl Battle {
                 "rattled" => Some((H::Rattled, NONE)),
                 "sandspit" => Some((H::SandSpit, NONE)),
                 "toxicdebris" => Some((H::ToxicDebris, NONE)),
+                "electromorphosis" => Some((H::Electromorphosis, 1)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -521,6 +523,9 @@ impl Battle {
                     // The attacker's side (its foes', if it hit an ally).
                     let side = if user.side == t.side { 1 - user.side } else { user.side };
                     self.add_hazard(side, super::state::SideCondition::ToxicSpikes);
+                }
+                H::Electromorphosis => {
+                    self.add_volatile(t, VolatileId::Charge);
                 }
                 H::SandSpit => {
                     self.set_weather(crate::damage::Weather::Sand, t);

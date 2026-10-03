@@ -336,7 +336,7 @@ impl Battle {
         self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
         // eachEvent('Weather'): per Pokemon, sandstorm's onWeather (subOrder
         // 5), then the ability's (7).
-        let weather = self.field.weather;
+        let weather = self.effective_weather();
         for (r, _) in keyed {
             if self.mon(r).hp == 0 {
                 continue;

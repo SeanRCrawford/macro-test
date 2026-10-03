@@ -266,7 +266,7 @@ impl Battle {
         if self.ability_is(user, "megasol") {
             crate::damage::Weather::Sun
         } else {
-            self.field.weather
+            self.effective_weather()
         }
     }
 
@@ -371,6 +371,7 @@ impl Battle {
                 c.volatiles.glaive_rush = m.volatiles.has(VolatileId::GlaiveRush);
                 c.volatiles.flash_fire = m.volatiles.has(VolatileId::FlashFire);
                 c.volatiles.gem = m.volatiles.has(VolatileId::Gem);
+                c.volatiles.charge = m.volatiles.has(VolatileId::Charge);
                 c.volatiles.semi_invulnerable = semi_invulnerable(m);
                 c.fallen = m.fallen;
                 c.stats_lowered_this_turn = m.stats_lowered_this_turn;
@@ -431,6 +432,7 @@ impl Battle {
                 m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
             }
             m.move_this_turn_result = Some(Some(false));
+            self.charge_spent(user, data);
             return Ok(());
         }
         let is_struggle = data.id == "struggle";
@@ -457,12 +459,21 @@ impl Battle {
         if m.move_this_turn_result.is_none() {
             m.move_this_turn_result = Some(Some(result));
         }
-        // AfterMove: White Herb's onAnyAfterMove.
+        // AfterMove: charge ends after an Electric move, then White Herb's
+        // onAnyAfterMove.
+        self.charge_spent(user, data);
         if self.mon(user).is_active || target.is_some_and(|t| self.mon(t).is_active) {
             self.any_white_herb(user);
         }
         self.faint_messages()?;
         Ok(())
+    }
+
+    /// charge's onAfterMove / onMoveAborted: used up by an Electric move.
+    fn charge_spent(&mut self, user: MonRef, data: &MoveData) {
+        if data.move_type == Dex::get().type_id("Electric").expect("Electric") && data.id != "charge" {
+            self.mon_mut(user).volatiles.remove(VolatileId::Charge);
+        }
     }
 
     /// `useMoveInner` for moves that target Pokemon.
@@ -744,7 +755,7 @@ impl Battle {
         };
         // onTry, then PrepareHit (Protean, Libero).
         let try_ok = match data.id.as_str() {
-            "auroraveil" => self.field.weather == crate::damage::Weather::Snow,
+            "auroraveil" => self.effective_weather() == crate::damage::Weather::Snow,
             "wideguard" | "quickguard" => self.will_act(),
             _ => true,
         };
@@ -758,7 +769,7 @@ impl Battle {
             "reflect" => add(self, SideCondition::Reflect, screen_turns),
             "lightscreen" => add(self, SideCondition::LightScreen, screen_turns),
             // onTry: only in snow.
-            "auroraveil" => self.field.weather == crate::damage::Weather::Snow && add(self, SideCondition::AuroraVeil, screen_turns),
+            "auroraveil" => self.effective_weather() == crate::damage::Weather::Snow && add(self, SideCondition::AuroraVeil, screen_turns),
             "wideguard" | "quickguard" => {
                 // onTry: fails as the last to act; onHitSide adds stall even
                 // if the guard was already up.
@@ -1141,7 +1152,7 @@ impl Battle {
         if self.ability_is(user, "compoundeyes") {
             mods.push((-1, us, 7, 5325));
         }
-        let weather = self.field.weather;
+        let weather = self.effective_weather();
         if (self.ability_is(t, "sandveil") && weather == crate::damage::Weather::Sand)
             || (self.ability_is(t, "snowcloak") && weather == crate::damage::Weather::Snow)
         {
@@ -1181,8 +1192,18 @@ impl Battle {
         } else {
             Vec::new()
         };
+        // Parental Bond's onPrepareHit: a second hit for single-hit attacks.
+        if self.ability_is(user, "parentalbond")
+            && mv.data.category != Category::Status
+            && mv.data.multihit.is_none()
+            && !mv.spread
+            && !["noparentalbond", "charge", "futuremove"].iter().any(|f| mv.data.flags.has(f))
+        {
+            mv.am.parental_bond = true;
+        }
         let target_hits = match mv.data.multihit {
             _ if !beat_up.is_empty() => beat_up.len() as u8,
+            _ if mv.am.parental_bond => 2,
             None => 1,
             Some((a, b)) if a == b => a,
             // Skill Link: the most hits.
@@ -2027,7 +2048,7 @@ impl Battle {
                 if self_effect.chance.is_none_or(|c| roll < c as u32) {
                     self.spread_move_hit(vec![Some(user)], user, mv, self_effect, false, is_secondary, true)?;
                 }
-                if mv.data.multihit.is_none() {
+                if mv.data.multihit.is_none() && !mv.am.parental_bond {
                     mv.self_dropped = true;
                 }
             } else {

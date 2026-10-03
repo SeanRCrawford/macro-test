@@ -33,6 +33,7 @@ const ABILITIES: &[&str] = &[
     "justified", "angerpoint", "raindish", "liquidooze", "stickyhold", "whitesmoke", "quickfeet", "shielddust", "damp",
     "leafguard", "hydration", "shedskin", "earlybird", "guarddog", "rattled", "supersweetsyrup", "sandspit",
     "tangledfeet", "anticipation", "forewarn", "runaway", "toxicdebris",
+    "illusion", "cloudnine", "airlock", "zerotohero", "electromorphosis", "parentalbond",
 ];
 
 /// Items whose every effect is implemented: damage boosts, Mega Stones and
