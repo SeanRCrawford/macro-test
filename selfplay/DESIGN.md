@@ -285,14 +285,30 @@ Decided:
 - Training on your Windows GPU machine, with PyTorch.
 - Target regulation is Reg M-C.
 - Showdown's Champions format uses stat points, not EVs.
+- **Reg M-C legal pool:** `data/regmc_pool.json`, built by
+  `tools/gen_pool.py` from Smogon's September 2026 usage stats
+  (`data/smogon_stats/`, 1760+ rating cut-off). It has 341 species, 154
+  items, 391 moves and 203 abilities, plus each species' common spreads,
+  moves, items and teammates.
+  - Species: every species in the leads file, plus Zoroark and
+    Zoroark-Hisui. Illusion means they never show up as leads.
+  - Items: an item is legal only if it appears somewhere in the stats. Any
+    legal item can go on any species; a Mega Stone on the wrong species does
+    nothing.
+  - Moves and abilities: these lists are the ones in use. Rarer ones are
+    folded into "Other" in the stats, so a move outside the list isn't
+    necessarily illegal.
+  - The stats name Megas by forme ("Salamence-Mega"). In a team that means the
+    base species holding its stone.
+  - This pool sets the order in which mechanics get implemented (section 4.6).
+    The usage stats also give the engine its first set prior for sampled
+    worlds until the team corpus arrives.
 
 Open:
 
 1. **Team corpus.** You will supply it later. Until then, use the 17 teams
    in `data/teams/` and the sets in `default_sets.txt`. Training is blocked on
    the corpus, so it is needed by phase 3.
-2. **Reg M-C legal pool.** `src/` was built for M-B. Which species, items and
-   moves are legal decides what the engine must implement first.
-3. **Champions mechanics changes.** Any differences from Scarlet and Violet,
+2. **Champions mechanics changes.** Any differences from Scarlet and Violet,
    such as move or ability changes or Mega Evolution details. Showdown's
    Champions mod is the authority here; checked in milestone 1h.
