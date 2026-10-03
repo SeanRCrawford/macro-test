@@ -75,6 +75,11 @@ const abilities = {};
 for (const [id, a] of Object.entries(data.Abilities)) {
 	if (a.num > 0) abilities[id] = plain(a);
 }
+// Shared conditions: weather, terrains, statuses and volatiles (Helping Hand,
+// Flash Fire...). Conditions that belong to one move (Reflect, Tailwind) live
+// under that move's "condition" key instead.
+const conditions = {};
+for (const [id, c] of Object.entries(data.Conditions)) conditions[id] = plain(c);
 const natures = {};
 for (const [id, n] of Object.entries(data.Natures)) {
 	natures[id] = {plus: n.plus || null, minus: n.minus || null};
@@ -100,7 +105,9 @@ const out = {
 	moves: sortedObject(moves),
 	items: sortedObject(items),
 	abilities: sortedObject(abilities),
+	conditions: sortedObject(conditions),
 };
 fs.writeFileSync(OUT, JSON.stringify(out, null, 1) + "\n");
 console.log(`wrote ${OUT}: ${Object.keys(species).length} species, ${Object.keys(moves).length} moves, ` +
-	`${Object.keys(items).length} items, ${Object.keys(abilities).length} abilities`);
+	`${Object.keys(items).length} items, ${Object.keys(abilities).length} abilities, ` +
+	`${Object.keys(conditions).length} conditions`);
