@@ -146,6 +146,9 @@ pub struct DamageCtx<'a> {
     pub spread: bool,
     /// Which hit of a multi-hit move, from 1.
     pub hit: u8,
+    /// The move got through the defender's protection (Unseen Fist): the
+    /// champions mod quarters the damage.
+    pub bypass_protect: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -986,6 +989,9 @@ impl<'a, 'b> Calc<'a, 'b> {
                 x = modify(x, of(1, 2));
             }
             x = self.modify_damage_event(am, x, type_mod, crit)?;
+            if self.ctx.bypass_protect {
+                x = modify(x, of(1, 4));
+            }
             if x == 0 {
                 x = 1;
             }

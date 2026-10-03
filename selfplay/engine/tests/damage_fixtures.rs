@@ -136,6 +136,7 @@ fn damage_matches_showdown() {
             crit: c.crit,
             spread: c.spread,
             hit: c.hit,
+            bypass_protect: false,
         };
         let move_id = dex.move_id(&c.move_id).unwrap_or_else(|| panic!("move {}", c.move_id));
         let expected = match &c.result {

@@ -286,10 +286,18 @@ impl Battle {
 
     /// The FractionalPriority event for a move action: Quick Claw.
     fn fractional_priority(&mut self, kind: &ActionKind) -> f64 {
-        match *kind {
-            ActionKind::Move { mon, .. } if self.item_of(mon) == Some("quickclaw") && self.chance.chance(1, 5) => 0.1,
-            _ => 0.0,
+        let ActionKind::Move { mon, slot, .. } = *kind else { return 0.0 };
+        // Quick Draw (priority -1); a success leaves Quick Claw (-2) nothing
+        // to do, without a roll.
+        let id = moves::move_for_slot(self.mon(mon), slot);
+        let attack = Dex::get().move_data(id).category != crate::dex::Category::Status;
+        if self.ability_is(mon, "quickdraw") && attack && self.chance.chance(3, 10) {
+            return 0.1;
         }
+        if self.item_of(mon) == Some("quickclaw") && self.chance.chance(1, 5) {
+            return 0.1;
+        }
+        0.0
     }
 
     /// `getActionSpeed`: a move's priority, and the acting Pokemon's speed.
@@ -331,6 +339,7 @@ impl Battle {
             "chlorophyll" => weather == crate::damage::Weather::Sun,
             "sandrush" => weather == crate::damage::Weather::Sand,
             "slushrush" => weather == crate::damage::Weather::Snow,
+            "surgesurfer" => self.field.terrain == crate::damage::Terrain::Electric,
             _ => false,
         };
         if doubled {
@@ -676,6 +685,12 @@ impl Battle {
                         m.hp = (m.hp + m.max_hp() / 3).min(m.max_hp());
                     }
                 }
+                // Natural Cure: clearStatus.
+                if self.ability_is(old, "naturalcure") {
+                    let m = self.mon_mut(old);
+                    m.status = crate::damage::Status::None;
+                    m.status_state = state::StatusState::default();
+                }
             }
             let o = self.mon_mut(old);
             // Leaving the field clears volatiles and boosts.
@@ -792,6 +807,12 @@ impl Battle {
         if let Some(s) = last_source {
             if self.ability_is(s, "moxie") && self.mon(s).is_active {
                 self.boost(s, &[(0, length as i8)], Some(s));
+            }
+            // Eelevate: getBestStat(unboosted, unmodified), the first on ties.
+            if self.ability_is(s, "eelevate") && self.mon(s).is_active {
+                let stats = self.mon(s).stats;
+                let best = (1..6).fold(1, |b, i| if stats[i] > stats[b] { i } else { b });
+                self.boost(s, &[(best - 1, length as i8)], Some(s));
             }
         }
         Ok(())

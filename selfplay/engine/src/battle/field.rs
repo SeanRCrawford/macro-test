@@ -18,6 +18,8 @@ pub(super) enum StartEffect {
     Hospitality,
     /// Copies a foe's ability.
     Trace,
+    /// Clears Reflect, Light Screen and Aurora Veil from both sides.
+    ScreenCleaner,
 }
 
 impl StartEffect {
@@ -36,6 +38,7 @@ pub(super) fn start_effect(ability: &str) -> Option<StartEffect> {
         "intimidate" => StartEffect::Intimidate,
         "hospitality" => StartEffect::Hospitality,
         "trace" => StartEffect::Trace,
+        "screencleaner" => StartEffect::ScreenCleaner,
         "drought" => StartEffect::Weather(Weather::Sun),
         "drizzle" => StartEffect::Weather(Weather::Rain),
         "sandstream" => StartEffect::Weather(Weather::Sand),
@@ -78,7 +81,8 @@ impl Battle {
         if item == Some("ironball") {
             return true;
         }
-        !m.has_type(dex.type_id("Flying").expect("Flying")) && dex.ability(m.ability).id != "levitate" && item != Some("airballoon")
+        let ability = dex.ability(m.ability).id.as_str();
+        !m.has_type(dex.type_id("Flying").expect("Flying")) && ability != "levitate" && ability != "eelevate" && item != Some("airballoon")
     }
 
     /// `field.setWeather` from an ability (5 turns: no rock items supported).
@@ -136,6 +140,13 @@ impl Battle {
                 for a in allies {
                     let amount = (self.mon(a).max_hp() / 4) as u32;
                     self.heal(a, amount);
+                }
+            }
+            StartEffect::ScreenCleaner => {
+                for side in [r.side, 1 - r.side] {
+                    for c in [super::state::SideCondition::Reflect, super::state::SideCondition::LightScreen, super::state::SideCondition::AuroraVeil] {
+                        self.sides[side].conditions[c as usize] = 0;
+                    }
                 }
             }
             StartEffect::Trace => {
@@ -226,13 +237,32 @@ impl Battle {
         let actives = self.all_active();
         let mut keyed: Vec<(MonRef, i32)> = actives.iter().map(|&r| (r, self.mon(r).speed)).collect();
         self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
-        if self.field.weather == Weather::Sand {
-            for (r, _) in keyed {
-                if self.mon(r).hp == 0 || !self.run_status_immunity(r, "sandstorm") {
-                    continue;
-                }
+        // eachEvent('Weather'): per Pokemon, sandstorm's onWeather (subOrder
+        // 5), then the ability's (7).
+        let weather = self.field.weather;
+        for (r, _) in keyed {
+            if self.mon(r).hp == 0 {
+                continue;
+            }
+            if weather == Weather::Sand && self.run_status_immunity(r, "sandstorm") {
                 let amount = (self.mon(r).max_hp() / 16) as u32;
                 self.effect_damage(r, amount);
+            }
+            if self.mon(r).hp == 0 {
+                continue;
+            }
+            let max = self.mon(r).max_hp() as u32;
+            match (Dex::get().ability(self.mon(r).ability).id.as_str(), weather) {
+                ("solarpower" | "dryskin", Weather::Sun) => {
+                    self.effect_damage(r, max / 8);
+                }
+                ("dryskin", Weather::Rain) => {
+                    self.heal(r, max / 8);
+                }
+                ("icebody", Weather::Snow) => {
+                    self.heal(r, max / 16);
+                }
+                _ => {}
             }
         }
         self.each_update();

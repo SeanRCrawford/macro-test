@@ -115,8 +115,11 @@ impl Battle {
         for (r, _) in keyed {
             // Abilities (subOrder 7) before items (8): Thermal Exchange cures
             // burns, Trace keeps looking.
-            if self.ability_is(r, "thermalexchange") && self.mon(r).status == crate::damage::Status::Burn {
+            if (self.ability_is(r, "thermalexchange") || self.ability_is(r, "waterbubble")) && self.mon(r).status == crate::damage::Status::Burn {
                 self.cure_status(r);
+            }
+            if self.ability_is(r, "owntempo") {
+                self.mon_mut(r).volatiles.remove(VolatileId::Confusion);
             }
             self.trace_update(r);
             if self.ability_is(r, "oblivious") {
@@ -382,6 +385,7 @@ impl Battle {
             ThermalExchange,
             SpicySpray,
             CursedBody,
+            PoisonPoint,
             PoisonTouch,
             AirBalloon,
         }
@@ -405,6 +409,7 @@ impl Battle {
                 "thermalexchange" => Some((H::ThermalExchange, NONE)),
                 "spicyspray" => Some((H::SpicySpray, NONE)),
                 "cursedbody" => Some((H::CursedBody, NONE)),
+                "poisonpoint" => Some((H::PoisonPoint, NONE)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -460,6 +465,9 @@ impl Battle {
                             }
                         }
                     }
+                }
+                H::PoisonPoint if contact && self.chance.chance(3, 10) => {
+                    self.try_set_status(user, crate::damage::Status::Poison);
                 }
                 H::PoisonTouch if contact && self.chance.chance(3, 10) => {
                     self.try_set_status(t, crate::damage::Status::Poison);

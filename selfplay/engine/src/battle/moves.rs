@@ -29,6 +29,9 @@ pub(super) struct MoveUse {
     pub bounced: bool,
     /// King's Rock added a 10% flinch secondary.
     pub kings_rock: bool,
+    /// Targets whose protection the move got through (getMoveHitData's
+    /// bypassProtect).
+    pub bypassed: Vec<MonRef>,
     /// `move.totalDamage` (Shell Bell).
     pub total_damage: u32,
 }
@@ -255,6 +258,16 @@ impl Battle {
         target
     }
 
+    /// `pokemon.effectiveWeather()` for the moving Pokemon's move: Mega Sol
+    /// makes it sun.
+    fn move_weather(&self, user: MonRef) -> crate::damage::Weather {
+        if self.ability_is(user, "megasol") {
+            crate::damage::Weather::Sun
+        } else {
+            self.field.weather
+        }
+    }
+
     /// onFoeTryMove: Armor Tail, Queenly Majesty, Dazzling.
     fn blocks_priority(&self, r: MonRef) -> bool {
         ["armortail", "queenlymajesty", "dazzling"].iter().any(|a| self.ability_is(r, a))
@@ -288,6 +301,7 @@ impl Battle {
                 self.boost(t, &[(2, 1)], Some(user));
                 return true;
             }
+            "dryskin" if is("Water") => {}
             "telepathy" => return t.side == user.side && data.category != Category::Status,
             "oblivious" => return data.id == "taunt",
             _ => return false,
@@ -342,6 +356,7 @@ impl Battle {
             crit,
             spread,
             hit: 1,
+            bypass_protect: false,
         }
     }
 
@@ -509,6 +524,7 @@ impl Battle {
             bounced,
             kings_rock,
             total_damage: 0,
+            bypassed: Vec::new(),
         };
         let result = self.try_spread_move_hit(user, &mut mv, targets);
         self.selfdestruct_user = None;
@@ -536,7 +552,7 @@ impl Battle {
     /// A charge move's onTryMove. None: not a charge move. Some(true): it
     /// hits this turn; Some(false): it started charging.
     fn charge_move(&mut self, user: MonRef, move_id: MoveId, data: &MoveData) -> Option<bool> {
-        let weather = self.field.weather;
+        let weather = self.move_weather(user);
         let (boosts, instant) = match data.id.as_str() {
             "electroshot" => (true, weather == crate::damage::Weather::Rain),
             "meteorbeam" => (true, false),
@@ -579,6 +595,10 @@ impl Battle {
         let Some(kind) = kind else { return false };
         // checkMoveBypassesProtect (King's Shield lets status moves through).
         if !data.flags.has("protect") || (kind == VolatileId::KingsShield && data.category == Category::Status) {
+            return false;
+        }
+        // HitProtect: Unseen Fist's contact moves go through.
+        if data.flags.has("contact") && self.ability_is(user, "unseenfist") {
             return false;
         }
         if data.flags.has("contact") {
@@ -704,6 +724,22 @@ impl Battle {
             return Ok(false);
         }
 
+        // HitProtect: Unseen Fist's contact moves get through Protect and
+        // friends (and Wide Guard), noted for the damage.
+        if data.flags.has("protect") && data.flags.has("contact") && self.ability_is(user, "unseenfist") {
+            for &t in &targets {
+                let v = &self.mon(t).volatiles;
+                let shielded = v.has(VolatileId::Protect)
+                    || v.has(VolatileId::SpikyShield)
+                    || v.has(VolatileId::BanefulBunker)
+                    || (v.has(VolatileId::KingsShield) && data.category != Category::Status)
+                    || (self.sides[t.side].condition(SideCondition::WideGuard) > 0
+                        && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes));
+                if shielded {
+                    mv.bypassed.push(t);
+                }
+            }
+        }
         let mut failed = false;
         let mut step = |b: &mut Battle, targets: &mut Vec<MonRef>, f: &mut dyn FnMut(&mut Battle, MonRef) -> HitRes| {
             let results: Vec<HitRes> = targets.iter().map(|&t| f(b, t)).collect();
@@ -721,6 +757,7 @@ impl Battle {
             if b.psychic_terrain_blocks(user, t, priority, data.target == MoveTarget::SelfTarget) {
                 HitRes::Bool(false)
             } else if data.flags.has("protect")
+                && !(data.flags.has("contact") && b.ability_is(user, "unseenfist"))
                 && b.sides[t.side].condition(SideCondition::WideGuard) > 0
                 && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes)
             {
@@ -813,7 +850,7 @@ impl Battle {
             return true;
         }
         // onModifyMove: weather-dependent accuracy.
-        match (data.id.as_str(), self.field.weather) {
+        match (data.id.as_str(), self.move_weather(user)) {
             ("thunder" | "hurricane", crate::damage::Weather::Rain) | ("blizzard", crate::damage::Weather::Snow) => return true,
             ("thunder" | "hurricane", crate::damage::Weather::Sun) => acc = 50,
             _ => {}
@@ -877,7 +914,10 @@ impl Battle {
         if self.ability_is(user, "compoundeyes") {
             mods.push((-1, us, 7, 5325));
         }
-        if self.ability_is(t, "sandveil") && self.field.weather == crate::damage::Weather::Sand {
+        let weather = self.field.weather;
+        if (self.ability_is(t, "sandveil") && weather == crate::damage::Weather::Sand)
+            || (self.ability_is(t, "snowcloak") && weather == crate::damage::Weather::Snow)
+        {
             mods.push((-1, ts, 7, 3277));
         }
         match self.item_of(user) {
@@ -902,6 +942,8 @@ impl Battle {
         let target_hits = match mv.data.multihit {
             None => 1,
             Some((a, b)) if a == b => a,
+            // Skill Link: the most hits.
+            Some((_, b)) if self.ability_is(user, "skilllink") => b,
             Some((2, 5)) => [2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5][self.chance.sample(20)],
             Some((a, b)) => self.chance.random_range(a as u32, b as u32 + 1) as u8,
         };
@@ -921,7 +963,11 @@ impl Battle {
             if targets.iter().all(|&t| self.mon(t).hp == 0) {
                 break;
             }
-            if hit > 1 && mv.data.has_key("multiaccuracy") && !self.multi_accuracy(user, targets[0], mv.data) {
+            if hit > 1
+                && mv.data.has_key("multiaccuracy")
+                && !self.ability_is(user, "skilllink")
+                && !self.multi_accuracy(user, targets[0], mv.data)
+            {
                 break;
             }
             mv.hit = hit;
@@ -1087,6 +1133,7 @@ impl Battle {
                     None => crit_ratio > 0 && self.chance.chance(1, [0, 24, 8, 2, 1][crit_ratio]),
                 };
                 let mut ctx = self.damage_ctx(&view, user, t, crit, spread);
+                ctx.bypass_protect = mv.bypassed.contains(&t);
                 ctx.hit = mv.hit;
                 let outcome = damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
                 if matches!(outcome, Outcome::Damage(_)) && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))? {

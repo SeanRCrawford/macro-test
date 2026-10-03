@@ -144,7 +144,7 @@ impl Battle {
         // Immunity: Sand Rush to sandstorm; TryAddVolatile: Inner Focus to
         // flinching.
         let ab = Dex::get().ability(m.ability).id.as_str();
-        if (key == "sandstorm" && matches!(ab, "sandrush" | "sandveil")) || (key == "flinch" && ab == "innerfocus") {
+        if (key == "sandstorm" && matches!(ab, "sandrush" | "sandveil" | "sandforce")) || (key == "flinch" && ab == "innerfocus") {
             return false;
         }
         key.is_empty() || !Dex::get().immune_to(key, m.types)
@@ -176,8 +176,12 @@ impl Battle {
             if self.terrain_blocks_status(t, status) {
                 return false;
             }
-            // SetStatus: Thermal Exchange can't be burned.
-            if status == Status::Burn && self.ability_is(t, "thermalexchange") {
+            // SetStatus: Thermal Exchange and Water Bubble can't be burned;
+            // Sweet Veil keeps its side awake.
+            if status == Status::Burn && (self.ability_is(t, "thermalexchange") || self.ability_is(t, "waterbubble")) {
+                return false;
+            }
+            if status == Status::Sleep && self.side_has_ability(t.side, "sweetveil") {
                 return false;
             }
         }
@@ -234,6 +238,13 @@ impl Battle {
         }
         if !self.run_status_immunity(t, id.id()) {
             return HitRes::Bool(false);
+        }
+        // TryAddVolatile: Own Tempo (confusion), Sweet Veil (Yawn, for its
+        // side).
+        if (id == VolatileId::Confusion && self.ability_is(t, "owntempo"))
+            || (id == VolatileId::Yawn && self.side_has_ability(t.side, "sweetveil"))
+        {
+            return HitRes::Null;
         }
         // TryAddVolatile: Aroma Veil guards its side (itself included).
         if matches!(id, VolatileId::Disable | VolatileId::Encore | VolatileId::Taunt)
@@ -533,6 +544,12 @@ impl Battle {
 
     // --- HP -------------------------------------------------------------------
 
+    /// An active Pokemon with HP on `side` has `ability` (Ally events reach
+    /// the holder itself too).
+    pub(super) fn side_has_ability(&self, side: usize, ability: &str) -> bool {
+        (0..ACTIVE_PER_SIDE).any(|p| self.occupant(side, p).is_some_and(|a| self.mon(a).hp > 0 && self.ability_is(a, ability)))
+    }
+
     /// `pokemon.faint()`: HP to 0 and queued to faint.
     pub(super) fn faint(&mut self, r: MonRef) {
         let m = self.mon(r);
@@ -571,6 +588,10 @@ impl Battle {
         let m = self.mon(t);
         if m.hp == 0 {
             return HitRes::Num(0);
+        }
+        // Magic Guard: only moves do damage.
+        if self.ability_is(t, "magicguard") {
+            return HitRes::Bool(false);
         }
         if !m.is_active {
             return HitRes::Bool(false);
@@ -728,6 +749,8 @@ impl Battle {
                     }
                     let max = m.max_hp() as u32;
                     let amount = match status {
+                        // Heatproof's onDamage halves burn damage.
+                        Status::Burn if self.ability_is(h.mon, "heatproof") => (max / 16).max(1) / 2,
                         Status::Burn => max / 16,
                         Status::Poison => max / 8,
                         _ => {
