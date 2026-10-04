@@ -741,7 +741,9 @@ impl Battle {
         let def = super::boosted(m.stats[2], m.boosts[1]).max(1) as u64;
         let base = ((22 * 40 * atk) / def) / 50 + 2;
         let base = base & 0xFFFF;
-        let roll = self.chance.random(16) as u64;
+        let hp = self.mon(r).hp as u64;
+        let kos = (0..16u64).filter(|&k| (base * (100 - k) / 100).max(1) >= hp).count() as u32;
+        let roll = self.chance.damage_roll(Some(kos)) as u64;
         let damage = (base * (100 - roll) / 100).max(1) as u32;
         if self.mon(r).hp == 0 || !self.mon(r).is_active {
             return;

@@ -287,7 +287,7 @@ impl Battle {
             }
         }
         let mut q = std::mem::take(&mut self.queue);
-        self.speed_sort(&mut q, compare_priority);
+        self.sort_actions(&mut q);
         q.extend(old);
         self.queue = q;
         self.requests = [SideRequest::Wait, SideRequest::Wait];
@@ -770,8 +770,26 @@ impl Battle {
         Ok(())
     }
 
-    /// Showdown's speedSort: selection sort that shuffles exact ties.
+    /// Showdown's speedSort: selection sort that shuffles exact ties. When
+    /// a turn's chance outcomes are enumerated, ties between event handlers
+    /// keep the order they were collected in (otherwise every sort of tied
+    /// handlers doubles the outcomes); ties in the action queue
+    /// (`sort_actions`) are still enumerated.
     fn speed_sort<T>(&mut self, list: &mut [T], cmp: impl Fn(&T, &T) -> Ordering) {
+        self.speed_sort_ties(list, cmp, false);
+    }
+
+    /// The action queue's speedSort: a speed tie is a real chance outcome.
+    fn sort_actions(&mut self, list: &mut [Action]) {
+        self.speed_sort_ties(list, compare_priority, true);
+    }
+
+    fn speed_sort_ties<T>(
+        &mut self,
+        list: &mut [T],
+        cmp: impl Fn(&T, &T) -> Ordering,
+        enumerate_ties: bool,
+    ) {
         let mut sorted = 0;
         while sorted + 1 < list.len() {
             let mut next = vec![sorted];
@@ -788,7 +806,12 @@ impl Battle {
                 }
             }
             if next.len() > 1 {
-                self.chance.shuffle(&mut list[sorted..sorted + next.len()]);
+                let tied = &mut list[sorted..sorted + next.len()];
+                if enumerate_ties {
+                    self.chance.shuffle(tied);
+                } else {
+                    self.chance.shuffle_minor(tied);
+                }
             }
             sorted += next.len();
         }
@@ -1072,7 +1095,7 @@ impl Battle {
             for a in q.iter_mut() {
                 self.action_speed(a)?;
             }
-            self.speed_sort(&mut q, compare_priority);
+            self.sort_actions(&mut q);
             self.queue = q;
         }
         Ok(false)

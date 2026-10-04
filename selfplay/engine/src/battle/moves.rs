@@ -1876,7 +1876,8 @@ impl Battle {
             // Skill Link: the most hits.
             Some((_, b)) if self.ability_is(user, "skilllink") => b,
             Some((2, 5)) => {
-                [2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5][self.chance.sample(20)]
+                [2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5]
+                    [self.chance.random_banded(20, &[7, 14, 17]) as usize]
             }
             Some((a, b)) => self.chance.random_range(a as u32, b as u32 + 1) as u8,
         };
@@ -2991,7 +2992,12 @@ impl Battle {
             self.faint(user);
         }
         Ok(match outcome {
-            Outcome::Damage(rolls) => HitRes::Num(rolls[self.chance.random(16) as usize]),
+            Outcome::Damage(rolls) => {
+                // Search enumerates "KOs" and "doesn't" as separate outcomes.
+                let hp = self.mon(t).hp;
+                let split = (!hit_sub).then(|| rolls.iter().filter(|&&d| d >= hp as u32).count() as u32);
+                HitRes::Num(rolls[self.chance.damage_roll(split) as usize])
+            }
             Outcome::Immune => HitRes::Bool(false),
             Outcome::NoDamage => HitRes::Undefined,
         })
@@ -3075,8 +3081,8 @@ impl Battle {
                 continue;
             }
             if !is_secondary && !self_effect.boosts.is_empty() {
-                let roll = self.chance.random(100);
-                if self_effect.chance.is_none_or(|c| roll < c as u32) {
+                let c = self_effect.chance.map_or(100, |c| c as u32);
+                if self.chance.roll_under(c, 100) {
                     self.spread_move_hit(
                         vec![Some(user)],
                         user,
@@ -3123,16 +3129,13 @@ impl Battle {
             // its effect on the user (self) happens.
             if subbed.get(i).copied().unwrap_or(false) {
                 for sec in secondaries {
-                    let roll = self.chance.random(100);
-                    if let (true, Some(se)) = (
-                        sec.chance.is_none_or(|c| roll < c as u32),
-                        sec.self_effect.as_deref(),
-                    ) {
+                    let hit = self.chance.roll_under(sec.chance.map_or(100, |c| c as u32), 100);
+                    if let (true, Some(se)) = (hit, sec.self_effect.as_deref()) {
                         self.self_drops(&[Some(user)], user, mv, se, true)?;
                     }
                 }
                 if mv.kings_rock {
-                    self.chance.random(100);
+                    self.chance.random_banded(100, &[]);
                 }
                 continue;
             }
@@ -3143,25 +3146,21 @@ impl Battle {
                 if dust && sec.self_effect.is_none() {
                     continue;
                 }
-                let roll = self.chance.random(100);
-                if sec.chance.is_none_or(|c| roll < c as u32) {
+                if self.chance.roll_under(sec.chance.map_or(100, |c| c as u32), 100) {
                     self.spread_move_hit(vec![Some(t)], user, mv, sec, false, true, false)?;
                 }
             }
             // King's Rock's onModifyMove adds a 10% flinch.
-            if mv.kings_rock && !dust {
-                let roll = self.chance.random(100);
-                if roll < 10 {
-                    self.spread_move_hit(
-                        vec![Some(t)],
-                        user,
-                        mv,
-                        &KINGS_ROCK_FLINCH,
-                        false,
-                        true,
-                        false,
-                    )?;
-                }
+            if mv.kings_rock && !dust && self.chance.roll_under(10, 100) {
+                self.spread_move_hit(
+                    vec![Some(t)],
+                    user,
+                    mv,
+                    &KINGS_ROCK_FLINCH,
+                    false,
+                    true,
+                    false,
+                )?;
             }
         }
         Ok(())

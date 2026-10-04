@@ -11,6 +11,7 @@ pub mod chance;
 pub mod corpus;
 pub mod damage;
 pub mod dex;
+pub mod enumerate;
 pub mod env;
 pub mod fixed;
 pub mod stats;

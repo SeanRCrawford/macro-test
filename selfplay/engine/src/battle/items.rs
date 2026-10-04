@@ -762,7 +762,7 @@ impl Battle {
                     self.try_set_status_from(t, crate::damage::Status::Poison, Some(user));
                 }
                 H::EffectSpore if contact && self.run_status_immunity(user, "powder") => {
-                    let r = self.chance.random(100);
+                    let r = self.chance.random_banded(100, &[11, 21, 30]);
                     let status = match r {
                         0..=10 => Some(crate::damage::Status::Sleep),
                         11..=20 => Some(crate::damage::Status::Paralysis),

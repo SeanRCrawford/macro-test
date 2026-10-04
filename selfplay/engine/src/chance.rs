@@ -2,9 +2,16 @@
 //!
 //! The calls mirror Showdown's PRNG wrappers (`random`, `randomChance`,
 //! `sample`, `shuffle`), so the engine makes a random decision exactly where
-//! Showdown does. Two modes:
+//! Showdown does. Three modes:
 //!
 //! - `Sampled`: a seeded PRNG, for self-play. Distributions match Showdown's.
+//! - `Scripted`: for enumerating a turn's chance outcomes (`enumerate.rs`).
+//!   Each draw is split into classes of outcomes that play differently (a
+//!   hit or a miss; a damage roll that KOs or doesn't), and the draw takes
+//!   the class the script says, or the first class past the script's end,
+//!   recording every class's probability. Rolls whose exact value doesn't
+//!   matter are banded (`random_banded`, `damage_roll`) and take the
+//!   band's middle value.
 //! - `Policy`: deterministic outcomes from a threshold `t` in [0, 1]. A chance
 //!   of n/d succeeds when n >= d or n/d >= t; `random(n)` returns
 //!   ceil(t * n) - 1 clamped to [0, n); `sample` and `shuffle` follow from
@@ -14,10 +21,73 @@
 //!   succeed (crits, secondary effects, misses never happen), t > 1 makes
 //!   every uncertain event fail.
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Chance {
     Sampled(Rng),
     Policy { threshold: f64 },
+    Scripted(Box<Script>),
+}
+
+/// One draw with more than one class of outcome.
+#[derive(Debug, Clone)]
+pub struct Draw {
+    pub taken: u8,
+    pub probs: Vec<f64>,
+}
+
+/// The classes to take, and what was drawn.
+#[derive(Debug, Clone, Default)]
+pub struct Script {
+    pub forced: Vec<u8>,
+    pub trace: Vec<Draw>,
+    /// The probability of the classes taken.
+    pub prob: f64,
+    /// Damage rolls are split into this many equal bands (besides the KO
+    /// split): 1 keeps only "KOs" and "doesn't".
+    pub roll_bands: u32,
+}
+
+impl Script {
+    pub fn new(forced: Vec<u8>, roll_bands: u32) -> Self {
+        Script {
+            forced,
+            trace: Vec::new(),
+            prob: 1.0,
+            roll_bands: roll_bands.clamp(1, 16),
+        }
+    }
+
+    /// Take a class among `probs` (more than one).
+    fn branch(&mut self, probs: Vec<f64>) -> usize {
+        let i = self.trace.len();
+        let taken = self.forced.get(i).copied().unwrap_or(0);
+        assert!((taken as usize) < probs.len(), "script class out of range");
+        self.prob *= probs[taken as usize];
+        self.trace.push(Draw { taken, probs });
+        taken as usize
+    }
+
+    /// Take one of the classes [0, b0), [b0, b1), ... [bk, n) (empty ones
+    /// dropped) and return its middle value.
+    fn banded(&mut self, n: u32, bounds: &[u32]) -> u32 {
+        let mut classes: Vec<(u32, u32)> = Vec::with_capacity(bounds.len() + 1);
+        let mut lo = 0;
+        for &b in bounds.iter().chain(std::iter::once(&n)) {
+            let b = b.min(n);
+            if b > lo {
+                classes.push((lo, b));
+                lo = b;
+            }
+        }
+        let pick = if classes.len() == 1 {
+            0
+        } else {
+            let probs = classes.iter().map(|&(a, b)| (b - a) as f64 / n as f64).collect();
+            self.branch(probs)
+        };
+        let (a, b) = classes[pick];
+        a + (b - a - 1) / 2
+    }
 }
 
 impl Chance {
@@ -37,6 +107,41 @@ impl Chance {
         match self {
             Chance::Sampled(rng) => rng.below(n),
             Chance::Policy { threshold } => policy_index(*threshold, n),
+            Chance::Scripted(s) => s.branch(vec![1.0 / n as f64; n as usize]) as u32,
+        }
+    }
+
+    /// `random(n)` where only which class [0, b0), [b0, b1), ... [bk, n) the
+    /// value falls in matters (`bounds` ascending). Sampled and policy modes
+    /// draw exactly as `random(n)`; scripted mode branches on the classes.
+    pub fn random_banded(&mut self, n: u32, bounds: &[u32]) -> u32 {
+        match self {
+            Chance::Scripted(s) => s.banded(n, bounds),
+            _ => self.random(n),
+        }
+    }
+
+    /// `random(n) < c`, as Showdown's secondaries roll it.
+    pub fn roll_under(&mut self, c: u32, n: u32) -> bool {
+        self.random_banded(n, &[c]) < c
+    }
+
+    /// The damage roll, an index into the 16 rolls (`random(16)`). `split`
+    /// is where the rolls change from KOing to not (the number of KOing
+    /// rolls, since index 0 is the highest).
+    pub fn damage_roll(&mut self, split: Option<u32>) -> u32 {
+        match self {
+            Chance::Scripted(s) => {
+                let bands = s.roll_bands;
+                let mut bounds: Vec<u32> = (1..bands).map(|k| k * 16 / bands).collect();
+                if let Some(k) = split.filter(|&k| k > 0 && k < 16) {
+                    bounds.push(k);
+                    bounds.sort_unstable();
+                    bounds.dedup();
+                }
+                s.banded(16, &bounds)
+            }
+            _ => self.random(16),
         }
     }
 
@@ -52,6 +157,12 @@ impl Chance {
             Chance::Policy { threshold } => {
                 numerator >= denominator || numerator as f64 / denominator as f64 >= *threshold
             }
+            Chance::Scripted(_) if numerator >= denominator => true,
+            Chance::Scripted(_) if numerator == 0 => false,
+            Chance::Scripted(s) => {
+                let p = numerator as f64 / denominator as f64;
+                s.branch(vec![p, 1.0 - p]) == 0
+            }
         }
     }
 
@@ -60,15 +171,24 @@ impl Chance {
         self.random(len as u32) as usize
     }
 
+    /// `shuffle`, except that scripted mode leaves the order unchanged
+    /// instead of enumerating it (ties whose order rarely matters).
+    pub fn shuffle_minor<T>(&mut self, items: &mut [T]) {
+        if !matches!(self, Chance::Scripted(_)) {
+            self.shuffle(items);
+        }
+    }
+
     /// Showdown's Fisher-Yates `shuffle(items, start, end)`. In policy mode
     /// Showdown's patched PRNG leaves the order unchanged.
     pub fn shuffle<T>(&mut self, items: &mut [T]) {
-        if let Chance::Sampled(rng) = self {
-            let n = items.len();
-            for i in 0..n.saturating_sub(1) {
-                let j = i + rng.below((n - i) as u32) as usize;
-                items.swap(i, j);
-            }
+        if matches!(self, Chance::Policy { .. }) {
+            return;
+        }
+        let n = items.len();
+        for i in 0..n.saturating_sub(1) {
+            let j = i + self.random((n - i) as u32) as usize;
+            items.swap(i, j);
         }
     }
 }
