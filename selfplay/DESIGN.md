@@ -436,6 +436,16 @@ Disguise and OHKO moves. The turn engine (1d) supplies that context.
   finished game reports +1/-1/0 per side and is replaced.
 - **Exit test** (`python -m selfplay.rollout --games 1000000`): see 4.12.
 
+### 4.12 Phase 2 exit test
+
+1,000,008 random-play games through the Python API (1,024 environments,
+4 cores, 30-turn cap), with no errors:
+
+- 268 s total: 3,732 games/s, 37,540 turns/s and 97,250 decisions/s. A
+  test suite ran alongside for part of it; unshared, the rate is about
+  4,500-4,700 games/s.
+- Games average 10.1 turns. Side 0 wins 49.8%, and 0.35% reach the cap.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:
