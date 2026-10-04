@@ -578,6 +578,18 @@ Results so far, on this container's 4 CPU cores:
 - One-turn search (k = 8) with run 6's network against the same network's
   raw policy: 0.695 ± 0.045 (410 games). About 590 leaves and 100 ms per
   searched turn, solver gap under 1e-4.
+- Search-labelled training from run 6 (run 7: 60 min, 3,880 games, 80k
+  examples, only about 300 gradient steps because play dominates on a
+  CPU): the new raw policy beats run 6's raw policy 0.525 ± 0.022 (2,000
+  games), and scores 0.972 against random and 0.580 against greedy. The
+  search still beats the policy it guides (0.71-0.79 in 100-game checks),
+  so there is a lot left to distil. This is the start of the curve, not a
+  result: Nessie used about 100 times as many games.
+
+Rough cost on the target machine: at about 600 leaves per searched turn and
+games of about 10 turns, 375k games is about 2 billion leaf evaluations.
+With the network on the GPU and the engine on 16 cores, that's roughly a
+day; it's worth measuring the first hour before committing to it.
 
 ## 5. Model and training (provisional; settled in phases 2–3)
 

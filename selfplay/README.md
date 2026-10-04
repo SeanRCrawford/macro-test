@@ -54,6 +54,9 @@ See DESIGN.md 4.13 for the model, the training setup and first results.
 ## Search
 
     python -m selfplay.search runs/tiny/model.pt --games 400 --k 8   # one-turn search vs the raw policy
+    python -m selfplay.search_train --init runs/tiny/model.pt --minutes 600 --envs 256 \
+        --device cuda --out runs/search                                  # search-labelled self-play
+    python -m selfplay.evaluate runs/search/model.pt --against runs/tiny/model.pt
 
 Each turn is solved as a matrix game between both sides' top-k joint
 actions, every cell scored over its chance outcomes by the value network
