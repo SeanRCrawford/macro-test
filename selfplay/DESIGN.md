@@ -446,6 +446,43 @@ Disguise and OHKO moves. The turn engine (1d) supplies that context.
   4,500-4,700 games/s.
 - Games average 10.1 turns. Side 0 wins 49.8%, and 0.35% reach the cap.
 
+### 4.13 Phase 3: first training runs (CPU)
+
+`python/selfplay/model.py`, `train.py`, `evaluate.py`; baselines in
+`engine/src/env/policy.rs`.
+
+- **Baselines.** Random play. Greedy damage: each slot uses its
+  highest-expected-damage move and target (`Battle::estimate_damage`),
+  Mega Evolves when it can, and switches only when forced. Greedy beats
+  random 97% of the time.
+- **Model.** About 0.2M parameters: a 2-layer, d=64 transformer over the
+  field and 12 Pokemon tokens. Each slot's 47 logits come from its active
+  Pokemon's token, and the joint logit is their sum, masked to legal joint
+  actions. Team preview scores each Pokemon as a lead or a bring, so it
+  carries across teams. With `perfect_info`, each active Pokemon's token
+  also gets the expected damage of each move at each target (the damage
+  calcs of 5).
+- **PPO.** GAE (gamma 1, lambda 0.95) along each side's own decisions. Half
+  the games are self-play. In the other half, side 1 is a league member:
+  past snapshots (one every 10 updates, the last 8 kept) and the greedy
+  baseline. Optional warm start: `--imitate-minutes` clones greedy first.
+
+Results on this container's 4 CPU cores (2,000-game evaluations, model on
+side 0 playing deterministically, 95% intervals):
+
+| Run | Setup | vs random | vs greedy |
+|---|---|---|---|
+| 1 | 30 min, no damage features | 0.96 (400 games) | 0.45 (400 games) |
+| 2 | 30 min, damage features | 0.97 (400 games) | 0.51-0.55 (400 games) |
+| 4 | 3 min imitation, then 27 min with 4x the gradient steps and 25% of games vs greedy | 0.986 ± 0.005 | 0.583 ± 0.022 |
+| 5 | run 4 plus 60 min | 0.979 ± 0.006 | 0.576 ± 0.022 |
+
+Exit test: the tiny CPU model beats random play clearly and greedy damage
+significantly (about 58%). The margin over greedy stops growing at this
+scale; runs 4 and 5 sit at about 56-62% in the evaluations along the way.
+Next: scale up on the GPU (`--device cuda`, larger `--d`/`--layers`, more
+environments), then the one-turn search (phase 4).
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

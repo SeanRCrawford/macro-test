@@ -48,6 +48,7 @@ class Config:
     seed: int = 0
     threads: int = 0
     perfect_info: bool = True
+    device: str = "cpu"             # or "cuda"
 
 
 def to_tensors(obs, rows=None):
@@ -60,12 +61,13 @@ def to_tensors(obs, rows=None):
 
 @torch.no_grad()
 def act(model, batch, greedy=False):
-    logp, value = model(*batch)
+    dev = next(model.parameters()).device
+    logp, value = model(*(t.to(dev) for t in batch))
     if greedy:
         a = logp.argmax(-1)
     else:
         a = torch.distributions.Categorical(logits=logp).sample()
-    return a, logp.gather(1, a[:, None]).squeeze(1), value
+    return a.cpu(), logp.gather(1, a[:, None]).squeeze(1).cpu(), value.cpu()
 
 
 @torch.no_grad()
@@ -101,7 +103,7 @@ class Trainer:
         out.mkdir(parents=True, exist_ok=True)
         torch.manual_seed(cfg.seed)
         self.rng = random.Random(cfg.seed)
-        self.model = PolicyNet(cfg.d, cfg.layers)
+        self.model = PolicyNet(cfg.d, cfg.layers).to(cfg.device)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
         self.env = SelfPlayEnv(cfg.envs, seed=cfg.seed, threads=cfg.threads,
                                perfect_info=cfg.perfect_info)
@@ -214,15 +216,17 @@ class Trainer:
             perm = torch.randperm(n)
             for i in range(0, n, c.minibatch):
                 idx = perm[i:i + c.minibatch]
-                logp_all, value = self.model(d["ints"][idx], d["mons"][idx], d["field"][idx],
-                                             d["masks"][idx], d["dec"][idx])
-                logp = logp_all.gather(1, d["act"][idx, None]).squeeze(1)
-                ratio = torch.exp(logp - d["logp"][idx])
-                a = adv[idx]
+                dev = c.device
+                mb = {k: d[k][idx].to(dev) for k in ("ints", "mons", "field", "masks", "dec", "act",
+                                                    "logp", "ret")}
+                logp_all, value = self.model(mb["ints"], mb["mons"], mb["field"], mb["masks"], mb["dec"])
+                logp = logp_all.gather(1, mb["act"][:, None]).squeeze(1)
+                ratio = torch.exp(logp - mb["logp"])
+                a = adv[idx].to(dev)
                 pg = -torch.min(ratio * a, ratio.clamp(1 - c.clip, 1 + c.clip) * a).mean()
-                vloss = ((value - d["ret"][idx]) ** 2).mean()
+                vloss = ((value - mb["ret"]) ** 2).mean()
                 p = logp_all.exp()
-                legal = d["masks"][idx].bool()
+                legal = mb["masks"].bool()
                 ent = -(p * logp_all).masked_fill(~legal, 0).sum(-1).mean()
                 loss = pg + c.value_coef * vloss - c.entropy * ent
                 self.opt.zero_grad()
@@ -254,8 +258,10 @@ class Trainer:
                 perm = torch.randperm(total)
                 for i in range(0, total, c.minibatch):
                     idx = perm[i:i + c.minibatch]
-                    logp, _ = self.model(ints[idx], mons[idx], field[idx], masks[idx], dec[idx])
-                    loss = -logp.gather(1, acts[idx, None]).mean()
+                    dev = c.device
+                    logp, _ = self.model(ints[idx].to(dev), mons[idx].to(dev), field[idx].to(dev),
+                                         masks[idx].to(dev), dec[idx].to(dev))
+                    loss = -logp.gather(1, acts[idx, None].to(dev)).mean()
                     self.opt.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm)
@@ -263,8 +269,8 @@ class Trainer:
             rounds += 1
             with torch.no_grad():
                 idx = torch.randperm(total)[:2048]
-                logp, _ = self.model(ints[idx], mons[idx], field[idx], masks[idx], dec[idx])
-                agree = (logp.argmax(-1) == acts[idx]).float().mean().item()
+                a, _, _ = act(self.model, (ints[idx], mons[idx], field[idx], masks[idx], dec[idx]), greedy=True)
+                agree = (a == acts[idx]).float().mean().item()
             print(f"imitate round={rounds} minutes={(time.time() - start) / 60:.2f} samples={total} "
                   f"loss={loss.item():.3f} agreement={agree:.3f}", flush=True)
         entry = {"imitation_minutes": minutes, "rounds": rounds,
@@ -325,7 +331,7 @@ def main():
     torch.set_num_threads(max(1, torch.get_num_threads()))
     t = Trainer(cfg, Path(a.out))
     if a.init:
-        t.model.load_state_dict(torch.load(a.init)["model"])
+        t.model.load_state_dict(torch.load(a.init, map_location=cfg.device)["model"])
     if a.imitate_minutes > 0:
         t.imitate(a.imitate_minutes)
     t.run(a.minutes, a.updates)

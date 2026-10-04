@@ -43,6 +43,14 @@ Needs Rust (https://rustup.rs) and, on Windows, the MSVC C++ build tools.
 
 See DESIGN.md 4.11 for the action and observation layouts.
 
+## Training (needs PyTorch)
+
+    python -m selfplay.train --imitate-minutes 3 --minutes 60 --minibatch 1024 --epochs 4 \
+        --league-frac 0.5 --greedy-frac 0.5 --out runs/tiny     # add --device cuda on a GPU
+    python -m selfplay.evaluate runs/tiny/model.pt --games 2000
+
+See DESIGN.md 4.13 for the model, the training setup and first results.
+
 ## Regenerate data from Showdown
 
 Showdown is the rules authority. Both scripts need a built checkout of

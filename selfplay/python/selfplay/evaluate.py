@@ -13,12 +13,12 @@ from selfplay.model import PolicyNet
 from selfplay.train import evaluate
 
 
-def load(path: str) -> PolicyNet:
-    ckpt = torch.load(path)
+def load(path: str, device: str = "cpu") -> PolicyNet:
+    ckpt = torch.load(path, map_location=device)
     cfg = ckpt["config"]
     model = PolicyNet(cfg["d"], cfg["layers"])
     model.load_state_dict(ckpt["model"])
-    return model.eval()
+    return model.to(device).eval()
 
 
 def main() -> None:
@@ -27,8 +27,9 @@ def main() -> None:
     p.add_argument("--games", type=int, default=2000)
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--hidden", action="store_true")
+    p.add_argument("--device", default="cpu")
     a = p.parse_args()
-    model = load(a.model)
+    model = load(a.model, a.device)
     for opp in ("random", "greedy"):
         score = evaluate(model, opp, a.games, a.seed, not a.hidden)
         se = math.sqrt(score * (1 - score) / a.games)
