@@ -232,6 +232,47 @@ class Trainer:
                 stats.append((pg.item(), vloss.item(), ent.item()))
         return np.mean(stats, axis=0)
 
+    def imitate(self, minutes: float):
+        """Warm start: learn the greedy-damage baseline's choices (greedy
+        against greedy, both sides) by cross-entropy, before PPO takes over."""
+        c, env = self.cfg, self.env
+        start = time.time()
+        rounds = 0
+        while time.time() - start < minutes * 60:
+            batches = []
+            for _ in range(c.steps):
+                obs = env.observe()
+                actions = env.greedy_actions()
+                rows = np.flatnonzero(obs.decisions.reshape(-1) != 0)
+                if len(rows):
+                    batches.append((to_tensors(obs, rows), torch.from_numpy(actions.reshape(-1)[rows])))
+                env.step(actions)
+            ints, mons, field, masks, dec = (torch.cat([b[0][k] for b in batches]) for k in range(5))
+            acts = torch.cat([b[1] for b in batches])
+            total = len(acts)
+            for _ in range(c.epochs):
+                perm = torch.randperm(total)
+                for i in range(0, total, c.minibatch):
+                    idx = perm[i:i + c.minibatch]
+                    logp, _ = self.model(ints[idx], mons[idx], field[idx], masks[idx], dec[idx])
+                    loss = -logp.gather(1, acts[idx, None]).mean()
+                    self.opt.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm)
+                    self.opt.step()
+            rounds += 1
+            with torch.no_grad():
+                idx = torch.randperm(total)[:2048]
+                logp, _ = self.model(ints[idx], mons[idx], field[idx], masks[idx], dec[idx])
+                agree = (logp.argmax(-1) == acts[idx]).float().mean().item()
+            print(f"imitate round={rounds} minutes={(time.time() - start) / 60:.2f} samples={total} "
+                  f"loss={loss.item():.3f} agreement={agree:.3f}", flush=True)
+        entry = {"imitation_minutes": minutes, "rounds": rounds,
+                 "vs_random": evaluate(self.model, "random", c.eval_games, 3000, c.perfect_info),
+                 "vs_greedy": evaluate(self.model, "greedy", c.eval_games, 3001, c.perfect_info)}
+        print(" ".join(f"{k}={v}" for k, v in entry.items()), flush=True)
+        self.log.write(json.dumps(entry) + "\n")
+
     def run(self, minutes: float, max_updates: int | None = None):
         c = self.cfg
         start = time.time()
@@ -270,6 +311,8 @@ def main():
     p.add_argument("--minutes", type=float, default=30)
     p.add_argument("--updates", type=int, default=None)
     p.add_argument("--out", default="runs/tiny")
+    p.add_argument("--imitate-minutes", type=float, default=0.0,
+                   help="first learn the greedy baseline's choices for this long")
     for k, v in asdict(Config()).items():
         if k == "perfect_info":
             p.add_argument("--hidden", action="store_true", help="Open Team Sheets observations")
@@ -279,7 +322,10 @@ def main():
     cfg = Config(**{k: getattr(a, k) for k in asdict(Config()) if k != "perfect_info"},
                  perfect_info=not a.hidden)
     torch.set_num_threads(max(1, torch.get_num_threads()))
-    Trainer(cfg, Path(a.out)).run(a.minutes, a.updates)
+    t = Trainer(cfg, Path(a.out))
+    if a.imitate_minutes > 0:
+        t.imitate(a.imitate_minutes)
+    t.run(a.minutes, a.updates)
 
 
 if __name__ == "__main__":
