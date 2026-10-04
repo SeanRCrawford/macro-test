@@ -408,13 +408,15 @@ impl Battle {
         // to do, without a roll.
         let id = moves::move_for_slot(self.mon(mon), slot);
         let attack = Dex::get().move_data(id).category != crate::dex::Category::Status;
+        // Stall (priority 0) moves last among equals.
+        let base = if self.ability_is(mon, "stall") { -0.1 } else { 0.0 };
         if self.ability_is(mon, "quickdraw") && attack && self.chance.chance(3, 10) {
             return 0.1;
         }
         if self.item_of(mon) == Some("quickclaw") && self.chance.chance(1, 5) {
             return 0.1;
         }
-        0.0
+        base
     }
 
     /// `getActionSpeed`: a move's priority, and the acting Pokemon's speed.
@@ -584,6 +586,11 @@ impl Battle {
         self.sides[side].pokemon[pos].position = pos;
         self.sides[side].pokemon[new_pos].position = new_pos;
         true
+    }
+
+    /// The DragOut event: Guard Dog and Suction Cups refuse.
+    pub(super) fn resists_drag(&self, r: MonRef) -> bool {
+        self.ability_is(r, "guarddog") || self.ability_is(r, "suctioncups")
     }
 
     /// The active move's contact flag (Shell Side Arm may add it).
@@ -1022,11 +1029,8 @@ impl Battle {
             return Ok(());
         }
         let i = bench[self.chance.sample(bench.len())];
-        // DragOut: Guard Dog stays.
-        if self
-            .occupant(side, pos)
-            .is_some_and(|o| self.ability_is(o, "guarddog"))
-        {
+        // DragOut: Guard Dog and Suction Cups stay.
+        if self.occupant(side, pos).is_some_and(|o| self.resists_drag(o)) {
             return Ok(());
         }
         let r = self.mon_ref(side, i);

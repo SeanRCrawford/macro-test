@@ -2154,7 +2154,7 @@ impl Battle {
                 if self.mon(*t).hp > 0
                     && self.mon(user).hp > 0
                     && !self.switchable(t.side).is_empty()
-                    && !self.ability_is(*t, "guarddog")
+                    && !self.resists_drag(*t)
                 {
                     self.mon_mut(*t).force_switch_flag = true;
                 }

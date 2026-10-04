@@ -388,6 +388,8 @@ pub struct Mon {
     pub times_attacked: u8,
     /// `attackedBy`: who attacked this Pokemon, and for how much.
     pub attacked_by: Vec<Attacker>,
+    /// `lastItem`: the item last used or eaten (Harvest).
+    pub last_item: Option<ItemId>,
     /// HP after this Pokemon was last damaged this turn (`hurtThisTurn`).
     pub hurt_this_turn: Option<u16>,
     /// Showdown's `pokemon.speed`: action speed as of the last `updateSpeed`.
@@ -469,6 +471,7 @@ impl Mon {
             move_last_turn_result: None,
             times_attacked: 0,
             attacked_by: Vec::new(),
+            last_item: None,
             hurt_this_turn: None,
             speed: stats[5] as i32,
         }

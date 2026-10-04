@@ -124,6 +124,8 @@ enum ResidualKind {
     Healer,
     Status(Status),
     Volatile(VolatileId),
+    /// Harvest, Moody (28) and Hunger Switch (29).
+    Ability,
 }
 
 /// Showdown's comparePriority for event handlers (priority is 0 for every
@@ -164,7 +166,7 @@ impl Battle {
             .is_some_and(|id| matches!(Dex::get().move_data(id).id.as_str(), "dig" | "dive"));
         if (key == "sandstorm"
             && (hidden || matches!(ab, "sandrush" | "sandveil" | "sandforce" | "overcoat")))
-            || (key == "powder" && ab == "overcoat")
+            || (key == "powder" && (ab == "overcoat" || self.item_of(t) == Some("safetygoggles")))
             || (key == "flinch" && ab == "innerfocus")
         {
             return false;
@@ -476,6 +478,59 @@ impl Battle {
             self.boost(t, &[(1, 1), (3, 1)], Some(t));
         }
         HitRes::Bool(true)
+    }
+
+    /// The residual abilities: Harvest, Moody and Hunger Switch.
+    fn ability_residual(&mut self, r: MonRef) {
+        match self.ability_id(r) {
+            // Harvest: in sun, or half the time, the last berry grows back.
+            "harvest" => {
+                if self.effective_weather() == crate::damage::Weather::Sun || self.chance.chance(1, 2) {
+                    let m = self.mon(r);
+                    if let Some(last) = m.last_item.filter(|&i| m.hp > 0 && m.item.is_none() && Dex::get().item(i).is_berry) {
+                        let m = self.mon_mut(r);
+                        m.item = Some(last);
+                        m.last_item = None;
+                    }
+                }
+            }
+            // Moody: +2 to a random stat not maxed, -1 to another not
+            // minimized.
+            "moody" => {
+                let boosts = self.mon(r).boosts;
+                let up: Vec<usize> = (0..5).filter(|&i| boosts[i] < 6).collect();
+                let plus = (!up.is_empty()).then(|| up[self.chance.sample(up.len())]);
+                let down: Vec<usize> = (0..5).filter(|&i| boosts[i] > -6 && Some(i) != plus).collect();
+                let minus = (!down.is_empty()).then(|| down[self.chance.sample(down.len())]);
+                let mut b: Vec<(usize, i8)> = Vec::new();
+                // The boost object lists stats in order.
+                for i in 0..5 {
+                    if Some(i) == plus {
+                        b.push((i, 2));
+                    } else if Some(i) == minus {
+                        b.push((i, -1));
+                    }
+                }
+                if !b.is_empty() {
+                    self.boost(r, &b, Some(r));
+                }
+            }
+            // Hunger Switch: Morpeko flips between its formes.
+            "hungerswitch" => {
+                let dex = Dex::get();
+                let name = dex.species(self.mon(r).species).name.as_str();
+                let to = match name {
+                    "Morpeko" => "Morpeko-Hangry",
+                    "Morpeko-Hangry" => "Morpeko",
+                    _ => return,
+                };
+                let id = dex.species_id(to).expect("Morpeko forme");
+                let m = self.mon_mut(r);
+                m.species = id;
+                m.set_types(dex.species(id).types);
+            }
+            _ => {}
+        }
     }
 
     /// A volatile's onEnd when its duration runs out in the residual phase.
@@ -1004,6 +1059,20 @@ impl Battle {
                         sub_order: 2,
                     });
                 }
+                let ability = match self.ability_id(r) {
+                    "harvest" | "moody" => Some((28, 2)),
+                    "hungerswitch" => Some((29, 7)),
+                    _ => None,
+                };
+                if let Some((order, sub_order)) = ability {
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::Ability,
+                        order,
+                        speed: m.speed,
+                        sub_order,
+                    });
+                }
                 if self.item_of(r) == Some("whiteherb") {
                     handlers.push(Residual {
                         mon: Some(r),
@@ -1210,8 +1279,15 @@ impl Battle {
                             (max / 16).max(1) * m.status_state.stage as u32
                         }
                     };
+                    // Poison Heal's onDamage (priority 1): poison heals instead.
+                    if matches!(status, Status::Poison | Status::Toxic) && self.ability_is(h.mon, "poisonheal") {
+                        let heal = (self.mon(h.mon).max_hp() / 8) as u32;
+                        self.heal(h.mon, heal);
+                        continue;
+                    }
                     self.effect_damage(h.mon, amount);
                 }
+                ResidualKind::Ability => self.ability_residual(h.mon),
             }
             self.faint_messages()?;
             if self.is_over() {

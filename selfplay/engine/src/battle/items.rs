@@ -21,7 +21,7 @@ impl Battle {
         if m.hp == 0 || !m.is_active || m.item.is_none() {
             return false;
         }
-        m.item = None;
+        m.last_item = m.item.take();
         true
     }
 
@@ -163,7 +163,7 @@ impl Battle {
                         continue;
                     }
                     // DragOut: Guard Dog stays.
-                    if self.use_item(t) && !self.ability_is(user, "guarddog") {
+                    if self.use_item(t) && !self.resists_drag(user) {
                         self.mon_mut(user).force_switch_flag = true;
                     }
                 }
@@ -579,6 +579,7 @@ impl Battle {
             InnardsOut,
             PoisonTouch,
             AirBalloon,
+            EffectSpore,
         }
         let dex = Dex::get();
         let contact = self.contact(data);
@@ -612,6 +613,7 @@ impl Battle {
                 "electromorphosis" => Some((H::Electromorphosis, 1)),
                 "wanderingspirit" => Some((H::WanderingSpirit, NONE)),
                 "innardsout" => Some((H::InnardsOut, 1)),
+                "effectspore" => Some((H::EffectSpore, NONE)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -734,6 +736,18 @@ impl Battle {
                 H::PoisonTouch if contact && self.chance.chance(3, 10) => {
                     self.try_set_status_from(t, crate::damage::Status::Poison, Some(user));
                 }
+                H::EffectSpore if contact && self.run_status_immunity(user, "powder") => {
+                    let r = self.chance.random(100);
+                    let status = match r {
+                        0..=10 => Some(crate::damage::Status::Sleep),
+                        11..=20 => Some(crate::damage::Status::Paralysis),
+                        21..=29 => Some(crate::damage::Status::Poison),
+                        _ => None,
+                    };
+                    if let Some(s) = status {
+                        self.try_set_status_from(user, s, Some(t));
+                    }
+                }
                 H::AirBalloon => {
                     // The balloon pops: the item is simply gone.
                     self.mon_mut(t).item = None;
@@ -754,11 +768,8 @@ impl Battle {
     /// `takeItem`: the TakeItem event lets Mega Stones stay with a Pokemon that
     /// can use them (`checker` is whose species counts) and Unburden notice.
     pub(super) fn take_item(&mut self, holder: MonRef, taker: MonRef) -> Option<ItemId> {
-        let m = self.mon(holder);
-        if !m.is_active {
-            return None;
-        }
-        let item = m.item?;
+        // No isActive check: a Pokemon the move just fainted still loses it.
+        let item = self.mon(holder).item?;
         // The TakeItem event: Unburden's handler (subOrder 7) runs before the
         // item's own refusal (8).
         if self.ability_is(holder, "unburden") {
