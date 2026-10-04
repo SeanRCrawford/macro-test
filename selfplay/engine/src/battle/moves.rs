@@ -91,6 +91,57 @@ impl Battle {
     /// Pokemon it would hit; damage to the user's ally counts against it.
     /// Average roll, no critical hit. For simple policies; changes nothing.
     pub fn estimate_damage(&self, user: MonRef, move_id: MoveId, target_loc: i8) -> f64 {
+        self.estimate_damage_in(&self.damage_view(), user, move_id, target_loc)
+    }
+
+    /// `estimate_damage` for each active slot (side * 2 + position), each of
+    /// its four moves and each target location 0, 1, 2, -1, -2, sharing one
+    /// damage view.
+    pub fn damage_table(&self) -> [[[f32; 5]; 4]; 4] {
+        let view = self.damage_view();
+        let mut out = [[[0.0; 5]; 4]; 4];
+        for side in 0..2 {
+            for pos in 0..ACTIVE_PER_SIDE {
+                let Some(r) = self.occupant(side, pos) else { continue };
+                if self.mon(r).hp == 0 {
+                    continue;
+                }
+                let moves: Vec<MoveId> = self.mon(r).moves.iter().take(4).map(|m| m.id).collect();
+                let ally_loc = -(((1 - pos) + 1) as i8);
+                for (k, &id) in moves.iter().enumerate() {
+                    let data = Dex::get().move_data(id);
+                    let row = &mut out[side * 2 + pos][k];
+                    if data.category == Category::Status {
+                        continue;
+                    }
+                    if matches!(data.target, MoveTarget::AllAdjacentFoes | MoveTarget::AllAdjacent) {
+                        // The location doesn't change who a spread move hits.
+                        let v = self.estimate_damage_in(&view, r, id, 0) as f32;
+                        row.fill(v);
+                        continue;
+                    }
+                    let foe1 = self.estimate_damage_in(&view, r, id, 1) as f32;
+                    let foe2 = self.estimate_damage_in(&view, r, id, 2) as f32;
+                    let ally = self.estimate_damage_in(&view, r, id, ally_loc) as f32;
+                    let first_foe_up = self.occupant(1 - side, 0).is_some_and(|f| self.mon(f).hp > 0);
+                    row[0] = if first_foe_up { foe1 } else { foe2 };
+                    row[1] = foe1;
+                    row[2] = foe2;
+                    // Its own slot stays 0.
+                    row[3 + (1 - pos)] = ally;
+                }
+            }
+        }
+        out
+    }
+
+    fn estimate_damage_in(
+        &self,
+        view: &[Option<Combatant>; 4],
+        user: MonRef,
+        move_id: MoveId,
+        target_loc: i8,
+    ) -> f64 {
         let data = Dex::get().move_data(move_id);
         if data.category == Category::Status || self.mon(user).hp == 0 {
             return 0.0;
@@ -119,10 +170,9 @@ impl Battle {
             }
         };
         let spread = targets.len() > 1;
-        let view = self.damage_view();
         let mut total = 0.0;
         for t in targets {
-            let ctx = self.damage_ctx(&view, user, t, false, spread);
+            let ctx = self.damage_ctx(view, user, t, false, spread);
             let Ok(am) = damage::prepare_move(&ctx, move_id) else { continue };
             let Ok(Outcome::Damage(rolls)) = damage::damage_for(&ctx, &am) else { continue };
             let mean = rolls.iter().map(|&r| r as f64).sum::<f64>() / 16.0;

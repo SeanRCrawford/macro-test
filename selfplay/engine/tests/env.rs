@@ -95,7 +95,7 @@ fn hidden_information_stays_hidden() {
     let mut mons = vec![0f32; TOKENS * MON_FLOATS];
     let mut field = vec![0f32; FIELD_FLOATS];
     for g in 0..env.len() {
-        engine::env::obs::observe(env.battle(g), 0, false, &mut ints, &mut mons, &mut field);
+        engine::env::obs::observe(env.battle(g), 0, false, None, &mut ints, &mut mons, &mut field);
         for tok in 6..12 {
             let f = &mons[tok * MON_FLOATS..(tok + 1) * MON_FLOATS];
             assert_eq!(f[8], 0.0, "opponent stats shown");

@@ -20,7 +20,12 @@ use crate::stats::compute_stats;
 pub const TOKENS: usize = 12;
 /// species, ability, item, 4 moves, 2 types.
 pub const INT_FIELDS: usize = 9;
-pub const MON_FLOATS: usize = 40 + VOLATILE_FLAGS;
+pub const MON_FLOATS: usize = 40 + VOLATILE_FLAGS + DAMAGE_FLOATS;
+/// For an active Pokemon: the expected damage of each of its 4 moves aimed at
+/// each target location (0, 1, 2, -1, -2), as `Battle::estimate_damage`
+/// gives it. Only with `perfect_info`, since it uses the targets' stats.
+const DAMAGE_FLOATS: usize = 20;
+const DAMAGE_AT: usize = 40 + VOLATILE_FLAGS;
 pub const FIELD_FLOATS: usize = 19 + 2 * SIDE_FLOATS;
 const SIDE_FLOATS: usize = SideCondition::COUNT + 8;
 const VOLATILE_FLAGS: usize = 50;
@@ -102,6 +107,7 @@ pub fn observe(
     battle: &Battle,
     side: usize,
     perfect_info: bool,
+    damage: Option<&[[[f32; 5]; 4]; 4]>,
     ints: &mut [i32],
     mons: &mut [f32],
     field: &mut [f32],
@@ -109,6 +115,16 @@ pub fn observe(
     ints.fill(0);
     mons.fill(0.0);
     field.fill(0.0);
+    // The damage features (perfect_info only), computed here unless given.
+    let own_table;
+    let table = match (perfect_info, damage) {
+        (false, _) => None,
+        (true, Some(t)) => Some(t),
+        (true, None) => {
+            own_table = battle.damage_table();
+            Some(&own_table)
+        }
+    };
     for (t, s) in [side, 1 - side].into_iter().enumerate() {
         let own = s == side;
         for uid in 0..6 {
@@ -122,7 +138,19 @@ pub fn observe(
             // A Pokemon the observer hasn't seen: only the team sheet.
             let hidden = !own && !perfect_info && !mon.is_some_and(|m| m.revealed);
             match mon.filter(|_| !hidden) {
-                Some(m) => mon_features(battle, m, own || perfect_info, int, f),
+                Some(m) => {
+                    mon_features(battle, m, own || perfect_info, int, f);
+                    if let Some(table) = table {
+                        if m.is_active && !m.fainted && m.position < ACTIVE_PER_SIDE {
+                            let d = &table[s * 2 + m.position];
+                            for k in 0..4 {
+                                for t in 0..5 {
+                                    f[DAMAGE_AT + k * 5 + t] = d[k][t];
+                                }
+                            }
+                        }
+                    }
+                }
                 None => sheet_features(
                     set,
                     own || perfect_info,

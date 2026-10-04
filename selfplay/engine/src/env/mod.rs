@@ -187,12 +187,15 @@ impl VecEnv {
             self.threads(),
             |(((((games, ints), mons), field), masks), decisions)| {
                 for (g, game) in games.iter().enumerate() {
+                    // Shared by both sides' views.
+                    let table = perfect.then(|| game.battle.damage_table());
                     for side in 0..2 {
                         let k = g * 2 + side;
                         obs::observe(
                             &game.battle,
                             side,
                             perfect,
+                            table.as_ref(),
                             &mut ints[k * TOKENS * INT_FIELDS..(k + 1) * TOKENS * INT_FIELDS],
                             &mut mons[k * TOKENS * MON_FLOATS..(k + 1) * TOKENS * MON_FLOATS],
                             &mut field[k * FIELD_FLOATS..(k + 1) * FIELD_FLOATS],
