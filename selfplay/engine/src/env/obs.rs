@@ -20,12 +20,16 @@ use crate::stats::compute_stats;
 pub const TOKENS: usize = 12;
 /// species, ability, item, 4 moves, 2 types.
 pub const INT_FIELDS: usize = 9;
-pub const MON_FLOATS: usize = 40 + VOLATILE_FLAGS + DAMAGE_FLOATS;
+pub const MON_FLOATS: usize = 40 + VOLATILE_FLAGS + DAMAGE_FLOATS + PARTY_FLOATS;
 /// For an active Pokemon: the expected damage of each of its 4 moves aimed at
 /// each target location (0, 1, 2, -1, -2), as `Battle::estimate_damage`
 /// gives it. Only with `perfect_info`, since it uses the targets' stats.
 const DAMAGE_FLOATS: usize = 20;
-const DAMAGE_AT: usize = 40 + VOLATILE_FLAGS;
+pub const DAMAGE_AT: usize = 40 + VOLATILE_FLAGS;
+/// One-hot party position (the index a switch choice names), for a brought
+/// Pokemon the observer can see.
+const PARTY_FLOATS: usize = 6;
+pub const PARTY_AT: usize = DAMAGE_AT + DAMAGE_FLOATS;
 pub const FIELD_FLOATS: usize = 19 + 2 * SIDE_FLOATS;
 const SIDE_FLOATS: usize = SideCondition::COUNT + 8;
 const VOLATILE_FLAGS: usize = 50;
@@ -247,6 +251,9 @@ fn mon_features(battle: &Battle, m: &Mon, own: bool, int: &mut [i32], f: &mut [f
     f[29] = (m.species != m.set.species && !m.transformed) as u8 as f32;
     f[30] = (own && m.can_mega_evo.is_some()) as u8 as f32;
     f[31] = m.transformed as u8 as f32;
+    if m.position < PARTY_FLOATS {
+        f[PARTY_AT + m.position] = 1.0;
+    }
     for (k, s) in m.moves.iter().take(4).enumerate() {
         f[32 + k] = s.pp as f32 / s.max_pp.max(1) as f32;
         f[36 + k] = (own && (s.disabled || s.imprisoned)) as u8 as f32;

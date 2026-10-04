@@ -161,6 +161,8 @@ impl VecEnv {
         d.set_item("tokens", TOKENS)?;
         d.set_item("int_fields", INT_FIELDS)?;
         d.set_item("mon_floats", MON_FLOATS)?;
+        d.set_item("damage_at", obs::DAMAGE_AT)?;
+        d.set_item("party_at", obs::PARTY_AT)?;
         d.set_item("field_floats", FIELD_FLOATS)?;
         d.set_item("mask_len", MASK_LEN)?;
         d.set_item("slot_actions", SLOT_ACTIONS)?;

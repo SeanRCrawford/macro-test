@@ -456,12 +456,11 @@ Disguise and OHKO moves. The turn engine (1d) supplies that context.
   Mega Evolves when it can, and switches only when forced. Greedy beats
   random 97% of the time.
 - **Model.** About 0.2M parameters: a 2-layer, d=64 transformer over the
-  field and 12 Pokemon tokens. Each slot's 47 logits come from its active
-  Pokemon's token, and the joint logit is their sum, masked to legal joint
-  actions. Team preview scores each Pokemon as a lead or a bring, so it
-  carries across teams. With `perfect_info`, each active Pokemon's token
-  also gets the expected damage of each move at each target (the damage
-  calcs of 5).
+  field and 12 Pokemon tokens. Team preview scores each Pokemon as a lead or a
+  bring, so it carries across teams. With `perfect_info`, each active
+  Pokemon's token also gets the expected damage of each move at each target
+  (the damage calcs of 5). Runs 1-5 below scored a joint action as the sum
+  of its two slot logits; that was replaced by the joint head (4.14).
 - **PPO.** GAE (gamma 1, lambda 0.95) along each side's own decisions. Half
   the games are self-play. In the other half, side 1 is a league member:
   past snapshots (one every 10 updates, the last 8 kept) and the greedy
@@ -482,6 +481,74 @@ significantly (about 58%). The margin over greedy stops growing at this
 scale; runs 4 and 5 sit at about 56-62% in the evaluations along the way.
 Next: scale up on the GPU (`--device cuda`, larger `--d`/`--layers`, more
 environments), then the one-turn search (phase 4).
+
+### 4.14 Joint actions, and the plan for search
+
+**Why joint actions.** Doubles is a simultaneous-move game: the value of a
+position is the value of the matrix game between both sides' joint actions
+(with chance inside each cell), and good play is that game's equilibrium
+mix, not a best reply to one guess at the opponent. A summed per-slot logit
+is a product distribution: it can't put half on "Protect + Tailwind" and half
+on "attack + Moonblast" without a quarter on each crossed pair, so the
+network could neither represent the mixes search finds nor learn from them.
+Jaxcalibur gives every action its own logit; in doubles that means every
+joint action.
+
+**The joint head** (`model.py`). Each slot's 47 actions are embedded: a
+move from its move embedding, PP, disabled flag, the expected damage at that
+target, the target's token (none, a foe's active, an ally) and the Mega
+flag; a switch from the token of the Pokemon it brings in (a party-position
+one-hot was added to the observation for this); pass as a learned vector.
+Each is added to the slot's own token and the field token. A pair scores
+u0(a) + u1(b) + <P e0(a), Q e1(b)> / sqrt(d), masked to the legal pairs
+and normalised as one softmax over 2,209. A test checks that it learns a
+50/50 mix of two pairs with under 5% on the crossed pairs.
+
+**Opponent prediction.** The same scoring over the opponent's actives
+(shared action embeddings, its own u, P, Q) predicts the opponent's actual
+joint action, as an auxiliary cross-entropy (`--opponent-coef`, 0.5).
+Jaxcalibur credits this head with a large gain. The search uses the policy
+run on the opponent's own view; this head is what is left to use under
+hidden information. PPO also has the zero-avoiding KL(uniform || policy)
+term (`--uniform-kl`).
+
+**What to measure.** Beating the greedy baseline rewards exploiting a fixed,
+weak opponent. The measures that matter for equilibrium play: head-to-head
+against past versions, how well an exploiter trained against a frozen
+version does (exploitability), the solver gap of the one-turn matrix, and
+in the end the ladder.
+
+**Hardware and route.** Target machine: RTX 4070 Laptop GPU (8 GB) and
+16 CPU cores. Estimates, from measurements on this engine (a state copy
+2.6 us; copy plus one turn 33 us, about 30,000 per core per second;
+86 legal joint actions per side on average mid-game, 1 in 10 positions
+over 166):
+
+| | Nessie-size | mikumiku37-size |
+|---|---|---|
+| Network | ~1.5M | ~8.7M |
+| Games | ~375k, every turn searched | ~330M, no search in training |
+| Engine | ~3M searched turns x ~2,000 leaves (a guess: Nessie's budget isn't published) = ~6e9 one-turn simulations = ~55 core-hours, ~4-6 h on 16 cores | ~20k turns/s, within the engine's speed |
+| Network | ~5e17 FLOP: ~10 h on the 4070 Laptop | ~2e19 FLOP: ~2 days on an RTX 5090, about 2 weeks on the 4070 Laptop |
+
+So the Nessie route fits this machine (about a day per run, if leaf
+evaluations are batched across many games onto the GPU), and it produces
+what the analysis-board goal needs: equilibrium supports, payoff matrices
+and chance outcomes. PPO stays as a cheap warm start for the policy prior.
+
+Order of work:
+
+1. Joint head and opponent head (done).
+2. Chance enumeration in the engine (4.4 designs it; the engine only samples
+   so far).
+3. One-turn matrix search in Rust: both sides' top-k joint actions from the
+   policy (each on its own view), each cell scored by the value network over
+   the cell's chance outcomes, solved for the equilibrium mix. Leaf
+   evaluations from many games are batched into one GPU call.
+4. Search-labelled self-play (value target: search value or result; policy
+   target: the equilibrium mix), at Nessie's size.
+5. Double oracle at the root and selective deepening, then the analysis
+   board.
 
 ## 5. Model and training (provisional; settled in phases 2–3)
 

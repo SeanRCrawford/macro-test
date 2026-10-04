@@ -46,3 +46,46 @@ def test_gae_credits_the_result_to_each_sides_last_decision(tmp_path):
     assert (data["reward"][~done] == 0).all()
     # With gamma 1, a terminal decision's return is its reward.
     assert torch.allclose(data["ret"][done], data["reward"][done], atol=1e-5)
+
+
+def test_joint_head_learns_a_correlated_mix():
+    """Half "a0 + b0", half "a1 + b1", never the crossed pairs: a product of
+    per-slot distributions can put at most 1/4 on each wanted pair."""
+    torch.manual_seed(0)
+    env = SelfPlayEnv(16, seed=3)
+    for _ in range(40):
+        obs = env.observe()
+        rows = np.flatnonzero(obs.decisions.reshape(-1) == 2)
+        masks = obs.masks.reshape(-1, 47, 47)
+        found = None
+        for r in rows:
+            m = masks[r]
+            a = np.flatnonzero(m.any(1))
+            b = np.flatnonzero(m.any(0))
+            for a0, a1 in zip(a, a[1:]):
+                for b0, b1 in zip(b, b[1:]):
+                    if m[a0, b0] and m[a1, b1] and m[a0, b1] and m[a1, b0]:
+                        found = (r, a0, a1, b0, b1)
+                        break
+                if found:
+                    break
+            if found:
+                break
+        if found:
+            break
+        env.step(env.random_actions(0))
+    assert found, "no position with two free choices per slot"
+    r, a0, a1, b0, b1 = found
+    model = PolicyNet(d=32, layers=1)
+    batch = to_tensors(obs, np.array([r]))
+    opt = torch.optim.Adam(model.parameters(), lr=3e-3)
+    want = [a0 * 47 + b0, a1 * 47 + b1]
+    for _ in range(300):
+        logp, _ = model(*batch)
+        loss = -logp[0, want].mean()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    p = logp[0].exp().detach()
+    assert p[want].min() > 0.4, p[want]
+    assert p[a0 * 47 + b1] + p[a1 * 47 + b0] < 0.05

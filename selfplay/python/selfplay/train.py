@@ -36,6 +36,8 @@ class Config:
     clip: float = 0.2
     entropy: float = 0.01
     value_coef: float = 0.5
+    opponent_coef: float = 0.5      # auxiliary: predict the opponent's joint action
+    uniform_kl: float = 0.003       # zero-avoiding KL(uniform || policy) over legal actions
     max_grad_norm: float = 1.0
     league_every: int = 10          # updates between snapshots
     league_size: int = 8
@@ -124,7 +126,7 @@ class Trainer:
     def rollout(self):
         c, env, n = self.cfg, self.env, self.cfg.envs
         buf = {k: [] for k in ("ints", "mons", "field", "masks", "dec", "act", "logp", "value",
-                               "stream")}
+                               "stream", "opp_masks", "opp_act")}
         rewards: list[float] = []
         dones: list[bool] = []
         last = {}                                   # stream -> index of its last transition
@@ -169,6 +171,13 @@ class Trainer:
                 for idx, rs in by.items():
                     a, _, _ = act(self.league[idx], to_tensors(obs, np.array(rs)))
                     actions.reshape(-1)[rs] = a.numpy()
+            if len(rows):
+                # The opponent's actual joint action, where it chose moves.
+                opp = rows ^ 1
+                opp_act = actions.reshape(-1)[opp].copy()
+                opp_act[dec.reshape(-1)[opp] != 2] = -1
+                buf["opp_act"].append(torch.from_numpy(opp_act))
+                buf["opp_masks"].append(torch.from_numpy(obs.masks.reshape(-1, obs.masks.shape[-1])[opp]))
             r = env.step(actions)
             for g in np.flatnonzero(r.done):
                 results.append((self.opponent[g], float(r.reward[g, 0]), int(r.turns[g])))
@@ -218,8 +227,9 @@ class Trainer:
                 idx = perm[i:i + c.minibatch]
                 dev = c.device
                 mb = {k: d[k][idx].to(dev) for k in ("ints", "mons", "field", "masks", "dec", "act",
-                                                    "logp", "ret")}
-                logp_all, value = self.model(mb["ints"], mb["mons"], mb["field"], mb["masks"], mb["dec"])
+                                                    "logp", "ret", "opp_masks", "opp_act")}
+                logp_all, value, opp_logp = self.model(mb["ints"], mb["mons"], mb["field"], mb["masks"],
+                                                       mb["dec"], mb["opp_masks"])
                 logp = logp_all.gather(1, mb["act"][:, None]).squeeze(1)
                 ratio = torch.exp(logp - mb["logp"])
                 a = adv[idx].to(dev)
@@ -228,12 +238,19 @@ class Trainer:
                 p = logp_all.exp()
                 legal = mb["masks"].bool()
                 ent = -(p * logp_all).masked_fill(~legal, 0).sum(-1).mean()
-                loss = pg + c.value_coef * vloss - c.entropy * ent
+                # KL(uniform || policy): keeps rare, situational actions alive.
+                n_legal = legal.sum(-1).clamp(min=1)
+                kl_u = (-logp_all.masked_fill(~legal, 0).sum(-1) / n_legal - n_legal.log()).mean()
+                seen = mb["opp_act"] >= 0
+                opp_ce = (-opp_logp.gather(1, mb["opp_act"].clamp(min=0)[:, None]).squeeze(1)
+                          [seen].mean()) if seen.any() else torch.zeros((), device=dev)
+                loss = (pg + c.value_coef * vloss - c.entropy * ent + c.uniform_kl * kl_u
+                        + c.opponent_coef * opp_ce)
                 self.opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm)
                 self.opt.step()
-                stats.append((pg.item(), vloss.item(), ent.item()))
+                stats.append((pg.item(), vloss.item(), ent.item(), opp_ce.item()))
         return np.mean(stats, axis=0)
 
     def imitate(self, minutes: float):
@@ -286,12 +303,13 @@ class Trainer:
             t0 = time.time()
             data, results = self.rollout()
             t1 = time.time()
-            pg, vl, ent = self.update(data)
+            pg, vl, ent, opp_ce = self.update(data)
             self.updates += 1
             vs_self = [r for o, r, _ in results if o is None]
             entry = {"update": self.updates, "minutes": (time.time() - start) / 60,
                      "games": self.games, "decisions": self.decisions,
                      "samples": len(data["act"]), "pg": pg, "value_loss": vl, "entropy": ent,
+                     "opponent_ce": opp_ce,
                      "rollout_s": t1 - t0, "update_s": time.time() - t1,
                      "mean_turns": float(np.mean([t for *_, t in results])) if results else 0.0,
                      "self_draws": float(np.mean([r == 0 for r in vs_self])) if vs_self else 0.0}
