@@ -25,7 +25,7 @@ import torch
 
 from selfplay.env import DECISION_SLOTS, SIZES, SelfPlayEnv
 from selfplay.model import PolicyNet
-from selfplay.search import OneTurnSearch, SearchConfig, play_vs_policy
+from selfplay.search import Search, SearchConfig, play_vs_policy
 from selfplay.train import act, to_tensors
 
 MASK = SIZES["mask_len"]
@@ -45,6 +45,8 @@ class Config:
     k: int = 8
     max_outcomes: int = 16
     roll_bands: int = 1
+    double_oracle: bool = False
+    deepen: int = 0                 # leaves deepened per searched turn
     eval_every: int = 10            # rounds
     eval_games: int = 200
     d: int = 64
@@ -110,8 +112,9 @@ class SearchTrainer:
         self.env = SelfPlayEnv(cfg.envs, seed=cfg.seed, threads=cfg.threads,
                                perfect_info=cfg.perfect_info)
         self.search_cfg = SearchConfig(k=cfg.k, max_outcomes=cfg.max_outcomes,
-                                       roll_bands=cfg.roll_bands)
-        self.search = OneTurnSearch(self.model, self.search_cfg, cfg.seed)
+                                       roll_bands=cfg.roll_bands, double_oracle=cfg.double_oracle,
+                                       deepen=cfg.deepen)
+        self.search = Search(self.model, self.search_cfg, cfg.seed)
         self.buffer = Buffer(cfg.buffer, cfg.k)
         # Per game: buffer indices of its examples so far, and their sides.
         self.pending: list[list[tuple[int, int]]] = [[] for _ in range(cfg.envs)]
@@ -134,7 +137,7 @@ class SearchTrainer:
                 actions.reshape(-1)[rows] = a.numpy()
             games = np.flatnonzero((dec == DECISION_SLOTS).any(1))
             if len(games):
-                results = self.search.run(env, obs, games)
+                results = self.search.run(env, games)
                 n, k = len(games), c.k
                 cands = np.full((n, 2, k), -1, np.int16)
                 mixes = np.zeros((n, 2, k), np.float32)
@@ -237,6 +240,8 @@ def main():
     for k, v in asdict(Config()).items():
         if k == "perfect_info":
             p.add_argument("--hidden", action="store_true", help="Open Team Sheets observations")
+        elif isinstance(v, bool):
+            p.add_argument(f"--{k.replace('_', '-')}", action="store_true")
         else:
             p.add_argument(f"--{k.replace('_', '-')}", type=type(v), default=v)
     a = p.parse_args()

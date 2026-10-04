@@ -126,12 +126,7 @@ pub fn expand_root(
             for o in e.outcomes {
                 let b = &o.battle;
                 out.probs.push(o.prob as f32);
-                out.terminal.push(match b.outcome {
-                    None => f32::NAN,
-                    Some(Outcome::Win(0)) => 1.0,
-                    Some(Outcome::Win(_)) => -1.0,
-                    Some(Outcome::Tie) => 0.0,
-                });
+                out.terminal.push(result_for_side0(b));
                 let table = perfect_info.then(|| b.damage_table());
                 for side in 0..2 {
                     obs::observe(b, side, perfect_info, table.as_ref(), &mut ints, &mut mons, &mut field);
@@ -283,4 +278,185 @@ pub fn solve_all(e: &Expansion, leaf_values: &[f32], iters: usize) -> Vec<(Vec<f
             (m, s)
         })
         .collect()
+}
+
+/// One cell to expand: a node of the tree and an action index per side (-1
+/// for a side with nothing to decide).
+#[derive(Debug, Clone, Copy)]
+pub struct CellRequest {
+    pub node: usize,
+    pub actions: [i64; 2],
+}
+
+/// The leaves of a list of cells (in request order). `nodes` holds each
+/// leaf's node id in the tree when the leaves were kept, else is empty.
+#[derive(Debug, Clone, Default)]
+pub struct CellLeaves {
+    pub cells: Vec<Cell>,
+    pub probs: Vec<f32>,
+    pub terminal: Vec<f32>,
+    pub nodes: Vec<usize>,
+    pub ints: Vec<i32>,
+    pub mons: Vec<f32>,
+    pub field: Vec<f32>,
+}
+
+/// Positions a search has reached: roots copied from games, then the leaves
+/// it chose to keep (for deepening). Search from any node, at any depth.
+#[derive(Debug, Clone, Default)]
+pub struct Tree {
+    pub nodes: Vec<Battle>,
+    pub perfect_info: bool,
+}
+
+impl Tree {
+    pub fn new(perfect_info: bool) -> Self {
+        Tree {
+            nodes: Vec::new(),
+            perfect_info,
+        }
+    }
+
+    pub fn add(&mut self, b: Battle) -> usize {
+        self.nodes.push(b);
+        self.nodes.len() - 1
+    }
+
+    /// Both views of each node, as `VecEnv::observe` writes a game's.
+    pub fn observe(
+        &self,
+        ids: &[usize],
+        ints: &mut [i32],
+        mons: &mut [f32],
+        field: &mut [f32],
+        masks: &mut [u8],
+        decisions: &mut [u8],
+    ) {
+        let n = ids.len();
+        assert_eq!(ints.len(), n * LEAF_INTS);
+        assert_eq!(mons.len(), n * LEAF_MONS);
+        assert_eq!(field.len(), n * LEAF_FIELD);
+        assert_eq!(masks.len(), n * 2 * action::MASK_LEN);
+        assert_eq!(decisions.len(), n * 2);
+        for (k, &id) in ids.iter().enumerate() {
+            let b = &self.nodes[id];
+            let table = self.perfect_info.then(|| b.damage_table());
+            for side in 0..2 {
+                let j = k * 2 + side;
+                let r = |w: usize| j * w..(j + 1) * w;
+                obs::observe(
+                    b,
+                    side,
+                    self.perfect_info,
+                    table.as_ref(),
+                    &mut ints[r(TOKENS * INT_FIELDS)],
+                    &mut mons[r(TOKENS * MON_FLOATS)],
+                    &mut field[r(FIELD_FLOATS)],
+                );
+                decisions[j] = action::legal_mask(b, side, &mut masks[r(action::MASK_LEN)]) as u8;
+            }
+        }
+    }
+
+    /// Play each requested cell through its chance outcomes, in parallel.
+    /// With `keep`, every leaf becomes a node of the tree.
+    pub fn expand(
+        &mut self,
+        cells: &[CellRequest],
+        cfg: &EnumConfig,
+        keep: bool,
+        threads: usize,
+    ) -> Result<CellLeaves, String> {
+        type One = (CellLeaves, Vec<Battle>);
+        let results: Vec<Mutex<Option<Result<One, String>>>> =
+            cells.iter().map(|_| Mutex::new(None)).collect();
+        let tree = &*self;
+        run_parallel((0..cells.len()).collect(), threads.max(1), |i| {
+            let r = tree.expand_cell(cells[i], cfg, keep);
+            *results[i].lock().expect("result") = Some(r);
+        });
+        let mut out = CellLeaves::default();
+        for r in results {
+            let (mut one, battles) = r.into_inner().expect("result").expect("expanded")?;
+            let l0 = out.probs.len();
+            for c in &mut one.cells {
+                c.first_leaf += l0;
+            }
+            out.cells.append(&mut one.cells);
+            out.probs.append(&mut one.probs);
+            out.terminal.append(&mut one.terminal);
+            out.ints.append(&mut one.ints);
+            out.mons.append(&mut one.mons);
+            out.field.append(&mut one.field);
+            for b in battles {
+                out.nodes.push(self.add(b));
+            }
+        }
+        Ok(out)
+    }
+
+    fn expand_cell(
+        &self,
+        req: CellRequest,
+        cfg: &EnumConfig,
+        keep: bool,
+    ) -> Result<(CellLeaves, Vec<Battle>), String> {
+        let battle = self
+            .nodes
+            .get(req.node)
+            .ok_or_else(|| format!("no node {}", req.node))?;
+        let mut choices = [None, None];
+        for side in 0..2 {
+            let d = action::decision(battle, side);
+            if d == Decision::None {
+                continue;
+            }
+            let a = req.actions[side];
+            choices[side] = Some(
+                usize::try_from(a)
+                    .ok()
+                    .and_then(|a| action::choice(d, a))
+                    .ok_or_else(|| format!("side {side}: action {a} isn't one for {d:?}"))?,
+            );
+        }
+        let e = enumerate(battle, &choices, cfg).map_err(|e| format!("{e:?}"))?;
+        let mut out = CellLeaves {
+            cells: vec![Cell {
+                first_leaf: 0,
+                leaves: e.outcomes.len(),
+                unexplored: e.unexplored,
+            }],
+            ..CellLeaves::default()
+        };
+        let mut ints = vec![0i32; TOKENS * INT_FIELDS];
+        let mut mons = vec![0f32; TOKENS * MON_FLOATS];
+        let mut field = vec![0f32; FIELD_FLOATS];
+        let mut kept = Vec::new();
+        for o in e.outcomes {
+            let b = &o.battle;
+            out.probs.push(o.prob as f32);
+            out.terminal.push(result_for_side0(b));
+            let table = self.perfect_info.then(|| b.damage_table());
+            for side in 0..2 {
+                obs::observe(b, side, self.perfect_info, table.as_ref(), &mut ints, &mut mons, &mut field);
+                out.ints.extend_from_slice(&ints);
+                out.mons.extend_from_slice(&mons);
+                out.field.extend_from_slice(&field);
+            }
+            if keep {
+                kept.push(o.battle);
+            }
+        }
+        Ok((out, kept))
+    }
+}
+
+/// Side 0's result if the battle is over (1, -1, 0), else NaN.
+pub fn result_for_side0(b: &Battle) -> f32 {
+    match b.outcome {
+        None => f32::NAN,
+        Some(Outcome::Win(0)) => 1.0,
+        Some(Outcome::Win(_)) => -1.0,
+        Some(Outcome::Tie) => 0.0,
+    }
 }

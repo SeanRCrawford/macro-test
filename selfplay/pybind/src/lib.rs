@@ -121,8 +121,6 @@ struct VecEnv {
     env: engine::env::VecEnv,
     actions: Vec<i64>,
     finished: Vec<Option<Finished>>,
-    /// The last `search_expand`.
-    search: search::Expansion,
 }
 
 #[pymethods]
@@ -149,7 +147,6 @@ impl VecEnv {
             env,
             actions: vec![-1; num_envs * 2],
             finished: vec![None; num_envs],
-            search: search::Expansion::default(),
         })
     }
 
@@ -299,101 +296,16 @@ impl VecEnv {
         fill(py, out, &actions, "out")
     }
 
-    /// One-turn search, step 1 (engine::search): for each of `games`, play
-    /// every pair of candidate actions (`candidates` [len(games), 2, k]
-    /// int64, -1 padding; a side with nothing to decide is ignored) through
-    /// every chance outcome, up to `max_outcomes` per pair. Returns the
-    /// number of leaves; fetch them with `search_leaves`.
-    #[pyo3(signature = (games, candidates, max_outcomes=16, roll_bands=1, seed=0))]
-    fn search_expand(
-        &mut self,
-        py: Python<'_>,
-        games: Vec<usize>,
-        candidates: &Bound<'_, PyAny>,
-        max_outcomes: usize,
-        roll_bands: u32,
-        seed: u64,
-    ) -> PyResult<usize> {
-        let buf = PyBuffer::<i64>::get(candidates)?;
-        let n = buf.item_count();
-        if games.is_empty() || n % (games.len() * 2) != 0 {
-            return Err(PyValueError::new_err("candidates: expected shape [len(games), 2, k]"));
+    /// A search tree whose roots are copies of `games` (node i is games[i]).
+    fn search_tree(&self, games: Vec<usize>) -> PyResult<SearchTree> {
+        let mut tree = search::Tree::new(self.env.config().perfect_info);
+        for g in games {
+            if g >= self.env.len() {
+                return Err(PyValueError::new_err(format!("no game {g}")));
+            }
+            tree.add(self.env.battle(g).clone());
         }
-        let k = n / (games.len() * 2);
-        let mut c = vec![0i64; n];
-        buf.copy_to_slice(py, &mut c)?;
-        if let Some(&g) = games.iter().find(|&&g| g >= self.env.len()) {
-            return Err(PyValueError::new_err(format!("no game {g}")));
-        }
-        let roots: Vec<_> = games
-            .iter()
-            .enumerate()
-            .map(|(i, &g)| {
-                let side = |s: usize| -> Vec<i64> {
-                    c[(i * 2 + s) * k..(i * 2 + s + 1) * k].iter().copied().filter(|&a| a >= 0).collect()
-                };
-                (self.env.battle(g), [side(0), side(1)])
-            })
-            .collect();
-        let cfg = engine::enumerate::EnumConfig { max_outcomes, roll_bands, seed };
-        let perfect = self.env.config().perfect_info;
-        let threads = self.env.worker_threads();
-        let e = py
-            .detach(|| search::expand(&roots, &cfg, perfect, threads))
-            .map_err(PyValueError::new_err)?;
-        self.search = e;
-        Ok(self.search.len())
-    }
-
-    /// One-turn search, step 2: the leaves' observations, both views (ints
-    /// [n,2,tokens,int_fields], mons [n,2,tokens,mon_floats], field
-    /// [n,2,field_floats]), probabilities [n] and, where the leaf ended the
-    /// game, side 0's result [n] (NaN elsewhere).
-    fn search_leaves(
-        &self,
-        py: Python<'_>,
-        ints: &Bound<'_, PyAny>,
-        mons: &Bound<'_, PyAny>,
-        field: &Bound<'_, PyAny>,
-        probs: &Bound<'_, PyAny>,
-        terminal: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
-        let e = &self.search;
-        fill(py, ints, &e.ints, "ints")?;
-        fill(py, mons, &e.mons, "mons")?;
-        fill(py, field, &e.field, "field")?;
-        fill(py, probs, &e.probs, "probs")?;
-        fill(py, terminal, &e.terminal, "terminal")
-    }
-
-    /// One-turn search, step 3: from each leaf's value for side 0
-    /// (`values` [n] float32), each root's payoff matrix and equilibrium.
-    /// Returns per root a dict: candidates (per side), matrix (rows: side
-    /// 0's candidates), row and col mixes, value, gap (exploitability).
-    #[pyo3(signature = (values, iters=1000))]
-    fn search_solve(&self, py: Python<'_>, values: &Bound<'_, PyAny>, iters: usize) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
-        let buf = PyBuffer::<f32>::get(values)?;
-        if buf.item_count() != self.search.len() {
-            return Err(PyValueError::new_err("values: one per leaf"));
-        }
-        let mut v = vec![0f32; buf.item_count()];
-        buf.copy_to_slice(py, &mut v)?;
-        let e = &self.search;
-        let solved = py.detach(|| search::solve_all(e, &v, iters));
-        solved
-            .into_iter()
-            .zip(&e.roots)
-            .map(|((m, s), r)| {
-                let d = pyo3::types::PyDict::new(py);
-                d.set_item("candidates", (r.candidates[0].clone(), r.candidates[1].clone()))?;
-                d.set_item("matrix", m)?;
-                d.set_item("row", s.row)?;
-                d.set_item("col", s.col)?;
-                d.set_item("value", s.value)?;
-                d.set_item("gap", s.gap)?;
-                Ok(d.unbind())
-            })
-            .collect()
+        Ok(SearchTree { tree, threads: self.env.worker_threads(), last: search::CellLeaves::default() })
     }
 
     /// Game `i` as a Showdown-style JSON snapshot (for debugging).
@@ -418,6 +330,153 @@ impl VecEnv {
     }
 }
 
+/// Positions for search (engine::search::Tree): roots from a VecEnv, plus
+/// the leaves an expansion keeps. Observe nodes, expand cells (node, side 0
+/// action, side 1 action) through their chance outcomes, read the leaves.
+#[pyclass(module = "selfplay._engine")]
+struct SearchTree {
+    tree: search::Tree,
+    threads: usize,
+    last: search::CellLeaves,
+}
+
+#[pymethods]
+impl SearchTree {
+    fn __len__(&self) -> usize {
+        self.tree.nodes.len()
+    }
+
+    /// Both views of each node in `ids`, laid out like VecEnv.observe.
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &self,
+        py: Python<'_>,
+        ids: Vec<usize>,
+        ints: &Bound<'_, PyAny>,
+        mons: &Bound<'_, PyAny>,
+        field: &Bound<'_, PyAny>,
+        masks: &Bound<'_, PyAny>,
+        decisions: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        if let Some(&i) = ids.iter().find(|&&i| i >= self.tree.nodes.len()) {
+            return Err(PyValueError::new_err(format!("no node {i}")));
+        }
+        let n = ids.len();
+        let (bi, bm, bf, bk, bd) = (
+            PyBuffer::<i32>::get(ints)?,
+            PyBuffer::<f32>::get(mons)?,
+            PyBuffer::<f32>::get(field)?,
+            PyBuffer::<u8>::get(masks)?,
+            PyBuffer::<u8>::get(decisions)?,
+        );
+        let (i, m, f, k, d) = unsafe {
+            (
+                writable(&bi, n * search::LEAF_INTS, "ints")?,
+                writable(&bm, n * search::LEAF_MONS, "mons")?,
+                writable(&bf, n * search::LEAF_FIELD, "field")?,
+                writable(&bk, n * 2 * MASK_LEN, "masks")?,
+                writable(&bd, n * 2, "decisions")?,
+            )
+        };
+        let tree = &self.tree;
+        py.detach(|| tree.observe(&ids, i, m, f, k, d));
+        Ok(())
+    }
+
+    /// Expand `cells` [n, 3] int64 (node, side 0 action, side 1 action; -1
+    /// where a side has nothing to decide), up to `max_outcomes` each. With
+    /// `keep`, the leaves become nodes. Returns the number of leaves; read
+    /// them with `leaves`.
+    #[pyo3(signature = (cells, max_outcomes=16, roll_bands=1, seed=0, keep=false))]
+    fn expand(
+        &mut self,
+        py: Python<'_>,
+        cells: &Bound<'_, PyAny>,
+        max_outcomes: usize,
+        roll_bands: u32,
+        seed: u64,
+        keep: bool,
+    ) -> PyResult<usize> {
+        let buf = PyBuffer::<i64>::get(cells)?;
+        if buf.item_count() % 3 != 0 {
+            return Err(PyValueError::new_err("cells: expected shape [n, 3]"));
+        }
+        let mut c = vec![0i64; buf.item_count()];
+        buf.copy_to_slice(py, &mut c)?;
+        let reqs: Vec<search::CellRequest> = c
+            .chunks(3)
+            .map(|x| search::CellRequest { node: x[0].max(0) as usize, actions: [x[1], x[2]] })
+            .collect();
+        let cfg = engine::enumerate::EnumConfig { max_outcomes, roll_bands, seed };
+        let (tree, threads) = (&mut self.tree, self.threads);
+        let out = py.detach(|| tree.expand(&reqs, &cfg, keep, threads)).map_err(PyValueError::new_err)?;
+        self.last = out;
+        Ok(self.last.probs.len())
+    }
+
+    /// The last expansion: leaf observations (both views), probabilities,
+    /// side 0's result where a leaf ended the game (else NaN), each cell's
+    /// first leaf and leaf count [cells] int64, the probability its outcome
+    /// cap left out [cells] float32, and (if kept) each leaf's node [leaves].
+    #[allow(clippy::too_many_arguments)]
+    fn leaves(
+        &self,
+        py: Python<'_>,
+        ints: &Bound<'_, PyAny>,
+        mons: &Bound<'_, PyAny>,
+        field: &Bound<'_, PyAny>,
+        probs: &Bound<'_, PyAny>,
+        terminal: &Bound<'_, PyAny>,
+        first: &Bound<'_, PyAny>,
+        count: &Bound<'_, PyAny>,
+        unexplored: &Bound<'_, PyAny>,
+        nodes: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let e = &self.last;
+        fill(py, ints, &e.ints, "ints")?;
+        fill(py, mons, &e.mons, "mons")?;
+        fill(py, field, &e.field, "field")?;
+        fill(py, probs, &e.probs, "probs")?;
+        fill(py, terminal, &e.terminal, "terminal")?;
+        let f: Vec<i64> = e.cells.iter().map(|c| c.first_leaf as i64).collect();
+        let n: Vec<i64> = e.cells.iter().map(|c| c.leaves as i64).collect();
+        let u: Vec<f32> = e.cells.iter().map(|c| c.unexplored as f32).collect();
+        fill(py, first, &f, "first")?;
+        fill(py, count, &n, "count")?;
+        fill(py, unexplored, &u, "unexplored")?;
+        let ids: Vec<i64> = e.nodes.iter().map(|&i| i as i64).collect();
+        fill(py, nodes, &ids, "nodes")
+    }
+
+    /// Node `i` as a Showdown-style JSON snapshot.
+    fn snapshot(&self, i: usize) -> PyResult<String> {
+        self.tree.nodes.get(i).map(|b| b.snapshot().to_string()).ok_or_else(|| PyValueError::new_err("no such node"))
+    }
+
+    /// The legal choices of node `i`'s `side`, as Showdown choice strings
+    /// with their action indices.
+    fn legal_choices(&self, i: usize, side: usize) -> PyResult<Vec<(usize, String)>> {
+        let b = self.tree.nodes.get(i).filter(|_| side < 2).ok_or_else(|| PyValueError::new_err("no such node or side"))?;
+        Ok(b.legal_choices(side)
+            .into_iter()
+            .map(|c| (engine::env::action::index(&c), c.to_showdown(&b.requests[side])))
+            .collect())
+    }
+}
+
+/// Solve a zero-sum matrix game (`matrix`: rows x cols, row-major, the row
+/// player's payoff) by regret matching+. Returns (row mix, col mix, value,
+/// gap), the gap being the exploitability of the pair of mixes.
+#[pyfunction]
+#[pyo3(signature = (matrix, rows, cols, iters=1000))]
+fn solve_matrix(matrix: Vec<f32>, rows: usize, cols: usize, iters: usize) -> PyResult<(Vec<f32>, Vec<f32>, f32, f32)> {
+    if matrix.len() != rows * cols || rows == 0 || cols == 0 {
+        return Err(PyValueError::new_err("matrix: expected rows * cols values"));
+    }
+    let s = search::solve(&matrix, rows, cols, iters);
+    Ok((s.row, s.col, s.value, s.gap))
+}
+
 #[pymodule]
 fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calc_stat, m)?)?;
@@ -427,5 +486,7 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_team, m)?)?;
     m.add_function(wrap_pyfunction!(validate_team, m)?)?;
     m.add_class::<VecEnv>()?;
+    m.add_class::<SearchTree>()?;
+    m.add_function(wrap_pyfunction!(solve_matrix, m)?)?;
     Ok(())
 }
