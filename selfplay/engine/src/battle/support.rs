@@ -874,9 +874,12 @@ pub fn unsupported(set: &PokemonSet) -> Vec<String> {
             out.push(format!("Mega ability {ab}"));
         }
     }
+    // move_supported, worked out once per move.
+    static MOVES: std::sync::OnceLock<Vec<bool>> = std::sync::OnceLock::new();
+    let supported = MOVES.get_or_init(|| dex.moves.iter().map(move_supported).collect());
     for &m in &set.moves {
         let data = dex.move_data(m);
-        if !move_supported(data) {
+        if !supported[m.0 as usize] {
             out.push(format!("move {}", data.id));
         }
     }

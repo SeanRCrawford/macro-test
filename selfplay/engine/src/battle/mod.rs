@@ -212,8 +212,8 @@ impl Battle {
     }
 
     /// Showdown's `getAllActive()`: slot occupants that haven't fainted.
-    fn all_active(&self) -> Vec<MonRef> {
-        let mut out = Vec::new();
+    fn all_active(&self) -> MonList {
+        let mut out = MonList::default();
         for side in 0..2 {
             for pos in 0..ACTIVE_PER_SIDE {
                 if let Some(r) = self.occupant(side, pos) {
@@ -585,10 +585,15 @@ impl Battle {
     /// `field.effectiveWeather()`: none while a Cloud Nine or Air Lock
     /// Pokemon is out (its suppressWeather flag; Mold Breaker can't touch it).
     pub(crate) fn effective_weather(&self) -> crate::damage::Weather {
-        let suppressed = self
-            .all_active()
-            .into_iter()
-            .any(|r| Dex::get().ability(self.mon(r).ability).suppress_weather);
+        let dex = Dex::get();
+        let suppressed = (0..2).any(|side| {
+            (0..ACTIVE_PER_SIDE).any(|pos| {
+                self.sides[side].slot_filled[pos] && {
+                    let m = &self.sides[side].pokemon[pos];
+                    !m.fainted && dex.ability(m.ability).suppress_weather
+                }
+            })
+        });
         if suppressed {
             crate::damage::Weather::None
         } else {
@@ -847,7 +852,8 @@ impl Battle {
 
     /// Returns true when the loop must stop for a request.
     fn run_action(&mut self, action: Action) -> Res<bool> {
-        if std::env::var_os("SELFPLAY_TRACE").is_some() {
+        static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *TRACE.get_or_init(|| std::env::var_os("SELFPLAY_TRACE").is_some()) {
             eprintln!(
                 "turn {} run {:?} | queue {:?}",
                 self.turn,
@@ -1593,6 +1599,31 @@ fn request_target(m: &Mon, id: crate::dex::MoveId) -> crate::dex::MoveTarget {
         return crate::dex::MoveTarget::SelfTarget;
     }
     data.target
+}
+
+/// Up to four Pokemon, without allocating (`all_active`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MonList {
+    buf: [Option<MonRef>; 4],
+    len: usize,
+}
+
+impl MonList {
+    fn push(&mut self, r: MonRef) {
+        self.buf[self.len] = Some(r);
+        self.len += 1;
+    }
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &MonRef> + '_ {
+        self.buf[..self.len].iter().flatten()
+    }
+}
+
+impl IntoIterator for MonList {
+    type Item = MonRef;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<MonRef>, 4>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.buf.into_iter().flatten()
+    }
 }
 
 /// Showdown's comparePriority for queue actions.

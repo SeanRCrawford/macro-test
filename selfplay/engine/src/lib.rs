@@ -8,6 +8,7 @@
 
 pub mod battle;
 pub mod chance;
+pub mod corpus;
 pub mod damage;
 pub mod dex;
 pub mod fixed;

@@ -194,9 +194,9 @@ impl Battle {
     /// `eachEvent('Update')`: actives in Speed order; Sitrus Berry is the only
     /// supported Update handler.
     pub(super) fn each_update(&mut self) {
-        let mut actives = self.all_active();
+        let actives = self.all_active();
         let speeds: Vec<i32> = actives.iter().map(|&r| self.mon(r).speed).collect();
-        let mut keyed: Vec<(MonRef, i32)> = actives.drain(..).zip(speeds).collect();
+        let mut keyed: Vec<(MonRef, i32)> = actives.into_iter().zip(speeds).collect();
         self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
         for (r, _) in keyed {
             // Abilities (subOrder 7) before items (8): Thermal Exchange cures

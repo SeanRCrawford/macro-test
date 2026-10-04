@@ -293,7 +293,8 @@ enum Holder {
 struct Ref {
     effect: Effect,
     holder: Holder,
-    hook: String,
+    /// The handler's name, borrowed from the dex.
+    hook: &'static str,
     order: i64,
     priority: i32,
     speed: i32,
@@ -433,6 +434,77 @@ pub const MOVES_WITH_HANDLERS: &[&str] = &[
 
 /// The `???` type (Struggle): no STAB, no immunities, neutral to everything.
 pub const TYPELESS: TypeId = TypeId(u8::MAX);
+
+/// An event's handler names: on, onAlly, onFoe, onAny and onSource
+/// (built once per event).
+fn event_hooks(event: &'static str) -> &'static [String; 5] {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<&'static str, &'static [String; 5]>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with(|c| {
+        *c.borrow_mut().entry(event).or_insert_with(|| {
+            Box::leak(Box::new(["", "Ally", "Foe", "Any", "Source"].map(|p| format!("on{p}{event}"))))
+        })
+    })
+}
+
+/// The handlers of effects named in the code (volatiles, weather, terrain,
+/// screens), looked up once.
+struct FixedHandlers {
+    helping_hand: &'static Handlers,
+    charge: &'static Handlers,
+    glaive_rush: &'static Handlers,
+    flash_fire: &'static Handlers,
+    gem: &'static Handlers,
+    minimize: &'static Handlers,
+    weather: [&'static Handlers; 4],
+    terrain: [&'static Handlers; 4],
+    screen: [&'static Handlers; 3],
+}
+
+fn fixed_handlers() -> &'static FixedHandlers {
+    static F: std::sync::OnceLock<FixedHandlers> = std::sync::OnceLock::new();
+    F.get_or_init(|| {
+        let d = Dex::get();
+        let mv = |id: &str| &d.move_data(d.move_id(id).expect("known move")).condition;
+        let cond = |id: &str| &d.condition(d.condition_id(id).expect("known condition")).handlers;
+        FixedHandlers {
+            helping_hand: mv("helpinghand"),
+            charge: mv("charge"),
+            glaive_rush: mv("glaiverush"),
+            flash_fire: &d.ability(d.ability_id("flashfire").unwrap()).condition,
+            gem: cond("gem"),
+            minimize: mv("minimize"),
+            weather: ["sunnyday", "raindance", "sandstorm", "snowscape"].map(cond),
+            terrain: ["electricterrain", "grassyterrain", "mistyterrain", "psychicterrain"].map(mv),
+            screen: ["reflect", "lightscreen", "auroraveil"].map(mv),
+        }
+    })
+}
+
+/// A Pokemon's effects, without allocating.
+#[derive(Default)]
+struct Effects {
+    buf: [Option<Effect>; 10],
+    len: usize,
+}
+
+impl Effects {
+    fn push(&mut self, e: Effect) {
+        self.buf[self.len] = Some(e);
+        self.len += 1;
+    }
+}
+
+impl IntoIterator for Effects {
+    type Item = Effect;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<Effect>, 10>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.buf.into_iter().flatten()
+    }
+}
 
 /// Calculate damage for every roll.
 pub fn calculate(ctx: &DamageCtx, move_id: MoveId) -> Res<Outcome> {
@@ -631,42 +703,39 @@ impl<'a, 'b> Calc<'a, 'b> {
 
     fn handlers(&self, effect: Effect) -> &'static Handlers {
         let d = self.dex;
-        let move_cond = |id: &str| &d.move_data(d.move_id(id).expect("known move")).condition;
+        let f = fixed_handlers();
         match effect {
             Effect::Ability(a) => &d.ability(a).handlers,
             Effect::Item(it) => &d.item(it).handlers,
             Effect::MoveSelf(m) => &d.move_data(m).handlers,
             Effect::Volatile(v) => match v {
-                VolatileKind::HelpingHand => move_cond("helpinghand"),
-                VolatileKind::Charge => move_cond("charge"),
-                VolatileKind::GlaiveRush => move_cond("glaiverush"),
-                VolatileKind::FlashFire => &d.ability(d.ability_id("flashfire").unwrap()).condition,
-                VolatileKind::Gem => &d.condition(d.condition_id("gem").unwrap()).handlers,
+                VolatileKind::HelpingHand => f.helping_hand,
+                VolatileKind::Charge => f.charge,
+                VolatileKind::GlaiveRush => f.glaive_rush,
+                VolatileKind::FlashFire => f.flash_fire,
+                VolatileKind::Gem => f.gem,
                 VolatileKind::SemiInvulnerable(m) => &d.move_data(m).condition,
-                VolatileKind::Minimize => move_cond("minimize"),
+                VolatileKind::Minimize => f.minimize,
             },
-            Effect::Weather(w) => {
-                let id = match w {
-                    Weather::Sun => "sunnyday",
-                    Weather::Rain => "raindance",
-                    Weather::Sand => "sandstorm",
-                    Weather::Snow => "snowscape",
-                    Weather::None => unreachable!(),
-                };
-                &d.condition(d.condition_id(id).unwrap()).handlers
-            }
-            Effect::Terrain(t) => move_cond(match t {
-                Terrain::Electric => "electricterrain",
-                Terrain::Grassy => "grassyterrain",
-                Terrain::Misty => "mistyterrain",
-                Terrain::Psychic => "psychicterrain",
+            Effect::Weather(w) => match w {
+                Weather::Sun => f.weather[0],
+                Weather::Rain => f.weather[1],
+                Weather::Sand => f.weather[2],
+                Weather::Snow => f.weather[3],
+                Weather::None => unreachable!(),
+            },
+            Effect::Terrain(t) => match t {
+                Terrain::Electric => f.terrain[0],
+                Terrain::Grassy => f.terrain[1],
+                Terrain::Misty => f.terrain[2],
+                Terrain::Psychic => f.terrain[3],
                 Terrain::None => unreachable!(),
-            }),
-            Effect::Screen(s) => move_cond(match s {
-                Screen::Reflect => "reflect",
-                Screen::Light => "lightscreen",
-                Screen::AuroraVeil => "auroraveil",
-            }),
+            },
+            Effect::Screen(s) => match s {
+                Screen::Reflect => f.screen[0],
+                Screen::Light => f.screen[1],
+                Screen::AuroraVeil => f.screen[2],
+            },
         }
     }
 
@@ -695,9 +764,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         am: &ActiveMove,
     ) {
         let h = self.handlers(effect);
-        if !h.has(hook) {
+        let Some((name, info)) = h.info.get_key_value(hook) else {
             return;
-        }
+        };
         if let Holder::Mon(i) = holder {
             match effect {
                 Effect::Ability(a)
@@ -716,29 +785,26 @@ impl<'a, 'b> Calc<'a, 'b> {
             Holder::Mon(i) => self.mon(i).speed,
             _ => 0,
         };
-        let sub_order = match h.hooks.get(&format!("{hook}SubOrder")) {
-            Some(&s) if s != 0 => s,
-            _ => self.default_sub_order(effect, holder),
+        let sub_order = match info.sub_order {
+            0 => self.default_sub_order(effect, holder),
+            s => s,
         };
         out.push(Ref {
             effect,
             holder,
-            hook: hook.to_string(),
-            order: h
-                .hooks
-                .get(&format!("{hook}Order"))
-                .map_or(NO_ORDER, |&o| o as i64),
-            priority: h.hook(&format!("{hook}Priority")),
+            hook: name.as_str(),
+            order: info.order.map_or(NO_ORDER, |o| o as i64),
+            priority: info.priority,
             speed,
             sub_order,
         });
     }
 
     /// Effects a Pokemon holds: volatiles, ability, item.
-    fn mon_effects(&self, i: usize) -> Vec<Effect> {
+    fn mon_effects(&self, i: usize) -> Effects {
         let m = self.mon(i);
         let v = m.volatiles;
-        let mut out = Vec::new();
+        let mut out = Effects::default();
         if v.helping_hand > 0 {
             out.push(Effect::Volatile(VolatileKind::HelpingHand));
         }
@@ -776,51 +842,47 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// `onEffect`).
     fn collect(
         &self,
-        event: &str,
+        event: &'static str,
         target: usize,
         source: Option<usize>,
         am: &ActiveMove,
         own_move: bool,
     ) -> Vec<Ref> {
         let mut out = Vec::new();
-        let on = format!("on{event}");
+        let names = event_hooks(event);
+        let [on, ally, foe, any, from_source] = names.each_ref().map(String::as_str);
         if own_move {
             // The move's handler counts as held by the event target.
             self.push(
                 &mut out,
                 Effect::MoveSelf(am.id),
                 Holder::Mon(target),
-                &on,
+                on,
                 am,
             );
         }
         for e in self.mon_effects(target) {
-            self.push(&mut out, e, Holder::Mon(target), &on, am);
+            self.push(&mut out, e, Holder::Mon(target), on, am);
         }
         let side = Self::side_of(target);
-        for i in self.active_indices().collect::<Vec<_>>() {
-            let hooks: [String; 2] = if Self::side_of(i) == side {
-                [format!("onAlly{event}"), format!("onAny{event}")]
-            } else {
-                [format!("onFoe{event}"), format!("onAny{event}")]
-            };
+        for i in 0..4 {
+            if self.ctx.actives[i].is_none() {
+                continue;
+            }
+            let hooks = if Self::side_of(i) == side { [ally, any] } else { [foe, any] };
             for e in self.mon_effects(i) {
-                for hook in &hooks {
+                for hook in hooks {
                     self.push(&mut out, e, Holder::Mon(i), hook, am);
                 }
             }
         }
         if let Some(s) = source {
             for e in self.mon_effects(s) {
-                self.push(&mut out, e, Holder::Mon(s), &format!("onSource{event}"), am);
+                self.push(&mut out, e, Holder::Mon(s), from_source, am);
             }
         }
         for (s, state) in self.ctx.sides.iter().enumerate() {
-            let hooks: [String; 2] = if s == side {
-                [on.clone(), format!("onAny{event}")]
-            } else {
-                [format!("onFoe{event}"), format!("onAny{event}")]
-            };
+            let hooks = if s == side { [on, any] } else { [foe, any] };
             let screens = [
                 (state.reflect, Screen::Reflect),
                 (state.light_screen, Screen::Light),
@@ -828,7 +890,7 @@ impl<'a, 'b> Calc<'a, 'b> {
             ];
             for (present, screen) in screens {
                 if present {
-                    for hook in &hooks {
+                    for hook in hooks {
                         self.push(&mut out, Effect::Screen(screen), Holder::Side(s), hook, am);
                     }
                 }
@@ -839,7 +901,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                 &mut out,
                 Effect::Weather(self.ctx.weather),
                 Holder::Field,
-                &on,
+                on,
                 am,
             );
         }
@@ -848,7 +910,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                 &mut out,
                 Effect::Terrain(self.ctx.terrain),
                 Holder::Field,
-                &on,
+                on,
                 am,
             );
         }
@@ -991,7 +1053,7 @@ impl<'a, 'b> Calc<'a, 'b> {
         }
         let normal = self.ty("Normal");
         for r in self.collect("ModifyType", a, Some(self.ctx.defender), am, false) {
-            match (r.effect, r.hook.as_str()) {
+            match (r.effect, r.hook) {
                 (Effect::Ability(ab), "onModifyType") => {
                     let to = match self.dex.ability(ab).id.as_str() {
                         "aerilate" => "Flying",
@@ -1016,7 +1078,7 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
         }
         for r in self.collect("ModifyMove", a, Some(self.ctx.defender), am, false) {
-            match (r.effect, r.hook.as_str()) {
+            match (r.effect, r.hook) {
                 (Effect::Ability(ab), "onModifyMove") => match self.dex.ability(ab).id.as_str() {
                     "moldbreaker" => am.ignore_ability = true,
                     "scrappy" => {
@@ -1173,6 +1235,8 @@ impl<'a, 'b> Calc<'a, 'b> {
         let stab = self.stab(am)?;
         let type_mod = self.type_mod(am, data)?;
         let mut rolls = [0u32; 16];
+        // The ModifyDamage handlers don't depend on the roll.
+        let modify_refs = self.collect("ModifyDamage", a, Some(self.ctx.defender), am, false);
         for (r, out) in rolls.iter_mut().enumerate() {
             let mut x = dmg * (100 - r as u64) / 100;
             x = modify(x, stab);
@@ -1190,7 +1254,7 @@ impl<'a, 'b> Calc<'a, 'b> {
             {
                 x = modify(x, of(1, 2));
             }
-            x = self.modify_damage_event(am, x, type_mod, crit)?;
+            x = self.modify_damage_event(&modify_refs, am, x, type_mod, crit)?;
             if self.ctx.bypass_protect {
                 x = modify(x, of(1, 4));
             }
@@ -1347,7 +1411,7 @@ impl<'a, 'b> Calc<'a, 'b> {
         let (a, d) = (self.ctx.attacker, self.ctx.defender);
         let mut b = boost;
         for r in self.collect("ModifyBoost", stat_user, None, am, false) {
-            match (r.effect, r.hook.as_str()) {
+            match (r.effect, r.hook) {
                 (Effect::Ability(ab), "onAnyModifyBoost")
                     if self.dex.ability(ab).id == "unaware" =>
                 {
@@ -1383,7 +1447,7 @@ impl<'a, 'b> Calc<'a, 'b> {
             return Ok(false);
         }
         if let Some(r) = self.collect("CriticalHit", d, None, am, false).first() {
-            return match (r.effect, r.hook.as_str()) {
+            return match (r.effect, r.hook) {
                 // Disguise: no crit on an intact disguise.
                 (Effect::Ability(ab), "onCriticalHit") if self.dex.ability(ab).id == "disguise" => {
                     Ok(!(self.disguised(d) && !self.ctx.hit_sub && self.run_immunity(am)))
@@ -1401,7 +1465,7 @@ impl<'a, 'b> Calc<'a, 'b> {
         let mv = self.dex.move_data(am.id);
         let refs = self.collect("BasePower", a, Some(d), am, true);
         self.fold(&refs, bp, |r, _| {
-            Ok(match (r.effect, r.hook.as_str()) {
+            Ok(match (r.effect, r.hook) {
                 (Effect::MoveSelf(_), "onBasePower") => match mv.id.as_str() {
                     "lashout" => {
                         if attacker.stats_lowered_this_turn {
@@ -1648,7 +1712,7 @@ impl<'a, 'b> Calc<'a, 'b> {
         let hook_source = format!("onSource{event}");
         self.fold(&refs, stat as i64, |r, _| {
             let yes = |c: bool, m: u32| if c { Act::Chain(m) } else { Act::None };
-            let hook = r.hook.as_str();
+            let hook = r.hook;
             Ok(match r.effect {
                 Effect::Ability(ab) if hook == hook_self => {
                     let id = self.dex.ability(ab).id.as_str();
@@ -1786,7 +1850,7 @@ impl<'a, 'b> Calc<'a, 'b> {
         let is_stab = am.move_type != TYPELESS && self.attacker().has_type(am.move_type);
         let mut stab: u32 = if is_stab { of(3, 2) } else { ONE };
         for r in self.collect("ModifySTAB", a, Some(self.ctx.defender), am, false) {
-            match (r.effect, r.hook.as_str()) {
+            match (r.effect, r.hook) {
                 (Effect::Ability(ab), "onModifySTAB")
                     if self.dex.ability(ab).id == "adaptability" =>
                 {
@@ -1826,7 +1890,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                 }
             }
             for r in &refs {
-                match (r.effect, r.hook.as_str()) {
+                match (r.effect, r.hook) {
                     // Disguise: an intact disguise takes everything neutrally.
                     (Effect::Ability(ab), "onEffectiveness")
                         if self.dex.ability(ab).id == "disguise" =>
@@ -1856,6 +1920,7 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// The ModifyDamage event (target: attacker, source: defender).
     fn modify_damage_event(
         &self,
+        refs: &[Ref],
         am: &ActiveMove,
         dmg: u64,
         type_mod: i32,
@@ -1864,10 +1929,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         let (a, d) = (self.ctx.attacker, self.ctx.defender);
         let defender = self.defender();
         let mv = self.dex.move_data(am.id);
-        let refs = self.collect("ModifyDamage", a, Some(d), am, false);
-        let v = self.fold(&refs, dmg as i64, |r, _| {
+        let v = self.fold(refs, dmg as i64, |r, _| {
             let yes = |c: bool, m: u32| if c { Act::Chain(m) } else { Act::None };
-            Ok(match (r.effect, r.hook.as_str()) {
+            Ok(match (r.effect, r.hook) {
                 (Effect::Ability(ab), "onModifyDamage") => match self.dex.ability(ab).id.as_str() {
                     "sniper" => yes(crit, of(3, 2)),
                     _ => return self.not_implemented(r),

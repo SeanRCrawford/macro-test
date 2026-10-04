@@ -16,6 +16,36 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// FxHash (rustc's hasher): the dex's string lookups sit on the battle's
+/// hot path, where SipHash's DoS resistance buys nothing.
+#[derive(Default, Clone, Copy)]
+pub struct FxHasher {
+    hash: u64,
+}
+
+impl Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        let mut chunks = bytes.chunks_exact(8);
+        for c in &mut chunks {
+            let w = u64::from_le_bytes(c.try_into().unwrap());
+            self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(K);
+        }
+        for &b in chunks.remainder() {
+            self.hash = (self.hash.rotate_left(5) ^ b as u64).wrapping_mul(K);
+        }
+    }
+    fn write_u8(&mut self, b: u8) {
+        self.write(&[b]);
+    }
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 use std::sync::OnceLock;
 
 const DEX_JSON: &str = include_str!("../../data/dex.json");
@@ -51,12 +81,23 @@ pub struct Handlers {
     /// e.g. "onBasePower", "basePowerCallback", "condition.onSourceModifyDamage".
     pub names: Vec<String>,
     /// e.g. "onBasePowerPriority" -> 15. Absent means Showdown's default (0 or none).
-    pub hooks: HashMap<String, i32>,
+    pub hooks: FastMap<String, i32>,
+    /// Each handler's sort keys, looked up once by name (the damage
+    /// module's hot path).
+    pub info: FastMap<String, HookInfo>,
+}
+
+/// A handler's Order, Priority and SubOrder fields.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HookInfo {
+    pub order: Option<i32>,
+    pub priority: i32,
+    pub sub_order: i32,
 }
 
 impl Handlers {
     pub fn has(&self, name: &str) -> bool {
-        self.names.iter().any(|n| n == name)
+        self.info.contains_key(name)
     }
     pub fn hook(&self, name: &str) -> i32 {
         self.hooks.get(name).copied().unwrap_or(0)
@@ -360,7 +401,7 @@ pub struct ItemData {
     /// Still works for a Klutz holder.
     pub ignore_klutz: bool,
     /// Base species name -> Mega forme name, for Mega Stones.
-    pub mega_stone: HashMap<String, String>,
+    pub mega_stone: FastMap<String, String>,
     pub nonstandard: Option<String>,
     pub handlers: Handlers,
 }
@@ -427,13 +468,13 @@ pub struct Dex {
     pub conditions: Vec<ConditionData>,
     pub natures: Vec<Nature>,
     pub nature_names: Vec<String>,
-    species_index: HashMap<String, SpeciesId>,
-    move_index: HashMap<String, MoveId>,
-    item_index: HashMap<String, ItemId>,
-    ability_index: HashMap<String, AbilityId>,
-    condition_index: HashMap<String, ConditionId>,
-    nature_index: HashMap<String, NatureId>,
-    type_index: HashMap<String, TypeId>,
+    species_index: FastMap<String, SpeciesId>,
+    move_index: FastMap<String, MoveId>,
+    item_index: FastMap<String, ItemId>,
+    ability_index: FastMap<String, AbilityId>,
+    condition_index: FastMap<String, ConditionId>,
+    nature_index: FastMap<String, NatureId>,
+    type_index: FastMap<String, TypeId>,
 }
 
 #[derive(Deserialize)]
@@ -528,6 +569,14 @@ fn handlers_of(raw: &HashMap<String, Value>, nested: Option<&str>) -> Handlers {
             }
         }
     }
+    for n in &h.names {
+        let info = HookInfo {
+            order: h.hooks.get(&format!("{n}Order")).copied(),
+            priority: h.hook(&format!("{n}Priority")),
+            sub_order: h.hook(&format!("{n}SubOrder")),
+        };
+        h.info.insert(n.clone(), info);
+    }
     h
 }
 
@@ -572,7 +621,7 @@ impl Dex {
     pub fn from_json(text: &str) -> Result<Dex, String> {
         let raw: RawDex = serde_json::from_str(text).map_err(|e| e.to_string())?;
 
-        let type_index: HashMap<String, TypeId> = raw
+        let type_index: FastMap<String, TypeId> = raw
             .types
             .iter()
             .enumerate()
@@ -601,7 +650,7 @@ impl Dex {
         }
 
         let mut species = Vec::new();
-        let mut species_index = HashMap::new();
+        let mut species_index = FastMap::default();
         for (i, sid) in sorted_keys(&raw.species).into_iter().enumerate() {
             let r = &raw.species[sid];
             let t = r
@@ -640,7 +689,7 @@ impl Dex {
         }
 
         let mut moves = Vec::new();
-        let mut move_index = HashMap::new();
+        let mut move_index = FastMap::default();
         for (i, mid) in sorted_keys(&raw.moves).into_iter().enumerate() {
             let r = &raw.moves[mid];
             let ctx = |e: String| format!("move {mid}: {e}");
@@ -788,7 +837,7 @@ impl Dex {
         }
 
         let mut items = Vec::new();
-        let mut item_index = HashMap::new();
+        let mut item_index = FastMap::default();
         for (i, iid) in sorted_keys(&raw.items).into_iter().enumerate() {
             let r = &raw.items[iid];
             let mega_stone = r
@@ -815,7 +864,7 @@ impl Dex {
         }
 
         let mut abilities = Vec::new();
-        let mut ability_index = HashMap::new();
+        let mut ability_index = FastMap::default();
         for (i, aid) in sorted_keys(&raw.abilities).into_iter().enumerate() {
             let r = &raw.abilities[aid];
             let breakable = r
@@ -847,7 +896,7 @@ impl Dex {
         }
 
         let mut conditions = Vec::new();
-        let mut condition_index = HashMap::new();
+        let mut condition_index = FastMap::default();
         for (i, cid) in sorted_keys(&raw.conditions).into_iter().enumerate() {
             let r = &raw.conditions[cid];
             conditions.push(ConditionData {
@@ -861,7 +910,7 @@ impl Dex {
         let mut nature_names: Vec<String> = raw.natures.keys().cloned().collect();
         nature_names.sort();
         let mut natures = Vec::new();
-        let mut nature_index = HashMap::new();
+        let mut nature_index = FastMap::default();
         for (i, nid) in nature_names.iter().enumerate() {
             let r = &raw.natures[nid];
             natures.push(Nature {
