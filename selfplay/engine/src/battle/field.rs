@@ -86,6 +86,8 @@ enum SwitchInKind {
     WhiteHerb,
     /// An entry hazard on the Pokemon's side.
     Hazard(SideCondition),
+    /// Healing Wish's slot condition (subOrder 3).
+    HealingWish,
 }
 
 impl Battle {
@@ -94,7 +96,7 @@ impl Battle {
         let m = self.mon(r);
         let dex = Dex::get();
         let item = self.item_of(r);
-        if item == Some("ironball") {
+        if self.field.gravity > 0 || m.volatiles.has(super::state::VolatileId::SmackDown) || item == Some("ironball") {
             return true;
         }
         let ability = self.ability_id(r);
@@ -282,6 +284,17 @@ impl Battle {
                     });
                 }
             }
+            let pos = m.position;
+            if pos < ACTIVE_PER_SIDE && self.sides[r.side].healing_wish[pos] {
+                handlers.push(SwitchIn {
+                    mon: r,
+                    what: SwitchInKind::HealingWish,
+                    speed,
+                    priority: 0,
+                    sub_order: 3,
+                    effect_order: 0,
+                });
+            }
             if let Some(e) = start_effect(&Dex::get().ability(m.ability).id) {
                 handlers.push(SwitchIn {
                     mon: r,
@@ -330,6 +343,20 @@ impl Battle {
             }
             match h.what {
                 SwitchInKind::ToxicReset => self.mon_mut(h.mon).status_state.stage = 0,
+                // healingwish's onSwap: only a hurt or statused Pokemon uses it.
+                SwitchInKind::HealingWish => {
+                    let m = self.mon(h.mon);
+                    let pos = m.position;
+                    if pos < ACTIVE_PER_SIDE
+                        && self.sides[h.mon.side].healing_wish[pos]
+                        && (m.hp < m.max_hp() || m.status != crate::damage::Status::None)
+                    {
+                        let m = self.mon_mut(h.mon);
+                        m.hp = m.max_hp();
+                        self.cure_status(h.mon);
+                        self.sides[h.mon.side].healing_wish[pos] = false;
+                    }
+                }
                 SwitchInKind::Seed => self.try_seed(h.mon),
                 SwitchInKind::WhiteHerb => self.white_herb(h.mon),
                 SwitchInKind::Hazard(c) => {
@@ -385,7 +412,9 @@ impl Battle {
                     } else {
                         crate::damage::Status::Poison
                     };
-                    self.try_set_status(r, status);
+                    // The source is the foe's first slot (fainted or not):
+                    // Flower Veil guards against it.
+                    self.try_set_status_from(r, status, foe_lead);
                 }
             }
             SideCondition::StickyWeb if self.grounded(r) => {

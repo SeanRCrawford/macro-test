@@ -1,0 +1,48 @@
+Salamence @ Salamencite  
+Ability: Intimidate  
+Careful Nature  
+- Double-Edge  
+- Tailwind  
+- Roost  
+- Rain Dance  
+
+Armarouge @ Focus Sash  
+Ability: Weak Armor  
+Timid Nature  
+- Armor Cannon  
+- Expanding Force  
+- Wide Guard  
+- Sunny Day  
+
+Sneasler @ White Herb  
+Ability: Unburden  
+Adamant Nature  
+- Protect  
+- Swords Dance  
+- Close Combat  
+- Throat Chop  
+
+Indeedee-F @ Psychic Seed  
+Ability: Psychic Surge  
+Relaxed Nature  
+- Psyshock  
+- Follow Me  
+- Baton Pass  
+- Trick Room  
+
+Politoed @ Choice Scarf  
+Ability: Drizzle  
+Timid Nature  
+- Weather Ball  
+- Muddy Water  
+- Ice Beam  
+- Icy Wind  
+
+Archaludon @ Leftovers  
+Ability: Stamina  
+Bold Nature  
+- Protect  
+- Electro Shot  
+- Dragon Pulse  
+- Snarl  
+

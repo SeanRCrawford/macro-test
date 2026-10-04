@@ -99,6 +99,10 @@ pub enum VolatileId {
     ChillyReception,
     /// A Ghost's Curse: a quarter of max HP each turn.
     Curse,
+    /// Endure: a move leaves it at 1 HP this turn.
+    Endure,
+    /// Smack Down: grounded.
+    SmackDown,
 }
 
 impl VolatileId {
@@ -142,6 +146,8 @@ impl VolatileId {
             "stockpile" => VolatileId::Stockpile,
             "chillyreception" => VolatileId::ChillyReception,
             "curse" => VolatileId::Curse,
+            "endure" => VolatileId::Endure,
+            "smackdown" => VolatileId::SmackDown,
             _ => return None,
         })
     }
@@ -189,6 +195,8 @@ impl VolatileId {
             VolatileId::Stockpile => "stockpile",
             VolatileId::ChillyReception => "chillyreception",
             VolatileId::Curse => "curse",
+            VolatileId::Endure => "endure",
+            VolatileId::SmackDown => "smackdown",
         }
     }
 
@@ -237,6 +245,7 @@ impl VolatileId {
             | VolatileId::DestinyBond
             | VolatileId::Stockpile
             | VolatileId::Curse
+            | VolatileId::SmackDown
             | VolatileId::Charge => None,
             VolatileId::AllySwitch => Some(2),
             // The charging move's condition: Fly, Dig and the like last two
@@ -246,7 +255,7 @@ impl VolatileId {
                 "bounce" | "dig" | "dive" | "fly" | "phantomforce" | "shadowforce"
             )
             .then_some(2),
-            VolatileId::ChillyReception => Some(1),
+            VolatileId::ChillyReception | VolatileId::Endure => Some(1),
             VolatileId::HealBlock => Some(2),
             // durationCallback: 5 or 6, rolled when it starts.
             VolatileId::PartiallyTrapped => Some(5),
@@ -365,6 +374,9 @@ pub struct Mon {
     pub base_moves: Option<Vec<MoveSlot>>,
     /// Illusion is disguising it (`pokemon.illusion` is set).
     pub illusion: bool,
+    /// A Round ally/foe moved this Round up (`sourceEffect` round): double
+    /// power.
+    pub round_boost: bool,
     /// atk, def, spa, spd, spe, accuracy, evasion.
     pub boosts: [i8; 7],
     pub ability: AbilityId,
@@ -457,6 +469,7 @@ impl Mon {
             transformed: false,
             base_moves: None,
             illusion: false,
+            round_boost: false,
             trace_seek: false,
             protean_used: false,
             fallen: 0,
@@ -618,6 +631,9 @@ pub struct Side {
     /// Revival Blessing's slot condition (one turn), by active slot: the
     /// next switch choice for that slot revives a fainted Pokemon.
     pub revival_blessing: [bool; ACTIVE_PER_SIDE],
+    /// Healing Wish's slot condition: heals the next hurt Pokemon to come
+    /// in there.
+    pub healing_wish: [bool; ACTIVE_PER_SIDE],
     /// Showdown's `side.active[slot]` is set: the Pokemon at list position
     /// `slot` occupies it (fainted or not) until replaced.
     pub slot_filled: [bool; ACTIVE_PER_SIDE],
@@ -738,4 +754,6 @@ pub struct Field {
     pub terrain_turns: u8,
     /// Trick Room's remaining duration (0: not up).
     pub trick_room: u8,
+    /// Gravity's remaining duration (0: not up).
+    pub gravity: u8,
 }

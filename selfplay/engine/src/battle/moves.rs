@@ -396,7 +396,7 @@ impl Battle {
                 self.mon_mut(t).item = Some(item);
                 continue;
             }
-            self.mon_mut(user).item = Some(item);
+            self.set_item(user, item);
             return;
         }
     }
@@ -519,6 +519,7 @@ impl Battle {
                 c.volatiles.charge = m.volatiles.has(VolatileId::Charge);
                 c.volatiles.semi_invulnerable = semi_invulnerable(m);
                 c.volatiles.minimize = m.volatiles.has(VolatileId::Minimize);
+                c.volatiles.smack_down = m.volatiles.has(VolatileId::SmackDown);
                 c.fallen = m.fallen;
                 c.stats_lowered_this_turn = m.stats_lowered_this_turn;
                 // getStat('spe'): the action speed without Trick Room's sign.
@@ -527,6 +528,7 @@ impl Battle {
                     .map_or(0, |s| s.unsigned_abs());
                 c.moved_this_turn = !m.newly_switched && !self.will_move(self.mon_ref(side, pos));
                 c.will_move = self.will_move(self.mon_ref(side, pos));
+                c.hurt_this_turn = m.hurt_this_turn.is_some_and(|h| h > 0);
                 // Avalanche: who damaged it this turn, by where they stand.
                 for a in m.attacked_by.iter().filter(|a| a.this_turn && a.damage > 0) {
                     if let Some(p) = (0..ACTIVE_PER_SIDE).find(|&p| {
@@ -578,6 +580,7 @@ impl Battle {
             hit: 1,
             bypass_protect: false,
             hit_sub: false,
+            gravity: self.field.gravity > 0,
         }
     }
 
@@ -735,6 +738,10 @@ impl Battle {
         let ctx = self.damage_ctx(&view, user, defender, false, false);
         let mut am =
             damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
+        // Round moved up by another's Round: sourceEffect round.
+        if data.id == "round" {
+            am.round_boost = std::mem::take(&mut self.mon_mut(user).round_boost);
+        }
         // Curse's onModifyMove: on itself unless a Ghost; a Ghost aiming at
         // nothing or an ally curses a random foe.
         if data.id == "curse" {
@@ -1247,6 +1254,24 @@ impl Battle {
                 }
                 result
             }
+            // Gravity: five turns; anything in the sky comes down.
+            "gravity" => {
+                if self.field.gravity > 0 {
+                    return false;
+                }
+                self.field.gravity = 5;
+                for r in self.all_active() {
+                    let sky = semi_invulnerable(self.mon(r))
+                        .is_some_and(|c| matches!(Dex::get().move_data(c).id.as_str(), "fly" | "bounce"));
+                    if sky {
+                        let m = self.mon_mut(r);
+                        m.volatiles.remove(VolatileId::TwoTurnMove);
+                        m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+                        self.cancel_move(r);
+                    }
+                }
+                true
+            }
             "trickroom" => {
                 // onFieldRestart ends it; using it again succeeds either way.
                 self.field.trick_room = if self.field.trick_room > 0 { 0 } else { 5 };
@@ -1326,10 +1351,13 @@ impl Battle {
                 }
             }
             "noretreat" if self.mon(user).volatiles.has(VolatileId::NoRetreat) => return Ok(false),
+            // onTryHit: someone has to come in.
+            "healingwish" if self.switchable(user.side).is_empty() => return Ok(false),
             // onTryHit: someone must have fainted.
             "revivalblessing" if !self.sides[user.side].pokemon.iter().any(|m| m.fainted) => {
                 return Ok(false)
             }
+            "round" => self.prioritize_rounds(),
             "stockpile"
                 if self
                     .mon(user)
@@ -1675,6 +1703,10 @@ impl Battle {
         let (us, ts) = (self.mon(user).speed, self.mon(t).speed);
         if self.ability_is(user, "compoundeyes") {
             mods.push((-1, us, 7, 5325));
+        }
+        // gravity's onModifyAccuracy (a field effect, priority 0).
+        if self.field.gravity > 0 {
+            mods.push((0, 0, 5, 6840));
         }
         if self.ability_is(user, "hustle") && physical {
             mods.push((-1, us, 7, 3277));
@@ -2098,17 +2130,9 @@ impl Battle {
             // Berserk's onDamage: a single-hit attack holds healing berries
             // until its AfterMoveSecondary.
             self.mon_mut(t).berserk_checked = mv.data.multihit.is_some() || mv.am.parental_bond;
-            // Disguise can bring it to 0 (still a hit for DamagingHit).
-            let d = if d == 0 {
-                0
-            } else {
-                let d = self.on_move_damage(t, d.max(1));
-                if self.mon(t).disguise_busted {
-                    d
-                } else {
-                    d.max(1)
-                }
-            };
+            // The Damage event: Disguise and Endure can bring it to 0 (still a
+            // hit for DamagingHit); spreadDamage only clamps a nonzero amount.
+            let d = if d == 0 { 0 } else { self.on_move_damage(t, d.max(1)) };
             self.move_damage_by = Some(user);
             let dealt = self.apply_damage(t, d);
             self.move_damage_by = None;
@@ -2371,6 +2395,11 @@ impl Battle {
                 self.try_set_status_from(t, status, Some(user));
                 did_something = did_something.combine(HitRes::Bool(true));
             }
+            if is_secondary && mv.data.id == "triattack" {
+                let status = [Status::Burn, Status::Paralysis, Status::Freeze][self.chance.sample(3)];
+                self.try_set_status_from(t, status, Some(user));
+                did_something = did_something.combine(HitRes::Bool(true));
+            }
             if is_secondary && mv.data.id == "burningjealousy" && self.mon(t).stats_raised_this_turn
             {
                 self.try_set_status_from(t, Status::Burn, Some(user));
@@ -2432,7 +2461,7 @@ impl Battle {
             }
             // selfdestruct: 'ifHit' (Memento, Final Gambit).
             if primary
-                && matches!(mv.data.id.as_str(), "memento" | "finalgambit")
+                && matches!(mv.data.id.as_str(), "memento" | "finalgambit" | "healingwish")
                 && damage[i] != HitRes::Bool(false)
             {
                 self.faint(user);
@@ -2731,6 +2760,12 @@ impl Battle {
                 }
                 HitRes::Undefined
             }
+            // slotCondition: the next hurt Pokemon to come in here is healed.
+            "healingwish" => {
+                let pos = self.mon(user).position;
+                self.sides[user.side].healing_wish[pos] = true;
+                HitRes::Bool(true)
+            }
             // slotCondition: the user's next switch choice revives.
             "revivalblessing" => {
                 let pos = self.mon(user).position;
@@ -2804,6 +2839,9 @@ impl Battle {
                 }
             }
             _ => {}
+        }
+        if self.ability_is(user, "superluck") {
+            ratio += 1;
         }
         // Merciless: poisoned targets always take critical hits.
         if self.ability_is(user, "merciless")

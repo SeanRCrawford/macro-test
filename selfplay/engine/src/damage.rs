@@ -65,6 +65,7 @@ pub struct Volatiles {
     /// Charging a semi-invulnerable move (Dig, Dive, Fly, Bounce...).
     pub semi_invulnerable: Option<MoveId>,
     pub minimize: bool,
+    pub smack_down: bool,
 }
 
 /// A Pokemon as the damage calculation sees it.
@@ -100,6 +101,8 @@ pub struct Combatant {
     pub spe_stat: u32,
     /// `queue.willMove`: still to move this turn (Analytic).
     pub will_move: bool,
+    /// `hurtThisTurn` (Assurance).
+    pub hurt_this_turn: bool,
     /// Positions (side * 2 + slot) whose occupant damaged this Pokemon this
     /// turn (Avalanche).
     pub damaged_by: u8,
@@ -133,6 +136,7 @@ impl Combatant {
             stats_lowered_this_turn: false,
             spe_stat: stats[5] as u32,
             will_move: false,
+            hurt_this_turn: false,
             damaged_by: 0,
         }
     }
@@ -175,6 +179,8 @@ pub struct DamageCtx<'a> {
     pub bypass_protect: bool,
     /// The damage goes to a substitute (resist berries stay out of it).
     pub hit_sub: bool,
+    /// Gravity is up: everyone is grounded.
+    pub gravity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +224,8 @@ pub struct ActiveMove {
     pub contact: bool,
     /// Fickle Beam's onBasePower chance came up: double power.
     pub fickle_beam: bool,
+    /// Round used right after another's Round (sourceEffect round).
+    pub round_boost: bool,
 }
 
 impl ActiveMove {
@@ -236,6 +244,7 @@ impl ActiveMove {
             parental_bond: false,
             contact: m.flags.has("contact"),
             fickle_beam: false,
+            round_boost: false,
         }
     }
 }
@@ -377,10 +386,12 @@ fn resist_berry(id: &str) -> Option<&'static str> {
 /// onModifyType, onModifyMove, onEffectiveness) this module implements.
 pub const MOVES_WITH_HANDLERS: &[&str] = &[
     "acrobatics",
+    "assurance",
     "aurawheel",
     "avalanche",
     "beatup",
     "ficklebeam",
+    "round",
     "shellsidearm",
     "gyroball",
     "lashout",
@@ -574,7 +585,7 @@ impl<'a, 'b> Calc<'a, 'b> {
     fn grounded(&self, i: usize, am: &ActiveMove) -> Option<bool> {
         let m = self.mon(i);
         let item = self.effective_item(i);
-        if item == Some("ironball") {
+        if self.ctx.gravity || m.volatiles.smack_down || item == Some("ironball") {
             return Some(true);
         }
         if m.has_type(self.ty("Flying")) {
@@ -1284,6 +1295,20 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
             "stompingtantrum" | "temperflare" => {
                 if attacker.move_last_turn_failed {
+                    bp * 2
+                } else {
+                    bp
+                }
+            }
+            "round" => {
+                if am.round_boost {
+                    bp * 2
+                } else {
+                    bp
+                }
+            }
+            "assurance" => {
+                if defender.hurt_this_turn {
                     bp * 2
                 } else {
                     bp

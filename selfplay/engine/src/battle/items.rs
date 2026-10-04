@@ -133,7 +133,7 @@ impl Battle {
                     if self.mon(t).hp == 0 || !self.mon(t).is_active {
                         self.mon_mut(user).item = Some(item);
                     } else {
-                        self.mon_mut(t).item = Some(item);
+                        self.set_item(t, item);
                     }
                 }
                 H::Berserk(damage) => {
@@ -175,6 +175,19 @@ impl Battle {
     pub(super) fn after_use_item(&mut self, r: MonRef) {
         if self.ability_is(r, "unburden") {
             self.add_volatile(r, VolatileId::Unburden);
+        }
+        // Symbiosis (onAllyAfterUseItem): the ally hands over its item.
+        for a in self.adjacent_allies(r) {
+            if !self.ability_is(a, "symbiosis") || self.mon(r).switch_flag.is_some() {
+                continue;
+            }
+            let Some(item) = self.take_item(a, a) else { continue };
+            let m = self.mon(r);
+            if m.hp > 0 && m.is_active {
+                self.set_item(r, item);
+            } else {
+                self.mon_mut(a).item = Some(item);
+            }
         }
     }
 
@@ -251,6 +264,13 @@ impl Battle {
             self.mon_mut(t).disguise_busted = true;
             return 0;
         }
+        // Endure (priority -10).
+        let m = self.mon(t);
+        let damage = if m.volatiles.has(VolatileId::Endure) && damage >= m.hp as u32 {
+            m.hp as u32 - 1
+        } else {
+            damage
+        };
         let m = self.mon(t);
         let damage = if self.ability_is(t, "sturdy") && m.hp == m.max_hp() && damage >= m.hp as u32
         {
@@ -848,11 +868,20 @@ impl Battle {
         }
         // setItem (needs HP and to be active).
         for (r, item) in [(target, mine), (user, yours)] {
-            let m = self.mon_mut(r);
-            if item.is_some() && m.hp > 0 && m.is_active {
-                m.item = item;
+            let m = self.mon(r);
+            if let (Some(item), true) = (item, m.hp > 0 && m.is_active) {
+                self.set_item(r, item);
             }
         }
         true
+    }
+
+    /// `setItem`'s item onStart: a Choice item drops any choice lock.
+    pub(super) fn set_item(&mut self, r: MonRef, item: ItemId) {
+        let m = self.mon_mut(r);
+        m.item = Some(item);
+        if matches!(Dex::get().item(item).id.as_str(), "choiceband" | "choicespecs" | "choicescarf") {
+            m.volatiles.remove(VolatileId::ChoiceLock);
+        }
     }
 }

@@ -90,6 +90,13 @@ impl Battle {
                 json!({"totalFainted": side.total_fainted, "sideConditions": conditions, "pokemon": pokemon})
             })
             .collect();
+        let mut pseudo = serde_json::Map::new();
+        if self.field.trick_room > 0 {
+            pseudo.insert("trickroom".into(), json!(self.field.trick_room));
+        }
+        if self.field.gravity > 0 {
+            pseudo.insert("gravity".into(), json!(self.field.gravity));
+        }
         json!({
             "turn": self.turn,
             "requests": requests,
@@ -102,7 +109,7 @@ impl Battle {
             "terrain": terrain_id(self.field.terrain),
             "weatherTurns": if self.field.weather == Weather::None { Value::Null } else { json!(self.field.weather_turns) },
             "terrainTurns": if self.field.terrain == Terrain::None { Value::Null } else { json!(self.field.terrain_turns) },
-            "pseudoWeather": if self.field.trick_room > 0 { json!({"trickroom": self.field.trick_room}) } else { json!({}) },
+            "pseudoWeather": pseudo,
             "sides": sides,
         })
     }

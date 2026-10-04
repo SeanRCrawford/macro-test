@@ -369,6 +369,30 @@ impl Battle {
         Ok(())
     }
 
+    /// `queue.cancelMove`: drop the Pokemon's queued move.
+    pub(super) fn cancel_move(&mut self, r: MonRef) {
+        self.queue
+            .retain(|a| !matches!(a.kind, ActionKind::Move { mon, .. } if mon == r));
+    }
+
+    /// Round's onTry: every queued Round goes to the front (prioritizeAction,
+    /// order 3), each later one ahead of the earlier, with double power.
+    pub(super) fn prioritize_rounds(&mut self) {
+        let mut i = 0;
+        while i < self.queue.len() {
+            if let ActionKind::Move { mon, slot, .. } = self.queue[i].kind {
+                let id = moves::move_for_slot(self.mon(mon), slot);
+                if Dex::get().move_data(id).id == "round" {
+                    let mut a = self.queue.remove(i);
+                    a.order = 3;
+                    self.queue.insert(0, a);
+                    self.mon_mut(mon).round_boost = true;
+                }
+            }
+            i += 1;
+        }
+    }
+
     /// `queue.prioritizeAction(resolveAction(move))`: the move goes first
     /// (order 3) (Instruct).
     pub(super) fn prioritize_move(&mut self, mon: MonRef, slot: usize, target_loc: i8) -> Res<()> {
@@ -1090,6 +1114,7 @@ impl Battle {
                     | V::Minimize
                     | V::DestinyBond
                     | V::Stockpile
+                    | V::SmackDown
             ) {
                 continue;
             }
@@ -1387,6 +1412,7 @@ impl Battle {
                 m.move_this_turn_result = None;
                 if self.turn != 1 {
                     m.hurt_this_turn = None;
+                    m.round_boost = false;
                     m.stats_raised_this_turn = false;
                     m.stats_lowered_this_turn = false;
                 }
@@ -1406,6 +1432,7 @@ impl Battle {
                 let throat_chopped = m.volatiles.has(state::VolatileId::ThroatChop);
                 let taunted = m.volatiles.has(state::VolatileId::Taunt);
                 let heal_blocked = m.volatiles.has(state::VolatileId::HealBlock);
+                let gravity = self.field.gravity > 0;
                 let disabled = m
                     .volatiles
                     .0
@@ -1421,6 +1448,7 @@ impl Battle {
                         || (throat_chopped && data.flags.has("sound"))
                         || (taunted && data.category == crate::dex::Category::Status)
                         || (heal_blocked && data.flags.has("heal"))
+                        || (gravity && data.flags.has("gravity"))
                         || disabled == Some(s.id);
                     s.imprisoned = imprisoned.contains(&s.id);
                 }

@@ -1,0 +1,54 @@
+Froslass @ Froslassite  
+Ability: Cursed Body  
+EVs: 32 HP / 4 Def / 1 SpA / 5 SpD / 24 Spe  
+Timid Nature  
+- Protect  
+- Blizzard  
+- Shadow Ball  
+- Aurora Veil  
+
+Incineroar @ Sitrus Berry  
+Ability: Intimidate  
+EVs: 30 HP / 21 Def / 15 SpD  
+Impish Nature  
+- Flare Blitz  
+- Darkest Lariat  
+- Fake Out  
+- Parting Shot  
+
+Basculegion @ Choice Scarf  
+Ability: Adaptability  
+EVs: 24 Atk / 14 Def / 28 Spe  
+Jolly Nature  
+- Wave Crash  
+- Last Respects  
+- Flip Turn  
+- Aqua Jet  
+
+Glimmora @ Glimmoranite  
+Ability: Toxic Debris  
+EVs: 2 HP / 32 SpA / 32 Spe  
+Timid Nature  
+- Spiky Shield  
+- Sludge Bomb  
+- Power Gem  
+- Earth Power  
+
+Rillaboom @ Miracle Seed  
+Ability: Grassy Surge  
+EVs: 32 HP / 32 Atk / 2 SpD  
+Adamant Nature  
+- Wood Hammer  
+- U-turn  
+- Grassy Glide  
+- Fake Out  
+
+Volcarona @ Grassy Seed  
+Ability: Flame Body  
+EVs: 12 HP / 19 Def / 5 SpA / 30 Spe  
+Modest Nature  
+- Protect  
+- Heat Wave  
+- Giga Drain  
+- Quiver Dance  
+

@@ -111,6 +111,7 @@ fn combatant(m: &Mon) -> Combatant {
         glaive_rush: m.volatiles.iter().any(|v| v == "glaiverush"),
         gem: m.volatiles.iter().any(|v| v == "gem"),
         semi_invulnerable: None,
+        smack_down: false,
         minimize: false,
     };
     for v in &m.volatiles {
@@ -180,6 +181,7 @@ fn damage_matches_showdown() {
             hit: c.hit,
             bypass_protect: false,
             hit_sub: false,
+            gravity: false,
         };
         let move_id = dex
             .move_id(&c.move_id)

@@ -436,7 +436,32 @@ function exportTeam(team) {
 	}).join("");
 }
 
+// TEAMS=corpus: play the real teams in data/corpus (the legal, supported
+// ones) instead of sets sampled from usage. FORCE then picks the teams that
+// use one of its ids.
+const CORPUS = process.env.TEAMS === "corpus" ? loadCorpus() : null;
+
+function loadCorpus() {
+	const dir = path.join(ROOT, "data", "corpus");
+	const validator = TeamValidator.get(FORMAT);
+	const ok = s => (!s.item || supportedItems.includes(toID(s.item))) &&
+		supportedAbilities.has(toID(s.ability)) && s.moves.every(m => supportedMoves.has(toID(m)));
+	const teams = [];
+	for (const file of fs.readdirSync(dir).sort()) {
+		const sets = Teams.import(fs.readFileSync(path.join(dir, file), "utf8"));
+		if (!sets || sets.length !== 6 || validator.validateTeam(sets) || !sets.every(ok)) continue;
+		const ids = new Set(sets.flatMap(s => [toID(s.ability), ...s.moves.map(toID)]));
+		teams.push({file, sets, ids});
+	}
+	return teams;
+}
+
 function supportedTeam(rand) {
+	if (CORPUS) {
+		const forced = CORPUS.filter(t => [...FORCE].some(id => t.ids.has(id)));
+		const t = pick(rand, forced.length ? forced : CORPUS);
+		return JSON.parse(JSON.stringify(t.sets));
+	}
 	const team = [];
 	const nums = new Set();
 	const usedItems = new Set();

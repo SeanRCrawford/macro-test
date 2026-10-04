@@ -119,6 +119,7 @@ enum ResidualKind {
     Terrain,
     GrassyHeal,
     TrickRoom,
+    Gravity,
     Side(usize, SideCondition),
     Leftovers,
     Healer,
@@ -313,6 +314,31 @@ impl Battle {
     pub(super) fn add_volatile(&mut self, t: MonRef, id: VolatileId) -> HitRes {
         if self.mon(t).hp == 0 {
             return HitRes::Bool(false);
+        }
+        if id == VolatileId::SmackDown {
+            // smackdown's onStart / onRestart: a Fly or Bounce user falls.
+            let m = self.mon(t);
+            let sky = super::moves::semi_invulnerable(m)
+                .is_some_and(|c| matches!(Dex::get().move_data(c).id.as_str(), "fly" | "bounce"));
+            if sky {
+                let m = self.mon_mut(t);
+                m.volatiles.remove(VolatileId::TwoTurnMove);
+                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+                self.cancel_move(t);
+            }
+            if self.mon(t).volatiles.has(VolatileId::SmackDown) {
+                return HitRes::Undefined;
+            }
+            let m = self.mon(t);
+            let ab = Dex::get().ability(m.ability).id.as_str();
+            let applies = sky
+                || ((m.has_type(Dex::get().type_id("Flying").expect("Flying"))
+                    || matches!(ab, "levitate" | "eelevate"))
+                    && self.item_of(t) != Some("ironball")
+                    && self.field.gravity == 0);
+            if !applies {
+                return HitRes::Bool(false);
+            }
         }
         if let Some(v) = self.mon_mut(t).volatiles.get_mut(id) {
             return match id {
@@ -654,6 +680,10 @@ impl Battle {
             .any(|x| x.id == VolatileId::Disable && x.move_id == Some(move_id))
             && !data.flags.has("cantusetwice")
         {
+            return false;
+        }
+        // gravity (priority 6): no airborne moves.
+        if self.field.gravity > 0 && data.flags.has("gravity") {
             return false;
         }
         // throatchop (priority 6): no sound moves; healblock: no healing ones.
@@ -1009,6 +1039,15 @@ impl Battle {
                 sub_order: 1,
             });
         }
+        if self.field.gravity > 0 {
+            handlers.push(Residual {
+                mon: None,
+                what: ResidualKind::Gravity,
+                order: 27,
+                speed: 0,
+                sub_order: 2,
+            });
+        }
         if self.field.weather != crate::damage::Weather::None {
             handlers.push(Residual {
                 mon: None,
@@ -1151,6 +1190,10 @@ impl Battle {
                         self.field.trick_room = self.field.trick_room.saturating_sub(1);
                         self.field.trick_room == 0
                     }
+                    ResidualKind::Gravity => {
+                        self.field.gravity = self.field.gravity.saturating_sub(1);
+                        self.field.gravity == 0
+                    }
                     ResidualKind::Side(side, c) => {
                         let d = &mut self.sides[side].conditions[c as usize];
                         *d = d.saturating_sub(1);
@@ -1174,6 +1217,7 @@ impl Battle {
             }
             match h.what {
                 ResidualKind::TrickRoom
+                | ResidualKind::Gravity
                 | ResidualKind::Side(..)
                 | ResidualKind::Weather
                 | ResidualKind::Terrain => unreachable!(),

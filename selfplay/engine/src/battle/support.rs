@@ -143,6 +143,8 @@ const ABILITIES: &[&str] = &[
     "purifyingsalt",
     "pickpocket",
     "berserk",
+    "superluck",
+    "symbiosis",
     "imposter",
     "hungerswitch",
     "harvest",
@@ -450,6 +452,28 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("ceaselessedge", &["onAfterHit", "onAfterSubDamage"]),
     ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
     ("endeavor", &["damageCallback", "onTryImmunity"]),
+    ("round", &["basePowerCallback", "onTry"]),
+    (
+        "gravity",
+        &[
+            "condition.durationCallback",
+            "condition.onBeforeMove",
+            "condition.onDisableMove",
+            "condition.onFieldEnd",
+            "condition.onFieldStart",
+            "condition.onModifyAccuracy",
+            "condition.onModifyMove",
+        ],
+    ),
+    ("smackdown", &["condition.onRestart", "condition.onStart"]),
+    (
+        "endure",
+        &["condition.onDamage", "condition.onStart", "onHit", "onPrepareHit"],
+    ),
+    (
+        "healingwish",
+        &["condition.onSwap", "condition.onSwitchIn", "onTryHit"],
+    ),
     ("transform", &["onHit"]),
     (
         "curse",
@@ -625,6 +649,7 @@ const FIELD_MOVES: &[&str] = &[
     "toxicspikes",
     "stickyweb",
     "chillyreception",
+    "gravity",
 ];
 
 /// Moves whose secondary has an onHit that `moves` implements.
@@ -634,6 +659,7 @@ const SECONDARY_ON_HIT: &[&str] = &[
     "alluringvoice",
     "burningjealousy",
     "eeriespell",
+    "triattack",
 ];
 
 /// Volatiles a move may add (Protect's own condition is the protect volatile).
@@ -666,6 +692,8 @@ const VOLATILES: &[&str] = &[
     "minimize",
     "destinybond",
     "stockpile",
+    "endure",
+    "smackdown",
 ];
 
 pub fn ability_supported(id: &str) -> bool {
@@ -736,6 +764,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         || matches!(
             m.id.as_str(),
             "throatchop"
+                | "healingwish"
                 | "curse"
                 | "revivalblessing"
                 | "allyswitch"
@@ -751,7 +780,7 @@ pub fn move_supported(m: &MoveData) -> bool {
     let selfdestruct_ok = !m.has_key("selfdestruct")
         || matches!(
             m.id.as_str(),
-            "finalgambit" | "memento" | "explosion" | "selfdestruct"
+            "finalgambit" | "memento" | "explosion" | "selfdestruct" | "healingwish"
         );
     let target_ok = match m.category {
         Category::Status => matches!(
@@ -792,7 +821,7 @@ pub fn move_supported(m: &MoveData) -> bool {
                 || (k == "condition" && condition_ok)
                 || field_key(k)
                 || (k == "selfdestruct" && selfdestruct_ok)
-                || (k == "slotCondition" && m.id == "revivalblessing")
+                || (k == "slotCondition" && matches!(m.id.as_str(), "revivalblessing" | "healingwish"))
         })
         && effect_supported(
             &m.primary,

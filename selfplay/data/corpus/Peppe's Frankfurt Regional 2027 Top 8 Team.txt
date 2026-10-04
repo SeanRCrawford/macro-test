@@ -1,0 +1,48 @@
+Floette-Eternal @ Floettite  
+Ability: Flower Veil  
+Modest Nature  
+- Dazzling Gleam  
+- Draining Kiss  
+- Calm Mind  
+- Protect  
+
+Rillaboom @ Miracle Seed  
+Ability: Grassy Surge  
+Adamant Nature  
+- Wood Hammer  
+- Grassy Glide  
+- High Horsepower  
+- Fake Out  
+
+Incineroar @ Sitrus Berry  
+Ability: Intimidate  
+Impish Nature  
+- Flare Blitz  
+- Taunt  
+- Parting Shot  
+- Fake Out  
+
+Dragonite @ Dragoninite  
+Ability: Inner Focus  
+Modest Nature  
+- Dragon Pulse  
+- Heat Wave  
+- Tailwind  
+- Protect  
+
+Gholdengo @ Life Orb  
+Ability: Good as Gold  
+Modest Nature  
+- Make It Rain  
+- Shadow Ball  
+- Nasty Plot  
+- Protect  
+
+Sneasler @ White Herb  
+Ability: Unburden  
+Adamant Nature  
+- Dire Claw  
+- Close Combat  
+- Rock Tomb  
+- Protect  
+
