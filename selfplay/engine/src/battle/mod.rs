@@ -106,6 +106,9 @@ pub struct Battle {
     pub chance: Chance,
     pub requests: [SideRequest; 2],
     pub outcome: Option<Outcome>,
+    /// Training's turn cap: a game still going after this many turns is a
+    /// draw. None (Showdown) plays on.
+    pub turn_limit: Option<u32>,
     queue: Vec<Action>,
     mid_turn: bool,
     /// Queued faints, with the user of the move that caused each (if any).
@@ -166,6 +169,7 @@ impl Battle {
             mold_breaker: None,
             ssa_physical: false,
             mega_used: [false; 2],
+            turn_limit: None,
             effect_order: 0,
             benched: [Vec::new(), Vec::new()],
         };
@@ -1377,6 +1381,11 @@ impl Battle {
 
     fn end_turn(&mut self) -> Res<()> {
         self.turn += 1;
+        if self.turn_limit.is_some_and(|l| self.turn > l) {
+            self.outcome = Some(Outcome::Tie);
+            self.requests = [SideRequest::Wait, SideRequest::Wait];
+            return Ok(());
+        }
         for side in 0..2 {
             for p in 0..ACTIVE_PER_SIDE {
                 if !self.sides[side].slot_filled[p] {

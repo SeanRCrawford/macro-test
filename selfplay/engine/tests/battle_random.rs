@@ -140,3 +140,32 @@ fn random_games_terminate_sanely() {
         "only {finished}/300 games finished within 400 steps"
     );
 }
+
+/// With the training turn cap, every game ends by turn 30: a game still going
+/// is a draw.
+#[test]
+fn turn_limit_draws() {
+    let mut rng = Rng::new(2);
+    let mut draws = 0;
+    for game in 0..200u64 {
+        let teams = [random_team(&mut rng), random_team(&mut rng)];
+        let mut b = Battle::new(teams, Chance::seeded(game)).unwrap();
+        b.turn_limit = Some(30);
+        while !b.is_over() {
+            let mut choices = [None, None];
+            for side in 0..2 {
+                if matches!(b.requests[side], SideRequest::Wait) {
+                    continue;
+                }
+                let legal = b.legal_choices(side);
+                choices[side] = Some(legal[rng.below(legal.len() as u32) as usize].clone());
+            }
+            b.choose(choices).unwrap();
+            assert!(b.turn <= 31, "game {game} ran past the cap");
+        }
+        if b.outcome == Some(engine::battle::Outcome::Tie) && b.turn == 31 {
+            draws += 1;
+        }
+    }
+    assert!(draws > 0, "no game reached the cap");
+}
