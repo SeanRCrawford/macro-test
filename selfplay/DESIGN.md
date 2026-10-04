@@ -555,16 +555,29 @@ and chance outcomes. PPO stays as a cheap warm start for the policy prior.
 Order of work:
 
 1. Joint head and opponent head (done).
-2. Chance enumeration in the engine (4.4 designs it; the engine only samples
-   so far).
-3. One-turn matrix search in Rust: both sides' top-k joint actions from the
-   policy (each on its own view), each cell scored by the value network over
-   the cell's chance outcomes, solved for the equilibrium mix. Leaf
-   evaluations from many games are batched into one GPU call.
-4. Search-labelled self-play (value target: search value or result; policy
-   target: the equilibrium mix), at Nessie's size.
+2. Chance enumeration in the engine (done, 4.4).
+3. One-turn matrix search (done): `engine/src/search.rs` and
+   `python/selfplay/search.py`. Both sides' top-k joint actions come from
+   the policy, each on its own view. Every pair is played through its chance
+   outcomes (up to 16, the rest renormalised away), the value network scores
+   the leaves (the mean of side 0's estimate and minus side 1's), and
+   regret matching+ solves the k x k matrix. Leaves from all searched games
+   are evaluated in large batches.
+4. Search-labelled self-play (`python/selfplay/search_train.py`): both
+   sides play the search's mix; targets are each side's mix (policy), the
+   opponent's mix (opponent head) and half search value, half game result
+   (value). At Nessie's size on the GPU machine.
 5. Double oracle at the root and selective deepening, then the analysis
    board.
+
+Results so far, on this container's 4 CPU cores:
+
+- PPO with the joint head (run 6: 3 min imitation, then 30 min): 0.982 ±
+  0.006 against random, 0.588 ± 0.022 against greedy, after 25 updates;
+  runs 4-5 needed 77-157 updates for the same.
+- One-turn search (k = 8) with run 6's network against the same network's
+  raw policy: 0.695 ± 0.045 (410 games). About 590 leaves and 100 ms per
+  searched turn, solver gap under 1e-4.
 
 ## 5. Model and training (provisional; settled in phases 2–3)
 
