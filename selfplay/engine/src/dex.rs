@@ -85,6 +85,15 @@ pub struct Handlers {
     /// Each handler's sort keys, looked up once by name (the damage
     /// module's hot path).
     pub info: FastMap<String, HookInfo>,
+    /// `hook_bit` of every handler name: a quick "certainly not here".
+    pub mask: u64,
+}
+
+/// A handler name's bit in `Handlers::mask`.
+pub fn hook_bit(name: &str) -> u64 {
+    let mut h = FxHasher::default();
+    h.write(name.as_bytes());
+    1 << (h.finish() >> 58)
 }
 
 /// A handler's Order, Priority and SubOrder fields.
@@ -576,6 +585,7 @@ fn handlers_of(raw: &HashMap<String, Value>, nested: Option<&str>) -> Handlers {
             sub_order: h.hook(&format!("{n}SubOrder")),
         };
         h.info.insert(n.clone(), info);
+        h.mask |= hook_bit(n);
     }
     h
 }
@@ -1006,6 +1016,9 @@ impl Dex {
     }
 
     pub fn type_id(&self, name: &str) -> Option<TypeId> {
+        if let Some(&t) = self.type_index.get(name) {
+            return Some(t);
+        }
         // Type names are stored capitalised ("Fire"); accept any case.
         let mut c = name.to_ascii_lowercase();
         if let Some(f) = c.get_mut(0..1) {

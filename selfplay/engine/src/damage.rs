@@ -437,15 +437,20 @@ pub const TYPELESS: TypeId = TypeId(u8::MAX);
 
 /// An event's handler names: on, onAlly, onFoe, onAny and onSource
 /// (built once per event).
-fn event_hooks(event: &'static str) -> &'static [String; 5] {
+fn event_hooks(event: &'static str) -> &'static [(String, u64); 5] {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    type Hooks = &'static [(String, u64); 5];
     thread_local! {
-        static CACHE: RefCell<HashMap<&'static str, &'static [String; 5]>> = RefCell::new(HashMap::new());
+        static CACHE: RefCell<HashMap<&'static str, Hooks>> = RefCell::new(HashMap::new());
     }
     CACHE.with(|c| {
         *c.borrow_mut().entry(event).or_insert_with(|| {
-            Box::leak(Box::new(["", "Ally", "Foe", "Any", "Source"].map(|p| format!("on{p}{event}"))))
+            Box::leak(Box::new(["", "Ally", "Foe", "Any", "Source"].map(|p| {
+                let name = format!("on{p}{event}");
+                let bit = crate::dex::hook_bit(&name);
+                (name, bit)
+            })))
         })
     })
 }
@@ -760,11 +765,14 @@ impl<'a, 'b> Calc<'a, 'b> {
         out: &mut Vec<Ref>,
         effect: Effect,
         holder: Holder,
-        hook: &str,
+        hook: (&str, u64),
         am: &ActiveMove,
     ) {
         let h = self.handlers(effect);
-        let Some((name, info)) = h.info.get_key_value(hook) else {
+        if h.mask & hook.1 == 0 {
+            return;
+        }
+        let Some((name, info)) = h.info.get_key_value(hook.0) else {
             return;
         };
         if let Holder::Mon(i) = holder {
@@ -850,7 +858,7 @@ impl<'a, 'b> Calc<'a, 'b> {
     ) -> Vec<Ref> {
         let mut out = Vec::new();
         let names = event_hooks(event);
-        let [on, ally, foe, any, from_source] = names.each_ref().map(String::as_str);
+        let [on, ally, foe, any, from_source] = names.each_ref().map(|(n, b)| (n.as_str(), *b));
         if own_move {
             // The move's handler counts as held by the event target.
             self.push(
