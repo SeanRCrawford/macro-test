@@ -1442,7 +1442,7 @@ impl Battle {
                             pp: s.pp,
                             disabled: off || (s.imprisoned && !last_active),
                             hidden: !off && s.imprisoned && last_active,
-                            target: Dex::get().move_data(s.id).target,
+                            target: request_target(m, s.id),
                         }
                     })
                     .collect();
@@ -1509,6 +1509,16 @@ fn action_belongs_to(a: &Action, r: MonRef) -> bool {
         | ActionKind::RunSwitch { mon } => *mon == r,
         _ => false,
     }
+}
+
+/// The target a request shows: Curse's nonGhostTarget is self.
+fn request_target(m: &Mon, id: crate::dex::MoveId) -> crate::dex::MoveTarget {
+    let dex = Dex::get();
+    let data = dex.move_data(id);
+    if data.id == "curse" && !m.has_type(dex.type_id("Ghost").expect("Ghost")) {
+        return crate::dex::MoveTarget::SelfTarget;
+    }
+    data.target
 }
 
 /// Showdown's comparePriority for queue actions.

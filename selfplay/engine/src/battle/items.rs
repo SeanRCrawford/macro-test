@@ -199,9 +199,8 @@ impl Battle {
                 let busted = dex.species_id("Mimikyu-Busted").expect("Mimikyu-Busted");
                 let m = self.mon_mut(r);
                 m.disguise_busted = false;
-                m.species = busted;
+                m.set_species(busted);
                 m.base_species = busted;
-                m.set_types(dex.species(busted).types);
                 let amount = (self.mon(r).max_hp() / 8) as u32;
                 self.effect_damage(r, amount);
             }

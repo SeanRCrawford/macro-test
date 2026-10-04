@@ -525,9 +525,7 @@ impl Battle {
                     _ => return,
                 };
                 let id = dex.species_id(to).expect("Morpeko forme");
-                let m = self.mon_mut(r);
-                m.species = id;
-                m.set_types(dex.species(id).types);
+                self.mon_mut(r).set_species(id);
             }
             _ => {}
         }
@@ -1054,6 +1052,21 @@ impl Battle {
                         sub_order: 0,
                     });
                 }
+                // findPokemonEventHandlers' order (it decides speed ties):
+                // status, volatiles, ability, item; then the field's.
+                for v in &m.volatiles.0 {
+                    if v.duration.is_some()
+                        || matches!(v.id, VolatileId::LeechSeed | VolatileId::SaltCure | VolatileId::Curse)
+                    {
+                        handlers.push(Residual {
+                            mon: Some(r),
+                            what: ResidualKind::Volatile(v.id),
+                            order: v.id.residual_order().unwrap_or(NO_HANDLER_ORDER),
+                            speed: m.speed,
+                            sub_order: 2,
+                        });
+                    }
+                }
                 if self.ability_is(r, "speedboost") {
                     handlers.push(Residual {
                         mon: Some(r),
@@ -1077,15 +1090,6 @@ impl Battle {
                         sub_order,
                     });
                 }
-                if self.item_of(r) == Some("whiteherb") {
-                    handlers.push(Residual {
-                        mon: Some(r),
-                        what: ResidualKind::WhiteHerb,
-                        order: 29,
-                        speed: m.speed,
-                        sub_order: 8,
-                    });
-                }
                 if matches!(self.ability_id(r), "healer" | "hydration" | "shedskin") {
                     handlers.push(Residual {
                         mon: Some(r),
@@ -1093,6 +1097,15 @@ impl Battle {
                         order: 5,
                         speed: m.speed,
                         sub_order: 3,
+                    });
+                }
+                if self.item_of(r) == Some("whiteherb") {
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::WhiteHerb,
+                        order: 29,
+                        speed: m.speed,
+                        sub_order: 8,
                     });
                 }
                 if self.item_of(r) == Some("leftovers") {
@@ -1103,19 +1116,6 @@ impl Battle {
                         speed: m.speed,
                         sub_order: 4,
                     });
-                }
-                for v in &m.volatiles.0 {
-                    if v.duration.is_some()
-                        || matches!(v.id, VolatileId::LeechSeed | VolatileId::SaltCure)
-                    {
-                        handlers.push(Residual {
-                            mon: Some(r),
-                            what: ResidualKind::Volatile(v.id),
-                            order: v.id.residual_order().unwrap_or(NO_HANDLER_ORDER),
-                            speed: m.speed,
-                            sub_order: 2,
-                        });
-                    }
                 }
                 if self.field.terrain == crate::damage::Terrain::Grassy {
                     handlers.push(Residual {
@@ -1210,6 +1210,10 @@ impl Battle {
                     self.leftovers(h.mon);
                 }
                 ResidualKind::Volatile(VolatileId::LeechSeed) => self.leech_seed(h.mon),
+                ResidualKind::Volatile(VolatileId::Curse) => {
+                    let amount = (self.mon(h.mon).max_hp() / 4) as u32;
+                    self.effect_damage(h.mon, amount);
+                }
                 ResidualKind::Volatile(VolatileId::SaltCure) => {
                     let dex = Dex::get();
                     let m = self.mon(h.mon);

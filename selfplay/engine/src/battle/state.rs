@@ -97,6 +97,8 @@ pub enum VolatileId {
     Stockpile,
     /// About to use Chilly Reception (its priorityChargeCallback).
     ChillyReception,
+    /// A Ghost's Curse: a quarter of max HP each turn.
+    Curse,
 }
 
 impl VolatileId {
@@ -139,6 +141,7 @@ impl VolatileId {
             "allyswitch" => VolatileId::AllySwitch,
             "stockpile" => VolatileId::Stockpile,
             "chillyreception" => VolatileId::ChillyReception,
+            "curse" => VolatileId::Curse,
             _ => return None,
         })
     }
@@ -185,6 +188,7 @@ impl VolatileId {
             VolatileId::AllySwitch => "allyswitch",
             VolatileId::Stockpile => "stockpile",
             VolatileId::ChillyReception => "chillyreception",
+            VolatileId::Curse => "curse",
         }
     }
 
@@ -201,6 +205,7 @@ impl VolatileId {
             VolatileId::LeechSeed => Some(8),
             VolatileId::HealBlock => Some(20),
             VolatileId::PartiallyTrapped | VolatileId::SaltCure => Some(13),
+            VolatileId::Curse => Some(12),
             VolatileId::Roost => Some(25),
             _ => None,
         }
@@ -231,6 +236,7 @@ impl VolatileId {
             | VolatileId::Minimize
             | VolatileId::DestinyBond
             | VolatileId::Stockpile
+            | VolatileId::Curse
             | VolatileId::Charge => None,
             VolatileId::AllySwitch => Some(2),
             // The charging move's condition: Fly, Dig and the like last two
@@ -498,6 +504,14 @@ impl Mon {
 
     /// `setType`: the new types; while roosting, Flying is still left out
     /// (roost's onType filters the current types).
+    /// `setSpecies`: the forme's types and stats (HP stays).
+    pub fn set_species(&mut self, id: SpeciesId) {
+        self.species = id;
+        self.set_types(Dex::get().species(id).types);
+        let s = compute_stats(id, self.set.nature, self.set.points);
+        self.stats = [self.stats[0], s[1], s[2], s[3], s[4], s[5]];
+    }
+
     pub fn set_types(&mut self, types: [TypeId; 2]) {
         self.types = types;
         if self.roost_types.is_some() {

@@ -733,6 +733,16 @@ impl Battle {
             .unwrap_or(user);
         let ctx = self.damage_ctx(&view, user, defender, false, false);
         let mut am = damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
+        // Curse's onModifyMove: on itself unless a Ghost; a Ghost aiming at
+        // nothing or an ally curses a random foe.
+        if data.id == "curse" {
+            let ghost = Dex::get().type_id("Ghost").expect("Ghost");
+            if !self.mon(user).has_type(ghost) {
+                am.target = MoveTarget::SelfTarget;
+            } else if target.is_none_or(|t| t != user && t.side == user.side) {
+                am.target = MoveTarget::RandomNormal;
+            }
+        }
         // Shell Side Arm's onModifyMove: physical (and contact) if that
         // would do more, a coin flip on a tie.
         if data.id == "shellsidearm" {
@@ -2650,6 +2660,30 @@ impl Battle {
                 m.set_types([psychic, psychic]);
                 HitRes::Undefined
             }
+            "curse" => {
+                let ghost = Dex::get().type_id("Ghost").expect("Ghost");
+                if !self.mon(user).has_type(ghost) {
+                    return HitRes::Bool(self.boost(user, &[(4, -1), (0, 1), (1, 1)], Some(user)).truthy());
+                }
+                // onTryHit: not twice.
+                if self.mon(t).volatiles.has(VolatileId::Curse) {
+                    return HitRes::Bool(false);
+                }
+                // directDamage: half the user's max HP, no Magic Guard.
+                let cost = (self.mon(user).max_hp() / 2) as u32;
+                self.apply_damage(user, cost);
+                let t = if t.side == user.side {
+                    match self.random_target(user, MoveTarget::RandomNormal) {
+                        Some(r) if r.side != user.side => r,
+                        _ => return HitRes::Bool(false),
+                    }
+                } else {
+                    t
+                };
+                self.mon_mut(t).volatiles.remove(VolatileId::Curse);
+                self.add_volatile(t, VolatileId::Curse);
+                HitRes::Undefined
+            }
             // Instruct: the target uses its last move again, right now.
             "instruct" => {
                 let m = self.mon(t);
@@ -2748,7 +2782,13 @@ impl Battle {
             ratio = ratio.max(5);
         }
         let crit_ratio = ratio.clamp(0, 4) as usize;
+        // getDamage returns OHKO, damageCallback and fixed damage before
+        // the crit roll.
+        let fixed = mv.data.ohko
+            || mv.data.fixed_damage.is_some()
+            || mv.data.handlers.has("damageCallback");
         let crit = match mv.data.will_crit {
+            _ if fixed => false,
             Some(c) => c,
             None => crit_ratio > 0 && self.chance.chance(1, [0, 24, 8, 2, 1][crit_ratio]),
         };

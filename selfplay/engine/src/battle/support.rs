@@ -449,6 +449,16 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("ceaselessedge", &["onAfterHit", "onAfterSubDamage"]),
     ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
     ("endeavor", &["damageCallback", "onTryImmunity"]),
+    (
+        "curse",
+        &[
+            "condition.onResidual",
+            "condition.onStart",
+            "onHit",
+            "onModifyMove",
+            "onTryHit",
+        ],
+    ),
     ("instruct", &["onHit"]),
     ("revivalblessing", &["onTryHit"]),
     ("aurawheel", &["onModifyType", "onTry"]),
@@ -715,6 +725,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         || matches!(
             m.id.as_str(),
             "throatchop"
+                | "curse"
                 | "revivalblessing"
                 | "allyswitch"
                 | "glaiverush"

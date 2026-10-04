@@ -973,6 +973,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                 "struggle" => am.move_type = TYPELESS,
                 // The battle picks the category (it may flip a coin).
                 "shellsidearm" => {}
+                // The battle picks Curse's target.
+                "curse" => {}
                 other => return unsupported(format!("move {other}.onModifyMove")),
             }
         }
