@@ -588,6 +588,10 @@ impl Battle {
         let mut hs: Vec<(MonRef, MonRef, H, u64, i32, u8)> = Vec::new();
         const NONE: u64 = 4_294_967_296;
         for &t in damaged {
+            // Illusion's onDamagingHit: the disguise breaks.
+            if self.ability_is(t, "illusion") {
+                self.mon_mut(t).illusion = false;
+            }
             let speed = self.mon(t).speed;
             if self.mon(t).status == crate::damage::Status::Freeze {
                 hs.push((t, t, H::Thaw, NONE, speed, 0));

@@ -143,6 +143,7 @@ const ABILITIES: &[&str] = &[
     "purifyingsalt",
     "pickpocket",
     "berserk",
+    "imposter",
     "hungerswitch",
     "harvest",
     "moody",
@@ -449,6 +450,7 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("ceaselessedge", &["onAfterHit", "onAfterSubDamage"]),
     ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
     ("endeavor", &["damageCallback", "onTryImmunity"]),
+    ("transform", &["onHit"]),
     (
         "curse",
         &[
@@ -464,7 +466,12 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("aurawheel", &["onModifyType", "onTry"]),
     (
         "allyswitch",
-        &["condition.onRestart", "condition.onStart", "onHit", "onPrepareHit"],
+        &[
+            "condition.onRestart",
+            "condition.onStart",
+            "onHit",
+            "onPrepareHit",
+        ],
     ),
     (
         "destinybond",
@@ -721,7 +728,11 @@ pub fn move_supported(m: &MoveData) -> bool {
             .and_then(|e| e.volatile_status.as_deref())
             .is_some_and(|v| VOLATILES.contains(&v))
         || field_move
-        || m.secondaries.iter().any(|s| s.volatile_status.as_deref().is_some_and(|v| VOLATILES.contains(&v)))
+        || m.secondaries.iter().any(|s| {
+            s.volatile_status
+                .as_deref()
+                .is_some_and(|v| VOLATILES.contains(&v))
+        })
         || matches!(
             m.id.as_str(),
             "throatchop"

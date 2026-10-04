@@ -530,7 +530,8 @@ impl Battle {
                 // Avalanche: who damaged it this turn, by where they stand.
                 for a in m.attacked_by.iter().filter(|a| a.this_turn && a.damage > 0) {
                     if let Some(p) = (0..ACTIVE_PER_SIDE).find(|&p| {
-                        self.sides[a.source.side].slot_filled[p] && self.mon_ref(a.source.side, p) == a.source
+                        self.sides[a.source.side].slot_filled[p]
+                            && self.mon_ref(a.source.side, p) == a.source
                     }) {
                         c.damaged_by |= 1 << (a.source.side * 2 + p);
                     }
@@ -732,7 +733,8 @@ impl Battle {
             .or_else(|| self.foes(user).first().copied())
             .unwrap_or(user);
         let ctx = self.damage_ctx(&view, user, defender, false, false);
-        let mut am = damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
+        let mut am =
+            damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
         // Curse's onModifyMove: on itself unless a Ghost; a Ghost aiming at
         // nothing or an ally curses a random foe.
         if data.id == "curse" {
@@ -751,8 +753,14 @@ impl Battle {
                 let (u, d) = (self.mon(user), self.mon(defender));
                 let base = 2 * 50 / 5 + 2;
                 let calc = |a: u32, b: u32| base * 90 * a / b / 50;
-                let physical = calc(super::boosted(u.stats[1], u.boosts[0]), super::boosted(d.stats[2], d.boosts[1]));
-                let special = calc(super::boosted(u.stats[3], u.boosts[2]), super::boosted(d.stats[4], d.boosts[3]));
+                let physical = calc(
+                    super::boosted(u.stats[1], u.boosts[0]),
+                    super::boosted(d.stats[2], d.boosts[1]),
+                );
+                let special = calc(
+                    super::boosted(u.stats[3], u.boosts[2]),
+                    super::boosted(d.stats[4], d.boosts[3]),
+                );
                 if physical > special || (physical == special && self.chance.chance(1, 2)) {
                     am.category = Category::Physical;
                     am.contact = true;
@@ -765,6 +773,7 @@ impl Battle {
         // Stance Change (onModifyMove priority 1): Blade to attack, Shield
         // for King's Shield (not permanent).
         if self.ability_is(user, "stancechange")
+            && !self.mon(user).transformed
             && Dex::get().species(self.mon(user).species).base_species == "Aegislash"
         {
             let forme = match (data.category, data.id.as_str()) {
@@ -955,15 +964,20 @@ impl Battle {
             }
             // Magician (ability, before the items): steal from the fastest
             // target hit.
+            // The event's handlers are collected first: an item Magician
+            // just stole doesn't join in.
+            let held = self.mon(user).item.is_some();
             if self.ability_is(user, "magician") {
                 self.magician(user, &mv, data);
             }
-            self.after_move_secondary_self(
-                user,
-                last_target,
-                data.category == Category::Status,
-                mv.total_damage,
-            );
+            if held {
+                self.after_move_secondary_self(
+                    user,
+                    last_target,
+                    data.category == Category::Status,
+                    mv.total_damage,
+                );
+            }
             if user != last_target && data.category != Category::Status {
                 self.emergency_exit(user, before);
             }
@@ -1357,8 +1371,7 @@ impl Battle {
 
         // HitProtect: Unseen Fist's contact moves get through Protect and
         // friends (and Wide Guard), noted for the damage.
-        if data.flags.has("protect") && self.contact(data) && self.hits_through_protect(user)
-        {
+        if data.flags.has("protect") && self.contact(data) && self.hits_through_protect(user) {
             for &t in &targets {
                 let v = &self.mon(t).volatiles;
                 let shielded = v.has(VolatileId::Protect)
@@ -1808,9 +1821,17 @@ impl Battle {
             if let Some(t) = *t {
                 if t != user {
                     // gotAttacked, with the last hit's damage.
-                    let damage = if let HitRes::Num(d) = move_damage[i] { d } else { 0 };
+                    let damage = if let HitRes::Num(d) = move_damage[i] {
+                        d
+                    } else {
+                        0
+                    };
                     let m = self.mon_mut(t);
-                    m.attacked_by.push(Attacker { source: user, damage, this_turn: true });
+                    m.attacked_by.push(Attacker {
+                        source: user,
+                        damage,
+                        this_turn: true,
+                    });
                     if matches!(move_damage[i], HitRes::Num(_)) {
                         m.times_attacked = m.times_attacked.saturating_add(hit - 1);
                     }
@@ -2076,9 +2097,7 @@ impl Battle {
             }
             // Berserk's onDamage: a single-hit attack holds healing berries
             // until its AfterMoveSecondary.
-            self.mon_mut(t).berserk_checked = mv.data.multihit.is_some()
-                || mv.am.parental_bond
-               ;
+            self.mon_mut(t).berserk_checked = mv.data.multihit.is_some() || mv.am.parental_bond;
             // Disguise can bring it to 0 (still a hit for DamagingHit).
             let d = if d == 0 {
                 0
@@ -2663,7 +2682,10 @@ impl Battle {
             "curse" => {
                 let ghost = Dex::get().type_id("Ghost").expect("Ghost");
                 if !self.mon(user).has_type(ghost) {
-                    return HitRes::Bool(self.boost(user, &[(4, -1), (0, 1), (1, 1)], Some(user)).truthy());
+                    return HitRes::Bool(
+                        self.boost(user, &[(4, -1), (0, 1), (1, 1)], Some(user))
+                            .truthy(),
+                    );
                 }
                 // onTryHit: not twice.
                 if self.mon(t).volatiles.has(VolatileId::Curse) {
@@ -2684,6 +2706,7 @@ impl Battle {
                 self.add_volatile(t, VolatileId::Curse);
                 HitRes::Undefined
             }
+            "transform" => HitRes::Bool(self.transform_into(user, t)),
             // Instruct: the target uses its last move again, right now.
             "instruct" => {
                 let m = self.mon(t);
@@ -2692,13 +2715,18 @@ impl Battle {
                 };
                 let data = Dex::get().move_data(last);
                 let slot = m.move_slot(last);
-                if ["failinstruct", "charge", "recharge"].iter().any(|f| data.flags.has(f))
+                if ["failinstruct", "charge", "recharge"]
+                    .iter()
+                    .any(|f| data.flags.has(f))
                     || slot.is_some_and(|s| m.moves[s].pp == 0)
                 {
                     return HitRes::Bool(false);
                 }
                 let loc = m.last_move_target_loc;
-                if self.prioritize_move(t, slot.unwrap_or(usize::MAX), loc).is_err() {
+                if self
+                    .prioritize_move(t, slot.unwrap_or(usize::MAX), loc)
+                    .is_err()
+                {
                     return HitRes::Bool(false);
                 }
                 HitRes::Undefined
@@ -2778,7 +2806,9 @@ impl Battle {
             _ => {}
         }
         // Merciless: poisoned targets always take critical hits.
-        if self.ability_is(user, "merciless") && matches!(self.mon(t).status, Status::Poison | Status::Toxic) {
+        if self.ability_is(user, "merciless")
+            && matches!(self.mon(t).status, Status::Poison | Status::Toxic)
+        {
             ratio = ratio.max(5);
         }
         let crit_ratio = ratio.clamp(0, 4) as usize;

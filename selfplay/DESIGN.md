@@ -365,10 +365,16 @@ formula adds stat points after the nature; Showdown adds them before.
   type-resist berries, Rocky Helmet, White Herb. 439 moves supported; by Reg
   M-C usage, 91% of move slots, 99% of items and 72% of abilities. Checked on
   3,000 replayed battles (46,972 decisions; 300 committed).
-  Next by usage: Hurricane (confusion), Electro Shot, Perish Song, Knock Off,
-  Stomping Tantrum, Solar Beam; No Guard, Stamina, Shadow Tag, Fairy Aura,
-  Rock Head, Flame Body, Rough Skin, Flash Fire, Swift Swim, Contrary; Eject
-  Button, Wide Lens, Mental Herb.
+  Later batches brought the long tail in: 650 moves, 201 abilities and every
+  pool item are supported. By Reg M-C usage, 0.28% of team slots still hold
+  an unsupported move or ability: Dragon Darts, Gravity, Octolock, Cud Chew,
+  Round, Pollen Puff, Smack Down, Mirror Coat and smaller ones. Each check
+  replays 6,000 battles, plus 900 led by the new feature's users
+  (`FORCE=ids` in `gen_fixtures.js`).
+  Scope from here: add a move or ability only when a team paste we're
+  given uses it, or to fix a deviation from Showdown. Unsupported features
+  can't produce wrong results: the generator leaves them out and the engine
+  refuses sets that use them.
 - [x] 1f. Turn-level differential tests against Showdown: random battles
   between supported teams, Showdown's PRNG replaced by the threshold policy
   `Chance::Policy` mirrors (`tools/showdown/gen_fixtures.js`,

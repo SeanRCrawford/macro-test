@@ -26,6 +26,8 @@ pub(super) enum StartEffect {
     SupersweetSyrup,
     /// Clears the allies' stat changes.
     CuriousMedicine,
+    /// Transforms into the foe opposite (onSwitchIn).
+    Imposter,
 }
 
 impl StartEffect {
@@ -48,6 +50,7 @@ pub(super) fn start_effect(ability: &str) -> Option<StartEffect> {
         "supremeoverlord" => StartEffect::SupremeOverlord,
         "supersweetsyrup" => StartEffect::SupersweetSyrup,
         "curiousmedicine" => StartEffect::CuriousMedicine,
+        "imposter" => StartEffect::Imposter,
         "drought" => StartEffect::Weather(Weather::Sun),
         "drizzle" => StartEffect::Weather(Weather::Rain),
         "sandstream" => StartEffect::Weather(Weather::Sand),
@@ -177,6 +180,12 @@ impl Battle {
                 for a in allies {
                     let amount = (self.mon(a).max_hp() / 4) as u32;
                     self.heal(a, amount);
+                }
+            }
+            StartEffect::Imposter => {
+                let pos = self.mon(r).position;
+                if let Some(t) = self.occupant(1 - r.side, ACTIVE_PER_SIDE - 1 - pos) {
+                    self.transform_into(r, t);
                 }
             }
             StartEffect::CuriousMedicine => {
@@ -497,6 +506,8 @@ impl Battle {
     /// volatiles), then the new one.
     pub(super) fn set_ability(&mut self, r: MonRef, ability: crate::dex::AbilityId) {
         let m = self.mon_mut(r);
+        // The old ability's End: Illusion's disguise drops.
+        m.illusion = false;
         match Dex::get().ability(m.ability).id.as_str() {
             "unburden" => {
                 m.volatiles.remove(super::state::VolatileId::Unburden);
@@ -510,6 +521,77 @@ impl Battle {
         // A fresh abilityState.
         m.protean_used = false;
         m.fallen = 0;
+    }
+
+    /// `transformInto`: become a copy of `t` (species, types, stats but HP,
+    /// moves at 5 PP, boosts, crit volatiles, ability).
+    pub(super) fn transform_into(&mut self, r: MonRef, t: MonRef) -> bool {
+        use super::state::{MoveSlot, VolatileId};
+        let target = self.mon(t).clone();
+        if target.fainted
+            || target.illusion
+            || self.mon(r).illusion
+            || target.volatiles.has(VolatileId::Substitute)
+            || target.transformed
+            || self.mon(r).transformed
+        {
+            return false;
+        }
+        let dex = Dex::get();
+        let m = self.mon_mut(r);
+        m.species = target.species;
+        m.set_types(target.roost_types.unwrap_or(target.types));
+        m.stats = [
+            m.stats[0],
+            target.stats[1],
+            target.stats[2],
+            target.stats[3],
+            target.stats[4],
+            target.stats[5],
+        ];
+        m.transformed = true;
+        m.times_attacked = target.times_attacked;
+        let moves = target
+            .moves
+            .iter()
+            .map(|s| {
+                let pp = dex.move_data(s.id).pp.min(5);
+                MoveSlot {
+                    id: s.id,
+                    pp,
+                    max_pp: pp,
+                    disabled: false,
+                    imprisoned: false,
+                    used: false,
+                }
+            })
+            .collect();
+        let own = std::mem::replace(&mut m.moves, moves);
+        if m.base_moves.is_none() {
+            m.base_moves = Some(own);
+        }
+        m.boosts = target.boosts;
+        for v in [VolatileId::DragonCheer, VolatileId::FocusEnergy] {
+            m.volatiles.remove(v);
+        }
+        for v in [VolatileId::DragonCheer, VolatileId::FocusEnergy] {
+            if let Some(tv) = target.volatiles.0.iter().find(|x| x.id == v) {
+                let counter = tv.counter;
+                self.add_volatile(r, v);
+                if let Some(x) = self.mon_mut(r).volatiles.get_mut(v) {
+                    x.counter = counter;
+                }
+            }
+        }
+        // setAbility(isTransform): the copied ability starts if it's new.
+        let old = self.mon(r).ability;
+        self.set_ability(r, target.ability);
+        if old != target.ability && self.mon(r).hp > 0 {
+            if let Some(e) = start_effect(&dex.ability(target.ability).id) {
+                self.ability_start(r, e);
+            }
+        }
+        true
     }
 
     /// `adjacentFoes()`: in doubles, every foe with HP.

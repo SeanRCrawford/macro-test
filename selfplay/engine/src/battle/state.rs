@@ -359,6 +359,12 @@ pub struct Mon {
     pub stats_lowered_this_turn: bool,
     /// The types to restore when Roost ends.
     pub roost_types: Option<[TypeId; 2]>,
+    /// Transformed: `base_moves` holds its own move slots
+    /// (baseMoveSlots) until it leaves the field.
+    pub transformed: bool,
+    pub base_moves: Option<Vec<MoveSlot>>,
+    /// Illusion is disguising it (`pokemon.illusion` is set).
+    pub illusion: bool,
     /// atk, def, spa, spd, spe, accuracy, evasion.
     pub boosts: [i8; 7],
     pub ability: AbilityId,
@@ -448,6 +454,9 @@ impl Mon {
             status: Status::None,
             status_state: StatusState::default(),
             roost_types: None,
+            transformed: false,
+            base_moves: None,
+            illusion: false,
             trace_seek: false,
             protean_used: false,
             fallen: 0,
@@ -540,6 +549,10 @@ impl Mon {
     /// `clearVolatile`: what leaving the field (or fainting) resets.
     pub fn clear_volatile(&mut self) {
         self.end_roost();
+        self.transformed = false;
+        if let Some(moves) = self.base_moves.take() {
+            self.moves = moves;
+        }
         self.boosts = [0; 7];
         self.volatiles = Volatiles::default();
         self.last_move = None;

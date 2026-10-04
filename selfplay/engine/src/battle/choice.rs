@@ -361,7 +361,9 @@ impl Battle {
                         }
                         passes -= 1;
                     }
-                    _ if self.sides[side].revival_blessing[i] => switches = switches.saturating_sub(1),
+                    _ if self.sides[side].revival_blessing[i] => {
+                        switches = switches.saturating_sub(1)
+                    }
                     _ => {
                         if switches == 0 {
                             return false;

@@ -357,7 +357,11 @@ impl Battle {
                     0.0,
                 )?;
                 let id = moves::move_for_slot(self.mon(mon), slot);
-                if Dex::get().move_data(id).handlers.has("priorityChargeCallback") {
+                if Dex::get()
+                    .move_data(id)
+                    .handlers
+                    .has("priorityChargeCallback")
+                {
                     self.add_action(ActionKind::PriorityCharge { mon }, 107, 0.0)?;
                 }
             }
@@ -368,7 +372,15 @@ impl Battle {
     /// `queue.prioritizeAction(resolveAction(move))`: the move goes first
     /// (order 3) (Instruct).
     pub(super) fn prioritize_move(&mut self, mon: MonRef, slot: usize, target_loc: i8) -> Res<()> {
-        self.add_action(ActionKind::Move { mon, slot, target_loc }, 3, 0.0)?;
+        self.add_action(
+            ActionKind::Move {
+                mon,
+                slot,
+                target_loc,
+            },
+            3,
+            0.0,
+        )?;
         let action = self.queue.pop().expect("just added");
         self.queue.insert(0, action);
         Ok(())
@@ -432,7 +444,11 @@ impl Battle {
         let id = moves::move_for_slot(self.mon(mon), slot);
         let attack = Dex::get().move_data(id).category != crate::dex::Category::Status;
         // Stall (priority 0) moves last among equals.
-        let base = if self.ability_is(mon, "stall") { -0.1 } else { 0.0 };
+        let base = if self.ability_is(mon, "stall") {
+            -0.1
+        } else {
+            0.0
+        };
         if self.ability_is(mon, "quickdraw") && attack && self.chance.chance(3, 10) {
             return 0.1;
         }
@@ -559,8 +575,14 @@ impl Battle {
     /// The ability's id as events see it: "" while a Mold Breaker move
     /// suppresses it (`suppressingAbility`).
     pub(crate) fn ability_id(&self, r: MonRef) -> &'static str {
-        let ab = Dex::get().ability(self.mon(r).ability);
+        let m = self.mon(r);
+        let ab = Dex::get().ability(m.ability);
         if ab.breakable && self.mold_breaker.is_some_and(|u| u != r) {
+            return "";
+        }
+        // ignoringAbility: a notransform ability does nothing once its
+        // holder has transformed.
+        if m.transformed && ab.flags.iter().any(|f| f == "notransform") {
             return "";
         }
         ab.id.as_str()
@@ -866,7 +888,10 @@ impl Battle {
                 // (queued last).
                 if self.mon(target).position < ACTIVE_PER_SIDE {
                     let mut action = Action {
-                        kind: ActionKind::Switch { mon: target, target },
+                        kind: ActionKind::Switch {
+                            mon: target,
+                            target,
+                        },
                         order: 3,
                         priority: 0.0,
                         speed: 1,
@@ -1088,7 +1113,10 @@ impl Battle {
         }
         let i = bench[self.chance.sample(bench.len())];
         // DragOut: Guard Dog and Suction Cups stay.
-        if self.occupant(side, pos).is_some_and(|o| self.resists_drag(o)) {
+        if self
+            .occupant(side, pos)
+            .is_some_and(|o| self.resists_drag(o))
+        {
             return Ok(());
         }
         let r = self.mon_ref(side, i);
@@ -1178,7 +1206,13 @@ impl Battle {
             self.sides[side].pokemon[new_pos].position = new_pos;
         }
         self.sides[side].slot_filled[pos] = true;
+        // Illusion's onBeforeSwitchIn: disguised while a Pokemon later in
+        // the list is still standing.
+        let later_standing = self.sides[side].pokemon[pos + 1..]
+            .iter()
+            .any(|p| !p.fainted);
         let m = &mut self.sides[side].pokemon[pos];
+        m.illusion = Dex::get().ability(m.ability).id == "illusion" && later_standing;
         m.position = pos;
         m.is_active = true;
         m.active_turns = 0;
@@ -1330,7 +1364,10 @@ impl Battle {
                 let attackers = attackers
                     .into_iter()
                     .filter(|a| self.mon(a.source).is_active)
-                    .map(|a| Attacker { this_turn: false, ..a })
+                    .map(|a| Attacker {
+                        this_turn: false,
+                        ..a
+                    })
                     .collect();
                 self.mon_mut(r).attacked_by = attackers;
                 let locked = self.choice_locked_move(r);

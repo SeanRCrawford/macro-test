@@ -485,9 +485,14 @@ impl Battle {
         match self.ability_id(r) {
             // Harvest: in sun, or half the time, the last berry grows back.
             "harvest" => {
-                if self.effective_weather() == crate::damage::Weather::Sun || self.chance.chance(1, 2) {
+                if self.effective_weather() == crate::damage::Weather::Sun
+                    || self.chance.chance(1, 2)
+                {
                     let m = self.mon(r);
-                    if let Some(last) = m.last_item.filter(|&i| m.hp > 0 && m.item.is_none() && Dex::get().item(i).is_berry) {
+                    if let Some(last) = m
+                        .last_item
+                        .filter(|&i| m.hp > 0 && m.item.is_none() && Dex::get().item(i).is_berry)
+                    {
                         let m = self.mon_mut(r);
                         m.item = Some(last);
                         m.last_item = None;
@@ -500,7 +505,9 @@ impl Battle {
                 let boosts = self.mon(r).boosts;
                 let up: Vec<usize> = (0..5).filter(|&i| boosts[i] < 6).collect();
                 let plus = (!up.is_empty()).then(|| up[self.chance.sample(up.len())]);
-                let down: Vec<usize> = (0..5).filter(|&i| boosts[i] > -6 && Some(i) != plus).collect();
+                let down: Vec<usize> = (0..5)
+                    .filter(|&i| boosts[i] > -6 && Some(i) != plus)
+                    .collect();
                 let minus = (!down.is_empty()).then(|| down[self.chance.sample(down.len())]);
                 let mut b: Vec<(usize, i8)> = Vec::new();
                 // The boost object lists stats in order.
@@ -1056,7 +1063,10 @@ impl Battle {
                 // status, volatiles, ability, item; then the field's.
                 for v in &m.volatiles.0 {
                     if v.duration.is_some()
-                        || matches!(v.id, VolatileId::LeechSeed | VolatileId::SaltCure | VolatileId::Curse)
+                        || matches!(
+                            v.id,
+                            VolatileId::LeechSeed | VolatileId::SaltCure | VolatileId::Curse
+                        )
                     {
                         handlers.push(Residual {
                             mon: Some(r),
@@ -1288,7 +1298,9 @@ impl Battle {
                         }
                     };
                     // Poison Heal's onDamage (priority 1): poison heals instead.
-                    if matches!(status, Status::Poison | Status::Toxic) && self.ability_is(h.mon, "poisonheal") {
+                    if matches!(status, Status::Poison | Status::Toxic)
+                        && self.ability_is(h.mon, "poisonheal")
+                    {
                         let heal = (self.mon(h.mon).max_hp() / 8) as u32;
                         self.heal(h.mon, heal);
                         continue;
