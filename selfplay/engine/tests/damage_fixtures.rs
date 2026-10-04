@@ -111,6 +111,7 @@ fn combatant(m: &Mon) -> Combatant {
         glaive_rush: m.volatiles.iter().any(|v| v == "glaiverush"),
         gem: m.volatiles.iter().any(|v| v == "gem"),
         semi_invulnerable: None,
+        minimize: false,
     };
     for v in &m.volatiles {
         // choicelock: added by Choice Scarf's ModifyMove; no effect on damage.
