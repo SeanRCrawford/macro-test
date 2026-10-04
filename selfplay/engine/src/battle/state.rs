@@ -374,6 +374,8 @@ pub struct Mon {
     pub base_moves: Option<Vec<MoveSlot>>,
     /// Illusion is disguising it (`pokemon.illusion` is set).
     pub illusion: bool,
+    /// Has been on the field (the opponent has seen it).
+    pub revealed: bool,
     /// A Round ally/foe moved this Round up (`sourceEffect` round): double
     /// power.
     pub round_boost: bool,
@@ -469,6 +471,7 @@ impl Mon {
             transformed: false,
             base_moves: None,
             illusion: false,
+            revealed: false,
             round_boost: false,
             trace_seek: false,
             protean_used: false,

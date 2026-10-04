@@ -130,13 +130,22 @@ mod tests {
     #[test]
     fn placements_from_names() {
         let p = Placement::from_name;
-        assert_eq!(p("vgcluca's Maddo's Cup #12 Champion Team"), Placement::Champion);
+        assert_eq!(
+            p("vgcluca's Maddo's Cup #12 Champion Team"),
+            Placement::Champion
+        );
         assert_eq!(
             p("Jannik's ValkrixVGC Pokemon Champions League #03 Champion Team"),
             Placement::Champion
         );
-        assert_eq!(p("ApronVGC's Frankfurt Regional 2027 Runner Up Team"), Placement::RunnerUp);
-        assert_eq!(p("Dorian Kang's Baltimore Regional 2027 Top 16 Team"), Placement::Top(16));
+        assert_eq!(
+            p("ApronVGC's Frankfurt Regional 2027 Runner Up Team"),
+            Placement::RunnerUp
+        );
+        assert_eq!(
+            p("Dorian Kang's Baltimore Regional 2027 Top 16 Team"),
+            Placement::Top(16)
+        );
         assert_eq!(p("Elm's Baxcalibur Floette Team"), Placement::Unplaced);
         assert_eq!(p("Pokemon Champions showcase"), Placement::Unplaced);
     }

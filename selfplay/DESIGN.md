@@ -189,9 +189,9 @@ Each phase has an exit test that has to pass before the next phase starts.
 side per battle), Champions stat points (not EVs), Open Team Sheets on the
 Showdown ladder. Stats follow Showdown's formula (section 4.8). Species and
 item clauses are checked
-when a team is built. Training games are capped at a fixed number of turns and
-count as a draw (reward 0) if they reach it. Showdown has no such cap, but it
-stops games that would otherwise never end.
+when a team is built. Training games are capped at 30 turns
+(`Battle::turn_limit`) and count as a draw (reward 0) if they reach it.
+Showdown has no such cap, but it stops games that would otherwise never end.
 
 ### 4.2 Decision points
 
@@ -381,7 +381,14 @@ formula adds stat points after the nature; Showdown adds them before.
   `engine/tests/battle_fixtures.rs`). Grows with each mechanic: a mechanic
   joins `support.rs`, `data/support.json` is regenerated, the fixture
   teams start using it, and the replay must still match.
-- [ ] 1g. Benchmark and speed gate.
+- [ ] 1g. Benchmark and speed gate. `cargo run --release --example bench`
+  plays random legal games between weighted corpus teams with the 30-turn
+  cap. After a profiling pass (callgrind) the engine does about 26,700 turns/s
+  on one core (from 9,500). The 100k gate isn't met. Most of the remaining cost
+  is string-keyed ability and item checks throughout the engine, and the
+  damage module's event collection. Interning those as integer ids is the
+  next step if speed becomes the bottleneck. Games run in parallel, so it
+  doesn't block training.
 - [ ] 1h. Driving a real Showdown battle (protocol client) from the engine's choices.
 
 ### 4.10 How the damage code mirrors Showdown
@@ -405,6 +412,29 @@ have: whether the user's last move failed (Stomping Tantrum, Temper Flare),
 whether the target has moved (Payback, Round), stats lowered this turn (Lash
 Out), modified Speed (Gyro Ball). Also unsupported so far: Stance Change,
 Disguise and OHKO moves. The turn engine (1d) supplies that context.
+
+### 4.11 Phase 2: the environment
+
+`engine/src/env/` (Rust) and `python/selfplay/env.py`:
+
+- **Teams** come from `data/corpus` (462 tournament and ladder pastes;
+  `engine::corpus`). Each game draws both teams by weight: Champion 8, Runner
+  Up 6, Top 4 5, Top 8 4, Top 16 3, Top 32 2, deeper 1.5, unplaced 1. So about
+  two thirds of games use a team that placed.
+- **Actions** (`env/action.rs`): team preview is one of 180 ordered picks.
+  A move or switch request is a joint action `slot0 * 47 + slot1` over 47
+  per-slot actions: 4 moves x 5 targets x Mega, switch to a party position
+  (also Revival Blessing's pick), and pass. A mask marks the legal ones;
+  every legal choice has its own index.
+- **Observations** (`env/obs.rs`), per side: 12 Pokemon tokens (own six,
+  then the opponent's six, in team order) with 9 dex ids each for
+  embeddings and 90 features, plus 55 field features. Open Team Sheets
+  hide the opponent's stats and which four it brought until each appears;
+  `perfect_info` shows them (the first training variant).
+- **Batching** (`env::VecEnv`, `selfplay._engine.VecEnv`): N self-play games
+  stepped together on all cores, written straight into numpy arrays. A
+  finished game reports +1/-1/0 per side and is replaced.
+- **Exit test** (`python -m selfplay.rollout --games 1000000`): see 4.12.
 
 ## 5. Model and training (provisional; settled in phases 2–3)
 
@@ -487,9 +517,8 @@ Decided:
 
 Open:
 
-1. **Team corpus.** You will supply it later. Until then, use the 17 teams
-   in `data/teams/` and the sets in `default_sets.txt`. Training is blocked on
-   the corpus, so it is needed by phase 3.
+1. **Team corpus.** Supplied: `data/corpus`, 462 pastes. 460 are legal, and
+   all of those are supported. More pastes can go in the folder as they come.
 2. **`src/` disagrees with Showdown on stats.** `src/stats.py` adds stat
    points after the nature, so a boosted stat with points in it reads up to 3
    too low. The existing app and CLI inherit this. Not changed here.

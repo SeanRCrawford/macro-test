@@ -323,7 +323,9 @@ impl Battle {
             if sky {
                 let m = self.mon_mut(t);
                 m.volatiles.remove(VolatileId::TwoTurnMove);
-                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+                m.volatiles
+                    .0
+                    .retain(|v| !matches!(v.id, VolatileId::Charging(_)));
                 self.cancel_move(t);
             }
             if self.mon(t).volatiles.has(VolatileId::SmackDown) {

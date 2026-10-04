@@ -96,7 +96,10 @@ impl Battle {
         let m = self.mon(r);
         let dex = Dex::get();
         let item = self.item_of(r);
-        if self.field.gravity > 0 || m.volatiles.has(super::state::VolatileId::SmackDown) || item == Some("ironball") {
+        if self.field.gravity > 0
+            || m.volatiles.has(super::state::VolatileId::SmackDown)
+            || item == Some("ironball")
+        {
             return true;
         }
         let ability = self.ability_id(r);

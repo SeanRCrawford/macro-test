@@ -181,7 +181,9 @@ impl Battle {
             if !self.ability_is(a, "symbiosis") || self.mon(r).switch_flag.is_some() {
                 continue;
             }
-            let Some(item) = self.take_item(a, a) else { continue };
+            let Some(item) = self.take_item(a, a) else {
+                continue;
+            };
             let m = self.mon(r);
             if m.hp > 0 && m.is_active {
                 self.set_item(r, item);
@@ -880,7 +882,10 @@ impl Battle {
     pub(super) fn set_item(&mut self, r: MonRef, item: ItemId) {
         let m = self.mon_mut(r);
         m.item = Some(item);
-        if matches!(Dex::get().item(item).id.as_str(), "choiceband" | "choicespecs" | "choicescarf") {
+        if matches!(
+            Dex::get().item(item).id.as_str(),
+            "choiceband" | "choicespecs" | "choicescarf"
+        ) {
             m.volatiles.remove(VolatileId::ChoiceLock);
         }
     }

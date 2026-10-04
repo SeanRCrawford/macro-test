@@ -1261,12 +1261,15 @@ impl Battle {
                 }
                 self.field.gravity = 5;
                 for r in self.all_active() {
-                    let sky = semi_invulnerable(self.mon(r))
-                        .is_some_and(|c| matches!(Dex::get().move_data(c).id.as_str(), "fly" | "bounce"));
+                    let sky = semi_invulnerable(self.mon(r)).is_some_and(|c| {
+                        matches!(Dex::get().move_data(c).id.as_str(), "fly" | "bounce")
+                    });
                     if sky {
                         let m = self.mon_mut(r);
                         m.volatiles.remove(VolatileId::TwoTurnMove);
-                        m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+                        m.volatiles
+                            .0
+                            .retain(|v| !matches!(v.id, VolatileId::Charging(_)));
                         self.cancel_move(r);
                     }
                 }
@@ -2132,7 +2135,11 @@ impl Battle {
             self.mon_mut(t).berserk_checked = mv.data.multihit.is_some() || mv.am.parental_bond;
             // The Damage event: Disguise and Endure can bring it to 0 (still a
             // hit for DamagingHit); spreadDamage only clamps a nonzero amount.
-            let d = if d == 0 { 0 } else { self.on_move_damage(t, d.max(1)) };
+            let d = if d == 0 {
+                0
+            } else {
+                self.on_move_damage(t, d.max(1))
+            };
             self.move_damage_by = Some(user);
             let dealt = self.apply_damage(t, d);
             self.move_damage_by = None;
@@ -2396,7 +2403,8 @@ impl Battle {
                 did_something = did_something.combine(HitRes::Bool(true));
             }
             if is_secondary && mv.data.id == "triattack" {
-                let status = [Status::Burn, Status::Paralysis, Status::Freeze][self.chance.sample(3)];
+                let status =
+                    [Status::Burn, Status::Paralysis, Status::Freeze][self.chance.sample(3)];
                 self.try_set_status_from(t, status, Some(user));
                 did_something = did_something.combine(HitRes::Bool(true));
             }
@@ -2461,7 +2469,10 @@ impl Battle {
             }
             // selfdestruct: 'ifHit' (Memento, Final Gambit).
             if primary
-                && matches!(mv.data.id.as_str(), "memento" | "finalgambit" | "healingwish")
+                && matches!(
+                    mv.data.id.as_str(),
+                    "memento" | "finalgambit" | "healingwish"
+                )
                 && damage[i] != HitRes::Bool(false)
             {
                 self.faint(user);

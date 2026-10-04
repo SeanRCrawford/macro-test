@@ -438,21 +438,42 @@ pub const TYPELESS: TypeId = TypeId(u8::MAX);
 /// An event's handler names: on, onAlly, onFoe, onAny and onSource
 /// (built once per event).
 fn event_hooks(event: &'static str) -> &'static [(String, u64); 5] {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    type Hooks = &'static [(String, u64); 5];
-    thread_local! {
-        static CACHE: RefCell<HashMap<&'static str, Hooks>> = RefCell::new(HashMap::new());
-    }
-    CACHE.with(|c| {
-        *c.borrow_mut().entry(event).or_insert_with(|| {
-            Box::leak(Box::new(["", "Ally", "Foe", "Any", "Source"].map(|p| {
-                let name = format!("on{p}{event}");
-                let bit = crate::dex::hook_bit(&name);
-                (name, bit)
-            })))
-        })
-    })
+    // Built once for every event the calculation runs, then read without
+    // locking from any thread.
+    const EVENTS: [&str; 14] = [
+        "BasePower",
+        "CriticalHit",
+        "Effectiveness",
+        "ModifyAtk",
+        "ModifyBoost",
+        "ModifyDamage",
+        "ModifyDef",
+        "ModifyMove",
+        "ModifySTAB",
+        "ModifySpA",
+        "ModifySpD",
+        "ModifyType",
+        "NegateImmunity",
+        "Type",
+    ];
+    type Table = crate::dex::FastMap<&'static str, [(String, u64); 5]>;
+    static TABLE: std::sync::OnceLock<Table> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        EVENTS
+            .iter()
+            .map(|&e| {
+                let hooks = ["", "Ally", "Foe", "Any", "Source"].map(|p| {
+                    let name = format!("on{p}{e}");
+                    let bit = crate::dex::hook_bit(&name);
+                    (name, bit)
+                });
+                (e, hooks)
+            })
+            .collect()
+    });
+    table
+        .get(event)
+        .unwrap_or_else(|| panic!("event {event} missing from event_hooks"))
 }
 
 /// The handlers of effects named in the code (volatiles, weather, terrain,
@@ -474,7 +495,10 @@ fn fixed_handlers() -> &'static FixedHandlers {
     F.get_or_init(|| {
         let d = Dex::get();
         let mv = |id: &str| &d.move_data(d.move_id(id).expect("known move")).condition;
-        let cond = |id: &str| &d.condition(d.condition_id(id).expect("known condition")).handlers;
+        let cond = |id: &str| {
+            &d.condition(d.condition_id(id).expect("known condition"))
+                .handlers
+        };
         FixedHandlers {
             helping_hand: mv("helpinghand"),
             charge: mv("charge"),
@@ -483,7 +507,13 @@ fn fixed_handlers() -> &'static FixedHandlers {
             gem: cond("gem"),
             minimize: mv("minimize"),
             weather: ["sunnyday", "raindance", "sandstorm", "snowscape"].map(cond),
-            terrain: ["electricterrain", "grassyterrain", "mistyterrain", "psychicterrain"].map(mv),
+            terrain: [
+                "electricterrain",
+                "grassyterrain",
+                "mistyterrain",
+                "psychicterrain",
+            ]
+            .map(mv),
             screen: ["reflect", "lightscreen", "auroraveil"].map(mv),
         }
     })
@@ -877,7 +907,11 @@ impl<'a, 'b> Calc<'a, 'b> {
             if self.ctx.actives[i].is_none() {
                 continue;
             }
-            let hooks = if Self::side_of(i) == side { [ally, any] } else { [foe, any] };
+            let hooks = if Self::side_of(i) == side {
+                [ally, any]
+            } else {
+                [foe, any]
+            };
             for e in self.mon_effects(i) {
                 for hook in hooks {
                     self.push(&mut out, e, Holder::Mon(i), hook, am);

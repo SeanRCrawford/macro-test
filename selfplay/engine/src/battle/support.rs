@@ -468,7 +468,12 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("smackdown", &["condition.onRestart", "condition.onStart"]),
     (
         "endure",
-        &["condition.onDamage", "condition.onStart", "onHit", "onPrepareHit"],
+        &[
+            "condition.onDamage",
+            "condition.onStart",
+            "onHit",
+            "onPrepareHit",
+        ],
     ),
     (
         "healingwish",
@@ -821,7 +826,8 @@ pub fn move_supported(m: &MoveData) -> bool {
                 || (k == "condition" && condition_ok)
                 || field_key(k)
                 || (k == "selfdestruct" && selfdestruct_ok)
-                || (k == "slotCondition" && matches!(m.id.as_str(), "revivalblessing" | "healingwish"))
+                || (k == "slotCondition"
+                    && matches!(m.id.as_str(), "revivalblessing" | "healingwish"))
         })
         && effect_supported(
             &m.primary,

@@ -109,6 +109,8 @@ pub struct Battle {
     /// Training's turn cap: a game still going after this many turns is a
     /// draw. None (Showdown) plays on.
     pub turn_limit: Option<u32>,
+    /// The six sets each side brought to team preview, by uid.
+    pub teams: [Vec<PokemonSet>; 2],
     queue: Vec<Action>,
     mid_turn: bool,
     /// Queued faints, with the user of the move that caused each (if any).
@@ -137,6 +139,7 @@ impl Battle {
                 support::check_set(set).map_err(BattleError::Unsupported)?;
             }
         }
+        let sets = teams.clone();
         let sides = teams.map(|team| {
             let pokemon: Vec<Mon> = team
                 .iter()
@@ -170,11 +173,17 @@ impl Battle {
             ssa_physical: false,
             mega_used: [false; 2],
             turn_limit: None,
+            teams: sets,
             effect_order: 0,
             benched: [Vec::new(), Vec::new()],
         };
         b.push_action(ActionKind::Start);
         Ok(b)
+    }
+
+    /// This side has Mega Evolved this battle.
+    pub fn mega_used(&self, side: usize) -> bool {
+        self.mega_used[side]
     }
 
     pub fn is_over(&self) -> bool {
@@ -1250,6 +1259,7 @@ impl Battle {
         m.illusion = Dex::get().ability(m.ability).id == "illusion" && later_standing;
         m.position = pos;
         m.is_active = true;
+        m.revealed = true;
         m.active_turns = 0;
         m.active_move_actions = 0;
         m.newly_switched = true;

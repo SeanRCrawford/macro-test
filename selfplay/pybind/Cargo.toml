@@ -9,4 +9,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 selfplay-engine = { path = "../engine" }
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
+mimalloc = { version = "0.1", default-features = false }
