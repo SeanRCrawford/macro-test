@@ -853,6 +853,8 @@ impl Battle {
                 .mon(user)
                 .has_type(Dex::get().type_id(t).expect("type"))
         }) {
+            // onTryMove returns null: not a failure for Stomping Tantrum.
+            self.mon_mut(user).move_this_turn_result = Some(None);
             return Ok(false);
         }
         // TryMove: a foe's Armor Tail stops priority moves aimed at its side.
@@ -1300,6 +1302,10 @@ impl Battle {
                 }
             }
             "noretreat" if self.mon(user).volatiles.has(VolatileId::NoRetreat) => return Ok(false),
+            // onTryHit: someone must have fainted.
+            "revivalblessing" if !self.sides[user.side].pokemon.iter().any(|m| m.fainted) => {
+                return Ok(false)
+            }
             "stockpile"
                 if self
                     .mon(user)
@@ -2643,6 +2649,12 @@ impl Battle {
                 }
                 m.set_types([psychic, psychic]);
                 HitRes::Undefined
+            }
+            // slotCondition: the user's next switch choice revives.
+            "revivalblessing" => {
+                let pos = self.mon(user).position;
+                self.sides[user.side].revival_blessing[pos] = true;
+                HitRes::Bool(true)
             }
             "allyswitch" => {
                 if self.swap_position(user) {

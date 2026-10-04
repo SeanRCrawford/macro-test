@@ -989,6 +989,10 @@ impl Battle {
     /// fieldEvent('Residual'): status damage, then volatile durations, in
     /// handler order; faints are processed after each handler.
     pub(super) fn residual(&mut self) -> Res<()> {
+        // Revival Blessing's slot condition lasts the turn.
+        for side in &mut self.sides {
+            side.revival_blessing = [false; ACTIVE_PER_SIDE];
+        }
         let mut handlers = Vec::new();
         // Field, then each side's conditions followed by its actives.
         if self.field.trick_room > 0 {

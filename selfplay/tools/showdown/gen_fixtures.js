@@ -395,6 +395,11 @@ function policyPrng(t) {
 	};
 }
 
+// FORCE=id,id: every battle's first team leads with a Pokemon using one of
+// these moves or abilities (for checking a new feature).
+const FORCE = new Set((process.env.FORCE || "").split(",").filter(Boolean).map(toID));
+const uses = (e, ids) => [...e.moves, ...(e.abilities || [])].some(([m]) => ids.has(toID(m)));
+
 function supportedSet(rand, entry, usedItems) {
 	let species = champions.species.get(entry.name);
 	let item = "";
@@ -405,7 +410,8 @@ function supportedSet(rand, entry, usedItems) {
 		species = champions.species.get(species.battleOnly);
 	}
 	const abilities = Object.values(species.abilities).map(toID).filter(a => supportedAbilities.has(a));
-	const ability = abilities.length ? pick(rand, abilities) : "noability";
+	let ability = abilities.length ? pick(rand, abilities) : "noability";
+	if (abilities.some(a => FORCE.has(a))) ability = abilities.find(a => FORCE.has(a));
 	if (!item && chance(rand, 0.5)) {
 		const options = supportedItems.filter(i => !usedItems.has(i) && !champions.items.get(i).megaStone);
 		item = pick(rand, options);
@@ -414,7 +420,8 @@ function supportedSet(rand, entry, usedItems) {
 	const poolMoves = entry.moves.map(([m]) => toID(m)).filter(m => supportedMoves.has(m));
 	let moves = [...new Set(poolMoves)];
 	if (!moves.length) return null;
-	moves = moves.sort(() => rand() - 0.5).slice(0, 4);
+	moves = moves.sort(() => rand() - 0.5);
+	moves = [...moves.filter(m => FORCE.has(m)), ...moves.filter(m => !FORCE.has(m))].slice(0, 4);
 	const [nature, points] = weightedPick(rand, entry.spreads.map(([n, p, w]) => [[n, p], w]));
 	return {species: species.name, ability: champions.abilities.get(ability).name, item, nature, level: 50,
 		evs: Object.fromEntries(STATS.map((st, i) => [st, points[i]])), moves};
@@ -435,7 +442,8 @@ function supportedTeam(rand) {
 	const usedItems = new Set();
 	let tries = 0;
 	while (team.length < 6 && tries++ < 500) {
-		const e = weightedPick(rand, speciesWeights);
+		const forced = FORCE.size && !team.length && speciesWeights.filter(([w]) => uses(w, FORCE));
+		const e = forced && forced.length ? weightedPick(rand, forced) : weightedPick(rand, speciesWeights);
 		const num = champions.species.get(e.name).num;
 		if (nums.has(num)) continue;
 		const set = supportedSet(rand, e, usedItems);
@@ -482,7 +490,11 @@ function legalChoices(battle, side) {
 	const bench = side.pokemon.map((p, i) => i).filter(i => i >= 2 && !side.pokemon[i].fainted);
 	const slotOptions = [0, 1].map(slot => {
 		if (req.forceSwitch) {
-			const opts = req.forceSwitch[slot] ? bench.map(i => ({s: `switch ${i + 1}`, sw: i})) : [];
+			// Revival Blessing: the slot picks a fainted Pokemon to revive.
+			const reviving = req.forceSwitch[slot] && side.slotConditions[slot]?.revivalblessing;
+			const opts = !req.forceSwitch[slot] ? [] : reviving ?
+				side.pokemon.map((p, i) => i).filter(i => side.pokemon[i].fainted).map(i => ({s: `switch ${i + 1}`, rev: i})) :
+				bench.map(i => ({s: `switch ${i + 1}`, sw: i}));
 			return [...opts, {s: "pass", pass: true, forced: !!req.forceSwitch[slot]}];
 		}
 		const r = req.active[slot];
@@ -511,12 +523,29 @@ function legalChoices(battle, side) {
 		return opts;
 	});
 	const out = [];
+	// clearChoice's forced switches and passes, used up slot by slot as
+	// chooseSwitch/choosePass do (a revive takes a switch if one is left).
 	const need = req.forceSwitch ? req.forceSwitch.filter(Boolean).length : 0;
-	const passesNeeded = Math.max(0, need - bench.length);
+	const forcedOk = (x, y) => {
+		let switches = Math.min(need, bench.length);
+		let passes = need - switches;
+		for (const o of [x, y]) {
+			if (o.forced) {
+				if (!passes) return false;
+				passes--;
+			} else if (o.rev !== undefined) {
+				switches = Math.max(0, switches - 1);
+			} else if (o.sw !== undefined) {
+				if (!switches) return false;
+				switches--;
+			}
+		}
+		return switches === 0;
+	};
 	for (const x of slotOptions[0]) for (const y of slotOptions[1]) {
 		if (x.sw !== undefined && x.sw === y.sw) continue;
 		if (x.mega && y.mega) continue;
-		if (req.forceSwitch && [x, y].filter(o => o.forced).length !== passesNeeded) continue;
+		if (req.forceSwitch && !forcedOk(x, y)) continue;
 		out.push(`${x.s}, ${y.s}`);
 	}
 	return out;

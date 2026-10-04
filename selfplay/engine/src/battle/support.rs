@@ -449,6 +449,7 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("ceaselessedge", &["onAfterHit", "onAfterSubDamage"]),
     ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
     ("endeavor", &["damageCallback", "onTryImmunity"]),
+    ("revivalblessing", &["onTryHit"]),
     ("aurawheel", &["onModifyType", "onTry"]),
     (
         "allyswitch",
@@ -713,6 +714,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         || matches!(
             m.id.as_str(),
             "throatchop"
+                | "revivalblessing"
                 | "allyswitch"
                 | "glaiverush"
                 | "phantomforce"
@@ -767,6 +769,7 @@ pub fn move_supported(m: &MoveData) -> bool {
                 || (k == "condition" && condition_ok)
                 || field_key(k)
                 || (k == "selfdestruct" && selfdestruct_ok)
+                || (k == "slotCondition" && m.id == "revivalblessing")
         })
         && effect_supported(
             &m.primary,
@@ -777,6 +780,7 @@ pub fn move_supported(m: &MoveData) -> bool {
                     "sideCondition",
                     "pseudoWeather",
                     "selfdestruct",
+                    "slotCondition",
                     "weather",
                     "terrain",
                 ],

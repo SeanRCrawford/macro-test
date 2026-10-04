@@ -221,7 +221,6 @@ impl VolatileId {
             | VolatileId::GlaiveRush
             | VolatileId::Confusion
             | VolatileId::Imprison
-            | VolatileId::Charging(_)
             | VolatileId::FlashFire
             | VolatileId::FocusEnergy
             | VolatileId::DragonCheer
@@ -234,6 +233,13 @@ impl VolatileId {
             | VolatileId::Stockpile
             | VolatileId::Charge => None,
             VolatileId::AllySwitch => Some(2),
+            // The charging move's condition: Fly, Dig and the like last two
+            // turns; Solar Beam and friends have no condition.
+            VolatileId::Charging(m) => matches!(
+                Dex::get().move_data(m).id.as_str(),
+                "bounce" | "dig" | "dive" | "fly" | "phantomforce" | "shadowforce"
+            )
+            .then_some(2),
             VolatileId::ChillyReception => Some(1),
             VolatileId::HealBlock => Some(2),
             // durationCallback: 5 or 6, rolled when it starts.
@@ -582,6 +588,9 @@ pub struct Side {
     /// Index into `pokemon` of the Pokemon that fainted this turn, if any.
     pub fainted_this_turn: bool,
     pub fainted_last_turn: bool,
+    /// Revival Blessing's slot condition (one turn), by active slot: the
+    /// next switch choice for that slot revives a fainted Pokemon.
+    pub revival_blessing: [bool; ACTIVE_PER_SIDE],
     /// Showdown's `side.active[slot]` is set: the Pokemon at list position
     /// `slot` occupies it (fainted or not) until replaced.
     pub slot_filled: [bool; ACTIVE_PER_SIDE],

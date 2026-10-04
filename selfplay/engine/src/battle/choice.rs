@@ -269,7 +269,14 @@ impl Battle {
                 }
             }
             SideRequest::Switch(force) => {
-                if force[slot] {
+                if force[slot] && self.sides[side].revival_blessing[slot] {
+                    // Revival Blessing: any fainted party member.
+                    for (i, m) in self.sides[side].pokemon.iter().enumerate() {
+                        if m.fainted {
+                            out.push(SlotChoice::Switch { index: i as u8 });
+                        }
+                    }
+                } else if force[slot] {
                     for i in self.switchable(side) {
                         out.push(SlotChoice::Switch { index: i as u8 });
                     }
@@ -336,18 +343,34 @@ impl Battle {
             return false;
         }
         if let SideRequest::Switch(force) = req {
+            // clearChoice's forced switches and passes, used up slot by
+            // slot (a revive takes a switch if one is left).
             let need = force.iter().filter(|&&f| f).count();
-            let available = self.switchable(side).len();
-            let passes_needed = need.saturating_sub(available);
-            let forced_passes = (0..2)
-                .filter(|&i| force[i] && c[i] == SlotChoice::Pass)
-                .count();
-            if forced_passes != passes_needed {
-                return false;
+            let mut switches = need.min(self.switchable(side).len());
+            let mut passes = need - switches;
+            for i in 0..2 {
+                match c[i] {
+                    _ if !force[i] => {
+                        if c[i] != SlotChoice::Pass {
+                            return false;
+                        }
+                    }
+                    SlotChoice::Pass => {
+                        if passes == 0 {
+                            return false;
+                        }
+                        passes -= 1;
+                    }
+                    _ if self.sides[side].revival_blessing[i] => switches = switches.saturating_sub(1),
+                    _ => {
+                        if switches == 0 {
+                            return false;
+                        }
+                        switches -= 1;
+                    }
+                }
             }
-            if (0..2).any(|i| !force[i] && c[i] != SlotChoice::Pass) {
-                return false;
-            }
+            return switches == 0;
         }
         true
     }

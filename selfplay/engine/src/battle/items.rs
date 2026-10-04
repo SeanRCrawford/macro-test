@@ -797,6 +797,12 @@ impl Battle {
 
     /// Trick's onHit: swap items. False when it fails.
     pub(super) fn trick(&mut self, user: MonRef, target: MonRef) -> bool {
+        // onTryImmunity: hasAbility('stickyhold'), which Mold Breaker
+        // doesn't touch.
+        let t = self.mon(target);
+        if t.is_active && Dex::get().ability(t.ability).id == "stickyhold" {
+            return false;
+        }
         // takeItem on each: None = no item, Some(None) = blocked (false).
         let take = |b: &mut Battle, r: MonRef| -> Option<Option<ItemId>> {
             let item = b.mon(r).item?;

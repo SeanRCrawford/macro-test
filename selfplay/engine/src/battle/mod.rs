@@ -66,6 +66,11 @@ enum ActionKind {
     MegaEvo {
         mon: MonRef,
     },
+    /// Revival Blessing's choice: `target` (fainted) comes back.
+    Revive {
+        mon: MonRef,
+        target: MonRef,
+    },
     /// A move's priorityChargeCallback (Chilly Reception's message).
     PriorityCharge {
         mon: MonRef,
@@ -280,6 +285,15 @@ impl Battle {
         let mon = self.mon_ref(side, pos);
         match choice {
             SlotChoice::Pass => {}
+            SlotChoice::Switch { index }
+                if matches!(self.requests[side], SideRequest::Switch(_))
+                    && self.sides[side].revival_blessing[pos] =>
+            {
+                // chooseSwitch: the reviver stays in.
+                self.sides[side].pokemon[pos].switch_flag = None;
+                let target = self.mon_ref(side, index as usize);
+                self.add_action(ActionKind::Revive { mon, target }, 6, 0.0)?;
+            }
             SlotChoice::Switch { index } => {
                 // resolveAction clears the switch flag once the switch is queued
                 // (keeping Baton Pass as the switch's sourceEffect).
@@ -430,6 +444,7 @@ impl Battle {
             }
             ActionKind::MegaEvo { mon }
             | ActionKind::PriorityCharge { mon }
+            | ActionKind::Revive { mon, .. }
             | ActionKind::Switch { mon, .. }
             | ActionKind::RunSwitch { mon } => Some(*mon),
             _ => None,
@@ -835,6 +850,32 @@ impl Battle {
                 self.run_move(mon, slot, target_loc, action.priority as i8)?;
             }
             ActionKind::MegaEvo { mon } => self.run_mega_evo(mon)?,
+            ActionKind::Revive { mon, target } => {
+                let side = mon.side;
+                self.sides[side].pokemon_left += 1;
+                // A fainted Pokemon still in its slot comes straight back in
+                // (queued last).
+                if self.mon(target).position < ACTIVE_PER_SIDE {
+                    let mut action = Action {
+                        kind: ActionKind::Switch { mon: target, target },
+                        order: 3,
+                        priority: 0.0,
+                        speed: 1,
+                        fractional: 0.0,
+                    };
+                    self.action_speed(&mut action)?;
+                    self.queue.push(action);
+                }
+                let t = self.mon_mut(target);
+                t.fainted = false;
+                t.faint_queued = false;
+                t.status = crate::damage::Status::None;
+                t.hp = (t.max_hp() / 2).max(1);
+                let pos = self.mon(mon).position;
+                if pos < ACTIVE_PER_SIDE {
+                    self.sides[side].revival_blessing[pos] = false;
+                }
+            }
             ActionKind::PriorityCharge { mon } => {
                 let m = self.mon(mon);
                 if m.is_active && !m.fainted {
@@ -911,9 +952,16 @@ impl Battle {
         let mut any = false;
         for side in 0..2 {
             if switches[side] && self.switchable(side).is_empty() {
+                // Revival Blessing's slot keeps its (fake) switch.
+                let mut revive = false;
                 for p in 0..ACTIVE_PER_SIDE.min(self.sides[side].pokemon.len()) {
+                    if self.sides[side].slot_filled[p] && self.sides[side].revival_blessing[p] {
+                        revive = true;
+                        continue;
+                    }
                     self.sides[side].pokemon[p].switch_flag = None;
                 }
+                any |= revive;
             } else if switches[side] {
                 any = true;
                 // BeforeSwitchOut (no handlers yet) runs now for a Pokemon
@@ -921,6 +969,7 @@ impl Battle {
                 for p in 0..ACTIVE_PER_SIDE.min(self.sides[side].pokemon.len()) {
                     let m = &mut self.sides[side].pokemon[p];
                     if self.sides[side].slot_filled[p]
+                        && !self.sides[side].revival_blessing[p]
                         && m.hp > 0
                         && m.switch_flag.is_some()
                         && !m.skip_before_switch_out
@@ -1446,6 +1495,7 @@ fn action_belongs_to(a: &Action, r: MonRef) -> bool {
         ActionKind::Move { mon, .. }
         | ActionKind::MegaEvo { mon }
         | ActionKind::PriorityCharge { mon }
+        | ActionKind::Revive { mon, .. }
         | ActionKind::Switch { mon, .. }
         | ActionKind::RunSwitch { mon } => *mon == r,
         _ => false,
