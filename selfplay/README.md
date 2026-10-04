@@ -21,10 +21,22 @@ Python bindings via PyO3. Plan and status are in [DESIGN.md](DESIGN.md).
 
 ## Build
 
-Needs Rust (https://rustup.rs) and, on Windows, the MSVC C++ build tools.
+Needs Rust (https://rustup.rs) and, on Windows, the Visual Studio Build
+Tools with "Desktop development with C++". `maturin develop` needs a
+virtual environment. On Windows (PowerShell):
 
-    pip install maturin
-    pip install ./selfplay          # or, inside a venv: cd selfplay && maturin develop --release
+    cd selfplay
+    py -3.11 -m venv .venv
+    .venv\Scripts\Activate.ps1       # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+    python -m pip install --upgrade pip
+    pip install torch --index-url https://download.pytorch.org/whl/cu126   # CUDA build; see pytorch.org
+    pip install maturin numpy pytest
+    maturin develop --release
+    python -c "import torch, selfplay._engine; print(torch.cuda.is_available())"   # expect True
+
+On Linux or macOS: `python -m venv .venv && source .venv/bin/activate`, then
+the same. Activate the venv in every new terminal. Without a venv,
+`pip install ./selfplay` also works (rebuild after engine changes).
 
 ## Test
 
