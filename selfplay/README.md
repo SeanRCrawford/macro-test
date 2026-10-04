@@ -51,6 +51,14 @@ See DESIGN.md 4.11 for the action and observation layouts.
 
 See DESIGN.md 4.13 for the model, the training setup and first results.
 
+## Search
+
+    python -m selfplay.search runs/tiny/model.pt --games 400 --k 8   # one-turn search vs the raw policy
+
+Each turn is solved as a matrix game between both sides' top-k joint
+actions, every cell scored over its chance outcomes by the value network
+(DESIGN.md 4.14).
+
 ## Regenerate data from Showdown
 
 Showdown is the rules authority. Both scripts need a built checkout of
