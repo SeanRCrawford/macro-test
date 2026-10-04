@@ -284,6 +284,15 @@ impl VecEnv {
         fill(py, out, &actions, "out")
     }
 
+    /// The greedy-damage baseline's action for every side with a decision
+    /// (-1 elsewhere), into `out` [n,2] int64.
+    fn greedy_actions(&self, py: Python<'_>, out: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut actions = vec![-1i64; self.env.len() * 2];
+        let env = &self.env;
+        py.detach(|| env.greedy_actions(&mut actions));
+        fill(py, out, &actions, "out")
+    }
+
     /// Game `i` as a Showdown-style JSON snapshot (for debugging).
     fn snapshot(&self, i: usize) -> PyResult<String> {
         if i >= self.env.len() {

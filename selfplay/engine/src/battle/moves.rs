@@ -86,6 +86,53 @@ impl Battle {
         super::choice::loc_of(user.side, target.side, self.mon(target).position)
     }
 
+    /// Expected damage of `user` using `move_id` aimed at `target_loc`, as a
+    /// fraction of each target's max HP (capped at its HP), summed over the
+    /// Pokemon it would hit; damage to the user's ally counts against it.
+    /// Average roll, no critical hit. For simple policies; changes nothing.
+    pub fn estimate_damage(&self, user: MonRef, move_id: MoveId, target_loc: i8) -> f64 {
+        let data = Dex::get().move_data(move_id);
+        if data.category == Category::Status || self.mon(user).hp == 0 {
+            return 0.0;
+        }
+        let at = |side: usize, pos: usize| {
+            self.sides[side]
+                .occupant(pos)
+                .filter(|m| m.hp > 0)
+                .map(|_| self.mon_ref(side, pos))
+        };
+        let foe = 1 - user.side;
+        let targets: Vec<MonRef> = match data.target {
+            MoveTarget::AllAdjacentFoes => self.foes(user),
+            MoveTarget::AllAdjacent => {
+                let mut t = self.adjacent_allies(user);
+                t.extend(self.foes(user));
+                t
+            }
+            _ => {
+                let t = match target_loc {
+                    l if l > 0 => at(foe, (l - 1) as usize),
+                    l if l < 0 => at(user.side, (-l - 1) as usize),
+                    _ => None,
+                };
+                t.or_else(|| self.foes(user).first().copied()).into_iter().collect()
+            }
+        };
+        let spread = targets.len() > 1;
+        let view = self.damage_view();
+        let mut total = 0.0;
+        for t in targets {
+            let ctx = self.damage_ctx(&view, user, t, false, spread);
+            let Ok(am) = damage::prepare_move(&ctx, move_id) else { continue };
+            let Ok(Outcome::Damage(rolls)) = damage::damage_for(&ctx, &am) else { continue };
+            let mean = rolls.iter().map(|&r| r as f64).sum::<f64>() / 16.0;
+            let m = self.mon(t);
+            let frac = mean.min(m.hp as f64) / m.max_hp().max(1) as f64;
+            total += if t.side == user.side { -frac } else { frac };
+        }
+        total
+    }
+
     /// `side.foes()`: the opposing actives with HP left.
     fn foes(&self, user: MonRef) -> Vec<MonRef> {
         let side = 1 - user.side;

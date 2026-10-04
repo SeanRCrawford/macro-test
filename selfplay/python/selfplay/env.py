@@ -84,6 +84,13 @@ class SelfPlayEnv:
         self._env.random_actions(self.obs.masks, self.obs.decisions, out, seed)
         return out
 
+    def greedy_actions(self) -> np.ndarray:
+        """The greedy-damage baseline's actions [n, 2] (-1 where a side has
+        nothing to decide)."""
+        out = np.empty((self.num_envs, 2), np.int64)
+        self._env.greedy_actions(out)
+        return out
+
     def legal_choices(self, game: int, side: int) -> list[tuple[int, str]]:
         """(action index, Showdown choice string) pairs, for debugging."""
         return self._env.legal_choices(game, side)

@@ -106,3 +106,35 @@ fn hidden_information_stays_hidden() {
         }
     }
 }
+
+#[test]
+fn greedy_beats_random() {
+    // Side 0 greedy, side 1 random: greedy should win most games.
+    let n = 64;
+    let mut env = VecEnv::new(n, sampler(), EnvConfig::default());
+    let mut masks = vec![0u8; MASK_LEN];
+    let mut greedy = vec![-1i64; n * 2];
+    let mut finished: Vec<Option<Finished>> = vec![None; n];
+    let mut rng = Rng::new(9);
+    let (mut games, mut wins) = (0, 0.0);
+    while games < 300 {
+        env.greedy_actions(&mut greedy);
+        let mut actions = vec![-1i64; n * 2];
+        for g in 0..n {
+            actions[2 * g] = greedy[2 * g];
+            let b = env.battle(g);
+            if action::legal_mask(b, 1, &mut masks) != Decision::None {
+                let legal: Vec<usize> = (0..MASK_LEN).filter(|&i| masks[i] == 1).collect();
+                actions[2 * g + 1] = legal[rng.below(legal.len() as u32) as usize] as i64;
+            }
+        }
+        env.step(&actions, &mut finished).unwrap();
+        for f in finished.iter().flatten() {
+            games += 1;
+            wins += (f.reward[0] + 1.0) as f64 / 2.0;
+        }
+    }
+    let rate = wins / games as f64;
+    eprintln!("greedy vs random: {rate:.3} over {games} games");
+    assert!(rate > 0.7, "greedy only won {rate:.3}");
+}

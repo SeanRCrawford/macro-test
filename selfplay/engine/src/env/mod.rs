@@ -7,6 +7,7 @@
 
 pub mod action;
 pub mod obs;
+pub mod policy;
 
 use crate::battle::{Battle, Outcome};
 use crate::chance::{Chance, Rng};
@@ -205,6 +206,21 @@ impl VecEnv {
                 }
             },
         );
+    }
+
+    /// The greedy-damage baseline's action for every side with a decision
+    /// (-1 elsewhere), into `out` [n * 2].
+    pub fn greedy_actions(&self, out: &mut [i64]) {
+        assert_eq!(out.len(), self.games.len() * 2);
+        let work: Vec<_> = self.games.chunks(CHUNK).zip(out.chunks_mut(CHUNK * 2)).collect();
+        run_parallel(work, self.threads(), |(games, out)| {
+            for (g, game) in games.iter().enumerate() {
+                for side in 0..2 {
+                    out[2 * g + side] = policy::greedy(&game.battle, side)
+                        .map_or(-1, |c| action::index(&c) as i64);
+                }
+            }
+        });
     }
 
     /// Play one decision in every game: `actions[2 * g + side]` is that
