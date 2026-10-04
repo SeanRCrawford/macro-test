@@ -52,6 +52,10 @@ struct Game {
     rng: Rng,
     /// Corpus indices of the two teams.
     teams: [usize; 2],
+    /// The battle's chance seed and every action played, so a game that
+    /// panics can be replayed (`examples/replay_crash.rs`).
+    seed: u64,
+    history: Vec<[i64; 2]>,
 }
 
 /// Draws teams from the corpus by weight.
@@ -104,13 +108,21 @@ fn new_game(sampler: &TeamSampler, mut rng: Rng, turn_limit: u32) -> Game {
     let seed = rng.next_u64();
     let mut battle = Battle::new(sets, Chance::seeded(seed)).expect("corpus teams are supported");
     battle.turn_limit = Some(turn_limit);
-    Game { battle, rng, teams }
+    Game {
+        battle,
+        rng,
+        teams,
+        seed,
+        history: Vec::new(),
+    }
 }
 
 pub struct VecEnv {
     games: Vec<Game>,
     sampler: TeamSampler,
     config: EnvConfig,
+    /// Reports of games that panicked (see `step`), until taken.
+    crashes: Vec<String>,
 }
 
 impl VecEnv {
@@ -124,6 +136,7 @@ impl VecEnv {
             games,
             sampler,
             config,
+            crashes: Vec::new(),
         }
     }
 
@@ -235,9 +248,18 @@ impl VecEnv {
         });
     }
 
+    /// Reports (JSON, one per game) of games that panicked since the last
+    /// call: the panic message, the corpus team names, the battle seed and
+    /// every action, which `examples/replay_crash.rs` replays.
+    pub fn take_crashes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.crashes)
+    }
+
     /// Play one decision in every game: `actions[2 * g + side]` is that
     /// side's action index (ignored when it has nothing to decide). A game
-    /// that ends is reported in `finished` and replaced by a new one.
+    /// that ends is reported in `finished` and replaced by a new one. A game
+    /// whose step panics (an engine bug) ends as a draw and is reported in
+    /// `take_crashes`, so one bad game doesn't stop training.
     pub fn step(
         &mut self,
         actions: &[i64],
@@ -250,6 +272,7 @@ impl VecEnv {
         let sampler = &self.sampler;
         let limit = self.config.turn_limit;
         let errors = std::sync::Mutex::new(Vec::new());
+        let crashes = std::sync::Mutex::new(Vec::new());
         let work: Vec<_> = self
             .games
             .chunks_mut(chunk)
@@ -259,9 +282,28 @@ impl VecEnv {
         run_parallel(work, threads, |((games, actions), finished)| {
             for (g, game) in games.iter_mut().enumerate() {
                 finished[g] = None;
-                if let Err(e) = step_game(game, [actions[2 * g], actions[2 * g + 1]]) {
-                    errors.lock().expect("errors").push(e);
-                    continue;
+                let a = [actions[2 * g], actions[2 * g + 1]];
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step_game(game, a)));
+                match r {
+                    Ok(Err(e)) => {
+                        errors.lock().expect("errors").push(e);
+                        continue;
+                    }
+                    Ok(Ok(())) => {}
+                    Err(panic) => {
+                        game.history.push(a);
+                        crashes
+                            .lock()
+                            .expect("crashes")
+                            .push(crash_report(game, sampler, panic.as_ref()));
+                        finished[g] = Some(Finished {
+                            reward: [0.0, 0.0],
+                            turns: game.battle.turn.min(limit),
+                        });
+                        let rng = Rng::new(game.rng.next_u64());
+                        *game = new_game(sampler, rng, limit);
+                        continue;
+                    }
                 }
                 if let Some(outcome) = game.battle.outcome {
                     let reward = match outcome {
@@ -278,6 +320,7 @@ impl VecEnv {
                 }
             }
         });
+        self.crashes.extend(crashes.into_inner().expect("crashes"));
         let errors = errors.into_inner().expect("errors");
         match errors.first() {
             Some(e) => Err(e.clone()),
@@ -310,6 +353,22 @@ pub(crate) fn run_parallel<W: Send>(work: Vec<W>, threads: usize, f: impl Fn(W) 
     });
 }
 
+fn crash_report(game: &Game, sampler: &TeamSampler, panic: &(dyn std::any::Any + Send)) -> String {
+    let msg = panic
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into());
+    serde_json::json!({
+        "panic": msg,
+        "teams": game.teams.map(|t| sampler.team(t).name.clone()),
+        "seed": game.seed,
+        "turn": game.battle.turn,
+        "actions": game.history,
+    })
+    .to_string()
+}
+
 fn step_game(game: &mut Game, actions: [i64; 2]) -> Result<(), String> {
     let mut choices = [None, None];
     for side in 0..2 {
@@ -327,5 +386,7 @@ fn step_game(game: &mut Game, actions: [i64; 2]) -> Result<(), String> {
     if choices.iter().all(Option::is_none) {
         return Ok(());
     }
-    game.battle.choose(choices).map_err(|e| format!("{e:?}"))
+    game.battle.choose(choices).map_err(|e| format!("{e:?}"))?;
+    game.history.push(actions);
+    Ok(())
 }

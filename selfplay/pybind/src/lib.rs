@@ -232,6 +232,23 @@ impl VecEnv {
         buf.copy_to_slice(py, &mut self.actions)?;
         let VecEnv { env, actions: a, finished, .. } = self;
         py.detach(|| env.step(a, finished)).map_err(PyValueError::new_err)?;
+        let crashes = self.env.take_crashes();
+        if !crashes.is_empty() {
+            // An engine bug ended these games as draws; keep a replayable
+            // record (engine/examples/replay_crash.rs) and carry on.
+            use std::io::Write;
+            let path = "engine_crashes.jsonl";
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                for c in &crashes {
+                    let _ = writeln!(f, "{c}");
+                }
+            }
+            eprintln!(
+                "warning: {} game(s) hit an engine panic and were counted as draws; \
+                 details appended to {path} (please send it in)",
+                crashes.len()
+            );
+        }
         let n = self.env.len();
         let mut d = vec![0u8; n];
         let mut r = vec![0f32; n * 2];
