@@ -311,6 +311,7 @@ def main():
     p.add_argument("--minutes", type=float, default=30)
     p.add_argument("--updates", type=int, default=None)
     p.add_argument("--out", default="runs/tiny")
+    p.add_argument("--init", default=None, help="start from this model.pt")
     p.add_argument("--imitate-minutes", type=float, default=0.0,
                    help="first learn the greedy baseline's choices for this long")
     for k, v in asdict(Config()).items():
@@ -323,6 +324,8 @@ def main():
                  perfect_info=not a.hidden)
     torch.set_num_threads(max(1, torch.get_num_threads()))
     t = Trainer(cfg, Path(a.out))
+    if a.init:
+        t.model.load_state_dict(torch.load(a.init)["model"])
     if a.imitate_minutes > 0:
         t.imitate(a.imitate_minutes)
     t.run(a.minutes, a.updates)
