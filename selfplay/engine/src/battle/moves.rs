@@ -2650,6 +2650,25 @@ impl Battle {
                 m.set_types([psychic, psychic]);
                 HitRes::Undefined
             }
+            // Instruct: the target uses its last move again, right now.
+            "instruct" => {
+                let m = self.mon(t);
+                let Some(last) = m.last_move else {
+                    return HitRes::Bool(false);
+                };
+                let data = Dex::get().move_data(last);
+                let slot = m.move_slot(last);
+                if ["failinstruct", "charge", "recharge"].iter().any(|f| data.flags.has(f))
+                    || slot.is_some_and(|s| m.moves[s].pp == 0)
+                {
+                    return HitRes::Bool(false);
+                }
+                let loc = m.last_move_target_loc;
+                if self.prioritize_move(t, slot.unwrap_or(usize::MAX), loc).is_err() {
+                    return HitRes::Bool(false);
+                }
+                HitRes::Undefined
+            }
             // slotCondition: the user's next switch choice revives.
             "revivalblessing" => {
                 let pos = self.mon(user).position;

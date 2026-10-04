@@ -365,6 +365,15 @@ impl Battle {
         Ok(())
     }
 
+    /// `queue.prioritizeAction(resolveAction(move))`: the move goes first
+    /// (order 3) (Instruct).
+    pub(super) fn prioritize_move(&mut self, mon: MonRef, slot: usize, target_loc: i8) -> Res<()> {
+        self.add_action(ActionKind::Move { mon, slot, target_loc }, 3, 0.0)?;
+        let action = self.queue.pop().expect("just added");
+        self.queue.insert(0, action);
+        Ok(())
+    }
+
     /// Showdown's resolveAction + getActionSpeed, appended to the queue.
     fn add_action(&mut self, kind: ActionKind, order: u32, priority: f64) -> Res<()> {
         let fractional = self.fractional_priority(&kind);

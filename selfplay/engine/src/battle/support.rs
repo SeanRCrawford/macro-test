@@ -449,6 +449,7 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("ceaselessedge", &["onAfterHit", "onAfterSubDamage"]),
     ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
     ("endeavor", &["damageCallback", "onTryImmunity"]),
+    ("instruct", &["onHit"]),
     ("revivalblessing", &["onTryHit"]),
     ("aurawheel", &["onModifyType", "onTry"]),
     (
