@@ -116,7 +116,7 @@ impl Battle {
                 H::Pickpocket => {
                     let m = self.mon(t);
                     if user == t
-                        || !data.flags.has("contact")
+                        || !self.contact(data)
                         || m.item.is_some()
                         || m.switch_flag.is_some()
                         || m.force_switch_flag
@@ -551,7 +551,7 @@ impl Battle {
             AirBalloon,
         }
         let dex = Dex::get();
-        let contact = data.flags.has("contact");
+        let contact = self.contact(data);
         let fire = move_type == dex.type_id("Fire").expect("Fire");
         let status_move = data.category == crate::dex::Category::Status;
         // (holder, target, kind, order, speed, subOrder)
@@ -623,7 +623,7 @@ impl Battle {
                 H::FlameBody if contact && self.chance.chance(3, 10) => {
                     self.try_set_status_from(user, crate::damage::Status::Burn, Some(t));
                 }
-                H::WeakArmor if data.category == crate::dex::Category::Physical => {
+                H::WeakArmor if self.physical(data) => {
                     self.boost(t, &[(1, -1), (4, 2)], Some(t));
                 }
                 H::ThermalExchange if fire => {
@@ -664,7 +664,7 @@ impl Battle {
                 {
                     self.boost(t, &[(4, 1)], Some(user));
                 }
-                H::ToxicDebris if data.category == crate::dex::Category::Physical => {
+                H::ToxicDebris if self.physical(data) => {
                     // The attacker's side (its foes', if it hit an ally).
                     let side = if user.side == t.side {
                         1 - user.side

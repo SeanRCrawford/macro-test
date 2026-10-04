@@ -22,7 +22,7 @@ use crate::dex::Dex;
 use crate::stats;
 use crate::team::PokemonSet;
 use choice::{SideChoice, SideRequest, SlotChoice, SlotRequest};
-use state::{Field, Mon, Side, SwitchFlag, ACTIVE_PER_SIDE};
+use state::{Attacker, Field, Mon, Side, SwitchFlag, ACTIVE_PER_SIDE};
 use std::cmp::Ordering;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +108,8 @@ pub struct Battle {
     /// The user of a move with ignoreAbility (Mold Breaker), while it runs:
     /// other Pokemon's breakable abilities are suppressed.
     mold_breaker: Option<MonRef>,
+    /// Shell Side Arm went physical this use (and makes contact).
+    ssa_physical: bool,
     mega_used: [bool; 2],
     /// The six as brought, while team-preview actions pick the four.
     benched: [Vec<Mon>; 2],
@@ -153,6 +155,7 @@ impl Battle {
             move_damage_by: None,
             selfdestruct_user: None,
             mold_breaker: None,
+            ssa_physical: false,
             mega_used: [false; 2],
             effect_order: 0,
             benched: [Vec::new(), Vec::new()],
@@ -558,6 +561,20 @@ impl Battle {
     }
 
     /// `queue.willMove(pokemon)`.
+    /// The active move's contact flag (Shell Side Arm may add it).
+    pub(super) fn contact(&self, data: &crate::dex::MoveData) -> bool {
+        data.flags.has("contact") || (data.id == "shellsidearm" && self.ssa_physical)
+    }
+
+    /// The active move's category is Physical (Shell Side Arm may switch).
+    pub(super) fn physical(&self, data: &crate::dex::MoveData) -> bool {
+        if data.id == "shellsidearm" {
+            self.ssa_physical
+        } else {
+            data.category == crate::dex::Category::Physical
+        }
+    }
+
     fn will_move(&self, r: MonRef) -> bool {
         !self.mon(r).fainted
             && self
@@ -1204,6 +1221,15 @@ impl Battle {
                     continue;
                 }
                 let r = self.mon_ref(side, p);
+                // Attacks are last turn's now; those by Pokemon gone from the
+                // field are forgotten.
+                let attackers = std::mem::take(&mut self.mon_mut(r).attacked_by);
+                let attackers = attackers
+                    .into_iter()
+                    .filter(|a| self.mon(a.source).is_active)
+                    .map(|a| Attacker { this_turn: false, ..a })
+                    .collect();
+                self.mon_mut(r).attacked_by = attackers;
                 let locked = self.choice_locked_move(r);
                 // A foe's imprison: its moves (but Struggle) can't be chosen.
                 let imprisoned: Vec<crate::dex::MoveId> = self.sides[side].pokemon[p]

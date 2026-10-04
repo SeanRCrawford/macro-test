@@ -7,7 +7,7 @@
 
 use super::conditions::{status_from_id, HitRes};
 use super::state::{
-    LockedMove, Mon, SideCondition, SwitchFlag, Volatile, VolatileId, ACTIVE_PER_SIDE,
+    Attacker, LockedMove, Mon, SideCondition, SwitchFlag, Volatile, VolatileId, ACTIVE_PER_SIDE,
 };
 use super::{Battle, BattleError, MonRef, Res};
 use crate::damage::{self, ActiveMove, Combatant, DamageCtx, Outcome, SideState, Status};
@@ -525,6 +525,15 @@ impl Battle {
                     .action_speed_of(self.mon_ref(side, pos))
                     .map_or(0, |s| s.unsigned_abs());
                 c.moved_this_turn = !m.newly_switched && !self.will_move(self.mon_ref(side, pos));
+                c.will_move = self.will_move(self.mon_ref(side, pos));
+                // Avalanche: who damaged it this turn, by where they stand.
+                for a in m.attacked_by.iter().filter(|a| a.this_turn && a.damage > 0) {
+                    if let Some(p) = (0..ACTIVE_PER_SIDE).find(|&p| {
+                        self.sides[a.source.side].slot_filled[p] && self.mon_ref(a.source.side, p) == a.source
+                    }) {
+                        c.damaged_by |= 1 << (a.source.side * 2 + p);
+                    }
+                }
                 c.volatiles.helping_hand = m
                     .volatiles
                     .0
@@ -715,7 +724,24 @@ impl Battle {
             .or_else(|| self.foes(user).first().copied())
             .unwrap_or(user);
         let ctx = self.damage_ctx(&view, user, defender, false, false);
-        let am = damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
+        let mut am = damage::prepare_move(&ctx, move_id).map_err(|e| BattleError::Unsupported(e.0))?;
+        // Shell Side Arm's onModifyMove: physical (and contact) if that
+        // would do more, a coin flip on a tie.
+        if data.id == "shellsidearm" {
+            self.ssa_physical = false;
+            if defender != user {
+                let (u, d) = (self.mon(user), self.mon(defender));
+                let base = 2 * 50 / 5 + 2;
+                let calc = |a: u32, b: u32| base * 90 * a / b / 50;
+                let physical = calc(super::boosted(u.stats[1], u.boosts[0]), super::boosted(d.stats[2], d.boosts[1]));
+                let special = calc(super::boosted(u.stats[3], u.boosts[2]), super::boosted(d.stats[4], d.boosts[3]));
+                if physical > special || (physical == special && self.chance.chance(1, 2)) {
+                    am.category = Category::Physical;
+                    am.contact = true;
+                    self.ssa_physical = true;
+                }
+            }
+        }
         // Mold Breaker's onModifyMove: the move ignores breakable abilities.
         self.mold_breaker = am.ignore_ability.then_some(user);
         // Stance Change (onModifyMove priority 1): Blade to attack, Shield
@@ -994,10 +1020,10 @@ impl Battle {
             return false;
         }
         // HitProtect: Unseen Fist's contact moves go through.
-        if data.flags.has("contact") && self.hits_through_protect(user) {
+        if self.contact(data) && self.hits_through_protect(user) {
             return false;
         }
-        if data.flags.has("contact") {
+        if self.contact(data) {
             match kind {
                 VolatileId::SpikyShield => {
                     let amount = (self.mon(user).max_hp() / 8) as u32;
@@ -1275,7 +1301,7 @@ impl Battle {
 
         // HitProtect: Unseen Fist's contact moves get through Protect and
         // friends (and Wide Guard), noted for the damage.
-        if data.flags.has("protect") && data.flags.has("contact") && self.hits_through_protect(user)
+        if data.flags.has("protect") && self.contact(data) && self.hits_through_protect(user)
         {
             for &t in &targets {
                 let v = &self.mon(t).volatiles;
@@ -1320,7 +1346,7 @@ impl Battle {
             if b.psychic_terrain_blocks(user, t, priority, data.target == MoveTarget::SelfTarget) {
                 HitRes::Bool(false)
             } else if data.flags.has("protect")
-                && !(data.flags.has("contact") && b.hits_through_protect(user))
+                && !(b.contact(data) && b.hits_through_protect(user))
                 && b.sides[t.side].condition(SideCondition::WideGuard) > 0
                 && matches!(
                     spread_target,
@@ -1331,7 +1357,7 @@ impl Battle {
                 HitRes::NotFail
             } else if priority > 0
                 && data.flags.has("protect")
-                && !(data.flags.has("contact") && b.hits_through_protect(user))
+                && !(b.contact(data) && b.hits_through_protect(user))
                 && b.sides[t.side].condition(SideCondition::QuickGuard) > 0
             {
                 // Quick Guard (priority 4).
@@ -1514,7 +1540,7 @@ impl Battle {
         // ModifyAccuracy: Compound Eyes (priority -1), then Wide Lens, Zoom
         // Lens and the target's Bright Powder (-2) by holder Speed, chained.
         let mut accuracy = acc as u32;
-        if let Some(modifier) = self.accuracy_modifier(user, t) {
+        if let Some(modifier) = self.accuracy_modifier(user, t, self.physical(data)) {
             accuracy = crate::fixed::modify(accuracy as u64, modifier) as u32;
         }
         if boost > 0 {
@@ -1552,7 +1578,7 @@ impl Battle {
                 a *= TABLE[(-eva) as usize];
             }
         }
-        if let Some(modifier) = self.accuracy_modifier(user, t) {
+        if let Some(modifier) = self.accuracy_modifier(user, t, self.physical(data)) {
             a = (((a * modifier as f64).trunc() + 2047.0) / 4096.0).trunc();
         }
         if self.mon(t).volatiles.has(VolatileId::GlaiveRush)
@@ -1574,11 +1600,14 @@ impl Battle {
     /// The ModifyAccuracy chain, if any handler applies: Compound Eyes and
     /// Sand Veil (priority -1), then Wide Lens, Zoom Lens and the target's
     /// Bright Powder (-2), by holder Speed.
-    fn accuracy_modifier(&mut self, user: MonRef, t: MonRef) -> Option<u32> {
+    fn accuracy_modifier(&mut self, user: MonRef, t: MonRef, physical: bool) -> Option<u32> {
         let mut mods: Vec<(i8, i32, u8, u32)> = Vec::new();
         let (us, ts) = (self.mon(user).speed, self.mon(t).speed);
         if self.ability_is(user, "compoundeyes") {
             mods.push((-1, us, 7, 5325));
+        }
+        if self.ability_is(user, "hustle") && physical {
+            mods.push((-1, us, 7, 3277));
         }
         let weather = self.effective_weather();
         if (self.ability_is(t, "sandveil") && weather == crate::damage::Weather::Sand)
@@ -1720,9 +1749,14 @@ impl Battle {
         }
         for (i, t) in hit_targets.iter().enumerate() {
             if let Some(t) = *t {
-                if t != user && matches!(move_damage[i], HitRes::Num(_)) {
+                if t != user {
+                    // gotAttacked, with the last hit's damage.
+                    let damage = if let HitRes::Num(d) = move_damage[i] { d } else { 0 };
                     let m = self.mon_mut(t);
-                    m.times_attacked = m.times_attacked.saturating_add(hit - 1);
+                    m.attacked_by.push(Attacker { source: user, damage, this_turn: true });
+                    if matches!(move_damage[i], HitRes::Num(_)) {
+                        m.times_attacked = m.times_attacked.saturating_add(hit - 1);
+                    }
                 }
             }
         }
@@ -2620,6 +2654,10 @@ impl Battle {
             }
             _ => {}
         }
+        // Merciless: poisoned targets always take critical hits.
+        if self.ability_is(user, "merciless") && matches!(self.mon(t).status, Status::Poison | Status::Toxic) {
+            ratio = ratio.max(5);
+        }
         let crit_ratio = ratio.clamp(0, 4) as usize;
         let crit = match mv.data.will_crit {
             Some(c) => c,
@@ -2633,6 +2671,8 @@ impl Battle {
         ctx.bypass_protect = mv.bypassed.contains(&t);
         ctx.hit_sub = hit_sub;
         ctx.hit = mv.hit;
+        // Fickle Beam's onBasePower: 30% to double.
+        mv.am.fickle_beam = mv.data.id == "ficklebeam" && self.chance.chance(3, 10);
         let outcome =
             damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
         if !hit_sub

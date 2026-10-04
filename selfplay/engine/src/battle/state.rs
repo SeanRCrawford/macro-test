@@ -361,10 +361,21 @@ pub struct Mon {
     pub move_this_turn_result: Option<Option<bool>>,
     pub move_last_turn_result: Option<Option<bool>>,
     pub times_attacked: u8,
+    /// `attackedBy`: who attacked this Pokemon, and for how much.
+    pub attacked_by: Vec<Attacker>,
     /// HP after this Pokemon was last damaged this turn (`hurtThisTurn`).
     pub hurt_this_turn: Option<u16>,
     /// Showdown's `pokemon.speed`: action speed as of the last `updateSpeed`.
     pub speed: i32,
+}
+
+/// One entry of `attackedBy`.
+#[derive(Debug, Clone, Copy)]
+pub struct Attacker {
+    pub source: super::MonRef,
+    /// The damage dealt (0 unless a number).
+    pub damage: u32,
+    pub this_turn: bool,
 }
 
 impl Mon {
@@ -432,6 +443,7 @@ impl Mon {
             move_this_turn_result: None,
             move_last_turn_result: None,
             times_attacked: 0,
+            attacked_by: Vec::new(),
             hurt_this_turn: None,
             speed: stats[5] as i32,
         }
@@ -490,6 +502,7 @@ impl Mon {
         self.being_called_back = false;
         self.times_attacked = 0;
         self.hurt_this_turn = None;
+        self.attacked_by.clear();
         self.trace_seek = false;
         self.protean_used = false;
         self.fallen = 0;

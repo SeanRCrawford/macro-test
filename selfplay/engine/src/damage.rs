@@ -97,6 +97,11 @@ pub struct Combatant {
     pub stats_lowered_this_turn: bool,
     /// `getStat('spe')`: boosted and modified Speed (Gyro Ball).
     pub spe_stat: u32,
+    /// `queue.willMove`: still to move this turn (Analytic).
+    pub will_move: bool,
+    /// Positions (side * 2 + slot) whose occupant damaged this Pokemon this
+    /// turn (Avalanche).
+    pub damaged_by: u8,
 }
 
 impl Combatant {
@@ -126,6 +131,8 @@ impl Combatant {
             moved_this_turn: false,
             stats_lowered_this_turn: false,
             spe_stat: stats[5] as u32,
+            will_move: false,
+            damaged_by: 0,
         }
     }
 
@@ -206,6 +213,10 @@ pub struct ActiveMove {
     pub type_changer: Option<AbilityId>,
     /// Parental Bond made this a two-hit move (the second hit does 1/4).
     pub parental_bond: bool,
+    /// The contact flag (Shell Side Arm adds it when it goes physical).
+    pub contact: bool,
+    /// Fickle Beam's onBasePower chance came up: double power.
+    pub fickle_beam: bool,
 }
 
 impl ActiveMove {
@@ -222,6 +233,8 @@ impl ActiveMove {
             has_sheer_force: false,
             type_changer: None,
             parental_bond: false,
+            contact: m.flags.has("contact"),
+            fickle_beam: false,
         }
     }
 }
@@ -363,7 +376,10 @@ fn resist_berry(id: &str) -> Option<&'static str> {
 pub const MOVES_WITH_HANDLERS: &[&str] = &[
     "acrobatics",
     "aurawheel",
+    "avalanche",
     "beatup",
+    "ficklebeam",
+    "shellsidearm",
     "gyroball",
     "lashout",
     "payback",
@@ -949,6 +965,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                 // The hit count; the battle sets each hit's power.
                 "beatup" => {}
                 "struggle" => am.move_type = TYPELESS,
+                // The battle picks the category (it may flip a coin).
+                "shellsidearm" => {}
                 other => return unsupported(format!("move {other}.onModifyMove")),
             }
         }
@@ -1263,6 +1281,13 @@ impl<'a, 'b> Calc<'a, 'b> {
                     bp
                 }
             }
+            "avalanche" => {
+                if attacker.damaged_by & (1 << d) != 0 {
+                    bp * 2
+                } else {
+                    bp
+                }
+            }
             "gyroball" => {
                 let user = self.speed_stat(a)?;
                 let target = self.speed_stat(d)?;
@@ -1380,6 +1405,13 @@ impl<'a, 'b> Calc<'a, 'b> {
                             Act::None
                         }
                     }
+                    "ficklebeam" => {
+                        if am.fickle_beam {
+                            Act::Chain(of(2, 1))
+                        } else {
+                            Act::None
+                        }
+                    }
                     "solarbeam" | "solarblade" => {
                         if matches!(
                             self.weather_for(Asker::Move),
@@ -1418,11 +1450,20 @@ impl<'a, 'b> Calc<'a, 'b> {
                         "megalauncher" => yes(flag("pulse"), of(3, 2)),
                         "sharpness" => yes(flag("slicing"), of(3, 2)),
                         "strongjaw" => yes(flag("bite"), of(3, 2)),
-                        "toughclaws" => yes(flag("contact"), 5325),
+                        "toughclaws" => yes(am.contact, 5325),
                         "punkrock" => yes(flag("sound"), 5325),
                         "reckless" => yes(mv.has_recoil || mv.has_crash_damage, 4915),
                         "sheerforce" => yes(am.has_sheer_force, 5325),
                         "technician" => Act::Technician,
+                        // No one else still to move.
+                        "analytic" => yes(
+                            self.ctx
+                                .actives
+                                .iter()
+                                .enumerate()
+                                .all(|(i, c)| i == a || !c.is_some_and(|c| c.will_move)),
+                            5325,
+                        ),
                         "sandforce" => {
                             let t = am.move_type;
                             yes(
@@ -1817,14 +1858,14 @@ impl<'a, 'b> Calc<'a, 'b> {
                 (Effect::Ability(ab), "onSourceModifyDamage") => {
                     let flag = |f: &str| mv.flags.has(f);
                     match self.dex.ability(ab).id.as_str() {
-                        "auraguard" => yes(flag("contact"), of(1, 2)),
+                        "auraguard" => yes(am.contact, of(1, 2)),
                         "multiscale" => yes(defender.hp >= defender.max_hp(), of(1, 2)),
                         "filter" | "solidrock" => yes(type_mod > 0, of(3, 4)),
                         "punkrock" => yes(flag("sound"), of(1, 2)),
                         "fluffy" => {
                             // chainModify(mod) with mod = 2 (Fire), 0.5 (contact), 1 or both.
                             let fire = am.move_type == self.ty("Fire");
-                            match (fire, flag("contact")) {
+                            match (fire, am.contact) {
                                 (true, false) => Act::Chain(of(2, 1)),
                                 (false, true) => Act::Chain(of(1, 2)),
                                 _ => Act::Chain(ONE),
