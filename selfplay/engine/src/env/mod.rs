@@ -123,10 +123,43 @@ pub struct VecEnv {
     config: EnvConfig,
     /// Reports of games that panicked (see `step`), until taken.
     crashes: Vec<String>,
+    /// Test hook: make this game's next step panic.
+    inject: Option<usize>,
+}
+
+thread_local! {
+    /// Where the last panic on this thread happened, with its backtrace.
+    static LAST_PANIC: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Record each panic's location and backtrace for `crash_report` (then run
+/// the usual hook, which prints the message).
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_default();
+            let trace = std::backtrace::Backtrace::force_capture().to_string();
+            // Keep the engine's own frames: the call path that matters.
+            let trace: Vec<&str> = trace
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.contains("engine") && !l.contains("backtrace"))
+                .take(60)
+                .collect();
+            LAST_PANIC.with(|p| *p.borrow_mut() = Some((location, trace.join("\n"))));
+            previous(info);
+        }));
+    });
 }
 
 impl VecEnv {
     pub fn new(n: usize, sampler: TeamSampler, config: EnvConfig) -> Self {
+        install_panic_hook();
         assert!(!sampler.is_empty(), "no teams to play");
         let mut seeder = Rng::new(config.seed);
         let games = (0..n)
@@ -137,6 +170,7 @@ impl VecEnv {
             sampler,
             config,
             crashes: Vec::new(),
+            inject: None,
         }
     }
 
@@ -255,6 +289,12 @@ impl VecEnv {
         std::mem::take(&mut self.crashes)
     }
 
+    /// Make game `g`'s next step panic, to test crash handling.
+    #[doc(hidden)]
+    pub fn inject_panic(&mut self, g: usize) {
+        self.inject = Some(g);
+    }
+
     /// Play one decision in every game: `actions[2 * g + side]` is that
     /// side's action index (ignored when it has nothing to decide). A game
     /// that ends is reported in `finished` and replaced by a new one. A game
@@ -273,17 +313,25 @@ impl VecEnv {
         let limit = self.config.turn_limit;
         let errors = std::sync::Mutex::new(Vec::new());
         let crashes = std::sync::Mutex::new(Vec::new());
+        let inject = self.inject.take();
         let work: Vec<_> = self
             .games
             .chunks_mut(chunk)
             .zip(actions.chunks(chunk * 2))
             .zip(finished.chunks_mut(chunk))
+            .enumerate()
             .collect();
-        run_parallel(work, threads, |((games, actions), finished)| {
+        run_parallel(work, threads, |(c, ((games, actions), finished))| {
             for (g, game) in games.iter_mut().enumerate() {
                 finished[g] = None;
                 let a = [actions[2 * g], actions[2 * g + 1]];
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step_game(game, a)));
+                let poison = inject == Some(c * chunk + g);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if poison {
+                        panic!("injected panic");
+                    }
+                    step_game(game, a)
+                }));
                 match r {
                     Ok(Err(e)) => {
                         errors.lock().expect("errors").push(e);
@@ -359,8 +407,11 @@ fn crash_report(game: &Game, sampler: &TeamSampler, panic: &(dyn std::any::Any +
         .map(|s| s.to_string())
         .or_else(|| panic.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "unknown panic".into());
+    let (location, backtrace) = LAST_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_default();
     serde_json::json!({
         "panic": msg,
+        "location": location,
+        "backtrace": backtrace,
         "teams": game.teams.map(|t| sampler.team(t).name.clone()),
         "seed": game.seed,
         "turn": game.battle.turn,

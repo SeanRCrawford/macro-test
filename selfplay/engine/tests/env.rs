@@ -138,3 +138,28 @@ fn greedy_beats_random() {
     eprintln!("greedy vs random: {rate:.3} over {games} games");
     assert!(rate > 0.7, "greedy only won {rate:.3}");
 }
+
+#[test]
+fn a_panicking_game_is_reported_and_replaced() {
+    let n = 16;
+    let mut env = VecEnv::new(n, sampler(), EnvConfig::default());
+    let mut greedy = vec![-1i64; n * 2];
+    let mut finished: Vec<Option<Finished>> = vec![None; n];
+    for _ in 0..3 {
+        env.greedy_actions(&mut greedy);
+        env.step(&greedy, &mut finished).unwrap();
+    }
+    env.inject_panic(11);
+    env.greedy_actions(&mut greedy);
+    env.step(&greedy, &mut finished).unwrap();
+    let f = finished[11].expect("the panicking game ends");
+    assert_eq!(f.reward, [0.0, 0.0]);
+    assert_eq!(env.battle(11).turn, 0, "replaced by a new game");
+    let crashes = env.take_crashes();
+    assert_eq!(crashes.len(), 1);
+    let r: serde_json::Value = serde_json::from_str(&crashes[0]).unwrap();
+    assert_eq!(r["panic"], "injected panic");
+    assert!(r["location"].as_str().unwrap().contains("mod.rs"), "{r}");
+    assert_eq!(r["actions"].as_array().unwrap().len(), 4);
+    assert!(env.take_crashes().is_empty());
+}

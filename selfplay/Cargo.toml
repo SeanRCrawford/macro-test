@@ -9,3 +9,5 @@ version = "0.1.0"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# File and line numbers in panic backtraces (crash reports); no speed cost.
+debug = "line-tables-only"
