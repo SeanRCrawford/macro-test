@@ -13,6 +13,7 @@ pub mod damage;
 pub mod dex;
 pub mod enumerate;
 pub mod env;
+pub mod search;
 pub mod fixed;
 pub mod stats;
 pub mod team;

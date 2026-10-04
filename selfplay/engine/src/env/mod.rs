@@ -139,6 +139,15 @@ impl VecEnv {
         &self.games[i].battle
     }
 
+    pub fn config(&self) -> &EnvConfig {
+        &self.config
+    }
+
+    /// Worker threads `observe` and `step` use.
+    pub fn worker_threads(&self) -> usize {
+        self.threads()
+    }
+
     /// The corpus teams game `i` is playing.
     pub fn teams(&self, i: usize) -> [usize; 2] {
         self.games[i].teams
@@ -282,7 +291,7 @@ const CHUNK: usize = 8;
 
 /// Run `f` on every work item, on `threads` threads pulling from a shared
 /// queue.
-fn run_parallel<W: Send>(work: Vec<W>, threads: usize, f: impl Fn(W) + Sync) {
+pub(crate) fn run_parallel<W: Send>(work: Vec<W>, threads: usize, f: impl Fn(W) + Sync) {
     if threads <= 1 {
         work.into_iter().for_each(f);
         return;

@@ -44,6 +44,16 @@ class StepResult:
     turns: np.ndarray       # [n] int32: length of finished games
 
 
+@dataclass
+class Leaves:
+    """One-turn search leaves (engine/src/search.rs), both views each."""
+    ints: np.ndarray        # [n, 2, tokens, int_fields]
+    mons: np.ndarray        # [n, 2, tokens, mon_floats]
+    field: np.ndarray       # [n, 2, field_floats]
+    probs: np.ndarray       # [n] float32
+    terminal: np.ndarray    # [n] float32: side 0's result if the leaf ended the game, else NaN
+
+
 class SelfPlayEnv:
     def __init__(self, num_envs: int, corpus: str | Path = DEFAULT_CORPUS, seed: int = 0,
                  turn_limit: int = 30, perfect_info: bool = True, threads: int = 0):
@@ -90,6 +100,31 @@ class SelfPlayEnv:
         out = np.empty((self.num_envs, 2), np.int64)
         self._env.greedy_actions(out)
         return out
+
+    def search_expand(self, games, candidates: np.ndarray, max_outcomes: int = 16,
+                      roll_bands: int = 1, seed: int = 0) -> int:
+        """Play every pair of candidate actions ([len(games), 2, k] int64,
+        -1 padding) in each of `games` through its chance outcomes; returns
+        the number of leaves."""
+        c = np.ascontiguousarray(candidates, dtype=np.int64)
+        return self._env.search_expand(list(map(int, games)), c, max_outcomes, roll_bands, seed)
+
+    def search_leaves(self, n: int) -> Leaves:
+        s = SIZES
+        leaves = Leaves(
+            ints=np.empty((n, 2, s["tokens"], s["int_fields"]), np.int32),
+            mons=np.empty((n, 2, s["tokens"], s["mon_floats"]), np.float32),
+            field=np.empty((n, 2, s["field_floats"]), np.float32),
+            probs=np.empty(n, np.float32),
+            terminal=np.empty(n, np.float32),
+        )
+        self._env.search_leaves(leaves.ints, leaves.mons, leaves.field, leaves.probs, leaves.terminal)
+        return leaves
+
+    def search_solve(self, values: np.ndarray, iters: int = 1000) -> list[dict]:
+        """Each root's payoff matrix and equilibrium from the leaves' values
+        for side 0."""
+        return self._env.search_solve(np.ascontiguousarray(values, dtype=np.float32), iters)
 
     def legal_choices(self, game: int, side: int) -> list[tuple[int, str]]:
         """(action index, Showdown choice string) pairs, for debugging."""

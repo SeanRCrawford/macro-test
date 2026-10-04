@@ -89,6 +89,11 @@ class PolicyNet(nn.Module):
         x = torch.cat([self.field_proj(field).unsqueeze(1), self.mon_proj(emb)], dim=1)
         return self.norm(self.encoder(x + self.position))
 
+    def value(self, ints, mons, field):
+        """The observer's expected result [B], in [-1, 1]."""
+        g = self.encode(ints, mons, field)[:, 0]
+        return torch.tanh(self.value_head(g)).squeeze(-1)
+
     def forward(self, ints, mons, field, masks, decisions, opp_masks=None):
         """Masked log-probabilities over the mask's action space [B, mask_len]
         and values [B]. Rows with no decision get a uniform dummy
