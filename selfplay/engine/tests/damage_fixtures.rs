@@ -5,7 +5,9 @@
 //! implemented) is counted, not failed; any case it does calculate must match
 //! exactly.
 
-use engine::damage::{calculate, Combatant, DamageCtx, Outcome, SideState, Status, Terrain, Volatiles, Weather};
+use engine::damage::{
+    calculate, Combatant, DamageCtx, Outcome, SideState, Status, Terrain, Volatiles, Weather,
+};
 use engine::dex::Dex;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -61,9 +63,20 @@ struct Case {
 
 fn combatant(m: &Mon) -> Combatant {
     let dex = Dex::get();
-    let species = dex.species_id(&m.species).unwrap_or_else(|| panic!("species {}", m.species));
-    let ability = dex.ability_id(&m.ability).unwrap_or_else(|| panic!("ability {}", m.ability));
-    let item = if m.item.is_empty() { None } else { Some(dex.item_id(&m.item).unwrap_or_else(|| panic!("item {}", m.item))) };
+    let species = dex
+        .species_id(&m.species)
+        .unwrap_or_else(|| panic!("species {}", m.species));
+    let ability = dex
+        .ability_id(&m.ability)
+        .unwrap_or_else(|| panic!("ability {}", m.ability));
+    let item = if m.item.is_empty() {
+        None
+    } else {
+        Some(
+            dex.item_id(&m.item)
+                .unwrap_or_else(|| panic!("item {}", m.item)),
+        )
+    };
     let mut c = Combatant::new(species, m.stats, ability, item);
     let types: Vec<_> = m.types.iter().map(|t| dex.type_id(t).unwrap()).collect();
     c.types = [types[0], *types.get(1).unwrap_or(&types[0])];
@@ -71,7 +84,14 @@ fn combatant(m: &Mon) -> Combatant {
     // The generator's battles have no queue and nobody newly switched in, so
     // every target counts as having moved (Payback doubles).
     c.moved_this_turn = true;
-    c.boosts = [0, m.boosts[0], m.boosts[1], m.boosts[2], m.boosts[3], m.boosts[4]];
+    c.boosts = [
+        0,
+        m.boosts[0],
+        m.boosts[1],
+        m.boosts[2],
+        m.boosts[3],
+        m.boosts[4],
+    ];
     c.status = match m.status.as_str() {
         "" => Status::None,
         "brn" => Status::Burn,
@@ -94,7 +114,18 @@ fn combatant(m: &Mon) -> Combatant {
     };
     for v in &m.volatiles {
         // choicelock: added by Choice Scarf's ModifyMove; no effect on damage.
-        assert!(["helpinghand", "charge", "flashfire", "glaiverush", "gem", "choicelock"].contains(&v.as_str()), "volatile {v}");
+        assert!(
+            [
+                "helpinghand",
+                "charge",
+                "flashfire",
+                "glaiverush",
+                "gem",
+                "choicelock"
+            ]
+            .contains(&v.as_str()),
+            "volatile {v}"
+        );
     }
     c.active_turns = m.active_turns;
     c.times_attacked = m.times_attacked;
@@ -118,7 +149,12 @@ fn damage_matches_showdown() {
             fainted: s.fainted,
         };
         let ctx = DamageCtx {
-            actives: [Some(&mons[0]), Some(&mons[1]), Some(&mons[2]), Some(&mons[3])],
+            actives: [
+                Some(&mons[0]),
+                Some(&mons[1]),
+                Some(&mons[2]),
+                Some(&mons[3]),
+            ],
             attacker: 0,
             defender: 2,
             weather: match c.weather.as_str() {
@@ -144,7 +180,9 @@ fn damage_matches_showdown() {
             bypass_protect: false,
             hit_sub: false,
         };
-        let move_id = dex.move_id(&c.move_id).unwrap_or_else(|| panic!("move {}", c.move_id));
+        let move_id = dex
+            .move_id(&c.move_id)
+            .unwrap_or_else(|| panic!("move {}", c.move_id));
         let expected = match &c.result {
             Expected::Rolls(r) => Outcome::Damage(r.as_slice().try_into().expect("16 rolls")),
             Expected::Word(w) if w == "immune" => Outcome::Immune,
@@ -163,10 +201,23 @@ fn damage_matches_showdown() {
     let skipped: usize = unsupported.values().sum();
     let mut reasons: Vec<_> = unsupported.into_iter().collect();
     reasons.sort_by_key(|r| std::cmp::Reverse(r.1));
-    eprintln!("{matched} matched, {} mismatched, {skipped} unsupported of {}", mismatches.len(), cases.len());
+    eprintln!(
+        "{matched} matched, {} mismatched, {skipped} unsupported of {}",
+        mismatches.len(),
+        cases.len()
+    );
     for (why, count) in reasons.iter().take(25) {
         eprintln!("  unsupported x{count}: {why}");
     }
-    assert!(mismatches.is_empty(), "{} mismatches:\n{}", mismatches.len(), mismatches[..mismatches.len().min(30)].join("\n"));
-    assert!(matched * 10 >= cases.len() * 9, "under 90% of cases supported: {matched}/{}", cases.len());
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches:\n{}",
+        mismatches.len(),
+        mismatches[..mismatches.len().min(30)].join("\n")
+    );
+    assert!(
+        matched * 10 >= cases.len() * 9,
+        "under 90% of cases supported: {matched}/{}",
+        cases.len()
+    );
 }

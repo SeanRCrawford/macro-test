@@ -19,13 +19,24 @@ fn stats_match_showdown() {
     let dex = Dex::get();
     let mut failures = Vec::new();
     for c in &cases {
-        let sid = dex.species_id(&c.species).unwrap_or_else(|| panic!("{} not in dex", c.species));
+        let sid = dex
+            .species_id(&c.species)
+            .unwrap_or_else(|| panic!("{} not in dex", c.species));
         let nid = dex.nature_id(&c.nature).unwrap();
         let got = compute_stats(sid, nid, c.points);
         if got != c.stats {
-            failures.push(format!("{} {} {:?}: got {:?}, Showdown {:?}", c.species, c.nature, c.points, got, c.stats));
+            failures.push(format!(
+                "{} {} {:?}: got {:?}, Showdown {:?}",
+                c.species, c.nature, c.points, got, c.stats
+            ));
         }
     }
     assert!(cases.len() > 10_000);
-    assert!(failures.is_empty(), "{} of {} differ:\n{}", failures.len(), cases.len(), failures[..failures.len().min(20)].join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} of {} differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures[..failures.len().min(20)].join("\n")
+    );
 }

@@ -12,8 +12,8 @@ pub mod choice;
 mod conditions;
 mod field;
 mod items;
-pub mod snapshot;
 mod moves;
+pub mod snapshot;
 pub mod state;
 pub mod support;
 
@@ -51,13 +51,28 @@ pub struct MonRef {
 
 #[derive(Debug, Clone, PartialEq)]
 enum ActionKind {
-    Team { side: usize, index: usize, uid: usize },
+    Team {
+        side: usize,
+        index: usize,
+        uid: usize,
+    },
     Start,
     BeforeTurn,
-    Move { mon: MonRef, slot: usize, target_loc: i8 },
-    MegaEvo { mon: MonRef },
-    Switch { mon: MonRef, target: MonRef },
-    RunSwitch { mon: MonRef },
+    Move {
+        mon: MonRef,
+        slot: usize,
+        target_loc: i8,
+    },
+    MegaEvo {
+        mon: MonRef,
+    },
+    Switch {
+        mon: MonRef,
+        target: MonRef,
+    },
+    RunSwitch {
+        mon: MonRef,
+    },
     Residual,
 }
 
@@ -119,7 +134,11 @@ impl Battle {
                     m
                 })
                 .collect();
-            Side { pokemon_left: pokemon.len(), pokemon, ..Side::default() }
+            Side {
+                pokemon_left: pokemon.len(),
+                pokemon,
+                ..Side::default()
+            }
         });
         let mut b = Battle {
             sides,
@@ -147,20 +166,33 @@ impl Battle {
     }
 
     pub fn mon(&self, r: MonRef) -> &Mon {
-        self.sides[r.side].pokemon.iter().find(|m| m.uid == r.uid).expect("MonRef to a Pokemon on its side")
+        self.sides[r.side]
+            .pokemon
+            .iter()
+            .find(|m| m.uid == r.uid)
+            .expect("MonRef to a Pokemon on its side")
     }
 
     fn mon_mut(&mut self, r: MonRef) -> &mut Mon {
-        self.sides[r.side].pokemon.iter_mut().find(|m| m.uid == r.uid).expect("MonRef to a Pokemon on its side")
+        self.sides[r.side]
+            .pokemon
+            .iter_mut()
+            .find(|m| m.uid == r.uid)
+            .expect("MonRef to a Pokemon on its side")
     }
 
     fn mon_ref(&self, side: usize, position: usize) -> MonRef {
-        MonRef { side, uid: self.sides[side].pokemon[position].uid }
+        MonRef {
+            side,
+            uid: self.sides[side].pokemon[position].uid,
+        }
     }
 
     /// The Pokemon in a slot (`side.active[pos]`), fainted or not.
     pub fn occupant(&self, side: usize, pos: usize) -> Option<MonRef> {
-        self.sides[side].occupant(pos).map(|m| MonRef { side, uid: m.uid })
+        self.sides[side]
+            .occupant(pos)
+            .map(|m| MonRef { side, uid: m.uid })
     }
 
     /// Showdown's `getAllActive()`: slot occupants that haven't fainted.
@@ -189,10 +221,18 @@ impl Battle {
         for side in 0..2 {
             let needed = !matches!(self.requests[side], SideRequest::Wait);
             match (&choices[side], needed) {
-                (None, true) => return Err(BattleError::Illegal(format!("side {side} must choose"))),
-                (Some(_), false) => return Err(BattleError::Illegal(format!("side {side} has nothing to choose"))),
+                (None, true) => {
+                    return Err(BattleError::Illegal(format!("side {side} must choose")))
+                }
+                (Some(_), false) => {
+                    return Err(BattleError::Illegal(format!(
+                        "side {side} has nothing to choose"
+                    )))
+                }
                 (Some(c), true) if !self.legal_choices(side).contains(c) => {
-                    return Err(BattleError::Illegal(format!("side {side}: {c:?} isn't legal")));
+                    return Err(BattleError::Illegal(format!(
+                        "side {side}: {c:?} isn't legal"
+                    )));
                 }
                 _ => {}
             }
@@ -243,7 +283,11 @@ impl Battle {
                     self.sides[side].pokemon[pos].shed_tailing = id == "shedtail";
                 }
                 let target = self.mon_ref(side, index as usize);
-                let order = if matches!(self.requests[side], SideRequest::Switch(_)) { 3 } else { 103 };
+                let order = if matches!(self.requests[side], SideRequest::Switch(_)) {
+                    3
+                } else {
+                    103
+                };
                 self.add_action(ActionKind::Switch { mon, target }, order, 0.0)?;
             }
             SlotChoice::Move { slot, target, mega } => {
@@ -253,13 +297,44 @@ impl Battle {
                 let m = self.mon(mon);
                 // A locked move aims where it was aimed before.
                 if m.locked_move().is_some() {
-                    let charged = m.volatiles.0.iter().find(|v| matches!(v.id, state::VolatileId::Charging(_))).map(|v| v.target_loc);
-                    let target_loc = charged.filter(|&l| l != 0).unwrap_or(m.last_move_target_loc);
-                    self.add_action(ActionKind::Move { mon, slot: moves::LOCKED_SLOT, target_loc }, 200, 0.0)?;
+                    let charged = m
+                        .volatiles
+                        .0
+                        .iter()
+                        .find(|v| matches!(v.id, state::VolatileId::Charging(_)))
+                        .map(|v| v.target_loc);
+                    let target_loc = charged
+                        .filter(|&l| l != 0)
+                        .unwrap_or(m.last_move_target_loc);
+                    self.add_action(
+                        ActionKind::Move {
+                            mon,
+                            slot: moves::LOCKED_SLOT,
+                            target_loc,
+                        },
+                        200,
+                        0.0,
+                    )?;
                     return Ok(());
                 }
-                let slot = if m.moves.iter().any(|s| s.pp > 0 && !s.disabled && !s.imprisoned) { slot as usize } else { usize::MAX };
-                self.add_action(ActionKind::Move { mon, slot, target_loc: target }, 200, 0.0)?;
+                let slot = if m
+                    .moves
+                    .iter()
+                    .any(|s| s.pp > 0 && !s.disabled && !s.imprisoned)
+                {
+                    slot as usize
+                } else {
+                    usize::MAX
+                };
+                self.add_action(
+                    ActionKind::Move {
+                        mon,
+                        slot,
+                        target_loc: target,
+                    },
+                    200,
+                    0.0,
+                )?;
             }
         }
         Ok(())
@@ -269,7 +344,13 @@ impl Battle {
     fn add_action(&mut self, kind: ActionKind, order: u32, priority: f64) -> Res<()> {
         let fractional = self.fractional_priority(&kind);
         self.set_original_target(&kind);
-        let mut action = Action { kind, order, priority, speed: 1, fractional };
+        let mut action = Action {
+            kind,
+            order,
+            priority,
+            speed: 1,
+            fractional,
+        };
         self.action_speed(&mut action)?;
         self.queue.push(action);
         Ok(())
@@ -282,13 +363,26 @@ impl Battle {
             ActionKind::Residual => 300,
             _ => NO_ORDER,
         };
-        self.queue.push(Action { kind, order, priority: 0.0, speed: 1, fractional: 0.0 });
+        self.queue.push(Action {
+            kind,
+            order,
+            priority: 0.0,
+            speed: 1,
+            fractional: 0.0,
+        });
     }
 
     /// resolveAction's `originalTarget = pokemon.getAtLoc(targetLoc)`.
     fn set_original_target(&mut self, kind: &ActionKind) {
-        if let ActionKind::Move { mon, target_loc, .. } = *kind {
-            let t = if target_loc == 0 { None } else { self.at_loc(mon, target_loc) };
+        if let ActionKind::Move {
+            mon, target_loc, ..
+        } = *kind
+        {
+            let t = if target_loc == 0 {
+                None
+            } else {
+                self.at_loc(mon, target_loc)
+            };
             let uid = t.map(|t| (t.side, self.mon(t).uid));
             self.mon_mut(mon).original_target = uid;
         }
@@ -296,7 +390,9 @@ impl Battle {
 
     /// The FractionalPriority event for a move action: Quick Claw.
     fn fractional_priority(&mut self, kind: &ActionKind) -> f64 {
-        let ActionKind::Move { mon, slot, .. } = *kind else { return 0.0 };
+        let ActionKind::Move { mon, slot, .. } = *kind else {
+            return 0.0;
+        };
         // Quick Draw (priority -1); a success leaves Quick Claw (-2) nothing
         // to do, without a roll.
         let id = moves::move_for_slot(self.mon(mon), slot);
@@ -319,7 +415,9 @@ impl Battle {
                 action.priority = self.move_priority(*mon, id) as f64 + action.fractional;
                 Some(*mon)
             }
-            ActionKind::MegaEvo { mon } | ActionKind::Switch { mon, .. } | ActionKind::RunSwitch { mon } => Some(*mon),
+            ActionKind::MegaEvo { mon }
+            | ActionKind::Switch { mon, .. }
+            | ActionKind::RunSwitch { mon } => Some(*mon),
             _ => None,
         };
         action.speed = match mon {
@@ -339,7 +437,10 @@ impl Battle {
         }
         // ModifySpe: Choice Scarf and Tailwind chain their modifiers.
         let mut modifier = self.speed_modifier(r);
-        if m.volatiles.has(state::VolatileId::Unburden) && m.item.is_none() && self.ability_is(r, "unburden") {
+        if m.volatiles.has(state::VolatileId::Unburden)
+            && m.item.is_none()
+            && self.ability_is(r, "unburden")
+        {
             modifier = crate::fixed::chain(modifier, 8192);
         }
         // Weather Speed abilities.
@@ -362,7 +463,8 @@ impl Battle {
         if self.sides[r.side].condition(state::SideCondition::Tailwind) > 0 {
             modifier = crate::fixed::chain(modifier, 8192);
         }
-        let mut spe = crate::fixed::modify(boosted(m.stats[5], m.boosts[4]) as u64, modifier) as u32;
+        let mut spe =
+            crate::fixed::modify(boosted(m.stats[5], m.boosts[4]) as u64, modifier) as u32;
         // par's onModifySpe (Quick Feet isn't supported).
         // par's onModifySpe, unless Quick Feet.
         if m.status == crate::damage::Status::Paralysis && !self.ability_is(r, "quickfeet") {
@@ -378,7 +480,10 @@ impl Battle {
     pub(crate) fn move_priority(&self, user: MonRef, move_id: crate::dex::MoveId) -> i8 {
         let data = Dex::get().move_data(move_id);
         let mut p = data.priority;
-        if data.id == "grassyglide" && self.field.terrain == crate::damage::Terrain::Grassy && self.grounded(user) {
+        if data.id == "grassyglide"
+            && self.field.terrain == crate::damage::Terrain::Grassy
+            && self.grounded(user)
+        {
             p += 1;
         }
         if data.category == crate::dex::Category::Status && self.ability_is(user, "prankster") {
@@ -386,7 +491,10 @@ impl Battle {
         }
         // Gale Wings: Flying moves at full HP.
         let m = self.mon(user);
-        if data.move_type == Dex::get().type_id("Flying").expect("Flying") && m.hp == m.max_hp() && self.ability_is(user, "galewings") {
+        if data.move_type == Dex::get().type_id("Flying").expect("Flying")
+            && m.hp == m.max_hp()
+            && self.ability_is(user, "galewings")
+        {
             p += 1;
         }
         p
@@ -395,7 +503,10 @@ impl Battle {
     /// `field.effectiveWeather()`: none while a Cloud Nine or Air Lock
     /// Pokemon is out (its suppressWeather flag; Mold Breaker can't touch it).
     pub(crate) fn effective_weather(&self) -> crate::damage::Weather {
-        let suppressed = self.all_active().into_iter().any(|r| Dex::get().ability(self.mon(r).ability).suppress_weather);
+        let suppressed = self
+            .all_active()
+            .into_iter()
+            .any(|r| Dex::get().ability(self.mon(r).ability).suppress_weather);
         if suppressed {
             crate::damage::Weather::None
         } else {
@@ -423,7 +534,9 @@ impl Battle {
             return None;
         }
         self.queue.iter().find_map(|a| match a.kind {
-            ActionKind::Move { mon, slot, .. } if mon == r => Some(moves::move_for_slot(self.mon(r), slot)),
+            ActionKind::Move { mon, slot, .. } if mon == r => {
+                Some(moves::move_for_slot(self.mon(r), slot))
+            }
             _ => None,
         })
     }
@@ -434,12 +547,23 @@ impl Battle {
         self.queue.retain(|a| !action_belongs_to(a, r));
         let move_id = moves::move_for_slot(self.mon(r), slot);
         let target_loc = self.random_target_loc(r, move_id);
-        self.insert_action(ActionKind::Move { mon: r, slot, target_loc }, 200)
+        self.insert_action(
+            ActionKind::Move {
+                mon: r,
+                slot,
+                target_loc,
+            },
+            200,
+        )
     }
 
     /// `queue.willMove(pokemon)`.
     fn will_move(&self, r: MonRef) -> bool {
-        !self.mon(r).fainted && self.queue.iter().any(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r))
+        !self.mon(r).fainted
+            && self
+                .queue
+                .iter()
+                .any(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r))
     }
 
     /// The integer priority (`action.move.priority`) and move of a queued
@@ -449,7 +573,10 @@ impl Battle {
             return None;
         }
         self.queue.iter().find_map(|a| match a.kind {
-            ActionKind::Move { mon, slot, .. } if mon == r => Some((moves::move_for_slot(self.mon(r), slot), a.priority - a.fractional)),
+            ActionKind::Move { mon, slot, .. } if mon == r => Some((
+                moves::move_for_slot(self.mon(r), slot),
+                a.priority - a.fractional,
+            )),
             _ => None,
         })
     }
@@ -459,7 +586,11 @@ impl Battle {
         if self.mon(r).fainted {
             return false;
         }
-        match self.queue.iter_mut().find(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r)) {
+        match self
+            .queue
+            .iter_mut()
+            .find(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r))
+        {
             Some(a) => {
                 a.order = 201;
                 true
@@ -473,7 +604,13 @@ impl Battle {
         if self.mon(r).fainted {
             return false;
         }
-        let Some(i) = self.queue.iter().position(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r)) else { return false };
+        let Some(i) = self
+            .queue
+            .iter()
+            .position(|a| matches!(a.kind, ActionKind::Move { mon, .. } if mon == r))
+        else {
+            return false;
+        };
         let mut a = self.queue.remove(i);
         a.order = 3;
         self.queue.insert(0, a);
@@ -482,7 +619,9 @@ impl Battle {
 
     /// `queue.willAct()`: a move or switch is still to come this turn.
     fn will_act(&self) -> bool {
-        self.queue.iter().any(|a| matches!(a.kind, ActionKind::Move { .. } | ActionKind::Switch { .. }))
+        self.queue
+            .iter()
+            .any(|a| matches!(a.kind, ActionKind::Move { .. } | ActionKind::Switch { .. }))
     }
 
     /// `battle.updateSpeed()`: refresh every active Pokemon's `speed`.
@@ -523,7 +662,13 @@ impl Battle {
     fn insert_action(&mut self, kind: ActionKind, order: u32) -> Res<()> {
         let fractional = self.fractional_priority(&kind);
         self.set_original_target(&kind);
-        let mut action = Action { kind, order, priority: 0.0, speed: 1, fractional };
+        let mut action = Action {
+            kind,
+            order,
+            priority: 0.0,
+            speed: 1,
+            fractional,
+        };
         if let ActionKind::RunSwitch { mon } | ActionKind::Move { mon, .. } = action.kind {
             let s = self.action_speed_of(mon)?;
             self.mon_mut(mon).speed = s;
@@ -545,7 +690,11 @@ impl Battle {
             None => self.queue.push(action),
             Some(f) => {
                 let l = last.unwrap_or(self.queue.len());
-                let index = if f == l { f } else { self.chance.random_range(f as u32, l as u32 + 1) as usize };
+                let index = if f == l {
+                    f
+                } else {
+                    self.chance.random_range(f as u32, l as u32 + 1) as usize
+                };
                 self.queue.insert(index, action);
             }
         }
@@ -576,15 +725,35 @@ impl Battle {
     /// Returns true when the loop must stop for a request.
     fn run_action(&mut self, action: Action) -> Res<bool> {
         if std::env::var_os("SELFPLAY_TRACE").is_some() {
-            eprintln!("turn {} run {:?} | queue {:?}", self.turn, action.kind, self.queue.iter().map(|a| &a.kind).collect::<Vec<_>>());
+            eprintln!(
+                "turn {} run {:?} | queue {:?}",
+                self.turn,
+                action.kind,
+                self.queue.iter().map(|a| &a.kind).collect::<Vec<_>>()
+            );
         }
         let is_start = matches!(action.kind, ActionKind::Start);
+        // HP before the action, for EmergencyExit after a residual (every
+        // active) or a runSwitch (the Pokemon coming in).
+        let hp_before: Vec<(MonRef, u16)> = match action.kind {
+            ActionKind::Residual => self
+                .all_active()
+                .into_iter()
+                .filter(|&r| self.mon(r).hp > 0)
+                .map(|r| (r, self.mon(r).hp))
+                .collect(),
+            ActionKind::RunSwitch { mon } => vec![(mon, self.mon(mon).hp)],
+            _ => Vec::new(),
+        };
         match action.kind {
             ActionKind::Team { side, index, uid } => {
                 if index == 0 {
                     self.benched[side] = std::mem::take(&mut self.sides[side].pokemon);
                 }
-                let pos = self.benched[side].iter().position(|m| m.uid == uid).expect("chosen Pokemon");
+                let pos = self.benched[side]
+                    .iter()
+                    .position(|m| m.uid == uid)
+                    .expect("chosen Pokemon");
                 let mut m = self.benched[side][pos].clone();
                 m.position = index;
                 self.sides[side].pokemon.push(m);
@@ -605,7 +774,11 @@ impl Battle {
                 self.mid_turn = true;
             }
             ActionKind::BeforeTurn => {}
-            ActionKind::Move { mon, slot, target_loc } => {
+            ActionKind::Move {
+                mon,
+                slot,
+                target_loc,
+            } => {
                 let m = self.mon(mon);
                 if !m.is_active || m.fainted {
                     return Ok(false);
@@ -618,7 +791,11 @@ impl Battle {
                 assert!(
                     pos < ACTIVE_PER_SIDE,
                     "switch for {mon:?} at position {pos}; target {target:?}; list {:?}",
-                    self.sides[mon.side].pokemon.iter().map(|m| (m.uid, m.position)).collect::<Vec<_>>()
+                    self.sides[mon.side]
+                        .pokemon
+                        .iter()
+                        .map(|m| (m.uid, m.position))
+                        .collect::<Vec<_>>()
                 );
                 self.switch_in(target, pos)?;
             }
@@ -632,7 +809,9 @@ impl Battle {
         // Phazing: Red Card drags in a random replacement.
         for side in 0..2 {
             for pos in 0..ACTIVE_PER_SIDE {
-                let Some(r) = self.occupant(side, pos) else { continue };
+                let Some(r) = self.occupant(side, pos) else {
+                    continue;
+                };
                 if self.mon(r).force_switch_flag {
                     if self.mon(r).hp > 0 {
                         self.drag_in(side, pos)?;
@@ -650,16 +829,29 @@ impl Battle {
         }
         if self.queue.is_empty() {
             self.check_fainted();
-        } else if self.queue.first().is_some_and(|a| matches!(a.kind, ActionKind::Switch { .. }) && a.order == 3) {
+        } else if self
+            .queue
+            .first()
+            .is_some_and(|a| matches!(a.kind, ActionKind::Switch { .. }) && a.order == 3)
+        {
             // More forced switches (instaswitch) already queued.
             return Ok(false);
         }
         if !is_start {
             self.each_update();
+            for &(r, before) in &hp_before {
+                self.emergency_exit(r, before);
+            }
         }
 
         let switches: Vec<bool> = (0..2)
-            .map(|s| (0..ACTIVE_PER_SIDE).any(|p| self.sides[s].occupant(p).is_some_and(|m| m.switch_flag.is_some())))
+            .map(|s| {
+                (0..ACTIVE_PER_SIDE).any(|p| {
+                    self.sides[s]
+                        .occupant(p)
+                        .is_some_and(|m| m.switch_flag.is_some())
+                })
+            })
             .collect();
         let mut any = false;
         for side in 0..2 {
@@ -673,7 +865,11 @@ impl Battle {
                 // leaving by its own move, not again when it switches.
                 for p in 0..ACTIVE_PER_SIDE.min(self.sides[side].pokemon.len()) {
                     let m = &mut self.sides[side].pokemon[p];
-                    if self.sides[side].slot_filled[p] && m.hp > 0 && m.switch_flag.is_some() && !m.skip_before_switch_out {
+                    if self.sides[side].slot_filled[p]
+                        && m.hp > 0
+                        && m.switch_flag.is_some()
+                        && !m.skip_before_switch_out
+                    {
                         m.skip_before_switch_out = true;
                     }
                 }
@@ -685,7 +881,11 @@ impl Battle {
         }
 
         // Gen 8+: speeds update after every action and the queue re-sorts.
-        if self.queue.first().is_some_and(|a| matches!(a.kind, ActionKind::Move { .. })) {
+        if self
+            .queue
+            .first()
+            .is_some_and(|a| matches!(a.kind, ActionKind::Move { .. }))
+        {
             self.update_speed()?;
             let mut q = std::mem::take(&mut self.queue);
             for a in q.iter_mut() {
@@ -718,8 +918,16 @@ impl Battle {
 
     fn make_switch_request(&mut self) {
         for side in 0..2 {
-            let force = [0, 1].map(|p| self.sides[side].occupant(p).is_some_and(|m| m.switch_flag.is_some()));
-            self.requests[side] = if force.iter().any(|&f| f) { SideRequest::Switch(force) } else { SideRequest::Wait };
+            let force = [0, 1].map(|p| {
+                self.sides[side]
+                    .occupant(p)
+                    .is_some_and(|m| m.switch_flag.is_some())
+            });
+            self.requests[side] = if force.iter().any(|&f| f) {
+                SideRequest::Switch(force)
+            } else {
+                SideRequest::Wait
+            };
         }
     }
 
@@ -731,7 +939,16 @@ impl Battle {
         m.clear_volatile();
         m.boosts = src.boosts;
         for v in &src.volatiles.0 {
-            if matches!(v.id, V::ChoiceLock | V::Encore | V::GlaiveRush | V::Yawn | V::Disable | V::Imprison | V::FlashFire) {
+            if matches!(
+                v.id,
+                V::ChoiceLock
+                    | V::Encore
+                    | V::GlaiveRush
+                    | V::Yawn
+                    | V::Disable
+                    | V::Imprison
+                    | V::FlashFire
+            ) {
                 continue;
             }
             m.volatiles.0.push(*v);
@@ -739,7 +956,10 @@ impl Battle {
         // roost's onType applies to the new Pokemon too.
         if m.volatiles.has(V::Roost) {
             let dex = Dex::get();
-            m.start_roost(dex.type_id("Flying").expect("Flying"), dex.type_id("Normal").expect("Normal"));
+            m.start_roost(
+                dex.type_id("Flying").expect("Flying"),
+                dex.type_id("Normal").expect("Normal"),
+            );
         }
     }
 
@@ -751,7 +971,10 @@ impl Battle {
         }
         let i = bench[self.chance.sample(bench.len())];
         // DragOut: Guard Dog stays.
-        if self.occupant(side, pos).is_some_and(|o| self.ability_is(o, "guarddog")) {
+        if self
+            .occupant(side, pos)
+            .is_some_and(|o| self.ability_is(o, "guarddog"))
+        {
             return Ok(());
         }
         let r = self.mon_ref(side, i);
@@ -811,7 +1034,13 @@ impl Battle {
                     self.copy_volatiles(old, incoming);
                 } else if self.mon(old).shed_tailing {
                     // copyVolatileFrom(old, 'shedtail'): only the substitute.
-                    let sub = self.mon(old).volatiles.0.iter().find(|v| v.id == state::VolatileId::Substitute).copied();
+                    let sub = self
+                        .mon(old)
+                        .volatiles
+                        .0
+                        .iter()
+                        .find(|v| v.id == state::VolatileId::Substitute)
+                        .copied();
                     let m = self.mon_mut(incoming);
                     m.clear_volatile();
                     if let Some(v) = sub {
@@ -863,7 +1092,9 @@ impl Battle {
     }
 
     fn run_mega_evo(&mut self, r: MonRef) -> Res<()> {
-        let Some(forme) = self.mon(r).can_mega_evo else { return Ok(()) };
+        let Some(forme) = self.mon(r).can_mega_evo else {
+            return Ok(());
+        };
         let dex = Dex::get();
         let m = self.mon_mut(r);
         let sp = dex.species(forme);
@@ -872,7 +1103,14 @@ impl Battle {
         m.types = sp.types;
         let new_stats = stats::compute_stats(forme, m.set.nature, m.set.points);
         // Showdown keeps HP as is; only the other stats change.
-        m.stats = [m.stats[0], new_stats[1], new_stats[2], new_stats[3], new_stats[4], new_stats[5]];
+        m.stats = [
+            m.stats[0],
+            new_stats[1],
+            new_stats[2],
+            new_stats[3],
+            new_stats[4],
+            new_stats[5],
+        ];
         let mega_ability = dex.ability_id(&sp.abilities[0]).expect("mega ability");
         m.base_ability = mega_ability;
         self.set_ability(r, mega_ability);
@@ -972,7 +1210,9 @@ impl Battle {
                     .moves
                     .iter()
                     .map(|s| s.id)
-                    .filter(|&id| Dex::get().move_data(id).id != "struggle" && self.imprisoned(r, id))
+                    .filter(|&id| {
+                        Dex::get().move_data(id).id != "struggle" && self.imprisoned(r, id)
+                    })
                     .collect();
                 let m = &mut self.sides[side].pokemon[p];
                 m.move_this_turn = None;
@@ -1000,7 +1240,12 @@ impl Battle {
                 let throat_chopped = m.volatiles.has(state::VolatileId::ThroatChop);
                 let taunted = m.volatiles.has(state::VolatileId::Taunt);
                 let heal_blocked = m.volatiles.has(state::VolatileId::HealBlock);
-                let disabled = m.volatiles.0.iter().find(|v| v.id == state::VolatileId::Disable).and_then(|v| v.move_id);
+                let disabled = m
+                    .volatiles
+                    .0
+                    .iter()
+                    .find(|v| v.id == state::VolatileId::Disable)
+                    .and_then(|v| v.move_id);
                 for s in m.moves.iter_mut() {
                     let data = Dex::get().move_data(s.id);
                     s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id))
@@ -1038,11 +1283,24 @@ impl Battle {
                         state::LockedMove::Move(id) => id,
                         state::LockedMove::Recharge => Dex::get().move_id("struggle").unwrap(),
                     };
-                    let only = choice::MoveOption { slot: 0, id, pp: 0, disabled: false, hidden: false, target: crate::dex::MoveTarget::SelfTarget };
-                    return Some(SlotRequest { moves: vec![only], struggle: false, can_mega: false, trapped: true });
+                    let only = choice::MoveOption {
+                        slot: 0,
+                        id,
+                        pp: 0,
+                        disabled: false,
+                        hidden: false,
+                        target: crate::dex::MoveTarget::SelfTarget,
+                    };
+                    return Some(SlotRequest {
+                        moves: vec![only],
+                        struggle: false,
+                        can_mega: false,
+                        trapped: true,
+                    });
                 }
                 // isLastActive: no unfainted active after it on its side.
-                let last_active = (p + 1..ACTIVE_PER_SIDE).all(|q| self.sides[side].occupant(q).is_none_or(|o| o.fainted));
+                let last_active = (p + 1..ACTIVE_PER_SIDE)
+                    .all(|q| self.sides[side].occupant(q).is_none_or(|o| o.fainted));
                 let mut moves: Vec<choice::MoveOption> = m
                     .moves
                     .iter()
@@ -1062,13 +1320,24 @@ impl Battle {
                 let struggle = moves.iter().all(|o| o.disabled);
                 if struggle {
                     let id = Dex::get().move_id("struggle").unwrap();
-                    moves = vec![choice::MoveOption { slot: 0, id, pp: 0, disabled: false, hidden: false, target: Dex::get().move_data(id).target }];
+                    moves = vec![choice::MoveOption {
+                        slot: 0,
+                        id,
+                        pp: 0,
+                        disabled: false,
+                        hidden: false,
+                        target: Dex::get().move_data(id).target,
+                    }];
                 }
                 // TrapPokemon: a foe's Shadow Tag (Ghost types and other
                 // Shadow Tag users go free).
                 let r = MonRef { side, uid: m.uid };
                 // Shed Shell's onTrapPokemon (priority -10) frees it.
-                let shadow_tag = !self.ability_is(r, "shadowtag") && self.adjacent_foes(r).into_iter().any(|f| self.ability_is(f, "shadowtag"));
+                let shadow_tag = !self.ability_is(r, "shadowtag")
+                    && self
+                        .adjacent_foes(r)
+                        .into_iter()
+                        .any(|f| self.ability_is(f, "shadowtag"));
                 // partiallytrapped's onTrapPokemon: while its source is in.
                 let bound = m
                     .volatiles
@@ -1085,16 +1354,28 @@ impl Battle {
                         && !self.ability_is(r, "runaway")
                         && !Dex::get().immune_to("trapped", m.types);
                 // Struggling counts as a locked move: no Mega Evolution.
-                Some(SlotRequest { moves, struggle, can_mega: m.can_mega_evo.is_some() && !struggle, trapped })
+                Some(SlotRequest {
+                    moves,
+                    struggle,
+                    can_mega: m.can_mega_evo.is_some() && !struggle,
+                    trapped,
+                })
             });
-            self.requests[side] = if slots.iter().any(Option::is_some) { SideRequest::Move(slots) } else { SideRequest::Wait };
+            self.requests[side] = if slots.iter().any(Option::is_some) {
+                SideRequest::Move(slots)
+            } else {
+                SideRequest::Wait
+            };
         }
     }
 }
 
 fn action_belongs_to(a: &Action, r: MonRef) -> bool {
     match &a.kind {
-        ActionKind::Move { mon, .. } | ActionKind::MegaEvo { mon } | ActionKind::Switch { mon, .. } | ActionKind::RunSwitch { mon } => *mon == r,
+        ActionKind::Move { mon, .. }
+        | ActionKind::MegaEvo { mon }
+        | ActionKind::Switch { mon, .. }
+        | ActionKind::RunSwitch { mon } => *mon == r,
         _ => false,
     }
 }
@@ -1103,7 +1384,11 @@ fn action_belongs_to(a: &Action, r: MonRef) -> bool {
 fn compare_priority(a: &Action, b: &Action) -> Ordering {
     a.order
         .cmp(&b.order)
-        .then(b.priority.partial_cmp(&a.priority).unwrap_or(Ordering::Equal))
+        .then(
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(Ordering::Equal),
+        )
         .then(b.speed.cmp(&a.speed))
 }
 

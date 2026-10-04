@@ -101,7 +101,12 @@ pub struct Combatant {
 
 impl Combatant {
     /// A full-HP Pokemon with no boosts, status or volatiles.
-    pub fn new(species: SpeciesId, stats: [u16; 6], ability: AbilityId, item: Option<ItemId>) -> Self {
+    pub fn new(
+        species: SpeciesId,
+        stats: [u16; 6],
+        ability: AbilityId,
+        item: Option<ItemId>,
+    ) -> Self {
         let dex = Dex::get();
         Combatant {
             species,
@@ -296,8 +301,15 @@ enum Asker {
 const NO_ORDER: i64 = 4_294_967_296;
 
 /// Moves whose type the -ate abilities leave alone.
-const NO_MODIFY_TYPE: [&str; 7] =
-    ["judgment", "multiattack", "naturalgift", "revelationdance", "technoblast", "terrainpulse", "weatherball"];
+const NO_MODIFY_TYPE: [&str; 7] = [
+    "judgment",
+    "multiattack",
+    "naturalgift",
+    "revelationdance",
+    "technoblast",
+    "terrainpulse",
+    "weatherball",
+];
 
 fn type_boost_item(id: &str) -> Option<&'static str> {
     Some(match id {
@@ -349,10 +361,45 @@ fn resist_berry(id: &str) -> Option<&'static str> {
 /// Moves whose own damage handlers (basePowerCallback, onBasePower,
 /// onModifyType, onModifyMove, onEffectiveness) this module implements.
 pub const MOVES_WITH_HANDLERS: &[&str] = &[
-    "acrobatics", "aurawheel", "beatup", "gyroball", "lashout", "payback", "barbbarrage", "blizzard", "eruption", "expandingforce", "facade", "freezedry",
-    "grassknot", "hardpress", "heatcrash", "heavyslam", "hex", "hurricane", "knockoff", "lastrespects", "lowkick",
-    "powertrip", "ragefist", "ragingbull", "reversal", "risingvoltage", "solarbeam", "solarblade", "storedpower",
-    "stompingtantrum", "struggle", "temperflare", "terrainpulse", "thunder", "tripleaxel", "venoshock", "waterspout", "watershuriken", "weatherball",
+    "acrobatics",
+    "aurawheel",
+    "beatup",
+    "gyroball",
+    "lashout",
+    "payback",
+    "barbbarrage",
+    "blizzard",
+    "eruption",
+    "expandingforce",
+    "facade",
+    "freezedry",
+    "grassknot",
+    "hardpress",
+    "heatcrash",
+    "heavyslam",
+    "hex",
+    "hurricane",
+    "knockoff",
+    "lastrespects",
+    "lowkick",
+    "powertrip",
+    "ragefist",
+    "ragingbull",
+    "reversal",
+    "risingvoltage",
+    "solarbeam",
+    "solarblade",
+    "storedpower",
+    "stompingtantrum",
+    "struggle",
+    "temperflare",
+    "terrainpulse",
+    "thunder",
+    "tripleaxel",
+    "venoshock",
+    "waterspout",
+    "watershuriken",
+    "weatherball",
 ];
 
 /// The `???` type (Struggle): no STAB, no immunities, neutral to everything.
@@ -366,7 +413,10 @@ pub fn calculate(ctx: &DamageCtx, move_id: MoveId) -> Res<Outcome> {
 
 /// The move as it will be used: useMoveInner's ModifyType and ModifyMove.
 pub fn prepare_move(ctx: &DamageCtx, move_id: MoveId) -> Res<ActiveMove> {
-    let calc = Calc { ctx, dex: Dex::get() };
+    let calc = Calc {
+        ctx,
+        dex: Dex::get(),
+    };
     let data = calc.dex.move_data(move_id);
     let mut am = ActiveMove::new(move_id, data);
     calc.modify_type_and_move(&mut am, data)?;
@@ -375,7 +425,10 @@ pub fn prepare_move(ctx: &DamageCtx, move_id: MoveId) -> Res<ActiveMove> {
 
 /// `getDamage` for a move already prepared by `prepare_move`.
 pub fn damage_for(ctx: &DamageCtx, am: &ActiveMove) -> Res<Outcome> {
-    let calc = Calc { ctx, dex: Dex::get() };
+    let calc = Calc {
+        ctx,
+        dex: Dex::get(),
+    };
     let mut am = am.clone();
     let data = calc.dex.move_data(am.id);
     calc.get_damage(&mut am, data)
@@ -384,9 +437,14 @@ pub fn damage_for(ctx: &DamageCtx, am: &ActiveMove) -> Res<Outcome> {
 /// Whether the defender eats its type-resist berry (onSourceModifyDamage)
 /// when `am` hits it for damage.
 pub fn eats_resist_berry(ctx: &DamageCtx, am: &ActiveMove) -> Res<bool> {
-    let calc = Calc { ctx, dex: Dex::get() };
+    let calc = Calc {
+        ctx,
+        dex: Dex::get(),
+    };
     let d = ctx.defender;
-    let Some(t) = calc.effective_item(d).and_then(resist_berry) else { return Ok(false) };
+    let Some(t) = calc.effective_item(d).and_then(resist_berry) else {
+        return Ok(false);
+    };
     if am.move_type != calc.ty(t) || !calc.can_eat(d) {
         return Ok(false);
     }
@@ -400,7 +458,11 @@ pub fn eats_resist_berry(ctx: &DamageCtx, am: &ActiveMove) -> Res<bool> {
 
 /// `runImmunity(move)` for the defender in `ctx`.
 pub fn run_immunity(ctx: &DamageCtx, am: &ActiveMove) -> bool {
-    Calc { ctx, dex: Dex::get() }.run_immunity(am)
+    Calc {
+        ctx,
+        dex: Dex::get(),
+    }
+    .run_immunity(am)
 }
 
 struct Calc<'a, 'b> {
@@ -462,7 +524,8 @@ impl<'a, 'b> Calc<'a, 'b> {
     }
 
     fn suppressing_weather(&self) -> bool {
-        self.active_indices().any(|i| self.dex.ability(self.mon(i).ability).suppress_weather)
+        self.active_indices()
+            .any(|i| self.dex.ability(self.mon(i).ability).suppress_weather)
     }
 
     /// `field.effectiveWeather()`.
@@ -478,7 +541,12 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// Mega Sol, the attacker's move, weather and Mega Sol itself see sun.
     fn weather_for(&self, asker: Asker) -> Weather {
         let mega_sol = self.has_ability(self.ctx.attacker, "megasol");
-        if mega_sol && matches!(asker, Asker::Move | Asker::Weather | Asker::Ability("megasol")) {
+        if mega_sol
+            && matches!(
+                asker,
+                Asker::Move | Asker::Weather | Asker::Ability("megasol")
+            )
+        {
             return Weather::Sun;
         }
         self.field_weather()
@@ -494,7 +562,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         if m.has_type(self.ty("Flying")) {
             return Some(false);
         }
-        if (self.has_ability(i, "levitate") || self.has_ability(i, "eelevate")) && !self.suppressing_ability(i, am) {
+        if (self.has_ability(i, "levitate") || self.has_ability(i, "eelevate"))
+            && !self.suppressing_ability(i, am)
+        {
             return None;
         }
         Some(item != Some("airballoon"))
@@ -516,7 +586,12 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
         }
         if let Some(it) = self.effective_item(i) {
-            if self.dex.item(self.mon(i).item.unwrap()).handlers.has("onModifyWeight") {
+            if self
+                .dex
+                .item(self.mon(i).item.unwrap())
+                .handlers
+                .has("onModifyWeight")
+            {
                 return unsupported(format!("item {it}.onModifyWeight"));
             }
         }
@@ -581,14 +656,25 @@ impl<'a, 'b> Calc<'a, 'b> {
         }
     }
 
-    fn push(&self, out: &mut Vec<Ref>, effect: Effect, holder: Holder, hook: &str, am: &ActiveMove) {
+    fn push(
+        &self,
+        out: &mut Vec<Ref>,
+        effect: Effect,
+        holder: Holder,
+        hook: &str,
+        am: &ActiveMove,
+    ) {
         let h = self.handlers(effect);
         if !h.has(hook) {
             return;
         }
         if let Holder::Mon(i) = holder {
             match effect {
-                Effect::Ability(a) if self.dex.ability(a).breakable && self.suppressing_ability(i, am) => return,
+                Effect::Ability(a)
+                    if self.dex.ability(a).breakable && self.suppressing_ability(i, am) =>
+                {
+                    return
+                }
                 Effect::Item(_) if self.ignoring_item(i) => return,
                 _ => {}
             }
@@ -608,7 +694,10 @@ impl<'a, 'b> Calc<'a, 'b> {
             effect,
             holder,
             hook: hook.to_string(),
-            order: h.hooks.get(&format!("{hook}Order")).map_or(NO_ORDER, |&o| o as i64),
+            order: h
+                .hooks
+                .get(&format!("{hook}Order"))
+                .map_or(NO_ORDER, |&o| o as i64),
             priority: h.hook(&format!("{hook}Priority")),
             speed,
             sub_order,
@@ -652,12 +741,25 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// Showdown's `findEventHandlers` + `speedSort` for an event whose target
     /// is a Pokemon. `own_move`: the move's own handler takes part (runEvent's
     /// `onEffect`).
-    fn collect(&self, event: &str, target: usize, source: Option<usize>, am: &ActiveMove, own_move: bool) -> Vec<Ref> {
+    fn collect(
+        &self,
+        event: &str,
+        target: usize,
+        source: Option<usize>,
+        am: &ActiveMove,
+        own_move: bool,
+    ) -> Vec<Ref> {
         let mut out = Vec::new();
         let on = format!("on{event}");
         if own_move {
             // The move's handler counts as held by the event target.
-            self.push(&mut out, Effect::MoveSelf(am.id), Holder::Mon(target), &on, am);
+            self.push(
+                &mut out,
+                Effect::MoveSelf(am.id),
+                Holder::Mon(target),
+                &on,
+                am,
+            );
         }
         for e in self.mon_effects(target) {
             self.push(&mut out, e, Holder::Mon(target), &on, am);
@@ -700,10 +802,22 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
         }
         if self.ctx.weather != Weather::None {
-            self.push(&mut out, Effect::Weather(self.ctx.weather), Holder::Field, &on, am);
+            self.push(
+                &mut out,
+                Effect::Weather(self.ctx.weather),
+                Holder::Field,
+                &on,
+                am,
+            );
         }
         if self.ctx.terrain != Terrain::None {
-            self.push(&mut out, Effect::Terrain(self.ctx.terrain), Holder::Field, &on, am);
+            self.push(
+                &mut out,
+                Effect::Terrain(self.ctx.terrain),
+                Holder::Field,
+                &on,
+                am,
+            );
         }
         // Showdown's comparePriority. Exact ties are shuffled by Showdown;
         // here they keep collection order.
@@ -718,7 +832,12 @@ impl<'a, 'b> Calc<'a, 'b> {
     }
 
     /// Apply handlers in order, as runEvent does.
-    fn fold(&self, refs: &[Ref], init: i64, mut act: impl FnMut(&Ref, i64) -> Res<Act>) -> Res<i64> {
+    fn fold(
+        &self,
+        refs: &[Ref],
+        init: i64,
+        mut act: impl FnMut(&Ref, i64) -> Res<Act>,
+    ) -> Res<i64> {
         let mut value = init;
         let mut m = ONE;
         let mut aura_done = false;
@@ -793,7 +912,11 @@ impl<'a, 'b> Calc<'a, 'b> {
                     }
                 }
                 "aurawheel" => {
-                    am.move_type = self.ty(if species.name == "Morpeko-Hangry" { "Dark" } else { "Electric" });
+                    am.move_type = self.ty(if species.name == "Morpeko-Hangry" {
+                        "Dark"
+                    } else {
+                        "Electric"
+                    });
                 }
                 "ragingbull" => match species.name.as_str() {
                     "Tauros-Paldea-Combat" => am.move_type = self.ty("Fighting"),
@@ -880,7 +1003,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                     _ => return self.not_implemented(&r),
                 },
                 // Choice lock, extra flinch chance.
-                (Effect::Item(it), "onModifyMove") if matches!(self.dex.item(it).id.as_str(), "choicescarf" | "kingsrock") => {}
+                (Effect::Item(it), "onModifyMove")
+                    if matches!(self.dex.item(it).id.as_str(), "choicescarf" | "kingsrock") => {}
                 _ => return self.not_implemented(&r),
             }
         }
@@ -961,10 +1085,18 @@ impl<'a, 'b> Calc<'a, 'b> {
         let bp = bp.max(1) as u64;
 
         // Attack and defense.
-        let stat_holder = if data.override_offensive_target { defender } else { attacker };
+        let stat_holder = if data.override_offensive_target {
+            defender
+        } else {
+            attacker
+        };
         let physical = category == Category::Physical;
-        let atk_stat = data.override_offensive_stat.unwrap_or(if physical { ATK } else { SPA });
-        let def_stat = data.override_defensive_stat.unwrap_or(if physical { DEF } else { SPD });
+        let atk_stat = data
+            .override_offensive_stat
+            .unwrap_or(if physical { ATK } else { SPA });
+        let def_stat = data
+            .override_defensive_stat
+            .unwrap_or(if physical { DEF } else { SPD });
         let mut atk_boost = stat_holder.boosts[atk_stat];
         let mut def_boost = defender.boosts[def_stat];
         if data.ignore_offensive || (crit && atk_boost < 0) {
@@ -980,7 +1112,11 @@ impl<'a, 'b> Calc<'a, 'b> {
         let defense = boosted(defender.stats[def_stat], def_boost);
         let atk_event = if physical { "ModifyAtk" } else { "ModifySpA" };
         let attack = self.stat_event(atk_event, a, d, am, attack)? as u64;
-        let def_event = if def_stat == DEF { "ModifyDef" } else { "ModifySpD" };
+        let def_event = if def_stat == DEF {
+            "ModifyDef"
+        } else {
+            "ModifySpD"
+        };
         let defense = self.stat_event(def_event, d, a, am, defense)? as u64;
 
         let base = (22 * bp * attack / defense) / 50;
@@ -1049,7 +1185,12 @@ impl<'a, 'b> Calc<'a, 'b> {
             u if u >= target * 2 => 60,
             _ => 40,
         };
-        let positive_boosts = attacker.boosts.iter().filter(|&&b| b > 0).map(|&b| b as i64).sum::<i64>();
+        let positive_boosts = attacker
+            .boosts
+            .iter()
+            .filter(|&&b| b > 0)
+            .map(|&b| b as i64)
+            .sum::<i64>();
         Ok(match data.id.as_str() {
             "acrobatics" => {
                 if attacker.item.is_none() {
@@ -1059,7 +1200,9 @@ impl<'a, 'b> Calc<'a, 'b> {
                 }
             }
             // A fractional base power is truthy, then clamped to at least 1.
-            "eruption" | "waterspout" => (bp * attacker.hp as i64 / attacker.max_hp() as i64).max(attacker.hp.min(1) as i64),
+            "eruption" | "waterspout" => {
+                (bp * attacker.hp as i64 / attacker.max_hp() as i64).max(attacker.hp.min(1) as i64)
+            }
             "lowkick" | "grassknot" => weight_bp(self.weight(d, am)?),
             "heavyslam" | "heatcrash" => ratio_bp(self.weight(a, am)?, self.weight(d, am)?),
             "hardpress" => {
@@ -1147,8 +1290,12 @@ impl<'a, 'b> Calc<'a, 'b> {
         let mut b = boost;
         for r in self.collect("ModifyBoost", stat_user, None, am, false) {
             match (r.effect, r.hook.as_str()) {
-                (Effect::Ability(ab), "onAnyModifyBoost") if self.dex.ability(ab).id == "unaware" => {
-                    let Holder::Mon(holder) = r.holder else { unreachable!() };
+                (Effect::Ability(ab), "onAnyModifyBoost")
+                    if self.dex.ability(ab).id == "unaware" =>
+                {
+                    let Holder::Mon(holder) = r.holder else {
+                        unreachable!()
+                    };
                     if holder == stat_user {
                         continue;
                     }
@@ -1234,7 +1381,10 @@ impl<'a, 'b> Calc<'a, 'b> {
                         }
                     }
                     "solarbeam" | "solarblade" => {
-                        if matches!(self.weather_for(Asker::Move), Weather::Rain | Weather::Sand | Weather::Snow) {
+                        if matches!(
+                            self.weather_for(Asker::Move),
+                            Weather::Rain | Weather::Sand | Weather::Snow
+                        ) {
                             Act::Chain(of(1, 2))
                         } else {
                             Act::None
@@ -1277,7 +1427,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                             let t = am.move_type;
                             yes(
                                 self.field_weather() == Weather::Sand
-                                    && [self.ty("Rock"), self.ty("Ground"), self.ty("Steel")].contains(&t),
+                                    && [self.ty("Rock"), self.ty("Ground"), self.ty("Steel")]
+                                        .contains(&t),
                                 5325,
                             )
                         }
@@ -1306,19 +1457,24 @@ impl<'a, 'b> Calc<'a, 'b> {
                         }
                     }
                 }
-                (Effect::Ability(ab), "onAllyBasePower") => match self.dex.ability(ab).id.as_str() {
-                    "steelyspirit" => {
-                        if am.move_type == self.ty("Steel") {
-                            Act::Chain(of(3, 2))
-                        } else {
-                            Act::None
+                (Effect::Ability(ab), "onAllyBasePower") => {
+                    match self.dex.ability(ab).id.as_str() {
+                        "steelyspirit" => {
+                            if am.move_type == self.ty("Steel") {
+                                Act::Chain(of(3, 2))
+                            } else {
+                                Act::None
+                            }
                         }
+                        _ => return self.not_implemented(r),
                     }
-                    _ => return self.not_implemented(r),
-                },
+                }
                 (Effect::Ability(ab), "onAnyBasePower") => match self.dex.ability(ab).id.as_str() {
                     "fairyaura" => {
-                        if d == a || am.category == Category::Status || am.move_type != self.ty("Fairy") {
+                        if d == a
+                            || am.category == Category::Status
+                            || am.move_type != self.ty("Fairy")
+                        {
                             Act::None
                         } else {
                             Act::FairyAura
@@ -1334,19 +1490,23 @@ impl<'a, 'b> Calc<'a, 'b> {
                         Act::None
                     }
                 }
-                (Effect::Ability(ab), "onSourceBasePower") => match self.dex.ability(ab).id.as_str() {
-                    "dryskin" => {
-                        if am.move_type == self.ty("Fire") {
-                            Act::Chain(of(5, 4))
-                        } else {
-                            Act::None
+                (Effect::Ability(ab), "onSourceBasePower") => {
+                    match self.dex.ability(ab).id.as_str() {
+                        "dryskin" => {
+                            if am.move_type == self.ty("Fire") {
+                                Act::Chain(of(5, 4))
+                            } else {
+                                Act::None
+                            }
                         }
+                        _ => return self.not_implemented(r),
                     }
-                    _ => return self.not_implemented(r),
-                },
+                }
                 (Effect::Terrain(t), "onBasePower") => match t {
                     Terrain::Grassy => {
-                        if matches!(mv.id.as_str(), "earthquake" | "bulldoze" | "magnitude") && self.is_grounded(d, am) {
+                        if matches!(mv.id.as_str(), "earthquake" | "bulldoze" | "magnitude")
+                            && self.is_grounded(d, am)
+                        {
                             Act::Chain(of(1, 2))
                         } else if am.move_type == self.ty("Grass") && self.is_grounded(a, am) {
                             Act::Chain(5325)
@@ -1355,7 +1515,11 @@ impl<'a, 'b> Calc<'a, 'b> {
                         }
                     }
                     Terrain::Electric | Terrain::Psychic => {
-                        let boosted = if t == Terrain::Electric { "Electric" } else { "Psychic" };
+                        let boosted = if t == Terrain::Electric {
+                            "Electric"
+                        } else {
+                            "Psychic"
+                        };
                         if am.move_type == self.ty(boosted) && self.is_grounded(a, am) {
                             Act::Chain(5325)
                         } else {
@@ -1379,7 +1543,9 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// Knock Off's TakeItem check: a Mega Stone can't be taken from the
     /// species it Mega Evolves.
     fn can_remove_item(&self, i: usize) -> bool {
-        let Some(it) = self.mon(i).item else { return false };
+        let Some(it) = self.mon(i).item else {
+            return false;
+        };
         let item = self.dex.item(it);
         if item.take_forbidden {
             return false;
@@ -1389,13 +1555,21 @@ impl<'a, 'b> Calc<'a, 'b> {
 
     /// ModifyAtk/SpA (target: attacker, source: defender) and ModifyDef/SpD
     /// (target: defender, source: attacker).
-    fn stat_event(&self, event: &'static str, target: usize, source: usize, am: &ActiveMove, stat: u64) -> Res<i64> {
+    fn stat_event(
+        &self,
+        event: &'static str,
+        target: usize,
+        source: usize,
+        am: &ActiveMove,
+        stat: u64,
+    ) -> Res<i64> {
         let refs = self.collect(event, target, Some(source), am, false);
         let holder_mon = self.mon(target);
         let other = self.mon(source);
         let t = |n: &str| self.ty(n);
         let mv_type = am.move_type;
-        let pinch = |ty: &str| mv_type == t(ty) && holder_mon.hp as u32 * 3 <= holder_mon.max_hp() as u32;
+        let pinch =
+            |ty: &str| mv_type == t(ty) && holder_mon.hp as u32 * 3 <= holder_mon.max_hp() as u32;
         let hook_self = format!("on{event}");
         let hook_source = format!("onSource{event}");
         self.fold(&refs, stat as i64, |r, _| {
@@ -1409,25 +1583,38 @@ impl<'a, 'b> Calc<'a, 'b> {
                         ("ModifyAtk" | "ModifySpA", "overgrow") => yes(pinch("Grass"), of(3, 2)),
                         ("ModifyAtk" | "ModifySpA", "torrent") => yes(pinch("Water"), of(3, 2)),
                         ("ModifyAtk" | "ModifySpA", "swarm") => yes(pinch("Bug"), of(3, 2)),
-                        ("ModifyAtk" | "ModifySpA", "firemane") => yes(mv_type == t("Fire"), of(3, 2)),
-                        ("ModifyAtk" | "ModifySpA", "waterbubble") => yes(mv_type == t("Water"), of(2, 1)),
-                        ("ModifyAtk" | "ModifySpA", "stakeout") => yes(other.active_turns == 0, of(2, 1)),
+                        ("ModifyAtk" | "ModifySpA", "firemane") => {
+                            yes(mv_type == t("Fire"), of(3, 2))
+                        }
+                        ("ModifyAtk" | "ModifySpA", "waterbubble") => {
+                            yes(mv_type == t("Water"), of(2, 1))
+                        }
+                        ("ModifyAtk" | "ModifySpA", "stakeout") => {
+                            yes(other.active_turns == 0, of(2, 1))
+                        }
                         ("ModifyAtk", "guts") => yes(holder_mon.status != Status::None, of(3, 2)),
                         ("ModifyAtk", "hugepower" | "purepower") => Act::Chain(of(2, 1)),
                         ("ModifyAtk", "hustle") => Act::Modify(of(3, 2)),
-                        ("ModifySpA", "solarpower") => {
-                            yes(self.weather_for(Asker::Ability("solarpower")) == Weather::Sun, of(3, 2))
-                        }
+                        ("ModifySpA", "solarpower") => yes(
+                            self.weather_for(Asker::Ability("solarpower")) == Weather::Sun,
+                            of(3, 2),
+                        ),
                         ("ModifySpA", "plus" | "minus") => {
                             let side = Self::side_of(target);
                             let ally_has = self.active_indices().any(|i| {
-                                i != target && Self::side_of(i) == side && matches!(self.ability_id(i), "plus" | "minus")
+                                i != target
+                                    && Self::side_of(i) == side
+                                    && matches!(self.ability_id(i), "plus" | "minus")
                             });
                             yes(ally_has, of(3, 2))
                         }
                         ("ModifyDef", "furcoat") => Act::Chain(of(2, 1)),
-                        ("ModifyDef", "grasspelt") => yes(self.ctx.terrain == Terrain::Grassy, of(3, 2)),
-                        ("ModifyDef", "marvelscale") => yes(holder_mon.status != Status::None, of(3, 2)),
+                        ("ModifyDef", "grasspelt") => {
+                            yes(self.ctx.terrain == Terrain::Grassy, of(3, 2))
+                        }
+                        ("ModifyDef", "marvelscale") => {
+                            yes(holder_mon.status != Status::None, of(3, 2))
+                        }
                         _ => return self.not_implemented(r),
                     }
                 }
@@ -1437,24 +1624,32 @@ impl<'a, 'b> Calc<'a, 'b> {
                         ("ModifyAtk" | "ModifySpA", "thickfat") => {
                             yes(mv_type == t("Fire") || mv_type == t("Ice"), of(1, 2))
                         }
-                        ("ModifyAtk" | "ModifySpA", "heatproof" | "waterbubble") => yes(mv_type == t("Fire"), of(1, 2)),
-                        ("ModifyAtk" | "ModifySpA", "purifyingsalt") => yes(mv_type == t("Ghost"), of(1, 2)),
+                        ("ModifyAtk" | "ModifySpA", "heatproof" | "waterbubble") => {
+                            yes(mv_type == t("Fire"), of(1, 2))
+                        }
+                        ("ModifyAtk" | "ModifySpA", "purifyingsalt") => {
+                            yes(mv_type == t("Ghost"), of(1, 2))
+                        }
                         _ => return self.not_implemented(r),
                     }
                 }
-                Effect::Volatile(VolatileKind::FlashFire) if hook == hook_self => {
-                    yes(mv_type == t("Fire") && self.has_ability(target, "flashfire"), of(3, 2))
-                }
-                Effect::Item(it) if hook == hook_self => match (event, self.dex.item(it).id.as_str()) {
-                    ("ModifyAtk" | "ModifySpA", "lightball") => {
-                        let base = &self.dex.species(holder_mon.species).base_species;
-                        yes(base == "Pikachu", of(2, 1))
+                Effect::Volatile(VolatileKind::FlashFire) if hook == hook_self => yes(
+                    mv_type == t("Fire") && self.has_ability(target, "flashfire"),
+                    of(3, 2),
+                ),
+                Effect::Item(it) if hook == hook_self => {
+                    match (event, self.dex.item(it).id.as_str()) {
+                        ("ModifyAtk" | "ModifySpA", "lightball") => {
+                            let base = &self.dex.species(holder_mon.species).base_species;
+                            yes(base == "Pikachu", of(2, 1))
+                        }
+                        _ => return self.not_implemented(r),
                     }
-                    _ => return self.not_implemented(r),
-                },
+                }
                 Effect::Weather(w) if hook == hook_self => match (event, w) {
                     ("ModifySpD", Weather::Sand) => {
-                        let applies = holder_mon.has_type(t("Rock")) && self.weather_for(Asker::Weather) == Weather::Sand;
+                        let applies = holder_mon.has_type(t("Rock"))
+                            && self.weather_for(Asker::Weather) == Weather::Sand;
                         if applies {
                             Act::Modify(of(3, 2))
                         } else {
@@ -1462,7 +1657,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                         }
                     }
                     ("ModifyDef", Weather::Snow) => {
-                        let applies = holder_mon.has_type(t("Ice")) && self.weather_for(Asker::Weather) == Weather::Snow;
+                        let applies = holder_mon.has_type(t("Ice"))
+                            && self.weather_for(Asker::Weather) == Weather::Snow;
                         if applies {
                             Act::Modify(of(3, 2))
                         } else {
@@ -1517,7 +1713,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         let mut stab: u32 = if is_stab { of(3, 2) } else { ONE };
         for r in self.collect("ModifySTAB", a, Some(self.ctx.defender), am, false) {
             match (r.effect, r.hook.as_str()) {
-                (Effect::Ability(ab), "onModifySTAB") if self.dex.ability(ab).id == "adaptability" => {
+                (Effect::Ability(ab), "onModifySTAB")
+                    if self.dex.ability(ab).id == "adaptability" =>
+                {
                     if is_stab {
                         stab = if stab == of(2, 1) { 9216 } else { of(2, 1) };
                     }
@@ -1556,13 +1754,20 @@ impl<'a, 'b> Calc<'a, 'b> {
             for r in &refs {
                 match (r.effect, r.hook.as_str()) {
                     // Disguise: an intact disguise takes everything neutrally.
-                    (Effect::Ability(ab), "onEffectiveness") if self.dex.ability(ab).id == "disguise" => {
-                        if am.category != Category::Status && self.disguised(d) && !self.ctx.hit_sub && self.run_immunity(am) {
+                    (Effect::Ability(ab), "onEffectiveness")
+                        if self.dex.ability(ab).id == "disguise" =>
+                    {
+                        if am.category != Category::Status
+                            && self.disguised(d)
+                            && !self.ctx.hit_sub
+                            && self.run_immunity(am)
+                        {
                             m = 0;
                         }
                     }
                     (Effect::Item(it), "onEffectiveness") if self.dex.item(it).id == "ironball" => {
-                        if am.move_type == self.ty("Ground") && defender.has_type(self.ty("Flying")) {
+                        if am.move_type == self.ty("Ground") && defender.has_type(self.ty("Flying"))
+                        {
                             m = 0;
                         }
                     }
@@ -1575,7 +1780,13 @@ impl<'a, 'b> Calc<'a, 'b> {
     }
 
     /// The ModifyDamage event (target: attacker, source: defender).
-    fn modify_damage_event(&self, am: &ActiveMove, dmg: u64, type_mod: i32, crit: bool) -> Res<u64> {
+    fn modify_damage_event(
+        &self,
+        am: &ActiveMove,
+        dmg: u64,
+        type_mod: i32,
+        crit: bool,
+    ) -> Res<u64> {
         let (a, d) = (self.ctx.attacker, self.ctx.defender);
         let defender = self.defender();
         let mv = self.dex.move_data(am.id);
@@ -1592,13 +1803,17 @@ impl<'a, 'b> Calc<'a, 'b> {
                     "expertbelt" => yes(type_mod > 0, 4915),
                     _ => return self.not_implemented(r),
                 },
-                (Effect::Ability(ab), "onAnyModifyDamage") => match self.dex.ability(ab).id.as_str() {
-                    "friendguard" => {
-                        let Holder::Mon(h) = r.holder else { unreachable!() };
-                        yes(d != h && Self::side_of(d) == Self::side_of(h), of(3, 4))
+                (Effect::Ability(ab), "onAnyModifyDamage") => {
+                    match self.dex.ability(ab).id.as_str() {
+                        "friendguard" => {
+                            let Holder::Mon(h) = r.holder else {
+                                unreachable!()
+                            };
+                            yes(d != h && Self::side_of(d) == Self::side_of(h), of(3, 4))
+                        }
+                        _ => return self.not_implemented(r),
                     }
-                    _ => return self.not_implemented(r),
-                },
+                }
                 (Effect::Ability(ab), "onSourceModifyDamage") => {
                     let flag = |f: &str| mv.flags.has(f);
                     match self.dex.ability(ab).id.as_str() {
@@ -1621,11 +1836,19 @@ impl<'a, 'b> Calc<'a, 'b> {
                 (Effect::Item(it), "onSourceModifyDamage") => {
                     let id = self.dex.item(it).id.as_str();
                     match resist_berry(id) {
-                        Some(t) => yes(am.move_type == self.ty(t) && type_mod > 0 && self.can_eat(d) && !self.ctx.hit_sub, of(1, 2)),
+                        Some(t) => yes(
+                            am.move_type == self.ty(t)
+                                && type_mod > 0
+                                && self.can_eat(d)
+                                && !self.ctx.hit_sub,
+                            of(1, 2),
+                        ),
                         None => return self.not_implemented(r),
                     }
                 }
-                (Effect::Volatile(VolatileKind::GlaiveRush), "onSourceModifyDamage") => Act::Chain(of(2, 1)),
+                (Effect::Volatile(VolatileKind::GlaiveRush), "onSourceModifyDamage") => {
+                    Act::Chain(of(2, 1))
+                }
                 // Earthquake on a Dig user, Surf on a Dive user, Gust on Fly.
                 (Effect::Volatile(VolatileKind::SemiInvulnerable(m)), "onSourceModifyDamage") => {
                     let hits = match self.dex.move_data(m).id.as_str() {
@@ -1637,7 +1860,9 @@ impl<'a, 'b> Calc<'a, 'b> {
                     yes(hits, of(2, 1))
                 }
                 (Effect::Screen(s), "onAnyModifyDamage") => {
-                    let Holder::Side(side) = r.holder else { unreachable!() };
+                    let Holder::Side(side) = r.holder else {
+                        unreachable!()
+                    };
                     let state = &self.ctx.sides[side];
                     let protects = d != a && Self::side_of(d) == side && !crit && !am.infiltrates;
                     let applies = match s {
@@ -1659,7 +1884,9 @@ impl<'a, 'b> Calc<'a, 'b> {
     /// `eatItem` succeeds unless a foe's Unnerve stops it.
     fn can_eat(&self, i: usize) -> bool {
         let side = Self::side_of(i);
-        !self.active_indices().any(|f| Self::side_of(f) != side && self.has_ability(f, "unnerve"))
+        !self
+            .active_indices()
+            .any(|f| Self::side_of(f) != side && self.has_ability(f, "unnerve"))
     }
 }
 

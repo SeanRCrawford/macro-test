@@ -52,15 +52,27 @@ fn pool() -> &'static Pool {
     static POOL: OnceLock<Pool> = OnceLock::new();
     POOL.get_or_init(|| {
         let raw: Value = serde_json::from_str(POOL_JSON).expect("embedded regmc_pool.json");
-        let items = raw["items"].as_array().unwrap().iter().map(|v| to_id(v.as_str().unwrap())).collect();
+        let items = raw["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| to_id(v.as_str().unwrap()))
+            .collect();
         let mut spreads = HashMap::new();
         for (id, entry) in raw["species"].as_object().unwrap() {
-            let Some(list) = entry.get("spreads").and_then(Value::as_array) else { continue };
+            let Some(list) = entry.get("spreads").and_then(Value::as_array) else {
+                continue;
+            };
             let parsed = list
                 .iter()
                 .map(|s| {
                     let nature = s[0].as_str().unwrap().to_string();
-                    let pts: Vec<u16> = s[1].as_array().unwrap().iter().map(|p| p.as_u64().unwrap() as u16).collect();
+                    let pts: Vec<u16> = s[1]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.as_u64().unwrap() as u16)
+                        .collect();
                     (nature, [pts[0], pts[1], pts[2], pts[3], pts[4], pts[5]])
                 })
                 .collect();
@@ -103,15 +115,24 @@ fn parse_set(lines: &[&str]) -> Result<PokemonSet, String> {
         None => (first.trim(), None),
     };
     // Gender suffix, then "Nickname (Species)".
-    let head = head.strip_suffix(" (M)").or_else(|| head.strip_suffix(" (F)")).unwrap_or(head).trim();
+    let head = head
+        .strip_suffix(" (M)")
+        .or_else(|| head.strip_suffix(" (F)"))
+        .unwrap_or(head)
+        .trim();
     let (name, species_name) = match head.strip_suffix(')').and_then(|h| h.rsplit_once(" (")) {
         Some((nick, sp)) if dex.species_id(sp).is_some() => (nick.trim().to_string(), sp.trim()),
         _ => (head.to_string(), head),
     };
-    let species = dex.species_id(species_name).ok_or_else(|| format!("unknown species {species_name:?}"))?;
+    let species = dex
+        .species_id(species_name)
+        .ok_or_else(|| format!("unknown species {species_name:?}"))?;
     let item = match item {
         None | Some("") => None,
-        Some(i) => Some(dex.item_id(i).ok_or_else(|| format!("{species_name}: unknown item {i:?}"))?),
+        Some(i) => Some(
+            dex.item_id(i)
+                .ok_or_else(|| format!("{species_name}: unknown item {i:?}"))?,
+        ),
     };
 
     let mut ability = None;
@@ -119,16 +140,28 @@ fn parse_set(lines: &[&str]) -> Result<PokemonSet, String> {
     let mut points = None;
     let mut moves = Vec::new();
     for line in &lines[1..] {
-        if let Some(a) = line.strip_prefix("Ability:").or_else(|| line.strip_prefix("Trait:")) {
+        if let Some(a) = line
+            .strip_prefix("Ability:")
+            .or_else(|| line.strip_prefix("Trait:"))
+        {
             let a = a.trim();
-            ability = Some(dex.ability_id(a).ok_or_else(|| format!("{species_name}: unknown ability {a:?}"))?);
+            ability = Some(
+                dex.ability_id(a)
+                    .ok_or_else(|| format!("{species_name}: unknown ability {a:?}"))?,
+            );
         } else if let Some(e) = line.strip_prefix("EVs:") {
             points = Some(parse_points(e).map_err(|err| format!("{species_name}: {err}"))?);
         } else if let Some(n) = nature_line(line) {
-            nature = Some(dex.nature_id(n).ok_or_else(|| format!("{species_name}: unknown nature {n:?}"))?);
+            nature = Some(
+                dex.nature_id(n)
+                    .ok_or_else(|| format!("{species_name}: unknown nature {n:?}"))?,
+            );
         } else if let Some(m) = line.strip_prefix('-').or_else(|| line.strip_prefix('~')) {
             let m = m.trim();
-            moves.push(dex.move_id(m).ok_or_else(|| format!("{species_name}: unknown move {m:?}"))?);
+            moves.push(
+                dex.move_id(m)
+                    .ok_or_else(|| format!("{species_name}: unknown move {m:?}"))?,
+            );
         }
         // Anything else (Level, Shiny, IVs, Hidden Power...) has no effect in
         // this format; Showdown ignores unknown lines too.
@@ -137,7 +170,9 @@ fn parse_set(lines: &[&str]) -> Result<PokemonSet, String> {
     let sp = dex.species(species);
     let ability = match ability {
         Some(a) => a,
-        None => dex.ability_id(sp.abilities.first().ok_or("species without abilities")?).unwrap(),
+        None => dex
+            .ability_id(sp.abilities.first().ok_or("species without abilities")?)
+            .unwrap(),
     };
     let nature = nature.unwrap_or_else(|| dex.nature_id("Serious").unwrap());
     let (species, ability) = normalize_forme(species, item, ability);
@@ -164,7 +199,11 @@ fn parse_set(lines: &[&str]) -> Result<PokemonSet, String> {
 /// - the Mega's ability on a stone holder becomes the base species' first
 ///   ability (a Salamence "with Aerilate" is an Intimidate Salamence until it
 ///   Mega Evolves).
-fn normalize_forme(species: SpeciesId, item: Option<ItemId>, ability: AbilityId) -> (SpeciesId, AbilityId) {
+fn normalize_forme(
+    species: SpeciesId,
+    item: Option<ItemId>,
+    ability: AbilityId,
+) -> (SpeciesId, AbilityId) {
     let dex = Dex::get();
     let mut species = species;
     let sp = dex.species(species);
@@ -176,7 +215,9 @@ fn normalize_forme(species: SpeciesId, item: Option<ItemId>, ability: AbilityId)
     let sp = dex.species(species);
     let ab = &dex.ability(ability).name;
     if !sp.abilities.contains(ab) {
-        let mega = item.and_then(|it| dex.item(it).mega_stone.get(&sp.name)).and_then(|m| dex.species_id(m));
+        let mega = item
+            .and_then(|it| dex.item(it).mega_stone.get(&sp.name))
+            .and_then(|m| dex.species_id(m));
         if let Some(m) = mega {
             if dex.species(m).abilities.first() == Some(ab) {
                 return (species, dex.ability_id(&sp.abilities[0]).unwrap_or(ability));
@@ -202,7 +243,9 @@ fn parse_points(text: &str) -> Result<[u16; 6], String> {
     let mut out = [0u16; 6];
     for part in text.split('/') {
         let part = part.trim();
-        let (n, stat) = part.split_once(' ').ok_or_else(|| format!("bad stat points {part:?}"))?;
+        let (n, stat) = part
+            .split_once(' ')
+            .ok_or_else(|| format!("bad stat points {part:?}"))?;
         let n: u16 = n.parse().map_err(|_| format!("bad stat points {part:?}"))?;
         let idx = match stat.trim().to_ascii_lowercase().as_str() {
             "hp" => 0,
@@ -265,26 +308,43 @@ pub fn validate(team: &[PokemonSet]) -> Vec<Problem> {
     let mut out = Vec::new();
     let mut add = |kind, message: String| out.push(Problem { kind, message });
     if team.len() != TEAM_SIZE {
-        add(ProblemKind::TeamSize, format!("team has {} Pokemon, needs {TEAM_SIZE}", team.len()));
+        add(
+            ProblemKind::TeamSize,
+            format!("team has {} Pokemon, needs {TEAM_SIZE}", team.len()),
+        );
     }
     let mut nums = HashSet::new();
     let mut items = HashSet::new();
     for set in team {
         let sp = dex.species(set.species);
         if let Some(base) = &sp.battle_only {
-            add(ProblemKind::Species, format!("{} only exists in battle; use {base}", sp.name));
-        } else if sp.nonstandard.is_some() || sp.tags.iter().any(|t| t == "Mythical" || t == "Restricted Legendary") {
+            add(
+                ProblemKind::Species,
+                format!("{} only exists in battle; use {base}", sp.name),
+            );
+        } else if sp.nonstandard.is_some()
+            || sp
+                .tags
+                .iter()
+                .any(|t| t == "Mythical" || t == "Restricted Legendary")
+        {
             add(ProblemKind::Species, format!("{} is not allowed", sp.name));
         }
         if !nums.insert(sp.num) {
-            add(ProblemKind::SpeciesClause, format!("two {}", sp.base_species));
+            add(
+                ProblemKind::SpeciesClause,
+                format!("two {}", sp.base_species),
+            );
         }
         if let Some(it) = set.item {
             let item = dex.item(it);
             if item.nonstandard.is_some() {
                 add(ProblemKind::Item, format!("{} is not allowed", item.name));
             } else if !pool().items.contains(&item.id) {
-                add(ProblemKind::ItemNotInUsage, format!("{} is not in the Reg M-C usage stats", item.name));
+                add(
+                    ProblemKind::ItemNotInUsage,
+                    format!("{} is not in the Reg M-C usage stats", item.name),
+                );
             }
             if !items.insert(it) {
                 add(ProblemKind::ItemClause, format!("two {}", item.name));
@@ -292,26 +352,47 @@ pub fn validate(team: &[PokemonSet]) -> Vec<Problem> {
         }
         let ability = dex.ability(set.ability);
         if !sp.abilities.iter().any(|a| to_id(a) == ability.id) || ability.nonstandard.is_some() {
-            add(ProblemKind::Ability, format!("{} can't have {}", sp.name, ability.name));
+            add(
+                ProblemKind::Ability,
+                format!("{} can't have {}", sp.name, ability.name),
+            );
         }
         let mut seen = HashSet::new();
         if set.moves.is_empty() || set.moves.len() > 4 {
-            add(ProblemKind::Move, format!("{} has {} moves", sp.name, set.moves.len()));
+            add(
+                ProblemKind::Move,
+                format!("{} has {} moves", sp.name, set.moves.len()),
+            );
         }
         for &m in &set.moves {
             let mv = dex.move_data(m);
             if !seen.insert(m) {
-                add(ProblemKind::Move, format!("{} has {} twice", sp.name, mv.name));
+                add(
+                    ProblemKind::Move,
+                    format!("{} has {} twice", sp.name, mv.name),
+                );
             } else if sp.learnset.binary_search(&m).is_err() {
-                add(ProblemKind::Move, format!("{} can't learn {}", sp.name, mv.name));
+                add(
+                    ProblemKind::Move,
+                    format!("{} can't learn {}", sp.name, mv.name),
+                );
             }
         }
         let total: u16 = set.points.iter().sum();
         if let Some(i) = set.points.iter().position(|&p| p > MAX_POINTS) {
-            add(ProblemKind::StatPoints, format!("{} has {} points in {}", sp.name, set.points[i], STAT_NAMES[i]));
+            add(
+                ProblemKind::StatPoints,
+                format!(
+                    "{} has {} points in {}",
+                    sp.name, set.points[i], STAT_NAMES[i]
+                ),
+            );
         }
         if total > MAX_TOTAL_POINTS {
-            add(ProblemKind::StatPoints, format!("{} has {total} stat points", sp.name));
+            add(
+                ProblemKind::StatPoints,
+                format!("{} has {total} stat points", sp.name),
+            );
         }
     }
     out
@@ -352,7 +433,10 @@ mod tests {
         let chomp = &team[2];
         assert_eq!(dex.species(chomp.species).name, "Garchomp");
         assert_eq!(dex.item(chomp.item.unwrap()).name, "Garchompite Z");
-        assert_eq!(dex.species(mega_forme(chomp).unwrap()).name, "Garchomp-Mega-Z");
+        assert_eq!(
+            dex.species(mega_forme(chomp).unwrap()).name,
+            "Garchomp-Mega-Z"
+        );
         assert!(validate(&team).is_empty(), "{:?}", validate(&team));
     }
 

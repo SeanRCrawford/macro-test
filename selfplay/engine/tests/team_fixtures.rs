@@ -52,28 +52,50 @@ fn repo_teams_parse_like_showdown() {
         for (got, want) in team.iter().zip(&case.sets) {
             let ctx = format!("{} / {}", case.file, want.name);
             assert_eq!(dex.species(got.species).id, want.species, "{ctx}");
-            assert_eq!(got.item.map(|i| dex.item(i).id.clone()).unwrap_or_default(), want.item, "{ctx}");
+            assert_eq!(
+                got.item.map(|i| dex.item(i).id.clone()).unwrap_or_default(),
+                want.item,
+                "{ctx}"
+            );
             // Showdown's importer keeps a Mega's ability as written; its
             // validator (and the engine's parser) rewrite it to the base
             // species' ability.
-            let mega_ability = got.item.and_then(|i| dex.item(i).mega_stone.get(&dex.species(got.species).name))
+            let mega_ability = got
+                .item
+                .and_then(|i| dex.item(i).mega_stone.get(&dex.species(got.species).name))
                 .and_then(|m| dex.species_id(m))
-                .is_some_and(|m| dex.species(m).abilities.iter().any(|a| to_id(a) == want.ability));
+                .is_some_and(|m| {
+                    dex.species(m)
+                        .abilities
+                        .iter()
+                        .any(|a| to_id(a) == want.ability)
+                });
             if !mega_ability {
                 assert_eq!(dex.ability(got.ability).id, want.ability, "{ctx}");
             }
             // Showdown ignores the repo's "Nature: X" lines (empty nature);
             // the engine reads them.
             if !want.nature.is_empty() {
-                assert_eq!(to_id(&dex.nature_names[got.nature.0 as usize]), want.nature, "{ctx}");
+                assert_eq!(
+                    to_id(&dex.nature_names[got.nature.0 as usize]),
+                    want.nature,
+                    "{ctx}"
+                );
             } else {
                 assert!(text.contains("Nature: "), "{ctx}: no nature");
             }
-            let moves: Vec<_> = got.moves.iter().map(|m| dex.move_data(*m).id.clone()).collect();
+            let moves: Vec<_> = got
+                .moves
+                .iter()
+                .map(|m| dex.move_data(*m).id.clone())
+                .collect();
             assert_eq!(moves, want.moves, "{ctx}");
             match want.points {
                 Some(p) => assert_eq!(got.points, p, "{ctx}"),
-                None => assert!(got.points_filled, "{ctx}: points should be filled from usage"),
+                None => assert!(
+                    got.points_filled,
+                    "{ctx}: points should be filled from usage"
+                ),
             }
         }
         let problems = validate(&team);
@@ -89,7 +111,10 @@ fn validation_agrees_with_showdown() {
         let team = parse_paste(&case.text).unwrap_or_else(|e| panic!("case {n}: {e}"));
         let problems = validate(&team);
         // The usage-stats item rule is ours, not Showdown's.
-        let ours: Vec<_> = problems.iter().filter(|p| p.kind != ProblemKind::ItemNotInUsage).collect();
+        let ours: Vec<_> = problems
+            .iter()
+            .filter(|p| p.kind != ProblemKind::ItemNotInUsage)
+            .collect();
         if ours.is_empty() != case.valid {
             disagreements.push(format!(
                 "case {n} ({}): Showdown valid={} {:?}; engine {:?}",
@@ -97,8 +122,19 @@ fn validation_agrees_with_showdown() {
             ));
         }
         if case.mutation == "unused legal item" {
-            assert!(problems.iter().any(|p| p.kind == ProblemKind::ItemNotInUsage), "case {n}");
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.kind == ProblemKind::ItemNotInUsage),
+                "case {n}"
+            );
         }
     }
-    assert!(disagreements.is_empty(), "{} of {}:\n{}", disagreements.len(), cases.len(), disagreements.join("\n"));
+    assert!(
+        disagreements.is_empty(),
+        "{} of {}:\n{}",
+        disagreements.len(),
+        cases.len(),
+        disagreements.join("\n")
+    );
 }

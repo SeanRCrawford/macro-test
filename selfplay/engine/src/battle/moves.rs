@@ -6,7 +6,9 @@
 //! healing.
 
 use super::conditions::{status_from_id, HitRes};
-use super::state::{LockedMove, Mon, SideCondition, SwitchFlag, Volatile, VolatileId, ACTIVE_PER_SIDE};
+use super::state::{
+    LockedMove, Mon, SideCondition, SwitchFlag, Volatile, VolatileId, ACTIVE_PER_SIDE,
+};
 use super::{Battle, BattleError, MonRef, Res};
 use crate::damage::{self, ActiveMove, Combatant, DamageCtx, Outcome, SideState, Status};
 use crate::dex::{Category, Dex, HitEffect, MoveData, MoveId, MoveTarget};
@@ -34,6 +36,8 @@ pub(super) struct MoveUse {
     pub bypassed: Vec<MonRef>,
     /// Targets this hit landed a critical hit on (getMoveHitData's crit).
     pub crit_on: Vec<MonRef>,
+    /// `move.hitTargets`: who the move went on to hit (Magician).
+    pub hit_targets: Vec<MonRef>,
     /// `move.totalDamage` (Shell Bell).
     pub total_damage: u32,
 }
@@ -94,7 +98,11 @@ impl Battle {
     /// `adjacentAllies()`: the other active on the user's side, if it has HP.
     pub(super) fn adjacent_allies(&self, user: MonRef) -> Vec<MonRef> {
         (0..ACTIVE_PER_SIDE)
-            .filter(|&p| self.sides[user.side].occupant(p).is_some_and(|m| m.hp > 0 && m.uid != user.uid))
+            .filter(|&p| {
+                self.sides[user.side]
+                    .occupant(p)
+                    .is_some_and(|m| m.hp > 0 && m.uid != user.uid)
+            })
             .map(|p| self.mon_ref(user.side, p))
             .collect()
     }
@@ -142,7 +150,10 @@ impl Battle {
     fn tracks_target(&self, user: MonRef, _target_type: MoveTarget) -> bool {
         self.ability_is(user, "stalwart")
             || self.ability_is(user, "propellertail")
-            || self.mon(user).move_this_turn.is_some_and(|m| Dex::get().move_data(m).has_key("tracksTarget"))
+            || self
+                .mon(user)
+                .move_this_turn
+                .is_some_and(|m| Dex::get().move_data(m).has_key("tracksTarget"))
     }
 
     fn get_target(&mut self, user: MonRef, target_type: MoveTarget, loc: i8) -> Option<MonRef> {
@@ -150,21 +161,36 @@ impl Battle {
         // is on the field.
         if self.tracks_target(user, target_type) {
             if let Some((side, uid)) = self.mon(user).original_target {
-                if let Some(t) = self.all_active().into_iter().find(|&t| t.side == side && self.mon(t).uid == uid && self.mon(t).is_active) {
+                if let Some(t) = self
+                    .all_active()
+                    .into_iter()
+                    .find(|&t| t.side == side && self.mon(t).uid == uid && self.mon(t).is_active)
+                {
                     return Some(t);
                 }
             }
         }
         let self_loc = self.loc_of(user, user);
-        if matches!(target_type, MoveTarget::AdjacentAlly | MoveTarget::Any | MoveTarget::Normal) && loc == self_loc {
+        if matches!(
+            target_type,
+            MoveTarget::AdjacentAlly | MoveTarget::Any | MoveTarget::Normal
+        ) && loc == self_loc
+        {
             return None;
         }
         let user_pos = self.mon(user).position;
-        if target_type != MoveTarget::RandomNormal && super::choice::valid_target_loc(loc, user_pos, target_type) && loc != 0 {
+        if target_type != MoveTarget::RandomNormal
+            && super::choice::valid_target_loc(loc, user_pos, target_type)
+            && loc != 0
+        {
             if let Some(t) = self.at_loc(user, loc) {
                 let tm = self.mon(t);
                 if tm.fainted && t.side == user.side {
-                    return Some(if target_type == MoveTarget::AdjacentAllyOrSelf { user } else { t });
+                    return Some(if target_type == MoveTarget::AdjacentAllyOrSelf {
+                        user
+                    } else {
+                        t
+                    });
                 }
                 if !tm.fainted {
                     return Some(t);
@@ -175,7 +201,12 @@ impl Battle {
     }
 
     /// `getMoveTargets` for moves that target Pokemon.
-    fn get_move_targets(&mut self, user: MonRef, am: &ActiveMove, target: Option<MonRef>) -> Vec<MonRef> {
+    fn get_move_targets(
+        &mut self,
+        user: MonRef,
+        am: &ActiveMove,
+        target: Option<MonRef>,
+    ) -> Vec<MonRef> {
         match am.target {
             MoveTarget::AllAdjacent => {
                 let mut t = self.adjacent_allies(user);
@@ -187,7 +218,11 @@ impl Battle {
             MoveTarget::Allies => {
                 let side = user.side;
                 (0..ACTIVE_PER_SIDE)
-                    .filter(|&p| self.sides[side].occupant(p).is_some_and(|m| m.hp > 0 && !m.fainted))
+                    .filter(|&p| {
+                        self.sides[side]
+                            .occupant(p)
+                            .is_some_and(|m| m.hp > 0 && !m.fainted)
+                    })
                     .map(|p| self.mon_ref(side, p))
                     .collect()
             }
@@ -249,11 +284,25 @@ impl Battle {
         } else {
             return target;
         };
-        let mut rods: Vec<(MonRef, i32)> = self.all_active().into_iter().filter(|&r| self.ability_is(r, rod)).map(|r| (r, self.mon(r).speed)).collect();
+        let mut rods: Vec<(MonRef, i32)> = self
+            .all_active()
+            .into_iter()
+            .filter(|&r| self.ability_is(r, rod))
+            .map(|r| (r, self.mon(r).speed))
+            .collect();
         self.speed_sort(&mut rods, |a, b| b.1.cmp(&a.1));
-        let redirect_type = if matches!(target_type, MoveTarget::RandomNormal | MoveTarget::AdjacentFoe) { MoveTarget::Normal } else { target_type };
+        let redirect_type = if matches!(
+            target_type,
+            MoveTarget::RandomNormal | MoveTarget::AdjacentFoe
+        ) {
+            MoveTarget::Normal
+        } else {
+            target_type
+        };
         for (r, _) in rods {
-            if r != user && super::choice::valid_target_loc(self.loc_of(user, r), user_pos, redirect_type) {
+            if r != user
+                && super::choice::valid_target_loc(self.loc_of(user, r), user_pos, redirect_type)
+            {
                 return r;
             }
         }
@@ -273,7 +322,9 @@ impl Battle {
     /// Protean / Libero's onPrepareHit: once per switch-in, the user becomes
     /// the move's type.
     fn protean(&mut self, user: MonRef, move_type: crate::dex::TypeId) {
-        if !(self.ability_is(user, "protean") || self.ability_is(user, "libero")) || self.mon(user).protean_used {
+        if !(self.ability_is(user, "protean") || self.ability_is(user, "libero"))
+            || self.mon(user).protean_used
+        {
             return;
         }
         let m = self.mon_mut(user);
@@ -287,15 +338,29 @@ impl Battle {
     /// Dive, Bounce, Phantom Force or Shadow Force), unless the move reaches
     /// it or No Guard (onAnyInvulnerability) is in play.
     fn invulnerable(&self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
-        let Some(charging) = semi_invulnerable(self.mon(t)) else { return false };
+        let Some(charging) = semi_invulnerable(self.mon(t)) else {
+            return false;
+        };
         if self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
             return false;
         }
-        if data.id == "toxic" && self.mon(user).has_type(Dex::get().type_id("Poison").expect("Poison")) {
+        if data.id == "toxic"
+            && self
+                .mon(user)
+                .has_type(Dex::get().type_id("Poison").expect("Poison"))
+        {
             return false;
         }
         let reaches: &[&str] = match Dex::get().move_data(charging).id.as_str() {
-            "fly" | "bounce" => &["gust", "twister", "skyuppercut", "thunder", "hurricane", "smackdown", "thousandarrows"],
+            "fly" | "bounce" => &[
+                "gust",
+                "twister",
+                "skyuppercut",
+                "thunder",
+                "hurricane",
+                "smackdown",
+                "thousandarrows",
+            ],
             "dig" => &["earthquake", "magnitude"],
             "dive" => &["surf", "whirlpool"],
             _ => &[],
@@ -303,14 +368,77 @@ impl Battle {
         !reaches.contains(&data.id.as_str())
     }
 
+    /// Magician's onAfterMoveSecondarySelf.
+    fn magician(&mut self, user: MonRef, mv: &MoveUse, data: &MoveData) {
+        let u = self.mon(user);
+        if u.switch_flag == Some(SwitchFlag::Replace)
+            || u.item.is_some()
+            || u.volatiles.has(VolatileId::Gem)
+            || data.category == Category::Status
+        {
+            return;
+        }
+        let mut hit: Vec<(MonRef, i32)> = mv
+            .hit_targets
+            .iter()
+            .map(|&t| (t, self.mon(t).speed))
+            .collect();
+        self.speed_sort(&mut hit, |a, b| b.1.cmp(&a.1));
+        for (t, _) in hit {
+            if t == user {
+                continue;
+            }
+            let Some(item) = self.take_item(t, user) else {
+                continue;
+            };
+            let u = self.mon(user);
+            if u.hp == 0 || !u.is_active {
+                self.mon_mut(t).item = Some(item);
+                continue;
+            }
+            self.mon_mut(user).item = Some(item);
+            return;
+        }
+    }
+
+    /// HitProtect: Unseen Fist and Piercing Drill's contact moves get
+    /// through protections.
+    pub(super) fn hits_through_protect(&self, user: MonRef) -> bool {
+        self.ability_is(user, "unseenfist") || self.ability_is(user, "piercingdrill")
+    }
+
+    /// `battle.skillSwap(source, target)`.
+    pub(super) fn skill_swap(&mut self, source: MonRef, target: MonRef) -> bool {
+        let dex = Dex::get();
+        let (sa, ta) = (self.mon(source).ability, self.mon(target).ability);
+        let fails =
+            |a: crate::dex::AbilityId| dex.ability(a).flags.iter().any(|f| f == "failskillswap");
+        if self.mon(source).fainted || self.mon(target).fainted || fails(sa) || fails(ta) {
+            return false;
+        }
+        self.set_ability(source, ta);
+        self.set_ability(target, sa);
+        for (r, a) in [(target, sa), (source, ta)] {
+            if let Some(e) = super::field::start_effect(&dex.ability(a).id) {
+                self.ability_start(r, e);
+            }
+        }
+        true
+    }
+
     /// onFoeTryMove: Armor Tail, Queenly Majesty, Dazzling.
     fn blocks_priority(&self, r: MonRef) -> bool {
-        ["armortail", "queenlymajesty", "dazzling"].iter().any(|a| self.ability_is(r, a))
+        ["armortail", "queenlymajesty", "dazzling"]
+            .iter()
+            .any(|a| self.ability_is(r, a))
     }
 
     /// DeductPP: each targeted foe with Pressure costs a PP more.
     fn pressure(&mut self, user: MonRef, move_id: MoveId, targets: &[MonRef]) {
-        let extra = targets.iter().filter(|&&t| t.side != user.side && self.ability_is(t, "pressure")).count() as u8;
+        let extra = targets
+            .iter()
+            .filter(|&&t| t.side != user.side && self.ability_is(t, "pressure"))
+            .count() as u8;
         let m = self.mon_mut(user);
         if let (true, Some(i)) = (extra > 0, m.move_slot(move_id)) {
             m.moves[i].pp = m.moves[i].pp.saturating_sub(extra);
@@ -318,7 +446,13 @@ impl Battle {
     }
 
     /// TryHit abilities that take the move in: true stops it on `t`.
-    fn absorbs(&mut self, user: MonRef, t: MonRef, move_type: crate::dex::TypeId, data: &MoveData) -> bool {
+    fn absorbs(
+        &mut self,
+        user: MonRef,
+        t: MonRef,
+        move_type: crate::dex::TypeId,
+        data: &MoveData,
+    ) -> bool {
         let dex = Dex::get();
         let is = |name: &str| move_type == dex.type_id(name).expect("type");
         match self.ability_id(t) {
@@ -326,7 +460,9 @@ impl Battle {
             "eartheater" if is("Ground") => {}
             "bulletproof" => return data.flags.has("bullet"),
             "sturdy" => return data.ohko,
-            "overcoat" => return data.flags.has("powder") && !dex.immune_to("powder", self.mon(t).types),
+            "overcoat" => {
+                return data.flags.has("powder") && !dex.immune_to("powder", self.mon(t).types)
+            }
             "waterabsorb" if is("Water") => {}
             "sapsipper" if is("Grass") => {
                 self.boost(t, &[(0, 1)], Some(user));
@@ -355,14 +491,23 @@ impl Battle {
         let mut out: [Option<Combatant>; 4] = Default::default();
         for side in 0..2 {
             for pos in 0..ACTIVE_PER_SIDE {
-                let Some(m) = self.sides[side].occupant(pos) else { continue };
+                let Some(m) = self.sides[side].occupant(pos) else {
+                    continue;
+                };
                 if m.hp == 0 && self.selfdestruct_user != Some(self.mon_ref(side, pos)) {
                     continue;
                 }
                 let mut c = Combatant::new(m.species, m.stats, m.ability, m.item);
                 c.types = m.types;
                 c.hp = m.hp;
-                c.boosts = [0, m.boosts[0], m.boosts[1], m.boosts[2], m.boosts[3], m.boosts[4]];
+                c.boosts = [
+                    0,
+                    m.boosts[0],
+                    m.boosts[1],
+                    m.boosts[2],
+                    m.boosts[3],
+                    m.boosts[4],
+                ];
                 c.status = m.status;
                 c.speed = m.speed;
                 c.active_turns = m.active_turns;
@@ -376,19 +521,37 @@ impl Battle {
                 c.fallen = m.fallen;
                 c.stats_lowered_this_turn = m.stats_lowered_this_turn;
                 // getStat('spe'): the action speed without Trick Room's sign.
-                c.spe_stat = self.action_speed_of(self.mon_ref(side, pos)).map_or(0, |s| s.unsigned_abs());
+                c.spe_stat = self
+                    .action_speed_of(self.mon_ref(side, pos))
+                    .map_or(0, |s| s.unsigned_abs());
                 c.moved_this_turn = !m.newly_switched && !self.will_move(self.mon_ref(side, pos));
-                c.volatiles.helping_hand =
-                    m.volatiles.0.iter().find(|v| v.id == VolatileId::HelpingHand).map_or(0, |v| v.counter as u8);
+                c.volatiles.helping_hand = m
+                    .volatiles
+                    .0
+                    .iter()
+                    .find(|v| v.id == VolatileId::HelpingHand)
+                    .map_or(0, |v| v.counter as u8);
                 out[side * 2 + pos] = Some(c);
             }
         }
         out
     }
 
-    fn damage_ctx<'a>(&self, view: &'a [Option<Combatant>; 4], attacker: MonRef, defender: MonRef, crit: bool, spread: bool) -> DamageCtx<'a> {
+    fn damage_ctx<'a>(
+        &self,
+        view: &'a [Option<Combatant>; 4],
+        attacker: MonRef,
+        defender: MonRef,
+        crit: bool,
+        spread: bool,
+    ) -> DamageCtx<'a> {
         DamageCtx {
-            actives: [view[0].as_ref(), view[1].as_ref(), view[2].as_ref(), view[3].as_ref()],
+            actives: [
+                view[0].as_ref(),
+                view[1].as_ref(),
+                view[2].as_ref(),
+                view[3].as_ref(),
+            ],
             attacker: attacker.side * 2 + self.mon(attacker).position,
             defender: defender.side * 2 + self.mon(defender).position,
             weather: self.field.weather,
@@ -408,7 +571,13 @@ impl Battle {
     }
 
     /// `runMove`.
-    pub(super) fn run_move(&mut self, user: MonRef, slot: usize, target_loc: i8, priority: i8) -> Res<()> {
+    pub(super) fn run_move(
+        &mut self,
+        user: MonRef,
+        slot: usize,
+        target_loc: i8,
+        priority: i8,
+    ) -> Res<()> {
         self.mon_mut(user).active_move_actions += 1;
         // A recharge turn: mustrecharge's BeforeMove (priority 11) stops
         // whatever move comes (Encore may have swapped one in).
@@ -417,7 +586,9 @@ impl Battle {
             m.volatiles.remove(VolatileId::GlaiveRush);
             m.volatiles.remove(VolatileId::MustRecharge);
             if m.volatiles.remove(VolatileId::TwoTurnMove) {
-                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+                m.volatiles
+                    .0
+                    .retain(|v| !matches!(v.id, VolatileId::Charging(_)));
             }
             m.move_this_turn_result = Some(None);
             return Ok(());
@@ -429,7 +600,9 @@ impl Battle {
             // MoveAborted: twoturnmove ends (and with it the charge).
             let m = self.mon_mut(user);
             if m.volatiles.remove(VolatileId::TwoTurnMove) {
-                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+                m.volatiles
+                    .0
+                    .retain(|v| !matches!(v.id, VolatileId::Charging(_)));
             }
             m.move_this_turn_result = Some(Some(false));
             self.charge_spent(user, data);
@@ -471,13 +644,21 @@ impl Battle {
 
     /// charge's onAfterMove / onMoveAborted: used up by an Electric move.
     fn charge_spent(&mut self, user: MonRef, data: &MoveData) {
-        if data.move_type == Dex::get().type_id("Electric").expect("Electric") && data.id != "charge" {
+        if data.move_type == Dex::get().type_id("Electric").expect("Electric")
+            && data.id != "charge"
+        {
             self.mon_mut(user).volatiles.remove(VolatileId::Charge);
         }
     }
 
     /// `useMoveInner` for moves that target Pokemon.
-    fn use_move(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8) -> Res<bool> {
+    fn use_move(
+        &mut self,
+        user: MonRef,
+        move_id: MoveId,
+        target: Option<MonRef>,
+        priority: i8,
+    ) -> Res<bool> {
         self.use_move_inner(user, move_id, target, priority, false)
     }
 
@@ -485,7 +666,13 @@ impl Battle {
     /// but its result is the bouncer's moveThisTurnResult.
     /// The bounced move keeps the original's priority (useMoveInner copies
     /// `activeMove.priority`), which Armor Tail and Psychic Terrain see.
-    fn bounce_move(&mut self, user: MonRef, move_id: MoveId, target: MonRef, priority: i8) -> Res<()> {
+    fn bounce_move(
+        &mut self,
+        user: MonRef,
+        move_id: MoveId,
+        target: MonRef,
+        priority: i8,
+    ) -> Res<()> {
         self.mon_mut(user).move_this_turn_result = None;
         let r = self.use_move_inner(user, move_id, Some(target), priority, true)?;
         let m = self.mon_mut(user);
@@ -495,14 +682,28 @@ impl Battle {
         Ok(())
     }
 
-    fn use_move_inner(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8, bounced: bool) -> Res<bool> {
+    fn use_move_inner(
+        &mut self,
+        user: MonRef,
+        move_id: MoveId,
+        target: Option<MonRef>,
+        priority: i8,
+        bounced: bool,
+    ) -> Res<bool> {
         let saved = self.mold_breaker;
         let r = self.use_move_body(user, move_id, target, priority, bounced);
         self.mold_breaker = saved;
         r
     }
 
-    fn use_move_body(&mut self, user: MonRef, move_id: MoveId, target: Option<MonRef>, priority: i8, bounced: bool) -> Res<bool> {
+    fn use_move_body(
+        &mut self,
+        user: MonRef,
+        move_id: MoveId,
+        target: Option<MonRef>,
+        priority: i8,
+        bounced: bool,
+    ) -> Res<bool> {
         let data = Dex::get().move_data(move_id);
         let base_target = data.target;
         // ModifyType / ModifyMove, through the damage module so both agree.
@@ -519,7 +720,9 @@ impl Battle {
         self.mold_breaker = am.ignore_ability.then_some(user);
         // Stance Change (onModifyMove priority 1): Blade to attack, Shield
         // for King's Shield (not permanent).
-        if self.ability_is(user, "stancechange") && Dex::get().species(self.mon(user).species).base_species == "Aegislash" {
+        if self.ability_is(user, "stancechange")
+            && Dex::get().species(self.mon(user).species).base_species == "Aegislash"
+        {
             let forme = match (data.category, data.id.as_str()) {
                 (_, "kingsshield") => Some("Aegislash"),
                 (Category::Status, _) => None,
@@ -559,15 +762,24 @@ impl Battle {
         if self.mon(user).hp == 0 {
             return Ok(false);
         }
-        let Some(target) = target else { return Ok(false) };
-        if matches!(am.target, MoveTarget::All | MoveTarget::AllySide | MoveTarget::FoeSide | MoveTarget::AllyTeam) {
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        if matches!(
+            am.target,
+            MoveTarget::All | MoveTarget::AllySide | MoveTarget::FoeSide | MoveTarget::AllyTeam
+        ) {
             if !bounced && am.target == MoveTarget::All {
                 let foes = self.foes(user);
                 self.pressure(user, move_id, &foes);
             }
             // TryMove: Armor Tail and friends let field-wide moves through,
             // except Perish Song (and Flower Shield, Rototiller).
-            if am.target == MoveTarget::All && priority > 0 && data.id == "perishsong" && self.foes(user).into_iter().any(|f| self.blocks_priority(f)) {
+            if am.target == MoveTarget::All
+                && priority > 0
+                && data.id == "perishsong"
+                && self.foes(user).into_iter().any(|f| self.blocks_priority(f))
+            {
                 return Ok(false);
             }
             if !bounced && data.flags.has("mustpressure") {
@@ -579,7 +791,11 @@ impl Battle {
         let targets = self.get_move_targets(user, &am, Some(target));
         // A charged move's second turn comes from lockedmove: no Pressure.
         if !bounced && self.mon(user).locked_move().is_none() {
-            let pressure_targets = if data.flags.has("mustpressure") { self.foes(user) } else { targets.clone() };
+            let pressure_targets = if data.flags.has("mustpressure") {
+                self.foes(user)
+            } else {
+                targets.clone()
+            };
             self.pressure(user, move_id, &pressure_targets);
         }
         // useMoveInner aims at the last target (or keeps the chosen one).
@@ -598,16 +814,33 @@ impl Battle {
             "burnup" => Some("Fire"),
             _ => None,
         };
-        if needs.is_some_and(|t| !self.mon(user).has_type(Dex::get().type_id(t).expect("type"))) {
+        if needs.is_some_and(|t| {
+            !self
+                .mon(user)
+                .has_type(Dex::get().type_id(t).expect("type"))
+        }) {
             return Ok(false);
         }
         // TryMove: a foe's Armor Tail stops priority moves aimed at its side.
-        if priority > 0 && self.foes(user).into_iter().any(|f| f.side == last_target.side && self.blocks_priority(f)) {
+        if priority > 0
+            && self
+                .foes(user)
+                .into_iter()
+                .any(|f| f.side == last_target.side && self.blocks_priority(f))
+        {
             return Ok(false);
         }
-        let explodes = matches!(data.id.as_str(), "explosion" | "selfdestruct" | "mistyexplosion");
+        let explodes = matches!(
+            data.id.as_str(),
+            "explosion" | "selfdestruct" | "mistyexplosion"
+        );
         // TryMove: Damp (onAnyTryMove) stops them.
-        if explodes && self.all_active().into_iter().any(|r| self.ability_is(r, "damp")) {
+        if explodes
+            && self
+                .all_active()
+                .into_iter()
+                .any(|r| self.ability_is(r, "damp"))
+        {
             self.selfdestruct_user = None;
             return Ok(false);
         }
@@ -624,7 +857,11 @@ impl Battle {
         // secondaries) adds a flinch unless one is there.
         let kings_rock = self.item_of(user) == Some("kingsrock")
             && data.category != Category::Status
-            && (am.has_sheer_force || !data.secondaries.iter().any(|s| s.volatile_status.as_deref() == Some("flinch")));
+            && (am.has_sheer_force
+                || !data
+                    .secondaries
+                    .iter()
+                    .any(|s| s.volatile_status.as_deref() == Some("flinch")));
         let mut mv = MoveUse {
             am,
             data,
@@ -638,18 +875,23 @@ impl Battle {
             total_damage: 0,
             bypassed: Vec::new(),
             crit_on: Vec::new(),
+            hit_targets: Vec::new(),
         };
         let result = self.try_spread_move_hit(user, &mut mv, targets);
         self.selfdestruct_user = None;
         let result = result?;
         // MoveFail: High Jump Kick's crash, Steel Beam's recoil.
         if !result {
+            let before = self.mon(user).hp;
             if data.has_key("hasCrashDamage") {
                 let amount = (self.mon(user).max_hp() / 2) as u32;
                 self.effect_damage(user, amount);
             } else if data.has_key("mindBlownRecoil") && data.multihit.is_none() {
                 let amount = (self.mon(user).max_hp() as u32).div_ceil(2);
                 self.effect_damage(user, amount);
+            }
+            if user != last_target && data.category != Category::Status {
+                self.emergency_exit(user, before);
             }
         }
         // selfBoost (Clanging Scales), once the move worked.
@@ -659,10 +901,26 @@ impl Battle {
         // AfterMoveSecondarySelf doesn't run for a Sheer Force move.
         if result && !(mv.am.has_sheer_force && self.ability_is(user, "sheerforce")) {
             // Fell Stinger (the move's own handler first).
-            if data.id == "fellstinger" && (self.mon(last_target).fainted || self.mon(last_target).hp == 0) {
+            let before = self.mon(user).hp;
+            if data.id == "fellstinger"
+                && (self.mon(last_target).fainted || self.mon(last_target).hp == 0)
+            {
                 self.boost(user, &[(0, 3)], Some(user));
             }
-            self.after_move_secondary_self(user, last_target, data.category == Category::Status, mv.total_damage);
+            // Magician (ability, before the items): steal from the fastest
+            // target hit.
+            if self.ability_is(user, "magician") {
+                self.magician(user, &mv, data);
+            }
+            self.after_move_secondary_self(
+                user,
+                last_target,
+                data.category == Category::Status,
+                mv.total_damage,
+            );
+            if user != last_target && data.category != Category::Status {
+                self.emergency_exit(user, before);
+            }
         }
         Ok(result)
     }
@@ -680,7 +938,9 @@ impl Battle {
         };
         let m = self.mon(user);
         if m.volatiles.has(VolatileId::Charging(move_id)) {
-            self.mon_mut(user).volatiles.remove(VolatileId::Charging(move_id));
+            self.mon_mut(user)
+                .volatiles
+                .remove(VolatileId::Charging(move_id));
             return Some(true);
         }
         if boosts {
@@ -692,13 +952,23 @@ impl Battle {
         // addVolatile('twoturnmove'): its onStart adds the move's own volatile
         // holding the target.
         let target_loc = self.mon(user).last_move_target_loc;
-        for (id, mv) in [(VolatileId::TwoTurnMove, Some(move_id)), (VolatileId::Charging(move_id), None)] {
+        for (id, mv) in [
+            (VolatileId::TwoTurnMove, Some(move_id)),
+            (VolatileId::Charging(move_id), None),
+        ] {
             if self.mon(user).volatiles.has(id) {
                 continue;
             }
             self.effect_order += 1;
             let effect_order = self.effect_order;
-            self.mon_mut(user).volatiles.0.push(Volatile { id, duration: id.duration(), counter: 0, move_id: mv, effect_order, target_loc });
+            self.mon_mut(user).volatiles.0.push(Volatile {
+                id,
+                duration: id.duration(),
+                counter: 0,
+                move_id: mv,
+                effect_order,
+                target_loc,
+            });
         }
         Some(false)
     }
@@ -708,16 +978,23 @@ impl Battle {
     /// Baneful Bunker.
     fn protect_blocks(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
         let v = &self.mon(t).volatiles;
-        let kind = [VolatileId::Protect, VolatileId::SpikyShield, VolatileId::KingsShield, VolatileId::BanefulBunker]
-            .into_iter()
-            .find(|&k| v.has(k));
+        let kind = [
+            VolatileId::Protect,
+            VolatileId::SpikyShield,
+            VolatileId::KingsShield,
+            VolatileId::BanefulBunker,
+        ]
+        .into_iter()
+        .find(|&k| v.has(k));
         let Some(kind) = kind else { return false };
         // checkMoveBypassesProtect (King's Shield lets status moves through).
-        if !data.flags.has("protect") || (kind == VolatileId::KingsShield && data.category == Category::Status) {
+        if !data.flags.has("protect")
+            || (kind == VolatileId::KingsShield && data.category == Category::Status)
+        {
             return false;
         }
         // HitProtect: Unseen Fist's contact moves go through.
-        if data.flags.has("contact") && self.ability_is(user, "unseenfist") {
+        if data.flags.has("contact") && self.hits_through_protect(user) {
             return false;
         }
         if data.flags.has("contact") {
@@ -730,7 +1007,7 @@ impl Battle {
                     self.boost(user, &[(0, -1)], Some(t));
                 }
                 VolatileId::BanefulBunker => {
-                    self.try_set_status(user, Status::Poison);
+                    self.try_set_status_from(user, Status::Poison, Some(t));
                 }
                 _ => {}
             }
@@ -740,7 +1017,14 @@ impl Battle {
 
     /// `tryMoveHit` for moves that hit a side or the field
     /// (runMoveEffects' sideCondition / pseudoWeather, and onHitSide).
-    fn try_move_hit(&mut self, user: MonRef, data: &MoveData, move_type: crate::dex::TypeId, bounced: bool, priority: i8) -> Res<bool> {
+    fn try_move_hit(
+        &mut self,
+        user: MonRef,
+        data: &MoveData,
+        move_type: crate::dex::TypeId,
+        bounced: bool,
+        priority: i8,
+    ) -> Res<bool> {
         // Entry hazards: TryHitSide lets a foe's Magic Bounce send them back.
         let hazard = match data.id.as_str() {
             "stealthrock" => Some(SideCondition::StealthRock),
@@ -752,11 +1036,20 @@ impl Battle {
         if let Some(c) = hazard {
             self.protean(user, move_type);
             if !bounced {
-                let mut bouncers: Vec<(MonRef, i32)> =
-                    self.foes(user).into_iter().filter(|&f| self.ability_is(f, "magicbounce")).map(|f| (f, self.mon(f).speed)).collect();
+                let mut bouncers: Vec<(MonRef, i32)> = self
+                    .foes(user)
+                    .into_iter()
+                    .filter(|&f| self.ability_is(f, "magicbounce"))
+                    .map(|f| (f, self.mon(f).speed))
+                    .collect();
                 self.speed_sort(&mut bouncers, |a, b| b.1.cmp(&a.1));
                 if let Some(&(holder, _)) = bouncers.first() {
-                    self.bounce_move(holder, Dex::get().move_id(&data.id).expect("move id"), user, priority)?;
+                    self.bounce_move(
+                        holder,
+                        Dex::get().move_id(&data.id).expect("move id"),
+                        user,
+                        priority,
+                    )?;
                     return Ok(false);
                 }
             }
@@ -765,7 +1058,12 @@ impl Battle {
         Ok(self.try_move_hit_inner(user, data, move_type))
     }
 
-    fn try_move_hit_inner(&mut self, user: MonRef, data: &MoveData, move_type: crate::dex::TypeId) -> bool {
+    fn try_move_hit_inner(
+        &mut self,
+        user: MonRef,
+        data: &MoveData,
+        move_type: crate::dex::TypeId,
+    ) -> bool {
         let add = |b: &mut Battle, c: SideCondition, turns: u8| {
             let d = &mut b.sides[user.side].conditions[c as usize];
             if *d > 0 {
@@ -784,20 +1082,31 @@ impl Battle {
             self.protean(user, move_type);
         }
         // Reflect and Light Screen's durationCallback: Light Clay makes 8.
-        let screen_turns = if self.item_of(user) == Some("lightclay") { 8 } else { 5 };
+        let screen_turns = if self.item_of(user) == Some("lightclay") {
+            8
+        } else {
+            5
+        };
         match data.id.as_str() {
             "tailwind" => add(self, SideCondition::Tailwind, 4),
             "reflect" => add(self, SideCondition::Reflect, screen_turns),
             "lightscreen" => add(self, SideCondition::LightScreen, screen_turns),
             // onTry: only in snow.
-            "auroraveil" => self.effective_weather() == crate::damage::Weather::Snow && add(self, SideCondition::AuroraVeil, screen_turns),
+            "auroraveil" => {
+                self.effective_weather() == crate::damage::Weather::Snow
+                    && add(self, SideCondition::AuroraVeil, screen_turns)
+            }
             "wideguard" | "quickguard" => {
                 // onTry: fails as the last to act; onHitSide adds stall even
                 // if the guard was already up.
                 if !self.will_act() {
                     return false;
                 }
-                let c = if data.id == "wideguard" { SideCondition::WideGuard } else { SideCondition::QuickGuard };
+                let c = if data.id == "wideguard" {
+                    SideCondition::WideGuard
+                } else {
+                    SideCondition::QuickGuard
+                };
                 add(self, c, 1);
                 self.add_volatile(user, VolatileId::Stall);
                 true
@@ -821,7 +1130,10 @@ impl Battle {
                     let (a, b) = (self.sides[0].conditions[i], self.sides[1].conditions[i]);
                     self.sides[0].conditions[i] = b;
                     self.sides[1].conditions[i] = a;
-                    let (a, b) = (self.sides[0].condition_order[i], self.sides[1].condition_order[i]);
+                    let (a, b) = (
+                        self.sides[0].condition_order[i],
+                        self.sides[1].condition_order[i],
+                    );
                     self.sides[0].condition_order[i] = b;
                     self.sides[1].condition_order[i] = a;
                 }
@@ -874,7 +1186,12 @@ impl Battle {
     }
 
     /// `trySpreadMoveHit` and its hit steps.
-    fn try_spread_move_hit(&mut self, user: MonRef, mv: &mut MoveUse, targets: Vec<MonRef>) -> Res<bool> {
+    fn try_spread_move_hit(
+        &mut self,
+        user: MonRef,
+        mv: &mut MoveUse,
+        targets: Vec<MonRef>,
+    ) -> Res<bool> {
         let data = mv.data;
         let priority = mv.priority;
         let spread_target = mv.am.target;
@@ -887,7 +1204,9 @@ impl Battle {
         mv.spread = targets.len() > 1;
 
         // Try and PrepareHit
-        if matches!(data.id.as_str(), "fakeout" | "firstimpression") && self.mon(user).active_move_actions > 1 {
+        if matches!(data.id.as_str(), "fakeout" | "firstimpression")
+            && self.mon(user).active_move_actions > 1
+        {
             return Ok(false);
         }
         if data.id == "clangoroussoul" {
@@ -901,7 +1220,9 @@ impl Battle {
         }
         // Sucker Punch fails unless its target is about to use an attack.
         if data.id == "suckerpunch" {
-            let attacking = self.queued_move(targets[0]).is_some_and(|m| Dex::get().move_data(m).category != Category::Status);
+            let attacking = self
+                .queued_move(targets[0])
+                .is_some_and(|m| Dex::get().move_data(m).category != Category::Status);
             if !attacking || self.mon(targets[0]).volatiles.has(VolatileId::MustRecharge) {
                 return Ok(false);
             }
@@ -912,22 +1233,32 @@ impl Battle {
         match data.id.as_str() {
             "rest" => {
                 let m = self.mon(user);
-                if m.status == Status::Sleep || m.hp >= m.max_hp() || matches!(self.ability_id(user), "insomnia" | "vitalspirit") {
+                if m.status == Status::Sleep
+                    || m.hp >= m.max_hp()
+                    || matches!(self.ability_id(user), "insomnia" | "vitalspirit")
+                {
                     return Ok(false);
                 }
             }
             "lastresort" => {
                 let m = self.mon(user);
-                let has = m.moves.iter().any(|s| Dex::get().move_data(s.id).id == "lastresort");
-                let others_used = m.moves.iter().all(|s| Dex::get().move_data(s.id).id == "lastresort" || s.used);
+                let has = m
+                    .moves
+                    .iter()
+                    .any(|s| Dex::get().move_data(s.id).id == "lastresort");
+                let others_used = m
+                    .moves
+                    .iter()
+                    .all(|s| Dex::get().move_data(s.id).id == "lastresort" || s.used);
                 if m.moves.len() < 2 || !has || !others_used {
                     return Ok(false);
                 }
             }
             "noretreat" if self.mon(user).volatiles.has(VolatileId::NoRetreat) => return Ok(false),
             "upperhand" => {
-                let ok = self.queued_move_priority(targets[0])
-                    .is_some_and(|(m, p)| p > 0.1 && Dex::get().move_data(m).category != Category::Status);
+                let ok = self.queued_move_priority(targets[0]).is_some_and(|(m, p)| {
+                    p > 0.1 && Dex::get().move_data(m).category != Category::Status
+                });
                 if !ok {
                     return Ok(false);
                 }
@@ -944,7 +1275,8 @@ impl Battle {
 
         // HitProtect: Unseen Fist's contact moves get through Protect and
         // friends (and Wide Guard), noted for the damage.
-        if data.flags.has("protect") && data.flags.has("contact") && self.ability_is(user, "unseenfist") {
+        if data.flags.has("protect") && data.flags.has("contact") && self.hits_through_protect(user)
+        {
             for &t in &targets {
                 let v = &self.mon(t).volatiles;
                 let shielded = v.has(VolatileId::Protect)
@@ -952,14 +1284,19 @@ impl Battle {
                     || v.has(VolatileId::BanefulBunker)
                     || (v.has(VolatileId::KingsShield) && data.category != Category::Status)
                     || (self.sides[t.side].condition(SideCondition::WideGuard) > 0
-                        && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes));
+                        && matches!(
+                            spread_target,
+                            MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes
+                        ));
                 if shielded {
                     mv.bypassed.push(t);
                 }
             }
         }
         let mut failed = false;
-        let mut step = |b: &mut Battle, targets: &mut Vec<MonRef>, f: &mut dyn FnMut(&mut Battle, MonRef) -> HitRes| {
+        let mut step = |b: &mut Battle,
+                        targets: &mut Vec<MonRef>,
+                        f: &mut dyn FnMut(&mut Battle, MonRef) -> HitRes| {
             let results: Vec<HitRes> = targets.iter().map(|&t| f(b, t)).collect();
             failed |= results.contains(&HitRes::Bool(false));
             let mut i = 0;
@@ -973,7 +1310,9 @@ impl Battle {
         // Bounce, Phantom Force or Shadow Force can't be hit, bar the moves
         // that reach it and No Guard (onAnyInvulnerability, priority 1).
         if data.id != "helpinghand" {
-            step(self, &mut targets, &mut |b, t| HitRes::Bool(!b.invulnerable(user, t, data)));
+            step(self, &mut targets, &mut |b, t| {
+                HitRes::Bool(!b.invulnerable(user, t, data))
+            });
         }
         // hitStepTryHitEvent: Psychic Terrain (priority 4) stops priority
         // moves on grounded foes; Protect blocks moves with the protect flag.
@@ -981,15 +1320,18 @@ impl Battle {
             if b.psychic_terrain_blocks(user, t, priority, data.target == MoveTarget::SelfTarget) {
                 HitRes::Bool(false)
             } else if data.flags.has("protect")
-                && !(data.flags.has("contact") && b.ability_is(user, "unseenfist"))
+                && !(data.flags.has("contact") && b.hits_through_protect(user))
                 && b.sides[t.side].condition(SideCondition::WideGuard) > 0
-                && matches!(spread_target, MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes)
+                && matches!(
+                    spread_target,
+                    MoveTarget::AllAdjacent | MoveTarget::AllAdjacentFoes
+                )
             {
                 // Wide Guard (priority 4).
                 HitRes::NotFail
             } else if priority > 0
                 && data.flags.has("protect")
-                && !(data.flags.has("contact") && b.ability_is(user, "unseenfist"))
+                && !(data.flags.has("contact") && b.hits_through_protect(user))
                 && b.sides[t.side].condition(SideCondition::QuickGuard) > 0
             {
                 // Quick Guard (priority 4).
@@ -997,13 +1339,20 @@ impl Battle {
             } else if b.protect_blocks(user, t, data) {
                 // Protect and its variants (priority 3).
                 HitRes::NotFail
-            } else if t != user && !bounced && data.flags.has("reflectable") && b.ability_is(t, "magicbounce") {
+            } else if t != user
+                && !bounced
+                && data.flags.has("reflectable")
+                && b.ability_is(t, "magicbounce")
+            {
                 // Magic Bounce (priority 1) sends the move back, there and then.
                 if let Err(e) = b.bounce_move(t, bounce_move_id, user, priority) {
                     bounce_err.get_or_insert(e);
                 }
                 HitRes::Bool(false)
-            } else if t != user && b.ability_is(t, "flashfire") && spread_type == Dex::get().type_id("Fire").expect("Fire") {
+            } else if t != user
+                && b.ability_is(t, "flashfire")
+                && spread_type == Dex::get().type_id("Fire").expect("Fire")
+            {
                 // Flash Fire absorbs Fire moves (and sets move.accuracy = true,
                 // so the move can't miss its other targets).
                 b.add_volatile(t, VolatileId::FlashFire);
@@ -1015,7 +1364,10 @@ impl Battle {
                 // Volt/Water Absorb, Sap Sipper, Lightning Rod, Storm Drain,
                 // Telepathy, Oblivious (Taunt).
                 HitRes::Bool(false)
-            } else if data.category == Category::Status && t != user && b.ability_is(t, "goodasgold") {
+            } else if data.category == Category::Status
+                && t != user
+                && b.ability_is(t, "goodasgold")
+            {
                 // Good as Gold (priority 0).
                 HitRes::Bool(false)
             } else {
@@ -1036,29 +1388,45 @@ impl Battle {
         }
         // hitStepTryImmunity: powder moves don't affect Grass types, and
         // Prankster-boosted moves don't affect Dark-type foes.
-        let prankster_boosted = data.category == Category::Status && self.ability_is(user, "prankster");
+        let prankster_boosted =
+            data.category == Category::Status && self.ability_is(user, "prankster");
         step(self, &mut targets, &mut |b, t| {
             let types = b.mon(t).types;
-            let powder = data.flags.has("powder") && t != user && Dex::get().immune_to("powder", types);
-            let prankster = prankster_boosted && t.side != user.side && Dex::get().immune_to("prankster", types);
+            let powder =
+                data.flags.has("powder") && t != user && Dex::get().immune_to("powder", types);
+            let prankster = prankster_boosted
+                && t.side != user.side
+                && Dex::get().immune_to("prankster", types);
             // onTryImmunity: Endeavor needs a target with more HP; Leech
             // Seed doesn't take on Grass types.
             let own = match data.id.as_str() {
                 "endeavor" => b.mon(user).hp >= b.mon(t).hp,
-                "leechseed" => b.mon(t).has_type(Dex::get().type_id("Grass").expect("Grass")),
-                "worryseed" => matches!(Dex::get().ability(b.mon(t).ability).id.as_str(), "truant" | "insomnia"),
+                "leechseed" => b
+                    .mon(t)
+                    .has_type(Dex::get().type_id("Grass").expect("Grass")),
+                "worryseed" => matches!(
+                    Dex::get().ability(b.mon(t).ability).id.as_str(),
+                    "truant" | "insomnia"
+                ),
                 _ => false,
             };
             HitRes::Bool(!(powder || prankster || own))
         });
         // hitStepAccuracy
-        step(self, &mut targets, &mut |b, t| HitRes::Bool(sure_hit || b.accuracy_check(user, t, data)));
+        step(self, &mut targets, &mut |b, t| {
+            HitRes::Bool(sure_hit || b.accuracy_check(user, t, data))
+        });
         // hitStepBreakProtect: Feint lifts protections.
         if data.has_key("breaksProtect") {
             for &t in &targets {
                 let m = self.mon_mut(t);
                 let mut broke = false;
-                for v in [VolatileId::Protect, VolatileId::SpikyShield, VolatileId::KingsShield, VolatileId::BanefulBunker] {
+                for v in [
+                    VolatileId::Protect,
+                    VolatileId::SpikyShield,
+                    VolatileId::KingsShield,
+                    VolatileId::BanefulBunker,
+                ] {
                     broke |= m.volatiles.remove(v);
                 }
                 // Crafty Shield and Mat Block aren't in yet.
@@ -1091,33 +1459,57 @@ impl Battle {
             if data.id == "sheercold" && self.mon(t).has_type(ice) {
                 return false;
             }
-            let acc = if data.id == "sheercold" && !self.mon(user).has_type(ice) { 20 } else { 30 };
-            if self.mon(t).volatiles.has(VolatileId::GlaiveRush) || self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
+            let acc = if data.id == "sheercold" && !self.mon(user).has_type(ice) {
+                20
+            } else {
+                30
+            };
+            if self.mon(t).volatiles.has(VolatileId::GlaiveRush)
+                || self.ability_is(user, "noguard")
+                || self.ability_is(t, "noguard")
+            {
                 return true;
             }
             return self.chance.chance(acc, 100);
         }
-        let Some(mut acc) = data.accuracy else { return true };
+        let Some(mut acc) = data.accuracy else {
+            return true;
+        };
         // The Accuracy event: glaiverush (anything hits its holder) and No
         // Guard (on either side of the move).
-        if self.mon(t).volatiles.has(VolatileId::GlaiveRush) || self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
+        if self.mon(t).volatiles.has(VolatileId::GlaiveRush)
+            || self.ability_is(user, "noguard")
+            || self.ability_is(t, "noguard")
+        {
             return true;
         }
         // onModifyMove: weather-dependent accuracy.
         match (data.id.as_str(), self.move_weather(user)) {
-            ("thunder" | "hurricane", crate::damage::Weather::Rain) | ("blizzard", crate::damage::Weather::Snow) => return true,
+            ("thunder" | "hurricane", crate::damage::Weather::Rain)
+            | ("blizzard", crate::damage::Weather::Snow) => return true,
             ("thunder" | "hurricane", crate::damage::Weather::Sun) => acc = 50,
             _ => {}
         }
-        let always = (data.id == "toxic" && self.mon(user).has_type(Dex::get().type_id("Poison").expect("Poison")))
+        let always = (data.id == "toxic"
+            && self
+                .mon(user)
+                .has_type(Dex::get().type_id("Poison").expect("Poison")))
             || (data.target == MoveTarget::SelfTarget && data.category == Category::Status);
         if always {
             return true;
         }
         // ModifyBoost: Unaware ignores the other side's accuracy/evasion.
         let unaware = |b: &Battle, r: MonRef| b.ability_is(r, "unaware");
-        let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5] as i32 };
-        let eva_boost = if unaware(self, user) || self.ignores_evasion(user, data) { 0 } else { self.mon(t).boosts[6] as i32 };
+        let acc_boost = if unaware(self, t) {
+            0
+        } else {
+            self.mon(user).boosts[5] as i32
+        };
+        let eva_boost = if unaware(self, user) || self.ignores_evasion(user, data) {
+            0
+        } else {
+            self.mon(t).boosts[6] as i32
+        };
         let boost = (acc_boost.clamp(-6, 6) - eva_boost).clamp(-6, 6);
         // ModifyAccuracy: Compound Eyes (priority -1), then Wide Lens, Zoom
         // Lens and the target's Bright Powder (-2) by holder Speed, chained.
@@ -1136,12 +1528,22 @@ impl Battle {
     /// Triple Axel's later hits: boosts on a fractional accuracy, then
     /// ModifyAccuracy, then the Accuracy event.
     fn multi_accuracy(&mut self, user: MonRef, t: MonRef, data: &MoveData) -> bool {
-        let Some(acc) = data.accuracy else { return true };
+        let Some(acc) = data.accuracy else {
+            return true;
+        };
         const TABLE: [f64; 7] = [1.0, 4.0 / 3.0, 5.0 / 3.0, 2.0, 7.0 / 3.0, 8.0 / 3.0, 3.0];
         let unaware = |b: &Battle, r: MonRef| b.ability_is(r, "unaware");
         let mut a = acc as f64;
-        let acc_boost = if unaware(self, t) { 0 } else { self.mon(user).boosts[5].clamp(-6, 6) };
-        a = if acc_boost > 0 { a * TABLE[acc_boost as usize] } else { a / TABLE[(-acc_boost) as usize] };
+        let acc_boost = if unaware(self, t) {
+            0
+        } else {
+            self.mon(user).boosts[5].clamp(-6, 6)
+        };
+        a = if acc_boost > 0 {
+            a * TABLE[acc_boost as usize]
+        } else {
+            a / TABLE[(-acc_boost) as usize]
+        };
         if !self.ignores_evasion(user, data) && !unaware(self, user) {
             let eva = self.mon(t).boosts[6].clamp(-6, 6);
             if eva > 0 {
@@ -1153,7 +1555,10 @@ impl Battle {
         if let Some(modifier) = self.accuracy_modifier(user, t) {
             a = (((a * modifier as f64).trunc() + 2047.0) / 4096.0).trunc();
         }
-        if self.mon(t).volatiles.has(VolatileId::GlaiveRush) || self.ability_is(user, "noguard") || self.ability_is(t, "noguard") {
+        if self.mon(t).volatiles.has(VolatileId::GlaiveRush)
+            || self.ability_is(user, "noguard")
+            || self.ability_is(t, "noguard")
+        {
             return true;
         }
         self.chance.chance(a.ceil() as u32, 100)
@@ -1161,7 +1566,9 @@ impl Battle {
 
     /// `move.ignoreEvasion`: the move's own, or Keen Eye / Illuminate's.
     fn ignores_evasion(&self, user: MonRef, data: &MoveData) -> bool {
-        data.has_key("ignoreEvasion") || self.ability_is(user, "keeneye") || self.ability_is(user, "illuminate")
+        data.has_key("ignoreEvasion")
+            || self.ability_is(user, "keeneye")
+            || self.ability_is(user, "illuminate")
     }
 
     /// The ModifyAccuracy chain, if any handler applies: Compound Eyes and
@@ -1193,13 +1600,19 @@ impl Battle {
         if mods.is_empty() {
             return None;
         }
-        self.speed_sort(&mut mods, |a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
-        Some(mods.iter().fold(crate::fixed::ONE, |m, x| crate::fixed::chain(m, x.3)))
+        self.speed_sort(&mut mods, |a, b| {
+            b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2))
+        });
+        Some(
+            mods.iter()
+                .fold(crate::fixed::ONE, |m, x| crate::fixed::chain(m, x.3)),
+        )
     }
 
     /// hitStepMoveHitLoop, for a single hit (multi-hit moves aren't supported).
     fn move_hit_loop(&mut self, user: MonRef, mv: &mut MoveUse, targets: Vec<MonRef>) -> Res<bool> {
         let effect = &mv.data.primary;
+        mv.hit_targets = targets.clone();
         // How many hits: fixed, or 2-5 weighted (no Loaded Dice / Skill Link).
         // Beat Up's onModifyMove: a hit per able ally (the user always
         // counts), in party order; each hit's power from its base Attack.
@@ -1218,7 +1631,9 @@ impl Battle {
             && mv.data.category != Category::Status
             && mv.data.multihit.is_none()
             && !mv.spread
-            && !["noparentalbond", "charge", "futuremove"].iter().any(|f| mv.data.flags.has(f))
+            && !["noparentalbond", "charge", "futuremove"]
+                .iter()
+                .any(|f| mv.data.flags.has(f))
         {
             mv.am.parental_bond = true;
         }
@@ -1229,7 +1644,9 @@ impl Battle {
             Some((a, b)) if a == b => a,
             // Skill Link: the most hits.
             Some((_, b)) if self.ability_is(user, "skilllink") => b,
-            Some((2, 5)) => [2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5][self.chance.sample(20)],
+            Some((2, 5)) => {
+                [2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5][self.chance.sample(20)]
+            }
             Some((a, b)) => self.chance.random_range(a as u32, b as u32 + 1) as u8,
         };
         let n = targets.len();
@@ -1242,7 +1659,8 @@ impl Battle {
             if damage.contains(&HitRes::Bool(false)) {
                 break;
             }
-            if hit > 1 && self.mon(user).status == Status::Sleep && !mv.data.has_key("sleepUsable") {
+            if hit > 1 && self.mon(user).status == Status::Sleep && !mv.data.has_key("sleepUsable")
+            {
                 break;
             }
             if targets.iter().all(|&t| self.mon(t).hp == 0) {
@@ -1256,17 +1674,31 @@ impl Battle {
                 break;
             }
             mv.hit = hit;
+            // move.totalDamage so far (Innards Out adds it).
+            mv.total_damage = total;
             if let Some(&bp) = beat_up.get(hit as usize - 1) {
                 mv.am.base_power = bp;
             }
-            let (md, tc) = self.spread_move_hit(targets.iter().map(|&t| Some(t)).collect(), user, mv, effect, true, false, false)?;
+            let (md, tc) = self.spread_move_hit(
+                targets.iter().map(|&t| Some(t)).collect(),
+                user,
+                mv,
+                effect,
+                true,
+                false,
+                false,
+            )?;
             move_damage = md;
             hit_targets = tc;
             if move_damage.iter().all(|&d| d == HitRes::Bool(false)) {
                 break;
             }
             for (i, &md) in move_damage.iter().enumerate() {
-                damage[i] = if md == HitRes::Bool(true) || !md.truthy() { HitRes::Num(0) } else { md };
+                damage[i] = if md == HitRes::Bool(true) || !md.truthy() {
+                    HitRes::Num(0)
+                } else {
+                    md
+                };
                 if let HitRes::Num(x) = damage[i] {
                     total += x;
                 }
@@ -1295,13 +1727,52 @@ impl Battle {
             }
         }
         self.each_update();
-        let targets: Vec<MonRef> = hit_targets.into_iter().flatten().collect();
-        self.after_move_secondary(&targets, user, mv.data);
+        let hit_list: Vec<MonRef> = hit_targets.iter().flatten().copied().collect();
+        // What each target took (Berserk): the whole move for a multi-hit
+        // one, else the hit.
+        let multihit = mv.data.multihit.is_some() || mv.am.parental_bond;
+        let taken: Vec<u32> = (0..hit_targets.len())
+            .filter(|&i| hit_targets[i].is_some())
+            .map(|i| {
+                if multihit {
+                    total
+                } else if let HitRes::Num(d) = damage[i] {
+                    d
+                } else {
+                    0
+                }
+            })
+            .collect();
+        // Champions: Sheer Force doesn't suppress AfterMoveSecondary.
+        self.after_move_secondary(&hit_list, &taken, total, user, mv.data);
+        // EmergencyExit for targets that dropped to half or below.
+        if !(mv.am.has_sheer_force && self.ability_is(user, "sheerforce")) {
+            for (i, t) in hit_targets.iter().enumerate() {
+                let (Some(t), HitRes::Num(d)) = (*t, damage[i]) else {
+                    continue;
+                };
+                let cur = if hit_targets.len() == 1 { total } else { d };
+                let m = self.mon(t);
+                if m.hp > 0 {
+                    let before =
+                        (m.hurt_this_turn.unwrap_or(0) as u32 + cur).min(u16::MAX as u32) as u16;
+                    self.emergency_exit(t, before);
+                }
+            }
+        }
         Ok(true)
     }
 
     /// `applyRecoilDamage`.
     fn apply_recoil(&mut self, user: MonRef, data: &MoveData, total: u32) {
+        let before = self.mon(user).hp;
+        self.apply_recoil_inner(user, data, total);
+        if data.id == "struggle" || data.recoil.is_some() || data.has_key("mindBlownRecoil") {
+            self.emergency_exit(user, before);
+        }
+    }
+
+    fn apply_recoil_inner(&mut self, user: MonRef, data: &MoveData, total: u32) {
         if data.id == "struggle" {
             // Struggle's recoil is direct damage, a quarter of max HP.
             let max = self.mon(user).max_hp() as f64;
@@ -1348,38 +1819,68 @@ impl Battle {
                     "helpinghand" if !self.mon(t).newly_switched && !self.will_move(t) => {
                         return Ok((vec![HitRes::Bool(false)], targets));
                     }
-                    "yawn" if self.mon(t).status != Status::None || !self.run_status_immunity(t, "slp") => {
+                    "yawn"
+                        if self.mon(t).status != Status::None
+                            || !self.run_status_immunity(t, "slp") =>
+                    {
                         return Ok((vec![HitRes::Bool(false)], targets));
                     }
-                    "disable" if self.mon(t).last_move.is_none_or(|m| Dex::get().move_data(m).id == "struggle") => {
+                    "disable"
+                        if self
+                            .mon(t)
+                            .last_move
+                            .is_none_or(|m| Dex::get().move_data(m).id == "struggle") =>
+                    {
                         return Ok((vec![HitRes::Bool(false)], targets));
                     }
                     "psychicfangs" | "brickbreak" | "ragingbull" => {
-                        for c in [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::AuroraVeil] {
+                        for c in [
+                            SideCondition::Reflect,
+                            SideCondition::LightScreen,
+                            SideCondition::AuroraVeil,
+                        ] {
                             self.sides[t.side].conditions[c as usize] = 0;
                         }
                     }
                     // substitute / shedtail's onTryHit (NOT_FAIL).
                     "substitute" => {
                         let m = self.mon(t);
-                        if m.volatiles.has(VolatileId::Substitute) || m.hp as u32 * 4 <= m.max_hp() as u32 || m.max_hp() == 1 {
+                        if m.volatiles.has(VolatileId::Substitute)
+                            || m.hp as u32 * 4 <= m.max_hp() as u32
+                            || m.max_hp() == 1
+                        {
                             return Ok((vec![HitRes::Bool(false)], targets));
                         }
                     }
                     "shedtail" => {
                         let m = self.mon(t);
-                        if self.switchable(t.side).is_empty() || m.volatiles.has(VolatileId::Substitute) || m.hp as u32 <= (m.max_hp() as u32).div_ceil(2) {
+                        if self.switchable(t.side).is_empty()
+                            || m.volatiles.has(VolatileId::Substitute)
+                            || m.hp as u32 <= (m.max_hp() as u32).div_ceil(2)
+                        {
                             return Ok((vec![HitRes::Bool(false)], targets));
                         }
                     }
                     "roleplay" => {
                         let dex = Dex::get();
-                        let (ta, sa) = (dex.ability(self.mon(t).ability), dex.ability(self.mon(user).ability));
-                        if ta.id == sa.id || ta.flags.iter().any(|f| f == "failroleplay") || sa.flags.iter().any(|f| f == "cantsuppress") {
+                        let (ta, sa) = (
+                            dex.ability(self.mon(t).ability),
+                            dex.ability(self.mon(user).ability),
+                        );
+                        if ta.id == sa.id
+                            || ta.flags.iter().any(|f| f == "failroleplay")
+                            || sa.flags.iter().any(|f| f == "cantsuppress")
+                        {
                             return Ok((vec![HitRes::Bool(false)], targets));
                         }
                     }
-                    "worryseed" if Dex::get().ability(self.mon(t).ability).flags.iter().any(|f| f == "cantsuppress") => {
+                    "worryseed"
+                        if Dex::get()
+                            .ability(self.mon(t).ability)
+                            .flags
+                            .iter()
+                            .any(|f| f == "cantsuppress") =>
+                    {
                         return Ok((vec![HitRes::Bool(false)], targets));
                     }
                     "clangoroussoul" => {
@@ -1410,10 +1911,19 @@ impl Battle {
         // drops out of the rest (Showdown's null target) but still counts for
         // the user's own effects and secondaries' rolls.
         let mut subbed = vec![false; targets.len()];
-        if primary && !matches!(mv.am.target, MoveTarget::All | MoveTarget::AllyTeam | MoveTarget::AllySide | MoveTarget::FoeSide) {
+        if primary
+            && !matches!(
+                mv.am.target,
+                MoveTarget::All | MoveTarget::AllyTeam | MoveTarget::AllySide | MoveTarget::FoeSide
+            )
+        {
             for i in 0..targets.len() {
                 let Some(t) = targets[i] else { continue };
-                if t == user || !self.mon(t).volatiles.has(VolatileId::Substitute) || mv.data.flags.has("bypasssub") || mv.am.infiltrates {
+                if t == user
+                    || !self.mon(t).volatiles.has(VolatileId::Substitute)
+                    || mv.data.flags.has("bypasssub")
+                    || mv.am.infiltrates
+                {
                     continue;
                 }
                 if self.hit_substitute(user, t, mv)? {
@@ -1473,12 +1983,21 @@ impl Battle {
                 damage[i] = HitRes::Bool(false);
                 continue;
             }
+            // Berserk's onDamage: a single-hit attack holds healing berries
+            // until its AfterMoveSecondary.
+            self.mon_mut(t).berserk_checked = mv.data.multihit.is_some()
+                || mv.am.parental_bond
+               ;
             // Disguise can bring it to 0 (still a hit for DamagingHit).
             let d = if d == 0 {
                 0
             } else {
                 let d = self.on_move_damage(t, d.max(1));
-                if self.mon(t).disguise_busted { d } else { d.max(1) }
+                if self.mon(t).disguise_busted {
+                    d
+                } else {
+                    d.max(1)
+                }
             };
             self.move_damage_by = Some(user);
             let dealt = self.apply_damage(t, d);
@@ -1510,12 +2029,29 @@ impl Battle {
             }
         }
 
-        self.run_move_effects(&mut damage, &targets, mv, user, effect, primary && !skip_boosts, primary, is_secondary)?;
+        self.run_move_effects(
+            &mut damage,
+            &targets,
+            mv,
+            user,
+            effect,
+            primary && !skip_boosts,
+            primary,
+            is_secondary,
+        )?;
         // Double Shock's self.onHit: Electric becomes "???".
         if is_self && matches!(mv.data.id.as_str(), "doubleshock" | "burnup") {
-            let lost = Dex::get().type_id(if mv.data.id == "burnup" { "Fire" } else { "Electric" }).expect("type");
+            let lost = Dex::get()
+                .type_id(if mv.data.id == "burnup" {
+                    "Fire"
+                } else {
+                    "Electric"
+                })
+                .expect("type");
             let m = self.mon_mut(user);
-            let t = m.types.map(|t| if t == lost { damage::TYPELESS } else { t });
+            let t = m
+                .types
+                .map(|t| if t == lost { damage::TYPELESS } else { t });
             m.set_types(t);
         }
         for i in 0..targets.len() {
@@ -1528,7 +2064,9 @@ impl Battle {
         let sheer_force = mv.am.has_sheer_force && primary;
         if let (Some(self_effect), false) = (effect.self_effect.as_deref(), sheer_force) {
             if !mv.self_dropped {
-                let with_subs: Vec<Option<MonRef>> = (0..targets.len()).map(|i| targets[i].or(subbed[i].then_some(user))).collect();
+                let with_subs: Vec<Option<MonRef>> = (0..targets.len())
+                    .map(|i| targets[i].or(subbed[i].then_some(user)))
+                    .collect();
                 self.self_drops(&with_subs, user, mv, self_effect, is_secondary)?;
             }
         }
@@ -1538,7 +2076,11 @@ impl Battle {
         // forceSwitch: Roar, Whirlwind, Dragon Tail, Circle Throw.
         if primary && mv.data.has_key("forceSwitch") {
             for t in targets.iter().flatten() {
-                if self.mon(*t).hp > 0 && self.mon(user).hp > 0 && !self.switchable(t.side).is_empty() && !self.ability_is(*t, "guarddog") {
+                if self.mon(*t).hp > 0
+                    && self.mon(user).hp > 0
+                    && !self.switchable(t.side).is_empty()
+                    && !self.ability_is(*t, "guarddog")
+                {
                     self.mon_mut(*t).force_switch_flag = true;
                 }
             }
@@ -1546,10 +2088,27 @@ impl Battle {
 
         // DamagingHit for the targets that took damage.
         if !is_secondary && !is_self {
-            let damaged: Vec<MonRef> =
-                (0..targets.len()).filter_map(|i| targets[i].filter(|_| matches!(damage[i], HitRes::Num(_)))).collect();
+            let damaged: Vec<MonRef> = (0..targets.len())
+                .filter_map(|i| targets[i].filter(|_| matches!(damage[i], HitRes::Num(_))))
+                .collect();
+            let mut pending_exit = None;
+            let dealt: Vec<u32> = (0..targets.len())
+                .filter_map(|i| match (targets[i], damage[i]) {
+                    (Some(_), HitRes::Num(n)) => Some(n),
+                    _ => None,
+                })
+                .collect();
             if !damaged.is_empty() {
-                self.damaging_hit(user, &damaged, mv.data, mv.am.move_type);
+                let user_hp = self.mon(user).hp;
+                pending_exit = Some(user_hp);
+                self.damaging_hit(
+                    user,
+                    &damaged,
+                    &dealt,
+                    mv.total_damage,
+                    mv.data,
+                    mv.am.move_type,
+                );
                 // AfterHit: Knock Off takes the item (the champions mod's
                 // spreadMoveHit doesn't need the user to still have HP).
                 if mv.data.id == "knockoff" {
@@ -1574,7 +2133,9 @@ impl Battle {
                             }
                             "mortalspin" => {
                                 self.mon_mut(user).volatiles.remove(VolatileId::LeechSeed);
-                                self.mon_mut(user).volatiles.remove(VolatileId::PartiallyTrapped);
+                                self.mon_mut(user)
+                                    .volatiles
+                                    .remove(VolatileId::PartiallyTrapped);
                                 for c in SideCondition::ALL.into_iter().filter(|c| c.is_hazard()) {
                                     self.sides[user.side].conditions[c as usize] = 0;
                                 }
@@ -1584,8 +2145,31 @@ impl Battle {
                     }
                 }
             }
+            // EmergencyExit for the user hurt during DamagingHit (Rocky
+            // Helmet, Rough Skin...).
+            if let Some(before) = pending_exit {
+                self.emergency_exit(user, before);
+            }
         }
         Ok((damage, targets))
+    }
+
+    /// Emergency Exit (onEmergencyExit): dropping to half or below from
+    /// above it, its holder switches out if it can.
+    pub(super) fn emergency_exit(&mut self, r: MonRef, before: u16) {
+        let m = self.mon(r);
+        let max = m.max_hp() as u32;
+        if m.hp == 0
+            || m.hp as u32 * 2 > max
+            || before as u32 * 2 <= max
+            || !self.ability_is(r, "emergencyexit")
+        {
+            return;
+        }
+        if self.switchable(r.side).is_empty() || m.force_switch_flag || m.switch_flag.is_some() {
+            return;
+        }
+        self.mon_mut(r).switch_flag = Some(SwitchFlag::Replace);
     }
 
     /// `runMoveEffects`.
@@ -1601,7 +2185,11 @@ impl Battle {
         primary: bool,
         is_secondary: bool,
     ) -> Res<()> {
-        let mut did_anything = damage.iter().copied().reduce(HitRes::combine).unwrap_or(HitRes::Undefined);
+        let mut did_anything = damage
+            .iter()
+            .copied()
+            .reduce(HitRes::combine)
+            .unwrap_or(HitRes::Undefined);
         for i in 0..targets.len() {
             let Some(t) = targets[i] else { continue };
             let mut did_something = HitRes::Undefined;
@@ -1627,8 +2215,9 @@ impl Battle {
                 }
             }
             if let Some(status) = &effect.status {
-                let status = status_from_id(status).ok_or_else(|| BattleError::Unsupported(format!("status {status}")))?;
-                let r = self.try_set_status(t, status);
+                let status = status_from_id(status)
+                    .ok_or_else(|| BattleError::Unsupported(format!("status {status}")))?;
+                let r = self.try_set_status_from(t, status, Some(user));
                 if !r && mv.data.primary.status.is_some() {
                     damage[i] = damage[i].combine(HitRes::Bool(false));
                     did_anything = did_anything.combine(HitRes::Null);
@@ -1637,11 +2226,16 @@ impl Battle {
                 did_something = did_something.combine(HitRes::Bool(r));
             }
             if let Some(v) = &effect.volatile_status {
-                let id = VolatileId::parse(v).ok_or_else(|| BattleError::Unsupported(format!("volatile {v}")))?;
+                let id = VolatileId::parse(v)
+                    .ok_or_else(|| BattleError::Unsupported(format!("volatile {v}")))?;
                 let r = self.add_volatile(t, id);
                 if id == VolatileId::PartiallyTrapped && r.truthy() {
                     let code = ((user.side as u32) << 8) | self.mon(user).uid as u32;
-                    let divisor = if self.item_of(user) == Some("bindingband") { 6 } else { 8 };
+                    let divisor = if self.item_of(user) == Some("bindingband") {
+                        6
+                    } else {
+                        8
+                    };
                     if let Some(v) = self.mon_mut(t).volatiles.get_mut(id) {
                         v.counter = code;
                         v.target_loc = divisor;
@@ -1662,12 +2256,14 @@ impl Battle {
             }
             // Secondaries' onHit: Dire Claw's random status, Throat Chop.
             if is_secondary && mv.data.id == "direclaw" {
-                let status = [Status::Poison, Status::Paralysis, Status::Sleep][self.chance.sample(3)];
-                self.try_set_status(t, status);
+                let status =
+                    [Status::Poison, Status::Paralysis, Status::Sleep][self.chance.sample(3)];
+                self.try_set_status_from(t, status, Some(user));
                 did_something = did_something.combine(HitRes::Bool(true));
             }
-            if is_secondary && mv.data.id == "burningjealousy" && self.mon(t).stats_raised_this_turn {
-                self.try_set_status(t, Status::Burn);
+            if is_secondary && mv.data.id == "burningjealousy" && self.mon(t).stats_raised_this_turn
+            {
+                self.try_set_status_from(t, Status::Burn, Some(user));
                 did_something = did_something.combine(HitRes::Bool(true));
             }
             // Eerie Spell: the target's last move loses 3 PP.
@@ -1698,10 +2294,15 @@ impl Battle {
                 did_something = did_something.combine(HitRes::Bool(true));
             }
             if primary {
-                did_something = did_something.combine(self.misc_on_hit(user, t, mv.data.id.as_str()));
+                did_something =
+                    did_something.combine(self.misc_on_hit(user, t, mv.data.id.as_str()));
             }
             // The Hit event: Anger Point after a critical hit.
-            if primary && mv.crit_on.contains(&t) && self.mon(t).hp > 0 && self.ability_is(t, "angerpoint") {
+            if primary
+                && mv.crit_on.contains(&t)
+                && self.mon(t).hp > 0
+                && self.ability_is(t, "angerpoint")
+            {
                 self.boost(t, &[(0, 12)], Some(t));
             }
             // onHit: Trick swaps items.
@@ -1712,13 +2313,18 @@ impl Battle {
             // onHit: Parting Shot lowers Attack and Sp. Atk, and doesn't
             // switch out if neither drops.
             if primary && mv.data.id == "partingshot" {
-                if !self.boost(t, &[(0, -1), (2, -1)], Some(user)).truthy() && !self.ability_is(t, "mirrorarmor") {
+                if !self.boost(t, &[(0, -1), (2, -1)], Some(user)).truthy()
+                    && !self.ability_is(t, "mirrorarmor")
+                {
                     mv.self_switch = false;
                 }
                 did_something = did_something.combine(HitRes::Bool(true));
             }
             // selfdestruct: 'ifHit' (Memento, Final Gambit).
-            if primary && matches!(mv.data.id.as_str(), "memento" | "finalgambit") && damage[i] != HitRes::Bool(false) {
+            if primary
+                && matches!(mv.data.id.as_str(), "memento" | "finalgambit")
+                && damage[i] != HitRes::Bool(false)
+            {
                 self.faint(user);
             }
             if primary && mv.self_switch {
@@ -1731,10 +2337,16 @@ impl Battle {
             if did_something == HitRes::Undefined {
                 did_something = HitRes::Bool(true);
             }
-            damage[i] = damage[i].combine(if did_something == HitRes::Null { HitRes::Bool(false) } else { did_something });
+            damage[i] = damage[i].combine(if did_something == HitRes::Null {
+                HitRes::Bool(false)
+            } else {
+                did_something
+            });
             did_anything = did_anything.combine(did_something);
         }
-        let failed = !did_anything.truthy() && did_anything != HitRes::Num(0) && effect.self_effect.is_none();
+        let failed = !did_anything.truthy()
+            && did_anything != HitRes::Num(0)
+            && effect.self_effect.is_none();
         if !failed && mv.self_switch && self.mon(user).hp > 0 {
             self.mon_mut(user).switch_flag = Some(SwitchFlag::Move(mv.data_id()));
         }
@@ -1746,14 +2358,28 @@ impl Battle {
         match id {
             "healpulse" => {
                 let max = self.mon(t).max_hp() as u64;
-                let amount = if self.ability_is(user, "megalauncher") { crate::fixed::modify(max, 3072) } else { max.div_ceil(2) };
-                if self.heal(t, amount as u32).truthy() { HitRes::Bool(true) } else { HitRes::NotFail }
+                let amount = if self.ability_is(user, "megalauncher") {
+                    crate::fixed::modify(max, 3072)
+                } else {
+                    max.div_ceil(2)
+                };
+                if self.heal(t, amount as u32).truthy() {
+                    HitRes::Bool(true)
+                } else {
+                    HitRes::NotFail
+                }
             }
             "psychup" => {
                 // Copy the boosts, then Dragon Cheer and Focus Energy (Dragon
                 // Cheer keeps the target's hasDragonType).
                 let boosts = self.mon(t).boosts;
-                let cheer = self.mon(t).volatiles.0.iter().find(|v| v.id == VolatileId::DragonCheer).map(|v| v.counter);
+                let cheer = self
+                    .mon(t)
+                    .volatiles
+                    .0
+                    .iter()
+                    .find(|v| v.id == VolatileId::DragonCheer)
+                    .map(|v| v.counter);
                 let focus = self.mon(t).volatiles.has(VolatileId::FocusEnergy);
                 let m = self.mon_mut(user);
                 m.boosts = boosts;
@@ -1761,7 +2387,11 @@ impl Battle {
                 m.volatiles.remove(VolatileId::FocusEnergy);
                 if let Some(c) = cheer {
                     self.add_volatile(user, VolatileId::DragonCheer);
-                    if let Some(v) = self.mon_mut(user).volatiles.get_mut(VolatileId::DragonCheer) {
+                    if let Some(v) = self
+                        .mon_mut(user)
+                        .volatiles
+                        .get_mut(VolatileId::DragonCheer)
+                    {
                         v.counter = c;
                     }
                 }
@@ -1831,30 +2461,27 @@ impl Battle {
                 HitRes::Undefined
             }
             "skillswap" => {
-                let dex = Dex::get();
-                let (sa, ta) = (self.mon(user).ability, self.mon(t).ability);
-                let fails = |a: crate::dex::AbilityId| dex.ability(a).flags.iter().any(|f| f == "failskillswap");
-                if self.mon(user).fainted || self.mon(t).fainted || fails(sa) || fails(ta) {
+                if !self.skill_swap(user, t) {
                     return HitRes::Bool(false);
-                }
-                self.set_ability(user, ta);
-                self.set_ability(t, sa);
-                for (r, a) in [(t, sa), (user, ta)] {
-                    if let Some(e) = super::field::start_effect(&dex.ability(a).id) {
-                        self.ability_start(r, e);
-                    }
                 }
                 HitRes::Undefined
             }
             "simplebeam" | "entrainment" => {
                 let dex = Dex::get();
-                let new = if id == "simplebeam" { dex.ability_id("simple").expect("simple") } else { self.mon(user).ability };
+                let new = if id == "simplebeam" {
+                    dex.ability_id("simple").expect("simple")
+                } else {
+                    self.mon(user).ability
+                };
                 let cur = dex.ability(self.mon(t).ability);
                 let cant = cur.flags.iter().any(|f| f == "cantsuppress") || cur.id == "truant";
                 let bad = if id == "simplebeam" {
                     cant || cur.id == "simple"
                 } else {
-                    t == user || self.mon(t).ability == new || cant || dex.ability(new).flags.iter().any(|f| f == "noentrain")
+                    t == user
+                        || self.mon(t).ability == new
+                        || cant
+                        || dex.ability(new).flags.iter().any(|f| f == "noentrain")
                 };
                 if bad || self.mon(t).hp == 0 {
                     return HitRes::Bool(false);
@@ -1895,10 +2522,14 @@ impl Battle {
                     _ => 2048,
                 };
                 let amount = crate::fixed::modify(self.mon(t).max_hp() as u64, factor) as u32;
-                if self.heal(t, amount).truthy() { HitRes::Bool(true) } else { HitRes::NotFail }
+                if self.heal(t, amount).truthy() {
+                    HitRes::Bool(true)
+                } else {
+                    HitRes::NotFail
+                }
             }
             "rest" => {
-                if !self.set_status(t, Status::Sleep) {
+                if !self.set_status_from(t, Status::Sleep, Some(user)) {
                     return HitRes::Bool(false);
                 }
                 if self.mon(t).status == Status::Sleep {
@@ -1916,7 +2547,11 @@ impl Battle {
                 let atk = super::boosted(m.stats[1], m.boosts[0]);
                 let success = self.boost(t, &[(0, -1)], Some(user)).truthy();
                 // TryHeal: Big Root.
-                let amount = if self.item_of(user) == Some("bigroot") { crate::fixed::modify(atk as u64, 5324) as u32 } else { atk };
+                let amount = if self.item_of(user) == Some("bigroot") {
+                    crate::fixed::modify(atk as u64, 5324) as u32
+                } else {
+                    atk
+                };
                 let healed = if self.ability_is(t, "liquidooze") {
                     self.effect_damage(user, amount);
                     false
@@ -1965,13 +2600,20 @@ impl Battle {
         if self.mon(user).volatiles.has(VolatileId::FocusEnergy) {
             ratio += 2;
         }
-        if let Some(v) = self.mon(user).volatiles.0.iter().find(|v| v.id == VolatileId::DragonCheer) {
+        if let Some(v) = self
+            .mon(user)
+            .volatiles
+            .0
+            .iter()
+            .find(|v| v.id == VolatileId::DragonCheer)
+        {
             ratio += 1 + v.counter as i32;
         }
         match self.item_of(user) {
             Some("scopelens") => ratio += 1,
             Some("leek") => {
-                let base = crate::dex::to_id(&Dex::get().species(self.mon(user).species).base_species);
+                let base =
+                    crate::dex::to_id(&Dex::get().species(self.mon(user).species).base_species);
                 if base == "farfetchd" || base == "sirfetchd" {
                     ratio += 2;
                 }
@@ -1991,8 +2633,12 @@ impl Battle {
         ctx.bypass_protect = mv.bypassed.contains(&t);
         ctx.hit_sub = hit_sub;
         ctx.hit = mv.hit;
-        let outcome = damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
-        if !hit_sub && matches!(outcome, Outcome::Damage(_)) && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))? {
+        let outcome =
+            damage::damage_for(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?;
+        if !hit_sub
+            && matches!(outcome, Outcome::Damage(_))
+            && damage::eats_resist_berry(&ctx, &mv.am).map_err(|e| BattleError::Unsupported(e.0))?
+        {
             self.eat_resist_berry(t);
         }
         // Final Gambit's damageCallback faints its user.
@@ -2015,8 +2661,12 @@ impl Battle {
         }
         let view = self.damage_view();
         let spread = mv.spread;
-        let HitRes::Num(mut d) = self.get_damage(user, t, mv, &view, spread, true)? else { return Ok(false) };
-        let Some(v) = self.mon_mut(t).volatiles.get_mut(VolatileId::Substitute) else { return Ok(true) };
+        let HitRes::Num(mut d) = self.get_damage(user, t, mv, &view, spread, true)? else {
+            return Ok(false);
+        };
+        let Some(v) = self.mon_mut(t).volatiles.get_mut(VolatileId::Substitute) else {
+            return Ok(true);
+        };
         d = d.min(v.counter);
         v.counter -= d;
         if v.counter == 0 {
@@ -2053,7 +2703,9 @@ impl Battle {
                 for c in SideCondition::ALL.into_iter().filter(|c| c.is_hazard()) {
                     self.sides[user.side].conditions[c as usize] = 0;
                 }
-                self.mon_mut(user).volatiles.remove(VolatileId::PartiallyTrapped);
+                self.mon_mut(user)
+                    .volatiles
+                    .remove(VolatileId::PartiallyTrapped);
             }
             _ => {}
         }
@@ -2065,7 +2717,14 @@ impl Battle {
     }
 
     /// `selfDrops`.
-    fn self_drops(&mut self, targets: &[Option<MonRef>], user: MonRef, mv: &mut MoveUse, self_effect: &'static HitEffect, is_secondary: bool) -> Res<()> {
+    fn self_drops(
+        &mut self,
+        targets: &[Option<MonRef>],
+        user: MonRef,
+        mv: &mut MoveUse,
+        self_effect: &'static HitEffect,
+        is_secondary: bool,
+    ) -> Res<()> {
         for t in targets {
             if t.is_none() || mv.self_dropped {
                 continue;
@@ -2073,28 +2732,57 @@ impl Battle {
             if !is_secondary && !self_effect.boosts.is_empty() {
                 let roll = self.chance.random(100);
                 if self_effect.chance.is_none_or(|c| roll < c as u32) {
-                    self.spread_move_hit(vec![Some(user)], user, mv, self_effect, false, is_secondary, true)?;
+                    self.spread_move_hit(
+                        vec![Some(user)],
+                        user,
+                        mv,
+                        self_effect,
+                        false,
+                        is_secondary,
+                        true,
+                    )?;
                 }
                 if mv.data.multihit.is_none() && !mv.am.parental_bond {
                     mv.self_dropped = true;
                 }
             } else {
-                self.spread_move_hit(vec![Some(user)], user, mv, self_effect, false, is_secondary, true)?;
+                self.spread_move_hit(
+                    vec![Some(user)],
+                    user,
+                    mv,
+                    self_effect,
+                    false,
+                    is_secondary,
+                    true,
+                )?;
             }
         }
         Ok(())
     }
 
     /// `secondaries`.
-    fn secondaries(&mut self, targets: &[Option<MonRef>], subbed: &[bool], user: MonRef, mv: &mut MoveUse) -> Res<()> {
-        let secondaries: &[HitEffect] = if mv.am.has_sheer_force { &[] } else { &mv.data.secondaries };
+    fn secondaries(
+        &mut self,
+        targets: &[Option<MonRef>],
+        subbed: &[bool],
+        user: MonRef,
+        mv: &mut MoveUse,
+    ) -> Res<()> {
+        let secondaries: &[HitEffect] = if mv.am.has_sheer_force {
+            &[]
+        } else {
+            &mv.data.secondaries
+        };
         for (i, &t) in targets.iter().enumerate() {
             // A substitute took the hit: each secondary still rolls, and only
             // its effect on the user (self) happens.
             if subbed.get(i).copied().unwrap_or(false) {
                 for sec in secondaries {
                     let roll = self.chance.random(100);
-                    if let (true, Some(se)) = (sec.chance.is_none_or(|c| roll < c as u32), sec.self_effect.as_deref()) {
+                    if let (true, Some(se)) = (
+                        sec.chance.is_none_or(|c| roll < c as u32),
+                        sec.self_effect.as_deref(),
+                    ) {
                         self.self_drops(&[Some(user)], user, mv, se, true)?;
                     }
                 }
@@ -2119,7 +2807,15 @@ impl Battle {
             if mv.kings_rock && !dust {
                 let roll = self.chance.random(100);
                 if roll < 10 {
-                    self.spread_move_hit(vec![Some(t)], user, mv, &KINGS_ROCK_FLINCH, false, true, false)?;
+                    self.spread_move_hit(
+                        vec![Some(t)],
+                        user,
+                        mv,
+                        &KINGS_ROCK_FLINCH,
+                        false,
+                        true,
+                        false,
+                    )?;
                 }
             }
         }
@@ -2148,7 +2844,10 @@ impl Battle {
 pub(super) fn semi_invulnerable(m: &super::state::Mon) -> Option<MoveId> {
     m.volatiles.0.iter().find_map(|v| match v.id {
         VolatileId::Charging(id)
-            if matches!(Dex::get().move_data(id).id.as_str(), "phantomforce" | "shadowforce" | "fly" | "bounce" | "dig" | "dive") =>
+            if matches!(
+                Dex::get().move_data(id).id.as_str(),
+                "phantomforce" | "shadowforce" | "fly" | "bounce" | "dig" | "dive"
+            ) =>
         {
             Some(id)
         }

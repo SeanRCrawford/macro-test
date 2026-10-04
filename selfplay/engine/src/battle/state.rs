@@ -193,9 +193,7 @@ impl VolatileId {
             | VolatileId::FollowMe
             | VolatileId::RagePowder
             | VolatileId::HelpingHand
-            | VolatileId::Gem => {
-                Some(1)
-            }
+            | VolatileId::Gem => Some(1),
             VolatileId::Stall | VolatileId::ThroatChop => Some(2),
             VolatileId::Encore => Some(3),
             VolatileId::ChoiceLock
@@ -216,7 +214,10 @@ impl VolatileId {
             // durationCallback: 5 or 6, rolled when it starts.
             VolatileId::PartiallyTrapped => Some(5),
             VolatileId::TwoTurnMove | VolatileId::MustRecharge => Some(2),
-            VolatileId::Roost | VolatileId::SpikyShield | VolatileId::KingsShield | VolatileId::BanefulBunker => Some(1),
+            VolatileId::Roost
+            | VolatileId::SpikyShield
+            | VolatileId::KingsShield
+            | VolatileId::BanefulBunker => Some(1),
             VolatileId::Yawn => Some(2),
             VolatileId::Taunt => Some(3),
             VolatileId::PerishSong => Some(4),
@@ -295,6 +296,9 @@ pub struct Mon {
     pub base_species: SpeciesId,
     /// Disguise took a hit and busts at the next Update.
     pub disguise_busted: bool,
+    /// Berserk's checkedBerserk: a healing berry may be eaten (false while
+    /// a single-hit attack's AfterMoveSecondary is still to come).
+    pub berserk_checked: bool,
     pub types: [TypeId; 2],
     /// Stored stats for the current species; [HP] is max HP.
     pub stats: [u16; 6],
@@ -372,7 +376,14 @@ impl Mon {
             .iter()
             .map(|&id| {
                 let pp = dex.move_data(id).max_pp();
-                MoveSlot { id, pp, max_pp: pp, disabled: false, imprisoned: false, used: false }
+                MoveSlot {
+                    id,
+                    pp,
+                    max_pp: pp,
+                    disabled: false,
+                    imprisoned: false,
+                    used: false,
+                }
             })
             .collect();
         Mon {
@@ -380,6 +391,7 @@ impl Mon {
             species: set.species,
             base_species: set.species,
             disguise_busted: false,
+            berserk_checked: true,
             types: dex.species(set.species).types,
             stats,
             hp: stats[0],
@@ -444,7 +456,10 @@ impl Mon {
         self.types = types;
         if self.roost_types.is_some() {
             let dex = Dex::get();
-            self.start_roost(dex.type_id("Flying").expect("Flying"), dex.type_id("Normal").expect("Normal"));
+            self.start_roost(
+                dex.type_id("Flying").expect("Flying"),
+                dex.type_id("Normal").expect("Normal"),
+            );
         }
     }
 
@@ -489,7 +504,14 @@ impl Mon {
         self.species = self.base_species;
         self.types = Dex::get().species(self.species).types;
         let stats = crate::stats::compute_stats(self.species, self.set.nature, self.set.points);
-        self.stats = [self.stats[0], stats[1], stats[2], stats[3], stats[4], stats[5]];
+        self.stats = [
+            self.stats[0],
+            stats[1],
+            stats[2],
+            stats[3],
+            stats[4],
+            stats[5],
+        ];
     }
 
     /// `getLockedMove`: a charged move to finish, or a turn to recharge.
@@ -569,7 +591,13 @@ impl SideCondition {
     ];
 
     pub fn is_hazard(self) -> bool {
-        matches!(self, SideCondition::StealthRock | SideCondition::Spikes | SideCondition::ToxicSpikes | SideCondition::StickyWeb)
+        matches!(
+            self,
+            SideCondition::StealthRock
+                | SideCondition::Spikes
+                | SideCondition::ToxicSpikes
+                | SideCondition::StickyWeb
+        )
     }
 
     /// Most layers a hazard stacks to.
@@ -605,9 +633,10 @@ impl SideCondition {
             SideCondition::Tailwind => (26, 5),
             SideCondition::WideGuard | SideCondition::QuickGuard => (4_294_967_296, 4),
             // Hazards have no Residual handler (see `is_hazard`).
-            SideCondition::StealthRock | SideCondition::Spikes | SideCondition::ToxicSpikes | SideCondition::StickyWeb => {
-                (4_294_967_296, 4)
-            }
+            SideCondition::StealthRock
+            | SideCondition::Spikes
+            | SideCondition::ToxicSpikes
+            | SideCondition::StickyWeb => (4_294_967_296, 4),
             SideCondition::AuroraVeil => (26, 10),
         }
     }

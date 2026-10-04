@@ -24,6 +24,8 @@ pub(super) enum StartEffect {
     SupremeOverlord,
     /// Lowers the foes' evasion, once per battle.
     SupersweetSyrup,
+    /// Clears the allies' stat changes.
+    CuriousMedicine,
 }
 
 impl StartEffect {
@@ -45,6 +47,7 @@ pub(super) fn start_effect(ability: &str) -> Option<StartEffect> {
         "screencleaner" => StartEffect::ScreenCleaner,
         "supremeoverlord" => StartEffect::SupremeOverlord,
         "supersweetsyrup" => StartEffect::SupersweetSyrup,
+        "curiousmedicine" => StartEffect::CuriousMedicine,
         "drought" => StartEffect::Weather(Weather::Sun),
         "drizzle" => StartEffect::Weather(Weather::Rain),
         "sandstream" => StartEffect::Weather(Weather::Sand),
@@ -92,7 +95,10 @@ impl Battle {
             return true;
         }
         let ability = self.ability_id(r);
-        !m.has_type(dex.type_id("Flying").expect("Flying")) && ability != "levitate" && ability != "eelevate" && item != Some("airballoon")
+        !m.has_type(dex.type_id("Flying").expect("Flying"))
+            && ability != "levitate"
+            && ability != "eelevate"
+            && item != Some("airballoon")
     }
 
     /// `field.setWeather` from an ability (5 turns: no rock items supported).
@@ -109,7 +115,11 @@ impl Battle {
             Weather::None => "",
         };
         self.field.weather = w;
-        self.field.weather_turns = if self.item_of(source) == Some(rock) { 8 } else { 5 };
+        self.field.weather_turns = if self.item_of(source) == Some(rock) {
+            8
+        } else {
+            5
+        };
         true
     }
 
@@ -119,7 +129,11 @@ impl Battle {
             return false;
         }
         self.field.terrain = t;
-        self.field.terrain_turns = if self.item_of(source) == Some("terrainextender") { 8 } else { 5 };
+        self.field.terrain_turns = if self.item_of(source) == Some("terrainextender") {
+            8
+        } else {
+            5
+        };
         self.terrain_change();
         true
     }
@@ -136,10 +150,19 @@ impl Battle {
                     .collect();
                 for t in targets {
                     // A substitute keeps Intimidate out.
-                    if self.mon(t).volatiles.has(super::state::VolatileId::Substitute) {
+                    if self
+                        .mon(t)
+                        .volatiles
+                        .has(super::state::VolatileId::Substitute)
+                    {
                         continue;
                     }
-                    self.boost_by(t, &[(0, -1)], Some(r), super::conditions::BoostCause::Intimidate);
+                    self.boost_by(
+                        t,
+                        &[(0, -1)],
+                        Some(r),
+                        super::conditions::BoostCause::Intimidate,
+                    );
                 }
             }
             StartEffect::Weather(w) => {
@@ -156,13 +179,22 @@ impl Battle {
                     self.heal(a, amount);
                 }
             }
+            StartEffect::CuriousMedicine => {
+                for a in self.adjacent_allies(r) {
+                    self.mon_mut(a).boosts = [0; 7];
+                }
+            }
             StartEffect::SupersweetSyrup => {
                 if self.mon(r).syrup_triggered {
                     return;
                 }
                 self.mon_mut(r).syrup_triggered = true;
                 for t in self.adjacent_foes(r) {
-                    if !self.mon(t).volatiles.has(super::state::VolatileId::Substitute) {
+                    if !self
+                        .mon(t)
+                        .volatiles
+                        .has(super::state::VolatileId::Substitute)
+                    {
                         self.boost(t, &[(6, -1)], Some(r));
                     }
                 }
@@ -173,7 +205,11 @@ impl Battle {
             }
             StartEffect::ScreenCleaner => {
                 for side in [r.side, 1 - r.side] {
-                    for c in [SideCondition::Reflect, SideCondition::LightScreen, SideCondition::AuroraVeil] {
+                    for c in [
+                        SideCondition::Reflect,
+                        SideCondition::LightScreen,
+                        SideCondition::AuroraVeil,
+                    ] {
                         self.sides[side].conditions[c as usize] = 0;
                     }
                 }
@@ -215,30 +251,69 @@ impl Battle {
             let index = order.iter().position(|&o| o == r).unwrap_or(0) as i64;
             let speed = m.speed as i64 * 4 - index;
             if m.status == crate::damage::Status::Toxic {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::ToxicReset, speed, priority: 0, sub_order: 0, effect_order: 0 });
+                handlers.push(SwitchIn {
+                    mon: r,
+                    what: SwitchInKind::ToxicReset,
+                    speed,
+                    priority: 0,
+                    sub_order: 0,
+                    effect_order: 0,
+                });
             }
             for c in SideCondition::ALL {
                 if c.is_hazard() && self.sides[r.side].condition(c) > 0 {
                     let effect_order = self.sides[r.side].condition_order[c as usize];
-                    handlers.push(SwitchIn { mon: r, what: SwitchInKind::Hazard(c), speed, priority: 0, sub_order: 4, effect_order });
+                    handlers.push(SwitchIn {
+                        mon: r,
+                        what: SwitchInKind::Hazard(c),
+                        speed,
+                        priority: 0,
+                        sub_order: 4,
+                        effect_order,
+                    });
                 }
             }
             if let Some(e) = start_effect(&Dex::get().ability(m.ability).id) {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Ability(e), speed, priority: e.priority(), sub_order: 7, effect_order: 0 });
+                handlers.push(SwitchIn {
+                    mon: r,
+                    what: SwitchInKind::Ability(e),
+                    speed,
+                    priority: e.priority(),
+                    sub_order: 7,
+                    effect_order: 0,
+                });
             }
             if self.item_of(r).is_some_and(|i| i.ends_with("seed")) {
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::Seed, speed, priority: -1, sub_order: 8, effect_order: 0 });
+                handlers.push(SwitchIn {
+                    mon: r,
+                    what: SwitchInKind::Seed,
+                    speed,
+                    priority: -1,
+                    sub_order: 8,
+                    effect_order: 0,
+                });
             }
         }
         for &r in &all {
             if self.item_of(r) == Some("whiteherb") {
                 let index = order.iter().position(|&o| o == r).unwrap_or(0) as i64;
                 let speed = self.mon(r).speed as i64 * 4 - index;
-                handlers.push(SwitchIn { mon: r, what: SwitchInKind::WhiteHerb, speed, priority: -2, sub_order: 8, effect_order: 0 });
+                handlers.push(SwitchIn {
+                    mon: r,
+                    what: SwitchInKind::WhiteHerb,
+                    speed,
+                    priority: -2,
+                    sub_order: 8,
+                    effect_order: 0,
+                });
             }
         }
         self.speed_sort(&mut handlers, |a, b| {
-            b.priority.cmp(&a.priority).then(b.speed.cmp(&a.speed)).then(a.sub_order.cmp(&b.sub_order)).then(a.effect_order.cmp(&b.effect_order))
+            b.priority
+                .cmp(&a.priority)
+                .then(b.speed.cmp(&a.speed))
+                .then(a.sub_order.cmp(&b.sub_order))
+                .then(a.effect_order.cmp(&b.effect_order))
         });
         for h in handlers {
             if self.mon(h.mon).fainted {
@@ -296,7 +371,11 @@ impl Battle {
                 if m.has_type(dex.type_id("Poison").expect("Poison")) {
                     self.sides[r.side].conditions[c as usize] = 0;
                 } else if !m.has_type(dex.type_id("Steel").expect("Steel")) {
-                    let status = if layers >= 2 { crate::damage::Status::Toxic } else { crate::damage::Status::Poison };
+                    let status = if layers >= 2 {
+                        crate::damage::Status::Toxic
+                    } else {
+                        crate::damage::Status::Poison
+                    };
                     self.try_set_status(r, status);
                 }
             }
@@ -332,7 +411,8 @@ impl Battle {
             return true;
         }
         let actives = self.all_active();
-        let mut keyed: Vec<(MonRef, i32)> = actives.iter().map(|&r| (r, self.mon(r).speed)).collect();
+        let mut keyed: Vec<(MonRef, i32)> =
+            actives.iter().map(|&r| (r, self.mon(r).speed)).collect();
         self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
         // eachEvent('Weather'): per Pokemon, sandstorm's onWeather (subOrder
         // 5), then the ability's (7).
@@ -399,8 +479,18 @@ impl Battle {
     }
 
     /// Psychic Terrain's onTryHit: priority moves fail against grounded foes.
-    pub(super) fn psychic_terrain_blocks(&self, user: MonRef, target: MonRef, priority: i8, self_target: bool) -> bool {
-        self.field.terrain == Terrain::Psychic && priority > 0 && !self_target && target.side != user.side && self.grounded(target)
+    pub(super) fn psychic_terrain_blocks(
+        &self,
+        user: MonRef,
+        target: MonRef,
+        priority: i8,
+        self_target: bool,
+    ) -> bool {
+        self.field.terrain == Terrain::Psychic
+            && priority > 0
+            && !self_target
+            && target.side != user.side
+            && self.grounded(target)
     }
 
     /// setAbility: the old ability's End (Unburden and Flash Fire drop their
@@ -425,7 +515,10 @@ impl Battle {
     /// `adjacentFoes()`: in doubles, every foe with HP.
     pub(super) fn adjacent_foes(&self, r: MonRef) -> Vec<MonRef> {
         let foe = 1 - r.side;
-        (0..ACTIVE_PER_SIDE).filter_map(|p| self.occupant(foe, p)).filter(|&t| self.mon(t).hp > 0 && !self.mon(t).fainted).collect()
+        (0..ACTIVE_PER_SIDE)
+            .filter_map(|p| self.occupant(foe, p))
+            .filter(|&t| self.mon(t).hp > 0 && !self.mon(t).fainted)
+            .collect()
     }
 
     /// Trace's onUpdate: copy a random foe's (traceable) ability, which then

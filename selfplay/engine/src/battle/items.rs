@@ -4,8 +4,8 @@
 
 use super::conditions::HitRes;
 use super::state::{SwitchFlag, Volatile, VolatileId, ACTIVE_PER_SIDE};
-use crate::damage::Terrain;
 use super::{Battle, MonRef};
+use crate::damage::Terrain;
 use crate::dex::{Dex, ItemId, MoveId};
 
 impl Battle {
@@ -37,17 +37,25 @@ impl Battle {
     /// AfterMoveSecondary on the move's targets, all handlers sorted
     /// together: frz thaws a target (thawsTarget), Eject Button (priority 2),
     /// Red Card.
-    pub(super) fn after_move_secondary(&mut self, targets: &[MonRef], user: MonRef, data: &crate::dex::MoveData) {
+    pub(super) fn after_move_secondary(
+        &mut self,
+        targets: &[MonRef],
+        taken: &[u32],
+        total: u32,
+        user: MonRef,
+        data: &crate::dex::MoveData,
+    ) {
         #[derive(Clone, Copy)]
         enum H {
             Thaw,
             EjectButton,
             RedCard,
             Pickpocket,
+            Berserk(u32),
         }
         // (holder, kind, priority, speed, subOrder)
         let mut hs: Vec<(MonRef, H, i32, i32, u8)> = Vec::new();
-        for &t in targets {
+        for (i, &t) in targets.iter().enumerate() {
             let speed = self.mon(t).speed;
             if self.mon(t).status == crate::damage::Status::Freeze {
                 hs.push((t, H::Thaw, 0, speed, 0));
@@ -56,30 +64,48 @@ impl Battle {
             if self.ability_is(t, "pickpocket") && self.mon(t).is_active {
                 hs.push((t, H::Pickpocket, 0, speed, 7));
             }
+            if self.ability_is(t, "berserk") && self.mon(t).is_active {
+                hs.push((t, H::Berserk(taken[i]), 0, speed, 7));
+            }
             match self.item_of(t) {
                 Some("ejectbutton") => hs.push((t, H::EjectButton, 2, speed, 8)),
                 Some("redcard") => hs.push((t, H::RedCard, 0, speed, 8)),
                 _ => {}
             }
         }
-        self.speed_sort(&mut hs, |a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)).then(a.4.cmp(&b.4)));
+        self.speed_sort(&mut hs, |a, b| {
+            b.2.cmp(&a.2).then(b.3.cmp(&a.3)).then(a.4.cmp(&b.4))
+        });
         let attack = data.category != crate::dex::Category::Status;
         for (t, h, _, _, _) in hs {
             match h {
                 H::Thaw => {
-                    if data.has_key("thawsTarget") && self.mon(t).status == crate::damage::Status::Freeze {
+                    if data.has_key("thawsTarget")
+                        && self.mon(t).status == crate::damage::Status::Freeze
+                    {
                         self.cure_status(t);
                     }
                 }
                 H::EjectButton => {
-                    if user == t || self.mon(t).hp == 0 || !attack || self.item_of(t) != Some("ejectbutton") {
+                    if user == t
+                        || self.mon(t).hp == 0
+                        || !attack
+                        || self.item_of(t) != Some("ejectbutton")
+                    {
                         continue;
                     }
                     let m = self.mon(t);
-                    if self.switchable(t.side).is_empty() || m.force_switch_flag || m.being_called_back {
+                    if self.switchable(t.side).is_empty()
+                        || m.force_switch_flag
+                        || m.being_called_back
+                    {
                         continue;
                     }
-                    if self.all_active().iter().any(|&a| self.mon(a).switch_flag == Some(SwitchFlag::Replace)) {
+                    if self
+                        .all_active()
+                        .iter()
+                        .any(|&a| self.mon(a).switch_flag == Some(SwitchFlag::Replace))
+                    {
                         continue;
                     }
                     self.mon_mut(t).switch_flag = Some(SwitchFlag::Replace);
@@ -89,13 +115,20 @@ impl Battle {
                 }
                 H::Pickpocket => {
                     let m = self.mon(t);
-                    if user == t || !data.flags.has("contact") || m.item.is_some() || m.switch_flag.is_some() || m.force_switch_flag {
+                    if user == t
+                        || !data.flags.has("contact")
+                        || m.item.is_some()
+                        || m.switch_flag.is_some()
+                        || m.force_switch_flag
+                    {
                         continue;
                     }
                     if self.mon(user).switch_flag == Some(SwitchFlag::Replace) {
                         continue;
                     }
-                    let Some(item) = self.take_item(user, t) else { continue };
+                    let Some(item) = self.take_item(user, t) else {
+                        continue;
+                    };
                     // setItem fails on a Pokemon with no HP: the item goes back.
                     if self.mon(t).hp == 0 || !self.mon(t).is_active {
                         self.mon_mut(user).item = Some(item);
@@ -103,12 +136,30 @@ impl Battle {
                         self.mon_mut(t).item = Some(item);
                     }
                 }
+                H::Berserk(damage) => {
+                    self.mon_mut(t).berserk_checked = true;
+                    let m = self.mon(t);
+                    let (hp, max) = (m.hp as u32, m.max_hp() as u32);
+                    if user != t && hp > 0 && total > 0 && hp * 2 <= max && (hp + damage) * 2 > max
+                    {
+                        self.boost(t, &[(2, 1)], Some(t));
+                    }
+                }
                 H::RedCard => {
-                    if user == t || self.mon(user).hp == 0 || self.mon(t).hp == 0 || !attack || self.item_of(t) != Some("redcard") {
+                    if user == t
+                        || self.mon(user).hp == 0
+                        || self.mon(t).hp == 0
+                        || !attack
+                        || self.item_of(t) != Some("redcard")
+                    {
                         continue;
                     }
                     let (u, m) = (self.mon(user), self.mon(t));
-                    if !u.is_active || self.switchable(user.side).is_empty() || u.force_switch_flag || m.force_switch_flag {
+                    if !u.is_active
+                        || self.switchable(user.side).is_empty()
+                        || u.force_switch_flag
+                        || m.force_switch_flag
+                    {
                         continue;
                     }
                     // DragOut: Guard Dog stays.
@@ -137,7 +188,9 @@ impl Battle {
         for (r, _) in keyed {
             // Abilities (subOrder 7) before items (8): Thermal Exchange cures
             // burns, Trace keeps looking.
-            if (self.ability_is(r, "thermalexchange") || self.ability_is(r, "waterbubble")) && self.mon(r).status == crate::damage::Status::Burn {
+            if (self.ability_is(r, "thermalexchange") || self.ability_is(r, "waterbubble"))
+                && self.mon(r).status == crate::damage::Status::Burn
+            {
                 self.cure_status(r);
             }
             // Disguise's onUpdate: Mimikyu-Busted for good, at an eighth's cost.
@@ -161,7 +214,13 @@ impl Battle {
             }
             self.item_update(r);
             // TryEatItem: Unnerve, and Sitrus's TryHeal (Heal Block).
-            if self.item_of(r) == Some("sitrusberry") && !self.unnerved(r) && !self.mon(r).volatiles.has(VolatileId::HealBlock) {
+            // Berserk's TryEatItem holds healing berries until its check.
+            let berserk_hold = self.ability_is(r, "berserk") && !self.mon(r).berserk_checked;
+            if self.item_of(r) == Some("sitrusberry")
+                && !berserk_hold
+                && !self.unnerved(r)
+                && !self.mon(r).volatiles.has(VolatileId::HealBlock)
+            {
                 let m = self.mon(r);
                 if m.hp > 0 && m.hp as u32 * 2 <= m.max_hp() as u32 {
                     let amount = (m.max_hp() / 4) as u32;
@@ -178,19 +237,24 @@ impl Battle {
 
     /// A foe's Unnerve: berries can't be eaten (onFoeTryEatItem).
     pub(super) fn unnerved(&self, r: MonRef) -> bool {
-        self.adjacent_foes(r).into_iter().any(|f| self.ability_is(f, "unnerve"))
+        self.adjacent_foes(r)
+            .into_iter()
+            .any(|f| self.ability_is(f, "unnerve"))
     }
 
     /// The Damage event for move damage: Sturdy (priority -30), then Focus
     /// Sash (-40).
     pub(super) fn on_move_damage(&mut self, t: MonRef, damage: u32) -> u32 {
         // Disguise (onDamage priority 1): the disguise takes it all.
-        if self.ability_is(t, "disguise") && Dex::get().species(self.mon(t).species).name == "Mimikyu" {
+        if self.ability_is(t, "disguise")
+            && Dex::get().species(self.mon(t).species).name == "Mimikyu"
+        {
             self.mon_mut(t).disguise_busted = true;
             return 0;
         }
         let m = self.mon(t);
-        let damage = if self.ability_is(t, "sturdy") && m.hp == m.max_hp() && damage >= m.hp as u32 {
+        let damage = if self.ability_is(t, "sturdy") && m.hp == m.max_hp() && damage >= m.hp as u32
+        {
             m.hp as u32 - 1
         } else {
             damage
@@ -210,9 +274,17 @@ impl Battle {
 
     /// AfterMoveSecondarySelf: Life Orb's recoil after an attack.
     /// Life Orb's recoil (priority 0) or Shell Bell's heal (-1).
-    pub(super) fn after_move_secondary_self(&mut self, user: MonRef, target: MonRef, is_status: bool, total_damage: u32) {
+    pub(super) fn after_move_secondary_self(
+        &mut self,
+        user: MonRef,
+        target: MonRef,
+        is_status: bool,
+        total_damage: u32,
+    ) {
         match self.item_of(user) {
-            Some("lifeorb") if user != target && !is_status && !self.mon(user).force_switch_flag => {
+            Some("lifeorb")
+                if user != target && !is_status && !self.mon(user).force_switch_flag =>
+            {
                 let amount = (self.mon(user).max_hp() / 10) as u32;
                 self.effect_damage(user, amount);
             }
@@ -265,7 +337,11 @@ impl Battle {
             }
             Some("leppaberry") if m.moves.iter().any(|s| s.pp == 0) && self.eat_berry(r) => {
                 let m = self.mon_mut(r);
-                let slot = m.moves.iter().position(|s| s.pp == 0).or_else(|| m.moves.iter().position(|s| s.pp < s.max_pp));
+                let slot = m
+                    .moves
+                    .iter()
+                    .position(|s| s.pp == 0)
+                    .or_else(|| m.moves.iter().position(|s| s.pp < s.max_pp));
                 if let Some(i) = slot {
                     m.moves[i].pp = (m.moves[i].pp + 10).min(m.moves[i].max_pp);
                 }
@@ -279,7 +355,9 @@ impl Battle {
     pub(super) fn after_set_status(&mut self, r: MonRef) {
         if self.item_of(r) == Some("lumberry") && self.eat_berry(r) {
             self.cure_status(r);
-            self.mon_mut(r).volatiles.remove(super::state::VolatileId::Confusion);
+            self.mon_mut(r)
+                .volatiles
+                .remove(super::state::VolatileId::Confusion);
             self.after_use_item(r);
         }
     }
@@ -293,12 +371,26 @@ impl Battle {
         if m.hp == 0 || m.volatiles.has(VolatileId::ChoiceLock) {
             return;
         }
-        m.volatiles.0.push(Volatile { id: VolatileId::ChoiceLock, duration: None, counter: 0, move_id: Some(move_id), effect_order: 0, target_loc: 0 });
+        m.volatiles.0.push(Volatile {
+            id: VolatileId::ChoiceLock,
+            duration: None,
+            counter: 0,
+            move_id: Some(move_id),
+            effect_order: 0,
+            target_loc: 0,
+        });
     }
 
     /// choicelock's onBeforeMove. False: the move is blocked.
     pub(super) fn choice_lock_allows(&mut self, user: MonRef, move_id: MoveId) -> bool {
-        let Some(locked) = self.mon(user).volatiles.0.iter().find(|v| v.id == VolatileId::ChoiceLock).and_then(|v| v.move_id) else {
+        let Some(locked) = self
+            .mon(user)
+            .volatiles
+            .0
+            .iter()
+            .find(|v| v.id == VolatileId::ChoiceLock)
+            .and_then(|v| v.move_id)
+        else {
             return true;
         };
         if self.item_of(user) != Some("choicescarf") {
@@ -310,7 +402,13 @@ impl Battle {
 
     /// choicelock's onDisableMove. Returns the locked move, if it holds.
     pub(super) fn choice_locked_move(&mut self, user: MonRef) -> Option<MoveId> {
-        let locked = self.mon(user).volatiles.0.iter().find(|v| v.id == VolatileId::ChoiceLock)?.move_id?;
+        let locked = self
+            .mon(user)
+            .volatiles
+            .0
+            .iter()
+            .find(|v| v.id == VolatileId::ChoiceLock)?
+            .move_id?;
         if self.item_of(user) != Some("choicescarf") || self.mon(user).move_slot(locked).is_none() {
             self.mon_mut(user).volatiles.remove(VolatileId::ChoiceLock);
             return None;
@@ -346,7 +444,9 @@ impl Battle {
 
     /// A seed's onStart / onTerrainChange: used once its terrain is up.
     pub(super) fn try_seed(&mut self, r: MonRef) {
-        let Some((terrain, stat)) = self.item_of(r).and_then(Self::seed) else { return };
+        let Some((terrain, stat)) = self.item_of(r).and_then(Self::seed) else {
+            return;
+        };
         let m = self.mon(r);
         if self.field.terrain != terrain || m.hp == 0 || !m.is_active {
             return;
@@ -361,7 +461,8 @@ impl Battle {
     /// eachEvent('TerrainChange'): seeds, in Speed order.
     pub(super) fn terrain_change(&mut self) {
         let actives = self.all_active();
-        let mut keyed: Vec<(MonRef, i32)> = actives.iter().map(|&r| (r, self.mon(r).speed)).collect();
+        let mut keyed: Vec<(MonRef, i32)> =
+            actives.iter().map(|&r| (r, self.mon(r).speed)).collect();
         self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
         for (r, _) in keyed {
             self.try_seed(r);
@@ -402,7 +503,8 @@ impl Battle {
                 }
             }
         }
-        let mut keyed: Vec<(MonRef, i32)> = holders.iter().map(|&r| (r, self.mon(r).speed)).collect();
+        let mut keyed: Vec<(MonRef, i32)> =
+            holders.iter().map(|&r| (r, self.mon(r).speed)).collect();
         self.speed_sort(&mut keyed, |a, b| b.1.cmp(&a.1));
         for (r, _) in keyed {
             self.white_herb(r);
@@ -413,7 +515,15 @@ impl Battle {
     /// Rocky Helmet (2), then by holder Speed the rest (Stamina, Flame Body,
     /// Weak Armor, Thermal Exchange, Spicy Spray, the attacker's Poison Touch)
     /// and freeze's thaw from Fire attacks.
-    pub(super) fn damaging_hit(&mut self, user: MonRef, damaged: &[MonRef], data: &crate::dex::MoveData, move_type: crate::dex::TypeId) {
+    pub(super) fn damaging_hit(
+        &mut self,
+        user: MonRef,
+        damaged: &[MonRef],
+        dealt: &[u32],
+        total_so_far: u32,
+        data: &crate::dex::MoveData,
+        move_type: crate::dex::TypeId,
+    ) {
         #[derive(Clone, Copy, PartialEq)]
         enum H {
             Thaw,
@@ -435,6 +545,8 @@ impl Battle {
             SandSpit,
             ToxicDebris,
             Electromorphosis,
+            WanderingSpirit,
+            InnardsOut,
             PoisonTouch,
             AirBalloon,
         }
@@ -468,6 +580,8 @@ impl Battle {
                 "sandspit" => Some((H::SandSpit, NONE)),
                 "toxicdebris" => Some((H::ToxicDebris, NONE)),
                 "electromorphosis" => Some((H::Electromorphosis, 1)),
+                "wanderingspirit" => Some((H::WanderingSpirit, NONE)),
+                "innardsout" => Some((H::InnardsOut, 1)),
                 _ => None,
             };
             if let Some((k, order)) = ab {
@@ -478,11 +592,16 @@ impl Battle {
                 Some("airballoon") => hs.push((t, t, H::AirBalloon, NONE, speed, 8)),
                 _ => {}
             }
-            if self.ability_is(user, "poisontouch") && !self.ability_is(t, "shielddust") && self.item_of(t) != Some("covertcloak") {
+            if self.ability_is(user, "poisontouch")
+                && !self.ability_is(t, "shielddust")
+                && self.item_of(t) != Some("covertcloak")
+            {
                 hs.push((user, t, H::PoisonTouch, NONE, self.mon(user).speed, 6));
             }
         }
-        self.speed_sort(&mut hs, |a, b| a.3.cmp(&b.3).then(b.4.cmp(&a.4)).then(a.5.cmp(&b.5)));
+        self.speed_sort(&mut hs, |a, b| {
+            a.3.cmp(&b.3).then(b.4.cmp(&a.4)).then(a.5.cmp(&b.5))
+        });
         for (_, t, h, _, _, _) in hs {
             match h {
                 H::Thaw => {
@@ -502,7 +621,7 @@ impl Battle {
                     self.boost(t, &[(1, 1)], Some(user));
                 }
                 H::FlameBody if contact && self.chance.chance(3, 10) => {
-                    self.try_set_status(user, crate::damage::Status::Burn);
+                    self.try_set_status_from(user, crate::damage::Status::Burn, Some(t));
                 }
                 H::WeakArmor if data.category == crate::dex::Category::Physical => {
                     self.boost(t, &[(1, -1), (4, 2)], Some(t));
@@ -511,21 +630,26 @@ impl Battle {
                     self.boost(t, &[(0, 1)], Some(user));
                 }
                 H::SpicySpray => {
-                    self.try_set_status(user, crate::damage::Status::Burn);
+                    self.try_set_status_from(user, crate::damage::Status::Burn, Some(t));
                 }
                 H::CursedBody => {
-                    if !self.mon(user).volatiles.has(VolatileId::Disable) && data.id != "struggle" && self.chance.chance(3, 10) {
+                    if !self.mon(user).volatiles.has(VolatileId::Disable)
+                        && data.id != "struggle"
+                        && self.chance.chance(3, 10)
+                    {
                         // disable's onStart: a turn shorter on the Pokemon
                         // that is moving now.
                         if self.add_volatile(user, VolatileId::Disable).truthy() {
-                            if let Some(v) = self.mon_mut(user).volatiles.get_mut(VolatileId::Disable) {
+                            if let Some(v) =
+                                self.mon_mut(user).volatiles.get_mut(VolatileId::Disable)
+                            {
                                 v.duration = Some(4);
                             }
                         }
                     }
                 }
                 H::Static if contact && self.chance.chance(3, 10) => {
-                    self.try_set_status(user, crate::damage::Status::Paralysis);
+                    self.try_set_status_from(user, crate::damage::Status::Paralysis, Some(t));
                 }
                 H::Gooey if contact => {
                     self.boost(user, &[(4, -1)], Some(t));
@@ -533,13 +657,30 @@ impl Battle {
                 H::Justified if move_type == dex.type_id("Dark").expect("Dark") => {
                     self.boost(t, &[(0, 1)], Some(user));
                 }
-                H::Rattled if ["Dark", "Bug", "Ghost"].iter().any(|n| move_type == dex.type_id(n).expect("type")) => {
+                H::Rattled
+                    if ["Dark", "Bug", "Ghost"]
+                        .iter()
+                        .any(|n| move_type == dex.type_id(n).expect("type")) =>
+                {
                     self.boost(t, &[(4, 1)], Some(user));
                 }
                 H::ToxicDebris if data.category == crate::dex::Category::Physical => {
                     // The attacker's side (its foes', if it hit an ally).
-                    let side = if user.side == t.side { 1 - user.side } else { user.side };
+                    let side = if user.side == t.side {
+                        1 - user.side
+                    } else {
+                        user.side
+                    };
                     self.add_hazard(side, super::state::SideCondition::ToxicSpikes);
+                }
+                H::WanderingSpirit if contact => {
+                    self.skill_swap(user, t);
+                }
+                // Innards Out: fainting, it hits back for what it lost.
+                H::InnardsOut if self.mon(t).hp == 0 => {
+                    let i = damaged.iter().position(|&d| d == t).unwrap_or(0);
+                    let amount = dealt.get(i).copied().unwrap_or(0) + total_so_far;
+                    self.effect_damage(user, amount);
                 }
                 H::Electromorphosis => {
                     self.add_volatile(t, VolatileId::Charge);
@@ -558,10 +699,10 @@ impl Battle {
                     }
                 }
                 H::PoisonPoint if contact && self.chance.chance(3, 10) => {
-                    self.try_set_status(user, crate::damage::Status::Poison);
+                    self.try_set_status_from(user, crate::damage::Status::Poison, Some(t));
                 }
                 H::PoisonTouch if contact && self.chance.chance(3, 10) => {
-                    self.try_set_status(t, crate::damage::Status::Poison);
+                    self.try_set_status_from(t, crate::damage::Status::Poison, Some(user));
                 }
                 H::AirBalloon => {
                     // The balloon pops: the item is simply gone.
@@ -648,7 +789,9 @@ impl Battle {
             return false;
         }
         // The second TakeItem: can the receiver hold it?
-        if mine.is_some_and(|i| !self.can_take(i, target)) || yours.is_some_and(|i| !self.can_take(i, user)) {
+        if mine.is_some_and(|i| !self.can_take(i, target))
+            || yours.is_some_and(|i| !self.can_take(i, user))
+        {
             self.mon_mut(target).item = yours;
             self.mon_mut(user).item = mine;
             return false;

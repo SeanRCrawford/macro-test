@@ -94,7 +94,9 @@ impl Rng {
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             z ^ (z >> 31)
         };
-        Rng { s: [next(), next(), next(), next()] }
+        Rng {
+            s: [next(), next(), next(), next()],
+        }
     }
 
     pub fn next_u64(&mut self) -> u64 {
@@ -127,7 +129,9 @@ mod tests {
     #[test]
     fn policy_threshold_semantics() {
         let mut half = Chance::policy(0.5);
-        assert!(half.chance(1, 2) && half.chance(9, 10) && !half.chance(1, 24) && !half.chance(3, 10));
+        assert!(
+            half.chance(1, 2) && half.chance(9, 10) && !half.chance(1, 24) && !half.chance(3, 10)
+        );
         assert_eq!(half.random(100), 49); // secondaries "random(100) < chance" succeed iff chance >= 50
         assert_eq!(half.random(16), 7);
         let mut all = Chance::policy(0.0);
@@ -145,6 +149,9 @@ mod tests {
         for _ in 0..40_000 {
             counts[c.random(4) as usize] += 1;
         }
-        assert!(counts.iter().all(|&k| (9_000..11_000).contains(&k)), "{counts:?}");
+        assert!(
+            counts.iter().all(|&k| (9_000..11_000).contains(&k)),
+            "{counts:?}"
+        );
     }
 }

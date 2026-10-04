@@ -10,9 +10,15 @@ use crate::dex::{Dex, MoveId, MoveTarget};
 pub enum SlotChoice {
     /// `slot` is the move slot (0-3). `target` is Showdown's target location:
     /// 1 or 2 for a foe's slot, -1 or -2 for one of ours, 0 for none.
-    Move { slot: u8, target: i8, mega: bool },
+    Move {
+        slot: u8,
+        target: i8,
+        mega: bool,
+    },
     /// Switch to the Pokemon at this index of the side's list.
-    Switch { index: u8 },
+    Switch {
+        index: u8,
+    },
     Pass,
 }
 
@@ -80,7 +86,11 @@ pub fn valid_target_loc(loc: i8, source_pos: usize, target: MoveTarget) -> bool 
     let source_loc = -(source_pos as i8 + 1);
     let is_self = loc == source_loc;
     let is_foe = loc > 0;
-    let adjacent = if is_foe { true } else { (loc - source_loc).abs() == 1 };
+    let adjacent = if is_foe {
+        true
+    } else {
+        (loc - source_loc).abs() == 1
+    };
     match target {
         MoveTarget::RandomNormal | MoveTarget::Scripted | MoveTarget::Normal => adjacent,
         MoveTarget::AdjacentAlly => adjacent && !is_foe,
@@ -95,14 +105,22 @@ pub fn valid_target_loc(loc: i8, source_pos: usize, target: MoveTarget) -> bool 
 pub fn needs_target(target: MoveTarget) -> bool {
     matches!(
         target,
-        MoveTarget::Normal | MoveTarget::Any | MoveTarget::AdjacentAlly | MoveTarget::AdjacentAllyOrSelf | MoveTarget::AdjacentFoe
+        MoveTarget::Normal
+            | MoveTarget::Any
+            | MoveTarget::AdjacentAlly
+            | MoveTarget::AdjacentAllyOrSelf
+            | MoveTarget::AdjacentFoe
     )
 }
 
 impl SlotChoice {
     pub fn to_showdown(self, request: &SideRequest, slot: usize) -> String {
         match self {
-            SlotChoice::Move { slot: m, target, mega } => {
+            SlotChoice::Move {
+                slot: m,
+                target,
+                mega,
+            } => {
                 let mut s = format!("move {}", m + 1);
                 if let SideRequest::Move(slots) = request {
                     if slots[slot].as_ref().is_some_and(|r| r.struggle) {
@@ -144,10 +162,17 @@ impl SlotChoice {
                     }
                 }
                 let slot = slot.ok_or_else(|| format!("no move in {text:?}"))?;
-                Ok(SlotChoice::Move { slot: (slot - 1) as u8, target, mega })
+                Ok(SlotChoice::Move {
+                    slot: (slot - 1) as u8,
+                    target,
+                    mega,
+                })
             }
             Some("switch") => {
-                let n: u8 = words.get(1).and_then(|w| w.parse().ok()).ok_or_else(|| format!("bad switch {text:?}"))?;
+                let n: u8 = words
+                    .get(1)
+                    .and_then(|w| w.parse().ok())
+                    .ok_or_else(|| format!("bad switch {text:?}"))?;
                 Ok(SlotChoice::Switch { index: n - 1 })
             }
             Some("pass") => Ok(SlotChoice::Pass),
@@ -159,10 +184,19 @@ impl SlotChoice {
 impl SideChoice {
     pub fn to_showdown(&self, request: &SideRequest) -> String {
         match self {
-            SideChoice::Team(order) => format!("team {}", order.iter().map(|i| (i + 1).to_string()).collect::<String>()),
-            SideChoice::Slots(slots) => {
-                slots.iter().enumerate().map(|(i, c)| c.to_showdown(request, i)).collect::<Vec<_>>().join(", ")
-            }
+            SideChoice::Team(order) => format!(
+                "team {}",
+                order
+                    .iter()
+                    .map(|i| (i + 1).to_string())
+                    .collect::<String>()
+            ),
+            SideChoice::Slots(slots) => slots
+                .iter()
+                .enumerate()
+                .map(|(i, c)| c.to_showdown(request, i))
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 
@@ -173,13 +207,20 @@ impl SideChoice {
             if digits.len() != 4 || digits.iter().any(|&d| d > 5) {
                 return Err(format!("bad team order {text:?}"));
             }
-            return Ok(SideChoice::Team([digits[0], digits[1], digits[2], digits[3]]));
+            return Ok(SideChoice::Team([
+                digits[0], digits[1], digits[2], digits[3],
+            ]));
         }
         let parts: Vec<&str> = text.split(',').map(str::trim).collect();
         if parts.len() != ACTIVE_PER_SIDE {
-            return Err(format!("expected {ACTIVE_PER_SIDE} slot choices in {text:?}"));
+            return Err(format!(
+                "expected {ACTIVE_PER_SIDE} slot choices in {text:?}"
+            ));
         }
-        Ok(SideChoice::Slots([SlotChoice::from_showdown(parts[0])?, SlotChoice::from_showdown(parts[1])?]))
+        Ok(SideChoice::Slots([
+            SlotChoice::from_showdown(parts[0])?,
+            SlotChoice::from_showdown(parts[1])?,
+        ]))
     }
 }
 
@@ -199,14 +240,25 @@ impl Battle {
                         continue;
                     }
                     let targets: Vec<i8> = if needs_target(m.target) && !req.struggle {
-                        [1, 2, -1, -2].into_iter().filter(|&l| valid_target_loc(l, slot, m.target)).collect()
+                        [1, 2, -1, -2]
+                            .into_iter()
+                            .filter(|&l| valid_target_loc(l, slot, m.target))
+                            .collect()
                     } else {
                         vec![0]
                     };
                     for t in targets {
-                        out.push(SlotChoice::Move { slot: m.slot, target: t, mega: false });
+                        out.push(SlotChoice::Move {
+                            slot: m.slot,
+                            target: t,
+                            mega: false,
+                        });
                         if req.can_mega {
-                            out.push(SlotChoice::Move { slot: m.slot, target: t, mega: true });
+                            out.push(SlotChoice::Move {
+                                slot: m.slot,
+                                target: t,
+                                mega: true,
+                            });
                         }
                     }
                 }
@@ -245,7 +297,10 @@ impl Battle {
         match &self.requests[side] {
             SideRequest::TeamPreview => crate::team::preview_choices()
                 .into_iter()
-                .filter(|o| o.iter().all(|&i| (i as usize) < self.sides[side].pokemon.len()))
+                .filter(|o| {
+                    o.iter()
+                        .all(|&i| (i as usize) < self.sides[side].pokemon.len())
+                })
                 .map(SideChoice::Team)
                 .collect(),
             SideRequest::Wait => Vec::new(),
@@ -275,14 +330,18 @@ impl Battle {
                 return false;
             }
         }
-        if matches!(c[0], SlotChoice::Move { mega: true, .. }) && matches!(c[1], SlotChoice::Move { mega: true, .. }) {
+        if matches!(c[0], SlotChoice::Move { mega: true, .. })
+            && matches!(c[1], SlotChoice::Move { mega: true, .. })
+        {
             return false;
         }
         if let SideRequest::Switch(force) = req {
             let need = force.iter().filter(|&&f| f).count();
             let available = self.switchable(side).len();
             let passes_needed = need.saturating_sub(available);
-            let forced_passes = (0..2).filter(|&i| force[i] && c[i] == SlotChoice::Pass).count();
+            let forced_passes = (0..2)
+                .filter(|&i| force[i] && c[i] == SlotChoice::Pass)
+                .count();
             if forced_passes != passes_needed {
                 return false;
             }

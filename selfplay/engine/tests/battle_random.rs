@@ -26,7 +26,12 @@ fn random_team(rng: &mut Rng) -> Vec<PokemonSet> {
         if nums.contains(&sp.num) {
             continue;
         }
-        let usable: Vec<_> = sp.learnset.iter().copied().filter(|m| moves.contains(&dex.move_data(*m).id)).collect();
+        let usable: Vec<_> = sp
+            .learnset
+            .iter()
+            .copied()
+            .filter(|m| moves.contains(&dex.move_data(*m).id))
+            .collect();
         if usable.is_empty() {
             continue;
         }
@@ -37,7 +42,11 @@ fn random_team(rng: &mut Rng) -> Vec<PokemonSet> {
             .map(|a| engine::dex::to_id(a))
             .find(|a| abilities.contains(a))
             .unwrap_or_else(|| "noability".into());
-        let item = if rng.below(2) == 0 { None } else { Some(&items[rng.below(items.len() as u32) as usize]) };
+        let item = if rng.below(2) == 0 {
+            None
+        } else {
+            Some(&items[rng.below(items.len() as u32) as usize])
+        };
         let mut points = [0u16; 6];
         let mut left = 66u16;
         while left > 0 {
@@ -90,10 +99,17 @@ fn random_games_terminate_sanely() {
                     continue;
                 }
                 let legal = b.legal_choices(side);
-                assert!(!legal.is_empty(), "game {game} step {steps}: no legal choice for side {side}: {:?}", b.requests[side]);
+                assert!(
+                    !legal.is_empty(),
+                    "game {game} step {steps}: no legal choice for side {side}: {:?}",
+                    b.requests[side]
+                );
                 choices[side] = Some(legal[rng.below(legal.len() as u32) as usize].clone());
             }
-            assert!(choices.iter().any(Option::is_some), "game {game}: nobody to move but not over");
+            assert!(
+                choices.iter().any(Option::is_some),
+                "game {game}: nobody to move but not over"
+            );
             let before = b.clone();
             let c2 = choices.clone();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.choose(choices)));
@@ -119,5 +135,8 @@ fn random_games_terminate_sanely() {
             finished += 1;
         }
     }
-    assert!(finished >= 295, "only {finished}/300 games finished within 400 steps");
+    assert!(
+        finished >= 295,
+        "only {finished}/300 games finished within 400 steps"
+    );
 }

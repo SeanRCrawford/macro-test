@@ -152,17 +152,52 @@ impl MoveTarget {
 pub struct MoveFlags(pub u64);
 
 pub const FLAG_NAMES: [&str; 38] = [
-    "allyanim", "bite", "bullet", "bypasssub", "cantusetwice", "charge", "contact", "dance",
-    "defrost", "distance", "failcopycat", "failencore", "failinstruct", "failmefirst",
-    "failmimic", "futuremove", "gravity", "heal", "metronome", "minimize", "mirror",
-    "mustpressure", "noassist", "nonsky", "noparentalbond", "nosketch", "nosleeptalk",
-    "pledgecombo", "powder", "protect", "pulse", "punch", "recharge", "reflectable", "slicing",
-    "snatch", "sound", "wind",
+    "allyanim",
+    "bite",
+    "bullet",
+    "bypasssub",
+    "cantusetwice",
+    "charge",
+    "contact",
+    "dance",
+    "defrost",
+    "distance",
+    "failcopycat",
+    "failencore",
+    "failinstruct",
+    "failmefirst",
+    "failmimic",
+    "futuremove",
+    "gravity",
+    "heal",
+    "metronome",
+    "minimize",
+    "mirror",
+    "mustpressure",
+    "noassist",
+    "nonsky",
+    "noparentalbond",
+    "nosketch",
+    "nosleeptalk",
+    "pledgecombo",
+    "powder",
+    "protect",
+    "pulse",
+    "punch",
+    "recharge",
+    "reflectable",
+    "slicing",
+    "snatch",
+    "sound",
+    "wind",
 ];
 
 impl MoveFlags {
     pub fn bit(name: &str) -> Option<u64> {
-        FLAG_NAMES.iter().position(|f| *f == name).map(|i| 1u64 << i)
+        FLAG_NAMES
+            .iter()
+            .position(|f| *f == name)
+            .map(|i| 1u64 << i)
     }
     pub fn has(self, name: &str) -> bool {
         Self::bit(name).is_some_and(|b| self.0 & b != 0)
@@ -219,10 +254,16 @@ impl HitEffect {
         let mut keys: Vec<String> = r.keys().cloned().collect();
         keys.sort();
         Ok(HitEffect {
-            chance: r.get("chance").and_then(Value::as_u64).map(|c| c.min(255) as u8),
+            chance: r
+                .get("chance")
+                .and_then(Value::as_u64)
+                .map(|c| c.min(255) as u8),
             boosts,
             status: r.get("status").and_then(Value::as_str).map(String::from),
-            volatile_status: r.get("volatileStatus").and_then(Value::as_str).map(String::from),
+            volatile_status: r
+                .get("volatileStatus")
+                .and_then(Value::as_str)
+                .map(String::from),
             self_effect,
             keys,
         })
@@ -444,7 +485,10 @@ pub fn to_id(name: &str) -> String {
 }
 
 fn stat_index(name: &str) -> Result<usize, String> {
-    STAT_NAMES.iter().position(|s| *s == name).ok_or_else(|| format!("unknown stat {name:?}"))
+    STAT_NAMES
+        .iter()
+        .position(|s| *s == name)
+        .ok_or_else(|| format!("unknown stat {name:?}"))
 }
 
 /// Handler names and Priority/Order/SubOrder fields from a raw entry. With a
@@ -454,16 +498,26 @@ fn handlers_of(raw: &HashMap<String, Value>, nested: Option<&str>) -> Handlers {
     let all: Vec<String> = raw
         .get("handlers")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let hooks_src = match nested {
-        Some(key) => raw.get(key).and_then(Value::as_object).cloned().unwrap_or_default(),
+        Some(key) => raw
+            .get(key)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
         None => raw.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
     };
     h.names = match nested {
         Some(key) => {
             let prefix = format!("{key}.");
-            all.iter().filter_map(|n| n.strip_prefix(&prefix).map(String::from)).collect()
+            all.iter()
+                .filter_map(|n| n.strip_prefix(&prefix).map(String::from))
+                .collect()
         }
         None => all.into_iter().filter(|n| !n.contains('.')).collect(),
     };
@@ -524,7 +578,12 @@ impl Dex {
             .enumerate()
             .map(|(i, t)| (t.clone(), TypeId(i as u8)))
             .collect();
-        let lookup_type = |t: &str| type_index.get(t).copied().ok_or_else(|| format!("unknown type {t}"));
+        let lookup_type = |t: &str| {
+            type_index
+                .get(t)
+                .copied()
+                .ok_or_else(|| format!("unknown type {t}"))
+        };
         let n = raw.types.len();
         let mut effectiveness = vec![vec![2u8; n]; n];
         for (defending, row) in &raw.typechart {
@@ -588,7 +647,8 @@ impl Dex {
             let mut flags = 0u64;
             if let Some(obj) = r.get("flags").and_then(Value::as_object) {
                 for name in obj.keys() {
-                    flags |= MoveFlags::bit(name).ok_or_else(|| ctx(format!("unknown flag {name}")))?;
+                    flags |=
+                        MoveFlags::bit(name).ok_or_else(|| ctx(format!("unknown flag {name}")))?;
                 }
             }
             let category = match str_field(r, "category") {
@@ -603,9 +663,10 @@ impl Dex {
                     let n = n.as_u64().unwrap_or(1) as u8;
                     Some((n, n))
                 }
-                Some(Value::Array(a)) if a.len() == 2 => {
-                    Some((a[0].as_u64().unwrap_or(1) as u8, a[1].as_u64().unwrap_or(1) as u8))
-                }
+                Some(Value::Array(a)) if a.len() == 2 => Some((
+                    a[0].as_u64().unwrap_or(1) as u8,
+                    a[1].as_u64().unwrap_or(1) as u8,
+                )),
                 Some(other) => return Err(ctx(format!("multihit {other}"))),
             };
             let ignore_immunity = match r.get("ignoreImmunity") {
@@ -641,9 +702,12 @@ impl Dex {
                 target: MoveTarget::parse(str_field(r, "target").unwrap_or("")).map_err(ctx)?,
                 flags: MoveFlags(flags),
                 has_secondaries: r.get("secondary").is_some_and(|v| !v.is_null())
-                    || r.get("secondaries").and_then(Value::as_array).is_some_and(|a| !a.is_empty()),
+                    || r.get("secondaries")
+                        .and_then(Value::as_array)
+                        .is_some_and(|a| !a.is_empty()),
                 has_recoil: r.contains_key("recoil"),
-                primary: HitEffect::parse(&r.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).map_err(ctx)?,
+                primary: HitEffect::parse(&r.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .map_err(ctx)?,
                 secondaries: {
                     let list: Vec<Value> = match (r.get("secondary"), r.get("secondaries")) {
                         (_, Some(Value::Array(a))) => a.clone(),
@@ -664,7 +728,8 @@ impl Dex {
                 multihit,
                 override_offensive_stat: stat("overrideOffensiveStat")?,
                 override_defensive_stat: stat("overrideDefensiveStat")?,
-                override_offensive_target: str_field(r, "overrideOffensivePokemon") == Some("target"),
+                override_offensive_target: str_field(r, "overrideOffensivePokemon")
+                    == Some("target"),
                 ignore_defensive: bool_field(r, "ignoreDefensive"),
                 ignore_offensive: bool_field(r, "ignoreOffensive"),
                 ignore_ability: bool_field(r, "ignoreAbility"),
@@ -682,7 +747,11 @@ impl Dex {
                 handlers: handlers_of(r, None),
                 condition: handlers_of(r, Some("condition")),
                 // true, or Baton Pass's "copyvolatile" (not Shed Tail's).
-                self_switch: matches!(r.get("selfSwitch"), Some(Value::Bool(true))) || matches!(r.get("selfSwitch").and_then(|v| v.as_str()), Some("copyvolatile" | "shedtail")),
+                self_switch: matches!(r.get("selfSwitch"), Some(Value::Bool(true)))
+                    || matches!(
+                        r.get("selfSwitch").and_then(|v| v.as_str()),
+                        Some("copyvolatile" | "shedtail")
+                    ),
                 self_boost: match r.get("selfBoost").and_then(Value::as_object) {
                     Some(o) => Some(HitEffect::parse(o).map_err(ctx)?),
                     None => None,
@@ -707,7 +776,12 @@ impl Dex {
             let mut learnset = r
                 .learnset
                 .iter()
-                .map(|m| move_index.get(m).copied().ok_or_else(|| format!("{sid}: learnset move {m}")))
+                .map(|m| {
+                    move_index
+                        .get(m)
+                        .copied()
+                        .ok_or_else(|| format!("{sid}: learnset move {m}"))
+                })
                 .collect::<Result<Vec<MoveId>, String>>()?;
             learnset.sort();
             species[id].learnset = learnset;
@@ -720,7 +794,11 @@ impl Dex {
             let mega_stone = r
                 .get("megaStone")
                 .and_then(Value::as_object)
-                .map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             items.push(ItemData {
                 id: iid.clone(),
@@ -757,7 +835,12 @@ impl Dex {
                 flags: r
                     .get("flags")
                     .and_then(Value::as_object)
-                    .map(|f| f.iter().filter(|(_, v)| v.as_i64() == Some(1)).map(|(k, _)| k.clone()).collect())
+                    .map(|f| {
+                        f.iter()
+                            .filter(|(_, v)| v.as_i64() == Some(1))
+                            .map(|(k, _)| k.clone())
+                            .collect()
+                    })
                     .unwrap_or_default(),
             });
             ability_index.insert(aid.clone(), AbilityId(i as u16));
@@ -818,7 +901,11 @@ impl Dex {
     /// "powder"): false when any of the types is immune.
     pub fn immune_to(&self, key: &str, types: [TypeId; 2]) -> bool {
         // The typeless "???" type (TypeId(255)) has no immunities.
-        types.iter().any(|t| self.immunities.get(t.0 as usize).is_some_and(|im| im.iter().any(|k| k == key)))
+        types.iter().any(|t| {
+            self.immunities
+                .get(t.0 as usize)
+                .is_some_and(|im| im.iter().any(|k| k == key))
+        })
     }
 
     /// A Mega Stone's onTakeItem: it stays with a Pokemon that can use it.
@@ -827,7 +914,9 @@ impl Dex {
     pub fn mega_stone_stays(&self, item: ItemId, holder: SpeciesId) -> bool {
         let stone = &self.item(item).mega_stone;
         let sp = self.species(holder);
-        stone.contains_key(&sp.base_species) || stone.contains_key(&sp.name) || stone.values().any(|v| *v == sp.name)
+        stone.contains_key(&sp.base_species)
+            || stone.contains_key(&sp.name)
+            || stone.values().any(|v| *v == sp.name)
     }
 
     pub fn species_id(&self, name: &str) -> Option<SpeciesId> {
@@ -904,7 +993,11 @@ impl Dex {
 
     /// One type-chart cell; the typeless "???" type is neutral either way.
     fn eff(&self, attacking: TypeId, defending: TypeId) -> u8 {
-        self.effectiveness.get(attacking.0 as usize).and_then(|row| row.get(defending.0 as usize)).copied().unwrap_or(2)
+        self.effectiveness
+            .get(attacking.0 as usize)
+            .and_then(|row| row.get(defending.0 as usize))
+            .copied()
+            .unwrap_or(2)
     }
 }
 
@@ -940,14 +1033,20 @@ mod tests {
         let koraidon = dex.species(dex.species_id("Koraidon").unwrap());
         assert!(koraidon.tags.iter().any(|t| t == "Restricted Legendary"));
         let stone = dex.item(dex.item_id("Salamencite").unwrap());
-        assert_eq!(stone.mega_stone.get("Salamence").map(String::as_str), Some("Salamence-Mega"));
+        assert_eq!(
+            stone.mega_stone.get("Salamence").map(String::as_str),
+            Some("Salamence-Mega")
+        );
     }
 
     #[test]
     fn moves_items_abilities() {
         let dex = Dex::get();
         let fake_out = dex.move_data(dex.move_id("Fake Out").unwrap());
-        assert_eq!((fake_out.base_power, fake_out.priority, fake_out.category), (40, 3, Category::Physical));
+        assert_eq!(
+            (fake_out.base_power, fake_out.priority, fake_out.category),
+            (40, 3, Category::Physical)
+        );
         assert!(fake_out.flags.has("contact") && !fake_out.flags.has("sound"));
         assert!(fake_out.handlers.has("onDisableMove")); // Champions: only usable on the first turn
         let rock_slide = dex.move_data(dex.move_id("Rock Slide").unwrap());
@@ -956,8 +1055,14 @@ mod tests {
         assert_eq!(charcoal.handlers.hook("onBasePowerPriority"), 15);
         let multiscale = dex.ability(dex.ability_id("Multiscale").unwrap());
         assert!(multiscale.breakable && multiscale.handlers.has("onSourceModifyDamage"));
-        assert!(dex.ability(dex.ability_id("Cloud Nine").unwrap()).suppress_weather);
-        assert!(dex.ability(dex.ability_id("Shell Armor").unwrap()).blocks_crit);
+        assert!(
+            dex.ability(dex.ability_id("Cloud Nine").unwrap())
+                .suppress_weather
+        );
+        assert!(
+            dex.ability(dex.ability_id("Shell Armor").unwrap())
+                .blocks_crit
+        );
         let flash_fire = dex.ability(dex.ability_id("Flash Fire").unwrap());
         assert_eq!(flash_fire.condition.hook("onModifyAtkPriority"), 5);
         let reflect = dex.move_data(dex.move_id("Reflect").unwrap());
@@ -971,14 +1076,29 @@ mod tests {
         let dex = Dex::get();
         let t = |n: &str| dex.type_id(n).unwrap();
         // Ground vs Charizard (Fire/Flying): immune.
-        assert_eq!(dex.effectiveness_quarters(t("ground"), [t("Fire"), t("Flying")]), 0);
+        assert_eq!(
+            dex.effectiveness_quarters(t("ground"), [t("Fire"), t("Flying")]),
+            0
+        );
         // Ice vs Garchomp (Dragon/Ground): 4x.
-        assert_eq!(dex.effectiveness_quarters(t("Ice"), [t("Dragon"), t("Ground")]), 16);
+        assert_eq!(
+            dex.effectiveness_quarters(t("Ice"), [t("Dragon"), t("Ground")]),
+            16
+        );
         // Fighting vs Gholdengo (Steel/Ghost): immune; Fire vs pure Grass: 2x.
-        assert_eq!(dex.effectiveness_quarters(t("Fighting"), [t("Steel"), t("Ghost")]), 0);
-        assert_eq!(dex.effectiveness_quarters(t("Fire"), [t("Grass"), t("Grass")]), 8);
+        assert_eq!(
+            dex.effectiveness_quarters(t("Fighting"), [t("Steel"), t("Ghost")]),
+            0
+        );
+        assert_eq!(
+            dex.effectiveness_quarters(t("Fire"), [t("Grass"), t("Grass")]),
+            8
+        );
         // Water vs Water/Dragon: x0.25.
-        assert_eq!(dex.effectiveness_quarters(t("Water"), [t("Water"), t("Dragon")]), 1);
+        assert_eq!(
+            dex.effectiveness_quarters(t("Water"), [t("Water"), t("Dragon")]),
+            1
+        );
         assert_eq!(dex.type_mod(t("Ice"), t("Ground")), 1);
         assert!(dex.type_immune(t("Normal"), t("Ghost")));
     }

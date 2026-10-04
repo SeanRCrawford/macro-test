@@ -25,7 +25,11 @@ impl HitRes {
     /// An onHit returning nothing on success (undefined) and false on
     /// failure.
     pub(super) fn or_undefined(self) -> HitRes {
-        if self == HitRes::Bool(true) { HitRes::Undefined } else { self }
+        if self == HitRes::Bool(true) {
+            HitRes::Undefined
+        } else {
+            self
+        }
     }
 
     pub(super) fn truthy(self) -> bool {
@@ -53,7 +57,9 @@ impl HitRes {
 
     /// `battleActions.combineResults`.
     pub(super) fn combine(self, right: HitRes) -> HitRes {
-        if self.rank() > right.rank() || (self.truthy() && !right.truthy() && right != HitRes::Num(0)) {
+        if self.rank() > right.rank()
+            || (self.truthy() && !right.truthy() && right != HitRes::Num(0))
+        {
             self
         } else if let (HitRes::Num(a), HitRes::Num(b)) = (self, right) {
             HitRes::Num(a + b)
@@ -123,7 +129,10 @@ enum ResidualKind {
 /// Showdown's comparePriority for event handlers (priority is 0 for every
 /// Residual handler the engine has).
 fn compare_handlers(a: &Residual, b: &Residual) -> Ordering {
-    a.order.cmp(&b.order).then(b.speed.cmp(&a.speed)).then(a.sub_order.cmp(&b.sub_order))
+    a.order
+        .cmp(&b.order)
+        .then(b.speed.cmp(&a.speed))
+        .then(a.sub_order.cmp(&b.sub_order))
 }
 
 struct ResidualOn {
@@ -151,8 +160,10 @@ impl Battle {
         // flinching.
         let ab = self.ability_id(t);
         // Dig and Dive's onImmunity: no sandstorm underground or underwater.
-        let hidden = super::moves::semi_invulnerable(m).is_some_and(|id| matches!(Dex::get().move_data(id).id.as_str(), "dig" | "dive"));
-        if (key == "sandstorm" && (hidden || matches!(ab, "sandrush" | "sandveil" | "sandforce" | "overcoat")))
+        let hidden = super::moves::semi_invulnerable(m)
+            .is_some_and(|id| matches!(Dex::get().move_data(id).id.as_str(), "dig" | "dive"));
+        if (key == "sandstorm"
+            && (hidden || matches!(ab, "sandrush" | "sandveil" | "sandforce" | "overcoat")))
             || (key == "powder" && ab == "overcoat")
             || (key == "flinch" && ab == "innerfocus")
         {
@@ -163,12 +174,40 @@ impl Battle {
 
     /// `trySetStatus`: fails if the target already has a status.
     pub(super) fn try_set_status(&mut self, t: MonRef, status: Status) -> bool {
+        self.try_set_status_from(t, status, None)
+    }
+
+    /// `trySetStatus` with the Pokemon causing it (Corrosion, Synchronize,
+    /// Flower Veil care).
+    pub(super) fn try_set_status_from(
+        &mut self,
+        t: MonRef,
+        status: Status,
+        source: Option<MonRef>,
+    ) -> bool {
         let current = self.mon(t).status;
-        self.set_status(t, if current == Status::None { status } else { current })
+        self.set_status_from(
+            t,
+            if current == Status::None {
+                status
+            } else {
+                current
+            },
+            source,
+        )
     }
 
     /// `setStatus` (`Status::None` cures).
     pub(super) fn set_status(&mut self, t: MonRef, status: Status) -> bool {
+        self.set_status_from(t, status, None)
+    }
+
+    pub(super) fn set_status_from(
+        &mut self,
+        t: MonRef,
+        status: Status,
+        source: Option<MonRef>,
+    ) -> bool {
         let m = self.mon(t);
         if m.hp == 0 {
             return false;
@@ -180,8 +219,15 @@ impl Battle {
             return false;
         }
         if status != Status::None {
-            let key = if status == Status::Toxic { "psn" } else { status_id(status) };
-            if !self.run_status_immunity(t, key) {
+            let key = if status == Status::Toxic {
+                "psn"
+            } else {
+                status_id(status)
+            };
+            // Corrosion poisons regardless of type.
+            let corrosive = matches!(status, Status::Poison | Status::Toxic)
+                && source.is_some_and(|s| self.ability_is(s, "corrosion"));
+            if !corrosive && !self.run_status_immunity(t, key) {
                 return false;
             }
             if self.terrain_blocks_status(t, status) {
@@ -189,10 +235,22 @@ impl Battle {
             }
             // SetStatus: Thermal Exchange and Water Bubble can't be burned;
             // Sweet Veil keeps its side awake.
-            if status == Status::Burn && (self.ability_is(t, "thermalexchange") || self.ability_is(t, "waterbubble")) {
+            if status == Status::Burn
+                && (self.ability_is(t, "thermalexchange") || self.ability_is(t, "waterbubble"))
+            {
                 return false;
             }
             if status == Status::Sleep && self.side_has_ability(t.side, "sweetveil") {
+                return false;
+            }
+            // Flower Veil (onAllySetStatus): Grass types on its side, from
+            // others.
+            if source.is_some_and(|s| s != t)
+                && self
+                    .mon(t)
+                    .has_type(Dex::get().type_id("Grass").expect("Grass"))
+                && self.side_has_ability(t.side, "flowerveil")
+            {
                 return false;
             }
             // Purifying Salt: no status at all; Insomnia, Vital Spirit,
@@ -211,7 +269,10 @@ impl Battle {
         }
         // onStart
         let state = match status {
-            Status::Sleep => StatusState { time: [2, 3, 3][self.chance.sample(3)], stage: 0 },
+            Status::Sleep => StatusState {
+                time: [2, 3, 3][self.chance.sample(3)],
+                stage: 0,
+            },
             Status::Freeze => StatusState { time: 3, stage: 0 },
             _ => StatusState::default(),
         };
@@ -219,6 +280,15 @@ impl Battle {
         m.status = status;
         m.status_state = state;
         if status != Status::None {
+            // AfterSetStatus: Synchronize (priority 0) passes it back, then
+            // Lum Berry (-1).
+            if let Some(s) = source.filter(|&s| s != t) {
+                if self.ability_is(t, "synchronize")
+                    && !matches!(status, Status::Sleep | Status::Freeze)
+                {
+                    self.try_set_status_from(s, status, Some(t));
+                }
+            }
             self.after_set_status(t);
         }
         true
@@ -268,17 +338,27 @@ impl Battle {
         if (id == VolatileId::Confusion && self.ability_is(t, "owntempo"))
             || (id == VolatileId::Yawn
                 && (self.side_has_ability(t.side, "sweetveil")
-                    || matches!(self.ability_id(t), "purifyingsalt" | "insomnia" | "vitalspirit")
-                    || (self.ability_is(t, "leafguard") && self.effective_weather() == crate::damage::Weather::Sun)))
+                    || (self.side_has_ability(t.side, "flowerveil")
+                        && self
+                            .mon(t)
+                            .has_type(Dex::get().type_id("Grass").expect("Grass")))
+                    || matches!(
+                        self.ability_id(t),
+                        "purifyingsalt" | "insomnia" | "vitalspirit"
+                    )
+                    || (self.ability_is(t, "leafguard")
+                        && self.effective_weather() == crate::damage::Weather::Sun)))
         {
             return HitRes::Null;
         }
         // TryAddVolatile: Aroma Veil guards its side (itself included).
-        if matches!(id, VolatileId::Disable | VolatileId::Encore | VolatileId::Taunt | VolatileId::HealBlock)
-            && (0..ACTIVE_PER_SIDE).any(|p| {
-                self.occupant(t.side, p).is_some_and(|a| self.mon(a).hp > 0 && self.ability_is(a, "aromaveil"))
-            })
-        {
+        if matches!(
+            id,
+            VolatileId::Disable | VolatileId::Encore | VolatileId::Taunt | VolatileId::HealBlock
+        ) && (0..ACTIVE_PER_SIDE).any(|p| {
+            self.occupant(t.side, p)
+                .is_some_and(|a| self.mon(a).hp > 0 && self.ability_is(a, "aromaveil"))
+        }) {
             return HitRes::Null;
         }
         if id == VolatileId::Encore {
@@ -313,21 +393,26 @@ impl Battle {
             return HitRes::Bool(false);
         }
         let counter = if id == VolatileId::DragonCheer {
-            self.mon(t).has_type(Dex::get().type_id("Dragon").expect("Dragon")) as u32
+            self.mon(t)
+                .has_type(Dex::get().type_id("Dragon").expect("Dragon")) as u32
         } else {
             counter
         };
         let counter = if id == VolatileId::Substitute {
             // substitute's onStart: a quarter of max HP; it frees a bound
             // Pokemon.
-            self.mon_mut(t).volatiles.remove(VolatileId::PartiallyTrapped);
+            self.mon_mut(t)
+                .volatiles
+                .remove(VolatileId::PartiallyTrapped);
             (self.mon(t).max_hp() / 4) as u32
         } else {
             counter
         };
         match id {
             // taunt's onStart: a turn longer if it already acted this turn.
-            VolatileId::Taunt if self.mon(t).active_turns > 0 && !self.will_move(t) => duration = Some(4),
+            VolatileId::Taunt if self.mon(t).active_turns > 0 && !self.will_move(t) => {
+                duration = Some(4)
+            }
             // disable's onStart: on the last move, with PP; a turn shorter if
             // the target is still to move.
             VolatileId::Disable => {
@@ -335,7 +420,9 @@ impl Battle {
                     duration = Some(4);
                 }
                 let m = self.mon(t);
-                let Some(last) = m.last_move else { return HitRes::Bool(false) };
+                let Some(last) = m.last_move else {
+                    return HitRes::Bool(false);
+                };
                 if m.move_slot(last).is_some_and(|s| m.moves[s].pp == 0) {
                     return HitRes::Bool(false);
                 }
@@ -343,14 +430,24 @@ impl Battle {
             }
             VolatileId::Roost => {
                 let dex = Dex::get();
-                let (flying, normal) = (dex.type_id("Flying").expect("Flying"), dex.type_id("Normal").expect("Normal"));
+                let (flying, normal) = (
+                    dex.type_id("Flying").expect("Flying"),
+                    dex.type_id("Normal").expect("Normal"),
+                );
                 self.mon_mut(t).start_roost(flying, normal);
             }
             _ => {}
         }
         self.effect_order += 1;
         let effect_order = self.effect_order;
-        self.mon_mut(t).volatiles.0.push(Volatile { id, duration, counter, move_id, effect_order, target_loc: 0 });
+        self.mon_mut(t).volatiles.0.push(Volatile {
+            id,
+            duration,
+            counter,
+            move_id,
+            effect_order,
+            target_loc: 0,
+        });
         HitRes::Bool(true)
     }
 
@@ -362,7 +459,9 @@ impl Battle {
             // twoturnmove's onEnd drops the charging move's volatile.
             VolatileId::TwoTurnMove => {
                 let m = self.mon_mut(t);
-                m.volatiles.0.retain(|v| !matches!(v.id, VolatileId::Charging(_)));
+                m.volatiles
+                    .0
+                    .retain(|v| !matches!(v.id, VolatileId::Charging(_)));
             }
             // yawn: the target falls asleep.
             VolatileId::Yawn => {
@@ -378,8 +477,12 @@ impl Battle {
     /// queued move to that one (or last a turn longer if it won't move).
     fn start_encore(&mut self, t: MonRef) -> HitRes {
         let m = self.mon(t);
-        let Some(last) = m.last_move else { return HitRes::Bool(false) };
-        let Some(slot) = m.move_slot(last) else { return HitRes::Bool(false) };
+        let Some(last) = m.last_move else {
+            return HitRes::Bool(false);
+        };
+        let Some(slot) = m.move_slot(last) else {
+            return HitRes::Bool(false);
+        };
         if Dex::get().move_data(last).flags.has("failencore") || m.moves[slot].pp == 0 {
             return HitRes::Bool(false);
         }
@@ -396,7 +499,10 @@ impl Battle {
             target_loc: 0,
         });
         // changeAction, unless a Mental Herb is about to cure it.
-        if queued.is_some_and(|q| q != last) && self.item_of(t) != Some("mentalherb") && self.change_move_action(t, slot).is_err() {
+        if queued.is_some_and(|q| q != last)
+            && self.item_of(t) != Some("mentalherb")
+            && self.change_move_action(t, slot).is_err()
+        {
             return HitRes::Bool(false);
         }
         HitRes::Bool(true)
@@ -404,7 +510,9 @@ impl Battle {
 
     /// The StallMove event: stall's onStallMove, if the user has it.
     pub(super) fn stall_move(&mut self, user: MonRef) -> bool {
-        let Some(v) = self.mon_mut(user).volatiles.get_mut(VolatileId::Stall) else { return true };
+        let Some(v) = self.mon_mut(user).volatiles.get_mut(VolatileId::Stall) else {
+            return true;
+        };
         let counter = v.counter.max(1);
         let success = self.chance.chance(1, counter);
         if !success {
@@ -454,7 +562,11 @@ impl Battle {
         }
         let v = &self.mon(user).volatiles;
         // disable (priority 7)
-        if v.0.iter().any(|x| x.id == VolatileId::Disable && x.move_id == Some(move_id)) && !data.flags.has("cantusetwice") {
+        if v.0
+            .iter()
+            .any(|x| x.id == VolatileId::Disable && x.move_id == Some(move_id))
+            && !data.flags.has("cantusetwice")
+        {
             return false;
         }
         // throatchop (priority 6): no sound moves; healblock: no healing ones.
@@ -492,9 +604,14 @@ impl Battle {
     /// Whether a foe with Imprison knows this move.
     pub(super) fn imprisoned(&self, user: MonRef, move_id: MoveId) -> bool {
         let foe = 1 - user.side;
-        (0..ACTIVE_PER_SIDE).filter_map(|p| self.sides[foe].occupant(p)).any(|m| {
-            m.hp > 0 && !m.fainted && m.volatiles.has(VolatileId::Imprison) && m.move_slot(move_id).is_some()
-        })
+        (0..ACTIVE_PER_SIDE)
+            .filter_map(|p| self.sides[foe].occupant(p))
+            .any(|m| {
+                m.hp > 0
+                    && !m.fainted
+                    && m.volatiles.has(VolatileId::Imprison)
+                    && m.move_slot(move_id).is_some()
+            })
     }
 
     /// Confusion's self-hit: getConfusionDamage (a 40 BP typeless physical
@@ -510,9 +627,15 @@ impl Battle {
         if self.mon(r).hp == 0 || !self.mon(r).is_active {
             return;
         }
+        // Berserk's onDamage: confusion counts as a single-hit move.
+        self.mon_mut(r).berserk_checked = false;
         let d = self.on_move_damage(r, damage);
         // Disguise takes it (0); otherwise at least 1.
-        let d = if self.mon(r).disguise_busted { d } else { d.max(1) };
+        let d = if self.mon(r).disguise_busted {
+            d
+        } else {
+            d.max(1)
+        };
         let dealt = self.apply_damage(r, d);
         if dealt != 0 {
             let m = self.mon_mut(r);
@@ -525,13 +648,24 @@ impl Battle {
     /// `battle.boost`: Num(0) if the target has no HP, false if it can't be
     /// boosted, null if every stage was already capped, true otherwise.
     /// `source` is who caused it (Defiant and Competitive react to foes).
-    pub(super) fn boost(&mut self, t: MonRef, boosts: &[(usize, i8)], source: Option<MonRef>) -> HitRes {
+    pub(super) fn boost(
+        &mut self,
+        t: MonRef,
+        boosts: &[(usize, i8)],
+        source: Option<MonRef>,
+    ) -> HitRes {
         self.boost_by(t, boosts, source, BoostCause::Other)
     }
 
     /// `battle.boost` with the effect behind it (some abilities only react
     /// to Intimidate, and Mirror Armor doesn't bounce its own reflection).
-    pub(super) fn boost_by(&mut self, t: MonRef, boosts: &[(usize, i8)], source: Option<MonRef>, cause: BoostCause) -> HitRes {
+    pub(super) fn boost_by(
+        &mut self,
+        t: MonRef,
+        boosts: &[(usize, i8)],
+        source: Option<MonRef>,
+        cause: BoostCause,
+    ) -> HitRes {
         let m = self.mon(t);
         if m.hp == 0 {
             return HitRes::Num(0);
@@ -553,20 +687,37 @@ impl Battle {
         let mut capped: Vec<(usize, i8)> = boosts
             .iter()
             .filter(|b| b.1 != 0)
-            .map(|&(stat, n)| (stat, (m.boosts[stat] + n * sign).clamp(-6, 6) - m.boosts[stat]))
+            .map(|&(stat, n)| {
+                (
+                    stat,
+                    (m.boosts[stat] + n * sign).clamp(-6, 6) - m.boosts[stat],
+                )
+            })
             .collect();
         // TryBoost
         let from_other = source.is_some_and(|s| s != t);
         match ability {
             "clearbody" | "whitesmoke" if source != Some(t) => capped.retain(|b| b.1 >= 0),
-            "keeneye" | "illuminate" if source != Some(t) => capped.retain(|b| !(b.0 == 5 && b.1 < 0)),
+            _ if source != Some(t)
+                && self
+                    .mon(t)
+                    .has_type(Dex::get().type_id("Grass").expect("Grass"))
+                && self.side_has_ability(t.side, "flowerveil") =>
+            {
+                capped.retain(|b| b.1 >= 0)
+            }
+            "keeneye" | "illuminate" if source != Some(t) => {
+                capped.retain(|b| !(b.0 == 5 && b.1 < 0))
+            }
             // Guard Dog (TryBoost priority 2): Intimidate raises Attack instead.
             "guarddog" if cause == BoostCause::Intimidate && capped.iter().any(|b| b.0 == 0) => {
                 capped.retain(|b| b.0 != 0);
                 self.boost(t, &[(0, 1)], Some(t));
             }
             "hypercutter" if source != Some(t) => capped.retain(|b| !(b.0 == 0 && b.1 < 0)),
-            "scrappy" | "innerfocus" | "oblivious" | "owntempo" if cause == BoostCause::Intimidate => {
+            "scrappy" | "innerfocus" | "oblivious" | "owntempo"
+                if cause == BoostCause::Intimidate =>
+            {
                 capped.retain(|b| b.0 != 0);
             }
             "mirrorarmor" if from_other && cause != BoostCause::MirrorArmor => {
@@ -590,7 +741,10 @@ impl Battle {
             _ => {}
         }
         let intimidated = capped.iter().any(|b| b.0 == 0 && b.1 != 0);
-        let (raises, lowers) = (capped.iter().any(|b| b.1 > 0), capped.iter().any(|b| b.1 < 0));
+        let (raises, lowers) = (
+            capped.iter().any(|b| b.1 > 0),
+            capped.iter().any(|b| b.1 < 0),
+        );
         let mut success = HitRes::Null;
         for (stat, n) in capped {
             let m = self.mon_mut(t);
@@ -632,21 +786,37 @@ impl Battle {
     pub(super) fn trap_source(&self, code: u32) -> Option<MonRef> {
         let side = (code >> 8) as usize;
         let uid = (code & 0xFF) as usize;
-        self.sides[side].pokemon.iter().any(|m| m.uid == uid).then_some(MonRef { side, uid })
+        self.sides[side]
+            .pokemon
+            .iter()
+            .any(|m| m.uid == uid)
+            .then_some(MonRef { side, uid })
     }
 
     /// leechseed's onResidual: the seeded Pokemon loses an eighth, and
     /// whoever stands in the seeder's slot gets it (Big Root; Liquid Ooze
     /// turns it into damage).
     fn leech_seed(&mut self, r: MonRef) {
-        let Some(v) = self.mon(r).volatiles.0.iter().find(|v| v.id == VolatileId::LeechSeed) else { return };
+        let Some(v) = self
+            .mon(r)
+            .volatiles
+            .0
+            .iter()
+            .find(|v| v.id == VolatileId::LeechSeed)
+        else {
+            return;
+        };
         let slot = v.target_loc as usize;
-        let Some(seeder) = self.occupant(slot / 2, slot % 2) else { return };
+        let Some(seeder) = self.occupant(slot / 2, slot % 2) else {
+            return;
+        };
         if self.mon(seeder).fainted || self.mon(seeder).hp == 0 {
             return;
         }
         let amount = (self.mon(r).max_hp() / 8) as u32;
-        let HitRes::Num(dealt) = self.effect_damage(r, amount) else { return };
+        let HitRes::Num(dealt) = self.effect_damage(r, amount) else {
+            return;
+        };
         if dealt == 0 {
             return;
         }
@@ -664,7 +834,10 @@ impl Battle {
     /// An active Pokemon with HP on `side` has `ability` (Ally events reach
     /// the holder itself too).
     pub(super) fn side_has_ability(&self, side: usize, ability: &str) -> bool {
-        (0..ACTIVE_PER_SIDE).any(|p| self.occupant(side, p).is_some_and(|a| self.mon(a).hp > 0 && self.ability_is(a, ability)))
+        (0..ACTIVE_PER_SIDE).any(|p| {
+            self.occupant(side, p)
+                .is_some_and(|a| self.mon(a).hp > 0 && self.ability_is(a, ability))
+        })
     }
 
     /// `pokemon.faint()`: HP to 0 and queued to faint.
@@ -686,7 +859,11 @@ impl Battle {
 
     /// `battle.heal`.
     pub(super) fn heal(&mut self, t: MonRef, amount: u32) -> HitRes {
-        let amount = if amount != 0 && amount <= 1 { 1 } else { amount };
+        let amount = if amount != 0 && amount <= 1 {
+            1
+        } else {
+            amount
+        };
         if amount == 0 {
             return HitRes::Num(0);
         }
@@ -714,7 +891,9 @@ impl Battle {
         if self.ability_is(t, "magicguard") {
             return HitRes::Bool(false);
         }
-        if !m.is_active {
+        // Berserk's onDamage: not a move, so berries may go.
+        self.mon_mut(t).berserk_checked = true;
+        if !self.mon(t).is_active {
             return HitRes::Bool(false);
         }
         let d = self.apply_damage(t, amount.max(1));
@@ -731,23 +910,49 @@ impl Battle {
         let mut handlers = Vec::new();
         // Field, then each side's conditions followed by its actives.
         if self.field.trick_room > 0 {
-            handlers.push(Residual { mon: None, what: ResidualKind::TrickRoom, order: 27, speed: 0, sub_order: 1 });
+            handlers.push(Residual {
+                mon: None,
+                what: ResidualKind::TrickRoom,
+                order: 27,
+                speed: 0,
+                sub_order: 1,
+            });
         }
         if self.field.weather != crate::damage::Weather::None {
-            handlers.push(Residual { mon: None, what: ResidualKind::Weather, order: 1, speed: 0, sub_order: 5 });
+            handlers.push(Residual {
+                mon: None,
+                what: ResidualKind::Weather,
+                order: 1,
+                speed: 0,
+                sub_order: 5,
+            });
         }
         if self.field.terrain != crate::damage::Terrain::None {
-            handlers.push(Residual { mon: None, what: ResidualKind::Terrain, order: 27, speed: 0, sub_order: 7 });
+            handlers.push(Residual {
+                mon: None,
+                what: ResidualKind::Terrain,
+                order: 27,
+                speed: 0,
+                sub_order: 7,
+            });
         }
         for side in 0..2 {
             for c in SideCondition::ALL {
                 if self.sides[side].condition(c) > 0 && !c.is_hazard() {
                     let (order, sub_order) = c.residual_order();
-                    handlers.push(Residual { mon: None, what: ResidualKind::Side(side, c), order, speed: 0, sub_order });
+                    handlers.push(Residual {
+                        mon: None,
+                        what: ResidualKind::Side(side, c),
+                        order,
+                        speed: 0,
+                        sub_order,
+                    });
                 }
             }
             for pos in 0..ACTIVE_PER_SIDE {
-                let Some(r) = self.occupant(side, pos) else { continue };
+                let Some(r) = self.occupant(side, pos) else {
+                    continue;
+                };
                 let m = self.mon(r);
                 let order = match m.status {
                     Status::Burn => Some(10),
@@ -755,22 +960,54 @@ impl Battle {
                     _ => None,
                 };
                 if let Some(order) = order {
-                    handlers.push(Residual { mon: Some(r), what: ResidualKind::Status(m.status), order, speed: m.speed, sub_order: 0 });
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::Status(m.status),
+                        order,
+                        speed: m.speed,
+                        sub_order: 0,
+                    });
                 }
                 if self.ability_is(r, "speedboost") {
-                    handlers.push(Residual { mon: Some(r), what: ResidualKind::SpeedBoost, order: 28, speed: m.speed, sub_order: 2 });
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::SpeedBoost,
+                        order: 28,
+                        speed: m.speed,
+                        sub_order: 2,
+                    });
                 }
                 if self.item_of(r) == Some("whiteherb") {
-                    handlers.push(Residual { mon: Some(r), what: ResidualKind::WhiteHerb, order: 29, speed: m.speed, sub_order: 8 });
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::WhiteHerb,
+                        order: 29,
+                        speed: m.speed,
+                        sub_order: 8,
+                    });
                 }
                 if matches!(self.ability_id(r), "healer" | "hydration" | "shedskin") {
-                    handlers.push(Residual { mon: Some(r), what: ResidualKind::Healer, order: 5, speed: m.speed, sub_order: 3 });
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::Healer,
+                        order: 5,
+                        speed: m.speed,
+                        sub_order: 3,
+                    });
                 }
                 if self.item_of(r) == Some("leftovers") {
-                    handlers.push(Residual { mon: Some(r), what: ResidualKind::Leftovers, order: 5, speed: m.speed, sub_order: 4 });
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::Leftovers,
+                        order: 5,
+                        speed: m.speed,
+                        sub_order: 4,
+                    });
                 }
                 for v in &m.volatiles.0 {
-                    if v.duration.is_some() || matches!(v.id, VolatileId::LeechSeed | VolatileId::SaltCure) {
+                    if v.duration.is_some()
+                        || matches!(v.id, VolatileId::LeechSeed | VolatileId::SaltCure)
+                    {
                         handlers.push(Residual {
                             mon: Some(r),
                             what: ResidualKind::Volatile(v.id),
@@ -781,7 +1018,13 @@ impl Battle {
                     }
                 }
                 if self.field.terrain == crate::damage::Terrain::Grassy {
-                    handlers.push(Residual { mon: Some(r), what: ResidualKind::GrassyHeal, order: 5, speed: m.speed, sub_order: 2 });
+                    handlers.push(Residual {
+                        mon: Some(r),
+                        what: ResidualKind::GrassyHeal,
+                        order: 5,
+                        speed: m.speed,
+                        sub_order: 2,
+                    });
                 }
             }
         }
@@ -820,7 +1063,10 @@ impl Battle {
                 continue;
             }
             match h.what {
-                ResidualKind::TrickRoom | ResidualKind::Side(..) | ResidualKind::Weather | ResidualKind::Terrain => unreachable!(),
+                ResidualKind::TrickRoom
+                | ResidualKind::Side(..)
+                | ResidualKind::Weather
+                | ResidualKind::Terrain => unreachable!(),
                 ResidualKind::WhiteHerb => self.white_herb(h.mon),
                 ResidualKind::SpeedBoost => {
                     if self.mon(h.mon).active_turns > 0 && self.ability_is(h.mon, "speedboost") {
@@ -842,10 +1088,17 @@ impl Battle {
                             }
                         }
                     }
-                    "hydration" if self.mon(h.mon).status != Status::None && self.effective_weather() == crate::damage::Weather::Rain => {
+                    "hydration"
+                        if self.mon(h.mon).status != Status::None
+                            && self.effective_weather() == crate::damage::Weather::Rain =>
+                    {
                         self.cure_status(h.mon);
                     }
-                    "shedskin" if self.mon(h.mon).hp > 0 && self.mon(h.mon).status != Status::None && self.chance.chance(33, 100) => {
+                    "shedskin"
+                        if self.mon(h.mon).hp > 0
+                            && self.mon(h.mon).status != Status::None
+                            && self.chance.chance(33, 100) =>
+                    {
                         self.cure_status(h.mon);
                     }
                     _ => {}
@@ -860,14 +1113,19 @@ impl Battle {
                 ResidualKind::Volatile(VolatileId::SaltCure) => {
                     let dex = Dex::get();
                     let m = self.mon(h.mon);
-                    let hard = m.has_type(dex.type_id("Water").expect("Water")) || m.has_type(dex.type_id("Steel").expect("Steel"));
+                    let hard = m.has_type(dex.type_id("Water").expect("Water"))
+                        || m.has_type(dex.type_id("Steel").expect("Steel"));
                     let amount = (m.max_hp() / if hard { 8 } else { 16 }) as u32;
                     self.effect_damage(h.mon, amount);
                 }
                 ResidualKind::Volatile(id) => {
                     let m = self.mon_mut(h.mon);
-                    let Some(v) = m.volatiles.get_mut(id) else { continue };
-                    let Some(d) = v.duration.as_mut() else { continue };
+                    let Some(v) = m.volatiles.get_mut(id) else {
+                        continue;
+                    };
+                    let Some(d) = v.duration.as_mut() else {
+                        continue;
+                    };
                     *d -= 1;
                     if *d == 0 {
                         self.end_volatile(h.mon, id);
@@ -891,8 +1149,15 @@ impl Battle {
                     // encore's onResidual: ends once the move is out of PP.
                     if id == VolatileId::Encore {
                         let m = self.mon_mut(h.mon);
-                        let mv = m.volatiles.0.iter().find(|v| v.id == id).and_then(|v| v.move_id);
-                        let has_pp = mv.and_then(|mv| m.moves.iter().find(|s| s.id == mv)).is_some_and(|s| s.pp > 0);
+                        let mv = m
+                            .volatiles
+                            .0
+                            .iter()
+                            .find(|v| v.id == id)
+                            .and_then(|v| v.move_id);
+                        let has_pp = mv
+                            .and_then(|mv| m.moves.iter().find(|s| s.id == mv))
+                            .is_some_and(|s| s.pp > 0);
                         if !has_pp {
                             m.volatiles.remove(id);
                         }
@@ -905,7 +1170,9 @@ impl Battle {
                     let max = m.max_hp() as u32;
                     let amount = match status {
                         // Heatproof's onDamage halves burn damage.
-                        Status::Burn if self.ability_is(h.mon, "heatproof") => (max / 16).max(1) / 2,
+                        Status::Burn if self.ability_is(h.mon, "heatproof") => {
+                            (max / 16).max(1) / 2
+                        }
                         Status::Burn => max / 16,
                         Status::Poison => max / 8,
                         _ => {

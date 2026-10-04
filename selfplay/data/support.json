@@ -133,6 +133,8 @@
     "seedsower",
     "purifyingsalt",
     "pickpocket",
+    "berserk",
+    "curiousmedicine",
     "protean",
     "libero",
     "mummy",
@@ -178,7 +180,15 @@
     "electromorphosis",
     "parentalbond",
     "stancechange",
-    "disguise"
+    "disguise",
+    "piercingdrill",
+    "synchronize",
+    "corrosion",
+    "flowerveil",
+    "wanderingspirit",
+    "innardsout",
+    "magician",
+    "emergencyexit"
   ],
   "items": [
     "abomasite",

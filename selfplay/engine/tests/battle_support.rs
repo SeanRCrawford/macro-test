@@ -17,5 +17,8 @@ fn support_json_is_current() {
         std::fs::write(&path, &text).unwrap();
     }
     let current = std::fs::read_to_string(&path).unwrap_or_default();
-    assert!(current == text, "data/support.json is stale: run UPDATE_SUPPORT=1 cargo test --test battle_support");
+    assert!(
+        current == text,
+        "data/support.json is stale: run UPDATE_SUPPORT=1 cargo test --test battle_support"
+    );
 }
