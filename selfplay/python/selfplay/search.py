@@ -188,7 +188,7 @@ class Search:
                 live = [r for r in roots if not r.done]
                 if not live:
                     break
-                self.stats["iterations"] += 1
+                self.stats["iterations"] += len(live)
                 self._oracle_step(tree, live)
         results = [self._result(tree, r) for r in roots]
         if deepen and c.deepen > 0:

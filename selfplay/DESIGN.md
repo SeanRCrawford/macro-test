@@ -567,8 +567,20 @@ Order of work:
    sides play the search's mix; targets are each side's mix (policy), the
    opponent's mix (opponent head) and half search value, half game result
    (value). At Nessie's size on the GPU machine.
-5. Double oracle at the root and selective deepening, then the analysis
-   board.
+5. Double oracle at the root and selective deepening (built; see below),
+   then the analysis board. `engine::search::Tree` holds positions (roots
+   copied from games, leaves an expansion keeps) and expands any (node,
+   action, action) cell, so Python can search from any node.
+   - Double oracle: start from each side's top 2 actions; scan each side's
+     legal actions (or its top `--scan`) against the opponent's current
+     mix; add up to 2 replies per side that gain more than 0.005; solve
+     again; stop when neither side gains. Each scanned action's loss
+     against the final mix is reported (the analysis board's "nearby
+     alternatives"). A test checks it reaches the full matrix's value.
+   - Selective deepening: re-expand the root's support cells keeping their
+     leaves, rank leaves by (reach probability)^2 x entropy of the static
+     evaluation, give the top `--deepen` a one-turn search of their own
+     (top 4 x 4), replace their values and solve the root again.
 
 Results so far, on this container's 4 CPU cores:
 
@@ -585,6 +597,16 @@ Results so far, on this container's 4 CPU cores:
   search still beats the policy it guides (0.71-0.79 in 100-game checks),
   so there is a lot left to distil. This is the start of the curve, not a
   result: Nessie used about 100 times as many games.
+
+- Step 5 with run 7's network, against plain one-turn search (top 8):
+  double oracle 0.545 ± 0.067 (212 games; about 760 cells, 8,350 leaves and
+  1.6 s per turn, 14 times the cost); one-turn plus deepening of 16 leaves
+  (about 10 qualify per turn) 0.468 ± 0.069 (200 games, 2.3 times the
+  cost). Neither is a clear gain yet. Both spend more evaluations of the
+  same value network, which is the weak part at this size; they are worth
+  measuring again with a GPU-trained network. Deepening also mixes depths
+  within a cell (a deepened leaf's value comes from a restricted 4 x 4
+  game), which can bias it.
 
 Rough cost on the target machine: at about 600 leaves per searched turn and
 games of about 10 turns, 375k games is about 2 billion leaf evaluations.
