@@ -442,6 +442,42 @@ const MOVE_HANDLERS: &[(&str, &[&str])] = &[
     ("mortalspin", &["onAfterHit", "onAfterSubDamage"]),
     ("endeavor", &["damageCallback", "onTryImmunity"]),
     (
+        "allyswitch",
+        &["condition.onRestart", "condition.onStart", "onHit", "onPrepareHit"],
+    ),
+    (
+        "destinybond",
+        &[
+            "condition.onBeforeMove",
+            "condition.onFaint",
+            "condition.onMoveAborted",
+            "condition.onStart",
+            "onPrepareHit",
+        ],
+    ),
+    ("bugbite", &["onHit"]),
+    (
+        "minimize",
+        &[
+            "condition.onAccuracy",
+            "condition.onRestart",
+            "condition.onSourceModifyDamage",
+        ],
+    ),
+    (
+        "chillyreception",
+        &["condition.onBeforeMove", "priorityChargeCallback"],
+    ),
+    (
+        "stockpile",
+        &[
+            "condition.onEnd",
+            "condition.onRestart",
+            "condition.onStart",
+            "onTry",
+        ],
+    ),
+    (
         "shellsidearm",
         &["onAfterSubDamage", "onHit", "onModifyMove", "onPrepareHit"],
     ),
@@ -560,6 +596,7 @@ const FIELD_MOVES: &[&str] = &[
     "spikes",
     "toxicspikes",
     "stickyweb",
+    "chillyreception",
 ];
 
 /// Moves whose secondary has an onHit that `moves` implements.
@@ -598,6 +635,9 @@ const VOLATILES: &[&str] = &[
     "substitute",
     "saltcure",
     "noretreat",
+    "minimize",
+    "destinybond",
+    "stockpile",
 ];
 
 pub fn ability_supported(id: &str) -> bool {
@@ -664,6 +704,7 @@ pub fn move_supported(m: &MoveData) -> bool {
         || matches!(
             m.id.as_str(),
             "throatchop"
+                | "allyswitch"
                 | "glaiverush"
                 | "phantomforce"
                 | "shadowforce"

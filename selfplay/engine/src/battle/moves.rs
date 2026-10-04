@@ -518,6 +518,7 @@ impl Battle {
                 c.volatiles.gem = m.volatiles.has(VolatileId::Gem);
                 c.volatiles.charge = m.volatiles.has(VolatileId::Charge);
                 c.volatiles.semi_invulnerable = semi_invulnerable(m);
+                c.volatiles.minimize = m.volatiles.has(VolatileId::Minimize);
                 c.fallen = m.fallen;
                 c.stats_lowered_this_turn = m.stats_lowered_this_turn;
                 // getStat('spe'): the action speed without Trick Room's sign.
@@ -594,6 +595,7 @@ impl Battle {
             let m = self.mon_mut(user);
             m.volatiles.remove(VolatileId::GlaiveRush);
             m.volatiles.remove(VolatileId::MustRecharge);
+            m.volatiles.remove(VolatileId::DestinyBond);
             if m.volatiles.remove(VolatileId::TwoTurnMove) {
                 m.volatiles
                     .0
@@ -605,7 +607,13 @@ impl Battle {
         let move_id = move_for_slot(self.mon(user), slot);
         let data = Dex::get().move_data(move_id);
         let target = self.get_target(user, data.target, target_loc);
-        if !self.before_move(user, move_id, data) {
+        let can_move = self.before_move(user, move_id, data);
+        // destinybond's BeforeMove (priority -1) and MoveAborted: it lasts
+        // only until the user's next move.
+        if !can_move || data.id != "destinybond" {
+            self.mon_mut(user).volatiles.remove(VolatileId::DestinyBond);
+        }
+        if !can_move {
             // MoveAborted: twoturnmove ends (and with it the charge).
             let m = self.mon_mut(user);
             if m.volatiles.remove(VolatileId::TwoTurnMove) {
@@ -1175,6 +1183,17 @@ impl Battle {
             "sunnyday" => self.set_weather(crate::damage::Weather::Sun, user),
             "sandstorm" => self.set_weather(crate::damage::Weather::Sand, user),
             "snowscape" => self.set_weather(crate::damage::Weather::Snow, user),
+            // Snow, then out (selfSwitch makes it a success if anyone can
+            // come in).
+            "chillyreception" => {
+                let snow = self.set_weather(crate::damage::Weather::Snow, user);
+                let ok = !self.switchable(user.side).is_empty() || snow;
+                if ok && self.mon(user).hp > 0 && !self.switchable(user.side).is_empty() {
+                    let id = Dex::get().move_id(&data.id).expect("move id");
+                    self.mon_mut(user).switch_flag = Some(SwitchFlag::Move(id));
+                }
+                ok
+            }
             "electricterrain" => self.set_terrain(crate::damage::Terrain::Electric, user),
             "grassyterrain" => self.set_terrain(crate::damage::Terrain::Grassy, user),
             "mistyterrain" => self.set_terrain(crate::damage::Terrain::Misty, user),
@@ -1281,6 +1300,16 @@ impl Battle {
                 }
             }
             "noretreat" if self.mon(user).volatiles.has(VolatileId::NoRetreat) => return Ok(false),
+            "stockpile"
+                if self
+                    .mon(user)
+                    .volatiles
+                    .0
+                    .iter()
+                    .any(|v| v.id == VolatileId::Stockpile && v.counter >= 3) =>
+            {
+                return Ok(false)
+            }
             "upperhand" => {
                 let ok = self.queued_move_priority(targets[0]).is_some_and(|(m, p)| {
                     p > 0.1 && Dex::get().move_data(m).category != Category::Status
@@ -1293,6 +1322,17 @@ impl Battle {
         }
         if data.has_key("stallingMove") && !(self.will_act() && self.stall_move(user)) {
             return Ok(false);
+        }
+        // The move's onPrepareHit: Destiny Bond fails if still up from last
+        // time; Ally Switch may fail on consecutive use.
+        match data.id.as_str() {
+            "destinybond" if self.mon_mut(user).volatiles.remove(VolatileId::DestinyBond) => {
+                return Ok(false)
+            }
+            "allyswitch" if !self.add_volatile(user, VolatileId::AllySwitch).truthy() => {
+                return Ok(false)
+            }
+            _ => {}
         }
         // PrepareHit: Protean and Libero.
         if !bounced {
@@ -1501,9 +1541,10 @@ impl Battle {
         let Some(mut acc) = data.accuracy else {
             return true;
         };
-        // The Accuracy event: glaiverush (anything hits its holder) and No
-        // Guard (on either side of the move).
-        if self.mon(t).volatiles.has(VolatileId::GlaiveRush)
+        // The Accuracy event: glaiverush (anything hits its holder), No
+        // Guard (on either side of the move) and Minimize's weakness.
+        if (self.mon(t).volatiles.has(VolatileId::Minimize) && data.flags.has("minimize"))
+            || self.mon(t).volatiles.has(VolatileId::GlaiveRush)
             || self.ability_is(user, "noguard")
             || self.ability_is(t, "noguard")
         {
@@ -2601,6 +2642,23 @@ impl Battle {
                     return HitRes::Bool(false);
                 }
                 m.set_types([psychic, psychic]);
+                HitRes::Undefined
+            }
+            "allyswitch" => {
+                if self.swap_position(user) {
+                    HitRes::Undefined
+                } else {
+                    HitRes::NotFail
+                }
+            }
+            // Bug Bite: steal and eat the target's berry.
+            "bugbite" | "pluck" => {
+                let berry = self.mon(t).item.filter(|&i| Dex::get().item(i).is_berry);
+                if self.mon(user).hp > 0 && berry.is_some() {
+                    if let Some(item) = self.take_item(t, user) {
+                        self.eat_effect(user, item);
+                    }
+                }
                 HitRes::Undefined
             }
             "soak" => {

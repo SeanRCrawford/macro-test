@@ -322,6 +322,29 @@ impl Battle {
                     v.duration = Some(2);
                     HitRes::Bool(true)
                 }
+                // allyswitch's onRestart: 1 in `counter` to keep going.
+                VolatileId::AllySwitch => {
+                    let counter = v.counter.max(1);
+                    if !self.chance.chance(1, counter) {
+                        self.mon_mut(t).volatiles.remove(VolatileId::AllySwitch);
+                        return HitRes::Bool(false);
+                    }
+                    let v = self.mon_mut(t).volatiles.get_mut(id).expect("allyswitch");
+                    if v.counter < 729 {
+                        v.counter *= 3;
+                    }
+                    v.duration = Some(2);
+                    HitRes::Bool(true)
+                }
+                // stockpile's onRestart: up to three layers.
+                VolatileId::Stockpile => {
+                    if v.counter >= 3 {
+                        return HitRes::Bool(false);
+                    }
+                    v.counter += 1;
+                    self.boost(t, &[(1, 1), (3, 1)], Some(t));
+                    HitRes::Bool(true)
+                }
                 // helpinghand's onRestart: the multiplier grows again.
                 VolatileId::HelpingHand => {
                     v.counter += 1;
@@ -376,8 +399,8 @@ impl Battle {
         let mut duration = id.duration();
         let mut move_id = None;
         let counter = match id {
-            VolatileId::Stall => 3,
-            VolatileId::HelpingHand => 1,
+            VolatileId::Stall | VolatileId::AllySwitch => 3,
+            VolatileId::HelpingHand | VolatileId::Stockpile => 1,
             // confusion's onStart: 2-5 turns.
             VolatileId::Confusion => self.chance.random_range(2, 6),
             VolatileId::PartiallyTrapped => {
@@ -448,6 +471,10 @@ impl Battle {
             effect_order,
             target_loc: 0,
         });
+        // stockpile's onStart: +1 Defense and Sp. Def.
+        if id == VolatileId::Stockpile {
+            self.boost(t, &[(1, 1), (3, 1)], Some(t));
+        }
         HitRes::Bool(true)
     }
 

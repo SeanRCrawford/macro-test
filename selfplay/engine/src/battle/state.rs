@@ -87,6 +87,16 @@ pub enum VolatileId {
     PartiallyTrapped,
     /// A Gem's boost to this move.
     Gem,
+    /// Minimize: moves with the minimize flag always hit for double damage.
+    Minimize,
+    /// Destiny Bond: a foe's move that faints it faints the foe too.
+    DestinyBond,
+    /// Ally Switch's consecutive-use counter (1 in `counter`).
+    AllySwitch,
+    /// Stockpile; `counter` is the layers.
+    Stockpile,
+    /// About to use Chilly Reception (its priorityChargeCallback).
+    ChillyReception,
 }
 
 impl VolatileId {
@@ -124,6 +134,11 @@ impl VolatileId {
             "saltcure" => VolatileId::SaltCure,
             "noretreat" => VolatileId::NoRetreat,
             "charge" => VolatileId::Charge,
+            "minimize" => VolatileId::Minimize,
+            "destinybond" => VolatileId::DestinyBond,
+            "allyswitch" => VolatileId::AllySwitch,
+            "stockpile" => VolatileId::Stockpile,
+            "chillyreception" => VolatileId::ChillyReception,
             _ => return None,
         })
     }
@@ -165,6 +180,11 @@ impl VolatileId {
             VolatileId::SaltCure => "saltcure",
             VolatileId::NoRetreat => "noretreat",
             VolatileId::Charge => "charge",
+            VolatileId::Minimize => "minimize",
+            VolatileId::DestinyBond => "destinybond",
+            VolatileId::AllySwitch => "allyswitch",
+            VolatileId::Stockpile => "stockpile",
+            VolatileId::ChillyReception => "chillyreception",
         }
     }
 
@@ -209,7 +229,12 @@ impl VolatileId {
             | VolatileId::Substitute
             | VolatileId::SaltCure
             | VolatileId::NoRetreat
+            | VolatileId::Minimize
+            | VolatileId::DestinyBond
+            | VolatileId::Stockpile
             | VolatileId::Charge => None,
+            VolatileId::AllySwitch => Some(2),
+            VolatileId::ChillyReception => Some(1),
             VolatileId::HealBlock => Some(2),
             // durationCallback: 5 or 6, rolled when it starts.
             VolatileId::PartiallyTrapped => Some(5),

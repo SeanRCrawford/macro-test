@@ -304,6 +304,36 @@ impl Battle {
         true
     }
 
+    /// A berry's onEat for `eater` (Bug Bite eats the target's).
+    pub(super) fn eat_effect(&mut self, eater: MonRef, item: ItemId) {
+        use crate::damage::Status;
+        match Dex::get().item(item).id.as_str() {
+            "sitrusberry" => {
+                let amount = (self.mon(eater).max_hp() / 4) as u32;
+                self.heal(eater, amount);
+            }
+            "lumberry" => {
+                self.cure_status(eater);
+                self.mon_mut(eater).volatiles.remove(VolatileId::Confusion);
+            }
+            "chestoberry" if self.mon(eater).status == Status::Sleep => {
+                self.cure_status(eater);
+            }
+            "leppaberry" => {
+                let m = self.mon_mut(eater);
+                let slot = m
+                    .moves
+                    .iter()
+                    .position(|s| s.pp == 0)
+                    .or_else(|| m.moves.iter().position(|s| s.pp < s.max_pp));
+                if let Some(i) = slot {
+                    m.moves[i].pp = (m.moves[i].pp + 10).min(m.moves[i].max_pp);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Update for status-curing and PP items: Mental Herb, Lum, Chesto, Leppa.
     fn item_update(&mut self, r: MonRef) {
         use super::state::VolatileId as V;

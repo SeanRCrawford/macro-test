@@ -64,6 +64,7 @@ pub struct Volatiles {
     pub gem: bool,
     /// Charging a semi-invulnerable move (Dig, Dive, Fly, Bounce...).
     pub semi_invulnerable: Option<MoveId>,
+    pub minimize: bool,
 }
 
 /// A Pokemon as the damage calculation sees it.
@@ -261,6 +262,7 @@ enum VolatileKind {
     Gem,
     /// The charging move's own condition (Dig, Dive, Fly, Bounce).
     SemiInvulnerable(MoveId),
+    Minimize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,6 +632,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                 VolatileKind::FlashFire => &d.ability(d.ability_id("flashfire").unwrap()).condition,
                 VolatileKind::Gem => &d.condition(d.condition_id("gem").unwrap()).handlers,
                 VolatileKind::SemiInvulnerable(m) => &d.move_data(m).condition,
+                VolatileKind::Minimize => move_cond("minimize"),
             },
             Effect::Weather(w) => {
                 let id = match w {
@@ -742,6 +745,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         }
         if let Some(m) = v.semi_invulnerable {
             out.push(Effect::Volatile(VolatileKind::SemiInvulnerable(m)));
+        }
+        if v.minimize {
+            out.push(Effect::Volatile(VolatileKind::Minimize));
         }
         out.push(Effect::Ability(m.ability));
         if let Some(it) = m.item {
@@ -1886,6 +1892,9 @@ impl<'a, 'b> Calc<'a, 'b> {
                         ),
                         None => return self.not_implemented(r),
                     }
+                }
+                (Effect::Volatile(VolatileKind::Minimize), "onSourceModifyDamage") => {
+                    yes(mv.flags.has("minimize"), of(2, 1))
                 }
                 (Effect::Volatile(VolatileKind::GlaiveRush), "onSourceModifyDamage") => {
                     Act::Chain(of(2, 1))

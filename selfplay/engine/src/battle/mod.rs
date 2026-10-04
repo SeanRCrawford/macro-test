@@ -66,6 +66,10 @@ enum ActionKind {
     MegaEvo {
         mon: MonRef,
     },
+    /// A move's priorityChargeCallback (Chilly Reception's message).
+    PriorityCharge {
+        mon: MonRef,
+    },
     Switch {
         mon: MonRef,
         target: MonRef,
@@ -338,6 +342,10 @@ impl Battle {
                     200,
                     0.0,
                 )?;
+                let id = moves::move_for_slot(self.mon(mon), slot);
+                if Dex::get().move_data(id).handlers.has("priorityChargeCallback") {
+                    self.add_action(ActionKind::PriorityCharge { mon }, 107, 0.0)?;
+                }
             }
         }
         Ok(())
@@ -419,6 +427,7 @@ impl Battle {
                 Some(*mon)
             }
             ActionKind::MegaEvo { mon }
+            | ActionKind::PriorityCharge { mon }
             | ActionKind::Switch { mon, .. }
             | ActionKind::RunSwitch { mon } => Some(*mon),
             _ => None,
@@ -561,6 +570,22 @@ impl Battle {
     }
 
     /// `queue.willMove(pokemon)`.
+    /// `swapPosition` with the ally (Ally Switch): false if there's no
+    /// (unfainted) ally to trade places with.
+    pub(super) fn swap_position(&mut self, r: MonRef) -> bool {
+        let side = r.side;
+        let pos = self.mon(r).position;
+        let new_pos = 1 - pos;
+        match self.occupant(side, new_pos) {
+            Some(o) if !self.mon(o).fainted => {}
+            _ => return false,
+        }
+        self.sides[side].pokemon.swap(pos, new_pos);
+        self.sides[side].pokemon[pos].position = pos;
+        self.sides[side].pokemon[new_pos].position = new_pos;
+        true
+    }
+
     /// The active move's contact flag (Shell Side Arm may add it).
     pub(super) fn contact(&self, data: &crate::dex::MoveData) -> bool {
         data.flags.has("contact") || (data.id == "shellsidearm" && self.ssa_physical)
@@ -803,6 +828,12 @@ impl Battle {
                 self.run_move(mon, slot, target_loc, action.priority as i8)?;
             }
             ActionKind::MegaEvo { mon } => self.run_mega_evo(mon)?,
+            ActionKind::PriorityCharge { mon } => {
+                let m = self.mon(mon);
+                if m.is_active && !m.fainted {
+                    self.add_volatile(mon, state::VolatileId::ChillyReception);
+                }
+            }
             ActionKind::Switch { mon, target } => {
                 let pos = self.mon(mon).position;
                 assert!(
@@ -965,6 +996,10 @@ impl Battle {
                     | V::Disable
                     | V::Imprison
                     | V::FlashFire
+                    | V::SaltCure
+                    | V::Minimize
+                    | V::DestinyBond
+                    | V::Stockpile
             ) {
                 continue;
             }
@@ -1165,6 +1200,12 @@ impl Battle {
             if m.fainted {
                 continue;
             }
+            // destinybond's onFaint: a foe's move takes the foe down too.
+            let bond = m.volatiles.has(state::VolatileId::DestinyBond);
+            if let Some(s) = source.filter(|s| bond && s.side != r.side) {
+                self.faint(s);
+            }
+            let m = self.mon_mut(r);
             m.fainted = true;
             m.is_active = false;
             m.clear_volatile();
@@ -1400,6 +1441,7 @@ fn action_belongs_to(a: &Action, r: MonRef) -> bool {
     match &a.kind {
         ActionKind::Move { mon, .. }
         | ActionKind::MegaEvo { mon }
+        | ActionKind::PriorityCharge { mon }
         | ActionKind::Switch { mon, .. }
         | ActionKind::RunSwitch { mon } => *mon == r,
         _ => false,
