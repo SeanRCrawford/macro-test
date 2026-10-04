@@ -153,7 +153,6 @@ class SlotActions(nn.Module):
         self.pass_ = nn.Parameter(torch.zeros(d))
         self.context = nn.Linear(2 * d, d)
         self.out = nn.Sequential(nn.GELU(), nn.Linear(d, d))
-        self.register_buffer("target_kind", torch.eye(5), persistent=False)
         self.register_buffer("mega", torch.tensor([0.0, 1.0]), persistent=False)
 
     def forward(self, h, ints, mons, observer: bool):
@@ -182,14 +181,16 @@ class SlotActions(nn.Module):
                 pick(fm[..., DISABLED:DISABLED + 4], w).unsqueeze(-1),
             ], -1)
             dmg = pick(fm[..., DAMAGE:DAMAGE + 20], w).view(B, 4, 5, 1)
-            x = torch.cat([
-                moves[:, :, None, None].expand(B, 4, 5, 2, moves.shape[-1]),
-                dmg[:, :, :, None].expand(B, 4, 5, 2, 1),
-                targets[:, None, :, None].expand(B, 4, 5, 2, d),
-                self.target_kind[None, None, :, None].expand(B, 4, 5, 2, 5),
-                self.mega[None, None, None, :, None].expand(B, 4, 5, 2, 1),
-            ], -1)
-            e = torch.cat([self.move(x).reshape(B, N_MOVE, d), switch,
+            # self.move applied to [move, damage, target, target kind, mega]
+            # for every (move, target, mega), computed per part and broadcast.
+            W, nm = self.move.weight, moves.shape[-1]
+            m_part = moves @ W[:, :nm].T                                      # [B, 4, d]
+            d_part = dmg * W[:, nm]                                           # [B, 4, 5, d]
+            t_part = targets @ W[:, nm + 1:nm + 1 + d].T + W[:, nm + 1 + d:nm + 6 + d].T  # [B, 5, d]
+            mega = W[:, nm + 6 + d]
+            x = (m_part[:, :, None, None] + d_part[:, :, :, None] + t_part[:, None, :, None]
+                 + self.mega[:, None] * mega + self.move.bias)                # [B, 4, 5, 2, d]
+            e = torch.cat([x.reshape(B, N_MOVE, d), switch,
                            self.pass_.expand(B, 1, d)], 1)                    # [B, 47, d]
             ctx = self.context(torch.cat([tok, g], -1)).unsqueeze(1)
             out.append(self.out(e + ctx))

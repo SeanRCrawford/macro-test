@@ -247,10 +247,26 @@ treat every decision point the same way.
   in a turn goes through one chance interface. A turn can run in three ways:
   sampled (training), with every outcome forced (tests, and an analysis board
   that lets the user pick outcomes), or enumerated, returning each distinct
-  outcome with its probability. Enumeration groups the 16 damage rolls into
-  "KOs" and "doesn't KO" bands where the exact roll doesn't change the
-  position class. This is what Nessie's search needs, and what the
-  lead-and-move advice tool needs to show "X% to win if you do this".
+  outcome with its probability. This is what Nessie's search needs, and what
+  the lead-and-move advice tool needs to show "X% to win if you do this".
+- **As built** (`chance.rs`, `enumerate.rs`): a `Scripted` chance forces the
+  class of outcome taken at each draw and records every class's
+  probability; `enumerate` replays the turn best-first over the classes not
+  taken, up to a cap, and reports the probability left out.
+  - Draws are split only where the outcome plays differently: a damage roll
+    into "KOs" and "doesn't" (optionally more bands, each represented by its
+    middle roll), a secondary's `random(100)` into "triggers" and
+    "doesn't", multi-hit counts into 2/3/4/5, Effect Spore into its four
+    results.
+  - Approximation: ties between event handlers (residuals, switch-in
+    abilities of equally fast Pokemon) keep their collected order when
+    enumerating, instead of doubling the outcomes for each tied sort.
+    Speed ties in the action queue are enumerated.
+  - Sampled and policy modes draw exactly as before, so the Showdown
+    fixtures are unchanged. With 16 bands, enumerated expectations match
+    sampling (`tests/enumerate.rs`).
+  - Size, for a random joint action in mid-game corpus positions: median 6
+    outcomes per cell, 1 in 10 over 54, at most 968.
 
 ### 4.5 Hidden information
 
