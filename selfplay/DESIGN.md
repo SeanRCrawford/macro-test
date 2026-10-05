@@ -613,6 +613,41 @@ games of about 10 turns, 375k games is about 2 billion leaf evaluations.
 With the network on the GPU and the engine on 16 cores, that's roughly a
 day; it's worth measuring the first hour before committing to it.
 
+### 4.15 Tools for people, and the team builder (planned)
+
+- **Corpus folders** (`corpus::load_sources`): the tournament corpus plus
+  `../data/teams` and `../data/my_teams` at weight 4. All 18 of those
+  teams are legal and supported.
+- **Play against the bot** (`python/selfplay/play.py`): the terminal shows
+  each side as `Battle::view` describes it (your HP in points, the bot's as
+  a percentage), what changed since the last decision (the engine keeps no
+  battle log yet), and the bot's choice after each turn. `h` shows the
+  search's mix for your side.
+- **Teams against the meta** (`python/selfplay/meta.py`): fixed matchups
+  (`VecEnv::set_matchups`) between each team and every placed tournament
+  team, on both sides, the bot playing both.
+- **Crash safety**: a game whose step panics ends as a draw and is reported
+  (corpus team names, seed, every action, panic location and engine call
+  path) to `engine_crashes.jsonl`; `examples/replay_crash.rs` replays it.
+
+**Team builder (next, after the model).** Find a team that does well
+against the meta under constraints such as "at least 4 of these 80 sets, up
+to 2 anything".
+
+- Objective: the weighted win rate against the placed teams, as `meta.py`
+  measures it.
+- Candidates: species from the pool, each with sets from the user's list or
+  from usage (`data/regmc_pool.json`: common spreads, moves, items), under
+  species and item clauses and one Mega per team.
+- Search: local search (swap a member, a set, an item or a move) with
+  racing: rate many candidates with a few games each, keep the best
+  fraction, double the games, repeat. A cheap prefilter: the value
+  network's estimate at team preview for each meta matchup, one forward
+  pass per pairing.
+- Prerequisite: the bot has to play unfamiliar teams well, or ratings of new
+  teams mean little. That is Nessie's team mutation (train on perturbed
+  sets), which should come first.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

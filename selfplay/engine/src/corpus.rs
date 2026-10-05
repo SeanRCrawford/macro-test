@@ -108,6 +108,41 @@ pub fn load_dir(dir: &Path) -> std::io::Result<(Vec<CorpusTeam>, Vec<Rejected>)>
     Ok((teams, rejected))
 }
 
+/// Load several folders as one corpus. Each source is `PATH` or
+/// `PATH=WEIGHT`: WEIGHT, if given, replaces the placement weight of every
+/// team in that folder. Teams from every source but the first are named
+/// "<folder name>/<file name>", so names stay unique.
+pub fn load_sources(sources: &[String]) -> std::io::Result<(Vec<CorpusTeam>, Vec<Rejected>)> {
+    let (mut teams, mut rejected) = (Vec::new(), Vec::new());
+    for (i, src) in sources.iter().enumerate() {
+        let (path, weight) = match src.rsplit_once('=') {
+            Some((p, w)) if w.parse::<f64>().is_ok() => (p, w.parse::<f64>().ok()),
+            _ => (src.as_str(), None),
+        };
+        let dir = Path::new(path);
+        let (mut t, mut r) = load_dir(dir)?;
+        let prefix = if i == 0 {
+            String::new()
+        } else {
+            dir.file_name()
+                .map(|n| format!("{}/", n.to_string_lossy()))
+                .unwrap_or_default()
+        };
+        for team in &mut t {
+            team.name = format!("{prefix}{}", team.name);
+            if let Some(w) = weight {
+                team.weight = w;
+            }
+        }
+        for x in &mut r {
+            x.name = format!("{prefix}{}", x.name);
+        }
+        teams.append(&mut t);
+        rejected.append(&mut r);
+    }
+    Ok((teams, rejected))
+}
+
 fn check(text: &str) -> Result<Vec<PokemonSet>, String> {
     let sets = team::parse_paste(text)?;
     if sets.len() != 6 {

@@ -93,6 +93,11 @@ impl TeamSampler {
         &self.teams[i]
     }
 
+    /// The index of the team called `name`.
+    pub fn find(&self, name: &str) -> Option<usize> {
+        self.teams.iter().position(|t| t.name == name)
+    }
+
     pub fn sample(&self, rng: &mut Rng) -> usize {
         let total = *self.cumulative.last().expect("a non-empty corpus");
         let x = (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * total;
@@ -102,8 +107,8 @@ impl TeamSampler {
     }
 }
 
-fn new_game(sampler: &TeamSampler, mut rng: Rng, turn_limit: u32) -> Game {
-    let teams = [sampler.sample(&mut rng), sampler.sample(&mut rng)];
+fn new_game(sampler: &TeamSampler, mut rng: Rng, turn_limit: u32, pair: Option<[usize; 2]>) -> Game {
+    let teams = pair.unwrap_or_else(|| [sampler.sample(&mut rng), sampler.sample(&mut rng)]);
     let sets: [Vec<PokemonSet>; 2] = teams.map(|i| sampler.team(i).sets.clone());
     let seed = rng.next_u64();
     let mut battle = Battle::new(sets, Chance::seeded(seed)).expect("corpus teams are supported");
@@ -125,6 +130,10 @@ pub struct VecEnv {
     crashes: Vec<String>,
     /// Test hook: make this game's next step panic.
     inject: Option<usize>,
+    /// Fixed (side 0, side 1) team pairs new games cycle through, instead
+    /// of sampling (`set_matchups`), and the next one to use.
+    matchups: Vec<[usize; 2]>,
+    next_matchup: usize,
 }
 
 thread_local! {
@@ -163,7 +172,7 @@ impl VecEnv {
         assert!(!sampler.is_empty(), "no teams to play");
         let mut seeder = Rng::new(config.seed);
         let games = (0..n)
-            .map(|_| new_game(&sampler, Rng::new(seeder.next_u64()), config.turn_limit))
+            .map(|_| new_game(&sampler, Rng::new(seeder.next_u64()), config.turn_limit, None))
             .collect();
         VecEnv {
             games,
@@ -171,6 +180,8 @@ impl VecEnv {
             config,
             crashes: Vec::new(),
             inject: None,
+            matchups: Vec::new(),
+            next_matchup: 0,
         }
     }
 
@@ -193,6 +204,29 @@ impl VecEnv {
     /// Worker threads `observe` and `step` use.
     pub fn worker_threads(&self) -> usize {
         self.threads()
+    }
+
+    pub fn sampler(&self) -> &TeamSampler {
+        &self.sampler
+    }
+
+    /// Play only these (side 0, side 1) corpus team pairs from now on,
+    /// cycling through them; every game restarts with the next pair. An
+    /// empty list goes back to sampling by weight (from the next new game).
+    pub fn set_matchups(&mut self, pairs: Vec<[usize; 2]>) {
+        assert!(pairs.iter().flatten().all(|&t| t < self.sampler.len()), "no such team");
+        self.matchups = pairs;
+        self.next_matchup = 0;
+        if self.matchups.is_empty() {
+            return;
+        }
+        let limit = self.config.turn_limit;
+        for g in 0..self.games.len() {
+            let pair = self.matchups[self.next_matchup % self.matchups.len()];
+            self.next_matchup += 1;
+            let rng = Rng::new(self.games[g].rng.next_u64());
+            self.games[g] = new_game(&self.sampler, rng, limit, Some(pair));
+        }
     }
 
     /// The corpus teams game `i` is playing.
@@ -313,6 +347,9 @@ impl VecEnv {
         let limit = self.config.turn_limit;
         let errors = std::sync::Mutex::new(Vec::new());
         let crashes = std::sync::Mutex::new(Vec::new());
+        // With fixed matchups, finished games are replaced afterwards, in
+        // game order, so each pair gets its turn.
+        let fixed = !self.matchups.is_empty();
         let inject = self.inject.take();
         let work: Vec<_> = self
             .games
@@ -348,8 +385,10 @@ impl VecEnv {
                             reward: [0.0, 0.0],
                             turns: game.battle.turn.min(limit),
                         });
-                        let rng = Rng::new(game.rng.next_u64());
-                        *game = new_game(sampler, rng, limit);
+                        if !fixed {
+                            let rng = Rng::new(game.rng.next_u64());
+                            *game = new_game(sampler, rng, limit, None);
+                        }
                         continue;
                     }
                 }
@@ -363,12 +402,24 @@ impl VecEnv {
                         reward,
                         turns: game.battle.turn.min(limit),
                     });
-                    let rng = Rng::new(game.rng.next_u64());
-                    *game = new_game(sampler, rng, limit);
+                    if !fixed {
+                        let rng = Rng::new(game.rng.next_u64());
+                        *game = new_game(sampler, rng, limit, None);
+                    }
                 }
             }
         });
         self.crashes.extend(crashes.into_inner().expect("crashes"));
+        if fixed {
+            for (g, f) in finished.iter().enumerate() {
+                if f.is_some() {
+                    let pair = self.matchups[self.next_matchup % self.matchups.len()];
+                    self.next_matchup += 1;
+                    let rng = Rng::new(self.games[g].rng.next_u64());
+                    self.games[g] = new_game(&self.sampler, rng, limit, Some(pair));
+                }
+            }
+        }
         let errors = errors.into_inner().expect("errors");
         match errors.first() {
             Some(e) => Err(e.clone()),

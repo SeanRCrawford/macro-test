@@ -7,7 +7,7 @@
 
 use engine::battle::Battle;
 use engine::chance::Chance;
-use engine::corpus::load_dir;
+use engine::corpus::load_sources;
 use engine::env::action::{self, Decision};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
@@ -22,8 +22,15 @@ fn main() {
     )
     .expect("a JSON report");
     println!("reported panic: {}", report["panic"]);
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/corpus");
-    let (teams, _) = load_dir(&dir).expect("corpus");
+    // The default corpus folders (python/selfplay/env.py DEFAULT_CORPUS).
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut sources = vec![root.join("data/corpus").display().to_string()];
+    for d in ["../data/teams", "../data/my_teams"] {
+        if root.join(d).is_dir() {
+            sources.push(format!("{}=4", root.join(d).display()));
+        }
+    }
+    let (teams, _) = load_sources(&sources).expect("corpus");
     let sets = [0, 1].map(|s| {
         let name = report["teams"][s].as_str().expect("team name");
         teams

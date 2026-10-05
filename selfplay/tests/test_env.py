@@ -49,3 +49,36 @@ def test_illegal_action_is_an_error():
     env.observe()
     with pytest.raises(ValueError):
         env.step(np.array([[10_000, 0]]))
+
+
+def test_matchups_cycle_through_fixed_pairs():
+    from selfplay.env import SelfPlayEnv
+    env = SelfPlayEnv(6, seed=4)
+    pairs = [(0, 1), (2, 3), (4, 5)]
+    env.set_matchups(pairs)
+    current = [env.game_teams(g) for g in range(env.num_envs)]
+    assert set(current) <= set(pairs)
+    counts = {p: 0 for p in pairs}
+    finished = 0
+    while finished < 30:
+        env.observe()
+        r = env.step(env.random_actions(finished))
+        for g in np.flatnonzero(r.done):
+            counts[current[g]] += 1
+            current[g] = env.game_teams(g)
+            finished += 1
+    assert all(c >= 6 for c in counts.values()), counts
+    env.set_matchups([])
+
+
+def test_team_lookup_and_views():
+    from selfplay.env import SelfPlayEnv
+    env = SelfPlayEnv(1, seed=1)
+    names = env.team_names()
+    assert env.team_index(names[5]) == 5
+    with pytest.raises(ValueError):
+        env.team_index("Team")              # matches many
+    env.set_matchups([(3, 7)])
+    v = env.view(0, 0)
+    assert len(v["you"]["pokemon"]) == 6 and len(v["foe"]["pokemon"]) == 6
+    assert all(len(p["moves"]) == 4 for p in v["foe"]["pokemon"])

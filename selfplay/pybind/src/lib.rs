@@ -119,32 +119,35 @@ fn fill<T: Element + Copy>(py: Python<'_>, dst: &Bound<'_, PyAny>, src: &[T], wh
 #[pyclass(module = "selfplay._engine")]
 struct VecEnv {
     env: engine::env::VecEnv,
+    rejected: Vec<(String, String)>,
     actions: Vec<i64>,
     finished: Vec<Option<Finished>>,
 }
 
 #[pymethods]
 impl VecEnv {
-    /// `corpus_dir`: a folder of Showdown pastes (weighted by placement).
+    /// `corpus`: folders of Showdown pastes, each "PATH" (teams weighted by
+    /// tournament placement) or "PATH=WEIGHT" (every team that weight).
     #[new]
-    #[pyo3(signature = (num_envs, corpus_dir, seed=0, turn_limit=30, perfect_info=true, threads=0))]
+    #[pyo3(signature = (num_envs, corpus, seed=0, turn_limit=30, perfect_info=true, threads=0))]
     fn new(
         num_envs: usize,
-        corpus_dir: &str,
+        corpus: Vec<String>,
         seed: u64,
         turn_limit: u32,
         perfect_info: bool,
         threads: usize,
     ) -> PyResult<Self> {
-        let (teams, _) = corpus::load_dir(std::path::Path::new(corpus_dir))
-            .map_err(|e| PyValueError::new_err(format!("{corpus_dir}: {e}")))?;
+        let (teams, rejected) = corpus::load_sources(&corpus)
+            .map_err(|e| PyValueError::new_err(format!("{corpus:?}: {e}")))?;
         if teams.is_empty() {
-            return Err(PyValueError::new_err(format!("{corpus_dir}: no playable teams")));
+            return Err(PyValueError::new_err(format!("{corpus:?}: no playable teams")));
         }
         let config = EnvConfig { turn_limit, perfect_info, seed, threads };
         let env = engine::env::VecEnv::new(num_envs, TeamSampler::new(teams), config);
         Ok(VecEnv {
             env,
+            rejected: rejected.into_iter().map(|r| (r.name, r.reason)).collect(),
             actions: vec![-1; num_envs * 2],
             finished: vec![None; num_envs],
         })
@@ -311,6 +314,51 @@ impl VecEnv {
         let env = &self.env;
         py.detach(|| env.greedy_actions(&mut actions));
         fill(py, out, &actions, "out")
+    }
+
+    /// The corpus teams' names, in index order.
+    fn team_names(&self) -> Vec<String> {
+        let s = self.env.sampler();
+        (0..s.len()).map(|i| s.team(i).name.clone()).collect()
+    }
+
+    /// The corpus teams' sampling weights, in index order.
+    fn team_weights(&self) -> Vec<f64> {
+        let s = self.env.sampler();
+        (0..s.len()).map(|i| s.team(i).weight).collect()
+    }
+
+    /// Pastes left out of the corpus, with the reason: (name, reason).
+    fn rejected(&self) -> Vec<(String, String)> {
+        self.rejected.clone()
+    }
+
+    /// Play only these (side 0 team, side 1 team) index pairs, cycling;
+    /// every game restarts. An empty list goes back to sampling.
+    fn set_matchups(&mut self, pairs: Vec<(usize, usize)>) -> PyResult<()> {
+        let n = self.env.sampler().len();
+        if pairs.iter().any(|&(a, b)| a >= n || b >= n) {
+            return Err(PyValueError::new_err("no such team"));
+        }
+        self.env.set_matchups(pairs.into_iter().map(|(a, b)| [a, b]).collect());
+        Ok(())
+    }
+
+    /// The (side 0, side 1) team indices game `i` is playing.
+    fn game_teams(&self, i: usize) -> PyResult<(usize, usize)> {
+        if i >= self.env.len() {
+            return Err(PyValueError::new_err("no such game"));
+        }
+        let [a, b] = self.env.teams(i);
+        Ok((a, b))
+    }
+
+    /// Game `i` as `side` sees it, as JSON for people (the play screen).
+    fn view(&self, i: usize, side: usize) -> PyResult<String> {
+        if i >= self.env.len() || side > 1 {
+            return Err(PyValueError::new_err("no such game or side"));
+        }
+        Ok(self.env.battle(i).view(side).to_string())
     }
 
     /// A search tree whose roots are copies of `games` (node i is games[i]).

@@ -74,6 +74,34 @@ Each turn is solved as a matrix game between both sides' top-k joint
 actions, every cell scored over its chance outcomes by the value network
 (DESIGN.md 4.14).
 
+## Teams
+
+Training plays the tournament teams in `data/corpus` (weighted by
+placement in the file name) plus your teams in `../data/teams` and
+`../data/my_teams` (weight 4, as a top-8 team). Teams from those folders
+are named "teams/<file>" and "my_teams/<file>". Teams that aren't legal or
+use something the engine doesn't support are left out;
+`SelfPlayEnv(1).rejected()` lists them with the reason.
+
+## Play against the bot
+
+    python -m selfplay.play runs/search/model.pt --you "my_teams/pseudo" --bot "teams/sand"
+    python -m selfplay.play runs/search/model.pt --list          # team names
+
+Teams are chosen by name or a unique part of it (random if left out). Each
+turn, pick each Pokemon's action from the list; `h` shows the search's mix
+for your side and its win estimate. The bot plays the one-turn search
+(`--bot-plays double-oracle` or `policy` to change it).
+
+## Teams against the meta
+
+    python -m selfplay.meta runs/search/model.pt --teams my_teams teams/ --games 20 --csv meta.csv
+
+Plays each team against every placed tournament team (Champion to Top 32),
+on both sides, with the bot playing both, and ranks the teams by win rate
+(plain and weighted by the opponents' placement), with their worst
+matchups. The CSV has every matchup.
+
 ## Regenerate data from Showdown
 
 Showdown is the rules authority. Both scripts need a built checkout of
