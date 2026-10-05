@@ -143,7 +143,7 @@ thread_local! {
 
 /// Record each panic's location and backtrace for `crash_report` (then run
 /// the usual hook, which prints the message).
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let previous = std::panic::take_hook();
@@ -452,13 +452,23 @@ pub(crate) fn run_parallel<W: Send>(work: Vec<W>, threads: usize, f: impl Fn(W) 
     });
 }
 
-fn crash_report(game: &Game, sampler: &TeamSampler, panic: &(dyn std::any::Any + Send)) -> String {
-    let msg = panic
+/// The location and engine call path of this thread's last panic.
+pub(crate) fn take_last_panic() -> (String, String) {
+    LAST_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_default()
+}
+
+/// A caught panic's message.
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    panic
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
         .or_else(|| panic.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "unknown panic".into());
-    let (location, backtrace) = LAST_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_default();
+        .unwrap_or_else(|| "unknown panic".into())
+}
+
+fn crash_report(game: &Game, sampler: &TeamSampler, panic: &(dyn std::any::Any + Send)) -> String {
+    let msg = panic_message(panic);
+    let (location, backtrace) = take_last_panic();
     serde_json::json!({
         "panic": msg,
         "location": location,

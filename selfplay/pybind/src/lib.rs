@@ -84,6 +84,26 @@ fn validate_team(text: &str) -> PyResult<Vec<(String, String)>> {
     Ok(team::validate(&team).into_iter().map(|p| (format!("{:?}", p.kind), p.message)).collect())
 }
 
+/// An engine bug ended games (or search cells) early: keep a record
+/// (engine/examples/replay_crash.rs replays game records) and carry on.
+fn report_crashes(crashes: &[String]) {
+    if crashes.is_empty() {
+        return;
+    }
+    use std::io::Write;
+    let path = "engine_crashes.jsonl";
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        for c in crashes {
+            let _ = writeln!(f, "{c}");
+        }
+    }
+    eprintln!(
+        "warning: {} engine panic(s) were skipped (a game counted as a draw, or a search cell \
+         left out); details appended to {path} (please send it in)",
+        crashes.len()
+    );
+}
+
 /// A writable, C-contiguous numpy array of `len` elements, as a slice.
 ///
 /// Safety: the caller keeps `buf` alive and nothing else touches the
@@ -235,23 +255,7 @@ impl VecEnv {
         buf.copy_to_slice(py, &mut self.actions)?;
         let VecEnv { env, actions: a, finished, .. } = self;
         py.detach(|| env.step(a, finished)).map_err(PyValueError::new_err)?;
-        let crashes = self.env.take_crashes();
-        if !crashes.is_empty() {
-            // An engine bug ended these games as draws; keep a replayable
-            // record (engine/examples/replay_crash.rs) and carry on.
-            use std::io::Write;
-            let path = "engine_crashes.jsonl";
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                for c in &crashes {
-                    let _ = writeln!(f, "{c}");
-                }
-            }
-            eprintln!(
-                "warning: {} game(s) hit an engine panic and were counted as draws; \
-                 details appended to {path} (please send it in)",
-                crashes.len()
-            );
-        }
+        report_crashes(&self.env.take_crashes());
         let n = self.env.len();
         let mut d = vec![0u8; n];
         let mut r = vec![0f32; n * 2];
@@ -475,6 +479,7 @@ impl SearchTree {
         let cfg = engine::enumerate::EnumConfig { max_outcomes, roll_bands, seed };
         let (tree, threads) = (&mut self.tree, self.threads);
         let out = py.detach(|| tree.expand(&reqs, &cfg, keep, threads)).map_err(PyValueError::new_err)?;
+        report_crashes(&std::mem::take(&mut self.tree.crashes));
         self.last = out;
         Ok(self.last.probs.len())
     }

@@ -307,13 +307,22 @@ pub struct CellLeaves {
 pub struct Tree {
     pub nodes: Vec<Battle>,
     pub perfect_info: bool,
+    /// Reports of cells whose turn panicked (an engine bug), until taken.
+    /// Such a cell comes back with no outcomes.
+    pub crashes: Vec<String>,
+    /// Test hook: make this request index of the next `expand` panic.
+    #[doc(hidden)]
+    pub inject_panic: Option<usize>,
 }
 
 impl Tree {
     pub fn new(perfect_info: bool) -> Self {
+        crate::env::install_panic_hook();
         Tree {
             nodes: Vec::new(),
             perfect_info,
+            crashes: Vec::new(),
+            inject_panic: None,
         }
     }
 
@@ -370,11 +379,54 @@ impl Tree {
         type One = (CellLeaves, Vec<Battle>);
         let results: Vec<Mutex<Option<Result<One, String>>>> =
             cells.iter().map(|_| Mutex::new(None)).collect();
+        let crashes = Mutex::new(Vec::new());
+        let inject = self.inject_panic.take();
         let tree = &*self;
         run_parallel((0..cells.len()).collect(), threads.max(1), |i| {
-            let r = tree.expand_cell(cells[i], cfg, keep);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if inject == Some(i) {
+                    panic!("injected panic");
+                }
+                tree.expand_cell(cells[i], cfg, keep)
+            }));
+            let r = r.unwrap_or_else(|panic| {
+                let (location, backtrace) = crate::env::take_last_panic();
+                let req = cells[i];
+                let b = &tree.nodes[req.node];
+                let actions: Vec<Option<String>> = (0..2)
+                    .map(|side| {
+                        let d = action::decision(b, side);
+                        usize::try_from(req.actions[side])
+                            .ok()
+                            .and_then(|a| action::choice(d, a))
+                            .map(|c| c.to_showdown(&b.requests[side]))
+                    })
+                    .collect();
+                crashes.lock().expect("crashes").push(
+                    serde_json::json!({
+                        "panic": crate::env::panic_message(panic.as_ref()),
+                        "location": location,
+                        "backtrace": backtrace,
+                        "search_cell": actions,
+                        "position": b.snapshot(),
+                    })
+                    .to_string(),
+                );
+                Ok((
+                    CellLeaves {
+                        cells: vec![Cell {
+                            first_leaf: 0,
+                            leaves: 0,
+                            unexplored: 1.0,
+                        }],
+                        ..CellLeaves::default()
+                    },
+                    Vec::new(),
+                ))
+            });
             *results[i].lock().expect("result") = Some(r);
         });
+        self.crashes.extend(crashes.into_inner().expect("crashes"));
         let mut out = CellLeaves::default();
         for r in results {
             let (mut one, battles) = r.into_inner().expect("result").expect("expanded")?;

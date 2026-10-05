@@ -113,3 +113,28 @@ fn expansion_covers_every_cell() {
     let worst = solved.iter().map(|(_, s)| s.gap).fold(0.0f32, f32::max);
     assert!(worst < 0.01, "solver gap {worst}");
 }
+
+#[test]
+fn a_panicking_cell_is_reported_and_left_out() {
+    let battles = positions(4, 9);
+    let mut tree = engine::search::Tree::new(true);
+    let mut cells = Vec::new();
+    for b in &battles {
+        let node = tree.add(b.clone());
+        let c = candidates(b, 1);
+        cells.push(engine::search::CellRequest {
+            node,
+            actions: [c[0].first().copied().unwrap_or(-1), c[1].first().copied().unwrap_or(-1)],
+        });
+    }
+    tree.inject_panic = Some(2);
+    let cfg = EnumConfig::default();
+    let out = tree.expand(&cells, &cfg, false, 2).unwrap();
+    assert_eq!(out.cells.len(), 4);
+    assert_eq!(out.cells[2].leaves, 0);
+    assert!(out.cells.iter().enumerate().all(|(i, c)| i == 2 || c.leaves > 0));
+    assert_eq!(tree.crashes.len(), 1);
+    let r: serde_json::Value = serde_json::from_str(&tree.crashes[0]).unwrap();
+    assert_eq!(r["panic"], "injected panic");
+    assert!(r["position"]["sides"].is_array());
+}
