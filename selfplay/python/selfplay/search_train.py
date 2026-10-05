@@ -245,6 +245,10 @@ def main():
         else:
             p.add_argument(f"--{k.replace('_', '-')}", type=type(v), default=v)
     a = p.parse_args()
+    if a.init:
+        # The model's size comes from the checkpoint.
+        saved = torch.load(a.init, map_location="cpu").get("config", {})
+        a.d, a.layers = saved.get("d", a.d), saved.get("layers", a.layers)
     cfg = Config(**{k: getattr(a, k) for k in asdict(Config()) if k != "perfect_info"},
                  perfect_info=not a.hidden)
     SearchTrainer(cfg, Path(a.out), a.init).run(a.minutes, a.rounds)
