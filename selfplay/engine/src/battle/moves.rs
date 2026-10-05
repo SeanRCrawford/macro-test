@@ -655,6 +655,26 @@ impl Battle {
         crit: bool,
         spread: bool,
     ) -> DamageCtx<'a> {
+        // Every calculation needs its attacker and defender in the view (on
+        // the field, not fainted). Say exactly who is missing if not.
+        for (role, r) in [("attacker", attacker), ("defender", defender)] {
+            let m = self.mon(r);
+            let i = r.side * 2 + m.position;
+            if i >= 4 || view[i].is_none() {
+                panic!(
+                    "damage ctx: the {role} {} (side {}, hp {}, fainted {}, active {}, position {}) \
+                     isn't on the field; the other is {} (turn {})",
+                    Dex::get().species(m.species).id,
+                    r.side,
+                    m.hp,
+                    m.fainted,
+                    m.is_active,
+                    m.position,
+                    Dex::get().species(self.mon(if role == "attacker" { defender } else { attacker }).species).id,
+                    self.turn,
+                );
+            }
+        }
         DamageCtx {
             actives: [
                 view[0].as_ref(),
