@@ -12,7 +12,7 @@
 use engine::battle::choice::{SideChoice, SideRequest};
 use engine::battle::Battle;
 use engine::chance::{Chance, Rng, Script};
-use engine::corpus::load_dir;
+use engine::corpus::load_sources;
 use engine::env::policy::greedy;
 use engine::env::TeamSampler;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -20,6 +20,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const CELLS: usize = 3;
+
+/// Out of 10, how often a side plays the greedy baseline (SHARE, default 7).
+fn share() -> u32 {
+    std::env::var("SHARE").ok().and_then(|s| s.parse().ok()).unwrap_or(7)
+}
 const MAX_BRANCHES: usize = 400;
 
 fn message(e: &(dyn std::any::Any + Send)) -> String {
@@ -87,7 +92,7 @@ fn play(sampler: &TeamSampler, g: u64, mut visit: impl FnMut(usize, &Battle, &[[
             if matches!(b.requests[side], SideRequest::Wait) {
                 return None;
             }
-            if rng.below(10) < 7 {
+            if rng.below(10) < share() {
                 if let Some(c) = greedy(b, side) {
                     return Some(c);
                 }
@@ -111,8 +116,15 @@ fn play(sampler: &TeamSampler, g: u64, mut visit: impl FnMut(usize, &Battle, &[[
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/corpus");
-    let sampler = TeamSampler::new(load_dir(&dir).expect("corpus").0);
+    // The default corpus folders (python/selfplay/env.py DEFAULT_CORPUS).
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut sources = vec![root.join("data/corpus").display().to_string()];
+    for d in ["../data/teams", "../data/my_teams"] {
+        if root.join(d).is_dir() {
+            sources.push(format!("{}=4", root.join(d).display()));
+        }
+    }
+    let sampler = TeamSampler::new(load_sources(&sources).expect("corpus").0);
     if args.get(1).map(String::as_str) == Some("replay") {
         let g: u64 = args[2].parse().unwrap();
         let want: usize = args[3].parse().unwrap();

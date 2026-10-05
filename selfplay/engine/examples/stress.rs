@@ -8,7 +8,7 @@
 use engine::battle::choice::SideRequest;
 use engine::battle::Battle;
 use engine::chance::{Chance, Rng};
-use engine::corpus::load_dir;
+use engine::corpus::load_sources;
 use engine::env::policy::greedy;
 use engine::env::TeamSampler;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -20,8 +20,15 @@ fn main() {
     let games: u64 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(100_000);
     let threads: u64 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(4);
     let share: f64 = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(0.7);
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/corpus");
-    let sampler = TeamSampler::new(load_dir(&dir).expect("corpus").0);
+    // The default corpus folders (python/selfplay/env.py DEFAULT_CORPUS).
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut sources = vec![root.join("data/corpus").display().to_string()];
+    for d in ["../data/teams", "../data/my_teams"] {
+        if root.join(d).is_dir() {
+            sources.push(format!("{}=4", root.join(d).display()));
+        }
+    }
+    let sampler = TeamSampler::new(load_sources(&sources).expect("corpus").0);
     std::panic::set_hook(Box::new(|_| {}));
     let next = AtomicU64::new(0);
     let crashes = AtomicU64::new(0);
