@@ -648,6 +648,104 @@ to 2 anything".
   teams mean little. That is Nessie's team mutation (train on perturbed
   sets), which should come first.
 
+### 4.16 Tree search
+
+`engine/src/mcts.rs` (the tree, in Rust) and `python/selfplay/mcts.py` (runs
+the network for it). It replaces the one-turn search as the bot's search,
+in play, in evaluation and in search-labelled training.
+
+**What the strong bots do, and what we take:**
+
+| | mikumiku37 | Nessie | Jaxcalibur | Laplace (Foul Play lineage) | Ours |
+|---|---|---|---|---|---|
+| Turn as a game | top-8 x top-8 matrix, solved | matrix, double oracle at the root | sampled edges, regret-like weights | each side picks by UCB1 on its own (decoupled UCT) | matrix at every node, solved |
+| Depth | one turn | one turn, then selected leaves | ~2 turns (4 plies) | as deep as 2M visits go | as deep as the budget goes (8 decisions max) |
+| Chance | the value net scores outcomes | exact enumeration of the outcomes that matter | each rollout resampled; stats keyed by state hash, HP in 10 bins | sampled per visit; damage branches only near the root | exact enumeration with KO bands, in every cell |
+| Leaf value | value net | value net | value net | hand-written eval | value net |
+| Prior | policy's top 8 | policy's likeliest move seeds the oracle | policy prior at every node (pUCT) | root only (no features deeper) | policy at every node: ranks and widens candidates, scales exploration |
+| Effort | uniform over the 64 cells | reach^2 x entropy for deepening | visit counts | visit counts | outcomes by reach x uncertainty, actions by equilibrium + prior bonus |
+
+**The design, and why:**
+
+- **Every node is a simultaneous-move matrix game, solved.** Rows and
+  columns are each side's candidate joint actions; a cell is the exact
+  expectation over the turn's chance outcomes of their values; the node's
+  value and strategies are the matrix's equilibrium (regret matching+, full
+  information, warm started from the last solve). This is Nessie's and
+  mikumiku37's view of a turn, applied at every depth. The alternative
+  used by Foul Play and Laplace, decoupled UCT (each side runs its own
+  bandit on sampled returns), needn't converge to an equilibrium (Lisy et
+  al., "Convergence of Monte Carlo Tree Search in Simultaneous Move Games",
+  NeurIPS 2013) and in practice prices the opponent as its exploration mix:
+  Laplace bolted a "gamble veto" on top for exactly that. Solving each
+  node's matrix makes the opponent a best responder at every node, and the
+  values are expectiminimax values (Bosansky et al., "Algorithms for
+  computing strategies in two-player simultaneous move games", AIJ 2016,
+  who apply the double oracle of McMahan, Gordon and Blum (2003) to such
+  games, as Nessie does at its root).
+- **Exact chance in every cell** (Nessie), with the KO-band enumeration of
+  4.4: a median of 6 outcomes per cell. A cell's value has no sampling
+  noise, so a few visits go a long way, which is what Nessie credits for
+  its sample efficiency. Jaxcalibur resamples chance per rollout and merges
+  near-identical states by hashing with binned HP; with exact enumeration
+  identical banded outcomes are already one child.
+- **The policy at every node (AlphaZero).** A new node takes its
+  candidates from its own policy (each side's view): the root starts with
+  4 per side, other nodes with 2, and a node visited N times may have
+  `start + 0.5 sqrt(N)` (progressive widening by the prior, up to 12).
+  Laplace could only use a prior at the root, having no features deeper;
+  our engine observes any position, so the network guides the whole tree.
+- **Simulations decide where to spend effort; values never come from
+  simulation returns.** At a node a cell is sampled from the product of
+  each side's weights `x(a) + c P(a) sqrt(N) / (1 + n(a))` over the cells
+  that can still change: the equilibrium mix plus AlphaZero's PUCT
+  exploration term, a sampled form close to Jaxcalibur's edge rule. In a
+  cell an outcome is sampled by probability x uncertainty (binary entropy
+  of the win chance, floored) / sqrt(1 + visits), Nessie's reach x entropy
+  ordering. Reaching an outcome that isn't a node makes it one.
+- **Backed-up values** blend a node's own static estimate (counting as one
+  visit) with its solved value, so a fresh 2 x 2 node doesn't swing its
+  parent on thin evidence (the role the mean of evaluations plays in
+  AlphaZero). Solved nodes (every cell's outcomes terminal or solved, every
+  legal action a candidate) are exact; a solved root stops early, which is
+  how endgames get solved, as Nessie does for 2v2s.
+- **Memory**: only expanded nodes keep a game state (10-20 KB); other
+  outcomes are their chance path (a few bytes) and are replayed (33 us)
+  when they become nodes.
+- **Batching** (AlphaGo's virtual-loss idea, as Lc0 and KataGo batch):
+  many games' trees advance together in waves, each wave one policy call
+  for the new nodes (few) and one value call for the new outcomes (many);
+  cells being expanded are skipped by other simulations in the wave.
+
+**Correctness.** `tests/mcts.rs`: on 1v1 endgames capped to end within two
+turns, with every legal action a candidate, the search marks the root
+solved and its value matches a brute-force expectiminimax over every
+action pair and outcome (within 0.02). On ordinary positions its mixes,
+candidates, widening and budget are checked.
+
+**Training with it** (`search_train.py --tree`): both sides play the root
+equilibrium mix; targets are the root mixes (policy and opponent head) and
+the search value blended with the result. `--fast-budget` gives most turns
+a cheap search and a random `--full-frac` a full one, the only ones trained
+on (KataGo's playout cap randomisation, Wu 2019); `--root-noise` adds
+AlphaZero's Dirichlet noise to full searches' root priors.
+
+**Next for the search:**
+
+1. Measure against the one-turn search at equal and larger budgets, and
+   tune `c_explore`, the widening rate, the start sizes and the static
+   weight with head-to-head games (Laplace's discipline: no change
+   without a significant result).
+2. Nessie's root double oracle as a widening rule at the root (best replies
+   from every legal action), and its alternatives over every legal action
+   for the analysis board.
+3. Engine speed: a position's damage features cost 100 us, three turns'
+   simulation; they are most of the engine's time per leaf.
+4. Hidden information (Open Team Sheets: stat points, brought four): worlds
+   sampled from the network's predictions, as mikumiku37 (16) and
+   Jaxcalibur (32) do, with Jaxcalibur's cut-off of the opponent's search
+   once we do something it couldn't have expected.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:
