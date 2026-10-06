@@ -616,6 +616,52 @@ pub struct RootResult {
     pub leaf_evals: u64,
     pub max_depth: usize,
     pub exact: bool,
+    /// The principal line: at each node, both sides' most likely actions,
+    /// side 0's value there, and the probability of the most likely outcome
+    /// that follows (the line continues through it while it is a node).
+    pub pv: Vec<PvStep>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PvStep {
+    pub actions: [i64; 2],
+    pub value: f32,
+    pub outcome_prob: f32,
+}
+
+impl SimTree {
+    fn principal_line(&self, stride: usize) -> Vec<PvStep> {
+        let mut out = Vec::new();
+        let mut node = 0usize;
+        while out.len() < 16 {
+            let n = &self.nodes[node];
+            if !n.has_prior || n.k[0] == 0 || n.k[1] == 0 || n.solved.is_nan() {
+                break;
+            }
+            let best = |s: usize| {
+                (0..n.k[s])
+                    .max_by(|&a, &b| n.strategy[s][a].total_cmp(&n.strategy[s][b]))
+                    .unwrap_or(0)
+            };
+            let (a, b) = (best(0), best(1));
+            let cid = n.cells[a * stride + b];
+            if cid == NONE {
+                break;
+            }
+            let cell = &self.cells[cid as usize];
+            let next = cell.children.iter().max_by(|x, y| x.prob.total_cmp(&y.prob));
+            out.push(PvStep {
+                actions: cell.actions,
+                value: n.value,
+                outcome_prob: next.map_or(0.0, |c| c.prob),
+            });
+            match next {
+                Some(c) if c.node != NONE => node = c.node as usize,
+                _ => break,
+            }
+        }
+        out
+    }
 }
 
 /// Many trees, one per root position, searched together.
@@ -929,6 +975,7 @@ impl Forest {
                     leaf_evals: t.leaf_evals,
                     max_depth: t.nodes.iter().map(|n| n.depth as usize).max().unwrap_or(0),
                     exact: r.exact,
+                    pv: t.principal_line(stride),
                 }
             })
             .collect()

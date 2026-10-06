@@ -171,6 +171,10 @@ fn searches_ordinary_positions_soundly() {
         }
         // One wave can overshoot the budget a little.
         assert!(r.leaf_evals < budget + 600, "{} leaf evaluations", r.leaf_evals);
+        assert!(!r.pv.is_empty());
+        for s in 0..2 {
+            assert!(r.candidates[s].contains(&r.pv[0].actions[s]));
+        }
         deep += (r.max_depth >= 2) as usize;
     }
     assert!(deep * 2 >= battles.len(), "the search rarely looks past the next turn");

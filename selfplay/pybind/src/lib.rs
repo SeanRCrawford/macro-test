@@ -699,7 +699,8 @@ impl MctsForest {
 
     /// Per root: candidates and priors (per side), matrix (rows: side 0),
     /// row and col (equilibrium mixes), value, gap, visits (per side),
-    /// nodes, cells, leaf_evals, max_depth, exact.
+    /// nodes, cells, leaf_evals, max_depth, exact, and pv: the principal
+    /// line as ((side 0 action, side 1 action), value, outcome probability).
     fn results(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
         self.forest
             .results()
@@ -719,6 +720,12 @@ impl MctsForest {
                 d.set_item("leaf_evals", r.leaf_evals)?;
                 d.set_item("max_depth", r.max_depth)?;
                 d.set_item("exact", r.exact)?;
+                let pv: Vec<((i64, i64), f32, f32)> = r
+                    .pv
+                    .iter()
+                    .map(|p| ((p.actions[0], p.actions[1]), p.value, p.outcome_prob))
+                    .collect();
+                d.set_item("pv", pv)?;
                 Ok(d.unbind())
             })
             .collect()
