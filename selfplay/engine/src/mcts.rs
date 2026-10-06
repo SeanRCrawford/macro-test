@@ -79,6 +79,11 @@ pub struct MctsConfig {
     pub max_depth: usize,
     /// Simulations per tree per wave.
     pub sims_per_wave: usize,
+    /// Widen the root by best reply (Nessie's double oracle) instead of by
+    /// the prior: probe every remaining action against the opponent's mix
+    /// and add the best if it gains more than `oracle_eps`.
+    pub root_oracle: bool,
+    pub oracle_eps: f32,
     pub seed: u64,
 }
 
@@ -97,6 +102,8 @@ impl Default for MctsConfig {
             solve_iters: 200,
             max_depth: 8,
             sims_per_wave: 4,
+            root_oracle: false,
+            oracle_eps: 0.005,
             seed: 0,
         }
     }
@@ -118,8 +125,8 @@ struct Child {
 #[derive(Debug, Clone)]
 struct Cell {
     node: u32,
-    /// Candidate indices (side 0, side 1).
-    ij: [u16; 2],
+    /// The action pair (side 0, side 1).
+    actions: [i64; 2],
     children: Vec<Child>,
     ready: bool,
     value: f32,
@@ -149,6 +156,15 @@ struct Node {
     action_visits: [Vec<u32>; 2],
     exact: bool,
     dirty: bool,
+    /// The root's pending double-oracle probe.
+    probe: Option<Probe>,
+}
+
+/// Cells probing actions against the opponent's support: (the probed
+/// action, the opponent's candidate index, cell).
+struct Probe {
+    side: usize,
+    cells: Vec<(i64, usize, u32)>,
 }
 
 impl Node {
@@ -170,6 +186,7 @@ impl Node {
             action_visits: [Vec::new(), Vec::new()],
             exact: false,
             dirty: false,
+            probe: None,
         }
     }
 }
@@ -235,26 +252,113 @@ impl SimTree {
     }
 
     fn cell_actions(&self, cell: &Cell) -> [i64; 2] {
-        let n = &self.nodes[cell.node as usize];
-        [0, 1].map(|s| n.ranked[s][cell.ij[s] as usize].0)
+        cell.actions
+    }
+
+    fn new_cell(&mut self, node: u32, actions: [i64; 2], want: &mut Vec<u32>) -> u32 {
+        let id = self.cells.len() as u32;
+        self.cells.push(Cell {
+            node,
+            actions,
+            children: Vec::new(),
+            ready: false,
+            value: 0.0,
+            exact: false,
+            visits: 0,
+        });
+        want.push(id);
+        id
     }
 
     /// Add (pending) cells for these candidate pairs of a node.
     fn add_cells(&mut self, node: u32, pairs: Vec<[usize; 2]>, stride: usize, want: &mut Vec<u32>) {
         for [i, j] in pairs {
-            let id = self.cells.len() as u32;
-            self.cells.push(Cell {
-                node,
-                ij: [i as u16, j as u16],
-                children: Vec::new(),
-                ready: false,
-                value: 0.0,
-                exact: false,
-                visits: 0,
-            });
+            let n = &self.nodes[node as usize];
+            let actions = [n.ranked[0][i].0, n.ranked[1][j].0];
+            let id = self.new_cell(node, actions, want);
             self.nodes[node as usize].cells[i * stride + j] = id;
-            want.push(id);
         }
+    }
+
+    /// The root's double oracle for `side`: probe every action not yet a
+    /// candidate against the opponent's current mix (first call), then add
+    /// the best reply, or the prior's next action if no reply gains
+    /// (second call, once the probes are valued). Returns whether it made
+    /// work, or None while probes are still being valued.
+    fn oracle(&mut self, side: usize, cfg: &MctsConfig, want: &mut Vec<u32>) -> Option<bool> {
+        let stride = Self::stride(cfg);
+        let other = 1 - side;
+        let n = &self.nodes[0];
+        let Some(probe) = &n.probe else {
+            // Probe against the opponent's support.
+            let support: Vec<usize> = (0..n.k[other])
+                .filter(|&j| n.strategy[other][j] > 0.01)
+                .collect();
+            let pool: Vec<usize> = (n.k[side]..n.ranked[side].len()).collect();
+            let mut cells = Vec::new();
+            for &a in &pool {
+                for &j in &support {
+                    let n = &self.nodes[0];
+                    let mut actions = [0i64; 2];
+                    actions[side] = n.ranked[side][a].0;
+                    actions[other] = n.ranked[other][j].0;
+                    let id = self.new_cell(0, actions, want);
+                    cells.push((actions[side], j, id));
+                }
+            }
+            self.nodes[0].probe = Some(Probe { side, cells });
+            return Some(true);
+        };
+        if probe.side != side || probe.cells.iter().any(|&(_, _, c)| !self.cells[c as usize].ready) {
+            return None;
+        }
+        // Each probed action's value against the opponent's mix.
+        let y = &n.strategy[other];
+        let mut score: Vec<(i64, f64, f64)> = Vec::new(); // (action, weighted sum, weight)
+        for &(a, j, c) in &probe.cells {
+            let w = y.get(j).copied().unwrap_or(0.0) as f64;
+            match score.iter_mut().find(|s| s.0 == a) {
+                Some(s) => {
+                    s.1 += w * self.cells[c as usize].value as f64;
+                    s.2 += w;
+                }
+                None => score.push((a, w * self.cells[c as usize].value as f64, w)),
+            }
+        }
+        let v = if n.solved.is_nan() { 0.0 } else { n.solved as f64 };
+        let sign = if side == 0 { 1.0 } else { -1.0 };
+        let best = score
+            .iter()
+            .filter(|s| s.2 > 0.0)
+            .map(|s| (s.0, sign * (s.1 / s.2 - v)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let k = n.k[side];
+        let chosen = match best {
+            Some((a, gain)) if gain > cfg.oracle_eps as f64 => a,
+            _ => n.ranked[side][k].0,
+        };
+        let probe = self.nodes[0].probe.take().expect("probe");
+        let n = &mut self.nodes[0];
+        let pos = n.ranked[side].iter().position(|r| r.0 == chosen).expect("probed action");
+        n.ranked[side].swap(k, pos);
+        n.k[side] += 1;
+        n.strategy[side].push(0.0);
+        n.action_visits[side].push(0);
+        for j in 0..n.k[other] {
+            let reuse = probe.cells.iter().find(|&&(a, pj, _)| a == chosen && pj == j).map(|&(_, _, c)| c);
+            let id = match reuse {
+                Some(c) => c,
+                None => {
+                    let mut actions = [0i64; 2];
+                    actions[side] = chosen;
+                    actions[other] = self.nodes[0].ranked[other][j].0;
+                    self.new_cell(0, actions, want)
+                }
+            };
+            let (i0, j0) = if side == 0 { (k, j) } else { (j, k) };
+            self.nodes[0].cells[i0 * stride + j0] = id;
+        }
+        Some(true)
     }
 
     /// Give a node its ranked actions and initial candidates.
@@ -299,6 +403,9 @@ impl SimTree {
                 } else {
                     1
                 };
+                if cfg.root_oracle && ni == 0 && !self.nodes[0].solved.is_nan() {
+                    return self.oracle(side, cfg, want_cells).unwrap_or(false);
+                }
                 let n = &mut self.nodes[ni];
                 let new = n.k[side];
                 n.k[side] += 1;

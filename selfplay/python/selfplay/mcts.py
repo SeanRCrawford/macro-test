@@ -38,6 +38,8 @@ class TreeConfig:
     solve_iters: int = 200
     max_depth: int = 8
     sims_per_wave: int = 4
+    root_oracle: bool = False   # widen the root by best reply (Nessie's double oracle)
+    oracle_eps: float = 0.005
     prior_top: int = 24         # ranked actions kept per side from the policy
     root_noise: float = 0.0     # Dirichlet noise share at the roots (self-play exploration)
     noise_alpha: float = 0.3
@@ -47,7 +49,7 @@ class TreeConfig:
     def engine_kwargs(self) -> dict:
         keys = ("root_candidates", "node_candidates", "max_candidates", "widen", "c_explore",
                 "chance_floor", "static_weight", "max_outcomes", "roll_bands", "solve_iters",
-                "max_depth", "sims_per_wave")
+                "max_depth", "sims_per_wave", "root_oracle", "oracle_eps")
         return {k: getattr(self, k) for k in keys}
 
 

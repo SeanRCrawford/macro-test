@@ -175,3 +175,36 @@ fn searches_ordinary_positions_soundly() {
     }
     assert!(deep * 2 >= battles.len(), "the search rarely looks past the next turn");
 }
+
+#[test]
+fn root_double_oracle_keeps_the_search_exact() {
+    // The root starts with one candidate per side and grows only by best
+    // reply (or the prior's next action when no reply gains): it must still
+    // end up solving each endgame exactly.
+    let mut battles = positions(6, 11, |b| {
+        b.turn >= 3
+            && (0..2).all(|s| b.sides[s].pokemon_left == 1 && matches!(b.requests[s], SideRequest::Move(_)))
+    });
+    assert!(battles.len() >= 4, "only {} endgames", battles.len());
+    for b in &mut battles {
+        b.turn_limit = Some(b.turn + 1);
+    }
+    let cfg = MctsConfig {
+        root_candidates: 1,
+        node_candidates: 64,
+        max_candidates: 64,
+        widen: 64.0,
+        root_oracle: true,
+        max_outcomes: 100_000,
+        solve_iters: 3000,
+        sims_per_wave: 16,
+        ..MctsConfig::default()
+    };
+    let mut forest = Forest::new(battles.clone(), cfg, true, 4);
+    run(&mut forest, u64::MAX);
+    for (b, r) in battles.iter().zip(forest.results()) {
+        let want = exact(b);
+        assert!(r.exact, "not solved ({} nodes, {} candidates)", r.nodes, r.candidates[0].len());
+        assert!((r.value - want).abs() < 0.02, "search {} vs exact {}", r.value, want);
+    }
+}
