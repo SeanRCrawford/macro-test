@@ -591,7 +591,7 @@ impl Battle {
                 let Some(m) = self.sides[side].occupant(pos) else {
                     continue;
                 };
-                if m.hp == 0 && self.selfdestruct_user != Some(self.mon_ref(side, pos)) {
+                if m.hp == 0 && self.attacking_user != Some(self.mon_ref(side, pos)) {
                     continue;
                 }
                 let mut c = Combatant::new(m.species, m.stats, m.ability, m.item);
@@ -1020,16 +1020,13 @@ impl Battle {
                 .into_iter()
                 .any(|r| self.ability_is(r, "damp"))
         {
-            self.selfdestruct_user = None;
             return Ok(false);
         }
         // Explosion: the user faints before the hit (but still attacks).
         if explodes {
             self.faint(user);
-            self.selfdestruct_user = Some(user);
         }
         if targets.is_empty() {
-            self.selfdestruct_user = None;
             return Ok(false);
         }
         // King's Rock's onModifyMove (after Sheer Force drops the move's
@@ -1056,8 +1053,11 @@ impl Battle {
             crit_on: Vec::new(),
             hit_targets: Vec::new(),
         };
+        // The user stays in the damage calculation until its move ends, even
+        // at 0 HP (restored after, for a move run inside another).
+        let outer = self.attacking_user.replace(user);
         let result = self.try_spread_move_hit(user, &mut mv, targets);
-        self.selfdestruct_user = None;
+        self.attacking_user = outer;
         let result = result?;
         // MoveFail: High Jump Kick's crash, Steel Beam's recoil.
         if !result {

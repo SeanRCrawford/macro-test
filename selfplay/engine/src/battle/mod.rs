@@ -117,8 +117,11 @@ pub struct Battle {
     faint_queue: Vec<(MonRef, Option<MonRef>)>,
     /// Set while move damage is dealt: the move's user, for the faint queue.
     move_damage_by: Option<MonRef>,
-    /// A self-destructing move's user, at 0 HP but still attacking.
-    selfdestruct_user: Option<MonRef>,
+    /// The user of the move being run. It stays in the damage calculation
+    /// at 0 HP, as in Showdown: Explosion's user faints before it hits, and
+    /// a spread contact move into Spiky Shield can KO its user before the
+    /// other target is hit.
+    attacking_user: Option<MonRef>,
     /// The user of a move with ignoreAbility (Mold Breaker), while it runs:
     /// other Pokemon's breakable abilities are suppressed.
     mold_breaker: Option<MonRef>,
@@ -168,7 +171,7 @@ impl Battle {
             mid_turn: true,
             faint_queue: Vec::new(),
             move_damage_by: None,
-            selfdestruct_user: None,
+            attacking_user: None,
             mold_breaker: None,
             ssa_physical: false,
             mega_used: [false; 2],
