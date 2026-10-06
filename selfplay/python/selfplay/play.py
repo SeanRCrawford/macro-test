@@ -7,6 +7,7 @@ hint (the search's mix for your side and its win estimate) or `q` to quit.
 
     python -m selfplay.play runs/search/model.pt --you "my_teams/pseudo" --bot "Champion"
     python -m selfplay.play runs/search/model.pt --bot-plays policy   # no search: faster, weaker
+    python -m selfplay.play runs/search/model.pt --budget 10000       # a deeper tree search
 """
 from __future__ import annotations
 
@@ -199,8 +200,9 @@ def main():
     p.add_argument("--you", default=None, help="your team (default: random)")
     p.add_argument("--bot", default=None, help="the bot's team (default: random)")
     p.add_argument("--list", action="store_true", help="list the teams and exit")
-    p.add_argument("--bot-plays", choices=("search", "double-oracle", "policy"), default="search")
-    p.add_argument("--k", type=int, default=8, help="search: candidates per side")
+    p.add_argument("--bot-plays", choices=("tree", "search", "double-oracle", "policy"), default="tree")
+    p.add_argument("--k", type=int, default=8, help="one-turn search: candidates per side")
+    p.add_argument("--budget", type=int, default=3000, help="tree search: value evaluations per turn")
     p.add_argument("--device", default="cpu")
     p.add_argument("--seed", type=int, default=None)
     a = p.parse_args()
@@ -218,8 +220,12 @@ def main():
     print(f"You: {names[you]}\nBot: {names[bot]}  (plays: {a.bot_plays})")
 
     model = load(a.model, a.device)
-    cfg = SearchConfig(k=a.k, double_oracle=a.bot_plays == "double-oracle", sample=True)
-    search = Search(model, cfg, seed)
+    if a.bot_plays == "tree":
+        from selfplay.mcts import TreeConfig, TreeSearch
+        search = TreeSearch(model, TreeConfig(budget=a.budget), seed)
+    else:
+        cfg = SearchConfig(k=a.k, double_oracle=a.bot_plays == "double-oracle", sample=True)
+        search = Search(model, cfg, seed)
     from selfplay.train import act, to_tensors
 
     def hint():

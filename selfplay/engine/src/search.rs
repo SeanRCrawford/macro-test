@@ -206,10 +206,35 @@ pub struct Solution {
 /// Solve the `rows` x `cols` game `m` (row-major, side 0's payoff) by
 /// regret matching+ with linearly weighted averages.
 pub fn solve(m: &[f32], rows: usize, cols: usize, iters: usize) -> Solution {
+    solve_warm(m, rows, cols, iters, None)
+}
+
+/// `solve`, starting from a previous solution's mixes (`warm`: side 0's and
+/// side 1's, possibly shorter than the matrix when actions were added since):
+/// when a node's matrix changes a little, the old equilibrium is a good
+/// first iterate and far fewer iterations are needed.
+pub fn solve_warm(
+    m: &[f32],
+    rows: usize,
+    cols: usize,
+    iters: usize,
+    warm: Option<(&[f32], &[f32])>,
+) -> Solution {
     assert_eq!(m.len(), rows * cols);
     let at = |i: usize, j: usize| m[i * cols + j] as f64;
     let mut rr = vec![0.0f64; rows];
     let mut rc = vec![0.0f64; cols];
+    if let Some((x0, y0)) = warm {
+        // Regrets proportional to the old mix make it the first iterate;
+        // their scale (a few iterations' worth) lets it move if it should.
+        const WARM: f64 = 4.0;
+        for (r, &p) in rr.iter_mut().zip(x0) {
+            *r = WARM * p as f64;
+        }
+        for (r, &p) in rc.iter_mut().zip(y0) {
+            *r = WARM * p as f64;
+        }
+    }
     let mut sr = vec![0.0f64; rows];
     let mut sc = vec![0.0f64; cols];
     let norm = |r: &[f64]| -> Vec<f64> {

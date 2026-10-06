@@ -365,6 +365,52 @@ impl VecEnv {
         Ok(self.env.battle(i).view(side).to_string())
     }
 
+    /// A tree search (engine::mcts) over the current positions of `games`.
+    #[pyo3(signature = (games, root_candidates=4, node_candidates=2, max_candidates=12, widen=0.5,
+                        c_explore=1.0, chance_floor=0.1, static_weight=1.0, max_outcomes=16,
+                        roll_bands=1, solve_iters=200, max_depth=8, sims_per_wave=4, seed=0))]
+    #[allow(clippy::too_many_arguments)]
+    fn mcts(
+        &self,
+        games: Vec<usize>,
+        root_candidates: usize,
+        node_candidates: usize,
+        max_candidates: usize,
+        widen: f32,
+        c_explore: f32,
+        chance_floor: f32,
+        static_weight: f32,
+        max_outcomes: usize,
+        roll_bands: u32,
+        solve_iters: usize,
+        max_depth: usize,
+        sims_per_wave: usize,
+        seed: u64,
+    ) -> PyResult<MctsForest> {
+        if let Some(&g) = games.iter().find(|&&g| g >= self.env.len()) {
+            return Err(PyValueError::new_err(format!("no game {g}")));
+        }
+        let cfg = engine::mcts::MctsConfig {
+            root_candidates,
+            node_candidates,
+            max_candidates,
+            widen,
+            c_explore,
+            chance_floor,
+            static_weight,
+            max_outcomes,
+            roll_bands,
+            solve_iters,
+            max_depth,
+            sims_per_wave,
+            seed,
+        };
+        let roots = games.iter().map(|&g| self.env.battle(g).clone()).collect();
+        Ok(MctsForest {
+            forest: engine::mcts::Forest::new(roots, cfg, self.env.config().perfect_info, self.env.worker_threads()),
+        })
+    }
+
     /// A search tree whose roots are copies of `games` (node i is games[i]).
     fn search_tree(&self, games: Vec<usize>) -> PyResult<SearchTree> {
         let mut tree = search::Tree::new(self.env.config().perfect_info);
@@ -534,6 +580,146 @@ impl SearchTree {
     }
 }
 
+/// The tree search over several positions (engine::mcts::Forest), stepped
+/// in waves by `selfplay.mcts`: `select` -> (`policy_inputs`, `set_policy`)
+/// -> `expand` -> (`leaf_inputs`, `set_values`).
+#[pyclass(module = "selfplay._engine")]
+struct MctsForest {
+    forest: engine::mcts::Forest,
+}
+
+#[pymethods]
+impl MctsForest {
+    fn __len__(&self) -> usize {
+        self.forest.len()
+    }
+
+    /// Run the simulations of every tree that hasn't spent `budget` value
+    /// evaluations; returns how many new nodes need a policy.
+    fn select(&mut self, py: Python<'_>, budget: u64) -> usize {
+        let f = &mut self.forest;
+        py.detach(|| f.select(budget))
+    }
+
+    /// Both views, masks [n,2,mask_len] and decisions [n,2] of the nodes
+    /// waiting for a policy.
+    fn policy_inputs(
+        &self,
+        py: Python<'_>,
+        ints: &Bound<'_, PyAny>,
+        mons: &Bound<'_, PyAny>,
+        field: &Bound<'_, PyAny>,
+        masks: &Bound<'_, PyAny>,
+        decisions: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let (bi, bm, bf, bk, bd) = (
+            PyBuffer::<i32>::get(ints)?,
+            PyBuffer::<f32>::get(mons)?,
+            PyBuffer::<f32>::get(field)?,
+            PyBuffer::<u8>::get(masks)?,
+            PyBuffer::<u8>::get(decisions)?,
+        );
+        let n = bd.item_count() / 2;
+        let (i, m, f, k, d) = unsafe {
+            (
+                writable(&bi, n * search::LEAF_INTS, "ints")?,
+                writable(&bm, n * search::LEAF_MONS, "mons")?,
+                writable(&bf, n * search::LEAF_FIELD, "field")?,
+                writable(&bk, n * 2 * MASK_LEN, "masks")?,
+                writable(&bd, n * 2, "decisions")?,
+            )
+        };
+        let forest = &self.forest;
+        py.detach(|| forest.policy_inputs(i, m, f, k, d));
+        Ok(())
+    }
+
+    /// Each waiting node's ranked legal actions per side: `actions` int64 and
+    /// `probs` float32, [n, 2, m], most probable first, -1 padding.
+    fn set_policy(&mut self, py: Python<'_>, actions: &Bound<'_, PyAny>, probs: &Bound<'_, PyAny>, m: usize) -> PyResult<()> {
+        let (ba, bp) = (PyBuffer::<i64>::get(actions)?, PyBuffer::<f32>::get(probs)?);
+        let mut a = vec![0i64; ba.item_count()];
+        let mut p = vec![0f32; bp.item_count()];
+        ba.copy_to_slice(py, &mut a)?;
+        bp.copy_to_slice(py, &mut p)?;
+        if a.len() != p.len() || m == 0 || a.len() % (2 * m) != 0 {
+            return Err(PyValueError::new_err("actions and probs: expected shape [n, 2, m]"));
+        }
+        self.forest.set_policy(&a, &p, m);
+        Ok(())
+    }
+
+    /// Play the waiting cells' chance outcomes; returns how many positions
+    /// need a value.
+    fn expand(&mut self, py: Python<'_>) -> usize {
+        let f = &mut self.forest;
+        let n = py.detach(|| f.expand());
+        report_crashes(&std::mem::take(&mut self.forest.crashes));
+        n
+    }
+
+    /// Both views of the positions waiting for a value.
+    fn leaf_inputs(&self, py: Python<'_>, ints: &Bound<'_, PyAny>, mons: &Bound<'_, PyAny>, field: &Bound<'_, PyAny>) -> PyResult<()> {
+        let n = self.forest.num_leaves();
+        let (bi, bm, bf) = (PyBuffer::<i32>::get(ints)?, PyBuffer::<f32>::get(mons)?, PyBuffer::<f32>::get(field)?);
+        let (i, m, f) = unsafe {
+            (
+                writable(&bi, n * search::LEAF_INTS, "ints")?,
+                writable(&bm, n * search::LEAF_MONS, "mons")?,
+                writable(&bf, n * search::LEAF_FIELD, "field")?,
+            )
+        };
+        let forest = &self.forest;
+        py.detach(|| forest.leaf_inputs(i, m, f));
+        Ok(())
+    }
+
+    /// Side 0's value of each waiting position; backs the trees up.
+    fn set_values(&mut self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
+        let buf = PyBuffer::<f32>::get(values)?;
+        if buf.item_count() != self.forest.num_leaves() {
+            return Err(PyValueError::new_err("values: one per waiting position"));
+        }
+        let mut v = vec![0f32; buf.item_count()];
+        buf.copy_to_slice(py, &mut v)?;
+        let f = &mut self.forest;
+        py.detach(|| f.set_values(&v));
+        Ok(())
+    }
+
+    /// Whether every tree is solved or has spent `budget`.
+    fn finished(&self, budget: u64) -> bool {
+        self.forest.finished(budget)
+    }
+
+    /// Per root: candidates and priors (per side), matrix (rows: side 0),
+    /// row and col (equilibrium mixes), value, gap, visits (per side),
+    /// nodes, cells, leaf_evals, max_depth, exact.
+    fn results(&self, py: Python<'_>) -> PyResult<Vec<Py<pyo3::types::PyDict>>> {
+        self.forest
+            .results()
+            .into_iter()
+            .map(|r| {
+                let d = pyo3::types::PyDict::new(py);
+                d.set_item("candidates", (r.candidates[0].clone(), r.candidates[1].clone()))?;
+                d.set_item("priors", (r.priors[0].clone(), r.priors[1].clone()))?;
+                d.set_item("matrix", r.matrix)?;
+                d.set_item("row", r.strategy[0].clone())?;
+                d.set_item("col", r.strategy[1].clone())?;
+                d.set_item("value", r.value)?;
+                d.set_item("gap", r.gap)?;
+                d.set_item("visits", (r.visits[0].clone(), r.visits[1].clone()))?;
+                d.set_item("nodes", r.nodes)?;
+                d.set_item("cells", r.cells)?;
+                d.set_item("leaf_evals", r.leaf_evals)?;
+                d.set_item("max_depth", r.max_depth)?;
+                d.set_item("exact", r.exact)?;
+                Ok(d.unbind())
+            })
+            .collect()
+    }
+}
+
 /// Solve a zero-sum matrix game (`matrix`: rows x cols, row-major, the row
 /// player's payoff) by regret matching+. Returns (row mix, col mix, value,
 /// gap), the gap being the exploitability of the pair of mixes.
@@ -557,6 +743,7 @@ fn _engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_team, m)?)?;
     m.add_class::<VecEnv>()?;
     m.add_class::<SearchTree>()?;
+    m.add_class::<MctsForest>()?;
     m.add_function(wrap_pyfunction!(solve_matrix, m)?)?;
     Ok(())
 }

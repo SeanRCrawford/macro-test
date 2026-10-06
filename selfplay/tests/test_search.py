@@ -86,3 +86,21 @@ def test_deepening_replaces_leaf_values():
 def test_solve_matrix():
     x, y, v, gap = solve_matrix([0, -1, 1, 1, 0, -1, -1, 1, 0], 3, 3, 2000)
     assert abs(v) < 0.01 and gap < 0.01 and max(x) < 0.35
+
+
+def test_tree_search_plays_legal_mixes_and_looks_ahead():
+    from selfplay.mcts import TreeConfig, TreeSearch
+    torch.manual_seed(3)
+    env = SelfPlayEnv(8, seed=21)
+    search = TreeSearch(PolicyNet(d=32, layers=1), TreeConfig(budget=300, max_outcomes=8))
+    deep = 0
+    for obs, games in positions(env, 12, seed=5):
+        for g, r in zip(games, search.run(env, games)):
+            assert abs(sum(r["row"]) - 1) < 1e-3 and abs(sum(r["col"]) - 1) < 1e-3
+            assert -1 <= r["value"] <= 1
+            assert all(obs.masks[g, 0, a] for a in r["candidates"][0])
+            assert obs.masks[g, 0, search.pick(r, 0)]
+            assert r["leaf_evals"] < 300 + 600
+            assert len(r["alternatives"][0]) == len(r["candidates"][0])
+            deep += r["max_depth"] >= 1
+    assert deep > 0

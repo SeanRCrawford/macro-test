@@ -1,7 +1,12 @@
-"""Search-labelled self-play (DESIGN.md 4.14 step 4, Nessie's recipe).
+"""Search-labelled self-play (DESIGN.md 4.14 step 4 and 4.16, Nessie's
+recipe with AlphaZero-style tree search).
 
-Both sides play the one-turn search's equilibrium mix every turn. Each
-searched turn becomes a training example for both sides:
+Both sides play the search's equilibrium mix every turn: the one-turn
+search, or with `--tree` the tree search (selfplay.mcts). With
+`--fast-budget`, most turns get a cheap search that only moves the game on,
+and a random `--full-frac` of them a full one that becomes training data
+(KataGo's playout cap randomisation). Each fully searched turn becomes a
+training example for both sides:
 
 - policy target: the side's equilibrium mix over its candidates;
 - opponent target: the opponent's equilibrium mix (the opponent head);
@@ -25,6 +30,7 @@ import torch
 
 from selfplay.env import DECISION_SLOTS, SIZES, SelfPlayEnv
 from selfplay.model import PolicyNet
+from selfplay.mcts import TreeConfig, TreeSearch
 from selfplay.search import Search, SearchConfig, play_vs_policy
 from selfplay.train import act, to_tensors
 
@@ -47,6 +53,11 @@ class Config:
     roll_bands: int = 1
     double_oracle: bool = False
     deepen: int = 0                 # leaves deepened per searched turn
+    tree: bool = False              # the tree search instead of the one-turn search
+    tree_budget: int = 800          # value evaluations per fully searched turn
+    fast_budget: int = 0            # >0: other turns get this cheap search, not trained on
+    full_frac: float = 0.25         # share of turns fully searched (with fast_budget)
+    root_noise: float = 0.0         # Dirichlet noise share at the roots of full searches
     eval_every: int = 10            # rounds
     eval_games: int = 200
     d: int = 64
@@ -114,8 +125,20 @@ class SearchTrainer:
         self.search_cfg = SearchConfig(k=cfg.k, max_outcomes=cfg.max_outcomes,
                                        roll_bands=cfg.roll_bands, double_oracle=cfg.double_oracle,
                                        deepen=cfg.deepen)
-        self.search = Search(self.model, self.search_cfg, cfg.seed)
-        self.buffer = Buffer(cfg.buffer, cfg.k)
+        if cfg.tree:
+            self.search_cfg = TreeConfig(budget=cfg.tree_budget, max_outcomes=cfg.max_outcomes,
+                                         roll_bands=cfg.roll_bands, root_noise=cfg.root_noise)
+            self.search = TreeSearch(self.model, self.search_cfg, cfg.seed)
+            self.fast = (TreeSearch(self.model, TreeConfig(budget=cfg.fast_budget,
+                                                           max_outcomes=cfg.max_outcomes,
+                                                           roll_bands=cfg.roll_bands), cfg.seed + 1)
+                         if cfg.fast_budget > 0 else None)
+            self.width = self.search_cfg.max_candidates
+        else:
+            self.search = Search(self.model, self.search_cfg, cfg.seed)
+            self.fast = None
+            self.width = cfg.k
+        self.buffer = Buffer(cfg.buffer, self.width)
         # Per game: buffer indices of its examples so far, and their sides.
         self.pending: list[list[tuple[int, int]]] = [[] for _ in range(cfg.envs)]
         self.rounds = self.games = self.examples = 0
@@ -136,9 +159,20 @@ class SearchTrainer:
                 a, _, _ = act(self.model, to_tensors(obs, rows))
                 actions.reshape(-1)[rows] = a.numpy()
             games = np.flatnonzero((dec == DECISION_SLOTS).any(1))
+            if len(games) and self.fast is not None:
+                # Playout cap randomisation: the cheap search only moves on.
+                full = self.rng.random(len(games)) < c.full_frac
+                quick = games[~full]
+                if len(quick):
+                    for g, r in zip(quick, self.fast.run(env, quick)):
+                        for side in (0, 1):
+                            if r["candidates"][side][0] >= 0:
+                                actions[g, side] = self.fast.pick(r, side)
+                games = games[full]
             if len(games):
-                results = self.search.run(env, games)
-                n, k = len(games), c.k
+                results = (self.search.run(env, games, noise=True) if c.tree
+                           else self.search.run(env, games))
+                n, k = len(games), self.width
                 cands = np.full((n, 2, k), -1, np.int16)
                 mixes = np.zeros((n, 2, k), np.float32)
                 val = np.zeros((n, 2), np.float32)

@@ -20,6 +20,10 @@ Values are side 0's expected result in [-1, 1]; side 1 minimises them.
 
     python -m selfplay.search runs/tiny/model.pt --games 400 --k 8
     python -m selfplay.search runs/tiny/model.pt --games 400 --double-oracle --deepen 16
+    python -m selfplay.search runs/tiny/model.pt --tree --tree-budget 2000 --vs-search
+
+`--tree` makes side 0 play the tree search (selfplay.mcts) instead, and
+`--opp-tree` side 1 (with `--vs-search`).
 """
 from __future__ import annotations
 
@@ -326,16 +330,22 @@ class Search:
 
 
 @torch.no_grad()
-def play_vs_policy(model, games: int, cfg: SearchConfig, seed: int = 0, envs: int = 32,
+def make_searcher(model, cfg, seed: int = 0):
+    """A Search for a SearchConfig, a TreeSearch for a TreeConfig."""
+    from selfplay.mcts import TreeConfig, TreeSearch
+    return TreeSearch(model, cfg, seed) if isinstance(cfg, TreeConfig) else Search(model, cfg, seed)
+
+
+def play_vs_policy(model, games: int, cfg, seed: int = 0, envs: int = 32,
                    perfect_info: bool = True, sampled_policy: bool = False,
-                   opponent_cfg: SearchConfig | None = None) -> dict:
-    """Side 0 searches with `cfg`; side 1 plays the raw policy (most likely
-    action, or a sample), or searches with `opponent_cfg`. Team preview is
-    the policy's on both sides."""
+                   opponent_cfg=None) -> dict:
+    """Side 0 searches with `cfg` (a SearchConfig or a TreeConfig); side 1
+    plays the raw policy (most likely action, or a sample), or searches with
+    `opponent_cfg`. Team preview is the policy's on both sides."""
     from selfplay.train import act, to_tensors
     env = SelfPlayEnv(min(envs, games), seed=seed, perfect_info=perfect_info)
-    search = Search(model, cfg, seed)
-    other = Search(model, opponent_cfg, seed + 1) if opponent_cfg else None
+    search = make_searcher(model, cfg, seed)
+    other = make_searcher(model, opponent_cfg, seed + 1) if opponent_cfg else None
     model.eval()
     done = score = 0.0
     while done < games:
@@ -356,14 +366,19 @@ def play_vs_policy(model, games: int, cfg: SearchConfig, seed: int = 0, envs: in
         fin = r.done.astype(bool)
         done += fin.sum()
         score += ((r.reward[fin, 0] + 1) / 2).sum()
-    s = search.stats
     p = score / done
-    roots = max(1, s["roots"])
-    return {"score": float(p), "ci95": float(1.96 * np.sqrt(p * (1 - p) / done)), "games": int(done),
-            "roots": s["roots"], "cells_per_root": s["cells"] / roots,
-            "leaves_per_root": s["leaves"] / roots, "iterations_per_root": s["iterations"] / roots,
-            "deepened_per_root": s["deepened"] / roots, "mean_gap": s["gap"] / roots,
-            "ms_per_root": 1000 * s["seconds"] / roots}
+    out = {"score": float(p), "ci95": float(1.96 * np.sqrt(p * (1 - p) / done)), "games": int(done)}
+    for who, srch in (("", search), ("opp_", other)):
+        if srch is None:
+            continue
+        s = srch.stats
+        roots = max(1, s["roots"])
+        out[who + "roots"] = s["roots"]
+        for k, v in s.items():
+            if k not in ("roots", "seconds"):
+                out[f"{who}{k}_per_root"] = v / roots
+        out[who + "ms_per_root"] = 1000 * s["seconds"] / roots
+    return out
 
 
 def config_args(p: argparse.ArgumentParser, prefix: str = ""):
@@ -389,12 +404,25 @@ def main():
     p.add_argument("--sampled-policy", action="store_true", help="the policy side samples instead of argmax")
     p.add_argument("--vs-search", action="store_true",
                    help="side 1 searches too, with the --opp-* settings (default: one-turn search)")
+    p.add_argument("--tree", action="store_true", help="side 0 plays the tree search")
+    p.add_argument("--opp-tree", action="store_true", help="side 1 plays the tree search")
     config_args(p)
     config_args(p, "opp-")
+    from selfplay import mcts
+    mcts.config_args(p, "tree-")
+    mcts.config_args(p, "opp-tree-")
     a = p.parse_args()
     model = load(a.model, a.device)
-    cfg = SearchConfig(**{k: getattr(a, k) for k in vars(SearchConfig())})
-    opp = SearchConfig(**{k: getattr(a, "opp_" + k) for k in vars(SearchConfig())}) if a.vs_search else None
+    if a.tree:
+        cfg = mcts.config_from(a, "tree_")
+    else:
+        cfg = SearchConfig(**{k: getattr(a, k) for k in vars(SearchConfig())})
+    opp = None
+    if a.vs_search:
+        if a.opp_tree:
+            opp = mcts.config_from(a, "opp_tree_")
+        else:
+            opp = SearchConfig(**{k: getattr(a, "opp_" + k) for k in vars(SearchConfig())})
     res = play_vs_policy(model, a.games, cfg, a.seed, a.envs, not a.hidden, a.sampled_policy, opp)
     print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
 
