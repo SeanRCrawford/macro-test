@@ -74,6 +74,15 @@ Each turn is solved as a matrix game between both sides' top-k joint
 actions, every cell scored over its chance outcomes by the value network
 (DESIGN.md 4.14).
 
+The tree search (DESIGN.md 4.16) looks further: every node is such a matrix
+game, grown where it matters, guided by the policy at every node:
+
+    python -m selfplay.search MODEL --tree --tree-budget 2000 --vs-search --games 1000 --device cuda
+    python -m selfplay.search MODEL --tree --tree-budget 2000 --vs-search --opp-tree --opp-tree-budget 500
+    python -m selfplay.search MODEL --tree --tree-budget 2000 --tree-root-oracle --vs-search --opp-tree --opp-tree-budget 2000
+    python -m selfplay.search_train --init MODEL --tree --tree-budget 800 --fast-budget 100 \
+        --full-frac 0.25 --root-noise 0.25 --epochs 8 --envs 256 --device cuda --out runs/tree
+
 ## Teams
 
 Training plays the tournament teams in `data/corpus` (weighted by

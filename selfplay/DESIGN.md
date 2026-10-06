@@ -730,15 +730,36 @@ a cheap search and a random `--full-frac` a full one, the only ones trained
 on (KataGo's playout cap randomisation, Wu 2019); `--root-noise` adds
 AlphaZero's Dirichlet noise to full searches' root priors.
 
+**First measurements** (run 7's small CPU-trained network, 200-300 games
+each, 95% intervals of about +-0.07; budgets in value evaluations per
+searched turn):
+
+| | Score | Evaluations (tree / other) | Tree depth, nodes |
+|---|---|---|---|
+| tree 600 vs one-turn top 8 | 0.459 +- 0.056 | 616 / 557 | 2.7, 32 |
+| tree 2,000 vs one-turn top 8 | 0.548 +- 0.069 | 2,016 / 562 | 3.8, 153 |
+| tree 2,000 (root 8 x 8) vs one-turn top 14 | 0.517 +- 0.069 | 2,037 / 1,594 | 3.4, 128 |
+| tree 2,000 vs tree 500 | 0.535 +- 0.069 | 2,010 / 541 | 3.9 vs 2.7 |
+
+None of these is significant. At this network's quality, as with the
+one-turn search's deepening and double oracle (4.14), extra search beyond a
+good one-turn matrix gains little; the gain from search grows with the
+value network's accuracy. Nothing suggests a bias against depth (more
+budget never scored below even). The comparisons that decide the defaults
+need the GPU-trained network and about 1,000 games each.
+
+The principal line (the most likely play and outcome, node by node, with
+values) comes with every result, for the analysis board.
+
 **Next for the search:**
 
-1. Measure against the one-turn search at equal and larger budgets, and
-   tune `c_explore`, the widening rate, the start sizes and the static
-   weight with head-to-head games (Laplace's discipline: no change
-   without a significant result).
-2. Nessie's root double oracle as a widening rule at the root (best replies
-   from every legal action), and its alternatives over every legal action
-   for the analysis board.
+1. Measure with a trained network (above), then tune `c_explore`, the
+   widening rate, the start sizes and the static weight with head-to-head
+   games (Laplace's discipline: no change without a significant result).
+2. Nessie's root double oracle is in as an option (`root_oracle`: widen the
+   root by best reply instead of by the prior; a test checks it keeps
+   endgames exact); measure it at the same time. Its alternatives over
+   every probed action are the next thing the analysis board needs.
 3. Engine speed: a position's damage features cost 100 us, three turns'
    simulation; they are most of the engine's time per leaf.
 4. Hidden information (Open Team Sheets: stat points, brought four): worlds
