@@ -748,6 +748,22 @@ value network's accuracy. Nothing suggests a bias against depth (more
 budget never scored below even). The comparisons that decide the defaults
 need the GPU-trained network and about 1,000 games each.
 
+With the first search-trained GPU network (400 games each, +-0.049):
+
+| | Score | ms per turn |
+|---|---|---|
+| tree 2,000 vs one-turn top 8 | **0.592** | 174 vs 16 |
+| tree 2,000 vs tree 500 | 0.542 | 173 vs 35 |
+| tree 2,000 with the root double oracle vs without | **0.563** | 138 vs 163 |
+| (one-turn) double oracle vs top 8 | 0.545 | 230 vs ~20 |
+| (one-turn) + deepening 16 leaves vs top 8 | 0.508 | 42 vs ~20 |
+
+With a trained network the tree search clearly beats the one-turn search,
+improves with budget, and the root double oracle helps inside it (and is
+cheaper: the root's best replies take budget that would have gone deep).
+The root oracle is now the default (`TreeConfig.root_oracle`; training's
+cheap searches keep the prior's widening).
+
 The principal line (the most likely play and outcome, node by node, with
 values) comes with every result, for the analysis board.
 

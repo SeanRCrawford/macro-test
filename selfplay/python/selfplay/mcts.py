@@ -38,7 +38,7 @@ class TreeConfig:
     solve_iters: int = 200
     max_depth: int = 8
     sims_per_wave: int = 4
-    root_oracle: bool = False   # widen the root by best reply (Nessie's double oracle)
+    root_oracle: bool = True    # widen the root by best reply (Nessie's double oracle)
     oracle_eps: float = 0.005
     prior_top: int = 24         # ranked actions kept per side from the policy
     root_noise: float = 0.0     # Dirichlet noise share at the roots (self-play exploration)

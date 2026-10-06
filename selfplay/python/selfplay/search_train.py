@@ -58,6 +58,7 @@ class Config:
     fast_budget: int = 0            # >0: other turns get this cheap search, not trained on
     full_frac: float = 0.25         # share of turns fully searched (with fast_budget)
     root_noise: float = 0.0         # Dirichlet noise share at the roots of full searches
+    prior_root: bool = False        # widen full searches' roots by the prior, not the double oracle
     eval_every: int = 10            # rounds
     eval_games: int = 200
     d: int = 64
@@ -127,11 +128,13 @@ class SearchTrainer:
                                        deepen=cfg.deepen)
         if cfg.tree:
             self.search_cfg = TreeConfig(budget=cfg.tree_budget, max_outcomes=cfg.max_outcomes,
-                                         roll_bands=cfg.roll_bands, root_noise=cfg.root_noise)
+                                         roll_bands=cfg.roll_bands, root_noise=cfg.root_noise,
+                                         root_oracle=not cfg.prior_root)
             self.search = TreeSearch(self.model, self.search_cfg, cfg.seed)
             self.fast = (TreeSearch(self.model, TreeConfig(budget=cfg.fast_budget,
                                                            max_outcomes=cfg.max_outcomes,
-                                                           roll_bands=cfg.roll_bands), cfg.seed + 1)
+                                                           roll_bands=cfg.roll_bands,
+                                                           root_oracle=False), cfg.seed + 1)
                          if cfg.fast_budget > 0 else None)
             self.width = self.search_cfg.max_candidates
         else:
