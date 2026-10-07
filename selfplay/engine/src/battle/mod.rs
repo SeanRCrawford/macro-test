@@ -110,7 +110,7 @@ pub struct Battle {
     /// draw. None (Showdown) plays on.
     pub turn_limit: Option<u32>,
     /// The six sets each side brought to team preview, by uid.
-    pub teams: [Vec<PokemonSet>; 2],
+    pub teams: [std::sync::Arc<[PokemonSet]>; 2],
     queue: Vec<Action>,
     mid_turn: bool,
     /// Queued faints, with the user of the move that caused each (if any).
@@ -142,7 +142,7 @@ impl Battle {
                 support::check_set(set).map_err(BattleError::Unsupported)?;
             }
         }
-        let sets = teams.clone();
+        let sets = teams.clone().map(std::sync::Arc::from);
         let sides = teams.map(|team| {
             let pokemon: Vec<Mon> = team
                 .iter()

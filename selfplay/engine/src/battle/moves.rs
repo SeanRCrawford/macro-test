@@ -91,14 +91,30 @@ impl Battle {
     /// Pokemon it would hit; damage to the user's ally counts against it.
     /// Average roll, no critical hit. For simple policies; changes nothing.
     pub fn estimate_damage(&self, user: MonRef, move_id: MoveId, target_loc: i8) -> f64 {
-        self.estimate_damage_in(&self.damage_view(), user, move_id, target_loc)
+        self.estimate_damage_in(&self.damage_view(), user, move_id, target_loc, None)
     }
 
     /// `estimate_damage` for each active slot (side * 2 + position), each of
     /// its four moves and each target location 0, 1, 2, -1, -2, sharing one
     /// damage view.
     pub fn damage_table(&self) -> [[[f32; 5]; 4]; 4] {
+        self.damage_table_with(None)
+    }
+
+    /// `damage_table`, remembering calculations in `cache` for positions
+    /// that share them (the same result as without it).
+    pub fn damage_table_with(&self, mut cache: Option<&mut damage::DamageCache>) -> [[[f32; 5]; 4]; 4] {
         let view = self.damage_view();
+        if let Some(c) = cache.as_deref_mut() {
+            // Any calculation's context carries the scene (actives and field).
+            let any = (0..2).flat_map(|s| (0..ACTIVE_PER_SIDE).map(move |p| (s, p))).find_map(|(s, p)| {
+                self.occupant(s, p).filter(|&r| view[s * 2 + self.mon(r).position].is_some())
+            });
+            match any {
+                Some(r) => c.begin(&self.damage_ctx(&view, r, r, false, false)),
+                None => return [[[0.0; 5]; 4]; 4],
+            }
+        }
         let mut out = [[[0.0; 5]; 4]; 4];
         for side in 0..2 {
             for pos in 0..ACTIVE_PER_SIDE {
@@ -116,13 +132,13 @@ impl Battle {
                     }
                     if matches!(data.target, MoveTarget::AllAdjacentFoes | MoveTarget::AllAdjacent) {
                         // The location doesn't change who a spread move hits.
-                        let v = self.estimate_damage_in(&view, r, id, 0) as f32;
+                        let v = self.estimate_damage_in(&view, r, id, 0, cache.as_deref_mut()) as f32;
                         row.fill(v);
                         continue;
                     }
-                    let foe1 = self.estimate_damage_in(&view, r, id, 1) as f32;
-                    let foe2 = self.estimate_damage_in(&view, r, id, 2) as f32;
-                    let ally = self.estimate_damage_in(&view, r, id, ally_loc) as f32;
+                    let foe1 = self.estimate_damage_in(&view, r, id, 1, cache.as_deref_mut()) as f32;
+                    let foe2 = self.estimate_damage_in(&view, r, id, 2, cache.as_deref_mut()) as f32;
+                    let ally = self.estimate_damage_in(&view, r, id, ally_loc, cache.as_deref_mut()) as f32;
                     let first_foe_up = self.occupant(1 - side, 0).is_some_and(|f| self.mon(f).hp > 0);
                     row[0] = if first_foe_up { foe1 } else { foe2 };
                     row[1] = foe1;
@@ -141,6 +157,7 @@ impl Battle {
         user: MonRef,
         move_id: MoveId,
         target_loc: i8,
+        mut cache: Option<&mut damage::DamageCache>,
     ) -> f64 {
         let data = Dex::get().move_data(move_id);
         if data.category == Category::Status || self.mon(user).hp == 0 {
@@ -173,9 +190,12 @@ impl Battle {
         let mut total = 0.0;
         for t in targets {
             let ctx = self.damage_ctx(view, user, t, false, spread);
-            let Ok(am) = damage::prepare_move(&ctx, move_id) else { continue };
-            let Ok(Outcome::Damage(rolls)) = damage::damage_for(&ctx, &am) else { continue };
-            let mean = rolls.iter().map(|&r| r as f64).sum::<f64>() / 16.0;
+            let sum = match cache.as_deref_mut() {
+                Some(c) => c.roll_sum(&ctx, move_id),
+                None => damage::roll_sum(&ctx, move_id),
+            };
+            let Some(sum) = sum else { continue };
+            let mean = sum as f64 / 16.0;
             let m = self.mon(t);
             let frac = mean.min(m.hp as f64) / m.max_hp().max(1) as f64;
             total += if t.side == user.side { -frac } else { frac };
@@ -596,7 +616,7 @@ impl Battle {
                 }
                 let mut c = Combatant::new(m.species, m.stats, m.ability, m.item);
                 c.types = m.types;
-                c.hp = m.hp;
+                c.set_hp(m.hp);
                 c.boosts = [
                     0,
                     m.boosts[0],

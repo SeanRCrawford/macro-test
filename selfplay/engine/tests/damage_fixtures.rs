@@ -80,7 +80,7 @@ fn combatant(m: &Mon) -> Combatant {
     let mut c = Combatant::new(species, m.stats, ability, item);
     let types: Vec<_> = m.types.iter().map(|t| dex.type_id(t).unwrap()).collect();
     c.types = [types[0], *types.get(1).unwrap_or(&types[0])];
-    c.hp = m.hp;
+    c.set_hp(m.hp);
     // The generator's battles have no queue and nobody newly switched in, so
     // every target counts as having moved (Payback doubles).
     c.moved_this_turn = true;

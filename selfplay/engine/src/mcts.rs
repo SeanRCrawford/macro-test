@@ -46,6 +46,7 @@ use crate::chance::{Chance, Rng, Script};
 use crate::enumerate::{enumerate, EnumConfig};
 use crate::env::action::{self, Decision, MASK_LEN};
 use crate::env::obs::{self, FIELD_FLOATS, INT_FIELDS, MON_FLOATS, TOKENS};
+use crate::damage::DamageCache;
 use crate::env::run_parallel;
 use crate::search::{result_for_side0, solve_warm, LEAF_FIELD, LEAF_INTS, LEAF_MONS};
 use std::sync::Mutex;
@@ -997,11 +998,13 @@ fn expand_cell(b: &Battle, actions: [i64; 2], cfg: &EnumConfig, perfect: bool) -
     let mut ints = vec![0i32; TOKENS * INT_FIELDS];
     let mut mons = vec![0f32; TOKENS * MON_FLOATS];
     let mut field = vec![0f32; FIELD_FLOATS];
+    // The outcomes mostly differ only in HP: they share damage calculations.
+    let mut cache = DamageCache::new();
     for o in e.outcomes {
         let terminal = result_for_side0(&o.battle);
         if terminal.is_nan() {
             out.leaves.push(out.children.len() as u16);
-            let table = perfect.then(|| o.battle.damage_table());
+            let table = perfect.then(|| o.battle.damage_table_with(Some(&mut cache)));
             for side in 0..2 {
                 obs::observe(&o.battle, side, perfect, table.as_ref(), &mut ints, &mut mons, &mut field);
                 out.ints.extend_from_slice(&ints);

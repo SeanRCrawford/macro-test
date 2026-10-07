@@ -19,7 +19,7 @@ use crate::dex::{
 };
 use crate::fixed::{chain, modify, of, ONE};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Weather {
     #[default]
     None,
@@ -29,7 +29,7 @@ pub enum Weather {
     Snow,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Terrain {
     #[default]
     None,
@@ -39,7 +39,7 @@ pub enum Terrain {
     Psychic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Status {
     #[default]
     None,
@@ -52,7 +52,7 @@ pub enum Status {
 }
 
 /// Volatile conditions that affect damage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Volatiles {
     /// Times Helping Hand was used on this Pokemon this turn (each is x1.5).
     pub helping_hand: u8,
@@ -69,14 +69,15 @@ pub struct Volatiles {
 }
 
 /// A Pokemon as the damage calculation sees it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Combatant {
     pub species: SpeciesId,
     /// Current types; a mono-type Pokemon repeats its type.
     pub types: [TypeId; 2],
     /// Stored stats; `stats[HP]` is max HP.
     pub stats: [u16; 6],
-    pub hp: u16,
+    /// Current HP: read through `hp()`, which notes the read (DamageCache).
+    hp: u16,
     /// Stat stages, indexed like stats (index 0 unused).
     pub boosts: [i8; 6],
     pub ability: AbilityId,
@@ -145,12 +146,22 @@ impl Combatant {
         self.stats[0]
     }
 
+    /// Current HP. Notes that the calculation in progress depends on it.
+    pub fn hp(&self) -> u16 {
+        HP_READ.with(|r| r.set(true));
+        self.hp
+    }
+
+    pub fn set_hp(&mut self, hp: u16) {
+        self.hp = hp;
+    }
+
     pub fn has_type(&self, t: TypeId) -> bool {
         self.types.contains(&t)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SideState {
     pub reflect: bool,
     pub light_screen: bool,
@@ -549,10 +560,7 @@ pub fn calculate(ctx: &DamageCtx, move_id: MoveId) -> Res<Outcome> {
 
 /// The move as it will be used: useMoveInner's ModifyType and ModifyMove.
 pub fn prepare_move(ctx: &DamageCtx, move_id: MoveId) -> Res<ActiveMove> {
-    let calc = Calc {
-        ctx,
-        dex: Dex::get(),
-    };
+    let calc = Calc::new(ctx);
     let data = calc.dex.move_data(move_id);
     let mut am = ActiveMove::new(move_id, data);
     calc.modify_type_and_move(&mut am, data)?;
@@ -561,10 +569,7 @@ pub fn prepare_move(ctx: &DamageCtx, move_id: MoveId) -> Res<ActiveMove> {
 
 /// `getDamage` for a move already prepared by `prepare_move`.
 pub fn damage_for(ctx: &DamageCtx, am: &ActiveMove) -> Res<Outcome> {
-    let calc = Calc {
-        ctx,
-        dex: Dex::get(),
-    };
+    let calc = Calc::new(ctx);
     let mut am = am.clone();
     let data = calc.dex.move_data(am.id);
     calc.get_damage(&mut am, data)
@@ -573,10 +578,7 @@ pub fn damage_for(ctx: &DamageCtx, am: &ActiveMove) -> Res<Outcome> {
 /// Whether the defender eats its type-resist berry (onSourceModifyDamage)
 /// when `am` hits it for damage.
 pub fn eats_resist_berry(ctx: &DamageCtx, am: &ActiveMove) -> Res<bool> {
-    let calc = Calc {
-        ctx,
-        dex: Dex::get(),
-    };
+    let calc = Calc::new(ctx);
     let d = ctx.defender;
     let Some(t) = calc.effective_item(d).and_then(resist_berry) else {
         return Ok(false);
@@ -594,19 +596,170 @@ pub fn eats_resist_berry(ctx: &DamageCtx, am: &ActiveMove) -> Res<bool> {
 
 /// `runImmunity(move)` for the defender in `ctx`.
 pub fn run_immunity(ctx: &DamageCtx, am: &ActiveMove) -> bool {
-    Calc {
-        ctx,
-        dex: Dex::get(),
+    Calc::new(ctx).run_immunity(am)
+}
+
+thread_local! {
+    /// Set when a calculation reads a Pokemon's current HP (`Combatant::hp`).
+    static HP_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Damage results remembered across positions that differ only in HP (the
+/// chance outcomes of one turn, a position seen as a leaf and then as a
+/// node). A scene is everything the calculations of one position see except
+/// current HP (the actives, the field); each result is keyed by its scene and
+/// the calculation's own inputs. A result whose calculation read HP
+/// (Multiscale, Eruption, pinch abilities...) is reused only at the same HP,
+/// so results are exactly the uncached ones.
+#[derive(Default)]
+pub struct DamageCache {
+    scenes: crate::dex::FastMap<SceneKey, u32>,
+    /// The scene `begin` set: its id and the actives' HP.
+    current: Option<(u32, [u16; 4])>,
+    map: crate::dex::FastMap<u64, CacheEntry>,
+    pub hits: u64,
+    pub misses: u64,
+    /// Calculations that read HP (their results are reused only at that HP).
+    pub hp_dependent: u64,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct SceneKey {
+    /// The actives with current HP zeroed.
+    actives: [Option<Combatant>; 4],
+    weather: Weather,
+    terrain: Terrain,
+    sides: [SideState; 2],
+    gravity: bool,
+}
+
+impl SceneKey {
+    fn of(ctx: &DamageCtx) -> Self {
+        SceneKey {
+            actives: ctx.actives.map(|c| {
+                c.map(|c| {
+                    let mut c = c.clone();
+                    c.hp = 0;
+                    c
+                })
+            }),
+            weather: ctx.weather,
+            terrain: ctx.terrain,
+            sides: ctx.sides,
+            gravity: ctx.gravity,
+        }
     }
-    .run_immunity(am)
+}
+
+struct CacheEntry {
+    /// The actives' HP, when the calculation read it.
+    hp: Option<[u16; 4]>,
+    sum: Option<u32>,
+}
+
+impl DamageCache {
+    /// Results kept before the cache starts over.
+    const MAX: usize = 1 << 15;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start a position: the scene of `ctx` (its actives and field; the
+    /// attacker, defender and per-hit flags don't matter) is the one the
+    /// following `roll_sum` calls see.
+    pub fn begin(&mut self, ctx: &DamageCtx) {
+        if self.map.len() >= Self::MAX {
+            self.map.clear();
+            self.scenes.clear();
+        }
+        let n = self.scenes.len() as u32;
+        let id = *self.scenes.entry(SceneKey::of(ctx)).or_insert(n);
+        self.current = Some((id, ctx.actives.map(|c| c.map_or(0, |c| c.hp))));
+    }
+
+    /// The sum of the 16 damage rolls of `move_id` in `ctx` (`prepare_move`
+    /// then `damage_for`), or `None` when it deals no damage or isn't
+    /// supported. `ctx` must be in the scene `begin` set.
+    pub fn roll_sum(&mut self, ctx: &DamageCtx, move_id: MoveId) -> Option<u32> {
+        let (scene, hps) = self.current.expect("DamageCache::begin first");
+        debug_assert!(
+            self.scenes.get(&SceneKey::of(ctx)) == Some(&scene)
+                && hps == ctx.actives.map(|c| c.map_or(0, |c| c.hp)),
+            "roll_sum outside the scene begin set"
+        );
+        let key = (scene as u64) << 32
+            | (move_id.0 as u64) << 16
+            | (ctx.attacker as u64) << 14
+            | (ctx.defender as u64) << 12
+            | (ctx.hit.min(15) as u64) << 8
+            | (ctx.crit as u64) << 3
+            | (ctx.spread as u64) << 2
+            | (ctx.bypass_protect as u64) << 1
+            | ctx.hit_sub as u64;
+        if ctx.hit < 16 {
+            if let Some(e) = self.map.get(&key) {
+                if e.hp.is_none_or(|h| h == hps) {
+                    self.hits += 1;
+                    return e.sum;
+                }
+            }
+        }
+        self.misses += 1;
+        let before = HP_READ.with(|r| r.replace(false));
+        let sum = roll_sum(ctx, move_id);
+        let read = HP_READ.with(|r| r.replace(before));
+        self.hp_dependent += read as u64;
+        if ctx.hit < 16 {
+            self.map.insert(key, CacheEntry { hp: read.then_some(hps), sum });
+        }
+        sum
+    }
+}
+
+/// `DamageCache::roll_sum` without the cache.
+pub fn roll_sum(ctx: &DamageCtx, move_id: MoveId) -> Option<u32> {
+    let am = prepare_move(ctx, move_id).ok()?;
+    match damage_for(ctx, &am) {
+        Ok(Outcome::Damage(rolls)) => Some(rolls.iter().sum()),
+        _ => None,
+    }
 }
 
 struct Calc<'a, 'b> {
     ctx: &'b DamageCtx<'a>,
     dex: &'static Dex,
+    /// Per active slot, the union of its effects' handler masks (filled on
+    /// first use): an event none of them handles skips the slot at once.
+    masks: std::cell::Cell<Option<[u64; 4]>>,
 }
 
 impl<'a, 'b> Calc<'a, 'b> {
+    fn new(ctx: &'b DamageCtx<'a>) -> Self {
+        Calc {
+            ctx,
+            dex: Dex::get(),
+            masks: std::cell::Cell::new(None),
+        }
+    }
+
+    /// Whether any effect slot `i` holds might handle `hook` (a hook bit).
+    fn may_handle(&self, i: usize, hook: u64) -> bool {
+        let masks = match self.masks.get() {
+            Some(m) => m,
+            None => {
+                let mut m = [0u64; 4];
+                for (j, mask) in m.iter_mut().enumerate() {
+                    if self.ctx.actives[j].is_some() {
+                        *mask = self.mon_effects(j).into_iter().fold(0, |acc, e| acc | self.handlers(e).mask);
+                    }
+                }
+                self.masks.set(Some(m));
+                m
+            }
+        };
+        masks[i] & hook != 0
+    }
     fn mon(&self, i: usize) -> &'a Combatant {
         self.ctx.actives[i].expect("damage ctx refers to an empty slot")
     }
@@ -899,8 +1052,10 @@ impl<'a, 'b> Calc<'a, 'b> {
                 am,
             );
         }
-        for e in self.mon_effects(target) {
-            self.push(&mut out, e, Holder::Mon(target), on, am);
+        if self.may_handle(target, on.1) {
+            for e in self.mon_effects(target) {
+                self.push(&mut out, e, Holder::Mon(target), on, am);
+            }
         }
         let side = Self::side_of(target);
         for i in 0..4 {
@@ -912,6 +1067,9 @@ impl<'a, 'b> Calc<'a, 'b> {
             } else {
                 [foe, any]
             };
+            if !self.may_handle(i, hooks[0].1 | hooks[1].1) {
+                continue;
+            }
             for e in self.mon_effects(i) {
                 for hook in hooks {
                     self.push(&mut out, e, Holder::Mon(i), hook, am);
@@ -919,8 +1077,10 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
         }
         if let Some(s) = source {
-            for e in self.mon_effects(s) {
-                self.push(&mut out, e, Holder::Mon(s), from_source, am);
+            if self.may_handle(s, from_source.1) {
+                for e in self.mon_effects(s) {
+                    self.push(&mut out, e, Holder::Mon(s), from_source, am);
+                }
             }
         }
         for (s, state) in self.ctx.sides.iter().enumerate() {
@@ -1193,9 +1353,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         }
         if data.handlers.has("damageCallback") {
             let dmg = match data.id.as_str() {
-                "superfang" => (defender.hp as u32 / 2).max(1),
-                "finalgambit" => attacker.hp as u32,
-                "endeavor" => (defender.hp as i64 - attacker.hp as i64).max(0) as u32,
+                "superfang" => (defender.hp() as u32 / 2).max(1),
+                "finalgambit" => attacker.hp() as u32,
+                "endeavor" => (defender.hp() as i64 - attacker.hp() as i64).max(0) as u32,
                 other => return unsupported(format!("move {other}.damageCallback")),
             };
             return Ok(Outcome::Damage([dmg; 16]));
@@ -1344,12 +1504,12 @@ impl<'a, 'b> Calc<'a, 'b> {
             }
             // A fractional base power is truthy, then clamped to at least 1.
             "eruption" | "waterspout" => {
-                (bp * attacker.hp as i64 / attacker.max_hp() as i64).max(attacker.hp.min(1) as i64)
+                (bp * attacker.hp() as i64 / attacker.max_hp() as i64).max(attacker.hp().min(1) as i64)
             }
             "lowkick" | "grassknot" => weight_bp(self.weight(d, am)?),
             "heavyslam" | "heatcrash" => ratio_bp(self.weight(a, am)?, self.weight(d, am)?),
             "hardpress" => {
-                let hp = defender.hp as i64;
+                let hp = defender.hp() as i64;
                 let max = defender.max_hp() as i64;
                 let v = ((100 * (100 * (hp * 4096 / max)) + 2047) / 4096) / 100;
                 if v == 0 {
@@ -1369,7 +1529,7 @@ impl<'a, 'b> Calc<'a, 'b> {
             "powertrip" | "storedpower" => bp + 20 * positive_boosts,
             "ragefist" => (50 + 50 * attacker.times_attacked as i64).min(350),
             "reversal" => {
-                let ratio = (attacker.hp as i64 * 48 / attacker.max_hp() as i64).max(1);
+                let ratio = (attacker.hp() as i64 * 48 / attacker.max_hp() as i64).max(1);
                 match ratio {
                     r if r < 2 => 200,
                     r if r < 5 => 150,
@@ -1749,9 +1909,9 @@ impl<'a, 'b> Calc<'a, 'b> {
         let t = |n: &str| self.ty(n);
         let mv_type = am.move_type;
         let pinch =
-            |ty: &str| mv_type == t(ty) && holder_mon.hp as u32 * 3 <= holder_mon.max_hp() as u32;
-        let hook_self = format!("on{event}");
-        let hook_source = format!("onSource{event}");
+            |ty: &str| mv_type == t(ty) && holder_mon.hp() as u32 * 3 <= holder_mon.max_hp() as u32;
+        let names = event_hooks(event);
+        let (hook_self, hook_source) = (names[0].0.as_str(), names[4].0.as_str());
         self.fold(&refs, stat as i64, |r, _| {
             let yes = |c: bool, m: u32| if c { Act::Chain(m) } else { Act::None };
             let hook = r.hook;
@@ -1998,7 +2158,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                     let flag = |f: &str| mv.flags.has(f);
                     match self.dex.ability(ab).id.as_str() {
                         "auraguard" => yes(am.contact, of(1, 2)),
-                        "multiscale" => yes(defender.hp >= defender.max_hp(), of(1, 2)),
+                        "multiscale" => yes(defender.hp() >= defender.max_hp(), of(1, 2)),
                         "filter" | "solidrock" => yes(type_mod > 0, of(3, 4)),
                         "punkrock" => yes(flag("sound"), of(1, 2)),
                         "fluffy" => {
