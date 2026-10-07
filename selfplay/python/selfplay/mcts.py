@@ -55,8 +55,11 @@ class TreeConfig:
 
 
 class TreeSearch:
-    def __init__(self, model, cfg: TreeConfig = TreeConfig(), seed: int = 0):
+    def __init__(self, model, cfg: TreeConfig = TreeConfig(), seed: int = 0, value_model=None):
         self.model, self.cfg = model, cfg
+        # The leaves' values can come from another network (to test a
+        # policy and a value apart).
+        self.value_model = value_model or model
         self.dev = next(model.parameters()).device
         self.rng = np.random.default_rng(seed)
         self.stats = {"roots": 0, "leaves": 0, "nodes": 0, "gap": 0.0, "seconds": 0.0,
@@ -108,7 +111,7 @@ class TreeSearch:
         for i in range(0, n, self.cfg.leaf_batch):
             j = min(n, i + self.cfg.leaf_batch)
             with torch.autocast("cuda", dtype=torch.float16, enabled=half):
-                v = self.model.value(*(self._t(a[i:j].reshape(-1, *a.shape[2:])) for a in (ints, mons, fld)))
+                v = self.value_model.value(*(self._t(a[i:j].reshape(-1, *a.shape[2:])) for a in (ints, mons, fld)))
             v = v.float().view(-1, 2)
             # Side 0's value: its own estimate and the negation of side 1's.
             out[i:j] = ((v[:, 0] - v[:, 1]) / 2).cpu().numpy()

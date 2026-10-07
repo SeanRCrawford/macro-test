@@ -330,24 +330,31 @@ class Search:
 
 
 @torch.no_grad()
-def make_searcher(model, cfg, seed: int = 0):
-    """A Search for a SearchConfig, a TreeSearch for a TreeConfig."""
+def make_searcher(model, cfg, seed: int = 0, value_model=None):
+    """A Search for a SearchConfig, a TreeSearch for a TreeConfig (whose
+    leaf values may come from `value_model`)."""
     from selfplay.mcts import TreeConfig, TreeSearch
-    return TreeSearch(model, cfg, seed) if isinstance(cfg, TreeConfig) else Search(model, cfg, seed)
+    if isinstance(cfg, TreeConfig):
+        return TreeSearch(model, cfg, seed, value_model)
+    assert value_model is None, "--value-model needs the tree search"
+    return Search(model, cfg, seed)
 
 
 def play_vs_policy(model, games: int, cfg, seed: int = 0, envs: int = 32,
                    perfect_info: bool = True, sampled_policy: bool = False,
-                   opponent_cfg=None, opponent_model=None) -> dict:
+                   opponent_cfg=None, opponent_model=None, value_model=None,
+                   opponent_value_model=None) -> dict:
     """Side 0 searches with `cfg` (a SearchConfig or a TreeConfig); side 1
     plays the raw policy (most likely action, or a sample), or searches with
     `opponent_cfg`. Team preview is the policy's on both sides. Side 1 uses
-    `opponent_model` (default: `model`) for its policy and its search."""
+    `opponent_model` (default: `model`) for its policy and its search. A tree
+    search's leaf values can come from `value_model` / `opponent_value_model`."""
     from selfplay.train import act, to_tensors
     env = SelfPlayEnv(min(envs, games), seed=seed, perfect_info=perfect_info)
-    search = make_searcher(model, cfg, seed)
+    search = make_searcher(model, cfg, seed, value_model)
     opp_model = opponent_model or model
-    other = make_searcher(opp_model, opponent_cfg, seed + 1) if opponent_cfg else None
+    other = (make_searcher(opp_model, opponent_cfg, seed + 1, opponent_value_model)
+             if opponent_cfg else None)
     model.eval()
     opp_model.eval()
     done = score = 0.0
@@ -414,6 +421,8 @@ def main():
     p.add_argument("--tree", action="store_true", help="side 0 plays the tree search")
     p.add_argument("--opp-tree", action="store_true", help="side 1 plays the tree search")
     p.add_argument("--opp-model", default=None, help="side 1 plays this model.pt (default: MODEL)")
+    p.add_argument("--value-model", default=None, help="side 0's tree search values leaves with this model.pt")
+    p.add_argument("--opp-value-model", default=None, help="side 1's tree search values leaves with this model.pt")
     config_args(p)
     config_args(p, "opp-")
     from selfplay import mcts
@@ -431,8 +440,9 @@ def main():
             opp = mcts.config_from(a, "opp_tree_")
         else:
             opp = SearchConfig(**{k: getattr(a, "opp_" + k) for k in vars(SearchConfig())})
-    opp_model = load(a.opp_model, a.device) if a.opp_model else None
-    res = play_vs_policy(model, a.games, cfg, a.seed, a.envs, not a.hidden, a.sampled_policy, opp, opp_model)
+    get = lambda path: load(path, a.device) if path else None
+    res = play_vs_policy(model, a.games, cfg, a.seed, a.envs, not a.hidden, a.sampled_policy, opp,
+                         get(a.opp_model), get(a.value_model), get(a.opp_value_model))
     print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
 
 

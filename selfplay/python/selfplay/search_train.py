@@ -59,6 +59,8 @@ class Config:
     full_frac: float = 0.25         # share of turns fully searched (with fast_budget)
     root_noise: float = 0.0         # Dirichlet noise share at the roots of full searches
     prior_root: bool = False        # widen full searches' roots by the prior, not the double oracle
+    policy_target: str = "mix"      # tree: "mix" (root equilibrium), "visits" (root visit
+                                    # counts, as AlphaZero/KataGo), or "blend" (their average)
     eval_every: int = 10            # rounds
     eval_games: int = 200
     d: int = 64
@@ -185,7 +187,7 @@ class SearchTrainer:
                         mix = np.asarray(r[key], np.float64)
                         if cand[0] >= 0:
                             cands[i, side, :len(cand)] = cand
-                            mixes[i, side, :len(mix)] = mix
+                            mixes[i, side, :len(mix)] = self.target(r, side, mix)
                             j = self.rng.choice(len(mix), p=mix / mix.sum())
                             actions[g, side] = cand[j]
                     val[i] = (r["value"], -r["value"])
@@ -210,6 +212,21 @@ class SearchTrainer:
                 self.games += 1
         self.model.train()
         return added
+
+    def target(self, r: dict, side: int, mix: np.ndarray) -> np.ndarray:
+        """The policy target at a searched root for `side`: its equilibrium
+        mix, its candidates' visit shares, or their average."""
+        kind = self.cfg.policy_target
+        if kind == "mix" or not self.cfg.tree:
+            return mix
+        visits = np.asarray(r["visits"][side], np.float64)[:len(mix)]
+        if visits.sum() <= 0:
+            return mix
+        visits = visits / visits.sum()
+        if kind == "visits":
+            return visits
+        assert kind == "blend", f"unknown policy target {kind}"
+        return (mix / mix.sum() + visits) / 2
 
     def update(self, new: int) -> dict:
         c, buf, dev = self.cfg, self.buffer, self.cfg.device
