@@ -25,6 +25,14 @@ pub struct FxHasher {
     hash: u64,
 }
 
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(K);
+    }
+}
+
 impl Hasher for FxHasher {
     fn write(&mut self, bytes: &[u8]) {
         const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
@@ -38,7 +46,19 @@ impl Hasher for FxHasher {
         }
     }
     fn write_u8(&mut self, b: u8) {
-        self.write(&[b]);
+        self.add(b as u64);
+    }
+    fn write_u16(&mut self, x: u16) {
+        self.add(x as u64);
+    }
+    fn write_u32(&mut self, x: u32) {
+        self.add(x as u64);
+    }
+    fn write_u64(&mut self, x: u64) {
+        self.add(x);
+    }
+    fn write_usize(&mut self, x: usize) {
+        self.add(x as u64);
     }
     fn finish(&self) -> u64 {
         self.hash

@@ -107,6 +107,25 @@ pub struct Combatant {
     /// Positions (side * 2 + slot) whose occupant damaged this Pokemon this
     /// turn (Avalanche).
     pub damaged_by: u8,
+    /// Its effects and the union of their handler masks, set by `prepare`
+    /// once its fields are final (else worked out by each calculation).
+    held: Derived<Option<(Effects, u64)>>,
+}
+
+/// Data worked out from the other fields: equality and hashing skip it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Derived<T>(T);
+
+impl<T> PartialEq for Derived<T> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for Derived<T> {}
+
+impl<T> std::hash::Hash for Derived<T> {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
 impl Combatant {
@@ -139,7 +158,16 @@ impl Combatant {
             will_move: false,
             hurt_this_turn: false,
             damaged_by: 0,
+            held: Derived(None),
         }
+    }
+
+    /// Work out its effects once, for every calculation it takes part in.
+    /// Call after setting its fields; changing them afterwards needs another
+    /// call.
+    pub fn prepare(&mut self) {
+        self.held = Derived(None);
+        self.held = Derived(Some(held_effects(self)));
     }
 
     pub fn max_hp(&self) -> u16 {
@@ -261,7 +289,7 @@ impl ActiveMove {
 }
 
 /// Which effect a handler belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Effect {
     Ability(AbilityId),
     Item(ItemId),
@@ -273,7 +301,7 @@ enum Effect {
     Screen(Screen),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum VolatileKind {
     HelpingHand,
     Charge,
@@ -285,7 +313,7 @@ enum VolatileKind {
     Minimize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Screen {
     Reflect,
     Light,
@@ -300,7 +328,7 @@ enum Holder {
 }
 
 /// One handler found for an event, with Showdown's sort keys.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Ref {
     effect: Effect,
     holder: Holder,
@@ -448,7 +476,7 @@ pub const TYPELESS: TypeId = TypeId(u8::MAX);
 
 /// An event's handler names: on, onAlly, onFoe, onAny and onSource
 /// (built once per event).
-fn event_hooks(event: &'static str) -> &'static [(String, u64); 5] {
+fn event_hooks(event: &'static str) -> &'static [(&'static str, u64); 5] {
     // Built once for every event the calculation runs, then read without
     // locking from any thread.
     const EVENTS: [&str; 14] = [
@@ -467,24 +495,20 @@ fn event_hooks(event: &'static str) -> &'static [(String, u64); 5] {
         "NegateImmunity",
         "Type",
     ];
-    type Table = crate::dex::FastMap<&'static str, [(String, u64); 5]>;
-    static TABLE: std::sync::OnceLock<Table> = std::sync::OnceLock::new();
+    static TABLE: std::sync::OnceLock<[[(&'static str, u64); 5]; 14]> = std::sync::OnceLock::new();
     let table = TABLE.get_or_init(|| {
-        EVENTS
-            .iter()
-            .map(|&e| {
-                let hooks = ["", "Ally", "Foe", "Any", "Source"].map(|p| {
-                    let name = format!("on{p}{e}");
-                    let bit = crate::dex::hook_bit(&name);
-                    (name, bit)
-                });
-                (e, hooks)
+        EVENTS.map(|e| {
+            ["", "Ally", "Foe", "Any", "Source"].map(|p| {
+                let name: &'static str = format!("on{p}{e}").leak();
+                (name, crate::dex::hook_bit(name))
             })
-            .collect()
+        })
     });
-    table
-        .get(event)
-        .unwrap_or_else(|| panic!("event {event} missing from event_hooks"))
+    let i = EVENTS
+        .iter()
+        .position(|&e| e == event)
+        .unwrap_or_else(|| panic!("event {event} missing from event_hooks"));
+    &table[i]
 }
 
 /// The handlers of effects named in the code (volatiles, weather, terrain,
@@ -531,7 +555,7 @@ fn fixed_handlers() -> &'static FixedHandlers {
 }
 
 /// A Pokemon's effects, without allocating.
-#[derive(Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 struct Effects {
     buf: [Option<Effect>; 10],
     len: usize,
@@ -549,6 +573,84 @@ impl IntoIterator for Effects {
     type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<Effect>, 10>>;
     fn into_iter(self) -> Self::IntoIter {
         self.buf.into_iter().flatten()
+    }
+}
+
+/// The handlers found for an event: on the stack up to `INLINE`, then on
+/// the heap.
+struct Refs {
+    len: usize,
+    inline: [std::mem::MaybeUninit<Ref>; Refs::INLINE],
+    spill: Vec<Ref>,
+}
+
+impl Refs {
+    const INLINE: usize = 8;
+
+    fn new() -> Self {
+        Refs {
+            len: 0,
+            inline: [const { std::mem::MaybeUninit::uninit() }; Refs::INLINE],
+            spill: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, r: Ref) {
+        if self.len < Self::INLINE {
+            self.inline[self.len].write(r);
+        } else {
+            if self.spill.is_empty() {
+                let inline: Vec<Ref> = self.iter().copied().collect();
+                self.spill = inline;
+            }
+            self.spill.push(r);
+        }
+        self.len += 1;
+    }
+}
+
+impl std::ops::Deref for Refs {
+    type Target = [Ref];
+    fn deref(&self) -> &[Ref] {
+        if self.len > Self::INLINE {
+            &self.spill
+        } else {
+            // SAFETY: the first `len` inline entries were written by `push`.
+            unsafe { std::slice::from_raw_parts(self.inline.as_ptr().cast::<Ref>(), self.len) }
+        }
+    }
+}
+
+impl std::ops::DerefMut for Refs {
+    fn deref_mut(&mut self) -> &mut [Ref] {
+        if self.len > Self::INLINE {
+            &mut self.spill
+        } else {
+            // SAFETY: as in `deref`.
+            unsafe { std::slice::from_raw_parts_mut(self.inline.as_mut_ptr().cast::<Ref>(), self.len) }
+        }
+    }
+}
+
+impl IntoIterator for Refs {
+    type Item = Ref;
+    type IntoIter = RefsIter;
+    fn into_iter(self) -> RefsIter {
+        RefsIter { refs: self, next: 0 }
+    }
+}
+
+struct RefsIter {
+    refs: Refs,
+    next: usize,
+}
+
+impl Iterator for RefsIter {
+    type Item = Ref;
+    fn next(&mut self) -> Option<Ref> {
+        let r = self.refs.get(self.next).copied();
+        self.next += 1;
+        r
     }
 }
 
@@ -726,12 +828,91 @@ pub fn roll_sum(ctx: &DamageCtx, move_id: MoveId) -> Option<u32> {
     }
 }
 
+/// Effects a Pokemon holds: volatiles, ability, item.
+fn mon_effects(m: &Combatant) -> Effects {
+    let v = m.volatiles;
+    let mut out = Effects::default();
+    if v.helping_hand > 0 {
+        out.push(Effect::Volatile(VolatileKind::HelpingHand));
+    }
+    if v.charge {
+        out.push(Effect::Volatile(VolatileKind::Charge));
+    }
+    if v.flash_fire {
+        out.push(Effect::Volatile(VolatileKind::FlashFire));
+    }
+    if v.glaive_rush {
+        out.push(Effect::Volatile(VolatileKind::GlaiveRush));
+    }
+    if v.gem {
+        out.push(Effect::Volatile(VolatileKind::Gem));
+    }
+    if let Some(m) = v.semi_invulnerable {
+        out.push(Effect::Volatile(VolatileKind::SemiInvulnerable(m)));
+    }
+    if v.minimize {
+        out.push(Effect::Volatile(VolatileKind::Minimize));
+    }
+    out.push(Effect::Ability(m.ability));
+    if let Some(it) = m.item {
+        out.push(Effect::Item(it));
+    }
+    out
+}
+
+
+/// A Pokemon's effects and the union of their handler masks.
+fn held_effects(m: &Combatant) -> (Effects, u64) {
+    let e = mon_effects(m);
+    (e, e.into_iter().fold(0, |acc, e| acc | handlers_of(e).mask))
+}
+
+/// An effect's handlers.
+fn handlers_of(effect: Effect) -> &'static Handlers {
+let d = Dex::get();
+    let f = fixed_handlers();
+    match effect {
+        Effect::Ability(a) => &d.ability(a).handlers,
+        Effect::Item(it) => &d.item(it).handlers,
+        Effect::MoveSelf(m) => &d.move_data(m).handlers,
+        Effect::Volatile(v) => match v {
+            VolatileKind::HelpingHand => f.helping_hand,
+            VolatileKind::Charge => f.charge,
+            VolatileKind::GlaiveRush => f.glaive_rush,
+            VolatileKind::FlashFire => f.flash_fire,
+            VolatileKind::Gem => f.gem,
+            VolatileKind::SemiInvulnerable(m) => &d.move_data(m).condition,
+            VolatileKind::Minimize => f.minimize,
+        },
+        Effect::Weather(w) => match w {
+            Weather::Sun => f.weather[0],
+            Weather::Rain => f.weather[1],
+            Weather::Sand => f.weather[2],
+            Weather::Snow => f.weather[3],
+            Weather::None => unreachable!(),
+        },
+        Effect::Terrain(t) => match t {
+            Terrain::Electric => f.terrain[0],
+            Terrain::Grassy => f.terrain[1],
+            Terrain::Misty => f.terrain[2],
+            Terrain::Psychic => f.terrain[3],
+            Terrain::None => unreachable!(),
+        },
+        Effect::Screen(s) => match s {
+            Screen::Reflect => f.screen[0],
+            Screen::Light => f.screen[1],
+            Screen::AuroraVeil => f.screen[2],
+        },
+    }
+}
+
 struct Calc<'a, 'b> {
     ctx: &'b DamageCtx<'a>,
     dex: &'static Dex,
-    /// Per active slot, the union of its effects' handler masks (filled on
-    /// first use): an event none of them handles skips the slot at once.
-    masks: std::cell::Cell<Option<[u64; 4]>>,
+    /// Per active slot, its effects and the union of their handler masks
+    /// (filled on first use): an event none of them handles skips the slot
+    /// at once.
+    held: std::cell::OnceCell<[(Effects, u64); 4]>,
 }
 
 impl<'a, 'b> Calc<'a, 'b> {
@@ -739,27 +920,25 @@ impl<'a, 'b> Calc<'a, 'b> {
         Calc {
             ctx,
             dex: Dex::get(),
-            masks: std::cell::Cell::new(None),
+            held: std::cell::OnceCell::new(),
         }
     }
 
-    /// Whether any effect slot `i` holds might handle `hook` (a hook bit).
-    fn may_handle(&self, i: usize, hook: u64) -> bool {
-        let masks = match self.masks.get() {
-            Some(m) => m,
-            None => {
-                let mut m = [0u64; 4];
-                for (j, mask) in m.iter_mut().enumerate() {
-                    if self.ctx.actives[j].is_some() {
-                        *mask = self.mon_effects(j).into_iter().fold(0, |acc, e| acc | self.handlers(e).mask);
-                    }
-                }
-                self.masks.set(Some(m));
-                m
-            }
+    /// Slot `i`'s effects, and whether any of them might handle `hook` (a
+    /// hook bit).
+    fn held(&self, i: usize, hook: u64) -> Option<&Effects> {
+        let (effects, mask) = match &self.mon(i).held.0 {
+            Some(h) => h,
+            None => &self.held.get_or_init(|| {
+                std::array::from_fn(|j| match self.ctx.actives[j] {
+                    Some(m) => held_effects(m),
+                    None => (Effects::default(), 0),
+                })
+            })[i],
         };
-        masks[i] & hook != 0
+        (mask & hook != 0).then_some(effects)
     }
+
     fn mon(&self, i: usize) -> &'a Combatant {
         self.ctx.actives[i].expect("damage ctx refers to an empty slot")
     }
@@ -890,41 +1069,7 @@ impl<'a, 'b> Calc<'a, 'b> {
     // --- Event handler collection ----------------------------------------
 
     fn handlers(&self, effect: Effect) -> &'static Handlers {
-        let d = self.dex;
-        let f = fixed_handlers();
-        match effect {
-            Effect::Ability(a) => &d.ability(a).handlers,
-            Effect::Item(it) => &d.item(it).handlers,
-            Effect::MoveSelf(m) => &d.move_data(m).handlers,
-            Effect::Volatile(v) => match v {
-                VolatileKind::HelpingHand => f.helping_hand,
-                VolatileKind::Charge => f.charge,
-                VolatileKind::GlaiveRush => f.glaive_rush,
-                VolatileKind::FlashFire => f.flash_fire,
-                VolatileKind::Gem => f.gem,
-                VolatileKind::SemiInvulnerable(m) => &d.move_data(m).condition,
-                VolatileKind::Minimize => f.minimize,
-            },
-            Effect::Weather(w) => match w {
-                Weather::Sun => f.weather[0],
-                Weather::Rain => f.weather[1],
-                Weather::Sand => f.weather[2],
-                Weather::Snow => f.weather[3],
-                Weather::None => unreachable!(),
-            },
-            Effect::Terrain(t) => match t {
-                Terrain::Electric => f.terrain[0],
-                Terrain::Grassy => f.terrain[1],
-                Terrain::Misty => f.terrain[2],
-                Terrain::Psychic => f.terrain[3],
-                Terrain::None => unreachable!(),
-            },
-            Effect::Screen(s) => match s {
-                Screen::Reflect => f.screen[0],
-                Screen::Light => f.screen[1],
-                Screen::AuroraVeil => f.screen[2],
-            },
-        }
+        handlers_of(effect)
     }
 
     /// Showdown's `resolvePriority` default subOrder by effect kind.
@@ -945,7 +1090,7 @@ impl<'a, 'b> Calc<'a, 'b> {
 
     fn push(
         &self,
-        out: &mut Vec<Ref>,
+        out: &mut Refs,
         effect: Effect,
         holder: Holder,
         hook: (&str, u64),
@@ -991,39 +1136,6 @@ impl<'a, 'b> Calc<'a, 'b> {
         });
     }
 
-    /// Effects a Pokemon holds: volatiles, ability, item.
-    fn mon_effects(&self, i: usize) -> Effects {
-        let m = self.mon(i);
-        let v = m.volatiles;
-        let mut out = Effects::default();
-        if v.helping_hand > 0 {
-            out.push(Effect::Volatile(VolatileKind::HelpingHand));
-        }
-        if v.charge {
-            out.push(Effect::Volatile(VolatileKind::Charge));
-        }
-        if v.flash_fire {
-            out.push(Effect::Volatile(VolatileKind::FlashFire));
-        }
-        if v.glaive_rush {
-            out.push(Effect::Volatile(VolatileKind::GlaiveRush));
-        }
-        if v.gem {
-            out.push(Effect::Volatile(VolatileKind::Gem));
-        }
-        if let Some(m) = v.semi_invulnerable {
-            out.push(Effect::Volatile(VolatileKind::SemiInvulnerable(m)));
-        }
-        if v.minimize {
-            out.push(Effect::Volatile(VolatileKind::Minimize));
-        }
-        out.push(Effect::Ability(m.ability));
-        if let Some(it) = m.item {
-            out.push(Effect::Item(it));
-        }
-        out
-    }
-
     fn side_of(i: usize) -> usize {
         i / 2
     }
@@ -1038,10 +1150,10 @@ impl<'a, 'b> Calc<'a, 'b> {
         source: Option<usize>,
         am: &ActiveMove,
         own_move: bool,
-    ) -> Vec<Ref> {
-        let mut out = Vec::new();
+    ) -> Refs {
+        let mut out = Refs::new();
         let names = event_hooks(event);
-        let [on, ally, foe, any, from_source] = names.each_ref().map(|(n, b)| (n.as_str(), *b));
+        let [on, ally, foe, any, from_source] = *names;
         if own_move {
             // The move's handler counts as held by the event target.
             self.push(
@@ -1052,8 +1164,8 @@ impl<'a, 'b> Calc<'a, 'b> {
                 am,
             );
         }
-        if self.may_handle(target, on.1) {
-            for e in self.mon_effects(target) {
+        if let Some(effects) = self.held(target, on.1) {
+            for e in *effects {
                 self.push(&mut out, e, Holder::Mon(target), on, am);
             }
         }
@@ -1067,18 +1179,18 @@ impl<'a, 'b> Calc<'a, 'b> {
             } else {
                 [foe, any]
             };
-            if !self.may_handle(i, hooks[0].1 | hooks[1].1) {
+            let Some(effects) = self.held(i, hooks[0].1 | hooks[1].1) else {
                 continue;
-            }
-            for e in self.mon_effects(i) {
+            };
+            for e in *effects {
                 for hook in hooks {
                     self.push(&mut out, e, Holder::Mon(i), hook, am);
                 }
             }
         }
         if let Some(s) = source {
-            if self.may_handle(s, from_source.1) {
-                for e in self.mon_effects(s) {
+            if let Some(effects) = self.held(s, from_source.1) {
+                for e in *effects {
                     self.push(&mut out, e, Holder::Mon(s), from_source, am);
                 }
             }
@@ -1911,7 +2023,7 @@ impl<'a, 'b> Calc<'a, 'b> {
         let pinch =
             |ty: &str| mv_type == t(ty) && holder_mon.hp() as u32 * 3 <= holder_mon.max_hp() as u32;
         let names = event_hooks(event);
-        let (hook_self, hook_source) = (names[0].0.as_str(), names[4].0.as_str());
+        let (hook_self, hook_source) = (names[0].0, names[4].0);
         self.fold(&refs, stat as i64, |r, _| {
             let yes = |c: bool, m: u32| if c { Act::Chain(m) } else { Act::None };
             let hook = r.hook;
@@ -2091,7 +2203,7 @@ impl<'a, 'b> Calc<'a, 'b> {
                     other => return unsupported(format!("move {other}.onEffectiveness")),
                 }
             }
-            for r in &refs {
+            for r in refs.iter() {
                 match (r.effect, r.hook) {
                     // Disguise: an intact disguise takes everything neutrally.
                     (Effect::Ability(ab), "onEffectiveness")
@@ -2258,3 +2370,4 @@ mod tests {
         assert_eq!(boosted(101, -2), 50);
     }
 }
+

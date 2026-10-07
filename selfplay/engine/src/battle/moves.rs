@@ -661,6 +661,7 @@ impl Battle {
                     .iter()
                     .find(|v| v.id == VolatileId::HelpingHand)
                     .map_or(0, |v| v.counter as u8);
+                c.prepare();
                 out[side * 2 + pos] = Some(c);
             }
         }

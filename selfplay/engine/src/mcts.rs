@@ -995,21 +995,30 @@ fn expand_cell(b: &Battle, actions: [i64; 2], cfg: &EnumConfig, perfect: bool) -
         leaves: Vec::new(),
         crash: None,
     };
-    let mut ints = vec![0i32; TOKENS * INT_FIELDS];
-    let mut mons = vec![0f32; TOKENS * MON_FLOATS];
-    let mut field = vec![0f32; FIELD_FLOATS];
+    let terminal: Vec<f32> = e.outcomes.iter().map(|o| result_for_side0(&o.battle)).collect();
+    let n = 2 * terminal.iter().filter(|t| t.is_nan()).count();
+    let (wi, wm, wf) = (TOKENS * INT_FIELDS, TOKENS * MON_FLOATS, FIELD_FLOATS);
+    out.ints = vec![0; n * wi];
+    out.mons = vec![0.0; n * wm];
+    out.field = vec![0.0; n * wf];
     // The outcomes mostly differ only in HP: they share damage calculations.
     let mut cache = DamageCache::new();
-    for o in e.outcomes {
-        let terminal = result_for_side0(&o.battle);
+    let mut j = 0;
+    for (o, terminal) in e.outcomes.into_iter().zip(terminal) {
         if terminal.is_nan() {
             out.leaves.push(out.children.len() as u16);
             let table = perfect.then(|| o.battle.damage_table_with(Some(&mut cache)));
             for side in 0..2 {
-                obs::observe(&o.battle, side, perfect, table.as_ref(), &mut ints, &mut mons, &mut field);
-                out.ints.extend_from_slice(&ints);
-                out.mons.extend_from_slice(&mons);
-                out.field.extend_from_slice(&field);
+                obs::observe(
+                    &o.battle,
+                    side,
+                    perfect,
+                    table.as_ref(),
+                    &mut out.ints[j * wi..(j + 1) * wi],
+                    &mut out.mons[j * wm..(j + 1) * wm],
+                    &mut out.field[j * wf..(j + 1) * wf],
+                );
+                j += 1;
             }
         }
         out.children.push(Child {
