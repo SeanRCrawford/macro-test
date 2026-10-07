@@ -380,9 +380,11 @@ def play_vs_policy(model, games: int, cfg, seed: int = 0, envs: int = 32,
         roots = max(1, s["roots"])
         out[who + "roots"] = s["roots"]
         for k, v in s.items():
-            if k not in ("roots", "seconds"):
+            if k not in ("roots", "seconds", "net_seconds"):
                 out[f"{who}{k}_per_root"] = v / roots
         out[who + "ms_per_root"] = 1000 * s["seconds"] / roots
+        if "net_seconds" in s:
+            out[who + "net_ms_per_root"] = 1000 * s["net_seconds"] / roots
     return out
 
 

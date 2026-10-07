@@ -59,7 +59,7 @@ class TreeSearch:
         self.dev = next(model.parameters()).device
         self.rng = np.random.default_rng(seed)
         self.stats = {"roots": 0, "leaves": 0, "nodes": 0, "gap": 0.0, "seconds": 0.0,
-                      "depth": 0, "waves": 0, "exact": 0}
+                      "net_seconds": 0.0, "depth": 0, "waves": 0, "exact": 0}
 
     def _t(self, a):
         return torch.from_numpy(np.ascontiguousarray(a)).to(self.dev)
@@ -121,16 +121,22 @@ class TreeSearch:
                                **c.engine_kwargs())
         first = True
         waves = 0
+        net = 0.0  # seconds in the network (with its input copies), not the engine
         while waves < 100_000:
             waves += 1
             n = forest.select(c.budget)
             if n:
+                t = time.perf_counter()
                 actions, probs = self._priors(forest, n, noise and first)
+                net += time.perf_counter() - t
                 forest.set_policy(actions, probs, c.prior_top)
             first = False
             m = forest.expand()
             if m:
-                forest.set_values(self._values(forest, m))
+                t = time.perf_counter()
+                values = self._values(forest, m)
+                net += time.perf_counter() - t
+                forest.set_values(values)
             if n == 0 and m == 0:
                 break
         out = forest.results()
@@ -144,6 +150,7 @@ class TreeSearch:
             s["gap"] += r["gap"]
         s["roots"] += len(out)
         s["waves"] += waves
+        s["net_seconds"] += net
         s["seconds"] += time.perf_counter() - t0
         return out
 

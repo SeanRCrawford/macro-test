@@ -243,13 +243,18 @@ class SearchTrainer:
         c = self.cfg
         start = time.time()
         while time.time() - start < minutes * 60 and (max_rounds is None or self.rounds < max_rounds):
+            searches = [x for x in (self.search, getattr(self, "fast", None)) if x is not None]
+            before = [(x.stats["seconds"], x.stats.get("net_seconds", 0.0)) for x in searches]
             t0 = time.time()
             new = self.play()
             t1 = time.time()
+            search_s = sum(x.stats["seconds"] - b[0] for x, b in zip(searches, before))
+            net_s = sum(x.stats.get("net_seconds", 0.0) - b[1] for x, b in zip(searches, before))
             self.examples += new
             entry = {"round": self.rounds + 1, "minutes": (time.time() - start) / 60,
                      "games": self.games, "examples": self.examples, "new": new,
-                     "play_s": t1 - t0, **self.update(new), "update_s": time.time() - t1,
+                     "play_s": t1 - t0, "search_s": search_s, "net_s": net_s,
+                     **self.update(new), "update_s": time.time() - t1,
                      "mean_gap": self.search.stats["gap"] / max(1, self.search.stats["roots"])}
             self.rounds += 1
             if self.rounds % c.eval_every == 0:

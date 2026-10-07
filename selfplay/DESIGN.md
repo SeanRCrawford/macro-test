@@ -776,8 +776,20 @@ values) comes with every result, for the analysis board.
    root by best reply instead of by the prior; a test checks it keeps
    endgames exact); measure it at the same time. Its alternatives over
    every probed action are the next thing the analysis board needs.
-3. Engine speed: a position's damage features cost 100 us, three turns'
-   simulation; they are most of the engine's time per leaf.
+3. Engine speed (done, 2.4x less engine work per leaf, same results):
+   the damage calculation skips a Pokemon in one test when none of its
+   effects handles the event, and works out each Pokemon's effects once
+   per view; damage features are memoised per expanded cell
+   (`DamageCache`: keyed by everything except current HP, and reused at
+   another HP only when the calculation never read HP, which Eruption,
+   Multiscale and the pinch abilities do; 85% hits). On
+   `examples/bench_mcts` (16 roots, budget 400) the engine's work fell
+   from 8.72G to 3.63G instructions. What's left is mostly turn
+   simulation (each chance outcome replays the turn) and the misses. A
+   memo of the simulator's calculations across those replays hit 81%
+   but a lookup cost as much as the calculation, so it was dropped.
+   `search_train` now logs `search_s` and `net_s` (network time inside
+   the search) to show whether the engine or the GPU is the bottleneck.
 4. Hidden information (Open Team Sheets: stat points, brought four): worlds
    sampled from the network's predictions, as mikumiku37 (16) and
    Jaxcalibur (32) do, with Jaxcalibur's cut-off of the opponent's search
