@@ -203,6 +203,8 @@ def main():
     p.add_argument("--bot-plays", choices=("tree", "search", "double-oracle", "policy"), default="tree")
     p.add_argument("--k", type=int, default=8, help="one-turn search: candidates per side")
     p.add_argument("--budget", type=int, default=3000, help="tree search: value evaluations per turn")
+    p.add_argument("--value-model", default=None,
+                   help="tree search: value positions with this model.pt (default: MODEL)")
     p.add_argument("--device", default="cpu")
     p.add_argument("--seed", type=int, default=None)
     a = p.parse_args()
@@ -222,7 +224,8 @@ def main():
     model = load(a.model, a.device)
     if a.bot_plays == "tree":
         from selfplay.mcts import TreeConfig, TreeSearch
-        search = TreeSearch(model, TreeConfig(budget=a.budget), seed)
+        value_model = load(a.value_model, a.device) if a.value_model else None
+        search = TreeSearch(model, TreeConfig(budget=a.budget), seed, value_model)
     else:
         cfg = SearchConfig(k=a.k, double_oracle=a.bot_plays == "double-oracle", sample=True)
         search = Search(model, cfg, seed)
