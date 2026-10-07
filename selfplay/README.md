@@ -83,6 +83,10 @@ game, grown where it matters, guided by the policy at every node:
     python -m selfplay.search_train --init MODEL --tree --tree-budget 800 --fast-budget 100 \
         --full-frac 0.25 --root-noise 0.25 --epochs 8 --envs 256 --device cuda --out runs/tree
 
+Two models head to head, both searching (side 1 plays `--opp-model`):
+
+    python -m selfplay.search runs/tree/model.pt --opp-model runs/big/model.pt --tree --vs-search --opp-tree --device cuda
+
 ## Teams
 
 Training plays the tournament teams in `data/corpus` (weighted by

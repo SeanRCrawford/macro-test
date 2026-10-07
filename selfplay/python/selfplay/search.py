@@ -338,24 +338,29 @@ def make_searcher(model, cfg, seed: int = 0):
 
 def play_vs_policy(model, games: int, cfg, seed: int = 0, envs: int = 32,
                    perfect_info: bool = True, sampled_policy: bool = False,
-                   opponent_cfg=None) -> dict:
+                   opponent_cfg=None, opponent_model=None) -> dict:
     """Side 0 searches with `cfg` (a SearchConfig or a TreeConfig); side 1
     plays the raw policy (most likely action, or a sample), or searches with
-    `opponent_cfg`. Team preview is the policy's on both sides."""
+    `opponent_cfg`. Team preview is the policy's on both sides. Side 1 uses
+    `opponent_model` (default: `model`) for its policy and its search."""
     from selfplay.train import act, to_tensors
     env = SelfPlayEnv(min(envs, games), seed=seed, perfect_info=perfect_info)
     search = make_searcher(model, cfg, seed)
-    other = make_searcher(model, opponent_cfg, seed + 1) if opponent_cfg else None
+    opp_model = opponent_model or model
+    other = make_searcher(opp_model, opponent_cfg, seed + 1) if opponent_cfg else None
     model.eval()
+    opp_model.eval()
     done = score = 0.0
     while done < games:
         obs = env.observe()
         actions = np.full((env.num_envs, 2), -1, np.int64)
         dec = obs.decisions
         rows = np.flatnonzero(dec.reshape(-1) != 0)
-        if len(rows):
-            a, _, _ = act(model, to_tensors(obs, rows), greedy=not sampled_policy)
-            actions.reshape(-1)[rows] = a.numpy()
+        for side, net in ((0, model), (1, opp_model)):
+            r = rows[rows % 2 == side]
+            if len(r):
+                a, _, _ = act(net, to_tensors(obs, r), greedy=not sampled_policy)
+                actions.reshape(-1)[r] = a.numpy()
         g0 = np.flatnonzero(dec[:, 0] == DECISION_SLOTS)
         if len(g0):
             actions[g0, 0] = search.act(env, g0, side=0)
@@ -406,6 +411,7 @@ def main():
                    help="side 1 searches too, with the --opp-* settings (default: one-turn search)")
     p.add_argument("--tree", action="store_true", help="side 0 plays the tree search")
     p.add_argument("--opp-tree", action="store_true", help="side 1 plays the tree search")
+    p.add_argument("--opp-model", default=None, help="side 1 plays this model.pt (default: MODEL)")
     config_args(p)
     config_args(p, "opp-")
     from selfplay import mcts
@@ -423,7 +429,8 @@ def main():
             opp = mcts.config_from(a, "opp_tree_")
         else:
             opp = SearchConfig(**{k: getattr(a, "opp_" + k) for k in vars(SearchConfig())})
-    res = play_vs_policy(model, a.games, cfg, a.seed, a.envs, not a.hidden, a.sampled_policy, opp)
+    opp_model = load(a.opp_model, a.device) if a.opp_model else None
+    res = play_vs_policy(model, a.games, cfg, a.seed, a.envs, not a.hidden, a.sampled_policy, opp, opp_model)
     print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
 
 
