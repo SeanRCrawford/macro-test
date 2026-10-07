@@ -85,6 +85,10 @@ pub struct MctsConfig {
     /// and add the best if it gains more than `oracle_eps`.
     pub root_oracle: bool,
     pub oracle_eps: f32,
+    /// A safety net against a policy's blind spot: the greedy damage action
+    /// (each Pokemon's highest expected damage) is always among the root's
+    /// starting candidates.
+    pub root_greedy: bool,
     pub seed: u64,
 }
 
@@ -105,6 +109,7 @@ impl Default for MctsConfig {
             sims_per_wave: 4,
             root_oracle: false,
             oracle_eps: 0.005,
+            root_greedy: false,
             seed: 0,
         }
     }
@@ -810,7 +815,7 @@ impl Forest {
         for (k, &(t, id)) in want.iter().enumerate() {
             let tree = &mut self.trees[t as usize];
             let b = &tree.nodes[id as usize].battle;
-            let ranked: [Vec<(i64, f32)>; 2] = [0, 1].map(|side| {
+            let mut ranked: [Vec<(i64, f32)>; 2] = [0, 1].map(|side| {
                 if action::decision(b, side) == Decision::None {
                     return vec![(-1, 1.0)];
                 }
@@ -826,6 +831,16 @@ impl Forest {
                 // leave the node as a leaf.
                 tree.nodes[id as usize].exact = true;
                 continue;
+            }
+            if cfg.root_greedy && id == 0 {
+                for (side, r) in ranked.iter_mut().enumerate() {
+                    if action::decision(b, side) != Decision::Slots {
+                        continue;
+                    }
+                    if let Some(c) = crate::env::policy::greedy(b, side) {
+                        promote(r, action::index(&c) as i64, cfg.root_candidates.max(1));
+                    }
+                }
             }
             tree.init_node(id, ranked, &cfg, &mut wc);
             self.want_cells.extend(wc.into_iter().map(|c| (t, c)));
@@ -980,6 +995,23 @@ impl Forest {
                 }
             })
             .collect()
+    }
+}
+
+/// Put `action` among the first `start` of `ranked` (keeping its prior, or
+/// taking the prior of the one it displaces when the policy left it out).
+fn promote(ranked: &mut Vec<(i64, f32)>, action: i64, start: usize) {
+    let at = start.min(ranked.len()).saturating_sub(1);
+    match ranked.iter().position(|r| r.0 == action) {
+        Some(p) if p < start => {}
+        Some(p) => {
+            let r = ranked.remove(p);
+            ranked.insert(at, r);
+        }
+        None => {
+            let prior = ranked.get(at).map_or(1.0, |r| r.1);
+            ranked.insert(at.min(ranked.len()), (action, prior));
+        }
     }
 }
 

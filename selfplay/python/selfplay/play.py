@@ -234,10 +234,24 @@ def main():
     def hint():
         r = search.run(env, [0])[0]
         v = env.view(0, 0)
-        print(f"  search: your win chance about {100 * (r['value'] + 1) / 2:.0f}%. Its mix for you:")
-        for cand, w in sorted(zip(r["candidates"][0], r["row"]), key=lambda t: -t[1]):
-            if w >= 0.01:
-                print(f"    {100 * w:4.0f}%  {joint_label(v, cand)}")
+        legal = int(env.observe().masks[0, 0].sum())
+        cands = r["candidates"][0]
+        print(f"  search: your win chance about {100 * (r['value'] + 1) / 2:.0f}%; it looked at "
+              f"{len(cands)} of your {legal} options (policy's top picks, plus best replies and the "
+              f"top-damage play).")
+        if "alternatives" not in r or a.bot_plays != "tree":
+            for cand, w in sorted(zip(cands, r["row"]), key=lambda t: -t[1]):
+                if w >= 0.01:
+                    print(f"    {100 * w:4.0f}%  {joint_label(v, cand)}")
+            return
+        # Each option's win chance against the bot's equilibrium mix.
+        loss = dict(r["alternatives"][0])
+        mix = dict(zip(cands, r["row"]))
+        prior = dict(zip(cands, r["priors"][0]))
+        print("     mix  prior  win%  (against the bot's mix)")
+        for cand in sorted(cands, key=lambda c: (-mix[c], loss[c])):
+            win = 100 * (r["value"] - loss[cand] + 1) / 2
+            print(f"    {100 * mix[cand]:4.0f}%  {100 * prior[cand]:4.0f}%  {win:3.0f}%  {joint_label(v, cand)}")
 
     record = [0, 0, 0]
     while True:

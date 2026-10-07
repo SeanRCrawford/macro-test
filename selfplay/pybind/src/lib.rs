@@ -369,7 +369,7 @@ impl VecEnv {
     #[pyo3(signature = (games, root_candidates=4, node_candidates=2, max_candidates=12, widen=0.5,
                         c_explore=1.0, chance_floor=0.1, static_weight=1.0, max_outcomes=16,
                         roll_bands=1, solve_iters=200, max_depth=8, sims_per_wave=4, root_oracle=false,
-                        oracle_eps=0.005, seed=0))]
+                        oracle_eps=0.005, root_greedy=false, seed=0))]
     #[allow(clippy::too_many_arguments)]
     fn mcts(
         &self,
@@ -388,6 +388,7 @@ impl VecEnv {
         sims_per_wave: usize,
         root_oracle: bool,
         oracle_eps: f32,
+        root_greedy: bool,
         seed: u64,
     ) -> PyResult<MctsForest> {
         if let Some(&g) = games.iter().find(|&&g| g >= self.env.len()) {
@@ -408,6 +409,7 @@ impl VecEnv {
             sims_per_wave,
             root_oracle,
             oracle_eps,
+            root_greedy,
             seed,
         };
         let roots = games.iter().map(|&g| self.env.battle(g).clone()).collect();

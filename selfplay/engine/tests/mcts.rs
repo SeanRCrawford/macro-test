@@ -212,3 +212,59 @@ fn root_double_oracle_keeps_the_search_exact() {
         assert!((r.value - want).abs() < 0.02, "search {} vs exact {}", r.value, want);
     }
 }
+
+#[test]
+fn root_greedy_is_always_a_candidate() {
+    use engine::env::policy::greedy;
+    let battles = positions(8, 5, |b| {
+        b.turn >= 2 && (0..2).all(|s| matches!(b.requests[s], SideRequest::Move(_)))
+    });
+    let cfg = MctsConfig {
+        root_greedy: true,
+        ..MctsConfig::default()
+    };
+    let mut forest = Forest::new(battles.clone(), cfg, true, 2);
+    // A policy that ranks every legal action in reverse index order, so the
+    // greedy action is rarely in its top four.
+    let budget = 100;
+    for _ in 0..10_000 {
+        let n = forest.select(budget);
+        if n > 0 {
+            let mut ints = vec![0i32; n * LEAF_INTS];
+            let mut mons = vec![0f32; n * LEAF_MONS];
+            let mut field = vec![0f32; n * LEAF_FIELD];
+            let mut masks = vec![0u8; n * 2 * MASK_LEN];
+            let mut dec = vec![0u8; n * 2];
+            forest.policy_inputs(&mut ints, &mut mons, &mut field, &mut masks, &mut dec);
+            let m = 1024;
+            let mut acts = vec![-1i64; n * 2 * m];
+            let mut probs = vec![0f32; n * 2 * m];
+            for k in 0..n * 2 {
+                let legal: Vec<usize> = (0..MASK_LEN).rev().filter(|&i| masks[k * MASK_LEN + i] == 1).collect();
+                for (i, &a) in legal.iter().enumerate() {
+                    acts[k * m + i] = a as i64;
+                    probs[k * m + i] = 1.0 / legal.len() as f32;
+                }
+            }
+            forest.set_policy(&acts, &probs, m);
+        }
+        let l = forest.expand();
+        if l > 0 {
+            let mut ints = vec![0i32; l * LEAF_INTS];
+            let mut mons = vec![0f32; l * LEAF_MONS];
+            let mut field = vec![0f32; l * LEAF_FIELD];
+            forest.leaf_inputs(&mut ints, &mut mons, &mut field);
+            let values: Vec<f32> = (0..l).map(|i| heuristic(&mons[i * LEAF_MONS..])).collect();
+            forest.set_values(&values);
+        }
+        if n == 0 && l == 0 {
+            break;
+        }
+    }
+    for (b, r) in battles.iter().zip(forest.results()) {
+        for s in 0..2 {
+            let g = action::index(&greedy(b, s).unwrap()) as i64;
+            assert!(r.candidates[s].contains(&g), "side {s}: greedy {g} not in {:?}", r.candidates[s]);
+        }
+    }
+}
