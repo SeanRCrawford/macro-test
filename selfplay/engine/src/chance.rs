@@ -8,8 +8,8 @@
 //! - `Scripted`: for enumerating a turn's chance outcomes (`enumerate.rs`).
 //!   Each draw is split into classes of outcomes that play differently (a
 //!   hit or a miss; a damage roll that KOs or doesn't), and the draw takes
-//!   the class the script says, or the first class past the script's end,
-//!   recording every class's probability. Rolls whose exact value doesn't
+//!   the class the script says, or the most probable class past the
+//!   script's end, recording every class's probability. Rolls whose exact value doesn't
 //!   matter are banded (`random_banded`, `damage_roll`) and take the
 //!   band's middle value.
 //! - `Policy`: deterministic outcomes from a threshold `t` in [0, 1]. A chance
@@ -47,6 +47,17 @@ pub struct Script {
     pub roll_bands: u32,
 }
 
+/// The first class of highest probability.
+pub fn likeliest(probs: &[f64]) -> u8 {
+    let mut best = 0;
+    for (i, &p) in probs.iter().enumerate() {
+        if p > probs[best] {
+            best = i;
+        }
+    }
+    best as u8
+}
+
 impl Script {
     pub fn new(forced: Vec<u8>, roll_bands: u32) -> Self {
         Script {
@@ -57,10 +68,13 @@ impl Script {
         }
     }
 
-    /// Take a class among `probs` (more than one).
+    /// Take a class among `probs` (more than one): the script's, or past
+    /// its end the most probable (so a replay follows the likeliest
+    /// continuation, and enumeration meets outcomes roughly in order of
+    /// probability).
     fn branch(&mut self, probs: Vec<f64>) -> usize {
         let i = self.trace.len();
-        let taken = self.forced.get(i).copied().unwrap_or(0);
+        let taken = self.forced.get(i).copied().unwrap_or_else(|| likeliest(&probs));
         assert!((taken as usize) < probs.len(), "script class out of range");
         self.prob *= probs[taken as usize];
         self.trace.push(Draw { taken, probs });

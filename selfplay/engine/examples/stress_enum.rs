@@ -66,7 +66,7 @@ fn hunt(b: &Battle, choices: &[Option<SideChoice>; 2]) -> Option<(Vec<u8>, Strin
             Err(m) => return Some((prefix, m)),
             Ok(trace) => {
                 for i in prefix.len()..trace.len() {
-                    for c in 1..trace[i].1 {
+                    for c in (0..trace[i].1).filter(|&c| c != trace[i].0) {
                         let mut p: Vec<u8> = trace[..i].iter().map(|t| t.0).collect();
                         p.push(c);
                         stack.push(p);

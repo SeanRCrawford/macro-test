@@ -3,9 +3,10 @@
 //! as the probability-weighted value of the positions it can lead to.
 //!
 //! The turn is replayed from a copy of the position with a `Scripted` chance
-//! that forces the class taken at each draw. The first run takes the first
-//! class everywhere and records every draw's classes; each class not taken
-//! is a sibling to replay later, most probable branch first, so a cap on
+//! that forces the class taken at each draw. The first run takes the most
+//! probable class everywhere and records every draw's classes; each class
+//! not taken is a sibling to replay later (again taking the most probable
+//! classes past its forced prefix), most probable branch first, so a cap on
 //! the number of outcomes keeps (roughly) the likeliest and reports the mass
 //! left out.
 
