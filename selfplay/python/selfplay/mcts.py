@@ -41,6 +41,11 @@ class TreeConfig:
     root_oracle: bool = True    # widen the root by best reply (Nessie's double oracle)
     oracle_eps: float = 0.005
     root_greedy: bool = True    # the greedy damage action is always a root candidate
+    oracle_pool: int = 24       # actions the root's double oracle considers (0: every legal one)
+    endgame: int = 2            # nodes with at most this many Pokemon a side: full width, provable
+    endgame_outcomes: int = 64  # chance outcomes per cell there
+    endgame_budget: float = 4.0 # an endgame root may spend this many times the budget
+    probe_outcomes: int = 8     # chance outcomes per screening probe
     prior_top: int = 24         # ranked actions kept per side from the policy
     root_noise: float = 0.0     # Dirichlet noise share at the roots (self-play exploration)
     noise_alpha: float = 0.3
@@ -51,7 +56,8 @@ class TreeConfig:
     def engine_kwargs(self) -> dict:
         keys = ("root_candidates", "node_candidates", "max_candidates", "widen", "c_explore",
                 "chance_floor", "static_weight", "max_outcomes", "roll_bands", "solve_iters",
-                "max_depth", "sims_per_wave", "root_oracle", "oracle_eps", "root_greedy")
+                "max_depth", "sims_per_wave", "root_oracle", "oracle_eps", "root_greedy",
+                "oracle_pool", "endgame", "endgame_outcomes", "endgame_budget", "probe_outcomes")
         return {k: getattr(self, k) for k in keys}
 
 
@@ -144,7 +150,9 @@ class TreeSearch:
                 values = self._values(forest, m)
                 net += time.perf_counter() - t
                 forest.set_values(values)
-            if n == 0 and m == 0:
+            # A wave can work without new nodes or leaves (cells whose
+            # outcomes all end the game): stop on the forest's own word.
+            if forest.finished(c.budget):
                 break
         out = forest.results()
         s = self.stats

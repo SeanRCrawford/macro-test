@@ -89,6 +89,25 @@ pub struct MctsConfig {
     /// (each Pokemon's highest expected damage) is always among the root's
     /// starting candidates.
     pub root_greedy: bool,
+    /// The root's double oracle considers the prior's first this many
+    /// actions per side (0: every legal action).
+    pub oracle_pool: usize,
+    /// Endgames: a node where neither side has more than this many Pokemon
+    /// left is solved full width (0: off). Its candidates grow only by best
+    /// reply over every legal action, with no cap, and it counts as solved
+    /// once no action outside them gains against the other side's
+    /// equilibrium mix (each such reply checked exactly, down to the end of
+    /// the game or the turn cap).
+    pub endgame: usize,
+    /// Chance outcomes enumerated per cell at endgame nodes (a cell whose
+    /// outcomes are cut off can't be exact).
+    pub endgame_outcomes: usize,
+    /// A tree whose root is an endgame may spend this many times the budget.
+    pub endgame_budget: f32,
+    /// Chance outcomes per probe cell (screening replies for the double
+    /// oracle). A probe that becomes a candidate, or that an endgame's proof
+    /// needs, is redone with the node's full number.
+    pub probe_outcomes: usize,
     pub seed: u64,
 }
 
@@ -110,6 +129,11 @@ impl Default for MctsConfig {
             root_oracle: false,
             oracle_eps: 0.005,
             root_greedy: false,
+            oracle_pool: 24,
+            endgame: 0,
+            endgame_outcomes: 64,
+            endgame_budget: 4.0,
+            probe_outcomes: 8,
             seed: 0,
         }
     }
@@ -137,7 +161,26 @@ struct Cell {
     ready: bool,
     value: f32,
     exact: bool,
+    /// Some chance outcomes were left out (the cell can't be exact).
+    truncated: bool,
+    /// Nothing left to refine below it (exact, or as far as it can go).
+    settled: bool,
+    /// Chance outcomes its expansion keeps.
+    cap: u32,
     visits: u32,
+}
+
+/// How a node widens beyond its starting candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Widen {
+    /// By the prior, up to `max_candidates`.
+    Prior,
+    /// The root's double oracle over the prior's first `oracle_pool`
+    /// actions; the prior's next action when no reply gains.
+    RootOracle,
+    /// An endgame: by best reply over every legal action, uncapped, and
+    /// solvable exactly.
+    Full,
 }
 
 struct Node {
@@ -145,14 +188,20 @@ struct Node {
     depth: u16,
     /// (cell, child) this node is an outcome of; NONE for the root.
     parent: (u32, u16),
-    /// Each side's legal actions, most probable first, with prior
-    /// probabilities; `[(-1, 1)]` for a side with nothing to decide.
+    /// Each side's legal actions (every one), most probable first, with
+    /// prior probabilities; `[(-1, 1)]` for a side with nothing to decide.
     ranked: [Vec<(i64, f32)>; 2],
     has_prior: bool,
     /// The candidates are the first `k[s]` of `ranked[s]`.
     k: [usize; 2],
-    /// Cell ids by (i, j), stride `max_candidates`.
-    cells: Vec<u32>,
+    /// Candidate cells: `rows[i][j]` pairs side 0's i-th candidate with
+    /// side 1's j-th.
+    rows: Vec<Vec<u32>>,
+    /// Other action pairs' cells (the double oracle's probes), by actions.
+    probes: crate::dex::FastMap<(i64, i64), u32>,
+    widen: Widen,
+    /// Visits at which each side's best reply is next looked for (Full).
+    oracle_due: [u32; 2],
     strategy: [Vec<f32>; 2],
     solved: f32,
     gap: f32,
@@ -162,19 +211,10 @@ struct Node {
     action_visits: [Vec<u32>; 2],
     exact: bool,
     dirty: bool,
-    /// The root's pending double-oracle probe.
-    probe: Option<Probe>,
-}
-
-/// Cells probing actions against the opponent's support: (the probed
-/// action, the opponent's candidate index, cell).
-struct Probe {
-    side: usize,
-    cells: Vec<(i64, usize, u32)>,
 }
 
 impl Node {
-    fn new(battle: Battle, depth: u16, parent: (u32, u16), static_v: f32, stride: usize) -> Self {
+    fn new(battle: Battle, depth: u16, parent: (u32, u16), static_v: f32) -> Self {
         Node {
             battle,
             depth,
@@ -182,7 +222,10 @@ impl Node {
             ranked: [Vec::new(), Vec::new()],
             has_prior: false,
             k: [0, 0],
-            cells: vec![NONE; stride * stride],
+            rows: Vec::new(),
+            probes: Default::default(),
+            widen: Widen::Prior,
+            oracle_due: [0, 0],
             strategy: [Vec::new(), Vec::new()],
             solved: f32::NAN,
             gap: 0.0,
@@ -192,9 +235,48 @@ impl Node {
             action_visits: [Vec::new(), Vec::new()],
             exact: false,
             dirty: false,
-            probe: None,
         }
     }
+
+    fn cell(&self, i: usize, j: usize) -> u32 {
+        self.rows[i][j]
+    }
+
+    /// The opponent's candidates (index, weight) in its mix above `min`.
+    fn support(&self, side: usize, min: f32) -> Vec<(usize, f32)> {
+        (0..self.k[side])
+            .filter_map(|j| {
+                let w = self.strategy[side].get(j).copied().unwrap_or(0.0);
+                (w > min).then_some((j, w))
+            })
+            .collect()
+    }
+
+    /// The action pair of `side`'s action `a` against the other side's
+    /// candidate `j`.
+    fn pair(&self, side: usize, a: i64, j: usize) -> [i64; 2] {
+        let b = self.ranked[1 - side][j].0;
+        if side == 0 {
+            [a, b]
+        } else {
+            [b, a]
+        }
+    }
+}
+
+/// Mix weight below which an action is out of the support the double
+/// oracle replies to (Full nodes, which must be exact, use the lower one).
+const SUPPORT: f32 = 0.01;
+const SUPPORT_FULL: f32 = 0.001;
+
+/// What one double-oracle step did.
+enum Step {
+    /// Probes are being valued (`true` if this step made new ones).
+    Busy(bool),
+    /// A best reply joined the candidates.
+    Added,
+    /// No action outside the candidates gains.
+    NoGain,
 }
 
 /// Side 0's chance to win, as an entropy in [0, 1] (1 at 50%).
@@ -239,8 +321,13 @@ struct SimTree {
 }
 
 impl SimTree {
-    fn stride(cfg: &MctsConfig) -> usize {
-        cfg.max_candidates.max(cfg.root_candidates).max(1)
+    /// This tree's budget: an endgame root may spend more.
+    fn budget(&self, budget: u64, cfg: &MctsConfig) -> u64 {
+        if self.nodes[0].widen == Widen::Full {
+            (budget as f64 * cfg.endgame_budget.max(1.0) as f64) as u64
+        } else {
+            budget
+        }
     }
 
     fn child_value(&self, c: &Child) -> f32 {
@@ -261,7 +348,7 @@ impl SimTree {
         cell.actions
     }
 
-    fn new_cell(&mut self, node: u32, actions: [i64; 2], want: &mut Vec<u32>) -> u32 {
+    fn new_cell(&mut self, node: u32, actions: [i64; 2], cap: usize, want: &mut Vec<u32>) -> u32 {
         let id = self.cells.len() as u32;
         self.cells.push(Cell {
             node,
@@ -270,124 +357,179 @@ impl SimTree {
             ready: false,
             value: 0.0,
             exact: false,
+            truncated: false,
+            settled: false,
+            cap: cap.min(u32::MAX as usize) as u32,
             visits: 0,
         });
         want.push(id);
         id
     }
 
-    /// Add (pending) cells for these candidate pairs of a node.
-    fn add_cells(&mut self, node: u32, pairs: Vec<[usize; 2]>, stride: usize, want: &mut Vec<u32>) {
-        for [i, j] in pairs {
-            let n = &self.nodes[node as usize];
-            let actions = [n.ranked[0][i].0, n.ranked[1][j].0];
-            let id = self.new_cell(node, actions, want);
-            self.nodes[node as usize].cells[i * stride + j] = id;
+    /// Chance outcomes a node's candidate cells keep.
+    fn cap(&self, ni: usize, cfg: &MctsConfig) -> usize {
+        if self.nodes[ni].widen == Widen::Full {
+            cfg.endgame_outcomes.max(cfg.max_outcomes)
+        } else {
+            cfg.max_outcomes
         }
     }
 
-    /// The root's double oracle for `side`: probe every action not yet a
-    /// candidate against the opponent's current mix (first call), then add
-    /// the best reply, or the prior's next action if no reply gains
-    /// (second call, once the probes are valued). Returns whether it made
-    /// work, or None while probes are still being valued.
-    fn oracle(&mut self, side: usize, cfg: &MctsConfig, want: &mut Vec<u32>) -> Option<bool> {
-        let stride = Self::stride(cfg);
-        let other = 1 - side;
-        let n = &self.nodes[0];
-        let Some(probe) = &n.probe else {
-            // Probe against the opponent's support.
-            let support: Vec<usize> = (0..n.k[other])
-                .filter(|&j| n.strategy[other][j] > 0.01)
-                .collect();
-            let pool: Vec<usize> = (n.k[side]..n.ranked[side].len()).collect();
-            let mut cells = Vec::new();
-            for &a in &pool {
-                for &j in &support {
-                    let n = &self.nodes[0];
-                    let mut actions = [0i64; 2];
-                    actions[side] = n.ranked[side][a].0;
-                    actions[other] = n.ranked[other][j].0;
-                    let id = self.new_cell(0, actions, want);
-                    cells.push((actions[side], j, id));
-                }
-            }
-            self.nodes[0].probe = Some(Probe { side, cells });
-            return Some(true);
-        };
-        if probe.side != side || probe.cells.iter().any(|&(_, _, c)| !self.cells[c as usize].ready) {
-            return None;
+    /// Whether a cell is as precise as the node's candidate cells.
+    fn full_precision(&self, c: u32, cap: usize) -> bool {
+        let cell = &self.cells[c as usize];
+        cell.cap as usize >= cap || (cell.ready && !cell.truncated)
+    }
+
+    /// The cell of an action pair at a node outside its candidate matrix:
+    /// the probe made earlier, or a new (screening) one.
+    fn probe_cell(&mut self, ni: usize, actions: [i64; 2], cfg: &MctsConfig, want: &mut Vec<u32>) -> u32 {
+        if let Some(&c) = self.nodes[ni].probes.get(&(actions[0], actions[1])) {
+            return c;
         }
-        // Each probed action's value against the opponent's mix.
-        let y = &n.strategy[other];
-        let mut score: Vec<(i64, f64, f64)> = Vec::new(); // (action, weighted sum, weight)
-        for &(a, j, c) in &probe.cells {
-            let w = y.get(j).copied().unwrap_or(0.0) as f64;
-            match score.iter_mut().find(|s| s.0 == a) {
-                Some(s) => {
-                    s.1 += w * self.cells[c as usize].value as f64;
-                    s.2 += w;
-                }
-                None => score.push((a, w * self.cells[c as usize].value as f64, w)),
-            }
-        }
-        let v = if n.solved.is_nan() { 0.0 } else { n.solved as f64 };
-        let sign = if side == 0 { 1.0 } else { -1.0 };
-        let best = score
-            .iter()
-            .filter(|s| s.2 > 0.0)
-            .map(|s| (s.0, sign * (s.1 / s.2 - v)))
-            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let cap = cfg.probe_outcomes.max(1).min(self.cap(ni, cfg));
+        let c = self.new_cell(ni as u32, actions, cap, want);
+        self.nodes[ni].probes.insert((actions[0], actions[1]), c);
+        c
+    }
+
+    /// Make `ranked[side][pos]` the side's next candidate, with its cells
+    /// against the other side's candidates (taken from the probes when
+    /// they exist).
+    fn add_candidate(&mut self, ni: usize, side: usize, pos: usize, cfg: &MctsConfig, want: &mut Vec<u32>) {
+        let cap = self.cap(ni, cfg);
+        let n = &mut self.nodes[ni];
         let k = n.k[side];
-        let chosen = match best {
-            Some((a, gain)) if gain > cfg.oracle_eps as f64 => a,
-            _ => n.ranked[side][k].0,
-        };
-        let probe = self.nodes[0].probe.take().expect("probe");
-        let n = &mut self.nodes[0];
-        let pos = n.ranked[side].iter().position(|r| r.0 == chosen).expect("probed action");
         n.ranked[side].swap(k, pos);
         n.k[side] += 1;
+        // The mixes will change: both sides' best replies are due again.
+        n.oracle_due = [0, 0];
         n.strategy[side].push(0.0);
         n.action_visits[side].push(0);
-        for j in 0..n.k[other] {
-            let reuse = probe.cells.iter().find(|&&(a, pj, _)| a == chosen && pj == j).map(|&(_, _, c)| c);
-            let id = match reuse {
-                Some(c) => c,
-                None => {
-                    let mut actions = [0i64; 2];
-                    actions[side] = chosen;
-                    actions[other] = self.nodes[0].ranked[other][j].0;
-                    self.new_cell(0, actions, want)
-                }
+        let a = n.ranked[side][k].0;
+        let other = n.k[1 - side];
+        let mut new = Vec::with_capacity(other);
+        for j in 0..other {
+            let actions = self.nodes[ni].pair(side, a, j);
+            let c = match self.nodes[ni].probes.remove(&(actions[0], actions[1])) {
+                Some(c) if self.full_precision(c, cap) => c,
+                _ => self.new_cell(ni as u32, actions, cap, want),
             };
-            let (i0, j0) = if side == 0 { (k, j) } else { (j, k) };
-            self.nodes[0].cells[i0 * stride + j0] = id;
+            new.push(c);
         }
-        Some(true)
+        let n = &mut self.nodes[ni];
+        if side == 0 {
+            n.rows.push(new);
+        } else {
+            for (row, c) in n.rows.iter_mut().zip(new) {
+                row.push(c);
+            }
+        }
+    }
+
+    /// Side 0's value of `side`'s action `a` against the other side's
+    /// `support` (renormalised), and whether every cell it needs is ready.
+    fn reply_value(&self, ni: usize, side: usize, a: i64, support: &[(usize, f32)]) -> Option<f32> {
+        let n = &self.nodes[ni];
+        let (mut v, mut w) = (0.0f64, 0.0f64);
+        for &(j, y) in support {
+            let actions = n.pair(side, a, j);
+            let c = *n.probes.get(&(actions[0], actions[1]))?;
+            let cell = &self.cells[c as usize];
+            if !cell.ready {
+                return None;
+            }
+            v += y as f64 * cell.value as f64;
+            w += y as f64;
+        }
+        (w > 0.0).then(|| (v / w) as f32)
+    }
+
+    /// One double-oracle step for `side` at a node: probe every action of
+    /// its pool outside the candidates against the other side's mix, then
+    /// add the one that gains most over the node's value, if any gains
+    /// more than `oracle_eps`.
+    fn oracle_step(&mut self, ni: usize, side: usize, cfg: &MctsConfig, want: &mut Vec<u32>) -> Step {
+        let n = &self.nodes[ni];
+        let full = n.widen == Widen::Full;
+        let support = n.support(1 - side, if full { SUPPORT_FULL } else { SUPPORT });
+        let len = n.ranked[side].len();
+        let end = if full || cfg.oracle_pool == 0 { len } else { cfg.oracle_pool.min(len) };
+        let pool: Vec<(usize, i64)> = (n.k[side]..end.max(n.k[side])).map(|p| (p, n.ranked[side][p].0)).collect();
+        let before = want.len();
+        for &(_, a) in &pool {
+            for &(j, _) in &support {
+                let actions = self.nodes[ni].pair(side, a, j);
+                self.probe_cell(ni, actions, cfg, want);
+            }
+        }
+        let made = want.len() > before;
+        let mut best: Option<(usize, f32)> = None;
+        let v = self.nodes[ni].solved;
+        let sign = if side == 0 { 1.0 } else { -1.0 };
+        for &(p, a) in &pool {
+            let Some(q) = self.reply_value(ni, side, a, &support) else {
+                return Step::Busy(made);
+            };
+            let gain = sign * (q - v);
+            if best.is_none_or(|b| gain > b.1) {
+                best = Some((p, gain));
+            }
+        }
+        match best {
+            Some((p, gain)) if gain > cfg.oracle_eps => {
+                self.add_candidate(ni, side, p, cfg, want);
+                Step::Added
+            }
+            _ => Step::NoGain,
+        }
     }
 
     /// Give a node its ranked actions and initial candidates.
     fn init_node(&mut self, node: u32, ranked: [Vec<(i64, f32)>; 2], cfg: &MctsConfig, want: &mut Vec<u32>) {
-        let stride = Self::stride(cfg);
         let n = &mut self.nodes[node as usize];
         let start = if n.depth == 0 { cfg.root_candidates } else { cfg.node_candidates };
+        let left = |s: usize| n.battle.sides[s].pokemon_left;
+        n.widen = if cfg.endgame > 0 && left(0).max(left(1)) <= cfg.endgame {
+            Widen::Full
+        } else if cfg.root_oracle && n.depth == 0 {
+            Widen::RootOracle
+        } else {
+            Widen::Prior
+        };
+        let cap = if n.widen == Widen::Full { usize::MAX } else { cfg.max_candidates.max(1) };
         n.ranked = ranked;
         n.has_prior = true;
         for s in 0..2 {
-            n.k[s] = n.ranked[s].len().min(start.max(1)).min(stride);
+            n.k[s] = n.ranked[s].len().min(start.max(1)).min(cap);
             n.strategy[s] = vec![1.0 / n.k[s].max(1) as f32; n.k[s]];
             n.action_visits[s] = vec![0; n.k[s]];
         }
         let (k0, k1) = (n.k[0], n.k[1]);
-        let pairs = (0..k0).flat_map(|i| (0..k1).map(move |j| [i, j])).collect();
-        self.add_cells(node, pairs, stride, want);
+        let mut rows = Vec::with_capacity(k0);
+        for i in 0..k0 {
+            let mut row = Vec::with_capacity(k1);
+            for j in 0..k1 {
+                let n = &self.nodes[node as usize];
+                let actions = [n.ranked[0][i].0, n.ranked[1][j].0];
+                let cap = self.cap(node as usize, cfg);
+                row.push(self.new_cell(node, actions, cap, want));
+            }
+            rows.push(row);
+        }
+        self.nodes[node as usize].rows = rows;
+    }
+
+    /// Whether a node's matrix and backed-up values must be redone at
+    /// once: a candidate whose cells were all probed already joined it.
+    fn resolve_now(&mut self, ni: usize, cfg: &MctsConfig) {
+        self.nodes[ni].dirty = true;
+        self.backup(cfg);
     }
 
     /// One simulation from the root: widen a node, or walk down to an
     /// outcome that becomes a new node. Returns whether it produced work.
     fn simulate(&mut self, cfg: &MctsConfig, want_policy: &mut Vec<u32>, want_cells: &mut Vec<u32>) -> bool {
-        let stride = Self::stride(cfg);
         let mut node = 0u32;
         loop {
             let ni = node as usize;
@@ -395,38 +537,75 @@ impl SimTree {
                 return false;
             }
             self.nodes[ni].visits += 1;
-            // Progressive widening by the prior.
-            let n = &self.nodes[ni];
-            let start = if n.depth == 0 { cfg.root_candidates } else { cfg.node_candidates };
-            let allowed = start + (cfg.widen * (n.visits as f32).sqrt()) as usize;
-            let deficit: [usize; 2] = [0, 1].map(|s| {
-                let target = allowed.min(n.ranked[s].len()).min(stride);
-                target.saturating_sub(n.k[s])
-            });
-            if deficit[0] > 0 || deficit[1] > 0 {
-                let side = if deficit[0] > deficit[1] || (deficit[0] == deficit[1] && n.visits.is_multiple_of(2)) {
-                    0
-                } else {
-                    1
-                };
-                if cfg.root_oracle && ni == 0 && !self.nodes[0].solved.is_nan() {
-                    return self.oracle(side, cfg, want_cells).unwrap_or(false);
+            let solved = !self.nodes[ni].solved.is_nan();
+            match self.nodes[ni].widen {
+                Widen::Full if solved => {
+                    // Look for a best reply when due (backing off while none
+                    // gains).
+                    let visits = self.nodes[ni].visits;
+                    let side = (visits % 2) as usize;
+                    if visits >= self.nodes[ni].oracle_due[side] {
+                        let before = want_cells.len();
+                        match self.oracle_step(ni, side, cfg, want_cells) {
+                            Step::Busy(true) => return true,
+                            Step::Busy(false) => {}
+                            Step::Added => {
+                                if want_cells.len() == before {
+                                    self.resolve_now(ni, cfg);
+                                }
+                                self.nodes[ni].oracle_due[side] = visits + 1;
+                                return true;
+                            }
+                            Step::NoGain => self.nodes[ni].oracle_due[side] = visits * 2,
+                        }
+                    }
                 }
-                let n = &mut self.nodes[ni];
-                let new = n.k[side];
-                n.k[side] += 1;
-                n.strategy[side].push(0.0);
-                n.action_visits[side].push(0);
-                let other = n.k[1 - side];
-                let pairs = (0..other)
-                    .map(|o| if side == 0 { [new, o] } else { [o, new] })
-                    .collect();
-                self.add_cells(node, pairs, stride, want_cells);
-                return true;
+                Widen::Full => {}
+                widen => {
+                    // Progressive widening.
+                    let n = &self.nodes[ni];
+                    let start = if n.depth == 0 { cfg.root_candidates } else { cfg.node_candidates };
+                    let allowed = start + (cfg.widen * (n.visits as f32).sqrt()) as usize;
+                    let deficit: [usize; 2] = [0, 1].map(|s| {
+                        let target = allowed.min(n.ranked[s].len()).min(cfg.max_candidates.max(1));
+                        target.saturating_sub(n.k[s])
+                    });
+                    if deficit[0] > 0 || deficit[1] > 0 {
+                        let side = if deficit[0] > deficit[1] || (deficit[0] == deficit[1] && n.visits.is_multiple_of(2)) {
+                            0
+                        } else {
+                            1
+                        };
+                        if widen == Widen::RootOracle && solved {
+                            let before = want_cells.len();
+                            return match self.oracle_step(ni, side, cfg, want_cells) {
+                                Step::Busy(made) => made,
+                                Step::Added => {
+                                    if want_cells.len() == before {
+                                        self.resolve_now(ni, cfg);
+                                    }
+                                    true
+                                }
+                                Step::NoGain => {
+                                    // No reply gains: the prior's next.
+                                    let k = self.nodes[ni].k[side];
+                                    self.add_candidate(ni, side, k, cfg, want_cells);
+                                    if want_cells.len() == before {
+                                        self.resolve_now(ni, cfg);
+                                    }
+                                    true
+                                }
+                            };
+                        }
+                        let k = self.nodes[ni].k[side];
+                        self.add_candidate(ni, side, k, cfg, want_cells);
+                        return true;
+                    }
+                }
             }
             // Each side's action: its equilibrium mix plus the prior's bonus,
             // sampled jointly over the cells that can still change (ready,
-            // not yet exact).
+            // not settled).
             let n = &self.nodes[ni];
             let w: [Vec<f32>; 2] = [0, 1].map(|s| {
                 (0..n.k[s])
@@ -442,26 +621,59 @@ impl SimTree {
             let joint: Vec<f32> = (0..k0 * k1)
                 .map(|ij| {
                     let (a, b) = (ij / k1, ij % k1);
-                    let cid = n.cells[a * stride + b];
-                    let open = cid != NONE && {
-                        let c = &self.cells[cid as usize];
-                        c.ready && !c.exact
-                    };
-                    if open {
+                    let c = &self.cells[n.cell(a, b) as usize];
+                    if c.ready && !c.settled {
                         w[0][a] * w[1][b]
                     } else {
                         0.0
                     }
                 })
                 .collect();
-            let Some(ij) = sample(&joint, &mut self.rng) else {
-                return false;
+            let ci = match sample(&joint, &mut self.rng) {
+                Some(ij) => {
+                    let (a, b) = (ij / k1, ij % k1);
+                    let n = &mut self.nodes[ni];
+                    n.action_visits[0][a] += 1;
+                    n.action_visits[1][b] += 1;
+                    n.cell(a, b) as usize
+                }
+                None if self.nodes[ni].widen == Widen::Full && solved => {
+                    // The candidates are settled: prove the node, by making
+                    // sure every reply is probed and none gains, then
+                    // settling the most threatening probe still open.
+                    let mut busy = false;
+                    for side in 0..2 {
+                        let before = want_cells.len();
+                        match self.oracle_step(ni, side, cfg, want_cells) {
+                            Step::Busy(made) => {
+                                if made {
+                                    return true;
+                                }
+                                busy = true;
+                            }
+                            Step::Added => {
+                                if want_cells.len() == before {
+                                    self.resolve_now(ni, cfg);
+                                }
+                                return true;
+                            }
+                            Step::NoGain => {}
+                        }
+                    }
+                    if busy {
+                        return false;
+                    }
+                    // The proof needs the screening probes at full precision.
+                    if self.refine_probes(ni, cfg, want_cells) {
+                        return true;
+                    }
+                    match self.open_probe(ni) {
+                        Some(c) => c,
+                        None => return false,
+                    }
+                }
+                None => return false,
             };
-            let (a, b) = (ij / k1, ij % k1);
-            let cid = self.nodes[ni].cells[a * stride + b];
-            let ci = cid as usize;
-            self.nodes[ni].action_visits[0][a] += 1;
-            self.nodes[ni].action_visits[1][b] += 1;
             self.cells[ci].visits += 1;
             // An outcome: likely and undecided first.
             let w: Vec<f32> = self.cells[ci]
@@ -477,7 +689,10 @@ impl SimTree {
                 })
                 .collect();
             let Some(k) = sample(&w, &mut self.rng) else {
-                self.cells[ci].exact = true;
+                // Every outcome is decided: exact, unless some were left out.
+                let cell = &mut self.cells[ci];
+                cell.settled = true;
+                cell.exact = !cell.truncated;
                 return false;
             };
             self.cells[ci].children[k].visits += 1;
@@ -507,7 +722,7 @@ impl SimTree {
             b.chance = Chance::Sampled(Rng::new(self.rng.next_u64()));
             let static_v = self.cells[ci].children[k].static_v;
             let id = self.nodes.len() as u32;
-            self.nodes.push(Node::new(b, depth, (cid, k as u16), static_v, stride));
+            self.nodes.push(Node::new(b, depth, (ci as u32, k as u16), static_v));
             // The simulation that creates a node is its first visit: its first
             // solved value then weighs as much as its static estimate.
             self.nodes[id as usize].visits = 1;
@@ -515,6 +730,67 @@ impl SimTree {
             want_policy.push(id);
             return true;
         }
+    }
+
+    /// Redo at full precision the screening probes a Full node's proof
+    /// needs (each action outside the candidates against the other side's
+    /// support). Returns whether it made any.
+    fn refine_probes(&mut self, ni: usize, cfg: &MctsConfig, want: &mut Vec<u32>) -> bool {
+        let cap = self.cap(ni, cfg);
+        let mut redo = Vec::new();
+        let n = &self.nodes[ni];
+        for side in 0..2 {
+            let support = n.support(1 - side, SUPPORT_FULL);
+            for p in n.k[side]..n.ranked[side].len() {
+                let a = n.ranked[side][p].0;
+                for &(j, _) in &support {
+                    let actions = n.pair(side, a, j);
+                    if let Some(&c) = n.probes.get(&(actions[0], actions[1])) {
+                        if !self.full_precision(c, cap) {
+                            redo.push(actions);
+                        }
+                    }
+                }
+            }
+        }
+        for actions in &redo {
+            let c = self.new_cell(ni as u32, *actions, cap, want);
+            self.nodes[ni].probes.insert((actions[0], actions[1]), c);
+        }
+        !redo.is_empty()
+    }
+
+    /// At a Full node whose candidates are settled: the open probe (ready,
+    /// not settled) of the reply that comes closest to gaining, to be
+    /// settled next.
+    fn open_probe(&self, ni: usize) -> Option<usize> {
+        let n = &self.nodes[ni];
+        let mut best: Option<(f32, usize)> = None;
+        for side in 0..2 {
+            let support = n.support(1 - side, SUPPORT_FULL);
+            let sign = if side == 0 { 1.0 } else { -1.0 };
+            for p in n.k[side]..n.ranked[side].len() {
+                let a = n.ranked[side][p].0;
+                let Some(q) = self.reply_value(ni, side, a, &support) else { continue };
+                let gain = sign * (q - n.solved);
+                // Its heaviest open cell.
+                let open = support
+                    .iter()
+                    .filter_map(|&(j, y)| {
+                        let actions = n.pair(side, a, j);
+                        let c = *n.probes.get(&(actions[0], actions[1]))?;
+                        let cell = &self.cells[c as usize];
+                        (cell.ready && !cell.settled).then_some((y, c as usize))
+                    })
+                    .max_by(|x, y| x.0.total_cmp(&y.0));
+                if let Some((_, c)) = open {
+                    if best.is_none_or(|b| gain > b.0) {
+                        best = Some((gain, c));
+                    }
+                }
+            }
+        }
+        best.map(|b| b.1)
     }
 
     /// Recompute a cell's value from its outcomes.
@@ -527,13 +803,37 @@ impl SimTree {
         }
         let cell = &mut self.cells[ci];
         cell.value = if p > 0.0 { (v / p) as f32 } else { 0.0 };
-        cell.exact = exact;
+        cell.exact = exact && !cell.truncated;
+        cell.settled |= cell.exact;
+    }
+
+    /// Whether a Full node's equilibrium is proven: every action outside
+    /// the candidates, valued exactly against the other side's mix, gains
+    /// at most `oracle_eps`.
+    fn certified(&self, ni: usize, cfg: &MctsConfig) -> bool {
+        let n = &self.nodes[ni];
+        (0..2).all(|side| {
+            let support = n.support(1 - side, SUPPORT_FULL);
+            let sign = if side == 0 { 1.0 } else { -1.0 };
+            (n.k[side]..n.ranked[side].len()).all(|p| {
+                let a = n.ranked[side][p].0;
+                let exact = support.iter().all(|&(j, _)| {
+                    let actions = n.pair(side, a, j);
+                    n.probes
+                        .get(&(actions[0], actions[1]))
+                        .is_some_and(|&c| self.cells[c as usize].exact)
+                });
+                exact
+                    && self
+                        .reply_value(ni, side, a, &support)
+                        .is_some_and(|q| sign * (q - n.solved) <= cfg.oracle_eps)
+            })
+        })
     }
 
     /// Solve every node whose cells changed, deepest first, and carry the
     /// new values up to the root.
     fn backup(&mut self, cfg: &MctsConfig) {
-        let stride = Self::stride(cfg);
         let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); cfg.max_depth + 2];
         for (i, n) in self.nodes.iter().enumerate() {
             if n.dirty {
@@ -554,8 +854,7 @@ impl SimTree {
                 let mut all_exact = true;
                 for i in 0..k0 {
                     for j in 0..k1 {
-                        let cid = self.nodes[ni].cells[i * stride + j];
-                        let cell = &self.cells[cid as usize];
+                        let cell = &self.cells[self.nodes[ni].cell(i, j) as usize];
                         all_ready &= cell.ready;
                         all_exact &= cell.exact;
                         m.push(cell.value);
@@ -576,7 +875,11 @@ impl SimTree {
                     let w = cfg.static_weight;
                     (w * n.static_v + n.visits as f32 * s.value) / (w + n.visits as f32)
                 };
-                n.exact = all_exact && n.k[0] == n.ranked[0].len() && n.k[1] == n.ranked[1].len();
+                let full_width = n.k[0] == n.ranked[0].len() && n.k[1] == n.ranked[1].len();
+                let exact = all_exact
+                    && (full_width || (n.widen == Widen::Full && self.certified(ni, cfg)));
+                let n = &mut self.nodes[ni];
+                n.exact = exact;
                 if n.exact {
                     n.value = s.value;
                 }
@@ -598,6 +901,8 @@ impl SimTree {
 /// One expanded cell's outcomes, before their values are known.
 struct Expanded {
     children: Vec<Child>,
+    /// Some outcomes were left out by the cap.
+    truncated: bool,
     ints: Vec<i32>,
     mons: Vec<f32>,
     field: Vec<f32>,
@@ -622,6 +927,10 @@ pub struct RootResult {
     pub leaf_evals: u64,
     pub max_depth: usize,
     pub exact: bool,
+    /// The root is an endgame (searched full width).
+    pub endgame: bool,
+    /// Each side's legal actions at the root.
+    pub legal: [usize; 2],
     /// The principal line: at each node, both sides' most likely actions,
     /// side 0's value there, and the probability of the most likely outcome
     /// that follows (the line continues through it while it is a node).
@@ -636,7 +945,7 @@ pub struct PvStep {
 }
 
 impl SimTree {
-    fn principal_line(&self, stride: usize) -> Vec<PvStep> {
+    fn principal_line(&self) -> Vec<PvStep> {
         let mut out = Vec::new();
         let mut node = 0usize;
         while out.len() < 16 {
@@ -650,11 +959,7 @@ impl SimTree {
                     .unwrap_or(0)
             };
             let (a, b) = (best(0), best(1));
-            let cid = n.cells[a * stride + b];
-            if cid == NONE {
-                break;
-            }
-            let cell = &self.cells[cid as usize];
+            let cell = &self.cells[n.cell(a, b) as usize];
             let next = cell.children.iter().max_by(|x, y| x.prob.total_cmp(&y.prob));
             out.push(PvStep {
                 actions: cell.actions,
@@ -691,7 +996,6 @@ pub struct Forest {
 impl Forest {
     pub fn new(roots: Vec<Battle>, cfg: MctsConfig, perfect_info: bool, threads: usize) -> Self {
         crate::env::install_panic_hook();
-        let stride = SimTree::stride(&cfg);
         let mut seeder = Rng::new(cfg.seed);
         let mut want_policy = Vec::new();
         let trees = roots
@@ -703,7 +1007,7 @@ impl Forest {
                     want_policy.push((t as u32, 0));
                 }
                 SimTree {
-                    nodes: vec![Node::new(b, 0, (NONE, 0), f32::NAN, stride)],
+                    nodes: vec![Node::new(b, 0, (NONE, 0), f32::NAN)],
                     cells: Vec::new(),
                     rng: Rng::new(seeder.next_u64()),
                     leaf_evals: 0,
@@ -747,7 +1051,7 @@ impl Forest {
             .trees
             .iter_mut()
             .enumerate()
-            .filter(|(_, t)| !t.done && t.leaf_evals < budget && t.nodes[0].has_prior)
+            .filter(|(_, t)| !t.done && t.leaf_evals < t.budget(budget, cfg) && t.nodes[0].has_prior)
             .collect();
         run_parallel(work, self.threads, |(ti, t)| {
             let (mut wp, mut wc) = (Vec::new(), Vec::new());
@@ -820,10 +1124,19 @@ impl Forest {
                     return vec![(-1, 1.0)];
                 }
                 let base = (k * 2 + side) * m;
-                (0..m)
+                let mut r: Vec<(i64, f32)> = (0..m)
                     .filter(|&i| actions[base + i] >= 0)
                     .map(|i| (actions[base + i], probs[base + i]))
-                    .collect()
+                    .collect();
+                // Every legal action, the policy's ranking first: the double
+                // oracle can reach any of them, and a node is only exact
+                // when all of them are accounted for.
+                let mut mask = vec![0u8; MASK_LEN];
+                action::legal_mask(b, side, &mut mask);
+                let listed: std::collections::HashSet<i64> = r.iter().map(|x| x.0).collect();
+                r.retain(|x| mask.get(x.0 as usize) == Some(&1));
+                r.extend((0..MASK_LEN).filter(|&i| mask[i] == 1 && !listed.contains(&(i as i64))).map(|i| (i as i64, 0.0)));
+                r
             });
             let mut wc = Vec::new();
             if ranked.iter().any(|r| r.is_empty()) {
@@ -857,6 +1170,7 @@ impl Forest {
             roll_bands: self.cfg.roll_bands,
             seed: self.cfg.seed,
         };
+
         let perfect = self.perfect_info;
         let results: Vec<Mutex<Option<Expanded>>> = cells.iter().map(|_| Mutex::new(None)).collect();
         let trees = &self.trees;
@@ -866,11 +1180,16 @@ impl Forest {
             let cell = &tree.cells[c as usize];
             let b = &tree.nodes[cell.node as usize].battle;
             let actions = tree.cell_actions(cell);
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| expand_cell(b, actions, &cfg, perfect)));
+            let ecfg = EnumConfig {
+                max_outcomes: cell.cap as usize,
+                ..cfg.clone()
+            };
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| expand_cell(b, actions, &ecfg, perfect)));
             let e = r.unwrap_or_else(|panic| {
                 let (location, backtrace) = crate::env::take_last_panic();
                 Expanded {
                     children: Vec::new(),
+                    truncated: true,
                     ints: Vec::new(),
                     mons: Vec::new(),
                     field: Vec::new(),
@@ -907,6 +1226,7 @@ impl Forest {
             let tree = &mut self.trees[t as usize];
             tree.leaf_evals += e.leaves.len() as u64;
             tree.cells[c as usize].children = e.children;
+            tree.cells[c as usize].truncated = e.truncated;
         }
         self.expanded = cells;
         if self.leaves.is_empty() {
@@ -961,11 +1281,10 @@ impl Forest {
 
     /// Whether every tree is finished or has spent `budget`.
     pub fn finished(&self, budget: u64) -> bool {
-        self.trees.iter().all(|t| t.done || t.leaf_evals >= budget)
+        self.trees.iter().all(|t| t.done || t.leaf_evals >= t.budget(budget, &self.cfg))
     }
 
     pub fn results(&self) -> Vec<RootResult> {
-        let stride = SimTree::stride(&self.cfg);
         self.trees
             .iter()
             .map(|t| {
@@ -974,8 +1293,7 @@ impl Forest {
                 let mut matrix = Vec::with_capacity(k0 * k1);
                 for i in 0..k0 {
                     for j in 0..k1 {
-                        let c = r.cells[i * stride + j];
-                        matrix.push(if c == NONE { f32::NAN } else { t.cells[c as usize].value });
+                        matrix.push(t.cells[r.cell(i, j) as usize].value);
                     }
                 }
                 RootResult {
@@ -991,7 +1309,9 @@ impl Forest {
                     leaf_evals: t.leaf_evals,
                     max_depth: t.nodes.iter().map(|n| n.depth as usize).max().unwrap_or(0),
                     exact: r.exact,
-                    pv: t.principal_line(stride),
+                    endgame: r.widen == Widen::Full,
+                    legal: [r.ranked[0].len(), r.ranked[1].len()],
+                    pv: t.principal_line(),
                 }
             })
             .collect()
@@ -1021,6 +1341,7 @@ fn expand_cell(b: &Battle, actions: [i64; 2], cfg: &EnumConfig, perfect: bool) -
     let e = enumerate(b, &c, cfg).expect("legal candidate actions");
     let mut out = Expanded {
         children: Vec::with_capacity(e.outcomes.len()),
+        truncated: e.unexplored > 1e-6,
         ints: Vec::new(),
         mons: Vec::new(),
         field: Vec::new(),

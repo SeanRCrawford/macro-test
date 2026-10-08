@@ -236,9 +236,11 @@ def main():
         v = env.view(0, 0)
         legal = int(env.observe().masks[0, 0].sum())
         cands = r["candidates"][0]
-        print(f"  search: your win chance about {100 * (r['value'] + 1) / 2:.0f}%; it looked at "
-              f"{len(cands)} of your {legal} options (policy's top picks, plus best replies and the "
-              f"top-damage play).")
+        how = ("an endgame: every option checked by best reply"
+               + (", solved exactly" if r.get("exact") else "")) if r.get("endgame") else \
+              "the policy's top picks, plus best replies and the top-damage play"
+        print(f"  search: your win chance about {100 * (r['value'] + 1) / 2:.0f}%; it kept "
+              f"{len(cands)} of your {legal} options ({how}).")
         if "alternatives" not in r or a.bot_plays != "tree":
             for cand, w in sorted(zip(cands, r["row"]), key=lambda t: -t[1]):
                 if w >= 0.01:

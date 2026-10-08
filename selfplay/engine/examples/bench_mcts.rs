@@ -86,7 +86,7 @@ fn main() {
                 .collect();
             forest.set_values(&values);
         }
-        if k == 0 && l == 0 {
+        if forest.finished(budget) {
             break;
         }
     }

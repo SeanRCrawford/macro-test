@@ -112,7 +112,9 @@ fn run(forest: &mut Forest, budget: u64) {
             let values: Vec<f32> = (0..l).map(|i| heuristic(&mons[i * LEAF_MONS..])).collect();
             forest.set_values(&values);
         }
-        if n == 0 && l == 0 {
+        // A wave can do work without new nodes or leaves (cells whose
+        // outcomes all end the game), so stop on the forest's own word.
+        if forest.finished(budget) {
             return;
         }
     }
@@ -257,7 +259,7 @@ fn root_greedy_is_always_a_candidate() {
             let values: Vec<f32> = (0..l).map(|i| heuristic(&mons[i * LEAF_MONS..])).collect();
             forest.set_values(&values);
         }
-        if n == 0 && l == 0 {
+        if forest.finished(budget) {
             break;
         }
     }
@@ -266,5 +268,169 @@ fn root_greedy_is_always_a_candidate() {
             let g = action::index(&greedy(b, s).unwrap()) as i64;
             assert!(r.candidates[s].contains(&g), "side {s}: greedy {g} not in {:?}", r.candidates[s]);
         }
+    }
+}
+
+/// The one-turn game's value by brute force: every pair of legal actions,
+/// every chance outcome, each outcome worth `leaf`.
+fn full_matrix(b: &Battle, leaf: fn(&Battle) -> f32) -> f32 {
+    let opts: Vec<Vec<_>> = (0..2).map(|s| b.legal_choices(s)).collect();
+    let cfg = EnumConfig {
+        max_outcomes: 1_000_000,
+        ..EnumConfig::default()
+    };
+    let rows: Vec<Vec<f32>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = opts[0]
+            .chunks(opts[0].len().div_ceil(8))
+            .map(|chunk| {
+                let (cfg, opts) = (&cfg, &opts);
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|a| {
+                            opts[1]
+                                .iter()
+                                .map(|c| {
+                                    let e = enumerate(b, &[Some(a.clone()), Some(c.clone())], cfg).unwrap();
+                                    assert!(e.unexplored < 1e-9);
+                                    e.outcomes.iter().map(|o| o.prob as f32 * leaf(&o.battle)).sum()
+                                })
+                                .collect::<Vec<f32>>()
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    let m: Vec<f32> = rows.concat();
+    solve(&m, opts[0].len(), opts[1].len(), 5000).value
+}
+
+#[test]
+fn solves_2v2_endgame_turns_exactly_by_double_oracle() {
+    // Two Pokemon each, both on the field; the turn cap ends the game after
+    // this turn, so the brute-force value is one full matrix game, and
+    // every cell can be exact: the search must prove its equilibrium
+    // (usually a draw: a side that can protect one Pokemon can't lose).
+    let hp = |b: &Battle, s: usize| {
+        b.sides[s].pokemon.iter().filter(|m| m.hp > 0).map(|m| m.hp as f32 / m.max_hp() as f32).sum::<f32>()
+    };
+    let mut battles = positions(4, 21, |b| {
+        (0..2).all(|s| {
+            b.sides[s].pokemon_left == 2 && matches!(b.requests[s], SideRequest::Move(_)) && hp(b, s) < 0.9
+        }) && b.legal_choices(0).len() * b.legal_choices(1).len() <= 4000
+    });
+    assert!(battles.len() >= 3, "only {} 2v2 endgames", battles.len());
+    for b in &mut battles {
+        b.turn_limit = Some(b.turn);
+    }
+    let cfg = MctsConfig {
+        root_candidates: 2,
+        node_candidates: 2,
+        endgame: 2,
+        endgame_outcomes: 1_000_000,
+        oracle_eps: 0.002,
+        solve_iters: 3000,
+        sims_per_wave: 16,
+        ..MctsConfig::default()
+    };
+    let mut forest = Forest::new(battles.clone(), cfg, true, 4);
+    run(&mut forest, u64::MAX);
+    for (b, r) in battles.iter().zip(forest.results()) {
+        // The turn cap ends the game after this turn.
+        let want = full_matrix(b, result_for_side0);
+        let full = r.legal[0] * r.legal[1];
+        assert!(r.endgame);
+        assert!(r.exact, "not proven: {} of {:?} candidates, {} cells", r.candidates[0].len(), r.legal, r.cells);
+        assert!((r.value - want).abs() < 0.02, "search {} vs brute force {}", r.value, want);
+        // The double oracle needs a fraction of the full matrix.
+        assert!(r.cells < full, "{} cells for a {full}-cell matrix", r.cells);
+        eprintln!("2v2: value {:.3} = {:.3}; {} cells of {full}", r.value, want, r.cells);
+    }
+}
+
+#[test]
+fn endgame_search_proves_deeper_endgames_from_one_candidate() {
+    // 1v1 with two turns to go: every node starts with one candidate a
+    // side, so proving the root means checking replies below it.
+    let mut battles = positions(8, 3, |b| {
+        b.turn >= 3
+            && (0..2).all(|s| b.sides[s].pokemon_left == 1 && matches!(b.requests[s], SideRequest::Move(_)))
+    });
+    assert!(battles.len() >= 5);
+    for b in &mut battles {
+        b.turn_limit = Some(b.turn + 1);
+    }
+    let cfg = MctsConfig {
+        root_candidates: 1,
+        node_candidates: 1,
+        endgame: 2,
+        endgame_outcomes: 100_000,
+        oracle_eps: 0.002,
+        solve_iters: 3000,
+        sims_per_wave: 16,
+        ..MctsConfig::default()
+    };
+    let mut forest = Forest::new(battles.clone(), cfg, true, 4);
+    run(&mut forest, u64::MAX);
+    for (b, r) in battles.iter().zip(forest.results()) {
+        let want = exact(b);
+        assert!(r.exact, "not proven ({} nodes)", r.nodes);
+        assert!((r.value - want).abs() < 0.02, "search {} vs exact {}", r.value, want);
+    }
+}
+
+/// Side 0's heuristic value of a position from its observation (as `run`
+/// values leaves), or the result if the game is over.
+fn leaf_value(b: &Battle) -> f32 {
+    let r = result_for_side0(b);
+    if !r.is_nan() {
+        return r;
+    }
+    let mut ints = vec![0i32; TOKENS * engine::env::obs::INT_FIELDS];
+    let mut mons = vec![0f32; TOKENS * MON_FLOATS];
+    let mut field = vec![0f32; engine::env::obs::FIELD_FLOATS];
+    engine::env::obs::observe(b, 0, true, None, &mut ints, &mut mons, &mut field);
+    heuristic(&mons)
+}
+
+#[test]
+fn endgame_double_oracle_finds_the_full_matrix_equilibrium() {
+    // One turn searched (no nodes below the root), outcomes valued by the
+    // HP heuristic: the double oracle, starting from two actions a side,
+    // must reach the equilibrium value of the full matrix of every legal
+    // action pair.
+    let battles = positions(4, 33, |b| {
+        (0..2).all(|s| b.sides[s].pokemon_left == 2 && matches!(b.requests[s], SideRequest::Move(_)))
+            && b.legal_choices(0).len() * b.legal_choices(1).len() <= 4000
+    });
+    assert!(battles.len() >= 3);
+    let cfg = MctsConfig {
+        root_candidates: 2,
+        node_candidates: 2,
+        endgame: 2,
+        endgame_outcomes: 1_000_000,
+        max_depth: 0,
+        oracle_eps: 0.001,
+        solve_iters: 3000,
+        sims_per_wave: 16,
+        ..MctsConfig::default()
+    };
+    let mut forest = Forest::new(battles.clone(), cfg, true, 4);
+    run(&mut forest, u64::MAX);
+    for (b, r) in battles.iter().zip(forest.results()) {
+        let want = full_matrix(b, leaf_value);
+        let full = r.legal[0] * r.legal[1];
+        eprintln!(
+            "2v2 one turn: value {:.4} vs full matrix {:.4}; candidates {:?} of {:?}, {} cells of {full}",
+            r.value,
+            want,
+            [r.candidates[0].len(), r.candidates[1].len()],
+            r.legal,
+            r.cells
+        );
+        assert!((r.value - want).abs() < 0.01, "search {} vs full matrix {}", r.value, want);
+        assert!(r.cells < full);
     }
 }

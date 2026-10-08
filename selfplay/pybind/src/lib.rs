@@ -369,7 +369,8 @@ impl VecEnv {
     #[pyo3(signature = (games, root_candidates=4, node_candidates=2, max_candidates=12, widen=0.5,
                         c_explore=1.0, chance_floor=0.1, static_weight=1.0, max_outcomes=16,
                         roll_bands=1, solve_iters=200, max_depth=8, sims_per_wave=4, root_oracle=false,
-                        oracle_eps=0.005, root_greedy=false, seed=0))]
+                        oracle_eps=0.005, root_greedy=false, oracle_pool=24, endgame=0,
+                        endgame_outcomes=64, endgame_budget=4.0, probe_outcomes=8, seed=0))]
     #[allow(clippy::too_many_arguments)]
     fn mcts(
         &self,
@@ -389,6 +390,11 @@ impl VecEnv {
         root_oracle: bool,
         oracle_eps: f32,
         root_greedy: bool,
+        oracle_pool: usize,
+        endgame: usize,
+        endgame_outcomes: usize,
+        endgame_budget: f32,
+        probe_outcomes: usize,
         seed: u64,
     ) -> PyResult<MctsForest> {
         if let Some(&g) = games.iter().find(|&&g| g >= self.env.len()) {
@@ -410,6 +416,11 @@ impl VecEnv {
             root_oracle,
             oracle_eps,
             root_greedy,
+            oracle_pool,
+            endgame,
+            endgame_outcomes,
+            endgame_budget,
+            probe_outcomes,
             seed,
         };
         let roots = games.iter().map(|&g| self.env.battle(g).clone()).collect();
@@ -711,6 +722,8 @@ impl MctsForest {
                 let d = pyo3::types::PyDict::new(py);
                 d.set_item("candidates", (r.candidates[0].clone(), r.candidates[1].clone()))?;
                 d.set_item("priors", (r.priors[0].clone(), r.priors[1].clone()))?;
+                d.set_item("endgame", r.endgame)?;
+                d.set_item("legal", (r.legal[0], r.legal[1]))?;
                 d.set_item("matrix", r.matrix)?;
                 d.set_item("row", r.strategy[0].clone())?;
                 d.set_item("col", r.strategy[1].clone())?;
