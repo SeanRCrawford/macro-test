@@ -104,6 +104,9 @@ pub struct MctsConfig {
     pub endgame_outcomes: usize,
     /// A tree whose root is an endgame may spend this many times the budget.
     pub endgame_budget: f32,
+    /// Nodes shallower than this are searched full width like endgames
+    /// (best reply over every legal action; Nessie's root): 1 is the root.
+    pub full_depth: usize,
     /// Chance outcomes per probe cell (screening replies for the double
     /// oracle). A probe that becomes a candidate, or that an endgame's proof
     /// needs, is redone with the node's full number.
@@ -133,6 +136,7 @@ impl Default for MctsConfig {
             endgame: 0,
             endgame_outcomes: 64,
             endgame_budget: 4.0,
+            full_depth: 0,
             probe_outcomes: 8,
             seed: 0,
         }
@@ -323,7 +327,8 @@ struct SimTree {
 impl SimTree {
     /// This tree's budget: an endgame root may spend more.
     fn budget(&self, budget: u64, cfg: &MctsConfig) -> u64 {
-        if self.nodes[0].widen == Widen::Full {
+        let left = |s: usize| self.nodes[0].battle.sides[s].pokemon_left;
+        if cfg.endgame > 0 && left(0).max(left(1)) <= cfg.endgame {
             (budget as f64 * cfg.endgame_budget.max(1.0) as f64) as u64
         } else {
             budget
@@ -490,7 +495,8 @@ impl SimTree {
         let n = &mut self.nodes[node as usize];
         let start = if n.depth == 0 { cfg.root_candidates } else { cfg.node_candidates };
         let left = |s: usize| n.battle.sides[s].pokemon_left;
-        n.widen = if cfg.endgame > 0 && left(0).max(left(1)) <= cfg.endgame {
+        let endgame = cfg.endgame > 0 && left(0).max(left(1)) <= cfg.endgame;
+        n.widen = if endgame || (n.depth as usize) < cfg.full_depth {
             Widen::Full
         } else if cfg.root_oracle && n.depth == 0 {
             Widen::RootOracle

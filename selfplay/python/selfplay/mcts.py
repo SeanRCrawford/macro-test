@@ -45,6 +45,7 @@ class TreeConfig:
     endgame: int = 2            # nodes with at most this many Pokemon a side: full width, provable
     endgame_outcomes: int = 64  # chance outcomes per cell there
     endgame_budget: float = 4.0 # an endgame root may spend this many times the budget
+    full_depth: int = 0         # levels searched full width by best reply (1: the root, as Nessie)
     probe_outcomes: int = 8     # chance outcomes per screening probe
     prior_top: int = 24         # ranked actions kept per side from the policy
     root_noise: float = 0.0     # Dirichlet noise share at the roots (self-play exploration)
@@ -57,7 +58,8 @@ class TreeConfig:
         keys = ("root_candidates", "node_candidates", "max_candidates", "widen", "c_explore",
                 "chance_floor", "static_weight", "max_outcomes", "roll_bands", "solve_iters",
                 "max_depth", "sims_per_wave", "root_oracle", "oracle_eps", "root_greedy",
-                "oracle_pool", "endgame", "endgame_outcomes", "endgame_budget", "probe_outcomes")
+                "oracle_pool", "endgame", "endgame_outcomes", "endgame_budget", "full_depth",
+                "probe_outcomes")
         return {k: getattr(self, k) for k in keys}
 
 

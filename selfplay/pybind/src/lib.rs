@@ -370,7 +370,7 @@ impl VecEnv {
                         c_explore=1.0, chance_floor=0.1, static_weight=1.0, max_outcomes=16,
                         roll_bands=1, solve_iters=200, max_depth=8, sims_per_wave=4, root_oracle=false,
                         oracle_eps=0.005, root_greedy=false, oracle_pool=24, endgame=0,
-                        endgame_outcomes=64, endgame_budget=4.0, probe_outcomes=8, seed=0))]
+                        endgame_outcomes=64, endgame_budget=4.0, full_depth=0, probe_outcomes=8, seed=0))]
     #[allow(clippy::too_many_arguments)]
     fn mcts(
         &self,
@@ -394,6 +394,7 @@ impl VecEnv {
         endgame: usize,
         endgame_outcomes: usize,
         endgame_budget: f32,
+        full_depth: usize,
         probe_outcomes: usize,
         seed: u64,
     ) -> PyResult<MctsForest> {
@@ -420,6 +421,7 @@ impl VecEnv {
             endgame,
             endgame_outcomes,
             endgame_budget,
+            full_depth,
             probe_outcomes,
             seed,
         };

@@ -812,6 +812,69 @@ values) comes with every result, for the analysis board.
    Jaxcalibur (32) do, with Jaxcalibur's cut-off of the opponent's search
    once we do something it couldn't have expected.
 
+### 4.17 Course correction: Nessie's route, properly
+
+**Diagnosis.** The parts were built from the references, but the whole
+follows AlphaZero, which doesn't fit our budget:
+
+- **Breadth came from the policy.** The tree searched each node's policy
+  candidates (8-12 of ~90 joint actions a side). That works when the
+  policy is strong: mikumiku37 (330M games) and Jaxcalibur (100M) get their
+  strength from the network (1747 and ~2400 Elo with no search) and search
+  adds 100-150 Elo. Our policy had 1.6M PPO games, 200 times fewer, so the
+  search inherited its blind spots (Rock Slide + Extreme Speed, never
+  considered). Nessie, on a budget like ours (375k games, a Mac mini),
+  takes breadth from the double oracle over every legal action, seeded by
+  the network's guess at each side's likeliest move; it needs a good value
+  network, not a good policy.
+- **We trained the wrong head.** Search-labelled training taught the policy
+  the search's mixes and taught the value the search's values. Measured
+  apart (4.16 results): the new values are worth +7 points (0.57 +- 0.04);
+  the new policy is worth nothing in search and loses alone (0.43 +- 0.02
+  sampled). An equilibrium mix is a poor regression target (not unique,
+  noisy where values are close); a value is well posed. Nessie trains a
+  value network with auxiliary heads.
+- **Measurement was too coarse.** 600-game matches resolve +-4 points. Nessie
+  checks endgames against a strict solver; Laplace mines its losses and A/B
+  tests every change. We need positions with known answers.
+
+**What stays:** the engine (Showdown-exact, 4.4 enumeration of KO rolls,
+crits and secondaries, which is Nessie's chance model), matrix nodes solved
+by regret matching+ (Nessie, mikumiku37), batching across games, the
+endgame double oracle (4.16 next steps).
+
+**Redesign, in stages, each with a gate:**
+
+1. **Breadth by value, not policy.** The root (and endgames) searched full
+   width by double oracle over every legal action, seeded by the policy's
+   likeliest action and the greedy damage play, screening replies with 2
+   chance outcomes and valuing candidates with full chance (`full_depth`,
+   `probe_outcomes`). On 32 positions at budget 2,000 it checks all ~90 x
+   ~90 actions at 1.3 times the time of the policy-driven root, at the cost
+   of depth (1.8 vs 3.6). Below the root, Nessie's deepening: expand the
+   leaves of the root's solution by reach x entropy. Gate: a match against
+   the policy-driven search with the best networks.
+2. **Learn values, not mixes.** Value target: search value and result (as
+   now); add Nessie's auxiliary heads (damage each Pokemon takes this turn,
+   turns each survives, game length, next weather and terrain; the
+   opponent's next action is in). The policy becomes the double oracle's
+   seed: trained toward the action the search plays, not its mix. Exact
+   labels where the search proves an endgame. Half the games on mutated
+   teams (Nessie). Gate: value error on held-out searched positions, then
+   a match.
+3. **A test suite with answers.** Positions from self-play, answered
+   offline: one turn as the full matrix (every action pair, every chance
+   outcome, leaves by a fixed reference network), and endgames proven by
+   the endgame search. Score: how much the bot's mix loses against the
+   true equilibrium on that turn (its exploitability there). Plus loss
+   mining: positions from lost games where a deep search disagrees with
+   the move played. Every change is judged here first, matches second.
+4. **Scale to Nessie's.** 375k searched games: about 20 hours at the
+   current rate (144k games in 7 hours with 512 games in parallel).
+
+PPO stays as the warm start. A mikumiku37-scale run (330M games) is about
+two weeks of this GPU, so it isn't the main line.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

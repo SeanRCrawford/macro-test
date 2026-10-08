@@ -20,6 +20,9 @@ fn main() {
     let n: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(64);
     let budget: u64 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(800);
     let threads: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(1);
+    // FULL_DEPTH / PROBE / ORACLE env vars: full-width levels, probe
+    // outcomes, root oracle.
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../data/corpus");
     let (teams, _) = load_dir(&dir).expect("corpus");
     let mut rng = Rng::new(3);
@@ -45,7 +48,13 @@ fn main() {
             b.choose(choices).unwrap();
         }
     }
-    let mut forest = Forest::new(roots, MctsConfig::default(), true, threads);
+    let cfg = MctsConfig {
+        full_depth: env("FULL_DEPTH", 0),
+        probe_outcomes: env("PROBE", 8),
+        root_oracle: env("ORACLE", 0) == 1,
+        ..MctsConfig::default()
+    };
+    let mut forest = Forest::new(roots, cfg, true, threads);
     let t = Instant::now();
     let (mut leaves, mut policies) = (0usize, 0usize);
     loop {
@@ -96,5 +105,16 @@ fn main() {
          {policies} policy positions, {:.0} ms/root",
         secs * 1e6 / leaves as f64,
         secs * 1000.0 / n as f64
+    );
+    let res = forest.results();
+    let mean = |f: &dyn Fn(&engine::mcts::RootResult) -> f64| res.iter().map(f).sum::<f64>() / res.len() as f64;
+    println!(
+        "root: candidates {:.1} x {:.1} of {:.0} x {:.0} legal; {:.0} cells; depth {:.1}",
+        mean(&|r| r.candidates[0].len() as f64),
+        mean(&|r| r.candidates[1].len() as f64),
+        mean(&|r| r.legal[0] as f64),
+        mean(&|r| r.legal[1] as f64),
+        mean(&|r| r.cells as f64),
+        mean(&|r| r.max_depth as f64),
     );
 }
