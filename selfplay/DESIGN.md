@@ -790,7 +790,24 @@ values) comes with every result, for the analysis board.
    but a lookup cost as much as the calculation, so it was dropped.
    `search_train` now logs `search_s` and `net_s` (network time inside
    the search) to show whether the engine or the GPU is the bottleneck.
-4. Hidden information (Open Team Sheets: stat points, brought four): worlds
+4. Endgames (done): every node lists every legal action, and nodes where
+   neither side has more than `endgame` (2) Pokemon left grow by best
+   reply over all of them (double oracle at any node, screening probes of
+   8 outcomes cached per action pair), uncapped. Such a node is exact once
+   no action outside its candidates, valued exactly against the other
+   side's mix, gains: the search settles the most threatening open replies
+   and redoes the probes at full precision for the proof. Tests: 2v2 turns
+   proven against brute force over the full ~100x100 matrix; from two
+   actions a side the double oracle reaches the full matrix's equilibrium
+   with 6-9% of its cells. Before, a node held the policy's top 24 joint
+   actions and searched at most 12 a side, so a 2v2 endgame was unsolvable
+   and the policy's blind spots were the search's.
+5. Chance enumeration (fixed): a replay took the first class at every
+   unforced draw (the crit, the secondary effect), so a cell's 16 outcomes
+   were far from the likeliest and, renormalised, overweighted crits and
+   secondaries. It now takes the likeliest class; on 2v2 turns the mass
+   left out fell from 0.5-39% to 0.1-7.5% and the value error 5-10x.
+6. Hidden information (Open Team Sheets: stat points, brought four): worlds
    sampled from the network's predictions, as mikumiku37 (16) and
    Jaxcalibur (32) do, with Jaxcalibur's cut-off of the opponent's search
    once we do something it couldn't have expected.
