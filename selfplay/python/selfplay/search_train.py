@@ -59,6 +59,8 @@ class Config:
     full_frac: float = 0.25         # share of turns fully searched (with fast_budget)
     root_noise: float = 0.0         # Dirichlet noise share at the roots of full searches
     prior_root: bool = False        # widen full searches' roots by the prior, not the double oracle
+    policy_model: str = ""          # a frozen model.pt for the search's priors and team preview:
+                                    # the trained model then learns values only (Nessie's split)
     policy_target: str = "mix"      # tree: "mix" (root equilibrium), "visits" (root visit
                                     # counts, as AlphaZero/KataGo), or "blend" (their average)
     eval_every: int = 10            # rounds
@@ -123,6 +125,14 @@ class SearchTrainer:
         if init:
             self.model.load_state_dict(torch.load(init, map_location=cfg.device)["model"])
         self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
+        # The prior: a frozen policy (e.g. the PPO run), or the model itself.
+        if cfg.policy_model:
+            from selfplay.evaluate import load
+            self.prior = load(cfg.policy_model, cfg.device)
+            for p_ in self.prior.parameters():
+                p_.requires_grad_(False)
+        else:
+            self.prior = self.model
         self.env = SelfPlayEnv(cfg.envs, seed=cfg.seed, threads=cfg.threads,
                                perfect_info=cfg.perfect_info)
         self.search_cfg = SearchConfig(k=cfg.k, max_outcomes=cfg.max_outcomes,
@@ -132,14 +142,16 @@ class SearchTrainer:
             self.search_cfg = TreeConfig(budget=cfg.tree_budget, max_outcomes=cfg.max_outcomes,
                                          roll_bands=cfg.roll_bands, root_noise=cfg.root_noise,
                                          root_oracle=not cfg.prior_root)
-            self.search = TreeSearch(self.model, self.search_cfg, cfg.seed)
-            self.fast = (TreeSearch(self.model, TreeConfig(budget=cfg.fast_budget,
+            self.search = TreeSearch(self.prior, self.search_cfg, cfg.seed, value_model=self.model)
+            self.fast = (TreeSearch(self.prior, TreeConfig(budget=cfg.fast_budget,
                                                            max_outcomes=cfg.max_outcomes,
                                                            roll_bands=cfg.roll_bands,
-                                                           root_oracle=False), cfg.seed + 1)
+                                                           root_oracle=False), cfg.seed + 1,
+                                    value_model=self.model)
                          if cfg.fast_budget > 0 else None)
             self.width = self.search_cfg.max_candidates
         else:
+            assert not cfg.policy_model, "--policy-model needs --tree"
             self.search = Search(self.model, self.search_cfg, cfg.seed)
             self.fast = None
             self.width = cfg.k
@@ -161,7 +173,7 @@ class SearchTrainer:
             # Team preview (and anything not searched): the policy, sampled.
             rows = np.flatnonzero(dec.reshape(-1) == 1)
             if len(rows):
-                a, _, _ = act(self.model, to_tensors(obs, rows))
+                a, _, _ = act(self.prior, to_tensors(obs, rows))
                 actions.reshape(-1)[rows] = a.numpy()
             games = np.flatnonzero((dec == DECISION_SLOTS).any(1))
             if len(games) and self.fast is not None:
@@ -247,7 +259,10 @@ class SearchTrainer:
             oce = -(opp * opp_logp.clamp(min=-1e4)).sum(-1)
             oce = oce[has_opp].mean() if has_opp.any() else torch.zeros((), device=dev)
             vloss = ((value - t(buf.value)) ** 2).mean()
-            loss = ce + c.value_coef * vloss + c.opponent_coef * oce
+            # With a frozen prior the model's own policy is unused: values
+            # (and the opponent head, as an auxiliary task) only.
+            policy_coef = 0.0 if c.policy_model else 1.0
+            loss = policy_coef * ce + c.value_coef * vloss + c.opponent_coef * oce
             self.opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -276,8 +291,9 @@ class SearchTrainer:
             self.rounds += 1
             if self.rounds % c.eval_every == 0:
                 entry.update({f"search_vs_policy_{k}": v for k, v in play_vs_policy(
-                    self.model, c.eval_games, self.search_cfg, 5000 + self.rounds,
-                    perfect_info=c.perfect_info).items() if k in ("score", "ci95")})
+                    self.prior, c.eval_games, self.search_cfg, 5000 + self.rounds,
+                    perfect_info=c.perfect_info,
+                    value_model=self.model if c.tree else None).items() if k in ("score", "ci95")})
                 self.save()
             self.log.write(json.dumps(entry) + "\n")
             self.log.flush()

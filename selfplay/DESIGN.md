@@ -875,6 +875,26 @@ endgame double oracle (4.16 next steps).
 PPO stays as the warm start. A mikumiku37-scale run (330M games) is about
 two weeks of this GPU, so it isn't the main line.
 
+**First measurements** (600 games each, +-0.04, the PPO policy with the
+first search-trained values on both sides unless said):
+
+- Policy trained on visit counts (352k games): 0.47-0.48 +- 0.02 alone
+  (sampled) against the PPO policy, 0.47 +- 0.04 in search. Like the mix
+  target (0.43), no better than PPO: neither target improves the policy at
+  this scale.
+- Greedy safety net 0.53, endgame search 0.52, full-width root (2-outcome
+  probes) 0.48: none significant. At budget ~2,000 a full-width root costs
+  more depth than its breadth is worth.
+- Search budget is worth a lot (2,000 against 500 leaves: 0.66), and so are
+  better values (+7 points). So the levers are value quality and leaves
+  per second.
+
+Hence `search_train --policy-model`: the search takes its priors (and team
+preview) from a frozen policy, and the trained network learns values only,
+with the opponent head as an auxiliary task. That's Nessie's split (a value
+network, a seed policy) and the best pair measured so far (PPO policy,
+search-trained values).
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:
