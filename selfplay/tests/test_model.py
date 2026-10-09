@@ -38,7 +38,7 @@ def test_policy_only_picks_legal_actions():
 def test_gae_credits_the_result_to_each_sides_last_decision(tmp_path):
     cfg = Config(envs=16, steps=200, d=16, layers=1, league_frac=0.0)
     t = Trainer(cfg, tmp_path)
-    data, results = t.rollout()
+    data, results, _ = t.rollout()
     assert results, "no game finished"
     done = data["done"]
     # Every terminal transition carries the game's result.
@@ -46,6 +46,31 @@ def test_gae_credits_the_result_to_each_sides_last_decision(tmp_path):
     assert (data["reward"][~done] == 0).all()
     # With gamma 1, a terminal decision's return is its reward.
     assert torch.allclose(data["ret"][done], data["reward"][done], atol=1e-5)
+    # The vectorised GAE matches the plain loop over transitions.
+    c = t.cfg
+    stream, value, reward = data["stream"], data["value"].float(), data["reward"]
+    boot = torch.zeros(2 * cfg.envs)
+    nv, na, adv = boot.clone(), torch.zeros_like(boot), torch.zeros(len(reward))
+    for i in range(len(reward) - 1, -1, -1):
+        s = stream[i]
+        if done[i]:
+            nv[s], na[s] = 0.0, 0.0
+        delta = reward[i] + c.gamma * nv[s] - value[i]
+        a = delta + c.gamma * c.lam * na[s]
+        adv[i] = a
+        nv[s], na[s] = value[i], a
+    # Recover blocks of distinct streams (a stream appears at most once a
+    # step, so these are steps or runs of steps).
+    blocks, seen, size = [], set(), 0
+    for s in stream.tolist():
+        if s in seen:
+            blocks.append(size)
+            seen, size = set(), 0
+        seen.add(s)
+        size += 1
+    blocks.append(size)
+    got, _ = t.gae(data, boot, blocks)
+    assert torch.allclose(got, adv, atol=1e-4)
 
 
 def test_joint_head_learns_a_correlated_mix():

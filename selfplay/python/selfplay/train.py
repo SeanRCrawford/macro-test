@@ -42,6 +42,7 @@ class Config:
     league_every: int = 10          # updates between snapshots
     league_size: int = 8
     league_frac: float = 0.3        # games whose side 1 is a league member
+    league_active: int = 2          # members a rollout's new league games draw from (PFSP)
     greedy_frac: float = 0.15       # of those, how many use the greedy baseline
     eval_every: int = 10
     eval_games: int = 400
@@ -51,6 +52,7 @@ class Config:
     threads: int = 0
     perfect_info: bool = True
     device: str = "cpu"             # or "cuda"
+    amp: bool = True                # CUDA: the transformer body in bfloat16 (heads stay float32)
 
 
 def to_tensors(obs, rows=None):
@@ -61,10 +63,18 @@ def to_tensors(obs, rows=None):
     return (flat(obs.ints), flat(obs.mons), flat(obs.field), flat(obs.masks), flat(obs.decisions))
 
 
+def autocast(dev, amp: bool):
+    """bfloat16 autocast for the network body on CUDA (PolicyNet keeps its
+    heads in float32)."""
+    dev = torch.device(dev)
+    return torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp and dev.type == "cuda")
+
+
 @torch.no_grad()
-def act(model, batch, greedy=False):
+def act(model, batch, greedy=False, amp=False):
     dev = next(model.parameters()).device
-    logp, value = model(*(t.to(dev) for t in batch))
+    with autocast(dev, amp):
+        logp, value = model(*(t.to(dev, non_blocking=True) for t in batch))
     if greedy:
         a = logp.argmax(-1)
     else:
@@ -109,67 +119,113 @@ class Trainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
         self.env = SelfPlayEnv(cfg.envs, seed=cfg.seed, threads=cfg.threads,
                                perfect_info=cfg.perfect_info)
-        self.league: list[PolicyNet] = []
-        # Per game: None (self-play), "greedy", or a league index.
+        if torch.device(cfg.device).type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        # Past versions: id -> model, and the learner's record against each
+        # (score, games) for prioritised fictitious self-play.
+        self.members: dict[int, PolicyNet] = {}
+        self.league: list[int] = []                 # ids of the current league
+        self.record: dict[int, list[float]] = {}
+        self.active: list[int] = []                 # this rollout's draw for new games
+        self.next_id = 0
+        # Per game: None (self-play), "greedy", or a league member's id.
         self.opponent: list = [None] * cfg.envs
         self.updates = self.games = self.decisions = 0
         self.log = open(out / "log.jsonl", "a")
+
+    def pfsp_weight(self, m: int) -> float:
+        """PFSP: favour the past versions the learner still struggles
+        against (AlphaStar's (1 - p)^2 on its win rate p, prior 1/2)."""
+        score, games = self.record.get(m, (0.0, 0.0))
+        p = (score + 1.0) / (games + 2.0)
+        return (1.0 - p) ** 2 + 0.02
+
+    def draw_active(self):
+        """The league members this rollout's new league games play."""
+        c = self.cfg
+        if not self.league:
+            self.active = []
+            return
+        k = min(c.league_active, len(self.league))
+        w = np.array([self.pfsp_weight(m) for m in self.league])
+        idx = np.random.default_rng(self.rng.randrange(1 << 30)).choice(
+            len(self.league), size=k, replace=False, p=w / w.sum())
+        self.active = [self.league[i] for i in idx]
 
     def pick_opponent(self):
         c = self.cfg
         if self.rng.random() >= c.league_frac:
             return None
-        if not self.league or self.rng.random() < c.greedy_frac:
+        if not self.active or self.rng.random() < c.greedy_frac:
             return "greedy"
-        return self.rng.randrange(len(self.league))
+        return self.rng.choice(self.active)
+
+    def snapshot(self):
+        """Add the current model to the league; forget members no longer in
+        it once no game still plays them."""
+        m = self.next_id
+        self.next_id += 1
+        self.members[m] = copy.deepcopy(self.model).eval()
+        self.league = (self.league + [m])[-self.cfg.league_size:]
+        playing = {o for o in self.opponent if isinstance(o, int)}
+        for old in list(self.members):
+            if old not in self.league and old not in playing:
+                del self.members[old]
+                self.record.pop(old, None)
 
     def rollout(self):
         c, env, n = self.cfg, self.env, self.cfg.envs
+        dev = torch.device(c.device)
+        timing = {"engine_s": 0.0, "net_s": 0.0, "gae_s": 0.0}
+        tick = time.perf_counter
+        self.draw_active()
         buf = {k: [] for k in ("ints", "mons", "field", "masks", "dec", "act", "logp", "value",
                                "stream", "opp_masks", "opp_act")}
         rewards: list[float] = []
         dones: list[bool] = []
-        last = {}                                   # stream -> index of its last transition
+        last = np.full(2 * n, -1, np.int64)        # stream -> index of its last transition
         results = []
         for _ in range(c.steps):
+            t = tick()
             obs = env.observe()
+            timing["engine_s"] += tick() - t
             actions = np.full((n, 2), -1, np.int64)
             dec = obs.decisions
             learner = dec != 0
             opp = np.array([o is not None for o in self.opponent])
             learner[:, 1] &= ~opp
             rows = np.flatnonzero(learner.reshape(-1))
+            t = tick()
             if len(rows):
-                batch = to_tensors(obs, rows)
-                a, logp, value = act(self.model, batch)
+                batch = tuple(x.to(dev, non_blocking=True) for x in to_tensors(obs, rows))
+                a, logp, value = act(self.model, batch, amp=c.amp)
                 actions.reshape(-1)[rows] = a.numpy()
-                for k, t in zip(("ints", "mons", "field", "masks", "dec"), batch):
-                    buf[k].append(t)
+                for k, x in zip(("ints", "mons", "field", "masks", "dec"), batch):
+                    buf[k].append(x)
                 buf["act"].append(a)
                 buf["logp"].append(logp)
                 buf["value"].append(value)
                 base = len(rewards)
-                for i, r in enumerate(rows):
-                    last[int(r)] = base + i
+                last[rows] = base + np.arange(len(rows))
                 buf["stream"].append(torch.from_numpy(rows))
                 rewards.extend([0.0] * len(rows))
                 dones.extend([False] * len(rows))
             # League opponents on side 1.
             opp_rows = np.flatnonzero((dec[:, 1] != 0) & opp)
             if len(opp_rows):
-                greedy = None
-                for g in opp_rows:
-                    o = self.opponent[g]
-                    if o == "greedy":
-                        if greedy is None:
-                            greedy = env.greedy_actions()
-                        actions[g, 1] = greedy[g, 1]
+                greedy_games = [g for g in opp_rows if self.opponent[g] == "greedy"]
+                if greedy_games:
+                    t2 = tick()
+                    greedy = env.greedy_actions()
+                    timing["engine_s"] += tick() - t2
+                    actions[greedy_games, 1] = greedy[greedy_games, 1]
                 by = {}
                 for g in opp_rows:
                     if self.opponent[g] != "greedy":
                         by.setdefault(self.opponent[g], []).append(g * 2 + 1)
-                for idx, rs in by.items():
-                    a, _, _ = act(self.league[idx], to_tensors(obs, np.array(rs)))
+                for m, rs in by.items():
+                    a, _, _ = act(self.members[m], to_tensors(obs, np.array(rs)), amp=c.amp)
                     actions.reshape(-1)[rs] = a.numpy()
             if len(rows):
                 # The opponent's actual joint action, where it chose moves.
@@ -177,64 +233,87 @@ class Trainer:
                 opp_act = actions.reshape(-1)[opp].copy()
                 opp_act[dec.reshape(-1)[opp] != 2] = -1
                 buf["opp_act"].append(torch.from_numpy(opp_act))
-                buf["opp_masks"].append(torch.from_numpy(obs.masks.reshape(-1, obs.masks.shape[-1])[opp]))
+                buf["opp_masks"].append(
+                    torch.from_numpy(obs.masks.reshape(-1, obs.masks.shape[-1])[opp]).to(dev, non_blocking=True))
+            timing["net_s"] += tick() - t
+            t = tick()
             r = env.step(actions)
+            timing["engine_s"] += tick() - t
             for g in np.flatnonzero(r.done):
-                results.append((self.opponent[g], float(r.reward[g, 0]), int(r.turns[g])))
+                o = self.opponent[g]
+                results.append((o, float(r.reward[g, 0]), int(r.turns[g])))
+                if isinstance(o, int) and o in self.members:
+                    rec = self.record.setdefault(o, [0.0, 0.0])
+                    rec[0] += (float(r.reward[g, 0]) + 1) / 2
+                    rec[1] += 1
                 for side in (0, 1):
-                    s = int(g * 2 + side)
-                    if s in last:
-                        rewards[last[s]] += float(r.reward[g, side])
-                        dones[last[s]] = True
-                        del last[s]
+                    s_ = g * 2 + side
+                    if last[s_] >= 0:
+                        rewards[last[s_]] += float(r.reward[g, side])
+                        dones[last[s_]] = True
+                        last[s_] = -1
                 self.opponent[g] = self.pick_opponent()
             self.decisions += len(rows)
         # Bootstrap: each unfinished stream's value now.
         obs = env.observe()
-        _, _, boot = act(self.model, to_tensors(obs))
+        _, _, boot = act(self.model, to_tensors(obs), amp=c.amp)
+        t = tick()
+        blocks = [len(x) for x in buf["stream"]]
         data = {k: torch.cat(v) for k, v in buf.items()}
         data["reward"] = torch.tensor(rewards)
         data["done"] = torch.tensor(dones)
-        data["adv"], data["ret"] = self.gae(data, boot)
+        data["adv"], data["ret"] = self.gae(data, boot, blocks)
+        timing["gae_s"] = tick() - t
         self.games += len(results)
-        return data, results
+        return data, results, timing
 
-    def gae(self, d, boot):
+    def gae(self, d, boot, blocks):
+        """Generalised advantage estimation per stream (game side), vectorised
+        over each env step's block of transitions (one per stream)."""
         c = self.cfg
-        n = len(d["reward"])
-        adv = torch.zeros(n)
-        nv = boot.clone()                           # next value per stream
-        na = torch.zeros_like(boot)                 # next advantage per stream
-        stream, value, reward, done = d["stream"], d["value"], d["reward"], d["done"]
-        for i in range(n - 1, -1, -1):
-            s = stream[i]
-            if done[i]:
-                nv[s], na[s] = 0.0, 0.0
-            delta = reward[i] + c.gamma * nv[s] - value[i]
-            a = delta + c.gamma * c.lam * na[s]
+        stream = d["stream"].numpy()
+        value = d["value"].float().numpy()
+        reward = d["reward"].numpy()
+        done = d["done"].numpy()
+        adv = np.zeros(len(reward), np.float32)
+        nv = boot.float().numpy().copy()            # next value per stream
+        na = np.zeros_like(nv)                      # next advantage per stream
+        end = len(reward)
+        for size in reversed(blocks):
+            i = slice(end - size, end)
+            s, dn = stream[i], done[i]
+            nv_s = np.where(dn, 0.0, nv[s])
+            na_s = np.where(dn, 0.0, na[s])
+            delta = reward[i] + c.gamma * nv_s - value[i]
+            a = delta + c.gamma * c.lam * na_s
             adv[i] = a
             nv[s], na[s] = value[i], a
-        return adv, adv + value
+            end -= size
+        adv = torch.from_numpy(adv)
+        return adv, adv + d["value"].float()
 
     def update(self, d):
         c = self.cfg
+        dev = torch.device(c.device)
         n = len(d["act"])
-        adv = (d["adv"] - d["adv"].mean()) / (d["adv"].std() + 1e-8)
+        # Everything on the device once; minibatches are drawn there.
+        d = {k: v.to(dev, non_blocking=True) for k, v in d.items()}
+        adv_all = (d["adv"] - d["adv"].mean()) / (d["adv"].std() + 1e-8)
         stats = []
         for _ in range(c.epochs):
-            perm = torch.randperm(n)
+            perm = torch.randperm(n, device=dev)
             for i in range(0, n, c.minibatch):
                 idx = perm[i:i + c.minibatch]
-                dev = c.device
-                mb = {k: d[k][idx].to(dev) for k in ("ints", "mons", "field", "masks", "dec", "act",
-                                                    "logp", "ret", "opp_masks", "opp_act")}
-                logp_all, value, opp_logp = self.model(mb["ints"], mb["mons"], mb["field"], mb["masks"],
-                                                       mb["dec"], mb["opp_masks"])
+                mb = {k: d[k][idx] for k in ("ints", "mons", "field", "masks", "dec", "act",
+                                             "logp", "ret", "opp_masks", "opp_act")}
+                with autocast(dev, c.amp):
+                    logp_all, value, opp_logp = self.model(mb["ints"], mb["mons"], mb["field"], mb["masks"],
+                                                           mb["dec"], mb["opp_masks"])
                 logp = logp_all.gather(1, mb["act"][:, None]).squeeze(1)
                 ratio = torch.exp(logp - mb["logp"])
-                a = adv[idx].to(dev)
+                a = adv_all[idx]
                 pg = -torch.min(ratio * a, ratio.clamp(1 - c.clip, 1 + c.clip) * a).mean()
-                vloss = ((value - mb["ret"]) ** 2).mean()
+                vloss = ((value.float() - mb["ret"]) ** 2).mean()
                 p = logp_all.exp()
                 legal = mb["masks"].bool()
                 ent = -(p * logp_all).masked_fill(~legal, 0).sum(-1).mean()
@@ -242,16 +321,17 @@ class Trainer:
                 n_legal = legal.sum(-1).clamp(min=1)
                 kl_u = (-logp_all.masked_fill(~legal, 0).sum(-1) / n_legal - n_legal.log()).mean()
                 seen = mb["opp_act"] >= 0
-                opp_ce = (-opp_logp.gather(1, mb["opp_act"].clamp(min=0)[:, None]).squeeze(1)
-                          [seen].mean()) if seen.any() else torch.zeros((), device=dev)
+                nll = -opp_logp.gather(1, mb["opp_act"].clamp(min=0)[:, None]).squeeze(1)
+                opp_ce = (nll * seen).sum() / seen.sum().clamp(min=1)
                 loss = (pg + c.value_coef * vloss - c.entropy * ent + c.uniform_kl * kl_u
                         + c.opponent_coef * opp_ce)
-                self.opt.zero_grad()
+                self.opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm)
                 self.opt.step()
-                stats.append((pg.item(), vloss.item(), ent.item(), opp_ce.item()))
-        return np.mean(stats, axis=0)
+                # Kept on the device: one sync per update, not per minibatch.
+                stats.append(torch.stack([pg, vloss, ent, opp_ce]).detach())
+        return torch.stack(stats).mean(0).tolist()
 
     def imitate(self, minutes: float):
         """Warm start: learn the greedy-damage baseline's choices (greedy
@@ -301,7 +381,7 @@ class Trainer:
         start = time.time()
         while time.time() - start < minutes * 60 and (max_updates is None or self.updates < max_updates):
             t0 = time.time()
-            data, results = self.rollout()
+            data, results, timing = self.rollout()
             t1 = time.time()
             pg, vl, ent, opp_ce = self.update(data)
             self.updates += 1
@@ -310,12 +390,12 @@ class Trainer:
                      "games": self.games, "decisions": self.decisions,
                      "samples": len(data["act"]), "pg": pg, "value_loss": vl, "entropy": ent,
                      "opponent_ce": opp_ce,
-                     "rollout_s": t1 - t0, "update_s": time.time() - t1,
+                     "rollout_s": t1 - t0, **timing, "update_s": time.time() - t1,
+                     "games_per_s": len(results) / max(time.time() - t0, 1e-9),
                      "mean_turns": float(np.mean([t for *_, t in results])) if results else 0.0,
                      "self_draws": float(np.mean([r == 0 for r in vs_self])) if vs_self else 0.0}
             if self.updates % c.league_every == 0:
-                self.league.append(copy.deepcopy(self.model).eval())
-                self.league = self.league[-c.league_size:]
+                self.snapshot()
             if self.updates % c.eval_every == 0:
                 entry["vs_random"] = evaluate(self.model, "random", c.eval_games, 1000 + self.updates,
                                               c.perfect_info)
@@ -341,6 +421,10 @@ def main():
     for k, v in asdict(Config()).items():
         if k == "perfect_info":
             p.add_argument("--hidden", action="store_true", help="Open Team Sheets observations")
+        elif isinstance(v, bool):
+            name = k.replace("_", "-")
+            p.add_argument(f"--no-{name}" if v else f"--{name}", dest=k,
+                           action="store_false" if v else "store_true")
         else:
             p.add_argument(f"--{k.replace('_', '-')}", type=type(v), default=v)
     a = p.parse_args()

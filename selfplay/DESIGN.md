@@ -895,6 +895,76 @@ with the opponent head as an auxiliary task. That's Nessie's split (a value
 network, a seed policy) and the best pair measured so far (PPO policy,
 search-trained values).
 
+### 4.18 Recalibration from the authors' follow-ups (2026-10-09)
+
+**What they added:**
+
+- **mikumiku37:** a Rust engine at ~7k random battles/s on one core.
+  Training runs 8,192 battles in parallel, 32 steps each per update (~262k
+  samples). Collection runs at ~100k steps/s including inference, and the
+  PPO update is ~70% of wall time, so the RTX 5090 is the limit, not the
+  simulator. League: half the games against the current policy, half
+  against past snapshots weighted toward those it still struggles with
+  (PFSP). Search cells average the value net over several RNG seeds per
+  joint action pair, and the matrix is solved by regret matching blending
+  worst case and expectation. It used 10,300 network evaluations per
+  decision (open sheet). Endgame deepening: 51.4%, "not significant, not
+  worth the compute".
+- **Nessie:** often over 100 legal joint actions, over 40 not nearly-always
+  bad. The equilibrium support has median size 3, is pure 31% of the time,
+  and has 5 or fewer actions 92% of the time.
+- **RotomDotExe** (top 20): 139M self-play games in 4 days, then a plateau.
+  A second model learned human play from 6,000 ladder replays, and a
+  search playing its best options against the likely human moves took it
+  from ~1600 to 1800+.
+- **Jaxcalibur:** the opponent-action auxiliary head made training ~3 times
+  as efficient. Battles and training batches were 2,048 (the smallest
+  that kept the GPU busy). With more compute, a larger network beats
+  training longer.
+
+**Where we stand against that:**
+
+| | mikumiku37 | ours (RTX 4070 Laptop) |
+|---|---|---|
+| Engine, one core | ~7k battles/s | 2.8k battles/s |
+| Collection | ~100k steps/s | ~6.8k steps/s |
+| Games/s overall | ~1,900 (8.7M params) | ~145 (1.8M params) |
+| PPO games so far | 330M | 1.6M |
+
+The engine is 2.5 times slower, but the training loop is 13 times slower
+overall. Allowing for a 5-7 times weaker GPU and a network 5 times
+smaller, it is 12-17 times less efficient than it should be. And the time
+split was the wrong way round: 3 hours of cheap PPO (1.6M games, about 1%
+of what the three PPO bots used) against ~30 hours of expensive
+search-labelled play. Our endgame search measured 0.52, consistent with
+mikumiku37's 51.4%.
+
+**Recalibrated plan:**
+
+1. **Training throughput first** (done in train.py; to be measured on the
+   GPU):
+   - Vectorised GAE: it was a Python loop over every sample, ~3.5 s of each
+     12.5 s rollout.
+   - Rollout data stays on the GPU, minibatches are drawn there, and there
+     is one sync per update instead of four per minibatch.
+   - The transformer body runs in bfloat16 (`--no-amp` to turn off), with
+     the heads kept in float32 so PPO's ratios are exact.
+   - League: past versions keep stable ids, and each rollout's new league
+     games draw from `league_active` (2) members by PFSP. Before, up to 8
+     snapshots each needed a forward pass every step.
+   - The log reports `engine_s`, `net_s`, `gae_s`, `update_s` and
+     `games_per_s`.
+   Then scale the batch to mikumiku37's shape: 2,048-8,192 battles, 32
+   steps, minibatch 4,096+.
+2. **PPO at scale is the main line:** 30-100M games (Jaxcalibur 100M,
+   RotomDotExe 139M, mikumiku37 330M). At mikumiku37's efficiency scaled to
+   this GPU that is roughly 30-40M games a day. Grow the network once
+   throughput allows (Jaxcalibur: bigger beats longer with more compute).
+3. **Search at play time** on top (mikumiku37 and Jaxcalibur: ~100 Elo),
+   with the frozen policy and search-trained values (4.17).
+4. **Later:** a human-play model from replays for ladder play (RotomDotExe),
+   and hidden information.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

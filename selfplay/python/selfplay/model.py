@@ -101,6 +101,12 @@ class PolicyNet(nn.Module):
         of the opponent's joint action [B, 2209] (meaningful where the
         opponent chooses moves)."""
         h = self.encode(ints, mons, field)
+        # The body may run in reduced precision (autocast); the heads don't,
+        # so log-probabilities (PPO's ratios) and values stay exact.
+        with torch.autocast(h.device.type, enabled=False):
+            return self._heads(h.float(), ints, mons.float(), masks, decisions, opp_masks)
+
+    def _heads(self, h, ints, mons, masks, decisions, opp_masks):
         g = h[:, 0]
         own = h[:, 1:7]
         value = torch.tanh(self.value_head(g)).squeeze(-1)
