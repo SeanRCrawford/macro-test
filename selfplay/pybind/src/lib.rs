@@ -371,7 +371,7 @@ impl VecEnv {
                         roll_bands=1, solve_iters=200, max_depth=8, sims_per_wave=4, root_oracle=false,
                         oracle_eps=0.005, root_greedy=false, oracle_pool=24, endgame=0,
                         endgame_outcomes=64, endgame_budget=4.0, full_depth=0, max_wave_scale=16,
-                        probe_outcomes=8, seed=0))]
+                        max_probes=64, probe_outcomes=8, seed=0))]
     #[allow(clippy::too_many_arguments)]
     fn mcts(
         &self,
@@ -397,6 +397,7 @@ impl VecEnv {
         endgame_budget: f32,
         full_depth: usize,
         max_wave_scale: usize,
+        max_probes: usize,
         probe_outcomes: usize,
         seed: u64,
     ) -> PyResult<MctsForest> {
@@ -425,6 +426,7 @@ impl VecEnv {
             endgame_budget,
             full_depth,
             max_wave_scale,
+            max_probes,
             probe_outcomes,
             seed,
         };

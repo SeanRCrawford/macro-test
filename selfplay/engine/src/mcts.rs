@@ -110,6 +110,9 @@ pub struct MctsConfig {
     /// Nodes shallower than this are searched full width like endgames
     /// (best reply over every legal action; Nessie's root): 1 is the root.
     pub full_depth: usize,
+    /// Most probe cells the double oracle makes in one step (the rest in
+    /// the next), so a full-width node never floods a wave.
+    pub max_probes: usize,
     /// Chance outcomes per probe cell (screening replies for the double
     /// oracle). A probe that becomes a candidate, or that an endgame's proof
     /// needs, is redone with the node's full number.
@@ -141,6 +144,7 @@ impl Default for MctsConfig {
             endgame_budget: 4.0,
             full_depth: 0,
             max_wave_scale: 16,
+            max_probes: 64,
             probe_outcomes: 8,
             seed: 0,
         }
@@ -466,10 +470,16 @@ impl SimTree {
         let end = if full || cfg.oracle_pool == 0 { len } else { cfg.oracle_pool.min(len) };
         let pool: Vec<(usize, i64)> = (n.k[side]..end.max(n.k[side])).map(|p| (p, n.ranked[side][p].0)).collect();
         let before = want.len();
-        for &(_, a) in &pool {
+        'pool: for &(_, a) in &pool {
             for &(j, _) in &support {
                 let actions = self.nodes[ni].pair(side, a, j);
-                self.probe_cell(ni, actions, cfg, want);
+                if !self.nodes[ni].probes.contains_key(&(actions[0], actions[1])) {
+                    if want.len() - before >= cfg.max_probes.max(1) {
+                        // The rest next time.
+                        break 'pool;
+                    }
+                    self.probe_cell(ni, actions, cfg, want);
+                }
             }
         }
         let made = want.len() > before;
@@ -756,7 +766,7 @@ impl SimTree {
                 for &(j, _) in &support {
                     let actions = n.pair(side, a, j);
                     if let Some(&c) = n.probes.get(&(actions[0], actions[1])) {
-                        if !self.full_precision(c, cap) {
+                        if !self.full_precision(c, cap) && redo.len() < cfg.max_probes.max(1) {
                             redo.push(actions);
                         }
                     }
@@ -1071,9 +1081,18 @@ impl Forest {
         run_parallel(work, self.threads, |(ti, t)| {
             let (mut wp, mut wc) = (Vec::new(), Vec::new());
             let mut produced = false;
+            // Plan no more outcomes this wave than the tree has budget left
+            // (each new cell counts as its cap, an upper bound).
+            let left = t.budget(budget, cfg).saturating_sub(t.leaf_evals).max(1);
+            let mut planned = 0u64;
             for _ in 0..sims {
                 t.sims += 1;
+                let before = wc.len();
                 produced |= t.simulate(cfg, &mut wp, &mut wc);
+                planned += wc[before..].iter().map(|&c| t.cells[c as usize].cap as u64).sum::<u64>();
+                if planned >= left {
+                    break;
+                }
             }
             if produced {
                 t.stalls = 0;

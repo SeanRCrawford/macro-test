@@ -143,10 +143,12 @@ class SearchTrainer:
                                          roll_bands=cfg.roll_bands, root_noise=cfg.root_noise,
                                          root_oracle=not cfg.prior_root)
             self.search = TreeSearch(self.prior, self.search_cfg, cfg.seed, value_model=self.model)
+            # The cheap search only moves games on: no endgame full width.
             self.fast = (TreeSearch(self.prior, TreeConfig(budget=cfg.fast_budget,
                                                            max_outcomes=cfg.max_outcomes,
                                                            roll_bands=cfg.roll_bands,
-                                                           root_oracle=False), cfg.seed + 1,
+                                                           root_oracle=False, endgame=0),
+                                    cfg.seed + 1,
                                     value_model=self.model)
                          if cfg.fast_budget > 0 else None)
             self.width = self.search_cfg.max_candidates
@@ -198,8 +200,16 @@ class SearchTrainer:
                         cand = np.asarray(r["candidates"][side])
                         mix = np.asarray(r[key], np.float64)
                         if cand[0] >= 0:
-                            cands[i, side, :len(cand)] = cand
-                            mixes[i, side, :len(mix)] = self.target(r, side, mix)
+                            target = self.target(r, side, mix)
+                            if len(cand) > k:
+                                # An endgame root can have more candidates
+                                # than the buffer holds: keep the heaviest.
+                                keep = np.argsort(-target, kind="stable")[:k]
+                                cands[i, side] = cand[keep]
+                                mixes[i, side] = target[keep] / max(target[keep].sum(), 1e-9)
+                            else:
+                                cands[i, side, :len(cand)] = cand
+                                mixes[i, side, :len(mix)] = target
                             j = self.rng.choice(len(mix), p=mix / mix.sum())
                             actions[g, side] = cand[j]
                     val[i] = (r["value"], -r["value"])
@@ -276,6 +286,8 @@ class SearchTrainer:
         start = time.time()
         while time.time() - start < minutes * 60 and (max_rounds is None or self.rounds < max_rounds):
             searches = [x for x in (self.search, getattr(self, "fast", None)) if x is not None]
+            for x in searches:
+                x.stats["max_wave"] = 0  # the largest wave (leaves) this round
             before = [(x.stats["seconds"], x.stats.get("net_seconds", 0.0)) for x in searches]
             t0 = time.time()
             new = self.play()
@@ -286,6 +298,7 @@ class SearchTrainer:
             entry = {"round": self.rounds + 1, "minutes": (time.time() - start) / 60,
                      "games": self.games, "examples": self.examples, "new": new,
                      "play_s": t1 - t0, "search_s": search_s, "net_s": net_s,
+                     "max_wave": max(x.stats.get("max_wave", 0) for x in searches),
                      **self.update(new), "update_s": time.time() - t1,
                      "mean_gap": self.search.stats["gap"] / max(1, self.search.stats["roots"])}
             self.rounds += 1

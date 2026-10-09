@@ -48,6 +48,7 @@ class TreeConfig:
     endgame_budget: float = 4.0 # an endgame root may spend this many times the budget
     full_depth: int = 0         # levels searched full width by best reply (1: the root, as Nessie)
     probe_outcomes: int = 8     # chance outcomes per screening probe
+    max_probes: int = 64        # probe cells one double-oracle step makes (the rest later)
     prior_top: int = 24         # ranked actions kept per side from the policy
     root_noise: float = 0.0     # Dirichlet noise share at the roots (self-play exploration)
     noise_alpha: float = 0.3
@@ -60,7 +61,7 @@ class TreeConfig:
                 "chance_floor", "static_weight", "max_outcomes", "roll_bands", "solve_iters",
                 "max_depth", "sims_per_wave", "root_oracle", "oracle_eps", "root_greedy",
                 "oracle_pool", "endgame", "endgame_outcomes", "endgame_budget", "full_depth",
-                "max_wave_scale", "probe_outcomes")
+                "max_wave_scale", "max_probes", "probe_outcomes")
         return {k: getattr(self, k) for k in keys}
 
 
@@ -73,7 +74,7 @@ class TreeSearch:
         self.dev = next(model.parameters()).device
         self.rng = np.random.default_rng(seed)
         self.stats = {"roots": 0, "leaves": 0, "nodes": 0, "gap": 0.0, "seconds": 0.0,
-                      "net_seconds": 0.0, "depth": 0, "waves": 0, "exact": 0}
+                      "net_seconds": 0.0, "depth": 0, "waves": 0, "exact": 0, "max_wave": 0}
 
     def _t(self, a):
         return torch.from_numpy(np.ascontiguousarray(a)).to(self.dev)
@@ -149,6 +150,7 @@ class TreeSearch:
                 forest.set_policy(actions, probs, c.prior_top)
             first = False
             m = forest.expand()
+            self.stats["max_wave"] = max(self.stats["max_wave"], m)
             if m:
                 t = time.perf_counter()
                 values = self._values(forest, m)
