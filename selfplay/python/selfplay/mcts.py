@@ -38,6 +38,7 @@ class TreeConfig:
     solve_iters: int = 200
     max_depth: int = 8
     sims_per_wave: int = 4
+    max_wave_scale: int = 16    # trees still running simulate up to this many times more per wave
     root_oracle: bool = True    # widen the root by best reply (Nessie's double oracle)
     oracle_eps: float = 0.005
     root_greedy: bool = True    # the greedy damage action is always a root candidate
@@ -59,7 +60,7 @@ class TreeConfig:
                 "chance_floor", "static_weight", "max_outcomes", "roll_bands", "solve_iters",
                 "max_depth", "sims_per_wave", "root_oracle", "oracle_eps", "root_greedy",
                 "oracle_pool", "endgame", "endgame_outcomes", "endgame_budget", "full_depth",
-                "probe_outcomes")
+                "max_wave_scale", "probe_outcomes")
         return {k: getattr(self, k) for k in keys}
 
 
@@ -111,16 +112,17 @@ class TreeSearch:
     @torch.no_grad()
     def _values(self, forest, n: int) -> np.ndarray:
         s = SIZES
-        ints = np.empty((n, 2, s["tokens"], s["int_fields"]), np.int32)
-        mons = np.empty((n, 2, s["tokens"], s["mon_floats"]), np.float32)
-        fld = np.empty((n, 2, s["field_floats"]), np.float32)
-        forest.leaf_inputs(ints, mons, fld)
         out = np.empty(n, np.float32)
         half = self.cfg.half and self.dev.type == "cuda"
         for i in range(0, n, self.cfg.leaf_batch):
             j = min(n, i + self.cfg.leaf_batch)
+            # A chunk at a time, so memory stays bounded however many leaves.
+            ints = np.empty((j - i, 2, s["tokens"], s["int_fields"]), np.int32)
+            mons = np.empty((j - i, 2, s["tokens"], s["mon_floats"]), np.float32)
+            fld = np.empty((j - i, 2, s["field_floats"]), np.float32)
+            forest.leaf_inputs(ints, mons, fld, i)
             with torch.autocast("cuda", dtype=torch.float16, enabled=half):
-                v = self.value_model.value(*(self._t(a[i:j].reshape(-1, *a.shape[2:])) for a in (ints, mons, fld)))
+                v = self.value_model.value(*(self._t(a.reshape(-1, *a.shape[2:])) for a in (ints, mons, fld)))
             v = v.float().view(-1, 2)
             # Side 0's value: its own estimate and the negation of side 1's.
             out[i:j] = ((v[:, 0] - v[:, 1]) / 2).cpu().numpy()

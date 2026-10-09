@@ -104,6 +104,9 @@ pub struct MctsConfig {
     pub endgame_outcomes: usize,
     /// A tree whose root is an endgame may spend this many times the budget.
     pub endgame_budget: f32,
+    /// Up to this many times `sims_per_wave` for the trees still running
+    /// once others have finished (in proportion), to keep batches large.
+    pub max_wave_scale: usize,
     /// Nodes shallower than this are searched full width like endgames
     /// (best reply over every legal action; Nessie's root): 1 is the root.
     pub full_depth: usize,
@@ -137,6 +140,7 @@ impl Default for MctsConfig {
             endgame_outcomes: 64,
             endgame_budget: 4.0,
             full_depth: 0,
+            max_wave_scale: 16,
             probe_outcomes: 8,
             seed: 0,
         }
@@ -1053,16 +1057,21 @@ impl Forest {
     pub fn select(&mut self, budget: u64) -> usize {
         let cfg = &self.cfg;
         let out = Mutex::new((Vec::new(), Vec::new()));
+        let total = self.trees.len();
         let work: Vec<(usize, &mut SimTree)> = self
             .trees
             .iter_mut()
             .enumerate()
             .filter(|(_, t)| !t.done && t.leaf_evals < t.budget(budget, cfg) && t.nodes[0].has_prior)
             .collect();
+        // As trees finish, the rest simulate more per wave, so the network
+        // still sees large batches (small ones cost almost as much each).
+        let scale = total.div_ceil(work.len().max(1)).clamp(1, cfg.max_wave_scale.max(1));
+        let sims = cfg.sims_per_wave * scale;
         run_parallel(work, self.threads, |(ti, t)| {
             let (mut wp, mut wc) = (Vec::new(), Vec::new());
             let mut produced = false;
-            for _ in 0..cfg.sims_per_wave {
+            for _ in 0..sims {
                 t.sims += 1;
                 produced |= t.simulate(cfg, &mut wp, &mut wc);
             }
@@ -1243,9 +1252,19 @@ impl Forest {
 
     /// The positions waiting for a value: both views each.
     pub fn leaf_inputs(&self, ints: &mut [i32], mons: &mut [f32], field: &mut [f32]) {
-        ints.copy_from_slice(&self.leaf_ints);
-        mons.copy_from_slice(&self.leaf_mons);
-        field.copy_from_slice(&self.leaf_field);
+        self.leaf_inputs_from(0, ints, mons, field);
+    }
+
+    /// The waiting positions from `start` on, as many as the buffers hold
+    /// (so callers can take them in chunks).
+    pub fn leaf_inputs_from(&self, start: usize, ints: &mut [i32], mons: &mut [f32], field: &mut [f32]) {
+        let n = mons.len() / LEAF_MONS;
+        assert!(start + n <= self.leaves.len(), "leaves {start}..{} of {}", start + n, self.leaves.len());
+        assert_eq!(ints.len(), n * LEAF_INTS);
+        assert_eq!(field.len(), n * LEAF_FIELD);
+        ints.copy_from_slice(&self.leaf_ints[start * LEAF_INTS..(start + n) * LEAF_INTS]);
+        mons.copy_from_slice(&self.leaf_mons[start * LEAF_MONS..(start + n) * LEAF_MONS]);
+        field.copy_from_slice(&self.leaf_field[start * LEAF_FIELD..(start + n) * LEAF_FIELD]);
     }
 
     pub fn num_leaves(&self) -> usize {

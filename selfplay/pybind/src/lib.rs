@@ -370,7 +370,8 @@ impl VecEnv {
                         c_explore=1.0, chance_floor=0.1, static_weight=1.0, max_outcomes=16,
                         roll_bands=1, solve_iters=200, max_depth=8, sims_per_wave=4, root_oracle=false,
                         oracle_eps=0.005, root_greedy=false, oracle_pool=24, endgame=0,
-                        endgame_outcomes=64, endgame_budget=4.0, full_depth=0, probe_outcomes=8, seed=0))]
+                        endgame_outcomes=64, endgame_budget=4.0, full_depth=0, max_wave_scale=16,
+                        probe_outcomes=8, seed=0))]
     #[allow(clippy::too_many_arguments)]
     fn mcts(
         &self,
@@ -395,6 +396,7 @@ impl VecEnv {
         endgame_outcomes: usize,
         endgame_budget: f32,
         full_depth: usize,
+        max_wave_scale: usize,
         probe_outcomes: usize,
         seed: u64,
     ) -> PyResult<MctsForest> {
@@ -422,6 +424,7 @@ impl VecEnv {
             endgame_outcomes,
             endgame_budget,
             full_depth,
+            max_wave_scale,
             probe_outcomes,
             seed,
         };
@@ -679,9 +682,25 @@ impl MctsForest {
     }
 
     /// Both views of the positions waiting for a value.
-    fn leaf_inputs(&self, py: Python<'_>, ints: &Bound<'_, PyAny>, mons: &Bound<'_, PyAny>, field: &Bound<'_, PyAny>) -> PyResult<()> {
-        let n = self.forest.num_leaves();
+    /// The waiting positions from `start` on, as many as the arrays hold.
+    #[pyo3(signature = (ints, mons, field, start=0))]
+    fn leaf_inputs(
+        &self,
+        py: Python<'_>,
+        ints: &Bound<'_, PyAny>,
+        mons: &Bound<'_, PyAny>,
+        field: &Bound<'_, PyAny>,
+        start: usize,
+    ) -> PyResult<()> {
         let (bi, bm, bf) = (PyBuffer::<i32>::get(ints)?, PyBuffer::<f32>::get(mons)?, PyBuffer::<f32>::get(field)?);
+        let n = bm.item_count() / search::LEAF_MONS;
+        if start + n > self.forest.num_leaves() {
+            return Err(PyValueError::new_err(format!(
+                "leaves {start}..{} of {}",
+                start + n,
+                self.forest.num_leaves()
+            )));
+        }
         let (i, m, f) = unsafe {
             (
                 writable(&bi, n * search::LEAF_INTS, "ints")?,
@@ -690,7 +709,7 @@ impl MctsForest {
             )
         };
         let forest = &self.forest;
-        py.detach(|| forest.leaf_inputs(i, m, f));
+        py.detach(|| forest.leaf_inputs_from(start, i, m, f));
         Ok(())
     }
 
