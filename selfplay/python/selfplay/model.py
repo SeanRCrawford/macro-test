@@ -74,6 +74,8 @@ class PolicyNet(nn.Module):
         self.opponent_head = JointHead(d)
         self.preview_head = nn.Sequential(nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 2))
         self.register_buffer("orders", torch.from_numpy(preview_orders()), persistent=False)
+        # Heads under autocast too (reduced precision), not just the body.
+        self.amp_heads = False
 
     def encode(self, ints: torch.Tensor, mons: torch.Tensor, field: torch.Tensor) -> torch.Tensor:
         """[B, 13, d] token states."""
@@ -101,6 +103,10 @@ class PolicyNet(nn.Module):
         of the opponent's joint action [B, 2209] (meaningful where the
         opponent chooses moves)."""
         h = self.encode(ints, mons, field)
+        if self.amp_heads:
+            # The heads in reduced precision too (autocast); only the final
+            # logits, log-probabilities and value are float32.
+            return self._heads(h, ints, mons, masks, decisions, opp_masks)
         # The body may run in reduced precision (autocast); the heads don't,
         # so log-probabilities (PPO's ratios) and values stay exact.
         with torch.autocast(h.device.type, enabled=False):
@@ -109,15 +115,15 @@ class PolicyNet(nn.Module):
     def _heads(self, h, ints, mons, masks, decisions, opp_masks):
         g = h[:, 0]
         own = h[:, 1:7]
-        value = torch.tanh(self.value_head(g)).squeeze(-1)
+        value = torch.tanh(self.value_head(g).float()).squeeze(-1)
 
-        logits = torch.full(masks.shape, -1e9, dtype=h.dtype, device=h.device)
-        joint = self.policy_head(*self.actions(h, ints, mons, observer=True))
+        logits = torch.full(masks.shape, -1e9, dtype=torch.float32, device=h.device)
+        joint = self.policy_head(*self.actions(h, ints, mons, observer=True)).float()
         is_slots = (decisions == 2).unsqueeze(-1)
         logits = torch.where(is_slots, joint, logits)
 
         # Team preview: lead scores for the first two picks, bring for the rest.
-        sc = self.preview_head(torch.cat([own, g.unsqueeze(1).expand_as(own)], -1))  # [B, 6, 2]
+        sc = self.preview_head(torch.cat([own, g.unsqueeze(1).expand_as(own)], -1)).float()  # [B, 6, 2]
         o = self.orders
         lead, bring = sc[..., 0], sc[..., 1]
         prev = lead[:, o[:, 0]] + lead[:, o[:, 1]] + bring[:, o[:, 2]] + bring[:, o[:, 3]]
@@ -128,7 +134,7 @@ class PolicyNet(nn.Module):
         logp = masked_log_softmax(logits, masks)
         if opp_masks is None:
             return logp, value
-        opp = self.opponent_head(*self.actions(h, ints, mons, observer=False))
+        opp = self.opponent_head(*self.actions(h, ints, mons, observer=False)).float()
         return logp, value, masked_log_softmax(opp, opp_masks)
 
 
@@ -141,8 +147,19 @@ def masked_log_softmax(logits, masks):
 
 
 def pick(x, w):
-    """Sum over tokens of x [B, 6, ...] weighted by the one-hot w [B, 6]."""
-    return (x * w.reshape(*w.shape, *([1] * (x.dim() - 2)))).sum(1)
+    """x [B, 6, ...] at the token the one-hot w [B, 6] marks (zeros where w is
+    all zero): a gather, the same as summing x weighted by w."""
+    idx = w.argmax(1)                                                       # [B]
+    has = (w.sum(1) > 0).to(x.dtype).reshape(-1, *([1] * (x.dim() - 2)))
+    return x[torch.arange(x.shape[0], device=x.device), idx] * has
+
+
+def pick_each(x, w):
+    """x [B, 6, d] at each of K one-hots w [B, 6, K] (zeros where one is all
+    zero): [B, K, d]."""
+    idx = w.argmax(1)                                                       # [B, K]
+    has = (w.sum(1) > 0).to(x.dtype).unsqueeze(-1)                          # [B, K, 1]
+    return x.gather(1, idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])) * has
 
 
 class SlotActions(nn.Module):
@@ -174,13 +191,13 @@ class SlotActions(nn.Module):
         targets = torch.stack([torch.zeros(B, d, device=h.device, dtype=h.dtype),
                                *actives(ht, ft), *actives(hm, fm)], 1)          # [B, 5, d]
         # Switch targets: the token at each party position.
-        party = torch.stack([pick(hm, fm[..., PARTY + k]) for k in range(N_SWITCH)], 1)  # [B, 6, d]
+        party = pick_each(hm, fm[..., PARTY:PARTY + N_SWITCH])               # [B, 6, d]
         switch = self.switch(party)
         out = []
         for col in (ACTIVE_SLOT0, ACTIVE_SLOT1):
             w = fm[..., col]
             tok = pick(hm, w)
-            ids = pick(ints[:, mi, 3:7].float(), w).round().long()            # [B, 4]
+            ids = pick(ints[:, mi, 3:7], w).long()                             # [B, 4]
             moves = torch.cat([
                 self.move_embedding(ids),                                                     # [B, 4, 12]
                 pick(fm[..., PP:PP + 4], w).unsqueeze(-1),
@@ -194,12 +211,14 @@ class SlotActions(nn.Module):
             d_part = dmg * W[:, nm]                                           # [B, 4, 5, d]
             t_part = targets @ W[:, nm + 1:nm + 1 + d].T + W[:, nm + 1 + d:nm + 6 + d].T  # [B, 5, d]
             mega = W[:, nm + 6 + d]
-            x = (m_part[:, :, None, None] + d_part[:, :, :, None] + t_part[:, None, :, None]
-                 + self.mega[:, None] * mega + self.move.bias)                # [B, 4, 5, 2, d]
-            e = torch.cat([x.reshape(B, N_MOVE, d), switch,
-                           self.pass_.expand(B, 1, d)], 1)                    # [B, 47, d]
-            ctx = self.context(torch.cat([tok, g], -1)).unsqueeze(1)
-            out.append(self.out(e + ctx))
+            ctx = self.context(torch.cat([tok, g], -1)).unsqueeze(1)          # [B, 1, d]
+            # Built with as few full-size intermediates as possible (this is
+            # memory-bound): the context joins the small parts first.
+            mt = (m_part + ctx)[:, :, None] + t_part[:, None] + self.move.bias  # [B, 4, 5, d]
+            x = (mt + d_part)[:, :, :, None] + self.mega[:, None] * mega      # [B, 4, 5, 2, d]
+            e = torch.cat([x.reshape(B, N_MOVE, d), switch + ctx,
+                           self.pass_ + ctx], 1)                              # [B, 47, d]
+            out.append(self.out(e))
         return out
 
 

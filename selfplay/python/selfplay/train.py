@@ -53,6 +53,10 @@ class Config:
     perfect_info: bool = True
     device: str = "cpu"             # or "cuda"
     amp: bool = True                # CUDA: the transformer body in bfloat16 (heads stay float32)
+    amp_heads: bool = False         # the heads in bfloat16 too (log-probabilities stay float32)
+    profile: bool = False           # profile 10 minibatches of the second update, print the table
+    save_every: int = 0             # keep a numbered checkpoint every this many updates (0: none)
+    baseline: str = ""              # a model.pt to play head to head at each evaluation (sampled)
 
 
 def to_tensors(obs, rows=None):
@@ -116,6 +120,8 @@ class Trainer:
         torch.manual_seed(cfg.seed)
         self.rng = random.Random(cfg.seed)
         self.model = PolicyNet(cfg.d, cfg.layers).to(cfg.device)
+        self.model.amp_heads = cfg.amp_heads
+        self.baseline = None
         self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
         self.env = SelfPlayEnv(cfg.envs, seed=cfg.seed, threads=cfg.threads,
                                perfect_info=cfg.perfect_info)
@@ -300,9 +306,19 @@ class Trainer:
         d = {k: v.to(dev, non_blocking=True) for k, v in d.items()}
         adv_all = (d["adv"] - d["adv"].mean()) / (d["adv"].std() + 1e-8)
         stats = []
+        prof = None
+        if c.profile and self.updates == 1:
+            acts = [torch.profiler.ProfilerActivity.CPU]
+            if dev.type == "cuda":
+                acts.append(torch.profiler.ProfilerActivity.CUDA)
+            prof = torch.profiler.profile(activities=acts)
+            prof.start()
         for _ in range(c.epochs):
             perm = torch.randperm(n, device=dev)
             for i in range(0, n, c.minibatch):
+                if prof is not None and len(stats) == 10:
+                    self.print_profile(prof, dev)
+                    prof = None
                 idx = perm[i:i + c.minibatch]
                 mb = {k: d[k][idx] for k in ("ints", "mons", "field", "masks", "dec", "act",
                                              "logp", "ret", "opp_masks", "opp_act")}
@@ -331,7 +347,17 @@ class Trainer:
                 self.opt.step()
                 # Kept on the device: one sync per update, not per minibatch.
                 stats.append(torch.stack([pg, vloss, ent, opp_ce]).detach())
+        if prof is not None:
+            self.print_profile(prof, dev)
         return torch.stack(stats).mean(0).tolist()
+
+    @staticmethod
+    def print_profile(prof, dev):
+        if dev.type == "cuda":
+            torch.cuda.synchronize()
+        prof.stop()
+        key = "self_cuda_time_total" if dev.type == "cuda" else "self_cpu_time_total"
+        print(prof.key_averages().table(sort_by=key, row_limit=30), flush=True)
 
     def imitate(self, minutes: float):
         """Warm start: learn the greedy-damage baseline's choices (greedy
@@ -396,7 +422,18 @@ class Trainer:
                      "self_draws": float(np.mean([r == 0 for r in vs_self])) if vs_self else 0.0}
             if self.updates % c.league_every == 0:
                 self.snapshot()
+            if c.save_every and self.updates % c.save_every == 0:
+                torch.save({"model": self.model.state_dict(), "config": asdict(c)},
+                           self.out / f"model_{self.updates:05d}.pt")
             if self.updates % c.eval_every == 0:
+                if c.baseline:
+                    from selfplay.evaluate import head_to_head, load
+                    if self.baseline is None:
+                        self.baseline = load(c.baseline, c.device)
+                    self.model.eval()
+                    entry["vs_baseline"] = head_to_head(self.model, self.baseline, c.eval_games,
+                                                        4000 + self.updates, c.perfect_info, sample=True)
+                    self.model.train()
                 entry["vs_random"] = evaluate(self.model, "random", c.eval_games, 1000 + self.updates,
                                               c.perfect_info)
                 entry["vs_greedy"] = evaluate(self.model, "greedy", c.eval_games, 2000 + self.updates,

@@ -59,6 +59,8 @@ class Config:
     full_frac: float = 0.25         # share of turns fully searched (with fast_budget)
     root_noise: float = 0.0         # Dirichlet noise share at the roots of full searches
     prior_root: bool = False        # widen full searches' roots by the prior, not the double oracle
+    endgame: int = 0                # full searches: endgame nodes full width (0: off; it cost
+                                    # ~4x a search for ~2 points, measured)
     policy_model: str = ""          # a frozen model.pt for the search's priors and team preview:
                                     # the trained model then learns values only (Nessie's split)
     policy_target: str = "mix"      # tree: "mix" (root equilibrium), "visits" (root visit
@@ -141,7 +143,7 @@ class SearchTrainer:
         if cfg.tree:
             self.search_cfg = TreeConfig(budget=cfg.tree_budget, max_outcomes=cfg.max_outcomes,
                                          roll_bands=cfg.roll_bands, root_noise=cfg.root_noise,
-                                         root_oracle=not cfg.prior_root)
+                                         root_oracle=not cfg.prior_root, endgame=cfg.endgame)
             self.search = TreeSearch(self.prior, self.search_cfg, cfg.seed, value_model=self.model)
             # The cheap search only moves games on: no endgame full width.
             self.fast = (TreeSearch(self.prior, TreeConfig(budget=cfg.fast_budget,
