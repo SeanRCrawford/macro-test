@@ -424,7 +424,8 @@ class Trainer:
             if self.updates % c.league_every == 0:
                 self.snapshot()
             if c.save_every and self.updates % c.save_every == 0:
-                torch.save({"model": self.model.state_dict(), "config": asdict(c)},
+                torch.save({"model": self.model.state_dict(), "config": asdict(c),
+                            "updates": self.updates, "games": self.games},
                            self.out / f"model_{self.updates:05d}.pt")
             if self.updates % c.eval_every == 0:
                 if c.baseline:
@@ -439,13 +440,15 @@ class Trainer:
                                               c.perfect_info)
                 entry["vs_greedy"] = evaluate(self.model, "greedy", c.eval_games, 2000 + self.updates,
                                               c.perfect_info)
-                torch.save({"model": self.model.state_dict(), "config": asdict(c)},
+                torch.save({"model": self.model.state_dict(), "config": asdict(c),
+                            "updates": self.updates, "games": self.games},
                            self.out / "model.pt")
             self.log.write(json.dumps(entry) + "\n")
             self.log.flush()
             print(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}"
                            for k, v in entry.items()), flush=True)
-        torch.save({"model": self.model.state_dict(), "config": asdict(c)}, self.out / "model.pt")
+        torch.save({"model": self.model.state_dict(), "config": asdict(c),
+                            "updates": self.updates, "games": self.games}, self.out / "model.pt")
 
 
 def main():
