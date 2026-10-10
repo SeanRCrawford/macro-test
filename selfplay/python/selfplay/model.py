@@ -20,11 +20,23 @@ Heads:
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 
 import numpy as np
 import torch
 from torch import nn
+
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    def math_attention():
+        """Plain attention (matmul, softmax, matmul): for 13 tokens the fused
+        kernels pad to 64-token tiles and waste most of their work."""
+        return sdpa_kernel(SDPBackend.MATH)
+except ImportError:  # older torch
+    def math_attention():
+        return contextlib.nullcontext()
 
 from selfplay.env import SIZES
 
@@ -74,8 +86,10 @@ class PolicyNet(nn.Module):
         self.opponent_head = JointHead(d)
         self.preview_head = nn.Sequential(nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 2))
         self.register_buffer("orders", torch.from_numpy(preview_orders()), persistent=False)
-        # Heads under autocast too (reduced precision), not just the body.
-        self.amp_heads = False
+        # Heads under autocast too (reduced precision), not just the body:
+        # log-probabilities move by ~0.001 (measured), far inside PPO's clip.
+        self.amp_heads = True
+        self.math_attention = True
 
     def encode(self, ints: torch.Tensor, mons: torch.Tensor, field: torch.Tensor) -> torch.Tensor:
         """[B, 13, d] token states."""
@@ -89,7 +103,8 @@ class PolicyNet(nn.Module):
             mons,
         ], dim=-1)
         x = torch.cat([self.field_proj(field).unsqueeze(1), self.mon_proj(emb)], dim=1)
-        return self.norm(self.encoder(x + self.position))
+        with math_attention() if self.math_attention else contextlib.nullcontext():
+            return self.norm(self.encoder(x + self.position))
 
     def value(self, ints, mons, field):
         """The observer's expected result [B], in [-1, 1]."""

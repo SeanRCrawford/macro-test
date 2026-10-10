@@ -956,6 +956,21 @@ mikumiku37's 51.4%.
      `games_per_s`.
    Then scale the batch to mikumiku37's shape: 2,048-8,192 battles, 32
    steps, minibatch 4,096+.
+
+   Measured on the RTX 4070 Laptop (2,048 battles, 32 steps, minibatch
+   4,096, 4 epochs, 1.8M parameters):
+   - 145 games/s before, 282 with these changes, 315 with gathers instead
+     of one-hot sums and the heads in bfloat16 too.
+   - Collection is ~2.6 s of each ~22.5 s cycle; the update is the rest,
+     and GPU-bound (255 ms of GPU time per 4,096-sample minibatch, 260 ms of
+     wall time).
+   - Update profile: matmuls 19% (the heads' float32 GEMMs, which bfloat16
+     heads cut by 20% of the update), copies and casts 12%, elementwise
+     adds and reductions ~26% (the heads' per-action embeddings and their
+     gradients), attention backward 7% (fused kernels tiled for long
+     sequences, on 13 tokens; now plain attention).
+   - bfloat16 heads move log-probabilities by ~0.001 (max 0.006), against
+     PPO's clip of 0.2, so they're the default.
 2. **PPO at scale is the main line:** 30-100M games (Jaxcalibur 100M,
    RotomDotExe 139M, mikumiku37 330M). At mikumiku37's efficiency scaled to
    this GPU that is roughly 30-40M games a day. Grow the network once

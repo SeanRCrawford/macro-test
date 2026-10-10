@@ -53,7 +53,8 @@ class Config:
     perfect_info: bool = True
     device: str = "cpu"             # or "cuda"
     amp: bool = True                # CUDA: the transformer body in bfloat16 (heads stay float32)
-    amp_heads: bool = False         # the heads in bfloat16 too (log-probabilities stay float32)
+    amp_heads: bool = True          # the heads in bfloat16 too (log-probabilities stay float32;
+                                    # they move ~0.001, measured): 20% faster updates
     profile: bool = False           # profile 10 minibatches of the second update, print the table
     save_every: int = 0             # keep a numbered checkpoint every this many updates (0: none)
     baseline: str = ""              # a model.pt to play head to head at each evaluation (sampled)
