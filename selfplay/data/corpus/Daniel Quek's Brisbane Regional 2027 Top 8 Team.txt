@@ -1,0 +1,48 @@
+Archaludon @ Leftovers  
+Ability: Stamina  
+Calm Nature  
+- Electro Shot  
+- Flash Cannon  
+- Dragon Pulse  
+- Protect  
+
+Grimmsnarl @ Light Clay  
+Ability: Prankster  
+Careful Nature  
+- Spirit Break  
+- Parting Shot  
+- Reflect  
+- Light Screen  
+
+Venusaur @ Focus Sash  
+Ability: Chlorophyll  
+Modest Nature  
+- Sleep Powder  
+- Sludge Bomb  
+- Leaf Storm  
+- Protect  
+
+Pelipper @ Sitrus Berry  
+Ability: Drizzle  
+Modest Nature  
+- Tailwind  
+- Weather Ball  
+- Hurricane  
+- Wide Guard  
+
+Swampert @ Swampertite  
+Ability: Torrent  
+Adamant Nature  
+- Protect  
+- Ice Punch  
+- Wave Crash  
+- Earthquake  
+
+Charizard @ Charizardite Y  
+Ability: Blaze  
+Modest Nature  
+- Heat Wave  
+- Weather Ball  
+- Hurricane  
+- Protect  
+

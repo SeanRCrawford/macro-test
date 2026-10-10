@@ -1,0 +1,48 @@
+Armarouge @ Focus Sash  
+Ability: Flash Fire  
+Modest Nature  
+- Armor Cannon  
+- Expanding Force  
+- Wide Guard  
+- Protect  
+
+Dragapult @ Life Orb  
+Ability: Infiltrator  
+Timid Nature  
+- Draco Meteor  
+- Shadow Ball  
+- Will-O-Wisp  
+- Protect  
+
+Gengar @ Gengarite  
+Ability: Cursed Body  
+Modest Nature  
+- Shadow Ball  
+- Focus Blast  
+- Protect  
+- Sludge Bomb  
+
+Milotic @ Psychic Seed  
+Ability: Competitive  
+Calm Nature  
+- Muddy Water  
+- Coil  
+- Hypnosis  
+- Recover  
+
+Indeedee-F @ Rocky Helmet  
+Ability: Psychic Surge  
+Relaxed Nature  
+- Psychic  
+- Follow Me  
+- Helping Hand  
+- Trick Room  
+
+Staraptor @ Staraptite  
+Ability: Intimidate  
+Adamant Nature  
+- Protect  
+- Close Combat  
+- Brave Bird  
+- Roost  
+

@@ -1,0 +1,48 @@
+Indeedee-F @ Rocky Helmet  
+Ability: Psychic Surge  
+Bold Nature  
+- Psychic  
+- Follow Me  
+- Helping Hand  
+- Trick Room  
+
+Milotic @ Psychic Seed  
+Ability: Competitive  
+Calm Nature  
+- Muddy Water  
+- Coil  
+- Hypnosis  
+- Recover  
+
+Whimsicott @ Focus Sash  
+Ability: Prankster  
+Timid Nature  
+- Moonblast  
+- Tailwind  
+- Charm  
+- Light Screen  
+
+Dragapult @ Life Orb  
+Ability: Infiltrator  
+Modest Nature  
+- Draco Meteor  
+- Shadow Ball  
+- Will-O-Wisp  
+- Protect  
+
+Armarouge @ Twisted Spoon  
+Ability: Flash Fire  
+Modest Nature  
+- Armor Cannon  
+- Expanding Force  
+- Trick Room  
+- Protect  
+
+Staraptor @ Staraptite  
+Ability: Intimidate  
+Adamant Nature  
+- Close Combat  
+- Brave Bird  
+- Roost  
+- Protect  
+

@@ -1,0 +1,48 @@
+Salamence @ Salamencite  
+Ability: Intimidate  
+Modest Nature  
+- Draco Meteor  
+- Hyper Voice  
+- Flamethrower  
+- Protect  
+
+Floette-Eternal @ Floettite  
+Ability: Flower Veil  
+Modest Nature  
+- Moonblast  
+- Dazzling Gleam  
+- Light of Ruin  
+- Protect  
+
+Whimsicott @ Focus Sash  
+Ability: Prankster  
+Timid Nature  
+- Moonblast  
+- Tailwind  
+- Encore  
+- Protect  
+
+Kingambit @ Chople Berry  
+Ability: Defiant  
+Adamant Nature  
+- Kowtow Cleave  
+- Iron Head  
+- Sucker Punch  
+- Low Kick  
+
+Sneasler @ White Herb  
+Ability: Unburden  
+Jolly Nature  
+- Close Combat  
+- Dire Claw  
+- Rock Tomb  
+- Fake Out  
+
+Basculegion @ Life Orb  
+Ability: Adaptability  
+Adamant Nature  
+- Wave Crash  
+- Last Respects  
+- Aqua Jet  
+- Protect  
+

@@ -1,7 +1,7 @@
 Froslass @ Froslassite
 Ability: Cursed Body
 Level: 50
-Nature: Timid
+Timid Nature
 - Blizzard
 - Shadow Ball
 - Aurora Veil
@@ -10,7 +10,7 @@ Nature: Timid
 Kingambit @ Black Glasses
 Ability: Defiant
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Kowtow Cleave
 - Sucker Punch
 - Swords Dance
@@ -19,7 +19,7 @@ Nature: Adamant
 Sneasler @ White Herb
 Ability: Unburden
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Fake Out
 - Close Combat
 - Dire Claw
@@ -28,7 +28,7 @@ Nature: Adamant
 Lycanroc-Dusk @ Focus Sash
 Ability: Tough Claws
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Accelerock
 - Close Combat
 - Rock Slide
@@ -37,7 +37,7 @@ Nature: Adamant
 Basculegion @ Life Orb
 Ability: Adaptability
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Wave Crash
 - Last Respects
 - Aqua Jet
@@ -46,7 +46,7 @@ Nature: Adamant
 Scovillain @ Scovillainite
 Ability: Moody
 Level: 50
-Nature: Bold
+Bold Nature
 - Overheat
 - Giga Drain
 - Rage Powder

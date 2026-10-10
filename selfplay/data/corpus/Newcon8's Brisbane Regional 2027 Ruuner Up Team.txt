@@ -1,0 +1,48 @@
+Floette-Eternal @ Floettite  
+Ability: Flower Veil  
+Modest Nature  
+- Moonblast  
+- Protect  
+- Calm Mind  
+- Dazzling Gleam  
+
+Kingambit @ Chople Berry  
+Ability: Defiant  
+Adamant Nature  
+- Sucker Punch  
+- Protect  
+- Kowtow Cleave  
+- Iron Head  
+
+Basculegion @ Colbur Berry  
+Ability: Adaptability  
+Adamant Nature  
+- Last Respects  
+- Aqua Jet  
+- Protect  
+- Wave Crash  
+
+Rillaboom @ Miracle Seed  
+Ability: Grassy Surge  
+Adamant Nature  
+- Grassy Glide  
+- Fake Out  
+- Wood Hammer  
+- High Horsepower  
+
+Salamence @ Salamencite  
+Ability: Intimidate  
+Modest Nature  
+- Flamethrower  
+- Protect  
+- Tailwind  
+- Hyper Voice  
+
+Sneasler @ Focus Sash  
+Ability: Poison Touch  
+Jolly Nature  
+- Protect  
+- Dire Claw  
+- Fake Out  
+- Close Combat  
+

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "selfplay"
+version = "0.1.0"
+description = "Self-play RL engine for Gen 9 Champions VGC"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[tool.maturin]
+manifest-path = "pybind/Cargo.toml"
+python-source = "python"
+module-name = "selfplay._engine"

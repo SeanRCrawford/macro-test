@@ -1,0 +1,48 @@
+Sneasler @ Grassy Seed  
+Ability: Unburden  
+Adamant Nature  
+- Protect  
+- Dire Claw  
+- Close Combat  
+- Rock Slide  
+
+Floette-Eternal @ Floettite  
+Ability: Flower Veil  
+Modest Nature  
+- Protect  
+- Dazzling Gleam  
+- Calm Mind  
+- Moonblast  
+
+Salamence @ Salamencite  
+Ability: Intimidate  
+Timid Nature  
+- Protect  
+- Tailwind  
+- Hyper Voice  
+- Draco Meteor  
+
+Rillaboom @ Sitrus Berry  
+Ability: Grassy Surge  
+Adamant Nature  
+- Fake Out  
+- Grassy Glide  
+- Wood Hammer  
+- U-turn  
+
+Incineroar @ Rocky Helmet  
+Ability: Intimidate  
+Impish Nature  
+- Fake Out  
+- Parting Shot  
+- Throat Chop  
+- Flare Blitz  
+
+Gholdengo @ Life Orb  
+Ability: Good as Gold  
+Timid Nature  
+- Protect  
+- Make It Rain  
+- Nasty Plot  
+- Shadow Ball  
+

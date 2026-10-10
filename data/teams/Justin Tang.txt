@@ -1,7 +1,7 @@
 Sneasler @ Focus Sash
 Ability: Poison Touch
 Level: 50
-Nature: Jolly
+Jolly Nature
 - Fake Out
 - Close Combat
 - Poison Jab
@@ -10,7 +10,7 @@ Nature: Jolly
 Sinistcha @ Colbur Berry
 Ability: Hospitality
 Level: 50
-Nature: Bold
+Bold Nature
 - Matcha Gotcha
 - Rage Powder
 - Trick Room
@@ -19,7 +19,7 @@ Nature: Bold
 Kingambit @ Life Orb
 Ability: Defiant
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Kowtow Cleave
 - Sucker Punch
 - Swords Dance
@@ -28,7 +28,7 @@ Nature: Adamant
 Blastoise @ Blastoisinite
 Ability: Rain Dish
 Level: 50
-Nature: Modest
+Modest Nature
 - Water Spout
 - Dark Pulse
 - Shell Smash
@@ -37,7 +37,7 @@ Nature: Modest
 Delphox @ Delphoxite
 Ability: Blaze
 Level: 50
-Nature: Timid
+Timid Nature
 - Heat Wave
 - Psychic
 - Nasty Plot
@@ -46,7 +46,7 @@ Nature: Timid
 Incineroar @ Sitrus Berry
 Ability: Intimidate
 Level: 50
-Nature: Careful
+Careful Nature
 - Parting Shot
 - Flare Blitz
 - Throat Chop
