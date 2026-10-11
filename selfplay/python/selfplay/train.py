@@ -31,6 +31,7 @@ class Config:
     epochs: int = 3
     minibatch: int = 4096
     lr: float = 3e-4
+    lr_final: float = -1.0          # >= 0: the learning rate decays linearly to this over --minutes
     gamma: float = 1.0
     lam: float = 0.95
     clip: float = 0.2
@@ -407,6 +408,10 @@ class Trainer:
         c = self.cfg
         start = time.time()
         while time.time() - start < minutes * 60 and (max_updates is None or self.updates < max_updates):
+            if c.lr_final >= 0:
+                frac = min(1.0, (time.time() - start) / (minutes * 60))
+                for group in self.opt.param_groups:
+                    group["lr"] = c.lr + (c.lr_final - c.lr) * frac
             t0 = time.time()
             data, results, timing = self.rollout()
             t1 = time.time()
@@ -417,6 +422,7 @@ class Trainer:
                      "games": self.games, "decisions": self.decisions,
                      "samples": len(data["act"]), "pg": pg, "value_loss": vl, "entropy": ent,
                      "opponent_ce": opp_ce,
+                     "lr": self.opt.param_groups[0]["lr"],
                      "rollout_s": t1 - t0, **timing, "update_s": time.time() - t1,
                      "games_per_s": len(results) / max(time.time() - t0, 1e-9),
                      "mean_turns": float(np.mean([t for *_, t in results])) if results else 0.0,
@@ -457,6 +463,8 @@ def main():
     p.add_argument("--updates", type=int, default=None)
     p.add_argument("--out", default="runs/tiny")
     p.add_argument("--init", default=None, help="start from this model.pt")
+    p.add_argument("--grow-layers", type=int, default=0,
+                   help="with --init: add this many encoder layers, each starting as an identity")
     p.add_argument("--imitate-minutes", type=float, default=0.0,
                    help="first learn the greedy baseline's choices for this long")
     for k, v in asdict(Config()).items():
@@ -470,15 +478,25 @@ def main():
             p.add_argument(f"--{k.replace('_', '-')}", type=type(v), default=v)
     a = p.parse_args()
     if a.init:
-        # The model's size comes from the checkpoint.
+        # The model's size comes from the checkpoint (plus any grown layers).
         saved = torch.load(a.init, map_location="cpu").get("config", {})
-        a.d, a.layers = saved.get("d", a.d), saved.get("layers", a.layers)
+        a.d, a.layers = saved.get("d", a.d), saved.get("layers", a.layers) + a.grow_layers
     cfg = Config(**{k: getattr(a, k) for k in asdict(Config()) if k != "perfect_info"},
                  perfect_info=not a.hidden)
     torch.set_num_threads(max(1, torch.get_num_threads()))
     t = Trainer(cfg, Path(a.out))
     if a.init:
-        t.model.load_state_dict(torch.load(a.init, map_location=cfg.device)["model"])
+        ckpt = torch.load(a.init, map_location=cfg.device)
+        state = ckpt["model"]
+        # Carry the counts on, so numbered checkpoints aren't overwritten
+        # when a run resumes into its own folder.
+        t.updates, t.games = ckpt.get("updates", 0), ckpt.get("games", 0)
+        if a.grow_layers:
+            from selfplay.model import load_grown
+            added = load_grown(t.model, state)
+            print(f"grew the encoder by {added} identity layers to {cfg.layers}", flush=True)
+        else:
+            t.model.load_state_dict(state)
     if a.imitate_minutes > 0:
         t.imitate(a.imitate_minutes)
     t.run(a.minutes, a.updates)

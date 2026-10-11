@@ -980,6 +980,34 @@ mikumiku37's 51.4%.
 4. **Later:** a human-play model from replays for ladder play (RotomDotExe),
    and hidden information.
 
+### 4.19 The first PPO run at scale (runs/ppo1)
+
+1.8M parameters, 2,048 battles x 32 steps, 2 epochs, league 0.5 with PFSP,
+from runs/big. 21.7M games in 22.5 hours.
+
+- **Elo** against runs/big (`selfplay.ladder`, 400 games a pairing, about
+  +-17 per pairing): +140 at 0.6M games, +198 at 5.8M, +248 at 11M, then
+  flat at +238 to +255 through 21M. Each checkpoint against its
+  predecessor (1.7M games apart) scored 0.49-0.53 in the second half.
+  vs_greedy kept creeping up (0.86 -> 0.92).
+- **Throughput** fell from 544 to ~190-240 games/s. Both the update (9.8 ->
+  14-21 s for the same samples) and collection slowed, and so did the
+  engine: the laptop was probably throttling. Games also got longer (5.3
+  -> 7.5-8 turns), as play improved.
+
+A plateau after ~11M games is early: Jaxcalibur was still improving at 100M
+games and mikumiku37 not near saturation at 330M, both with ~8.5M
+parameters. The likeliest limit is capacity, then optimisation (a constant
+learning rate). Two tools to test which:
+
+- `--grow-layers N` with --init: adds N encoder layers whose attention and
+  feed-forward output projections start at zero. With pre-norm residual
+  blocks each new layer is an identity, so the grown network plays
+  exactly as before (checked: output difference 0) and learns from there.
+- `--lr-final X`: the learning rate decays linearly to X over --minutes.
+- A resumed run carries its update and game counts, so numbered
+  checkpoints in the same folder aren't overwritten.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

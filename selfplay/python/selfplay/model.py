@@ -153,6 +153,25 @@ class PolicyNet(nn.Module):
         return logp, value, masked_log_softmax(opp, opp_masks)
 
 
+def load_grown(model: "PolicyNet", state: dict) -> int:
+    """Load `state` from a network with fewer encoder layers into `model`,
+    making each extra layer an exact identity: its attention output and
+    feed-forward output projections start at zero, so with pre-norm residual
+    blocks the grown network computes the same function and learns from
+    there (zero-initialised residual branches, as in ReZero/Fixup). Returns
+    how many layers were added."""
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    assert not unexpected, f"unexpected keys {unexpected}"
+    new = sorted({int(k.split(".")[2]) for k in missing if k.startswith("encoder.layers.")})
+    assert all(k.startswith("encoder.layers.") for k in missing), f"missing {missing}"
+    for i in new:
+        layer = model.encoder.layers[i]
+        for lin in (layer.self_attn.out_proj, layer.linear2):
+            nn.init.zeros_(lin.weight)
+            nn.init.zeros_(lin.bias)
+    return len(new)
+
+
 def masked_log_softmax(logits, masks):
     legal = masks.bool()
     logits = logits.masked_fill(~legal, -1e9)
