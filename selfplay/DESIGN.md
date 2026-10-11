@@ -995,6 +995,16 @@ from runs/big. 21.7M games in 22.5 hours.
   engine: the laptop was probably throttling. Games also got longer (5.3
   -> 7.5-8 turns), as play improved.
 
+With search (both sides searching, 400 games):
+
+- ppo1's policy against runs/big's, both valuing leaves with runs/tree_v:
+  0.625 +- 0.047 (about +90 Elo; +245 without search, which covers for a
+  weaker policy).
+- ppo1's own value head against runs/tree_v's values, both with ppo1's
+  policy: 0.587 +- 0.048 (about +60). The PPO value, from 22M games, beats
+  the search-trained one (352k games): at this scale cheap self-play wins
+  on values too, and ppo1 alone is the best search bot so far.
+
 A plateau after ~11M games is early: Jaxcalibur was still improving at 100M
 games and mikumiku37 not near saturation at 330M, both with ~8.5M
 parameters. The likeliest limit is capacity, then optimisation (a constant
