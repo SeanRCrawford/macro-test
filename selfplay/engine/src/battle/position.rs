@@ -496,7 +496,11 @@ impl Battle {
                 for (pos, e) in sides[s]["pokemon"].as_array().into_iter().flatten().take(ACTIVE_PER_SIDE).enumerate() {
                     let known = e["moves"].as_array().is_some_and(|m| m.iter().any(|x| x.get("disabled").is_some()));
                     if !known && b.sides[s].slot_filled[pos] && !b.sides[s].pokemon[pos].fainted {
+                        // Mid-turn, a Choice lock outlives its item until the
+                        // turn ends: keep the volatiles as given.
+                        let kept = b.sides[s].pokemon[pos].volatiles.clone();
                         b.refresh_disabled(s, pos);
+                        b.sides[s].pokemon[pos].volatiles = kept;
                     }
                 }
             }
@@ -660,6 +664,24 @@ fn apply_mon(m: &mut Mon, e: &Value, order: &mut u64) -> Res<()> {
     }
     if let Some(hp) = int(e, "hp") {
         m.hp = hp.clamp(0, m.max_hp() as i64) as u16;
+    } else if let Some(pct) = e.get("hp_pct").and_then(Value::as_f64) {
+        // An opponent's HP as Showdown shows it in Champions:
+        // floor(100 * hp / max), at least 1. Take the middle of the HP
+        // that shows as `pct`.
+        let max = m.max_hp() as u32;
+        let pct = pct.round() as u32;
+        m.hp = if pct == 0 {
+            0
+        } else if pct >= 100 {
+            m.max_hp()
+        } else {
+            // The HP that show as pct: from ceil(pct * max / 100) up to
+            // just below ceil((pct + 1) * max / 100) (1% covers everything
+            // below 2%).
+            let lo = if pct == 1 { 1 } else { (pct * max).div_ceil(100) };
+            let hi = ((pct + 1) * max).div_ceil(100).saturating_sub(1).max(lo);
+            ((lo + hi) / 2).clamp(1, max - 1) as u16
+        };
     }
     if let Some(s) = e.get("status").and_then(Value::as_str) {
         m.status = parse_status(s)?;
@@ -706,6 +728,12 @@ fn apply_mon(m: &mut Mon, e: &Value, order: &mut u64) -> Res<()> {
     m.revealed = e.get("revealed").and_then(Value::as_bool).unwrap_or(m.is_active || m.fainted);
     if let Some(v) = e.get("volatiles").and_then(Value::as_array) {
         let mut vols: Vec<Volatile> = v.iter().map(|x| parse_volatile(x, order)).collect::<Res<_>>()?;
+        // A substitute of unknown HP: a quarter of max HP, as it was made.
+        for (x, vol) in v.iter().zip(vols.iter_mut()) {
+            if vol.id == VolatileId::Substitute && x.get("counter").is_none() {
+                vol.counter = (m.max_hp() / 4) as u32;
+            }
+        }
         vols.sort_by_key(|x| x.effect_order);
         m.volatiles.0 = vols;
     }

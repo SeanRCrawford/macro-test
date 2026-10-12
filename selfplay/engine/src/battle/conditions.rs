@@ -467,9 +467,9 @@ impl Battle {
                 duration = Some(4)
             }
             // disable's onStart: on the last move, with PP; a turn shorter if
-            // the target is still to move.
+            // the target is still to move, or is moving now (Cursed Body).
             VolatileId::Disable => {
-                if self.will_move(t) {
+                if self.will_move(t) || self.attacking_user == Some(t) {
                     duration = Some(4);
                 }
                 let m = self.mon(t);
