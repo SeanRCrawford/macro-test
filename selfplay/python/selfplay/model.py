@@ -25,6 +25,7 @@ import itertools
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 try:
@@ -62,6 +63,59 @@ def preview_orders() -> np.ndarray:
     return np.array(out, dtype=np.int64)
 
 
+def compute_dtype(t: torch.Tensor) -> torch.dtype:
+    """The dtype autocast computes in on t's device (t's own when it's off)."""
+    dev = t.device.type
+    try:
+        if torch.is_autocast_enabled(dev):
+            return torch.get_autocast_dtype(dev)
+    except TypeError:  # older torch: no device argument
+        if dev == "cuda" and torch.is_autocast_enabled():
+            return torch.get_autocast_gpu_dtype()
+    return t.dtype
+
+
+class EncoderLayer(nn.Module):
+    """nn.TransformerEncoderLayer (pre-norm, GELU, feed-forward 2d, no
+    dropout) with the same parameters, so checkpoints load unchanged, and
+    its attention written out. Under autocast it runs in bfloat16: PyTorch's
+    math attention converts bfloat16 to float32 and back (copies and
+    float32 GEMMs), and the fused kernels pad 13 tokens to 64. Only the
+    small [B, heads, 13, 13] softmax is float32."""
+
+    def __init__(self, d: int, heads: int):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d, heads, batch_first=True)
+        self.linear1 = nn.Linear(d, 2 * d)
+        self.linear2 = nn.Linear(2 * d, d)
+        self.norm1 = nn.LayerNorm(d)
+        self.norm2 = nn.LayerNorm(d)
+        self.heads = heads
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, d = x.shape
+        H = self.heads
+        a = self.self_attn
+        qkv = F.linear(self.norm1(x), a.in_proj_weight, a.in_proj_bias)          # [B, T, 3d]
+        q, k, v = qkv.view(B, T, 3, H, d // H).permute(2, 0, 3, 1, 4)             # [B, H, T, d/H] each
+        scores = torch.matmul(q * (d // H) ** -0.5, k.transpose(-1, -2))       # [B, H, T, T]
+        p = torch.softmax(scores.float(), -1).to(v.dtype)
+        o = torch.matmul(p, v).transpose(1, 2).reshape(B, T, d)
+        x = x + a.out_proj(o)
+        return x + self.linear2(F.gelu(self.linear1(self.norm2(x))))
+
+
+class Encoder(nn.Module):
+    def __init__(self, d: int, heads: int, layers: int):
+        super().__init__()
+        self.layers = nn.ModuleList(EncoderLayer(d, heads) for _ in range(layers))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
 class PolicyNet(nn.Module):
     def __init__(self, d: int = 64, layers: int = 2, heads: int = 4):
         super().__init__()
@@ -76,9 +130,7 @@ class PolicyNet(nn.Module):
         self.field_proj = nn.Sequential(nn.Linear(s["field_floats"], d), nn.GELU(), nn.Linear(d, d))
         # Which token: field, own 0-5, foe 0-5.
         self.position = nn.Parameter(torch.zeros(TOKENS + 1, d))
-        layer = nn.TransformerEncoderLayer(d, heads, 2 * d, dropout=0.0, batch_first=True,
-                                           norm_first=True, activation="gelu")
-        self.encoder = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
+        self.encoder = Encoder(d, heads, layers)
         self.norm = nn.LayerNorm(d)
         self.value_head = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
         self.actions = SlotActions(d, self.move)
@@ -89,7 +141,6 @@ class PolicyNet(nn.Module):
         # Heads under autocast too (reduced precision), not just the body:
         # log-probabilities move by ~0.001 (measured), far inside PPO's clip.
         self.amp_heads = True
-        self.math_attention = True
 
     def encode(self, ints: torch.Tensor, mons: torch.Tensor, field: torch.Tensor) -> torch.Tensor:
         """[B, 13, d] token states."""
@@ -103,7 +154,9 @@ class PolicyNet(nn.Module):
             mons,
         ], dim=-1)
         x = torch.cat([self.field_proj(field).unsqueeze(1), self.mon_proj(emb)], dim=1)
-        with math_attention() if self.math_attention else contextlib.nullcontext():
+        # (math_attention only matters for nn.TransformerEncoder, which the
+        # benchmark swaps in to compare.)
+        with math_attention():
             return self.norm(self.encoder(x + self.position))
 
     def value(self, ints, mons, field):
@@ -211,6 +264,10 @@ class SlotActions(nn.Module):
         self.context = nn.Linear(2 * d, d)
         self.out = nn.Sequential(nn.GELU(), nn.Linear(d, d))
         self.register_buffer("mega", torch.tensor([0.0, 1.0]), persistent=False)
+        # Build the [B, 47, d] embeddings in autocast's dtype (bfloat16): the
+        # float32 pieces (damage features, weight slices) otherwise promote
+        # the largest tensors of the update to float32. False: as before.
+        self.low_precision = True
 
     def forward(self, h, ints, mons, observer: bool):
         g = h[:, 0]
@@ -219,6 +276,8 @@ class SlotActions(nn.Module):
         hm, ht = h[:, mine], h[:, theirs]
         fm, ft = mons[:, mi], mons[:, ti]
         B, d = h.shape[0], self.d
+        cd = compute_dtype(h)
+        c = (lambda t: t.to(cd)) if self.low_precision else (lambda t: t)
         # Target tokens by location [0, 1, 2, -1, -2]: none, the foes' actives,
         # this side's actives.
         actives = lambda hh, ff: [pick(hh, ff[..., c]) for c in (ACTIVE_SLOT0, ACTIVE_SLOT1)]
@@ -226,7 +285,8 @@ class SlotActions(nn.Module):
                                *actives(ht, ft), *actives(hm, fm)], 1)          # [B, 5, d]
         # Switch targets: the token at each party position.
         party = pick_each(hm, fm[..., PARTY:PARTY + N_SWITCH])               # [B, 6, d]
-        switch = self.switch(party)
+        switch = c(self.switch(party))
+        pass_ = c(self.pass_)
         out = []
         for col in (ACTIVE_SLOT0, ACTIVE_SLOT1):
             w = fm[..., col]
@@ -241,17 +301,17 @@ class SlotActions(nn.Module):
             # self.move applied to [move, damage, target, target kind, mega]
             # for every (move, target, mega), computed per part and broadcast.
             W, nm = self.move.weight, moves.shape[-1]
-            m_part = moves @ W[:, :nm].T                                      # [B, 4, d]
-            d_part = dmg * W[:, nm]                                           # [B, 4, 5, d]
-            t_part = targets @ W[:, nm + 1:nm + 1 + d].T + W[:, nm + 1 + d:nm + 6 + d].T  # [B, 5, d]
-            mega = W[:, nm + 6 + d]
-            ctx = self.context(torch.cat([tok, g], -1)).unsqueeze(1)          # [B, 1, d]
+            m_part = c(moves @ W[:, :nm].T)                                   # [B, 4, d]
+            d_part = c(dmg) * c(W[:, nm])                                     # [B, 4, 5, d]
+            t_part = c(targets @ W[:, nm + 1:nm + 1 + d].T + W[:, nm + 1 + d:nm + 6 + d].T)  # [B, 5, d]
+            mega = c(W[:, nm + 6 + d])
+            ctx = c(self.context(torch.cat([tok, g], -1))).unsqueeze(1)       # [B, 1, d]
             # Built with as few full-size intermediates as possible (this is
             # memory-bound): the context joins the small parts first.
-            mt = (m_part + ctx)[:, :, None] + t_part[:, None] + self.move.bias  # [B, 4, 5, d]
-            x = (mt + d_part)[:, :, :, None] + self.mega[:, None] * mega      # [B, 4, 5, 2, d]
+            mt = (m_part + ctx)[:, :, None] + t_part[:, None] + c(self.move.bias)  # [B, 4, 5, d]
+            x = (mt + d_part)[:, :, :, None] + c(self.mega)[:, None] * mega   # [B, 4, 5, 2, d]
             e = torch.cat([x.reshape(B, N_MOVE, d), switch + ctx,
-                           self.pass_ + ctx], 1)                              # [B, 47, d]
+                           pass_ + ctx], 1)                                   # [B, 47, d]
             out.append(self.out(e))
         return out
 

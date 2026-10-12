@@ -141,6 +141,8 @@ class Trainer:
         self.opponent: list = [None] * cfg.envs
         self.updates = self.games = self.decisions = 0
         self.run_updates = 0    # this process's updates (`updates` carries a resumed run's)
+        from selfplay.gpu import GpuMonitor
+        self.gpu = GpuMonitor(cfg.device)
         self.log = open(out / "log.jsonl", "a")
 
     def pfsp_weight(self, m: int) -> float:
@@ -428,7 +430,8 @@ class Trainer:
                      "rollout_s": t1 - t0, **timing, "update_s": time.time() - t1,
                      "games_per_s": len(results) / max(time.time() - t0, 1e-9),
                      "mean_turns": float(np.mean([t for *_, t in results])) if results else 0.0,
-                     "self_draws": float(np.mean([r == 0 for r in vs_self])) if vs_self else 0.0}
+                     "self_draws": float(np.mean([r == 0 for r in vs_self])) if vs_self else 0.0,
+                     **self.gpu.take()}
             if self.updates % c.league_every == 0:
                 self.snapshot()
             if c.save_every and self.updates % c.save_every == 0:

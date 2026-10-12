@@ -1042,6 +1042,26 @@ cycle), and the same work got ~70% slower over the run (rollout network
 time 6.2 -> 10.9 s, update 26 -> 41 s, 163 -> 99 games/s): the laptop GPU
 throttling, as in ppo1.
 
+The ppo3 log shows the speed falling 2.5x within the first hour (300 games/s
+at 3 minutes, 120 at 65 minutes; network time per rollout 2.7 -> 8.5 s,
+update 16 -> 36 s) and staying there; a fresh start is fast again (290).
+NVML's counters show both the power cap and thermal slowdown active (in a
+7.7-minute window around a 3-update profile: 367 s power-capped, 183 s
+thermally slowed). A 2.5x drop is more than clock limits usually cost, so
+the other suspect is memory: on Windows a CUDA process that outgrows the
+8 GB spills into system memory instead of failing. The training log now
+records the GPU's clock, temperature, power, limits and memory each update
+(selfplay/gpu.py) to tell which.
+
+The update's profile (fresh GPU): 19% of the GPU time in dtype copies and
+~12% in float32 GEMMs. PyTorch's math attention converts bfloat16 to
+float32 and back; the action embeddings' float32 pieces promoted the
+update's largest tensors ([B, 47, d] per slot and head) to float32. Now
+the attention is written out in bfloat16 (only the 13x13 softmax in
+float32; same parameters, same function in float32) and the action
+embeddings are built in autocast's dtype. `selfplay.benchmark` times both
+versions on the same weights.
+
 ### 4.20 Team ratings and the Showdown client
 
 **Team ratings** (`selfplay.teams`). Every corpus team plays ~600 games,

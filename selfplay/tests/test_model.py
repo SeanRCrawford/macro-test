@@ -114,3 +114,44 @@ def test_joint_head_learns_a_correlated_mix():
     p = logp[0].exp().detach()
     assert p[want].min() > 0.4, p[want]
     assert p[a0 * 47 + b1] + p[a1 * 47 + b0] < 0.05
+
+
+def test_encoder_matches_torch_transformer():
+    """The written-out encoder computes nn.TransformerEncoder's function
+    with the same parameters (checkpoints load unchanged)."""
+    from torch import nn
+
+    from selfplay.model import Encoder
+
+    torch.manual_seed(0)
+    enc = Encoder(64, 4, 3)
+    for p in enc.parameters():
+        nn.init.normal_(p, std=0.1)
+    ref = nn.TransformerEncoder(nn.TransformerEncoderLayer(64, 4, 128, dropout=0.0, batch_first=True,
+                                                           norm_first=True, activation="gelu"),
+                                3, enable_nested_tensor=False)
+    ref.load_state_dict(enc.state_dict())
+    x = torch.randn(16, 13, 64)
+    assert (enc(x) - ref(x)).abs().max() < 1e-5
+
+
+def test_bfloat16_paths_agree_with_the_old_code():
+    """Under bfloat16 autocast the new attention and action embeddings give
+    the old code's log-probabilities to within bfloat16 rounding; in
+    float32, exactly."""
+    from selfplay.benchmark import legacy, positions
+    from selfplay.model import PolicyNet
+
+    torch.manual_seed(0)
+    model = PolicyNet(64, 2).eval()
+    old = legacy(model).eval()
+    ints, mons, field, masks, dec = positions(256)
+    with torch.no_grad():
+        a, va = model(ints, mons, field, masks, dec)
+        b, vb = old(ints, mons, field, masks, dec)
+        legal = masks.bool()
+        assert (a - b)[legal].abs().max() < 1e-4 and (va - vb).abs().max() < 1e-5
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            a, va = model(ints, mons, field, masks, dec)
+            b, vb = old(ints, mons, field, masks, dec)
+        assert (a - b)[legal].abs().mean() < 0.02 and (va - vb).abs().max() < 0.05
