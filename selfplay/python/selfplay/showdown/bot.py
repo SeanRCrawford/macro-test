@@ -112,12 +112,14 @@ class Bot:
             ranked.insert(0, a)
             info = (f"win {100 * (r['value'] + 1) / 2:.0f}% (search, {r['leaf_evals']} evals, "
                     f"{time.perf_counter() - start:.1f}s); "
-                    + "; ".join(f"{100 * w:.0f}% {legal.get(c, c)}" for c, w in mix[:3] if w >= 0.01))
+                    + "; ".join(f"{100 * w:.0f}% {choice_text(legal[c], t)}" for c, w in mix[:3]
+                                if w >= 0.01 and c in legal))
         else:
             a = self._pick(logp[0], list(legal))
             ranked.remove(a)
             ranked.insert(0, a)
-            info += "; " + "; ".join(f"{100 * np.exp(logp[0][x]):.0f}% {legal[x]}" for x in ranked[:3])
+            info += "; " + "; ".join(f"{100 * np.exp(logp[0][x]):.0f}% {choice_text(legal[x], t)}"
+                                     for x in ranked[:3])
         for x in ranked:
             if valid(legal[x], req):
                 if x != a:
@@ -156,7 +158,11 @@ def valid(choice: str, req: dict) -> bool:
             if k < 0 or k >= len(pokemon) or k in switched:
                 return False
             p = pokemon[k]
-            if p.get("active") or parse_condition(p.get("condition", "0 fnt"))[2] == "fnt":
+            fainted = parse_condition(p.get("condition", "0 fnt"))[2] == "fnt"
+            # Revival Blessing: this slot's "switch" names a fainted Pokemon
+            # to revive.
+            reviving = force and slot < len(pokemon) and pokemon[slot].get("reviving")
+            if p.get("active") or fainted != bool(reviving):
                 return False
             # (A "maybeTrapped" Pokemon may try: Showdown says if it can't.)
             if not force and slot < len(active) and active[slot].get("trapped"):

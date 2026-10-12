@@ -102,23 +102,32 @@ def compare(truth: dict, snap: dict, ours: bool, out: collections.Counter, seen:
     check("side.conditions" if ours else "foe.conditions", truth["sideConditions"], snap["sideConditions"])
 
 
+def perspectives(b):
+    """(our side, our paste, our stream, our decisions) for each player
+    recorded (truth sides in Showdown's order)."""
+    yield 0, b["teams"][0], b["lines"], b["decisions"]
+    if "lines_p2" in b:
+        yield 1, b["teams"][1], b["lines_p2"], b["decisions_p2"]
+
+
 def run(limit=None, verbose=False, ots=None):
     env = SelfPlayEnv(1, seed=0)
     out, seen = collections.Counter(), collections.Counter()
     examples: dict = {}
     errors = []
-    for n, b in enumerate(battles()[:limit]):
+    for n, b, (me, paste, lines, decisions) in ((n, b, p) for n, b in enumerate(battles()[:limit])
+                                                for p in perspectives(b)):
         if ots is not None and b["ots"] != ots:
             continue
-        t = Tracker(b["teams"][0], our_side="p1")
+        t = Tracker(paste, our_side=f"p{me + 1}")
         fed = 0
-        for d in b["decisions"]:
-            t.feed_all(b["lines"][fed:d["at"]])
+        for d in decisions:
+            t.feed_all(lines[fed:d["at"]])
             fed = d["at"]
             truth = d["truth"]
-            if truth["requests"][0] == "teampreview":
+            if truth["requests"][me] == "teampreview":
                 continue
-            where = f"battle {n} turn {truth['turn']}"
+            where = f"battle {n} p{me + 1} turn {truth['turn']}"
             pos = t.position()
             try:
                 env._env.set_position(0, json.dumps(pos), 0)
@@ -137,14 +146,14 @@ def run(limit=None, verbose=False, ots=None):
                 ours = sorted(c for _, c in env.legal_choices(0, 0))
                 check("legal choices", sorted(d["legal"]), ours)
             check("turn", truth["turn"], snap["turn"])
-            check("requests.ours", truth["requests"][0], snap["requests"][0])
+            check("requests.ours", truth["requests"][me], snap["requests"][0])
             check("weather", (truth["weather"], truth["weatherTurns"]), (snap["weather"], snap["weatherTurns"]))
             check("terrain", (truth["terrain"], truth["terrainTurns"]), (snap["terrain"], snap["terrainTurns"]))
             check("pseudoweather", truth["pseudoWeather"], snap["pseudoWeather"])
-            compare(truth["sides"][0], snap["sides"][0], True, out, seen, where, examples)
-            compare(truth["sides"][1], snap["sides"][1], False, out, seen, where, examples, b["ots"])
-            compare_durations(truth["sides"][0], pos["sides"][0], True, check)
-            compare_durations(truth["sides"][1], pos["sides"][1], False, check)
+            compare(truth["sides"][me], snap["sides"][0], True, out, seen, where, examples)
+            compare(truth["sides"][1 - me], snap["sides"][1], False, out, seen, where, examples, b["ots"])
+            compare_durations(truth["sides"][me], pos["sides"][0], True, check)
+            compare_durations(truth["sides"][1 - me], pos["sides"][1], False, check)
         if t.warnings and verbose:
             print(f"battle {n} warnings: {t.warnings[:5]}")
     return out, seen, examples, errors
@@ -175,12 +184,12 @@ def test_bot_choices_are_legal():
 
     torch.manual_seed(0)
     model = PolicyNet(32, 1).eval()
-    for b in battles()[:12]:
-        bot = Bot(model, b["teams"][0], sample=True, seed=1)
-        t = Tracker(b["teams"][0], our_side="p1")
+    for me, paste, lines, decisions in (p for b in battles()[:12] for p in perspectives(b)):
+        bot = Bot(model, paste, sample=True, seed=1)
+        t = Tracker(paste, our_side=f"p{me + 1}")
         fed = 0
-        for d in b["decisions"]:
-            t.feed_all(b["lines"][fed:d["at"]])
+        for d in decisions:
+            t.feed_all(lines[fed:d["at"]])
             fed = d["at"]
             with torch.no_grad():
                 choice, _ = bot.decide(t)

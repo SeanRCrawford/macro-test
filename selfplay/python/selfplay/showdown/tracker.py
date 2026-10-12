@@ -171,13 +171,14 @@ class Side:
 
 class Tracker:
     def __init__(self, our_team: list[dict] | str | None = None, our_side: str | None = None,
-                 d: Data | None = None):
+                 d: Data | None = None, our_name: str | None = None):
         """`our_team`: our six sets, as position set dicts or a paste (the
-        order we uploaded). `our_side`: 'p1' or 'p2' if known (else the
-        first request tells)."""
+        order we uploaded). `our_side`: 'p1' or 'p2' if known; else our
+        name's |player| line or the first request tells."""
         self.d = d or data()
         self.our_team = our_team
         self.us: str | None = our_side
+        self.our_name = to_id(our_name) if our_name else None
         self.sides = {"p1": Side("p1"), "p2": Side("p2")}
         self.turn = 0
         self.upkeep_seen = False          # the residual of this turn has run
@@ -277,6 +278,8 @@ class Tracker:
     def _on_player(self, a):
         if len(a) >= 2:
             self.sides[a[0]].name = a[1]
+            if self.us is None and self.our_name and to_id(a[1]) == self.our_name:
+                self.us = a[0]
 
     def _on_teamsize(self, a):
         self.sides[a[0]].team_size = int(a[1])
@@ -313,7 +316,12 @@ class Tracker:
         if sid and self.us is None:
             self.us = sid
         side = self.mine
-        if not side.mons:
+        if self.our_team is not None and not side.complete:
+            # Our side, from our paste (team preview may have listed it
+            # before we knew which side was ours).
+            side.mons, side.sets = [], []
+            self._setup_our_side()
+        elif not side.mons:
             if self.our_team is not None:
                 self._setup_our_side()
             else:
@@ -685,6 +693,11 @@ class Tracker:
             m.sleep_turns += 1
         if reason == "recharge":
             m.volatiles.pop("mustrecharge", None)
+        # A charging Pokemon that can't move loses its charge (twoturnmove's
+        # onMoveAborted).
+        if "twoturnmove" in m.volatiles:
+            move = m.volatiles.pop("twoturnmove").get("move")
+            m.volatiles.pop(f"charging:{move}", None)
 
     def _on_minus_singleturn(self, a):
         m = self.mon(a[0])
@@ -1077,6 +1090,13 @@ class Tracker:
         if m is None:
             return
         eff = effect_id(a[1])
+        # Leppa Berry: 10 PP back to a move.
+        if eff == "leppaberry" and len(a) > 2:
+            move = to_id(a[2])
+            mx = self.d.max_pp(move)
+            if move in m.pp:
+                m.pp[move] = min(mx, m.pp[move] + 10)
+            m.pp_used[move] = max(0, m.pp_used.get(move, 0) - 10)
         if eff in ("protect", "spikyshield", "kingsshield", "banefulbunker", "wideguard", "quickguard"):
             self._missed()
         # Feint (and the like) broke the target's protection: Showdown drops

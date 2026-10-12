@@ -4,10 +4,10 @@
 //   node selfplay/tools/showdown/protocol_fixtures.js /path/to/pokemon-showdown
 //
 // Writes selfplay/tests/fixtures/protocol.json.gz: random-play battles
-// between the corpus teams the engine supports, each with everything player
-// 1's client receives (the battle log as player 1 sees it, with its
-// requests) and, at each of player 1's decisions, Showdown's true state in
-// the shape of gen_fixtures.js's battle snapshots. tests/test_showdown.py
+// between the corpus teams the engine supports, each with everything each
+// player's client receives (the battle log as that player sees it, with its
+// requests) and, at each of its decisions, Showdown's true state in the
+// shape of gen_fixtures.js's battle snapshots. tests/test_showdown.py
 // follows the log with the client's tracker, rebuilds the position in the
 // engine and compares it with the truth. Half the battles use Open Team
 // Sheets.
@@ -104,18 +104,21 @@ function truth(battle) {
 }
 
 function play(teamTexts, seed, ots, rand) {
-	const lines = [];
-	const decisions = [];
+	// Each player's stream, and its decisions.
+	const lines = [[], []];
+	const decisions = [[], []];
 	const battle = new Battle({
 		formatid: FORMAT,
 		seed: `${seed},${seed * 7 + 1},${seed * 13 + 2},${seed * 31 + 3}`,
 		send(type, data) {
 			if (Array.isArray(data)) data = data.join("\n");
 			if (type === "update") {
-				lines.push(...extractChannelMessages(data, [1])[1]);
+				const channels = extractChannelMessages(data, [1, 2]);
+				lines[0].push(...channels[1]);
+				lines[1].push(...channels[2]);
 			} else if (type === "sideupdate") {
 				const [side, rest] = [data.slice(0, 2), data.slice(3)];
-				if (side === "p1") lines.push(...rest.split("\n"));
+				if (side === "p1" || side === "p2") lines[side === "p1" ? 0 : 1].push(...rest.split("\n"));
 			}
 		},
 	});
@@ -127,13 +130,13 @@ function play(teamTexts, seed, ots, rand) {
 	if (ots) battle.showOpenTeamSheets();
 	battle.sendUpdates();
 	for (let step = 0; step < 120 && !battle.ended; step++) {
-		const p1 = battle.sides[0];
-		if (p1.activeRequest && !p1.activeRequest.wait) {
+		for (const [n, player] of battle.sides.entries()) {
+			if (!player.activeRequest || player.activeRequest.wait) continue;
 			const t = truth(battle);
 			for (const [i, side] of battle.sides.entries()) {
 				side.pokemon.forEach((p, k) => { t.sides[i].pokemon[k].teamIndex = slot[i].get(p); });
 			}
-			decisions.push({at: lines.length, truth: t, legal: legalChoices(battle, p1)});
+			decisions[n].push({at: lines[n].length, truth: t, legal: legalChoices(battle, player)});
 		}
 		const choices = battle.sides.map(side => {
 			const legal = legalChoices(battle, side);
@@ -153,7 +156,8 @@ function play(teamTexts, seed, ots, rand) {
 		const text = Teams.export([set]);
 		return /\nEVs: /.test(text) ? text : text.replace(/\n/, "\nEVs: 0 HP  \n");
 	}).join(""));
-	return {ots, teams: exported, lines, decisions, winner: battle.winner || null};
+	return {ots, teams: exported, lines: lines[0], decisions: decisions[0], lines_p2: lines[1],
+		decisions_p2: decisions[1], winner: battle.winner || null};
 }
 
 const corpus = loadCorpus();
