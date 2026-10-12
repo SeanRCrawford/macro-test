@@ -1472,6 +1472,21 @@ impl Battle {
         Ok(())
     }
 
+    /// Which of the moves of the Pokemon in slot `p` a foe's Imprison
+    /// blocks.
+    fn refresh_imprisoned(&mut self, side: usize, p: usize) {
+        let r = self.mon_ref(side, p);
+        let imprisoned: Vec<crate::dex::MoveId> = self.sides[side].pokemon[p]
+            .moves
+            .iter()
+            .map(|s| s.id)
+            .filter(|&id| Dex::get().move_data(id).id != "struggle" && self.imprisoned(r, id))
+            .collect();
+        for s in self.sides[side].pokemon[p].moves.iter_mut() {
+            s.imprisoned = imprisoned.contains(&s.id);
+        }
+    }
+
     /// DisableMove for the Pokemon in slot `p`: which of its moves can't
     /// be chosen next turn.
     fn refresh_disabled(&mut self, side: usize, p: usize) {

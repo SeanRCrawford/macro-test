@@ -142,6 +142,9 @@ class Side:
         self.team_size = 4
         self.conditions: dict = {}        # id -> turns left or layers
         self.mega_used = False
+        self.leads: list = [None, None]  # the uids that led, by slot
+        self.revival_blessing = [False, False]
+        self.healing_wish = [False, False]
         self.total_fainted = 0
         self.fainted_this_turn = False
         self.fainted_last_turn = False
@@ -236,6 +239,11 @@ class Tracker:
 
     def _setup_our_side(self):
         sets = self._our_sets()
+        # A paste may name the Mega forme ("Gardevoir-Mega @ Gardevoirite"):
+        # it starts as the base species.
+        for st in sets:
+            if self.d.is_mega(st["species"]):
+                st["species"] = self.d.base_of(st["species"])
         self._setup_side(self.mine, sets, True)
         for m, s in zip(self.mine.mons, sets):
             if s.get("name"):
@@ -323,6 +331,11 @@ class Tracker:
         side = self.mine
         pokemon = req.get("side", {}).get("pokemon", [])
         if req.get("teamPreview"):
+            # The six in team order: their HP (an Illusion user's max HP
+            # gives it away when it leads under another's name).
+            for m, p in zip(side.mons, pokemon):
+                hp, mx, _ = parse_condition(p["condition"])
+                m.exact, m.hp, m.max_hp = True, hp, mx or m.max_hp
             return
         order = []
         for i, p in enumerate(pokemon):
@@ -357,6 +370,9 @@ class Tracker:
             if slot >= len(order):
                 break
             m = side.mons[order[slot]]
+            # Moves the request leaves out (all but Struggle, or but a
+            # locked move) can't be chosen.
+            m.disabled = {mid: True for mid in m.moves}
             for mv in act.get("moves", []):
                 mid = to_id(mv.get("id") or mv.get("move", ""))
                 if "pp" in mv:
@@ -393,6 +409,7 @@ class Tracker:
             if f[key] > 0:
                 f[key] -= 1
         for side in self.sides.values():
+            side.revival_blessing = [False, False]   # lasts the turn
             for c in list(side.conditions):
                 if c in SIDE_TURNS or c in ("wideguard", "quickguard"):
                     side.conditions[c] -= 1
@@ -470,6 +487,8 @@ class Tracker:
                 side.order.append(m.uid)
         m.active, m.slot, m.revealed = True, slot, True
         m.fainted = False
+        if self.turn == 0 and slot < 2 and side.leads[slot] is None:
+            side.leads[slot] = m.uid
         hp, mx, status = parse_condition(a[2]) if len(a) > 2 else (100, 100, "")
         self._set_hp(m, hp, mx)
         m.status = "" if status == "fnt" else status
@@ -631,6 +650,9 @@ class Tracker:
             m.volatiles.pop("glaiverush", None)
         mv = self.d.moves.get(move, {})
         self._stalling = m if mv.get("stallingMove") else None
+        # Slot conditions: the next switch into this slot revives / heals.
+        if not called and m.slot is not None and move in ("revivalblessing", "healingwish"):
+            getattr(side, "revival_blessing" if move == "revivalblessing" else "healing_wish")[m.slot] = True
         if move == "minimize":
             m.volatiles["minimize"] = {}
 
@@ -673,6 +695,9 @@ class Tracker:
         single = {"protect": "protect", "detect": "protect", "spikyshield": "spikyshield",
                   "kingsshield": "kingsshield", "banefulbunker": "banefulbunker", "followme": "followme",
                   "ragepowder": "ragepowder", "helpinghand": "helpinghand", "endure": "endure", "roost": "roost"}
+        # Spiky Shield and the rest announce themselves as Protect.
+        if eff == "protect" and m.last_move in ("spikyshield", "kingsshield", "banefulbunker"):
+            eff = m.last_move
         if eff in single:
             prev = m.volatiles.get(single[eff], {})
             m.volatiles[single[eff]] = {"duration": 1}
@@ -701,6 +726,12 @@ class Tracker:
         if m is not None and m is self._stalling:
             m.volatiles.pop("stall", None)
             self._stalling = None
+        # A Revival Blessing or Healing Wish that failed leaves no slot
+        # condition.
+        if m is not None and m is self._last_user and self._last_move in ("revivalblessing", "healingwish") \
+                and m.slot is not None:
+            side = self._side_of(m)
+            getattr(side, "revival_blessing" if self._last_move == "revivalblessing" else "healing_wish")[m.slot] = False
         self._missed()
 
     def _missed(self):
@@ -774,6 +805,15 @@ class Tracker:
         if m is None:
             return
         hp, mx, status = parse_condition(a[1])
+        side = self._side_of(m)
+        if any(x == "[from] move: Revival Blessing" for x in a[2:]) and side is not None:
+            m.fainted = False
+            m.status = ""
+            # The revive was the switch of a slot that had the blessing.
+            if True in side.revival_blessing:
+                side.revival_blessing[side.revival_blessing.index(True)] = False
+        if any(x == "[from] move: Healing Wish" for x in a[2:]) and side is not None and m.slot is not None:
+            side.healing_wish[m.slot] = False
         self._set_hp(m, hp, mx)
         if status and status != "fnt":
             m.status = status
@@ -1039,6 +1079,15 @@ class Tracker:
         eff = effect_id(a[1])
         if eff in ("protect", "spikyshield", "kingsshield", "banefulbunker", "wideguard", "quickguard"):
             self._missed()
+        # Feint (and the like) broke the target's protection: Showdown drops
+        # its Protect counter too.
+        if eff == "feint" or "[broken]" in a[2:]:
+            for v in ("protect", "spikyshield", "kingsshield", "banefulbunker", "stall"):
+                m.volatiles.pop(v, None)
+            side = self._side_of(m)
+            if side is not None:
+                side.conditions.pop("wideguard", None)
+                side.conditions.pop("quickguard", None)
         if eff == "confusion":
             v = m.volatiles.get("confusion")
             if v:
@@ -1049,8 +1098,9 @@ class Tracker:
             s = self.mon(src) if src else None
             ss = self._side_of(s) if s else None
             counter = (((0 if ss is self.mine else 1) << 8) | s.uid) if s else 0
+            # 5 or 6 turns (random); Showdown says when it ends.
             if "partiallytrapped" not in m.volatiles:
-                m.volatiles["partiallytrapped"] = {"duration": 5, "counter": counter}
+                m.volatiles["partiallytrapped"] = {"duration": 6, "counter": counter}
         elif eff == "substitute" and any("[damage]" in x for x in a[2:]):
             pass
         self._reveal_from(m, a[2:])
@@ -1143,6 +1193,12 @@ class Tracker:
 
     # --- Decisions ------------------------------------------------------------
 
+    def preview_position(self) -> dict:
+        """Team preview: both teams, ours first."""
+        return {"teampreview": True,
+                "sides": [{"team": self._team_json(self.mine) or self._sets(self.mine)[0]},
+                          {"team": self._sets(self.foe)[0]}]}
+
     def needs_decision(self) -> bool:
         r = self.request
         return bool(r) and not r.get("wait") and not self.ended
@@ -1180,6 +1236,8 @@ class Tracker:
                 "fainted_this_turn": side.fainted_this_turn,
                 "fainted_last_turn": side.fainted_last_turn,
                 "conditions": conditions,
+                "revival_blessing": side.revival_blessing,
+                "healing_wish": side.healing_wish,
                 "slot_filled": [any(m.slot == p and (m.active or m.fainted) for m in side.mons) for p in (0, 1)],
             })
         if req.get("forceSwitch"):
@@ -1260,6 +1318,9 @@ class Tracker:
             mx = d.max_pp(mid)
             pp = m.pp.get(mid, mx - m.pp_used.get(mid, 0)) if m.exact else mx - m.pp_used.get(mid, 0)
             slot = {"id": mid, "pp": max(0, min(mx, pp))}
+            # Our active Pokemon's disabled moves are Showdown's word.
+            if side is self.mine and m.active and m.disabled:
+                slot["disabled"] = bool(m.disabled.get(mid, False))
             moves.append(slot)
         if moves:
             e["moves"] = moves

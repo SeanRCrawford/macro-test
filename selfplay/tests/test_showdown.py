@@ -65,7 +65,7 @@ def compare(truth: dict, snap: dict, ours: bool, out: collections.Counter, seen:
         seen[key] += 1
         if a != b:
             out[key] += 1
-            examples.setdefault(key, f"{where}: {a!r} vs {b!r}")
+            examples.setdefault(key, f"{where}: {a!r} vs {b!r}"[:300])
 
     tp, sp = truth["pokemon"], snap["pokemon"]
     for k, t in enumerate(tp):
@@ -131,8 +131,11 @@ def run(limit=None, verbose=False, ots=None):
                 seen[key] += 1
                 if a != b_:
                     out[key] += 1
-                    examples.setdefault(key, f"{where}: {a!r} vs {b_!r}")
+                    examples.setdefault(key, f"{where}: {a!r} vs {b_!r}"[:300])
 
+            if "legal" in d:
+                ours = sorted(c for _, c in env.legal_choices(0, 0))
+                check("legal choices", sorted(d["legal"]), ours)
             check("turn", truth["turn"], snap["turn"])
             check("requests.ours", truth["requests"][0], snap["requests"][0])
             check("weather", (truth["weather"], truth["weatherTurns"]), (snap["weather"], snap["weatherTurns"]))
@@ -153,11 +156,35 @@ def test_tracker_matches_showdown():
     assert not errors, errors[:5]
     # Our side and the field must be exact; the opponent's HP is a
     # percentage, and some durations Showdown never shows.
-    exact = [k for k in seen if k.startswith("ours.") or k in ("turn", "requests.ours", "pseudoweather")]
+    exact = [k for k in seen if k.startswith("ours.") or k in ("turn", "requests.ours", "pseudoweather",
+                                                                 "legal choices")]
     for k in exact:
         assert out[k] == 0, f"{k}: {out[k]}/{seen[k]} wrong, e.g. {examples[k]}"
     for k in seen:
         assert out[k] <= 0.02 * seen[k], f"{k}: {out[k]}/{seen[k]} wrong, e.g. {examples[k]}"
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="no protocol fixtures")
+def test_bot_choices_are_legal():
+    """The bot (an untrained network) answers every request of the first
+    battles with a choice Showdown takes."""
+    import torch
+
+    from selfplay.model import PolicyNet
+    from selfplay.showdown.bot import Bot
+
+    torch.manual_seed(0)
+    model = PolicyNet(32, 1).eval()
+    for b in battles()[:12]:
+        bot = Bot(model, b["teams"][0], sample=True, seed=1)
+        t = Tracker(b["teams"][0], our_side="p1")
+        fed = 0
+        for d in b["decisions"]:
+            t.feed_all(b["lines"][fed:d["at"]])
+            fed = d["at"]
+            with torch.no_grad():
+                choice, _ = bot.decide(t)
+            assert choice in d["legal"], (choice, d["legal"][:5])
 
 
 if __name__ == "__main__":

@@ -55,8 +55,10 @@ function loadCorpus() {
 	for (const file of fs.readdirSync(dir).sort()) {
 		const text = fs.readFileSync(path.join(dir, file), "utf8");
 		const sets = Teams.import(text);
+		// The validator also normalises sets as the server does (a Mega forme
+		// holding its stone becomes the base species).
 		if (!sets || sets.length !== 6 || validator.validateTeam(sets) || !sets.every(ok)) continue;
-		teams.push({file, text});
+		teams.push({file, text: Teams.export(sets)});
 	}
 	return teams;
 }
@@ -131,7 +133,7 @@ function play(teamTexts, seed, ots, rand) {
 			for (const [i, side] of battle.sides.entries()) {
 				side.pokemon.forEach((p, k) => { t.sides[i].pokemon[k].teamIndex = slot[i].get(p); });
 			}
-			decisions.push({at: lines.length, truth: t});
+			decisions.push({at: lines.length, truth: t, legal: legalChoices(battle, p1)});
 		}
 		const choices = battle.sides.map(side => {
 			const legal = legalChoices(battle, side);

@@ -12,8 +12,9 @@
 //! and ability), so the client only fills in what it knows. Ids are
 //! Showdown ids; names work too.
 //!
-//! A position is taken at a decision: the start of a turn ("move"
-//! requests), or a switch request. A switch request mid-turn (U-turn,
+//! A position is taken at a decision: team preview (`"teampreview": true`
+//! and the teams), the start of a turn ("move" requests), or a switch
+//! request. A switch request mid-turn (U-turn,
 //! Eject Button) rebuilds with only the turn's residual still to come; the
 //! actions left in the turn aren't part of a position.
 
@@ -381,6 +382,10 @@ impl Battle {
             }
         }
         let mut b = Battle::new(teams, chance)?;
+        // Team preview: the two teams are all there is.
+        if flag(p, "teampreview") {
+            return Ok(b);
+        }
         b.queue.clear();
         b.turn = int(p, "turn").unwrap_or(1).max(0) as u32;
         let f = p.get("field").cloned().unwrap_or(json!({}));
@@ -512,11 +517,23 @@ impl Battle {
                 return Err(bad("a switch request with no slot to fill"));
             }
         } else {
+            // Disabled moves as given (the client has them from Showdown's
+            // request), or worked out from the position.
             b.mid_turn = false;
             for s in 0..2 {
+                let entries = sides[s]["pokemon"].as_array().cloned().unwrap_or_default();
                 for pos in 0..ACTIVE_PER_SIDE {
+                    let known = entries.get(pos).is_some_and(|e| {
+                        e["moves"].as_array().is_some_and(|m| m.iter().any(|x| x.get("disabled").is_some()))
+                    });
                     if b.sides[s].slot_filled[pos] {
-                        b.refresh_disabled(s, pos);
+                        if known {
+                            // A request shows an Imprison on the last active
+                            // Pokemon as usable; the engine still knows.
+                            b.refresh_imprisoned(s, pos);
+                        } else {
+                            b.refresh_disabled(s, pos);
+                        }
                     }
                 }
             }
