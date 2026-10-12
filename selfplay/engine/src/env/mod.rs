@@ -197,6 +197,14 @@ impl VecEnv {
         &self.games[i].battle
     }
 
+    /// Put game `i` at `battle` (a position rebuilt by the Showdown client).
+    /// The game keeps its team indices; it is no longer a replayable one.
+    pub fn set_battle(&mut self, i: usize, battle: Battle) {
+        let g = &mut self.games[i];
+        g.battle = battle;
+        g.history.clear();
+    }
+
     pub fn config(&self) -> &EnvConfig {
         &self.config
     }

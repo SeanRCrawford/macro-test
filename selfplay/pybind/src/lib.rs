@@ -367,6 +367,30 @@ impl VecEnv {
         Ok((a, b))
     }
 
+    /// Game `i`'s position (engine::battle::position) as JSON.
+    fn position(&self, i: usize) -> PyResult<String> {
+        if i >= self.env.len() {
+            return Err(PyValueError::new_err("no such game"));
+        }
+        Ok(self.env.battle(i).position().to_string())
+    }
+
+    /// Put game `i` at a position (JSON, as `position` writes it or the
+    /// Showdown client builds it). Raises ValueError if the engine can't
+    /// rebuild it (an unsupported effect, a malformed position).
+    #[pyo3(signature = (i, position, seed=0))]
+    fn set_position(&mut self, i: usize, position: &str, seed: u64) -> PyResult<()> {
+        if i >= self.env.len() {
+            return Err(PyValueError::new_err("no such game"));
+        }
+        let p: serde_json::Value =
+            serde_json::from_str(position).map_err(|e| PyValueError::new_err(format!("position JSON: {e}")))?;
+        let b = engine::battle::Battle::from_position(&p, engine::chance::Chance::seeded(seed))
+            .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+        self.env.set_battle(i, b);
+        Ok(())
+    }
+
     /// Game `i` as `side` sees it, as JSON for people (the play screen).
     fn view(&self, i: usize, side: usize) -> PyResult<String> {
         if i >= self.env.len() || side > 1 {

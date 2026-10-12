@@ -13,6 +13,7 @@ mod conditions;
 mod field;
 mod items;
 mod moves;
+pub mod position;
 pub mod snapshot;
 pub mod state;
 pub mod support;
@@ -1446,16 +1447,6 @@ impl Battle {
                     })
                     .collect();
                 self.mon_mut(r).attacked_by = attackers;
-                let locked = self.choice_locked_move(r);
-                // A foe's imprison: its moves (but Struggle) can't be chosen.
-                let imprisoned: Vec<crate::dex::MoveId> = self.sides[side].pokemon[p]
-                    .moves
-                    .iter()
-                    .map(|s| s.id)
-                    .filter(|&id| {
-                        Dex::get().move_data(id).id != "struggle" && self.imprisoned(r, id)
-                    })
-                    .collect();
                 let m = &mut self.sides[side].pokemon[p];
                 m.move_this_turn = None;
                 m.newly_switched = false;
@@ -1467,42 +1458,8 @@ impl Battle {
                     m.stats_raised_this_turn = false;
                     m.stats_lowered_this_turn = false;
                 }
-                // DisableMove: Gigaton Hammer and Blood Moon ("cantusetwice")
-                // can't be chosen right after being used.
-                // Fake Out's onDisableMove: only usable on the first turn out.
-                // Encore and Throat Chop's onDisableMove.
-                let last = m.last_move;
-                let acted = m.active_move_actions > 0;
-                let encored = m
-                    .volatiles
-                    .0
-                    .iter()
-                    .find(|v| v.id == state::VolatileId::Encore)
-                    .and_then(|v| v.move_id)
-                    .filter(|&e| m.move_slot(e).is_some());
-                let throat_chopped = m.volatiles.has(state::VolatileId::ThroatChop);
-                let taunted = m.volatiles.has(state::VolatileId::Taunt);
-                let heal_blocked = m.volatiles.has(state::VolatileId::HealBlock);
-                let gravity = self.field.gravity > 0;
-                let disabled = m
-                    .volatiles
-                    .0
-                    .iter()
-                    .find(|v| v.id == state::VolatileId::Disable)
-                    .and_then(|v| v.move_id);
-                for s in m.moves.iter_mut() {
-                    let data = Dex::get().move_data(s.id);
-                    s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id))
-                        || (matches!(data.id.as_str(), "fakeout" | "firstimpression") && acted)
-                        || locked.is_some_and(|l| l != s.id)
-                        || encored.is_some_and(|e| e != s.id)
-                        || (throat_chopped && data.flags.has("sound"))
-                        || (taunted && data.category == crate::dex::Category::Status)
-                        || (heal_blocked && data.flags.has("heal"))
-                        || (gravity && data.flags.has("gravity"))
-                        || disabled == Some(s.id);
-                    s.imprisoned = imprisoned.contains(&s.id);
-                }
+                self.refresh_disabled(side, p);
+                let m = &mut self.sides[side].pokemon[p];
                 if !m.fainted {
                     m.active_turns += 1;
                 }
@@ -1513,6 +1470,56 @@ impl Battle {
         }
         self.make_move_request();
         Ok(())
+    }
+
+    /// DisableMove for the Pokemon in slot `p`: which of its moves can't
+    /// be chosen next turn.
+    fn refresh_disabled(&mut self, side: usize, p: usize) {
+        let r = self.mon_ref(side, p);
+        let locked = self.choice_locked_move(r);
+        // A foe's imprison: its moves (but Struggle) can't be chosen.
+        let imprisoned: Vec<crate::dex::MoveId> = self.sides[side].pokemon[p]
+            .moves
+            .iter()
+            .map(|s| s.id)
+            .filter(|&id| Dex::get().move_data(id).id != "struggle" && self.imprisoned(r, id))
+            .collect();
+        let gravity = self.field.gravity > 0;
+        let m = &mut self.sides[side].pokemon[p];
+        // Gigaton Hammer and Blood Moon ("cantusetwice") can't be chosen
+        // right after being used. Fake Out's onDisableMove: only usable on
+        // the first turn out. Encore and Throat Chop's onDisableMove.
+        let last = m.last_move;
+        let acted = m.active_move_actions > 0;
+        let encored = m
+            .volatiles
+            .0
+            .iter()
+            .find(|v| v.id == state::VolatileId::Encore)
+            .and_then(|v| v.move_id)
+            .filter(|&e| m.move_slot(e).is_some());
+        let throat_chopped = m.volatiles.has(state::VolatileId::ThroatChop);
+        let taunted = m.volatiles.has(state::VolatileId::Taunt);
+        let heal_blocked = m.volatiles.has(state::VolatileId::HealBlock);
+        let disabled = m
+            .volatiles
+            .0
+            .iter()
+            .find(|v| v.id == state::VolatileId::Disable)
+            .and_then(|v| v.move_id);
+        for s in m.moves.iter_mut() {
+            let data = Dex::get().move_data(s.id);
+            s.disabled = (data.flags.has("cantusetwice") && last == Some(s.id))
+                || (matches!(data.id.as_str(), "fakeout" | "firstimpression") && acted)
+                || locked.is_some_and(|l| l != s.id)
+                || encored.is_some_and(|e| e != s.id)
+                || (throat_chopped && data.flags.has("sound"))
+                || (taunted && data.category == crate::dex::Category::Status)
+                || (heal_blocked && data.flags.has("heal"))
+                || (gravity && data.flags.has("gravity"))
+                || disabled == Some(s.id);
+            s.imprisoned = imprisoned.contains(&s.id);
+        }
     }
 
     fn make_move_request(&mut self) {

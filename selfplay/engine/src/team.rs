@@ -263,7 +263,7 @@ fn parse_points(text: &str) -> Result<[u16; 6], String> {
 
 /// The most common Reg M-C spread for this set's species (its Mega forme's
 /// entry when it holds its stone), preferring one with the set's nature.
-fn default_points(set: &PokemonSet) -> [u16; 6] {
+pub fn default_points(set: &PokemonSet) -> [u16; 6] {
     let dex = Dex::get();
     let nature = &dex.nature_names[set.nature.0 as usize];
     let keys = [mega_forme(set), Some(set.species)];

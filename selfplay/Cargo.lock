@@ -162,6 +162,7 @@ dependencies = [
  "mimalloc",
  "pyo3",
  "selfplay-engine",
+ "serde_json",
 ]
 
 [[package]]

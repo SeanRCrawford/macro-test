@@ -256,7 +256,9 @@ fn mon_features(battle: &Battle, m: &Mon, own: bool, int: &mut [i32], f: &mut [f
     }
     for (k, s) in m.moves.iter().take(4).enumerate() {
         f[32 + k] = s.pp as f32 / s.max_pp.max(1) as f32;
-        f[36 + k] = (own && (s.disabled || s.imprisoned)) as u8 as f32;
+        // Only an active Pokemon's flags are current (a benched one keeps
+        // those of its last turn out).
+        f[36 + k] = (own && m.is_active && (s.disabled || s.imprisoned)) as u8 as f32;
     }
     for v in &m.volatiles.0 {
         f[40 + volatile_slot(v.id)] = 1.0;
