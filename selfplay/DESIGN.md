@@ -1018,6 +1018,20 @@ learning rate). Two tools to test which:
 - A resumed run carries its update and game counts, so numbered
   checkpoints in the same folder aren't overwritten.
 
+**runs/ppo2** (ppo1 grown from 4 to 8 layers, ~3.6M parameters): 7.3M games
+in 12.9 hours at 138-183 games/s (25-30% slower than ppo1). Against ppo1
+(sampled, 400 games, +-0.05): 0.517, 0.573, 0.516, 0.545, 0.566, 0.561, so
+about +35 Elo. Capacity was part of the plateau, not most of it. Next
+suspects, both cheap to change:
+
+- League memory: a snapshot every 10 updates, 8 kept, so the oldest past
+  version is ~80 updates (~430k games) old, about 2% of a 20M-game run.
+  Self-play in a simultaneous-move game can wander (beat the current
+  version, forget older strategies) unless older versions stay in the
+  pool, as AlphaStar's league and mikumiku37's snapshots keep them. Next:
+  a snapshot every 25 updates, 16 kept (~2M games), PFSP over all.
+- Constant learning rate: decay to 3e-5 over the run.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:
