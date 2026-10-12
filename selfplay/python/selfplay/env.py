@@ -107,6 +107,10 @@ class SelfPlayEnv:
     def team_weights(self) -> list[float]:
         return self._env.team_weights()
 
+    def team_species(self, i: int) -> list[str]:
+        """Team i's species names, in team order."""
+        return self._env.team_species(i)
+
     def rejected(self) -> list[tuple[str, str]]:
         """Pastes left out of the corpus: (name, reason)."""
         return self._env.rejected()

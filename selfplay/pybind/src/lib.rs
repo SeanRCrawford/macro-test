@@ -332,6 +332,16 @@ impl VecEnv {
         (0..s.len()).map(|i| s.team(i).weight).collect()
     }
 
+    /// Corpus team `i`'s species names, in team order.
+    fn team_species(&self, i: usize) -> PyResult<Vec<String>> {
+        let s = self.env.sampler();
+        if i >= s.len() {
+            return Err(PyValueError::new_err("no such team"));
+        }
+        let dex = Dex::get();
+        Ok(s.team(i).sets.iter().map(|m| dex.species(m.species).name.clone()).collect())
+    }
+
     /// Pastes left out of the corpus, with the reason: (name, reason).
     fn rejected(&self) -> Vec<(String, String)> {
         self.rejected.clone()
