@@ -140,6 +140,7 @@ class Trainer:
         # Per game: None (self-play), "greedy", or a league member's id.
         self.opponent: list = [None] * cfg.envs
         self.updates = self.games = self.decisions = 0
+        self.run_updates = 0    # this process's updates (`updates` carries a resumed run's)
         self.log = open(out / "log.jsonl", "a")
 
     def pfsp_weight(self, m: int) -> float:
@@ -309,7 +310,7 @@ class Trainer:
         adv_all = (d["adv"] - d["adv"].mean()) / (d["adv"].std() + 1e-8)
         stats = []
         prof = None
-        if c.profile and self.updates == 1:
+        if c.profile and self.run_updates == 1:
             acts = [torch.profiler.ProfilerActivity.CPU]
             if dev.type == "cuda":
                 acts.append(torch.profiler.ProfilerActivity.CUDA)
@@ -407,7 +408,7 @@ class Trainer:
     def run(self, minutes: float, max_updates: int | None = None):
         c = self.cfg
         start = time.time()
-        while time.time() - start < minutes * 60 and (max_updates is None or self.updates < max_updates):
+        while time.time() - start < minutes * 60 and (max_updates is None or self.run_updates < max_updates):
             if c.lr_final >= 0:
                 frac = min(1.0, (time.time() - start) / (minutes * 60))
                 for group in self.opt.param_groups:
@@ -417,6 +418,7 @@ class Trainer:
             t1 = time.time()
             pg, vl, ent, opp_ce = self.update(data)
             self.updates += 1
+            self.run_updates += 1
             vs_self = [r for o, r, _ in results if o is None]
             entry = {"update": self.updates, "minutes": (time.time() - start) / 60,
                      "games": self.games, "decisions": self.decisions,
