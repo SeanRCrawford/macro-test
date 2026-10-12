@@ -1062,6 +1062,20 @@ float32; same parameters, same function in float32) and the action
 embeddings are built in autocast's dtype. `selfplay.benchmark` times both
 versions on the same weights.
 
+Measured on the laptop (ppo3, 4,096 rows a call): inference 38.9k -> 61.3k
+rows/s (x1.57), training step 12.2k -> 18.0k rows/s (x1.47), peak memory
+4.87 -> 4.04 GB.
+
+**Team ratings with ppo3** (478 teams, ~900 games each): the placed teams
+average about +25 Elo and the unplaced -12, but among placed teams the
+placement doesn't order them (Champion +35, Top 4 +19, Top 64+ +31, groups
+of 7-31 teams): placement says more about the player than the team, and the
+bot has practised the placed teams more. By species, the support and Trick
+Room Pokemon rate lowest (Indeedee-F -20, Whimsicott -29, Hatterene -26,
+against Indeedee's attacking male forme at +6), which may be the bot
+playing them worse rather than their being weak: one to check against
+people.
+
 ### 4.20 Team ratings and the Showdown client
 
 **Team ratings** (`selfplay.teams`). Every corpus team plays ~600 games,
