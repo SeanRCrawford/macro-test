@@ -1032,6 +1032,16 @@ suspects, both cheap to change:
   a snapshot every 25 updates, 16 kept (~2M games), PFSP over all.
 - Constant learning rate: decay to 3e-5 over the run.
 
+**runs/ppo3** (from ppo2; league snapshot every 25 updates, 16 kept; lr
+3e-4 -> 3e-5 over the run): ~4.9M games in 10.7 hours. Against ppo2
+(sampled, 400 games, +-0.05): 0.517 at the start, 0.572 at the end, so
+about +50 Elo; with ppo2's +35 and ppo1's +248, ~+330 over runs/big. Neither
+change made a step: gains now come at roughly +5-10 Elo per million games.
+The network is ~98% of the wall time (engine 0.7 s of a ~52 s update
+cycle), and the same work got ~70% slower over the run (rollout network
+time 6.2 -> 10.9 s, update 26 -> 41 s, 163 -> 99 games/s): the laptop GPU
+throttling, as in ppo1.
+
 ### 4.20 Team ratings and the Showdown client
 
 **Team ratings** (`selfplay.teams`). Every corpus team plays ~600 games,
