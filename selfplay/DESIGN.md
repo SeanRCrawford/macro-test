@@ -1032,6 +1032,55 @@ suspects, both cheap to change:
   a snapshot every 25 updates, 16 kept (~2M games), PFSP over all.
 - Constant learning rate: decay to 3e-5 over the run.
 
+### 4.20 Team ratings and the Showdown client
+
+**Team ratings** (`selfplay.teams`). Every corpus team plays ~600 games,
+half against the whole pool and half against the teams that placed Top 8
+or better, with one network on both sides; a Bradley-Terry fit gives each
+team an Elo, with its score against the top teams, the mean Elo by
+placement (do the teams that placed win in the bot's hands?) and by
+species. The ratings measure the team as the bot plays it, and the bot has
+practised the placed teams most (corpus weights).
+
+**Showdown client** (`selfplay.showdown`), for private benchmark games
+against people (mikumiku37, the user). The engine never plays on Showdown
+directly; at each decision the client rebuilds the position and decides as
+in self-play:
+
+- `Battle::position` / `Battle::from_position` (engine/src/battle/position.rs):
+  a decision point as JSON (both sides' brought Pokemon with HP, status,
+  boosts, volatiles with durations, PP, items, abilities; side conditions;
+  field; the requests) and a battle rebuilt from it. tests/position.rs
+  rebuilds 1,622 positions from 120 corpus games (407 at switch requests)
+  and plays each on four steps with the same choices and draws: identical
+  to the original. Rebuilding exposed one observation quirk, fixed: a
+  benched Pokemon kept the "disabled" flags of its last turn out.
+- `tracker.py` follows one player's protocol stream: our side exact from
+  the requests (HP, PP, items, order), the opponent's from the log, the
+  turns left on weather, terrain, screens, Taunt, Encore, Protect's counter
+  and the rest counted as Showdown counts them. The opponent's sets come
+  from Open Team Sheets (Champions shows everything but stat points;
+  usage spreads fill those, by the nature shown) or else from usage,
+  corrected as they're revealed; its unseen back two are the network's own
+  team-preview policy for the opponent, given the leads.
+- Checked against Showdown itself: tools/showdown/protocol_fixtures.js
+  plays random battles in Showdown's simulator and records each player's
+  stream with Showdown's true state and legal choices at each decision.
+  Over 400 battles from both sides (10,500 decisions): with Open Team
+  Sheets the rebuilt position offers exactly Showdown's legal choices every
+  time, and our side matches exactly; what's left is what the log never
+  shows (a flinch from anything but Fake Out, an Illusion before it breaks;
+  without team sheets, unrevealed items and abilities). Our own disabled
+  moves come from the request; the engine still works out Imprison.
+- One engine deviation found on the way: Disable from Cursed Body lasts a
+  turn less (Showdown also shortens it when the target is the Pokemon
+  moving now); fixed.
+- The client logs in, challenges or accepts, accepts Open Team Sheets and
+  waits for the opponent's at team preview, confirms best-of-3 games and
+  prints each decision with its win estimate. Two clients played Bo1 and
+  Bo3 games against each other on a local Showdown server without a
+  rejected choice.
+
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

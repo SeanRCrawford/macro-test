@@ -30,7 +30,7 @@ virtual environment. On Windows (PowerShell):
     .venv\Scripts\Activate.ps1       # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
     python -m pip install --upgrade pip
     pip install torch --index-url https://download.pytorch.org/whl/cu126   # CUDA build; see pytorch.org
-    pip install maturin numpy pytest
+    pip install maturin numpy pytest websockets
     maturin develop --release
     python -c "import torch, selfplay._engine; print(torch.cuda.is_available())"   # expect True
 
@@ -115,6 +115,48 @@ on both sides, with the bot playing both, and ranks the teams by win rate
 (plain and weighted by the opponents' placement), with their worst
 matchups. The CSV has every matchup.
 
+## Team ratings
+
+    python -m selfplay.teams runs/ppo3/model.pt --device cuda --csv teams.csv
+    python -m selfplay.teams runs/ppo3/model.pt --teams my_teams teams/ --top 4
+
+Every team in the training corpus plays about 600 games (--games), half
+against random teams and half against the teams that placed Top 8 or
+better (--top), with the bot on both sides. The report ranks the teams by
+Elo (Bradley-Terry; 0 is the average team) and shows each one's score
+against the top teams, the mean Elo by tournament placement, and the mean
+Elo of the teams each species is on. `--teams` rates only some teams
+(still against the whole pool). Pastes that don't load are listed first,
+with the reason. The ratings say how well the bot plays each team: teams
+that need precise play rate low while the bot plays them badly.
+
+## Play on Showdown
+
+    python -m selfplay.showdown runs/ppo3/model.pt --team my_team.txt --user MyBot --password ... --challenge mikumiku37
+    python -m selfplay.showdown runs/ppo3/model.pt --team my_team.txt --user MyBot --password ... --accept YourName --games 5
+
+The bot logs in (a registered account needs its password, or set
+SHOWDOWN_PASSWORD), uploads `--team` (a Showdown paste) and either
+challenges the users given or accepts challenges from those listed
+(`--accept` alone: anyone). The format defaults to
+gen9championsvgc2026regmc; a best-of-3 challenge works too and counts as
+one match of `--games`. It plays with the tree search (`--budget`, 2000
+value evaluations a turn, a few seconds on a GPU) or the policy
+(`--policy`), accepts Open Team Sheets (`--no-ots` to decline) and prints
+every decision with its win estimate and top options. Logs go to
+runs/showdown. Use it for private challenges with people who agreed to
+play the bot.
+
+It follows the battle from Showdown's messages and rebuilds the position in
+the engine at each decision (tests/test_showdown.py checks it against
+Showdown's own state). The opponent's unrevealed sets come from Open Team
+Sheets, or else from usage stats; its unseen back two are the network's
+guess.
+
+To try it without an account, run a local server (in a pokemon-showdown
+checkout: `node pokemon-showdown start --no-security`) and add
+`--server ws://localhost:8000/showdown/websocket --local`.
+
 ## Regenerate data from Showdown
 
 Showdown is the rules authority. Both scripts need a built checkout of
@@ -122,6 +164,7 @@ https://github.com/smogon/pokemon-showdown (`npm install && node build`):
 
     node selfplay/tools/showdown/export_dex.js   /path/to/pokemon-showdown
     node selfplay/tools/showdown/gen_fixtures.js /path/to/pokemon-showdown
+    node selfplay/tools/showdown/protocol_fixtures.js /path/to/pokemon-showdown
     python selfplay/tools/gen_pool.py
 
 `dex.json` records the Showdown commit it came from. Regenerate the fixtures
