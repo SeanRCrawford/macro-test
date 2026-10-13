@@ -1076,6 +1076,16 @@ against Indeedee's attacking male forme at +6), which may be the bot
 playing them worse rather than their being weak: one to check against
 people.
 
+**runs/ppo4** (from ppo3, the faster code, lr 1.5e-4 -> 2e-5, 600 min, the
+laptop in its performance mode): 12.3M games, 2.5x ppo3's, at 420 games/s
+at the start, 350 after an hour, 337 at the end. The GPU log explains the
+rest of the slowdown: the clock is held by the power cap all the time (no
+thermal flag), and the laptop lowers the cap as it warms (63 -> 49.5 W,
+62 -> 72 C; 1,610 -> 1,390 MHz). Memory is full (7.6-7.8 of 8 GB in use)
+but no longer what sets the speed. Against ppo3 (400 games, +-0.05): 0.546
+after an hour, 0.553 at the end, about +37 Elo; ~+370 over runs/big in all,
+~57M games.
+
 ### 4.20 Team ratings and the Showdown client
 
 **Team ratings** (`selfplay.teams`). Every corpus team plays ~600 games,

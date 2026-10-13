@@ -141,6 +141,7 @@ class Trainer:
         self.opponent: list = [None] * cfg.envs
         self.updates = self.games = self.decisions = 0
         self.run_updates = 0    # this process's updates (`updates` carries a resumed run's)
+        self.minutes_done = 0.0 # of --minutes, before this process (--resume)
         from selfplay.gpu import GpuMonitor
         self.gpu = GpuMonitor(cfg.device)
         self.log = open(out / "log.jsonl", "a")
@@ -409,7 +410,9 @@ class Trainer:
 
     def run(self, minutes: float, max_updates: int | None = None):
         c = self.cfg
-        start = time.time()
+        # A resumed run carries on from where its time budget (and learning
+        # rate schedule) stood.
+        start = time.time() - self.minutes_done * 60
         while time.time() - start < minutes * 60 and (max_updates is None or self.run_updates < max_updates):
             if c.lr_final >= 0:
                 frac = min(1.0, (time.time() - start) / (minutes * 60))
@@ -436,7 +439,8 @@ class Trainer:
                 self.snapshot()
             if c.save_every and self.updates % c.save_every == 0:
                 torch.save({"model": self.model.state_dict(), "config": asdict(c),
-                            "updates": self.updates, "games": self.games},
+                            "updates": self.updates, "games": self.games,
+                            "minutes": (time.time() - start) / 60},
                            self.out / f"model_{self.updates:05d}.pt")
             if self.updates % c.eval_every == 0:
                 if c.baseline:
@@ -452,14 +456,16 @@ class Trainer:
                 entry["vs_greedy"] = evaluate(self.model, "greedy", c.eval_games, 2000 + self.updates,
                                               c.perfect_info)
                 torch.save({"model": self.model.state_dict(), "config": asdict(c),
-                            "updates": self.updates, "games": self.games},
+                            "updates": self.updates, "games": self.games,
+                            "minutes": (time.time() - start) / 60},
                            self.out / "model.pt")
             self.log.write(json.dumps(entry) + "\n")
             self.log.flush()
             print(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}"
                            for k, v in entry.items()), flush=True)
         torch.save({"model": self.model.state_dict(), "config": asdict(c),
-                            "updates": self.updates, "games": self.games}, self.out / "model.pt")
+                            "updates": self.updates, "games": self.games,
+                            "minutes": (time.time() - start) / 60}, self.out / "model.pt")
 
 
 def main():
@@ -468,6 +474,9 @@ def main():
     p.add_argument("--updates", type=int, default=None)
     p.add_argument("--out", default="runs/tiny")
     p.add_argument("--init", default=None, help="start from this model.pt")
+    p.add_argument("--resume", action="store_true",
+                   help="with --init: continue that run's --minutes and learning-rate schedule from where it "
+                        "stopped (rerun the same command with --init OUT/model.pt --resume)")
     p.add_argument("--grow-layers", type=int, default=0,
                    help="with --init: add this many encoder layers, each starting as an identity")
     p.add_argument("--imitate-minutes", type=float, default=0.0,
@@ -496,6 +505,9 @@ def main():
         # Carry the counts on, so numbered checkpoints aren't overwritten
         # when a run resumes into its own folder.
         t.updates, t.games = ckpt.get("updates", 0), ckpt.get("games", 0)
+        if a.resume:
+            t.minutes_done = ckpt.get("minutes", 0.0)
+            print(f"resuming at {t.minutes_done:.0f} of {a.minutes:.0f} minutes", flush=True)
         if a.grow_layers:
             from selfplay.model import load_grown
             added = load_grown(t.model, state)

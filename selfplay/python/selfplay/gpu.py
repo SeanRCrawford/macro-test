@@ -48,7 +48,8 @@ class GpuMonitor:
 
     def _run(self):
         n = self.nvml
-        while True:
+        failures = 0
+        while failures < 600:
             try:
                 s = (n.nvmlDeviceGetClockInfo(self.handle, n.NVML_CLOCK_SM),
                      n.nvmlDeviceGetTemperature(self.handle, n.NVML_TEMPERATURE_GPU),
@@ -59,8 +60,11 @@ class GpuMonitor:
                      n.nvmlDeviceGetEnforcedPowerLimit(self.handle) / 1000.0)
                 with self.lock:
                     self.samples.append(s)
+                failures = 0
             except Exception:
-                return
+                # A failed reading (the driver busy, the laptop switching
+                # power modes) is skipped, not the end of sampling.
+                failures += 1
             time.sleep(self.interval)
 
     def take(self) -> dict:
