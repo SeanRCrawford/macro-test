@@ -1086,6 +1086,18 @@ but no longer what sets the speed. Against ppo3 (400 games, +-0.05): 0.546
 after an hour, 0.553 at the end, about +37 Elo; ~+370 over runs/big in all,
 ~57M games.
 
+ppo4's Elo curve over its checkpoints was flattish after the first hour:
+the 3.0M network (d=192, 8 layers) has stopped gaining. Depth was doubled
+once already (+35); width hasn't been tried, and the peers' ~8.5M
+corresponds to about d=320 at our depth. Next, **runs/ppo5**: d=256, 8
+layers (5.3M parameters, ~1.8x the compute per game, minibatch 2,048 to fit
+8 GB), started by distillation (`--distill`): ppo4 plays self-play games and
+the new network learns its policy, opponent prediction (KL) and values
+(squared error), logging its agreement and a head-to-head against ppo4
+every 10 minutes, before PPO continues for two days. On a CPU test a
+student of another size reached 96% agreement and 0.48 against its teacher
+in 4 minutes.
+
 ### 4.20 Team ratings and the Showdown client
 
 **Team ratings** (`selfplay.teams`). Every corpus team plays ~600 games,

@@ -408,6 +408,82 @@ class Trainer:
         print(" ".join(f"{k}={v}" for k, v in entry.items()), flush=True)
         self.log.write(json.dumps(entry) + "\n")
 
+    def distill(self, teacher, minutes: float):
+        """Start a new network (another size) from a trained one: the teacher
+        plays self-play games (sampling its policy, both sides) and this
+        network learns to match its policy and opponent prediction (KL) and
+        its values (squared error) on those positions, before PPO takes
+        over. Much faster than relearning by reinforcement."""
+        from selfplay.evaluate import head_to_head
+        c, env = self.cfg, self.env
+        dev = torch.device(c.device)
+        teacher.eval()
+        start = last_eval = time.time()
+        rounds = 0
+        keys = ("ints", "mons", "field", "masks", "dec")
+        while time.time() - start < minutes * 60:
+            # A rollout of the teacher playing both sides; the positions stay
+            # on the device.
+            buf = {k: [] for k in (*keys, "opp_masks", "opp_dec")}
+            for _ in range(c.steps):
+                obs = env.observe()
+                rows = np.flatnonzero(obs.decisions.reshape(-1) != 0)
+                actions = np.full(obs.decisions.shape, -1, np.int64)
+                if len(rows):
+                    batch = to_tensors(obs, rows)
+                    a, _, _ = act(teacher, batch, amp=c.amp)
+                    actions.reshape(-1)[rows] = a.numpy()
+                    for k, t in zip(keys, batch):
+                        buf[k].append(t.to(dev, non_blocking=True))
+                    opp = rows ^ 1
+                    buf["opp_masks"].append(torch.from_numpy(
+                        obs.masks.reshape(-1, obs.masks.shape[-1])[opp]).to(dev, non_blocking=True))
+                    buf["opp_dec"].append(torch.from_numpy(obs.decisions.reshape(-1)[opp]).to(dev))
+                env.step(actions)
+            data = {k: torch.cat(v) for k, v in buf.items()}
+            n = len(data["ints"])
+            stats = []
+            for _ in range(c.epochs):
+                perm = torch.randperm(n, device=dev)
+                for i in range(0, n, c.minibatch):
+                    mb = {k: v[perm[i:i + c.minibatch]] for k, v in data.items()}
+                    args = [mb[k] for k in keys] + [mb["opp_masks"]]
+                    with torch.no_grad(), autocast(dev, c.amp):
+                        t_logp, t_value, t_opp = teacher(*args)
+                    with autocast(dev, c.amp):
+                        s_logp, s_value, s_opp = self.model(*args)
+                    legal = mb["masks"].bool()
+                    kl = (t_logp.exp() * (t_logp - s_logp)).masked_fill(~legal, 0).sum(-1).mean()
+                    # The opponent head, where the opponent chooses moves.
+                    seen = (mb["opp_dec"] == 2).float()
+                    opp_legal = mb["opp_masks"].bool()
+                    opp_kl = ((t_opp.exp() * (t_opp - s_opp)).masked_fill(~opp_legal, 0).sum(-1) * seen).sum() \
+                        / seen.sum().clamp(min=1)
+                    vloss = ((s_value.float() - t_value.float()) ** 2).mean()
+                    loss = kl + c.value_coef * vloss + c.opponent_coef * opp_kl
+                    self.opt.zero_grad(set_to_none=True)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm)
+                    self.opt.step()
+                    agree = (s_logp.argmax(-1) == t_logp.argmax(-1)).float().mean()
+                    stats.append(torch.stack([kl, vloss, opp_kl, agree]).detach())
+            rounds += 1
+            kl, vloss, opp_kl, agree = torch.stack(stats).mean(0).tolist()
+            entry = {"distill_round": rounds, "minutes": (time.time() - start) / 60, "samples": n,
+                     "kl": kl, "value_mse": vloss, "opponent_kl": opp_kl, "agreement": agree, **self.gpu.take()}
+            if time.time() - last_eval > 600 or time.time() - start >= minutes * 60:
+                last_eval = time.time()
+                self.model.eval()
+                entry["vs_teacher"] = head_to_head(self.model, teacher, c.eval_games, 5000 + rounds,
+                                                   c.perfect_info, sample=True)
+                self.model.train()
+            self.log.write(json.dumps(entry) + "\n")
+            self.log.flush()
+            print(" ".join(f"{k}={v:.3g}" if isinstance(v, float) else f"{k}={v}"
+                           for k, v in entry.items()), flush=True)
+        torch.save({"model": self.model.state_dict(), "config": asdict(c), "updates": 0, "games": 0},
+                   self.out / "model_distilled.pt")
+
     def run(self, minutes: float, max_updates: int | None = None):
         c = self.cfg
         # A resumed run carries on from where its time budget (and learning
@@ -479,6 +555,9 @@ def main():
                         "stopped (rerun the same command with --init OUT/model.pt --resume)")
     p.add_argument("--grow-layers", type=int, default=0,
                    help="with --init: add this many encoder layers, each starting as an identity")
+    p.add_argument("--distill", default=None,
+                   help="start this network (--d, --layers) by learning a trained model.pt's policy and values")
+    p.add_argument("--distill-minutes", type=float, default=120.0)
     p.add_argument("--imitate-minutes", type=float, default=0.0,
                    help="first learn the greedy baseline's choices for this long")
     for k, v in asdict(Config()).items():
@@ -514,6 +593,9 @@ def main():
             print(f"grew the encoder by {added} identity layers to {cfg.layers}", flush=True)
         else:
             t.model.load_state_dict(state)
+    if a.distill and not a.resume:
+        from selfplay.evaluate import load
+        t.distill(load(a.distill, cfg.device), a.distill_minutes)
     if a.imitate_minutes > 0:
         t.imitate(a.imitate_minutes)
     t.run(a.minutes, a.updates)
