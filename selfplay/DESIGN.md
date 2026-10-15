@@ -1098,6 +1098,25 @@ every 10 minutes, before PPO continues for two days. On a CPU test a
 student of another size reached 96% agreement and 0.48 against its teacher
 in 4 minutes.
 
+**runs/ppo5** (d=256, 8 layers, 5.3M parameters; distilled from ppo4 for
+two hours, then 2,880 minutes of PPO, lr 2e-4 -> 2e-5): 49M games at
+283-293 games/s, only ~15% slower than ppo4 at 1.8x the compute per game
+(the GPU still at its power cap 83-89% of the time, 54-59 W of 63; 6.7 of
+8 GB in use). Against ppo4 (400 games each, +-0.025): 0.645 at 2,230
+minutes, 0.653 at 2,550, 0.641 at the end, about +100 Elo, nearly three
+times ppo4's gain over ppo3 for twice the games: the width, not more
+training, was what the 3.0M network lacked. ~+475 Elo over runs/big.
+
+`selfplay.summary` prints a run's log in a screenful, the evaluations
+pooled over equal stretches of time (24 evaluations a row measure a score
+to about +-0.005, where one alone is +-0.025).
+
+Next, **runs/ppo6**: d=320 (8.2M parameters, the peers' size), distilled
+from ppo5. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
+need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
+network needs more games to fill.
+
 ### 4.20 Team ratings and the Showdown client
 
 **Team ratings** (`selfplay.teams`). Every corpus team plays ~600 games,
