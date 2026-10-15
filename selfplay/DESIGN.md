@@ -1111,8 +1111,25 @@ training, was what the 3.0M network lacked. ~+475 Elo over runs/big.
 pooled over equal stretches of time (24 evaluations a row measure a score
 to about +-0.005, where one alone is +-0.025).
 
+The pooled log (`selfplay.summary runs/ppo5`): distillation reached 79%
+agreement and 0.50 against ppo4 in 120 minutes (the KL still falling), but
+the first three hours of PPO scored 0.40 against ppo4 and it took nine to
+get back to 0.50; from there it rose steadily as the learning rate fell,
++41 Elo at 1,080 minutes, +74 at 1,980, +89 at the end (0.625 +-0.008 over
+the last 4,000 games). ppo4 dipped the same way after restarting from
+ppo3 at 1.5e-4. A fresh optimizer at the full learning rate shakes a
+trained policy loose; training now can warm up after every start
+(`--lr-warmup` minutes, 10% to the schedule's rate; a resume starts a fresh
+optimizer too), and PPO gets a fresh Adam after distillation instead of the
+one fitted to the distillation losses. The log also shows 7.8 of 8 GB in
+use for the first 18 hours, 6.9 after: PyTorch kept the distillation's
+memory reserved, now given back when it ends.
+
+**Against people**: ppo5 with the search, 5-8 against mikumiku37.
+
 Next, **runs/ppo6**: d=320 (8.2M parameters, the peers' size), distilled
-from ppo5. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+from ppo5 for three hours, peak learning rate 1.5e-4 (a wider network
+takes a smaller step) with an hour's warm-up. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.

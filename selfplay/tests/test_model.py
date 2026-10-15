@@ -155,3 +155,13 @@ def test_bfloat16_paths_agree_with_the_old_code():
             a, va = model(ints, mons, field, masks, dec)
             b, vb = old(ints, mons, field, masks, dec)
         assert (a - b)[legal].abs().mean() < 0.02 and (va - vb).abs().max() < 0.05
+
+
+def test_learning_rate_warms_up_after_each_start_then_follows_the_schedule():
+    from selfplay.train import Config, scheduled_lr
+    c = Config(lr=2e-4, lr_final=2e-5, lr_warmup=60)
+    assert scheduled_lr(c, 0, 1000, 0) == pytest.approx(2e-5)            # 10% at a fresh start
+    assert scheduled_lr(c, 30, 1000, 30) == pytest.approx(0.55 * (2e-4 - 1.8e-4 * 0.03))
+    assert scheduled_lr(c, 500, 1000, 600) == pytest.approx(1.1e-4)      # the plain schedule
+    assert scheduled_lr(c, 500, 1000, 0) == pytest.approx(1.1e-5)        # a resume warms up again
+    assert scheduled_lr(Config(lr=3e-4), 10, 100, 0) == 3e-4             # neither: constant

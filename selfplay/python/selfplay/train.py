@@ -32,6 +32,8 @@ class Config:
     minibatch: int = 4096
     lr: float = 3e-4
     lr_final: float = -1.0          # >= 0: the learning rate decays linearly to this over --minutes
+    lr_warmup: float = 0.0          # minutes: after each start (a fresh optimizer: a new run, the end of
+                                    # distillation, a resume) the learning rate rises from 10% to the schedule's
     gamma: float = 1.0
     lam: float = 0.95
     clip: float = 0.2
@@ -59,6 +61,17 @@ class Config:
     profile: bool = False           # profile 10 minibatches of the second update, print the table
     save_every: int = 0             # keep a numbered checkpoint every this many updates (0: none)
     baseline: str = ""              # a model.pt to play head to head at each evaluation (sampled)
+
+
+def scheduled_lr(c: Config, done: float, minutes: float, fresh: float) -> float:
+    """The learning rate `done` minutes into a `minutes`-long schedule,
+    `fresh` minutes after this optimizer started."""
+    lr = c.lr
+    if c.lr_final >= 0:
+        lr += (c.lr_final - c.lr) * min(1.0, done / minutes)
+    if c.lr_warmup > 0:
+        lr *= min(1.0, 0.1 + 0.9 * fresh / c.lr_warmup)
+    return lr
 
 
 def to_tensors(obs, rows=None):
@@ -483,17 +496,21 @@ class Trainer:
                            for k, v in entry.items()), flush=True)
         torch.save({"model": self.model.state_dict(), "config": asdict(c), "updates": 0, "games": 0},
                    self.out / "model_distilled.pt")
+        # PPO starts with a fresh optimizer: Adam's moments were fitted to the
+        # distillation losses' gradients.
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=c.lr)
 
     def run(self, minutes: float, max_updates: int | None = None):
         c = self.cfg
         # A resumed run carries on from where its time budget (and learning
         # rate schedule) stood.
         start = time.time() - self.minutes_done * 60
+        fresh = time.time()
         while time.time() - start < minutes * 60 and (max_updates is None or self.run_updates < max_updates):
-            if c.lr_final >= 0:
-                frac = min(1.0, (time.time() - start) / (minutes * 60))
+            if c.lr_final >= 0 or c.lr_warmup > 0:
+                lr = scheduled_lr(c, (time.time() - start) / 60, minutes, (time.time() - fresh) / 60)
                 for group in self.opt.param_groups:
-                    group["lr"] = c.lr + (c.lr_final - c.lr) * frac
+                    group["lr"] = lr
             t0 = time.time()
             data, results, timing = self.rollout()
             t1 = time.time()
@@ -596,6 +613,10 @@ def main():
     if a.distill and not a.resume:
         from selfplay.evaluate import load
         t.distill(load(a.distill, cfg.device), a.distill_minutes)
+        # Give back the teacher's and the distillation's GPU memory (PyTorch
+        # keeps freed memory reserved): ppo5 held 7.8 of 8 GB until it did.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     if a.imitate_minutes > 0:
         t.imitate(a.imitate_minutes)
     t.run(a.minutes, a.updates)
