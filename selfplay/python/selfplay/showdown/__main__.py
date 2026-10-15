@@ -4,9 +4,17 @@
     python -m selfplay.showdown runs/ppo3/model.pt --team my_team.txt --user MyBot --password ... \\
         --challenge mikumiku37
 
---team is a paste file, or the name of one in the repo's data/teams folder
-("Big 6 Chople"; quote names with spaces). A set without an EVs line gets
-the usage spread the engine trained with, and that is what is uploaded.
+--team is a paste file, or the name of a team the bot trains with: in
+data/teams, data/my_teams or the tournament corpus (selfplay/data/corpus),
+written as in the team ratings ("Big 6 Chople", "teams/Big 6 Chople" or a
+corpus name; quote names with spaces). A set without an EVs line gets the
+usage spread the engine trained with, and that is what is uploaded. A team
+Showdown would refuse, or with something the engine doesn't implement,
+stops here.
+
+After each battle the bot saves its replay on the server and writes the
+link to --log-dir/replays.txt: unlisted by default (anyone with the link
+can watch it), --replays public to list it, --replays off for none.
 
     # Wait for challenges from these users (or anyone, with --accept alone):
     python -m selfplay.showdown runs/ppo3/model.pt --team my_team.txt --user MyBot --password ... \\
@@ -27,26 +35,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import difflib
 import os
 import sys
 from pathlib import Path
 
 import torch
-
-TEAMS = Path(__file__).resolve().parents[4] / "data" / "teams"
-
-
-def find_team(name: str) -> Path:
-    """A paste file: the path given, else that name in data/teams."""
-    for p in (Path(name), TEAMS / name, TEAMS / f"{name}.txt"):
-        if p.is_file():
-            return p
-    known = sorted(p.stem for p in TEAMS.glob("*.txt"))
-    close = difflib.get_close_matches(Path(name).stem, known, n=5, cutoff=0.4)
-    raise SystemExit(f"no team file {name!r} (looked here and in {TEAMS})"
-                     + (f"; did you mean: {', '.join(repr(c) for c in close)}" if close else ""))
-
 
 def main():
     from selfplay.evaluate import load
@@ -57,7 +50,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("model")
     p.add_argument("--team", required=True,
-                   help="the bot's team: a Showdown paste file, or a name in data/teams")
+                   help="the bot's team: a paste file, or a team's name (data/teams, data/my_teams, the corpus)")
     p.add_argument("--user", required=True, help="the bot's Showdown account")
     p.add_argument("--password", default=None, help="its password (or SHOWDOWN_PASSWORD)")
     p.add_argument("--challenge", nargs="+", default=[], help="users to challenge, in turn")
@@ -75,6 +68,8 @@ def main():
     p.add_argument("--ots-wait", type=float, default=20.0, help="seconds to wait for the opponent's sheet")
     p.add_argument("--timer", action="store_true", help="turn the battle timer on")
     p.add_argument("--log-dir", default="runs/showdown")
+    p.add_argument("--replays", choices=["unlisted", "public", "off"], default="unlisted",
+                   help="save each battle's replay on the server (links in LOG_DIR/replays.txt)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
@@ -88,15 +83,17 @@ def main():
     if not a.challenge and a.accept is None:
         p.error("give --challenge USER or --accept [USER ...]")
 
-    from selfplay import validate_team
-    from selfplay.showdown.team import complete_paste
+    from selfplay.showdown.team import check_team, complete_paste, find_team
     path = find_team(a.team)
     team, notes = complete_paste(path.read_text(encoding="utf-8-sig"))
     print(f"team: {path}")
     for note in notes:
         print("  " + note)
-    for kind, message in validate_team(team):
-        print(f"  warning ({kind}): {message}")
+    errors, warnings = check_team(team)
+    for w in warnings:
+        print("  warning: " + w)
+    if errors:
+        raise SystemExit("this team can't be played:\n  " + "\n  ".join(errors))
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
     tree = None if a.policy else TreeConfig(budget=a.budget)
@@ -109,7 +106,7 @@ def main():
     client = Client(make_bot, team, a.user, a.password or os.environ.get("SHOWDOWN_PASSWORD"),
                     server=a.server, fmt=a.format, challenge=a.challenge, accept=a.accept,
                     games=a.games, ots=not a.no_ots, timer=a.timer, log_dir=a.log_dir, local=a.local,
-                    ots_wait=a.ots_wait)
+                    ots_wait=a.ots_wait, replays=a.replays)
     asyncio.run(client.run())
     r, s = client.record, client.series_record
     print(f"done: games {r['win']} won, {r['loss']} lost, {r['tie']} tied"

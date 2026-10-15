@@ -289,9 +289,60 @@ def test_the_client_names_the_encoding_of_every_file_it_reads():
     import subprocess
     import sys
     code = ("from selfplay.showdown.data import Data; Data().corpus_usage(); "
-            "from selfplay.showdown.__main__ import TEAMS; from selfplay.showdown.team import complete_paste; "
-            "[complete_paste(p.read_text(encoding='utf-8-sig')) for p in sorted(TEAMS.glob('*.txt'))[:3]]")
+            "from selfplay.showdown.team import complete_paste, team_folders, check_team; "
+            "[check_team(complete_paste(p.read_text(encoding='utf-8-sig'))[0]) for f in team_folders() for p in sorted(f.glob('*.txt'))[:2]]")
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
     r = subprocess.run([sys.executable, "-X", "warn_default_encoding", "-W", "error::EncodingWarning",
                         "-c", code], env=env, capture_output=True, text=True, encoding="utf-8")
     assert r.returncode == 0, r.stderr[-2000:]
+
+
+def test_replay_links_go_to_replays_txt(tmp_path):
+    """After a battle the client saves its replay; the server answers with
+    a popup holding the link (Room.uploadReplay), which is matched to its
+    battle and written down."""
+    from selfplay.showdown.client import Client, replay_id
+    fmt = "gen9championsvgc2026regmc"
+    assert replay_id(f"battle-{fmt}-123") == f"{fmt}-123"
+    assert replay_id(f"battle-{fmt}-123-abcdefpw") == f"{fmt}-123"
+    out = []
+    c = Client(lambda: None, "", "MyBot", log_dir=str(tmp_path), out=out.append)
+    c.replays_waiting = {f"{fmt}-5": (f"battle-{fmt}-5", "loss", "Other"),
+                         f"{fmt}-55": (f"battle-{fmt}-55", "win", "mikumiku37")}
+    url = f"https://replay.pokemonshowdown.com/{fmt}-55-a1b2c3pw"
+    popup = (f"|html|<p>Your replay has been uploaded! It's available at:</p><p> "
+             f'<a class="no-panel-intercept" href="{url}" target="_blank">{url}</a> '
+             f'<copytext value="{url}">Copy</copytext>')
+    assert c.replay_popup(popup)
+    line = (tmp_path / "replays.txt").read_text(encoding="utf-8")
+    assert url in line and "win" in line and "mikumiku37" in line
+    assert list(c.replays_waiting) == [f"{fmt}-5"]
+    # Hiding a replay the opponent saved first saves it again: one link.
+    assert c.replay_popup(popup) and list(c.replays_waiting) == [f"{fmt}-5"]
+    assert (tmp_path / "replays.txt").read_text(encoding="utf-8") == line
+    assert not c.replay_popup("|html|<p>Something else</p>")
+    assert c.replay_popup("Your replay could not be saved: Error: no database")
+    assert not c.replays_waiting and "replay not saved" in out[-1]
+
+
+def test_teams_are_found_in_every_folder_the_bot_trains_on():
+    from selfplay.showdown.team import check_team, find_team, team_folders
+    folders = team_folders()
+    corpus = [f for f in folders if f.name == "corpus"]
+    if not corpus:
+        pytest.skip("no corpus")
+    paste = sorted(corpus[0].glob("*.txt"))[0]
+    assert find_team(paste.stem) == paste
+    assert find_team(paste.name) == paste
+    assert find_team(f"corpus/{paste.stem}") == paste
+    teams = [f for f in folders if f.name == "teams"]
+    if teams and (teams[0] / "Big 6 Chople.txt").is_file():
+        assert find_team("teams/Big 6 Chople") == find_team("Big 6 Chople") == teams[0] / "Big 6 Chople.txt"
+    with pytest.raises(SystemExit, match="did you mean"):
+        find_team(paste.stem[:-2] + "zz")
+    # A team Showdown would refuse.
+    bad = corpus[0] / "nihileyugo's Golisopod Swampert Team.txt"
+    if bad.is_file():
+        errors, _ = check_team(bad.read_text(encoding="utf-8"))
+        assert any("Precipice Blades" in e for e in errors)
+    assert check_team(paste.read_text(encoding="utf-8")) == ([], [])

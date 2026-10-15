@@ -137,8 +137,9 @@ that need precise play rate low while the bot plays them badly.
     python -m selfplay.showdown runs/ppo3/model.pt --team my_team.txt --user MyBot --password ... --accept YourName --games 5
 
 The bot logs in (a registered account needs its password, or set
-SHOWDOWN_PASSWORD), uploads `--team` (a Showdown paste, or the name of one
-in data/teams: `--team "Big 6 Chople"`) and either
+SHOWDOWN_PASSWORD), uploads `--team` (a Showdown paste, or the name of a
+team in data/teams, data/my_teams or the corpus, as the team ratings print
+it: `--team "Big 6 Chople"`) and either
 challenges the users given or accepts challenges from those listed
 (`--accept` alone: anyone). The format defaults to
 gen9championsvgc2026regmc; a best-of-3 challenge works too and counts as
@@ -149,7 +150,13 @@ every decision with its win estimate and top options. Logs go to
 runs/showdown. Use it for private challenges with people who agreed to
 play the bot. A set without an `EVs:` line is uploaded with the usage
 spread the engine fills in (what the bot trained with); otherwise Showdown
-would give it no stat points.
+would give it no stat points. A team Showdown would refuse, or with a move,
+ability or item the engine doesn't implement, stops before connecting.
+
+After each battle the bot saves the replay on the server and adds its link
+to runs/showdown/replays.txt (date, result, opponent, link). Replays are
+unlisted by default (anyone with the link can watch; they don't show in
+searches); `--replays public` lists them, `--replays off` saves none.
 
 It follows the battle from Showdown's messages and rebuilds the position in
 the engine at each decision (tests/test_showdown.py checks it against

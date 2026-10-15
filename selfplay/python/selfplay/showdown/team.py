@@ -7,7 +7,9 @@ to Showdown is the one the engine sees.
 """
 from __future__ import annotations
 
+import difflib
 import re
+from pathlib import Path
 
 from selfplay.showdown.data import to_id
 
@@ -107,3 +109,50 @@ def pack_team(text: str) -> str:
             "" if s["level"] == 100 else str(s["level"]), "",
         ]))
     return "]".join(out)
+
+
+def team_folders() -> list[Path]:
+    """Where --team looks, your own teams first: data/teams, data/my_teams,
+    then the tournament corpus (the folders self-play trains on)."""
+    from selfplay.env import DEFAULT_CORPUS
+    folders = [Path(s.rsplit("=", 1)[0]) if re.search(r"=[\d.]+$", s) else Path(s) for s in DEFAULT_CORPUS]
+    return [f for f in folders[1:] + folders[:1] if f.is_dir()]
+
+
+def find_team(name: str) -> Path:
+    """A paste file: the path given, else that name in one of the team
+    folders. A name may carry its folder as the team ratings print it
+    ("teams/Big 6 Chople"), and may leave out ".txt"."""
+    candidates = [Path(name), Path(f"{name}.txt")]
+    for folder in team_folders():
+        for base in (folder, folder.parent):
+            candidates += [base / name, base / f"{name}.txt"]
+    for p in candidates:
+        if p.is_file():
+            return p
+    known = {p.stem: p for f in team_folders() for p in f.glob("*.txt")}
+    close = difflib.get_close_matches(Path(name).stem, list(known), n=6, cutoff=0.4)
+    where = ", ".join(str(f) for f in team_folders())
+    raise SystemExit(f"no team file {name!r} (looked here and in {where})"
+                     + ("; did you mean:\n  " + "\n  ".join(close) if close else ""))
+
+
+def check_team(text: str) -> tuple[list[str], list[str]]:
+    """(errors, warnings) for playing `text` on Showdown: Reg M-C rules it
+    breaks, and moves, abilities or items the engine doesn't implement (the
+    bot couldn't follow its own battle). An item legal on Showdown but
+    missing from the usage stats is only a warning."""
+    from selfplay import parse_team, validate_team
+    from selfplay.showdown.data import Data
+    errors, warnings = [], []
+    for kind, message in validate_team(text):
+        (warnings if kind == "ItemNotInUsage" else errors).append(message)
+    d = Data()
+    for s in parse_team(text):
+        for what, names, known in (("move", s["moves"], d.supported_moves),
+                                   ("ability", [s["ability"]], d.supported_abilities),
+                                   ("item", [s["item"]] if s["item"] else [], d.supported_items)):
+            for n in names:
+                if to_id(n) not in known:
+                    errors.append(f"{s['name']}: the engine doesn't implement the {what} {n}")
+    return errors, warnings

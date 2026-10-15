@@ -77,6 +77,15 @@ def login(name: str, password: str | None, challstr: str, url: str = LOGIN_URL) 
     return assertion
 
 
+def replay_id(room: str) -> str:
+    """The replay id a battle room's replay is saved under (its link adds
+    a password for an unlisted one): Showdown's Room.getReplayData."""
+    rest = room[len("battle-"):]
+    if room.endswith("pw"):
+        rest = rest[:rest.rfind("-", 0, len(rest) - 2)]
+    return rest
+
+
 @dataclass
 class Battle:
     room: str
@@ -98,10 +107,13 @@ class Client:
                  server: str = MAIN_SERVER, fmt: str = FORMAT, challenge: list[str] = (),
                  accept: list[str] | None = None, games: int = 1, ots: bool = True,
                  timer: bool = False, log_dir: str = "runs/showdown",
-                 local: bool = False, think_delay: float = 0.3, ots_wait: float = 20.0, out=print):
+                 local: bool = False, think_delay: float = 0.3, ots_wait: float = 20.0,
+                 replays: str = "unlisted", out=print):
         """`make_bot()` -> a fresh Bot per battle. `challenge`: users to
         challenge (one battle at a time, in turn). `accept`: accept
-        challenges from these users ([] = anyone; None = none)."""
+        challenges from these users ([] = anyone; None = none). `replays`:
+        save each battle's replay on the server, "unlisted" (watchable by
+        link), "public" or "off"."""
         self.make_bot, self.team, self.name, self.password = make_bot, team, name, password
         self.server, self.format = server, fmt
         self.to_challenge = list(challenge)
@@ -110,6 +122,8 @@ class Client:
         self.ots, self.timer = ots, timer
         self.log_dir = Path(log_dir)
         self.local, self.think_delay, self.ots_wait = local, think_delay, ots_wait
+        self.replays = replays
+        self.replays_waiting: dict[str, tuple[str, str, str]] = {}  # replay id -> (room, result, opponent)
         self.out = out
         self.battles: dict[str, Battle] = {}
         self.record = {"win": 0, "loss": 0, "tie": 0}
@@ -133,6 +147,12 @@ class Client:
             self.ws = ws
             reader = asyncio.create_task(self._read())
             await self.done.wait()
+            # The last replays' links come a moment after the battle ends.
+            deadline = time.time() + 20
+            while self.replays_waiting and not reader.done() and time.time() < deadline:
+                await asyncio.sleep(0.25)
+            for room, *_ in self.replays_waiting.values():
+                self.out(f"[{room}] no replay link came back from the server")
             reader.cancel()
         self.worker.shutdown(wait=False)
 
@@ -194,7 +214,9 @@ class Client:
             self.out(f"name refused: {'|'.join(parts[2:])}")
             self.done.set()
         elif kind == "popup":
-            self.out("server: " + "|".join(parts[2:]).replace("||", "\n  "))
+            text = "|".join(parts[2:])
+            if not self.replay_popup(text):
+                self.out("server: " + text.replace("||", "\n  "))
         elif kind == "pm" and len(parts) > 4:
             sender, receiver, text = parts[2].strip(), parts[3].strip(), "|".join(parts[4:])
             if to_id(receiver) == to_id(self.name) and text.startswith("/challenge "):
@@ -210,6 +232,36 @@ class Client:
                 return
             for user, fmt in (data.get("challengesFrom") or {}).items():
                 await self.incoming(user, fmt)
+
+    def replay_popup(self, text: str) -> bool:
+        """A saved replay's link (or the reason it wasn't saved): print it
+        and add it to replays.txt. False: some other popup."""
+        if "replay" not in text.lower():
+            return False
+        if not self.replays_waiting:
+            return True  # a battle's replay saved again (hiding it re-saves it)
+        m = re.search(r'href="(https?://[^"]+)"', text)
+        fullid = m.group(1).rstrip("/").rsplit("/", 1)[-1] if m else ""
+        saved = fullid not in ("", "undefined", "null")
+        key = next((k for k in self.replays_waiting
+                    if fullid == k or fullid.startswith(k + "-") or fullid.endswith("-" + k)
+                    or f"-{k}-" in fullid), None)
+        if key is None:
+            if saved:
+                return True  # another battle's, already written down
+            key = next(iter(self.replays_waiting))  # an error: answers come in order
+        room, result, foe = self.replays_waiting.pop(key)
+        if not saved:
+            reason = ("the server gave it no id (a local server stores no replays)" if m else
+                      re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text).replace("|html|", "")).strip())
+            self.out(f"[{room}] replay not saved: {reason}")
+            return True
+        url = m.group(1)
+        self.out(f"[{room}] replay: {url}")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.log_dir / "replays.txt", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M')}  {result:4s}  vs {foe}  {url}  ({room})\n")
+        return True
 
     async def series_line(self, room: str, line: str):
         """A best-of-3's own room: who won each game, and its end."""
@@ -277,6 +329,11 @@ class Client:
         b = self.battles.get(room)
         if b is None:
             if not any(l.startswith("|init|battle") for l in lines):
+                # A room we've finished with: only its errors matter (say,
+                # a replay command refused).
+                for line in lines:
+                    if line.startswith("|error|"):
+                        self.out(f"[{room}] {line[7:]}")
                 return
             try:
                 b = Battle(room, Tracker(self.team, our_name=self.name), self.make_bot())
@@ -359,6 +416,13 @@ class Client:
         path = self.log_dir / f"{b.room}.log"
         path.write_text("\n".join(b.log) + "\n", encoding="utf-8")
         self.out(f"[{b.room}] log: {path}")
+        if self.replays != "off":
+            # Unlisted: the replay gets a password in its link and stays out
+            # of searches.
+            if self.replays == "unlisted":
+                await self.send("/hidereplay", b.room)
+            await self.send("/savereplay", b.room)
+            self.replays_waiting[replay_id(b.room)] = (b.room, result, b.tracker.foe.name or "?")
         await self.send(f"/leave {b.room}")
         del self.battles[b.room]
         # A best-of-3 counts as one match, when its room says it's over.
