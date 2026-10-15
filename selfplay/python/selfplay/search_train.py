@@ -163,7 +163,7 @@ class SearchTrainer:
         # Per game: buffer indices of its examples so far, and their sides.
         self.pending: list[list[tuple[int, int]]] = [[] for _ in range(cfg.envs)]
         self.rounds = self.games = self.examples = 0
-        self.log = open(out / "log.jsonl", "a")
+        self.log = open(out / "log.jsonl", "a", encoding="utf-8")
 
     def play(self) -> int:
         """One round of games; returns the examples added."""

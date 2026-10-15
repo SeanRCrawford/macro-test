@@ -26,14 +26,14 @@ class Data:
     def __init__(self, root: Path = DATA):
         self.root = root
         self._corpus = None
-        dex = json.loads((root / "dex.json").read_text())
+        dex = json.loads((root / "dex.json").read_text(encoding="utf-8"))
         self.species = dex["species"]
         self.moves = dex["moves"]
         self.items = dex["items"]
         self.abilities = dex["abilities"]
-        pool = json.loads((root / "regmc_pool.json").read_text())
+        pool = json.loads((root / "regmc_pool.json").read_text(encoding="utf-8"))
         self.pool = pool["species"]
-        support = json.loads((root / "support.json").read_text())
+        support = json.loads((root / "support.json").read_text(encoding="utf-8"))
         self.supported_moves = set(support["moves"])
         self.supported_abilities = set(support["abilities"])
         self.supported_items = set(support["items"])

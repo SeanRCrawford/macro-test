@@ -12,7 +12,7 @@ def test_summary_pools_evaluations_and_drops_repeated_updates(tmp_path):
                           "vs_greedy": 0.9}
     # Updates 3-4 were played, then the run resumed from update 2 and replayed them.
     lines += [entry(1, 0.5), entry(2, 0.5), entry(3, 0.0), entry(4, 0.0), entry(3, 0.7), entry(4, 0.7)]
-    log.write_text("\n".join(json.dumps(e) for e in lines) + "\n")
+    log.write_text("\n".join(json.dumps(e) for e in lines) + "\n", encoding="utf-8")
     distill, train = read(log)
     assert len(distill) == 1 and [e["update"] for e in train] == [1, 2, 3, 4]
     out = summarize(tmp_path, rows=2, last=2)

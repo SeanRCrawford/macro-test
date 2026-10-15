@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -138,10 +139,13 @@ class Client:
     async def _read(self):
         try:
             async for message in self.ws:
-                await self.handle(message)
-        except Exception as e:  # report and stop
+                try:
+                    await self.handle(message)
+                except Exception as e:  # a bug here: report it in full, keep the connection
+                    self.out(f"error handling a message: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        except Exception as e:  # the connection itself: report and stop
             self.out(f"connection closed: {type(e).__name__}: {e}")
-            self.done.set()
+        self.done.set()
 
     async def send(self, text: str, room: str = ""):
         await self.ws.send(f"{room}|{text}")
@@ -274,7 +278,17 @@ class Client:
         if b is None:
             if not any(l.startswith("|init|battle") for l in lines):
                 return
-            b = Battle(room, Tracker(self.team, our_name=self.name), self.make_bot())
+            try:
+                b = Battle(room, Tracker(self.team, our_name=self.name), self.make_bot())
+            except Exception as e:
+                # It would fail the same way in every battle: concede this
+                # one rather than leave the opponent waiting, and stop.
+                self.out(f"[{room}] couldn't set up the bot, conceding and stopping: "
+                         f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
+                await self.send("/forfeit", room)
+                await self.send(f"/leave {room}")
+                self.done.set()
+                return
             self.battles[room] = b
             self.started.append(room)
             self.out(f"[{room}] started")

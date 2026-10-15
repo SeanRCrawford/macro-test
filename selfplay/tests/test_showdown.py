@@ -279,3 +279,19 @@ def test_login_gets_past_a_server_that_refuses_pythons_default_client():
             login("MyBot", "secret", "4|abc", url)
     finally:
         server.shutdown()
+
+
+def test_the_client_names_the_encoding_of_every_file_it_reads():
+    """Windows reads a file as cp1252 unless told otherwise, and dex.json
+    isn't valid cp1252: loading the client's data with Python's missing-
+    encoding warning as an error must pass."""
+    import os
+    import subprocess
+    import sys
+    code = ("from selfplay.showdown.data import Data; Data().corpus_usage(); "
+            "from selfplay.showdown.__main__ import TEAMS; from selfplay.showdown.team import complete_paste; "
+            "[complete_paste(p.read_text(encoding='utf-8-sig')) for p in sorted(TEAMS.glob('*.txt'))[:3]]")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    r = subprocess.run([sys.executable, "-X", "warn_default_encoding", "-W", "error::EncodingWarning",
+                        "-c", code], env=env, capture_output=True, text=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr[-2000:]

@@ -131,7 +131,7 @@ def main():
         print(f"{names[t][:60]:<60} {mean:8.3f} {weighted:9.3f} {ci:6.3f}  "
               + "; ".join(f"{names[m][:28]} {s:.2f}" for m, s, _ in worst))
     if a.csv:
-        with open(a.csv, "w", newline="") as f:
+        with open(a.csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["team", "opponent", "opponent_weight", "score", "games"])
             for t, *_, per in rows:

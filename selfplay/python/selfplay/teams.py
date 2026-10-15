@@ -228,7 +228,7 @@ def main():
         print(f"{s:<24} {len(ts):5d} {np.mean([elo[t] for t in ts]):+9.0f} {vs:7.3f}")
 
     if a.csv:
-        with open(a.csv, "w", newline="") as f:
+        with open(a.csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["rank", "team", "elo", "elo_se", "score", "games", "vs_top", "vs_top_games",
                         "placed", "species"])

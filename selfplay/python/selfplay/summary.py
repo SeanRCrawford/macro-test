@@ -27,7 +27,7 @@ def read(path: Path) -> tuple[list[dict], list[dict]]:
     """Distillation entries, and training entries; a resumed run's repeated
     updates (since its last saved model) replace the earlier ones."""
     distill, train = [], []
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         e = json.loads(line)

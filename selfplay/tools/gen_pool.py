@@ -95,9 +95,9 @@ def parse_spread(s):
 
 
 def main():
-    leads = parse_leads((STATS_DIR / f"leads-{FORMAT}.txt").read_text())
-    moveset = parse_moveset((STATS_DIR / f"moveset-{FORMAT}.txt").read_text())
-    dex = json.loads((ROOT / "data" / "dex.json").read_text())
+    leads = parse_leads((STATS_DIR / f"leads-{FORMAT}.txt").read_text(encoding="utf-8"))
+    moveset = parse_moveset((STATS_DIR / f"moveset-{FORMAT}.txt").read_text(encoding="utf-8"))
+    dex = json.loads((ROOT / "data" / "dex.json").read_text(encoding="utf-8"))
 
     problems = []
 

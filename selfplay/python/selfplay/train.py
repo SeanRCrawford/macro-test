@@ -144,7 +144,7 @@ class Trainer:
         self.minutes_done = 0.0 # of --minutes, before this process (--resume)
         from selfplay.gpu import GpuMonitor
         self.gpu = GpuMonitor(cfg.device)
-        self.log = open(out / "log.jsonl", "a")
+        self.log = open(out / "log.jsonl", "a", encoding="utf-8")
 
     def pfsp_weight(self, m: int) -> float:
         """PFSP: favour the past versions the learner still struggles

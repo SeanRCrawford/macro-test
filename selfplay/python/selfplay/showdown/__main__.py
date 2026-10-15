@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import difflib
 import os
+import sys
 from pathlib import Path
 
 import torch
@@ -77,6 +78,13 @@ def main():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
+    # A Windows console (or output sent to a file) may not take every
+    # character in a name or a chat line: show those as "?", don't stop.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     if not a.challenge and a.accept is None:
         p.error("give --challenge USER or --accept [USER ...]")
 
