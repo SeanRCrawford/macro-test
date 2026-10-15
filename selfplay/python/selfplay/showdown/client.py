@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -27,22 +28,49 @@ LOGIN_URL = "https://play.pokemonshowdown.com/action.php"
 FORMAT = "gen9championsvgc2026regmc"
 
 
-def login(name: str, password: str | None, challstr: str) -> str:
+# The login server sits behind Cloudflare, which refuses Python's default
+# "Python-urllib" user agent (HTTP 403).
+USER_AGENT = "Mozilla/5.0 (compatible; selfplay-showdown-client)"
+
+
+def fetch(url: str, form: dict | None = None) -> str:
+    """GET `url`, or POST `form` to it; on a 403, try once more with the
+    requests package (another client signature) if it is installed."""
+    data = urllib.parse.urlencode(form).encode() if form is not None else None
+    req = urllib.request.Request(url, data, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode()
+    except urllib.error.HTTPError as e:
+        if e.code != 403:
+            raise
+        try:
+            import requests
+        except ImportError:
+            raise RuntimeError(f"{url} refused the request (HTTP 403); pip install requests "
+                               "to try another way") from e
+        r = (requests.post(url, data=form, timeout=30) if form is not None
+             else requests.get(url, timeout=30))
+        if r.status_code == 403:
+            raise RuntimeError(f"{url} refused the request (HTTP 403) from this connection; "
+                               "try another network, or log in to play.pokemonshowdown.com in a "
+                               "browser from it once") from e
+        r.raise_for_status()
+        return r.text
+
+
+def login(name: str, password: str | None, challstr: str, url: str = LOGIN_URL) -> str:
     """The assertion for /trn: a registered name needs its password; an
     unregistered one gets an assertion without."""
     if password:
-        data = urllib.parse.urlencode({"act": "login", "name": name, "pass": password,
-                                       "challstr": challstr}).encode()
-        with urllib.request.urlopen(LOGIN_URL, data, timeout=30) as r:
-            text = r.read().decode()
+        text = fetch(url, {"act": "login", "name": name, "pass": password, "challstr": challstr})
         reply = json.loads(text[1:] if text.startswith("]") else text)
         if not reply.get("actionsuccess") or not reply.get("assertion"):
             raise RuntimeError(f"login failed: {reply.get('assertion') or reply}")
         assertion = reply["assertion"]
     else:
         q = urllib.parse.urlencode({"act": "getassertion", "userid": to_id(name), "challstr": challstr})
-        with urllib.request.urlopen(f"{LOGIN_URL}?{q}", timeout=30) as r:
-            assertion = r.read().decode().strip()
+        assertion = fetch(f"{url}?{q}").strip()
     if assertion.startswith(";"):
         raise RuntimeError(f"login failed for {name}: {assertion} (a registered name needs --password)")
     return assertion
@@ -143,7 +171,12 @@ class Client:
                 await self.send(f"/trn {self.name},0,")
             else:
                 loop = asyncio.get_running_loop()
-                assertion = await loop.run_in_executor(None, login, self.name, self.password, challstr)
+                try:
+                    assertion = await loop.run_in_executor(None, login, self.name, self.password, challstr)
+                except Exception as e:
+                    self.out(f"login failed: {type(e).__name__}: {e}")
+                    self.done.set()
+                    return
                 await self.send(f"/trn {self.name},0,{assertion}")
         elif kind == "updateuser":
             user = parts[2].strip() if len(parts) > 2 else ""

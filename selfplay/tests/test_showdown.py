@@ -228,3 +228,54 @@ def test_completed_pastes_upload_the_team_the_engine_plays():
             assert p["evs"] == a["points"] and (p["nature"] or "Serious") == a["nature"], path.name
         assert pack_team(done).count("]") == len(after) - 1
     assert filled > 0
+
+
+def test_login_gets_past_a_server_that_refuses_pythons_default_client():
+    """Showdown's login server (behind Cloudflare) answers Python-urllib's
+    user agent with 403; the client sends its own, and on a 403 tries the
+    requests package."""
+    import threading
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from selfplay.showdown.client import login
+
+    blocked = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def reply(self, form):
+            agent = self.headers.get("User-Agent", "")
+            if any(b in agent for b in blocked):
+                self.send_response(403)
+                self.end_headers()
+                return
+            ok = form.get("challstr") == ["4|abc"]
+            body = (']{"actionsuccess":true,"assertion":"signed"}' if form.get("act") == ["login"]
+                    else "signed") if ok else ";;bad challstr"
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def do_GET(self):
+            self.reply(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            self.reply(urllib.parse.parse_qs(self.rfile.read(n).decode()))
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/action.php"
+    try:
+        for block in (["Python-urllib"], ["Python-urllib", "selfplay-showdown-client"]):
+            blocked[:] = block
+            assert login("MyBot", "secret", "4|abc", url) == "signed"
+            assert login("MyBot", None, "4|abc", url) == "signed"
+        blocked[:] = ["Python-urllib", "selfplay-showdown-client", "python-requests"]
+        with pytest.raises(RuntimeError, match="403"):
+            login("MyBot", "secret", "4|abc", url)
+    finally:
+        server.shutdown()
