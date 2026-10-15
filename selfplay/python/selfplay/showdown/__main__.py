@@ -4,6 +4,10 @@
     python -m selfplay.showdown runs/ppo3/model.pt --team my_team.txt --user MyBot --password ... \\
         --challenge mikumiku37
 
+--team is a paste file, or the name of one in the repo's data/teams folder
+("Big 6 Chople"; quote names with spaces). A set without an EVs line gets
+the usage spread the engine trained with, and that is what is uploaded.
+
     # Wait for challenges from these users (or anyone, with --accept alone):
     python -m selfplay.showdown runs/ppo3/model.pt --team my_team.txt --user MyBot --password ... \\
         --accept YourName mikumiku37 --games 10
@@ -23,10 +27,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import os
 from pathlib import Path
 
 import torch
+
+TEAMS = Path(__file__).resolve().parents[4] / "data" / "teams"
+
+
+def find_team(name: str) -> Path:
+    """A paste file: the path given, else that name in data/teams."""
+    for p in (Path(name), TEAMS / name, TEAMS / f"{name}.txt"):
+        if p.is_file():
+            return p
+    known = sorted(p.stem for p in TEAMS.glob("*.txt"))
+    close = difflib.get_close_matches(Path(name).stem, known, n=5, cutoff=0.4)
+    raise SystemExit(f"no team file {name!r} (looked here and in {TEAMS})"
+                     + (f"; did you mean: {', '.join(repr(c) for c in close)}" if close else ""))
 
 
 def main():
@@ -37,7 +55,8 @@ def main():
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("model")
-    p.add_argument("--team", required=True, help="the bot's team: a Showdown paste file")
+    p.add_argument("--team", required=True,
+                   help="the bot's team: a Showdown paste file, or a name in data/teams")
     p.add_argument("--user", required=True, help="the bot's Showdown account")
     p.add_argument("--password", default=None, help="its password (or SHOWDOWN_PASSWORD)")
     p.add_argument("--challenge", nargs="+", default=[], help="users to challenge, in turn")
@@ -61,7 +80,15 @@ def main():
     if not a.challenge and a.accept is None:
         p.error("give --challenge USER or --accept [USER ...]")
 
-    team = Path(a.team).read_text(encoding="utf-8")
+    from selfplay import validate_team
+    from selfplay.showdown.team import complete_paste
+    path = find_team(a.team)
+    team, notes = complete_paste(path.read_text(encoding="utf-8-sig"))
+    print(f"team: {path}")
+    for note in notes:
+        print("  " + note)
+    for kind, message in validate_team(team):
+        print(f"  warning ({kind}): {message}")
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
     tree = None if a.policy else TreeConfig(budget=a.budget)

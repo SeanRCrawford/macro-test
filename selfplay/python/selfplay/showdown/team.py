@@ -2,6 +2,8 @@
 
 The engine parses the paste itself when it rebuilds a position, so these
 only need the names, species, item, ability, moves and spread.
+`complete_paste` writes out what the engine fills in, so the team uploaded
+to Showdown is the one the engine sees.
 """
 from __future__ import annotations
 
@@ -62,6 +64,34 @@ def parse_set(lines: list[str]) -> dict:
 
 def parse_paste(text: str) -> list[dict]:
     return [parse_set(b) for b in _blocks(text)]
+
+
+def complete_paste(text: str) -> tuple[str, list[str]]:
+    """The paste spelled out as the engine reads it, so Showdown plays the
+    same team: a set without an `EVs:` line gets the usage spread the engine
+    fills in (Showdown would give it no stat points), and a `Nature: X` line
+    (which Showdown ignores) becomes `X Nature`. Returns the paste and a
+    note per change."""
+    from selfplay import parse_team
+    sets = parse_team(text)
+    blocks = _blocks(text)
+    if len(sets) != len(blocks):
+        raise ValueError(f"the paste has {len(blocks)} blocks but the engine reads {len(sets)} sets")
+    out, notes = [], []
+    for lines, s in zip(blocks, sets):
+        lines = list(lines)
+        if not any(line.endswith(" Nature") for line in lines[1:]) and s["nature"] != "Serious":
+            lines = [line for line in lines if not line.lower().startswith("nature:")]
+            lines.insert(1, f"{s['nature']} Nature")
+            notes.append(f"{s['name']}: nature written as '{s['nature']} Nature' (Showdown ignores 'Nature:')")
+        if s["points_filled"]:
+            evs = " / ".join(f"{p} {n}" for p, n in zip(s["points"], STATS) if p) or "0 HP"
+            first_move = next((i for i, line in enumerate(lines) if line[:1] in "-~"), len(lines))
+            lines.insert(first_move, f"EVs: {evs}")
+            notes.append(f"{s['name']}: no EVs line, so the usage spread the bot trained with: "
+                         f"{s['nature']}, {evs}")
+        out.append("\n".join(lines))
+    return "\n\n".join(out) + "\n", notes
 
 
 def pack_team(text: str) -> str:

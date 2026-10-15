@@ -203,3 +203,28 @@ if __name__ == "__main__":
               + "".join(f"\n  {e}" for e in errors[:10]))
         for k in sorted(seen):
             print(f"{k:22s} {out[k]:5d} / {seen[k]:5d} wrong" + (f"   e.g. {examples[k]}" if k in examples else ""))
+
+
+def test_completed_pastes_upload_the_team_the_engine_plays():
+    """A paste without EVs (or with 'Nature: X') is uploaded as the engine
+    reads it: the same spread and nature, nothing left for usage to fill."""
+    from selfplay import parse_team
+    from selfplay.showdown.team import complete_paste, pack_team, parse_paste
+    teams = sorted((Path(__file__).resolve().parents[2] / "data" / "teams").glob("*.txt"))
+    if not teams:
+        pytest.skip("no data/teams")
+    filled = 0
+    for path in teams:
+        text = path.read_text(encoding="utf-8-sig")
+        try:
+            before = parse_team(text)
+        except ValueError:
+            continue  # not a paste the engine reads
+        done, _ = complete_paste(text)
+        after = parse_team(done)
+        filled += sum(s["points_filled"] for s in before)
+        for b, a, p in zip(before, after, parse_paste(done)):
+            assert (a["points"], a["nature"], a["points_filled"]) == (b["points"], b["nature"], False), path.name
+            assert p["evs"] == a["points"] and (p["nature"] or "Serious") == a["nature"], path.name
+        assert pack_team(done).count("]") == len(after) - 1
+    assert filled > 0
