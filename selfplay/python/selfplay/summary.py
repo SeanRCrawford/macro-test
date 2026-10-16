@@ -51,10 +51,12 @@ def summarize(run: Path, rows: int = 16, last: int = 10, eval_games: int = 400) 
     if distill:
         evals = [e for e in distill if "vs_teacher" in e]
         out.append(f"distillation: {len(distill)} rounds, {distill[-1]['minutes']:.0f} min")
-        out.append(f"{'min':>6s} {'agreement':>9s} {'kl':>7s} {'value_mse':>9s} {'opp_kl':>7s} {'vs_teacher':>10s}")
+        out.append(f"{'min':>6s} {'agreement':>9s} {'kl':>7s} {'value_mse':>9s} {'opp_kl':>7s} {'vs_teacher':>10s}"
+                   f" {'entropy':>7s} {'teacher':>7s}")
         for e in evals or distill[-1:]:
             out.append(f"{e['minutes']:6.0f} {e['agreement']:9.3f} {e['kl']:7.3f} {e['value_mse']:9.3f} "
-                       f"{e['opponent_kl']:7.3f} {e.get('vs_teacher', float('nan')):10.3f}")
+                       f"{e['opponent_kl']:7.3f} {e.get('vs_teacher', float('nan')):10.3f}"
+                       f" {e.get('entropy', float('nan')):7.3f} {e.get('teacher_entropy', float('nan')):7.3f}")
         out.append("")
     if not train:
         return out or ["no training entries"]
@@ -62,9 +64,10 @@ def summarize(run: Path, rows: int = 16, last: int = 10, eval_games: int = 400) 
     edges = np.linspace(train[0]["minutes"] - 1e-9, span, rows + 1)
     out.append(f"training: {train[-1]['update']} updates, {train[-1]['minutes']:.0f} min, "
                f"{train[-1]['games'] / 1e6:.1f}M games")
+    kicked = any("teacher_kl" in e for e in train)
     out.append(f"{'min':>6s} {'games':>7s} {'g/s':>5s} {'lr':>8s} {'entropy':>7s} {'v_loss':>6s} "
                f"{'opp_ce':>6s} {'vs_baseline':>11s} {'(Elo)':>6s} {'n':>3s} {'vs_greedy':>9s} "
-               f"{'gpu_W':>5s} {'vram':>5s}")
+               f"{'gpu_W':>5s} {'vram':>5s}" + (f" {'t_kl':>6s}" if kicked else ""))
     for lo, hi in zip(edges[:-1], edges[1:]):
         group = [e for e in train if lo < e["minutes"] <= hi]
         if not group:
@@ -80,7 +83,8 @@ def summarize(run: Path, rows: int = 16, last: int = 10, eval_games: int = 400) 
                    f"{np.mean([g['value_loss'] for g in group]):6.3f} "
                    f"{np.mean([g['opponent_ce'] for g in group]):6.3f} "
                    f"{base:11.3f} {elo(base) if n else float('nan'):+6.0f} {n:3d} {greedy:9.3f} "
-                   f"{watts:5.1f} {vram:5.2f}")
+                   f"{watts:5.1f} {vram:5.2f}"
+                   + (f" {pooled(group, 'teacher_kl')[0]:6.3f}" if kicked else ""))
     evals = [e for e in train if "vs_baseline" in e][-last:]
     if evals:
         s, n = pooled(evals, "vs_baseline")

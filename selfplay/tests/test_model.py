@@ -1,4 +1,6 @@
 """The policy network and the PPO plumbing (needs torch and the built module)."""
+import json
+
 import numpy as np
 import pytest
 
@@ -165,3 +167,45 @@ def test_learning_rate_warms_up_after_each_start_then_follows_the_schedule():
     assert scheduled_lr(c, 500, 1000, 600) == pytest.approx(1.1e-4)      # the plain schedule
     assert scheduled_lr(c, 500, 1000, 0) == pytest.approx(1.1e-5)        # a resume warms up again
     assert scheduled_lr(Config(lr=3e-4), 10, 100, 0) == 3e-4             # neither: constant
+
+
+def test_kickstarting_pulls_the_policy_toward_the_teacher(tmp_path):
+    """PPO with a teacher KL: the weight fades over the schedule, the KL is
+    logged, and with a large weight the student moves toward the teacher."""
+    from dataclasses import asdict
+
+    from selfplay.train import kickstart_weight, policy_kl
+    torch.manual_seed(123)
+    teacher = PolicyNet(16, 1)
+    with torch.no_grad():  # a decided teacher, far from the student's near-uniform start
+        for prm in teacher.policy_head.parameters():
+            prm.mul_(8)
+    path = tmp_path / "teacher.pt"
+    torch.save({"model": teacher.state_dict(), "config": asdict(Config(d=16, layers=1))}, path)
+    c = Config(kickstart=str(path), kickstart_coef=2.0, kickstart_minutes=100)
+    assert kickstart_weight(c, 0) == 2.0 and kickstart_weight(c, 50) == 1.0 and kickstart_weight(c, 150) == 0.0
+    assert kickstart_weight(Config(), 0) == 0.0
+
+    def trained_gap(kick: bool, out):
+        cfg = Config(envs=16, steps=16, d=16, layers=1, league_frac=0.0, minibatch=256, epochs=2, lr=3e-3,
+                     kickstart=str(path) if kick else "", kickstart_coef=50.0, kickstart_minutes=1e6)
+        t = Trainer(cfg, out)
+        obs = t.env.observe()
+        rows = np.flatnonzero(obs.decisions.reshape(-1) != 0)
+        batch = to_tensors(obs, rows)
+        legal = batch[3].bool()
+
+        def gap():
+            with torch.no_grad():
+                return policy_kl(teacher(*batch)[0], t.model(*batch)[0], legal).mean().item()
+
+        before = gap()
+        t.run(minutes=60, max_updates=3)
+        return before, gap()
+
+    before, kicked = trained_gap(True, tmp_path / "kick")
+    entries = [json.loads(line) for line in (tmp_path / "kick" / "log.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert all("teacher_kl" in e and 49 < e["kickstart"] <= 50 for e in entries)
+    _, plain = trained_gap(False, tmp_path / "plain")
+    print("gap to teacher: start %.4f, kickstarted %.4f, plain %.4f" % (before, kicked, plain))
+    assert kicked < 0.8 * before and kicked < 0.8 * plain, (before, kicked, plain)

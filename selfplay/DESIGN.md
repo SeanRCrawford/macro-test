@@ -1129,7 +1129,25 @@ memory reserved, now given back when it ends.
 
 Next, **runs/ppo6**: d=320 (8.2M parameters, the peers' size), distilled
 from ppo5 for three hours, peak learning rate 1.5e-4 (a wider network
-takes a smaller step) with an hour's warm-up. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+takes a smaller step) with an hour's warm-up.
+
+**runs/ppo6** after 12 hours (721 minutes, 9.8M games, 226 games/s): 0.404
+against ppo5, about -68 Elo, which is +21 over ppo4: exactly where ppo5
+stood against ppo4 after its own 12 hours. The warm-up didn't keep what
+the distillation handed over; both runs relearn at the pace PPO allows, as
+if the distillation's head start were spent in the first hours. Plain PPO
+moves a distilled student away from its teacher (the policy gradient is
+noisy where the teacher's choices are fine-grained, and the entropy bonus
+spreads the student out: ppo6's entropy is 1.38 at 12 hours, ppo5 ended at
+1.15). **Kickstarting** (Schmitt et al. 2018) keeps it there while the
+reinforcement signal takes over: PPO adds the teacher's KL on the run's own
+positions (`--kickstart MODEL`), its weight fading from `--kickstart-coef`
+to 0 over `--kickstart-minutes`. On the run's own positions it also
+corrects what distillation on the teacher's positions can't (the student's
+own mistakes lead it to positions the teacher rarely reaches). In a small
+test, plain PPO moved the student away from the teacher (KL 0.011 ->
+0.015 in three updates) and kickstarted PPO toward it (-> 0.008). The
+distillation log now has the student's and the teacher's entropy. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.

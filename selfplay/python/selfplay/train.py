@@ -61,6 +61,10 @@ class Config:
     profile: bool = False           # profile 10 minibatches of the second update, print the table
     save_every: int = 0             # keep a numbered checkpoint every this many updates (0: none)
     baseline: str = ""              # a model.pt to play head to head at each evaluation (sampled)
+    kickstart: str = ""             # a teacher model.pt: PPO also learns its policy (KL) on the run's own
+                                    # positions, the weight fading from kickstart_coef to 0 over kickstart_minutes
+    kickstart_coef: float = 1.0
+    kickstart_minutes: float = 720.0
 
 
 def scheduled_lr(c: Config, done: float, minutes: float, fresh: float) -> float:
@@ -72,6 +76,22 @@ def scheduled_lr(c: Config, done: float, minutes: float, fresh: float) -> float:
     if c.lr_warmup > 0:
         lr *= min(1.0, 0.1 + 0.9 * fresh / c.lr_warmup)
     return lr
+
+
+def kickstart_weight(c: Config, done: float) -> float:
+    """The teacher KL's weight `done` minutes into the run's schedule."""
+    if not c.kickstart or c.kickstart_minutes <= 0:
+        return 0.0
+    return c.kickstart_coef * max(0.0, 1.0 - done / c.kickstart_minutes)
+
+
+def policy_kl(t_logp, s_logp, legal):
+    """KL(teacher || student) over the legal actions, per row."""
+    return (t_logp.exp() * (t_logp - s_logp)).masked_fill(~legal, 0).sum(-1)
+
+
+def policy_entropy(logp, legal):
+    return -(logp.exp() * logp).masked_fill(~legal, 0).sum(-1)
 
 
 def to_tensors(obs, rows=None):
@@ -138,6 +158,7 @@ class Trainer:
         self.model.amp_heads = cfg.amp_heads
         self.baseline = None
         self.opt = torch.optim.Adam(self.model.parameters(), lr=cfg.lr)
+        self.teacher = None  # kickstarting's, loaded when the run starts
         self.env = SelfPlayEnv(cfg.envs, seed=cfg.seed, threads=cfg.threads,
                                perfect_info=cfg.perfect_info)
         if torch.device(cfg.device).type == "cuda":
@@ -317,7 +338,10 @@ class Trainer:
         adv = torch.from_numpy(adv)
         return adv, adv + d["value"].float()
 
-    def update(self, d):
+    def update(self, d, kick_weight: float = 0.0):
+        """One PPO update on rollout `d`; `kick_weight`: the teacher KL's
+        weight (kickstarting). Returns pg, value, entropy, opponent CE and
+        teacher KL."""
         c = self.cfg
         dev = torch.device(c.device)
         n = len(d["act"])
@@ -360,12 +384,20 @@ class Trainer:
                 opp_ce = (nll * seen).sum() / seen.sum().clamp(min=1)
                 loss = (pg + c.value_coef * vloss - c.entropy * ent + c.uniform_kl * kl_u
                         + c.opponent_coef * opp_ce)
+                kick = torch.zeros((), device=dev)
+                if kick_weight > 0:
+                    # Kickstarting: stay near the teacher's policy on our own
+                    # positions while the reinforcement signal takes over.
+                    with torch.no_grad(), autocast(dev, c.amp):
+                        t_logp, _ = self.teacher(mb["ints"], mb["mons"], mb["field"], mb["masks"], mb["dec"])
+                    kick = policy_kl(t_logp.float(), logp_all.float(), legal).mean()
+                    loss = loss + kick_weight * kick
                 self.opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm)
                 self.opt.step()
                 # Kept on the device: one sync per update, not per minibatch.
-                stats.append(torch.stack([pg, vloss, ent, opp_ce]).detach())
+                stats.append(torch.stack([pg, vloss, ent, opp_ce, kick]).detach())
         if prof is not None:
             self.print_profile(prof, dev)
         return torch.stack(stats).mean(0).tolist()
@@ -466,7 +498,7 @@ class Trainer:
                     with autocast(dev, c.amp):
                         s_logp, s_value, s_opp = self.model(*args)
                     legal = mb["masks"].bool()
-                    kl = (t_logp.exp() * (t_logp - s_logp)).masked_fill(~legal, 0).sum(-1).mean()
+                    kl = policy_kl(t_logp, s_logp, legal).mean()
                     # The opponent head, where the opponent chooses moves.
                     seen = (mb["opp_dec"] == 2).float()
                     opp_legal = mb["opp_masks"].bool()
@@ -479,11 +511,16 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm)
                     self.opt.step()
                     agree = (s_logp.argmax(-1) == t_logp.argmax(-1)).float().mean()
-                    stats.append(torch.stack([kl, vloss, opp_kl, agree]).detach())
+                    # A student fitted by KL(teacher || student) tends to
+                    # spread out more than its teacher: watch both.
+                    s_ent = policy_entropy(s_logp.float(), legal).mean()
+                    t_ent = policy_entropy(t_logp.float(), legal).mean()
+                    stats.append(torch.stack([kl, vloss, opp_kl, agree, s_ent, t_ent]).detach())
             rounds += 1
-            kl, vloss, opp_kl, agree = torch.stack(stats).mean(0).tolist()
+            kl, vloss, opp_kl, agree, s_ent, t_ent = torch.stack(stats).mean(0).tolist()
             entry = {"distill_round": rounds, "minutes": (time.time() - start) / 60, "samples": n,
-                     "kl": kl, "value_mse": vloss, "opponent_kl": opp_kl, "agreement": agree, **self.gpu.take()}
+                     "kl": kl, "value_mse": vloss, "opponent_kl": opp_kl, "agreement": agree,
+                     "entropy": s_ent, "teacher_entropy": t_ent, **self.gpu.take()}
             if time.time() - last_eval > 600 or time.time() - start >= minutes * 60:
                 last_eval = time.time()
                 self.model.eval()
@@ -511,10 +548,18 @@ class Trainer:
                 lr = scheduled_lr(c, (time.time() - start) / 60, minutes, (time.time() - fresh) / 60)
                 for group in self.opt.param_groups:
                     group["lr"] = lr
+            kick_weight = kickstart_weight(c, (time.time() - start) / 60)
+            if kick_weight > 0 and self.teacher is None:
+                from selfplay.evaluate import load
+                self.teacher = load(c.kickstart, c.device)
+            elif kick_weight == 0 and self.teacher is not None:
+                self.teacher = None  # done: give its memory back
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             t0 = time.time()
             data, results, timing = self.rollout()
             t1 = time.time()
-            pg, vl, ent, opp_ce = self.update(data)
+            pg, vl, ent, opp_ce, kick = self.update(data, kick_weight)
             self.updates += 1
             self.run_updates += 1
             vs_self = [r for o, r, _ in results if o is None]
@@ -522,6 +567,7 @@ class Trainer:
                      "games": self.games, "decisions": self.decisions,
                      "samples": len(data["act"]), "pg": pg, "value_loss": vl, "entropy": ent,
                      "opponent_ce": opp_ce,
+                     **({"teacher_kl": kick, "kickstart": kick_weight} if kick_weight > 0 else {}),
                      "lr": self.opt.param_groups[0]["lr"],
                      "rollout_s": t1 - t0, **timing, "update_s": time.time() - t1,
                      "games_per_s": len(results) / max(time.time() - t0, 1e-9),
