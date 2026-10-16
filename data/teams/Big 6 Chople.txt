@@ -1,7 +1,7 @@
 Kingambit @ Chople Berry
 Ability: Defiant
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Kowtow Cleave
 - Sucker Punch
 - Iron Head
@@ -10,7 +10,7 @@ Nature: Adamant
 Basculegion @ Life Orb
 Ability: Adaptability
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Wave Crash
 - Last Respects
 - Aqua Jet
@@ -19,7 +19,7 @@ Nature: Adamant
 Garchomp @ Sitrus Berry
 Ability: Rough Skin
 Level: 50
-Nature: Jolly
+Jolly Nature
 - Dragon Claw
 - Earthquake
 - Rock Slide
@@ -28,7 +28,7 @@ Nature: Jolly
 Charizard @ Charizardite Y
 Ability: Blaze
 Level: 50
-Nature: Timid
+Timid Nature
 - Heat Wave
 - Weather Ball
 - Ancient Power
@@ -37,7 +37,7 @@ Nature: Timid
 Whimsicott @ Focus Sash
 Ability: Prankster
 Level: 50
-Nature: Timid
+Timid Nature
 - Moonblast
 - Tailwind
 - Encore
@@ -46,7 +46,7 @@ Nature: Timid
 Floette-Eternal @ Floettite
 Ability: Flower Veil
 Level: 50
-Nature: Modest
+Modest Nature
 - Moonblast
 - Dazzling Gleam
 - Light of Ruin

@@ -1,0 +1,62 @@
+REGNAR (Gengar) @ Gengarite  
+Ability: Cursed Body  
+EVs: 32 HP / 14 SpD / 20 Spe  
+Modest Nature  
+Level: 50  
+Shiny: Yes  
+- Shadow Ball  
+- Sludge Bomb  
+- Perish Song  
+- Protect  
+
+PRESSURE (Rillaboom) @ Eject Button  
+Ability: Grassy Surge  
+EVs: 32 HP / 1 Def / 32 SpD / 1 Spe  
+Careful Nature  
+Level: 50  
+Shiny: Yes  
+- Fake Out  
+- U-Turn  
+- Grassy Glide  
+- Protect  
+
+MOCHI (Incineroar) @ Passho Berry  
+Ability: Intimidate  
+EVs: 31 HP / 15 Def / 20 SpD  
+Sassy Nature  
+Level: 50  
+Shiny: Yes  
+- Fake Out  
+- Throat Chop  
+- Parting Shot  
+- Protect  
+
+FLOW (Politoed) @ Sitrus Berry  
+Ability: Drizzle  
+EVs: 32 HP / 22 Def / 10 SpD / 2 Spe  
+Calm Nature  
+Level: 50  
+- Weather Ball  
+- Encore  
+- Perish Song  
+- Protect  
+
+BOARDSTATE (Archaludon) @ Leftovers  
+Ability: Stamina  
+EVs: 32 HP / 1 Def / 1 SpA / 32 SpD  
+Bold Nature  
+Level: 50  
+- Dragon Pulse  
+- Flash Cannon  
+- Electro Shot  
+- Protect  
+
+SEQUENCE (Vivillon) @ Focus Sash  
+Ability: Compound Eyes  
+EVs: 2 Def / 32 SpA / 32 Spe  
+Timid Nature  
+Level: 50  
+- Hurricane  
+- Sleep Powder  
+- Rage Powder  
+- Protect  

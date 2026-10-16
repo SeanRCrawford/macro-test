@@ -1,7 +1,7 @@
 Farigiraf @ Sitrus Berry
 Ability: Armor Tail
 Level: 50
-Nature: Calm
+Calm Nature
 - Psychic
 - Helping Hand
 - Trick Room
@@ -10,7 +10,7 @@ Nature: Calm
 Arcanine-Hisui @ Focus Sash
 Ability: Rock Head
 Level: 50
-Nature: Jolly
+Jolly Nature
 - Flare Blitz
 - Extreme Speed
 - Head Smash
@@ -19,7 +19,7 @@ Nature: Jolly
 Sylveon @ Fairy Feather
 Ability: Pixilate
 Level: 50
-Nature: Modest
+Modest Nature
 - Hyper Voice
 - Hyper Beam
 - Quick Attack
@@ -28,7 +28,7 @@ Nature: Modest
 Staraptor @ Staraptite
 Ability: Intimidate
 Level: 50
-Nature: Jolly
+Jolly Nature
 - Dual Wingbeat
 - Close Combat
 - Tailwind
@@ -37,7 +37,7 @@ Nature: Jolly
 Raichu @ Raichunite Y
 Ability: Lightning Rod
 Level: 50
-Nature: Timid
+Timid Nature
 - Fake Out
 - Zap Cannon
 - Focus Blast
@@ -46,7 +46,7 @@ Nature: Timid
 Kingambit @ Life Orb
 Ability: Defiant
 Level: 50
-Nature: Adamant
+Adamant Nature
 - Kowtow Cleave
 - Swords Dance
 - Sucker Punch

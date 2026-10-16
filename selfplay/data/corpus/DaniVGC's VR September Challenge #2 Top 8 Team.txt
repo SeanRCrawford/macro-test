@@ -1,0 +1,48 @@
+Archaludon @ Leftovers  
+Ability: Stamina  
+Bold Nature  
+- Electro Shot  
+- Dragon Pulse  
+- Flash Cannon  
+- Protect  
+
+Pelipper @ Focus Sash  
+Ability: Drizzle  
+Modest Nature  
+- Weather Ball  
+- Hurricane  
+- Wide Guard  
+- Protect  
+
+Farigiraf @ Sitrus Berry  
+Ability: Armor Tail  
+Bold Nature  
+- Twin Beam  
+- Trick Room  
+- Shadow Ball  
+- Protect  
+
+Golisopod @ Golisopite  
+Ability: Emergency Exit  
+Adamant Nature  
+- Iron Head  
+- Leech Life  
+- Liquidation  
+- Protect  
+
+Garchomp @ Garchompite Z  
+Ability: Rough Skin  
+Modest Nature  
+- Draco Meteor  
+- Power Gem  
+- Earth Power  
+- Protect  
+
+Basculegion @ Choice Scarf  
+Ability: Adaptability  
+Jolly Nature  
+- Wave Crash  
+- Aqua Jet  
+- Last Respects  
+- Flip Turn  
+

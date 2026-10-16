@@ -1,0 +1,54 @@
+Gholdengo @ Life Orb  
+Ability: Good as Gold  
+EVs: 27 HP / 2 Def / 1 SpA / 22 SpD / 14 Spe  
+Modest Nature  
+- Make It Rain  
+- Shadow Ball  
+- Nasty Plot  
+- Protect  
+
+Dragonite @ Dragoninite  
+Ability: Inner Focus  
+EVs: 23 HP / 30 SpA / 13 Spe  
+Modest Nature  
+- Dragon Pulse  
+- Heat Wave  
+- Tailwind  
+- Protect  
+
+Incineroar @ Sitrus Berry  
+Ability: Intimidate  
+EVs: 31 HP / 21 Def / 7 SpD / 7 Spe  
+Impish Nature  
+- Flare Blitz  
+- Throat Chop  
+- Parting Shot  
+- Fake Out  
+
+Rillaboom @ Miracle Seed  
+Ability: Grassy Surge  
+EVs: 17 HP / 32 Atk / 4 Def / 5 SpD / 8 Spe  
+Adamant Nature  
+- Grassy Glide  
+- Wood Hammer  
+- High Horsepower  
+- Fake Out  
+
+Sneasler @ White Herb  
+Ability: Unburden  
+EVs: 28 HP / 7 Def / 1 SpD / 30 Spe  
+Adamant Nature  
+- Close Combat  
+- Dire Claw  
+- Rock Tomb  
+- Protect  
+
+Floette-Eternal @ Floettite  
+Ability: Flower Veil  
+EVs: 31 HP / 23 Def / 1 SpA / 11 Spe  
+Bold Nature  
+- Draining Kiss  
+- Dazzling Gleam  
+- Calm Mind  
+- Protect  
+

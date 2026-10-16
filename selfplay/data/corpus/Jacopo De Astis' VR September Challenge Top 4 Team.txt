@@ -1,0 +1,49 @@
+Gardevoir @ Gardevoirite  
+Ability: Trace  
+Shiny: Yes  
+Modest Nature  
+- Hyper Voice  
+- Expanding Force  
+- Trick Room  
+- Protect  
+
+Indeedee-F @ Rocky Helmet  
+Ability: Psychic Surge  
+Bold Nature  
+- Follow Me  
+- Helping Hand  
+- Trick Room  
+- Psychic  
+
+Arcanine-Hisui @ Focus Sash  
+Ability: Rock Head  
+Adamant Nature  
+- Flare Blitz  
+- Head Smash  
+- Extreme Speed  
+- Protect  
+
+Basculegion @ Mystic Water  
+Ability: Adaptability  
+Adamant Nature  
+- Wave Crash  
+- Last Respects  
+- Aqua Jet  
+- Protect  
+
+Whimsicott @ Occa Berry  
+Ability: Prankster  
+Timid Nature  
+- Moonblast  
+- Tailwind  
+- Encore  
+- Protect  
+
+Kommo-o @ Life Orb  
+Ability: Soundproof  
+Modest Nature  
+- Flamethrower  
+- Clanging Scales  
+- Aura Sphere  
+- Protect  
+

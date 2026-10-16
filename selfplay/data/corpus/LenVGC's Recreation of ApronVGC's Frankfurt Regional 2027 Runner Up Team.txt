@@ -1,0 +1,54 @@
+Farigiraf @ Sitrus Berry  
+Ability: Armor Tail  
+EVs: 29 HP / 14 Def / 23 SpD  
+Sassy Nature  
+- Psychic  
+- Trick Room  
+- Helping Hand  
+- Protect  
+
+Garchomp @ Garchompite Z  
+Ability: Rough Skin  
+EVs: 5 HP / 29 SpA / 32 Spe  
+Modest Nature  
+- Draco Meteor  
+- Flamethrower  
+- Power Gem  
+- Protect  
+
+Sneasler @ White Herb  
+Ability: Unburden  
+EVs: 32 HP / 10 Atk / 7 Def / 17 Spe  
+Adamant Nature  
+- Close Combat  
+- Gunk Shot  
+- Fake Out  
+- Protect  
+
+Torkoal @ Charcoal  
+Ability: Drought  
+EVs: 32 HP / 1 Def / 32 SpA / 1 SpD  
+Quiet Nature  
+- Eruption  
+- Earth Power  
+- Weather Ball  
+- Protect  
+
+Sylveon @ Fairy Feather  
+Ability: Pixilate  
+EVs: 31 HP / 25 Def / 10 SpA  
+Modest Nature  
+- Hyper Voice  
+- Hyper Beam  
+- Yawn  
+- Detect  
+
+Incineroar @ Chople Berry  
+Ability: Intimidate  
+EVs: 32 HP / 25 Atk / 7 Def / 2 SpD  
+Adamant Nature  
+- Flare Blitz  
+- Darkest Lariat  
+- Parting Shot  
+- Fake Out  
+

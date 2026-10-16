@@ -1,0 +1,54 @@
+Meowstic-F @ Meowsticite  
+Ability: Competitive  
+EVs: 2 HP / 32 SpA / 32 Spe  
+Timid Nature  
+- Expanding Force  
+- Thunderbolt  
+- Fake Out  
+- Protect  
+
+Kommo-o @ Leftovers  
+Ability: Soundproof  
+EVs: 10 HP / 1 Def / 22 SpA / 1 SpD / 32 Spe  
+Modest Nature  
+- Clanging Scales  
+- Aura Sphere  
+- Clangorous Soul  
+- Protect  
+
+Indeedee @ Focus Sash  
+Ability: Psychic Surge  
+EVs: 2 HP / 32 SpA / 32 Spe  
+Timid Nature  
+- Expanding Force  
+- Hyper Voice  
+- Trick Room  
+- Imprison  
+
+Sneasler @ Psychic Seed  
+Ability: Unburden  
+EVs: 11 HP / 32 Atk / 1 Def / 22 Spe  
+Adamant Nature  
+- Close Combat  
+- Dire Claw  
+- Rock Slide  
+- Protect  
+
+Kingambit @ Chople Berry  
+Ability: Defiant  
+EVs: 32 HP / 17 Atk / 16 Def / 1 Spe  
+Adamant Nature  
+- Kowtow Cleave  
+- Iron Head  
+- Sucker Punch  
+- Protect  
+
+Charizard @ Charizardite Y  
+Ability: Blaze  
+EVs: 32 HP / 12 Def / 1 SpA / 21 Spe  
+Modest Nature  
+- Weather Ball  
+- Heat Wave  
+- Solar Beam  
+- Protect  
+

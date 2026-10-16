@@ -1,0 +1,53 @@
+Mirage (Gardevoir) @ Gardevoirite  
+Ability: Trace  
+Shiny: Yes  
+Modest Nature  
+- Hyper Voice  
+- Expanding Force  
+- Thunderbolt  
+- Protect  
+
+Comrade (Indeedee-F) @ Colbur Berry  
+Ability: Psychic Surge  
+Shiny: Yes  
+Bold Nature  
+- Psychic  
+- Helping Hand  
+- Follow Me  
+- Protect  
+
+Bully Boy (Sneasler) @ Psychic Seed  
+Ability: Unburden  
+Shiny: Yes  
+Adamant Nature  
+- Dire Claw  
+- Close Combat  
+- Rock Tomb  
+- Protect  
+
+Lucario @ Lucarionite Z  
+Ability: Inner Focus  
+Shiny: Yes  
+Timid Nature  
+- Flash Cannon  
+- Aura Sphere  
+- Dark Pulse  
+- Detect  
+
+Boots (Annihilape) @ Choice Scarf  
+Ability: Defiant  
+Shiny: Yes  
+Jolly Nature  
+- Close Combat  
+- Ice Punch  
+- Phantom Force  
+- Shadow Claw  
+
+Alexander (Armarouge) @ Focus Sash  
+Ability: Flash Fire  
+Timid Nature  
+- Armor Cannon  
+- Expanding Force  
+- Wide Guard  
+- Protect  
+

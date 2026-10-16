@@ -1,0 +1,48 @@
+Indeedee-F @ Rocky Helmet  
+Ability: Psychic Surge  
+Relaxed Nature  
+- Psychic  
+- Helping Hand  
+- Skill Swap  
+- Follow Me  
+
+Maushold @ Chople Berry  
+Ability: Friend Guard  
+Impish Nature  
+- Protect  
+- Super Fang  
+- Feint  
+- Follow Me  
+
+Sinistcha @ Coba Berry  
+Ability: Hospitality  
+Bold Nature  
+- Protect  
+- Matcha Gotcha  
+- Rage Powder  
+- Life Dew  
+
+Sneasler @ Focus Sash  
+Ability: Poison Touch  
+Jolly Nature  
+- Fake Out  
+- Close Combat  
+- Poison Jab  
+- Quick Guard  
+
+Blastoise @ Blastoisinite  
+Ability: Rain Dish  
+Modest Nature  
+- Protect  
+- Water Spout  
+- Dark Pulse  
+- Shell Smash  
+
+Delphox @ Delphoxite  
+Ability: Blaze  
+Timid Nature  
+- Protect  
+- Heat Wave  
+- Psyshock  
+- Nasty Plot  
+

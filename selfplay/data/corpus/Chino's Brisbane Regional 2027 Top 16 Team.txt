@@ -1,0 +1,48 @@
+Delphox @ Delphoxite  
+Ability: Blaze  
+Timid Nature  
+- Heat Wave  
+- Psychic  
+- Nasty Plot  
+- Protect  
+
+Sneasler @ Focus Sash  
+Ability: Poison Touch  
+Jolly Nature  
+- Fake Out  
+- Close Combat  
+- Poison Jab  
+- Quick Guard  
+
+Kingambit @ Life Orb  
+Ability: Defiant  
+Adamant Nature  
+- Kowtow Cleave  
+- Sucker Punch  
+- Swords Dance  
+- Protect  
+
+Floette-Eternal @ Floettite  
+Ability: Flower Veil  
+Modest Nature  
+- Moonblast  
+- Dazzling Gleam  
+- Calm Mind  
+- Protect  
+
+Sinistcha-Masterpiece @ Colbur Berry  
+Ability: Hospitality  
+Bold Nature  
+- Matcha Gotcha  
+- Rage Powder  
+- Trick Room  
+- Protect  
+
+Incineroar @ Rocky Helmet  
+Ability: Intimidate  
+Careful Nature  
+- Fake Out  
+- Flare Blitz  
+- Parting Shot  
+- Helping Hand  
+

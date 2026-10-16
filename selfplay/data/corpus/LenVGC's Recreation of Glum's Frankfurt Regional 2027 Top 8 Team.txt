@@ -1,0 +1,54 @@
+Vivillon @ Focus Sash  
+Ability: Compound Eyes  
+EVs: 9 Def / 25 SpA / 32 Spe  
+Timid Nature  
+- Sleep Powder  
+- Rage Powder  
+- Hurricane  
+- Protect  
+
+Politoed @ Sitrus Berry  
+Ability: Drizzle  
+EVs: 32 HP / 24 Def / 10 SpD  
+Calm Nature  
+- Weather Ball  
+- Perish Song  
+- Encore  
+- Protect  
+
+Gengar @ Gengarite  
+Ability: Cursed Body  
+EVs: 30 HP / 18 Def / 11 SpD / 7 Spe  
+Modest Nature  
+- Shadow Ball  
+- Sludge Bomb  
+- Perish Song  
+- Protect  
+
+Incineroar @ Passho Berry  
+Ability: Intimidate  
+EVs: 31 HP / 21 Def / 14 SpD  
+Relaxed Nature  
+- Protect  
+- Fake Out  
+- Flare Blitz  
+- Parting Shot  
+
+Rillaboom @ Occa Berry  
+Ability: Grassy Surge  
+EVs: 32 HP / 5 Atk / 29 SpD  
+Adamant Nature  
+- Fake Out  
+- Grassy Glide  
+- U-turn  
+- Protect  
+
+Kommo-o @ Leftovers  
+Ability: Soundproof  
+EVs: 10 HP / 1 Def / 22 SpA / 1 SpD / 32 Spe  
+Modest Nature  
+- Clanging Scales  
+- Clangorous Soul  
+- Aura Sphere  
+- Protect  
+

@@ -1,0 +1,48 @@
+Garchomp @ Choice Scarf  
+Ability: Rough Skin  
+Adamant Nature  
+- Dragon Claw  
+- Earthquake  
+- Stomping Tantrum  
+- Rock Tomb  
+
+Farigiraf @ Sitrus Berry  
+Ability: Armor Tail  
+Bold Nature  
+- Psychic  
+- Thunderbolt  
+- Trick Room  
+- Protect  
+
+Aerodactyl @ Aerodactylite  
+Ability: Unnerve  
+Jolly Nature  
+- Rock Slide  
+- Dual Wingbeat  
+- Tailwind  
+- Wide Guard  
+
+Sylveon @ Fairy Feather  
+Ability: Pixilate  
+Modest Nature  
+- Hyper Voice  
+- Hyper Beam  
+- Quick Attack  
+- Detect  
+
+Charizard @ Charizardite Y  
+Ability: Blaze  
+Timid Nature  
+- Heat Wave  
+- Weather Ball  
+- Solar Beam  
+- Protect  
+
+Kingambit @ Focus Sash  
+Ability: Defiant  
+Adamant Nature  
+- Kowtow Cleave  
+- Sucker Punch  
+- Iron Head  
+- Low Kick  
+
