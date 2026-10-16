@@ -1147,7 +1147,20 @@ corrects what distillation on the teacher's positions can't (the student's
 own mistakes lead it to positions the teacher rarely reaches). In a small
 test, plain PPO moved the student away from the teacher (KL 0.011 ->
 0.015 in three updates) and kickstarted PPO toward it (-> 0.008). The
-distillation log now has the student's and the teacher's entropy. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+distillation log now has the student's and the teacher's entropy.
+
+The ppo6 log shows how the head start went. Distillation (180 minutes)
+ended at 74% agreement and 0.48-0.50 against ppo5. In the first 47
+minutes of PPO (the warm-up) it scored 0.42; as the learning rate reached
+its peak the policy's entropy jumped from 1.37 to 1.56 and the opponent
+head's cross-entropy from 1.47 to 1.81 (it predicts a self-play opponent
+that had become more random), and the score fell to 0.36. Ten hours later
+it had only climbed back to 0.41, entropy 1.37. The same in ppo5 (1.47 in
+its first three hours, 1.15 at the end): a high learning rate heats the
+policy, and much of a run's gain comes as it cools. So the kickstarting
+should fade only once the learning rate has come down: **runs/ppo6k**
+restarts PPO from ppo6's distilled network with the teacher KL fading
+over 36 of its 72 hours. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.
