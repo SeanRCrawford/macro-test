@@ -1212,7 +1212,31 @@ make the search's estimates meaningless while the network alone looks
 fine (near-zero win estimates, incoherent play). The search now uses
 bfloat16, `selfplay.precision MODEL` measures both against float32 on real
 positions, and each decision line shows the network's own estimate
-(float32) beside the search's. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+(float32) beside the search's.
+
+**Ties the search breaks badly.** The Ice Beam turn, rebuilt from the log:
+the tracker's position was right (Whimsicott 32%, Mega Charizard Y 79%,
+sun, Grassy Terrain), and in the engine Ice Beam into Whimsicott knocks it
+out every time Milotic gets to move; only Solar Beam into Milotic first
+makes Milotic's move irrelevant. So the equilibrium expected that Solar
+Beam, under which every Milotic move ties, and the bot played the mix's
+most likely action, which the solver had put on the move into its
+partner. Playing the mix's argmax picks arbitrarily among ties. Now, when
+not sampling (Showdown), the bot takes among the actions within 0.02 (one
+point of win chance) of the best against the opponent's equilibrium the
+one that does best against its likely replies (its policy): a refinement
+that drops weakly dominated actions (`TreeConfig.tiebreak`; the decision
+line says when it changed the choice).
+
+**Search budget.** 6,000 against 2,000 (both ppo5, both searching, 404
+games): 0.520 +-0.049, though the larger side looked at 8,220 leaves a
+root against 2,852. Past 2,000 the search gains little with these
+networks (2,000 against 500 was 0.66): the value network is the limit.
+
+**Time.** With the battle timer on, one game's decisions took 28-55 s
+(the GPU shared with a match) and the bot nearly ran out. A search now
+stops at `--max-seconds` (20) or half of what the turn timer leaves, and
+rejoining a battle no longer re-answers its Open Team Sheets offer. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.

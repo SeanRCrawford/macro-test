@@ -62,6 +62,8 @@ def main():
     p.add_argument("--local", action="store_true", help="a local server without login (--no-security)")
     p.add_argument("--policy", action="store_true", help="play the network's policy, no search")
     p.add_argument("--budget", type=int, default=2000, help="search: value evaluations per turn")
+    p.add_argument("--max-seconds", type=float, default=20.0,
+                   help="search: the longest a decision may take (less when the battle timer is short)")
     p.add_argument("--sample", action="store_true",
                    help="sample the policy / the search's mix (default: its most likely action)")
     p.add_argument("--no-ots", action="store_true", help="decline Open Team Sheets")
@@ -106,7 +108,7 @@ def main():
     client = Client(make_bot, team, a.user, a.password or os.environ.get("SHOWDOWN_PASSWORD"),
                     server=a.server, fmt=a.format, challenge=a.challenge, accept=a.accept,
                     games=a.games, ots=not a.no_ots, timer=a.timer, log_dir=a.log_dir, local=a.local,
-                    ots_wait=a.ots_wait, replays=a.replays)
+                    ots_wait=a.ots_wait, replays=a.replays, max_seconds=a.max_seconds)
     asyncio.run(client.run())
     r, s = client.record, client.series_record
     print(f"done: games {r['win']} won, {r['loss']} lost, {r['tie']} tied"

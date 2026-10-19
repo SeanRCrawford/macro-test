@@ -104,3 +104,39 @@ def test_tree_search_plays_legal_mixes_and_looks_ahead():
             assert len(r["alternatives"][0]) == len(r["candidates"][0])
             deep += r["max_depth"] >= 1
     assert deep > 0
+
+
+def test_tiebreak_prefers_the_action_better_against_other_replies():
+    """Two actions tie against the opponent's equilibrium reply (it knocks
+    our user out first, so our move doesn't matter); the one that does
+    better if the opponent plays otherwise wins the tie, whatever the
+    solver's mix weighted. A worse action never wins it."""
+    from selfplay.mcts import tiebreak
+    r = {"candidates": ([10, 11, 12], [20, 21]),
+         # Rows ours: 10 "Ice Beam into the partner", 11 "Ice Beam into the
+         # foe", 12 "something worse". Cols theirs: 20 (equilibrium), 21.
+         "matrix": [-0.7, -0.7,
+                    -0.7, 0.4,
+                    -0.9, 0.9],
+         "row": [0.6, 0.4, 0.0], "col": [1.0, 0.0], "priors": ([0.3, 0.3, 0.4], [0.5, 0.5])}
+    assert tiebreak(r, 0, 0.02, default=0) == 1
+    assert tiebreak(r, 0, 0.0, default=0) == 1      # exact ties still break
+    # Side 1's view: its results are the negation, its candidates the rows.
+    r1 = {"candidates": ([20, 21], [10, 11]), "matrix": [0.7, 0.7, 0.7, -0.4],
+          "row": [1.0, 0.0], "col": [0.6, 0.4], "priors": ([0.5, 0.5], [0.5, 0.5])}
+    assert tiebreak(r1, 1, 0.02, default=0) == 1
+    assert tiebreak({"candidates": ([1], [2]), "matrix": []}, 0, 0.02, default=0) == 0
+
+
+def test_tree_search_stops_at_its_time_limit():
+    import time
+
+    from selfplay.mcts import TreeConfig, TreeSearch
+    torch.manual_seed(3)
+    env = SelfPlayEnv(1, seed=21)
+    _, games = next(positions(env, 1, seed=5))
+    search = TreeSearch(PolicyNet(d=32, layers=1), TreeConfig(budget=10_000_000, max_seconds=1.0))
+    start = time.perf_counter()
+    r = search.run(env, games)[0]
+    assert time.perf_counter() - start < 6
+    assert r["leaf_evals"] > 0 and abs(sum(r["row"]) - 1) < 1e-3

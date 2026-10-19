@@ -100,6 +100,8 @@ class Battle:
     started: float = field(default_factory=time.time)
     result: str | None = None
     series: bool = False          # a game of a best-of-3
+    time_left: float | None = None  # the battle timer's seconds for our turn, when last told
+    time_seen: float = 0.0
 
 
 class Client:
@@ -108,12 +110,13 @@ class Client:
                  accept: list[str] | None = None, games: int = 1, ots: bool = True,
                  timer: bool = False, log_dir: str = "runs/showdown",
                  local: bool = False, think_delay: float = 0.3, ots_wait: float = 20.0,
-                 replays: str = "unlisted", out=print):
+                 replays: str = "unlisted", max_seconds: float = 20.0, out=print):
         """`make_bot()` -> a fresh Bot per battle. `challenge`: users to
         challenge (one battle at a time, in turn). `accept`: accept
         challenges from these users ([] = anyone; None = none). `replays`:
         save each battle's replay on the server, "unlisted" (watchable by
-        link), "public" or "off"."""
+        link), "public" or "off". `max_seconds`: the longest a decision's
+        search may take (less when the battle timer is short)."""
         self.make_bot, self.team, self.name, self.password = make_bot, team, name, password
         self.server, self.format = server, fmt
         self.to_challenge = list(challenge)
@@ -123,6 +126,7 @@ class Client:
         self.log_dir = Path(log_dir)
         self.local, self.think_delay, self.ots_wait = local, think_delay, ots_wait
         self.replays = replays
+        self.max_seconds = max_seconds
         self.replays_waiting: dict[str, tuple[str, str, str]] = {}  # replay id -> (room, result, opponent)
         self.out = out
         self.battles: dict[str, Battle] = {}
@@ -361,7 +365,16 @@ class Client:
                 b.series = True
             elif line.startswith("|uhtml|otsrequest|"):
                 b.ots_offered = True
-                await self.send("/acceptopenteamsheets" if self.ots else "/rejectopenteamsheets", room)
+                # (Rejoining a battle replays its log: the offer is long past.)
+                if "|start" not in lines:
+                    await self.send("/acceptopenteamsheets" if self.ots else "/rejectopenteamsheets", room)
+            elif line.startswith("|inactive|"):
+                m = re.search(r"Time left: (\d+) sec this turn", line)
+                who = re.match(r"\|inactive\|(.+?) has (\d+) seconds left", line)
+                if who and to_id(who.group(1)) == to_id(self.name):
+                    m = who
+                if m:
+                    b.time_left, b.time_seen = float(m.group(m.lastindex)), time.time()
             elif "rejected open team sheets" in line:
                 b.ots_rejected = True
             elif line.startswith("|error|"):
@@ -391,9 +404,15 @@ class Client:
             while time.time() < deadline and not t.ots and not b.ots_rejected:
                 await asyncio.sleep(0.25)
         rqid = t.rqid
+        # Think for at most half of what the turn timer leaves (less a margin
+        # for the network and the connection), and never past max_seconds.
+        seconds = self.max_seconds
+        if b.time_left is not None:
+            left = b.time_left - (time.time() - b.time_seen)
+            seconds = max(1.0, min(seconds, 0.5 * left - 2.0))
         loop = asyncio.get_running_loop()
         try:
-            choice, why = await loop.run_in_executor(self.worker, b.bot.decide, t)
+            choice, why = await loop.run_in_executor(self.worker, b.bot.decide, t, seconds)
         except Exception as e:
             choice, why = "default", f"error: {type(e).__name__}: {e}"
         if t.rqid != rqid:

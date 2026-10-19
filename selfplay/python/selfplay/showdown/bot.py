@@ -89,8 +89,9 @@ class Bot:
 
     # --- Moves and switches --------------------------------------------------------
 
-    def decide(self, t: Tracker) -> tuple[str, str]:
-        """The choice for the current request, and a line saying why."""
+    def decide(self, t: Tracker, max_seconds: float | None = None) -> tuple[str, str]:
+        """The choice for the current request, and a line saying why.
+        `max_seconds`: stop the search by then (the turn timer)."""
         req = t.request or {}
         if req.get("teamPreview"):
             return self.preview(t)
@@ -106,6 +107,7 @@ class Bot:
         info = f"win {100 * (value[0] + 1) / 2:.0f}% (network)"
         ranked = sorted(legal, key=lambda x: -logp[0][x])
         if self.search is not None:
+            self.search.cfg.max_seconds = max_seconds or 0.0
             r = self.search.search(self.env, [0])[0]
             a = self.search.pick(r, 0)
             mix = sorted(zip(r["candidates"][0], r["row"]), key=lambda x: -x[1])
@@ -113,10 +115,13 @@ class Bot:
             ranked = [c for c, _ in mix] + [x for x in ranked if x not in r["candidates"][0]]
             ranked.remove(a)
             ranked.insert(0, a)
+            tied = a != mix[0][0]
             info = (f"win {100 * (r['value'] + 1) / 2:.0f}% (search, {r['leaf_evals']} evals, "
                     f"{time.perf_counter() - start:.1f}s; network alone {100 * (value[0] + 1) / 2:.0f}%); "
                     + "; ".join(f"{100 * w:.0f}% {choice_text(legal[c], t, names)}" for c, w in mix[:3]
-                                if w >= 0.01 and c in legal))
+                                if w >= 0.01 and c in legal)
+                    + (f" [as good against the likely play, and better against the rest: "
+                       f"{choice_text(legal[a], t, names)}]" if tied and a in legal else ""))
         else:
             a = self._pick(logp[0], list(legal))
             ranked.remove(a)
