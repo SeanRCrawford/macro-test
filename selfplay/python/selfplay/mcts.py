@@ -54,7 +54,7 @@ class TreeConfig:
     noise_alpha: float = 0.3
     leaf_batch: int = 8192
     sample: bool = True         # play a sample of the root mix (else its most likely action)
-    half: bool = True           # leaf values in float16 on CUDA (most of the network's time)
+    half: bool = True           # leaf values in bfloat16 on CUDA, as the network trains (most of its time)
 
     def engine_kwargs(self) -> dict:
         keys = ("root_candidates", "node_candidates", "max_candidates", "widen", "c_explore",
@@ -122,7 +122,9 @@ class TreeSearch:
             mons = np.empty((j - i, 2, s["tokens"], s["mon_floats"]), np.float32)
             fld = np.empty((j - i, 2, s["field_floats"]), np.float32)
             forest.leaf_inputs(ints, mons, fld, i)
-            with torch.autocast("cuda", dtype=torch.float16, enabled=half):
+            # bfloat16, the precision the network trained and was evaluated
+            # in; float16's narrower range was never checked on it.
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=half):
                 v = self.value_model.value(*(self._t(a.reshape(-1, *a.shape[2:])) for a in (ints, mons, fld)))
             v = v.float().view(-1, 2)
             # Side 0's value: its own estimate and the negation of side 1's.

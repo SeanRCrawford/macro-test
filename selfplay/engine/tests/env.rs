@@ -67,10 +67,10 @@ fn random_masked_play() {
                 .collect();
             assert!(!legal.is_empty(), "a decision with nothing legal");
             // The bot's actions: every legal choice (no two sharing an
-            // index) but attacks on its own partner for nothing.
+            // index) but attacks on its own partner.
             let b = env.battle(k / 2);
             let all = b.legal_choices(k % 2);
-            let kept = all.iter().filter(|c| !action::wasted(b, k % 2, c)).count();
+            let kept = all.iter().filter(|c| !action::attacks_partner(b, k % 2, c)).count();
             assert_eq!(legal.len(), if kept == 0 { all.len() } else { kept });
             assert!(legal.iter().all(|&i| all.iter().any(|c| action::index(c) == i)));
             pruned += all.len() - legal.len();
@@ -172,12 +172,11 @@ fn a_panicking_game_is_reported_and_replaced() {
     assert!(env.take_crashes().is_empty());
 }
 
-/// The bot's mask leaves out a damaging move into its own partner (High
-/// Horsepower into Garchomp, Rock Slide is a spread move and stays), unless
-/// the partner gains from it (Earth Eater heals on a Ground hit). The engine
-/// still takes both: they're legal on Showdown.
+/// The bot's mask leaves out every damaging move aimed at its own partner
+/// (High Horsepower into Garchomp, even one with Earth Eater); a spread move
+/// (Rock Slide) stays. The engine still takes them: they're legal on Showdown.
 #[test]
-fn attacks_on_a_partner_are_left_out_unless_it_gains() {
+fn attacks_on_a_partner_are_left_out() {
     use engine::battle::choice::SideChoice;
     use engine::battle::Battle;
     use engine::chance::Chance;
@@ -191,7 +190,7 @@ fn attacks_on_a_partner_are_left_out_unless_it_gains() {
         ))
         .unwrap()
     };
-    for (ally, kept) in [("Rough Skin", false), ("Earth Eater", true)] {
+    for ally in ["Rough Skin", "Earth Eater"] {
         let mut b = Battle::new([team(ally), team("Rough Skin")], Chance::policy(0.5)).unwrap();
         let preview = [0, 1].map(|_| Some(SideChoice::from_showdown("team 1234").unwrap()));
         b.choose(preview).unwrap();
@@ -200,7 +199,7 @@ fn attacks_on_a_partner_are_left_out_unless_it_gains() {
         assert!(b.legal_choices(0).contains(&into_partner));
         let mut mask = vec![0u8; MASK_LEN];
         action::play_mask(&b, 0, &mut mask);
-        assert_eq!(mask[action::index(&into_partner)] == 1, kept, "{ally}");
+        assert_eq!(mask[action::index(&into_partner)], 0, "{ally}");
         assert_eq!(mask[action::index(&into_foe)], 1);
         let spread = SideChoice::from_showdown("move 3, move 4").unwrap();
         assert_eq!(mask[action::index(&spread)], 1);

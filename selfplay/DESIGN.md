@@ -1197,16 +1197,22 @@ a damaging move at an ally, so the engine's legal choices (which must
 match Showdown's) include it, and the network and the search saw it as
 one more option; in a losing position (14%) the values are close and the
 mix spreads over such moves. The bot's actions now come from `play_mask`:
-the legal ones less a damaging move aimed at its own partner, unless the
-partner gains from it (an absorbing ability: Water Absorb, Storm Drain,
-Volt Absorb, Lightning Rod, Flash Fire, Sap Sipper, Earth Eater; a hit
-that raises it: Justified, Stamina, Anger Point, Weak Armor, Rattled,
-Steam Engine, Thermal Exchange; Weakness Policy; Pollen Puff, Beat Up).
+the legal ones less any damaging move aimed at its own partner (spread
+moves, which pick no target, and support moves like Helping Hand stay).
 The network's observation masks, the one-turn search and the tree search
 all use it; the engine still takes those choices. In the turn-2 position
 of the loss above it leaves the bot 76 of 116 joint actions and the
 opponent's model 54 of 78. The endgame search still matches brute force
-over every legal action. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+over every legal action.
+
+**The search's precision.** The tree search valued its leaves in float16
+while the network trained and was evaluated in bfloat16; float16's range
+was never checked on the larger networks, and an overflow there would
+make the search's estimates meaningless while the network alone looks
+fine (near-zero win estimates, incoherent play). The search now uses
+bfloat16, `selfplay.precision MODEL` measures both against float32 on real
+positions, and each decision line shows the network's own estimate
+(float32) beside the search's. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.

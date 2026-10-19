@@ -114,7 +114,7 @@ class Bot:
             ranked.remove(a)
             ranked.insert(0, a)
             info = (f"win {100 * (r['value'] + 1) / 2:.0f}% (search, {r['leaf_evals']} evals, "
-                    f"{time.perf_counter() - start:.1f}s); "
+                    f"{time.perf_counter() - start:.1f}s; network alone {100 * (value[0] + 1) / 2:.0f}%); "
                     + "; ".join(f"{100 * w:.0f}% {choice_text(legal[c], t, names)}" for c, w in mix[:3]
                                 if w >= 0.01 and c in legal))
         else:

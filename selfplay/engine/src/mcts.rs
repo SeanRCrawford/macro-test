@@ -1163,7 +1163,7 @@ impl Forest {
                     .map(|i| (actions[base + i], probs[base + i]))
                     .collect();
                 // Every action the bot plays (play_mask: legal, less attacks on
-                // its own partner for nothing), the policy's ranking first: the double
+                // its own partner), the policy's ranking first: the double
                 // oracle can reach any of them, and a node is only exact
                 // when all of them are accounted for.
                 let mut mask = vec![0u8; MASK_LEN];
