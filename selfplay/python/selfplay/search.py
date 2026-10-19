@@ -343,12 +343,13 @@ def make_searcher(model, cfg, seed: int = 0, value_model=None):
 def play_vs_policy(model, games: int, cfg, seed: int = 0, envs: int = 32,
                    perfect_info: bool = True, sampled_policy: bool = False,
                    opponent_cfg=None, opponent_model=None, value_model=None,
-                   opponent_value_model=None) -> dict:
+                   opponent_value_model=None, progress=None) -> dict:
     """Side 0 searches with `cfg` (a SearchConfig or a TreeConfig); side 1
     plays the raw policy (most likely action, or a sample), or searches with
     `opponent_cfg`. Team preview is the policy's on both sides. Side 1 uses
     `opponent_model` (default: `model`) for its policy and its search. A tree
-    search's leaf values can come from `value_model` / `opponent_value_model`."""
+    search's leaf values can come from `value_model` / `opponent_value_model`.
+    `progress(line)`, if given, hears the running score as games finish."""
     from selfplay.train import act, to_tensors
     env = SelfPlayEnv(min(envs, games), seed=seed, perfect_info=perfect_info)
     search = make_searcher(model, cfg, seed, value_model)
@@ -358,6 +359,9 @@ def play_vs_policy(model, games: int, cfg, seed: int = 0, envs: int = 32,
     model.eval()
     opp_model.eval()
     done = score = 0.0
+    start = last_report = time.time()
+    if progress:
+        progress(f"playing {games} games, {env.num_envs} at a time (a line about every minute)")
     while done < games:
         obs = env.observe()
         actions = np.full((env.num_envs, 2), -1, np.int64)
@@ -378,6 +382,12 @@ def play_vs_policy(model, games: int, cfg, seed: int = 0, envs: int = 32,
         fin = r.done.astype(bool)
         done += fin.sum()
         score += ((r.reward[fin, 0] + 1) / 2).sum()
+        if progress and done and (time.time() - last_report > 60 or done >= games):
+            last_report = time.time()
+            mins = (last_report - start) / 60
+            left = mins * (games - done) / done
+            progress(f"  {int(done)}/{games} games, score {score / done:.3f}, "
+                     f"{mins:.1f} min so far, about {left:.0f} min to go")
     p = score / done
     out = {"score": float(p), "ci95": float(1.96 * np.sqrt(p * (1 - p) / done)), "games": int(done)}
     for who, srch in (("", search), ("opp_", other)):
@@ -444,7 +454,8 @@ def main():
             opp = SearchConfig(**{k: getattr(a, "opp_" + k) for k in vars(SearchConfig())})
     get = lambda path: load(path, a.device) if path else None
     res = play_vs_policy(model, a.games, cfg, a.seed, a.envs, not a.hidden, a.sampled_policy, opp,
-                         get(a.opp_model), get(a.value_model), get(a.opp_value_model))
+                         get(a.opp_model), get(a.value_model), get(a.opp_value_model),
+                         progress=lambda line: print(line, flush=True))
     print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()))
 
 

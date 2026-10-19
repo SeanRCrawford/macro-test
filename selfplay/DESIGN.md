@@ -1160,7 +1160,21 @@ its first three hours, 1.15 at the end): a high learning rate heats the
 policy, and much of a run's gain comes as it cools. So the kickstarting
 should fade only once the learning rate has come down: **runs/ppo6k**
 restarts PPO from ppo6's distilled network with the teacher KL fading
-over 36 of its 72 hours. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+over 36 of its 72 hours.
+
+**runs/ppo6k** (53.6M games; 197 games/s with the teacher's forward pass,
+223 without): no collapse. 0.466 against ppo5 in the first 4.5 hours
+(ppo6: 0.36-0.42), level by 18 hours, 0.548 as the kickstart ended at 36
+hours. Within 4.5 hours of its end the entropy fell from 1.40 to 1.29 (the
+teacher KL, which grew from 0.26 to 0.46 as its weight faded, had held the
+student wider than it chose to be) and the score dipped to 0.534, then
+rose as the learning rate cooled: 0.561 +-0.008 at the end, **+42 Elo over
+ppo5** with sampled policies. In search (both sides the tree search at
+2,000, 402 games) it scored 0.515 +-0.049 against ppo5: no measurable
+difference. Width's returns are falling (d=192 -> 256: +89, 256 -> 320:
++42) and d=320 is about the most that fits in 8 GB. The levers left are
+the search's (budget, value quality: 4.17). `selfplay.search` matches now
+print their running score about once a minute. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.
