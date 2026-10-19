@@ -19,15 +19,24 @@ def test_shapes_and_masks():
     assert o.masks[..., SIZES["preview_actions"]:].sum() == 0
 
 
-def test_mask_matches_legal_choices():
+def test_mask_is_the_legal_choices_less_attacks_on_a_partner():
+    """The bot's mask: Showdown's legal choices, less damaging moves aimed at
+    its own partner (target -1/-2) when the partner gains nothing."""
     env = SelfPlayEnv(8, seed=2)
+    dropped = 0
     for step in range(40):
         o = env.observe()
         for g in range(8):
             for side in range(2):
-                legal = {i for i, _ in env.legal_choices(g, side)}
-                assert legal == set(np.flatnonzero(o.masks[g, side])), (step, g, side)
+                legal = dict(env.legal_choices(g, side))
+                mask = set(np.flatnonzero(o.masks[g, side]))
+                assert mask <= set(legal) and (mask or not legal), (step, g, side)
+                for i in set(legal) - mask:
+                    assert any(w in ("-1", "-2") for part in legal[i].split(",") for w in part.split()[2:3]), \
+                        legal[i]
+                    dropped += 1
         env.step(env.random_actions(step))
+    assert dropped > 0
 
 
 def test_random_games_finish_zero_sum():

@@ -1188,7 +1188,25 @@ knocking Mega Salamence out 96-100% of the time, against 0% behind
 Protect. So the misjudgement is the network's and the search's, not the
 tracking: the bot's decision lines now say what it expects the opponent
 to do and are kept in the saved log, and `selfplay.showdown.review`
-replays a saved battle with a model, decision by decision. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+replays a saved battle with a model, decision by decision.
+
+**Attacks on its own partner.** With a larger budget (20,083 evaluations,
+5.5 s) the bot played Protect with one Pokemon and put half its mix on
+Ice Beam into that Protecting partner: a turn thrown away. Showdown allows
+a damaging move at an ally, so the engine's legal choices (which must
+match Showdown's) include it, and the network and the search saw it as
+one more option; in a losing position (14%) the values are close and the
+mix spreads over such moves. The bot's actions now come from `play_mask`:
+the legal ones less a damaging move aimed at its own partner, unless the
+partner gains from it (an absorbing ability: Water Absorb, Storm Drain,
+Volt Absorb, Lightning Rod, Flash Fire, Sap Sipper, Earth Eater; a hit
+that raises it: Justified, Stamina, Anger Point, Weak Armor, Rattled,
+Steam Engine, Thermal Exchange; Weakness Policy; Pollen Puff, Beat Up).
+The network's observation masks, the one-turn search and the tree search
+all use it; the engine still takes those choices. In the turn-2 position
+of the loss above it leaves the bot 76 of 116 joint actions and the
+opponent's model 54 of 78. The endgame search still matches brute force
+over every legal action. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.

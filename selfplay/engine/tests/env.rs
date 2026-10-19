@@ -50,6 +50,7 @@ fn random_masked_play() {
     let mut finished: Vec<Option<Finished>> = vec![None; n];
     let mut rng = Rng::new(5);
     let mut games = 0;
+    let mut pruned = 0;
     for _ in 0..3000 {
         env.observe(&mut ints, &mut mons, &mut field, &mut masks, &mut decisions);
         assert!(mons.iter().chain(&field).all(|x| x.is_finite()));
@@ -65,8 +66,14 @@ fn random_masked_play() {
                 .map(|(i, _)| i)
                 .collect();
             assert!(!legal.is_empty(), "a decision with nothing legal");
-            // No two legal choices share an index.
-            assert_eq!(legal.len(), env.battle(k / 2).legal_choices(k % 2).len());
+            // The bot's actions: every legal choice (no two sharing an
+            // index) but attacks on its own partner for nothing.
+            let b = env.battle(k / 2);
+            let all = b.legal_choices(k % 2);
+            let kept = all.iter().filter(|c| !action::wasted(b, k % 2, c)).count();
+            assert_eq!(legal.len(), if kept == 0 { all.len() } else { kept });
+            assert!(legal.iter().all(|&i| all.iter().any(|c| action::index(c) == i)));
+            pruned += all.len() - legal.len();
             actions[k] = legal[rng.below(legal.len() as u32) as usize] as i64;
         }
         env.step(&actions, &mut finished).unwrap();
@@ -77,6 +84,7 @@ fn random_masked_play() {
         }
     }
     assert!(games > 50, "only {games} games finished");
+    assert!(pruned > 0, "no attack on a partner was left out");
 }
 
 #[test]
@@ -162,4 +170,39 @@ fn a_panicking_game_is_reported_and_replaced() {
     assert!(r["location"].as_str().unwrap().contains("mod.rs"), "{r}");
     assert_eq!(r["actions"].as_array().unwrap().len(), 4);
     assert!(env.take_crashes().is_empty());
+}
+
+/// The bot's mask leaves out a damaging move into its own partner (High
+/// Horsepower into Garchomp, Rock Slide is a spread move and stays), unless
+/// the partner gains from it (Earth Eater heals on a Ground hit). The engine
+/// still takes both: they're legal on Showdown.
+#[test]
+fn attacks_on_a_partner_are_left_out_unless_it_gains() {
+    use engine::battle::choice::SideChoice;
+    use engine::battle::Battle;
+    use engine::chance::Chance;
+    use engine::team::parse_paste;
+    let team = |ally: &str| {
+        parse_paste(&format!(
+            "Excadrill @ Focus Sash\nAbility: Sand Rush\nLevel: 50\n- High Horsepower\n- Iron Head\n- Rock Slide\n- Protect\n\n\
+             Garchomp @ Sitrus Berry\nAbility: {ally}\nLevel: 50\n- Dragon Claw\n- Earthquake\n- Rock Slide\n- Protect\n\n\
+             Incineroar @ Sitrus Berry\nAbility: Intimidate\nLevel: 50\n- Fake Out\n- Protect\n- Flare Blitz\n- Parting Shot\n\n\
+             Pelipper @ Damp Rock\nAbility: Drizzle\nLevel: 50\n- Hurricane\n- Protect\n- Tailwind\n- Weather Ball"
+        ))
+        .unwrap()
+    };
+    for (ally, kept) in [("Rough Skin", false), ("Earth Eater", true)] {
+        let mut b = Battle::new([team(ally), team("Rough Skin")], Chance::policy(0.5)).unwrap();
+        let preview = [0, 1].map(|_| Some(SideChoice::from_showdown("team 1234").unwrap()));
+        b.choose(preview).unwrap();
+        let into_partner = SideChoice::from_showdown("move 1 -2, move 4").unwrap(); // Excadrill HH -> Garchomp
+        let into_foe = SideChoice::from_showdown("move 1 1, move 4").unwrap();
+        assert!(b.legal_choices(0).contains(&into_partner));
+        let mut mask = vec![0u8; MASK_LEN];
+        action::play_mask(&b, 0, &mut mask);
+        assert_eq!(mask[action::index(&into_partner)] == 1, kept, "{ally}");
+        assert_eq!(mask[action::index(&into_foe)], 1);
+        let spread = SideChoice::from_showdown("move 3, move 4").unwrap();
+        assert_eq!(mask[action::index(&spread)], 1);
+    }
 }

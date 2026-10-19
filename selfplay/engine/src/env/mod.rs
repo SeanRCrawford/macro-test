@@ -298,7 +298,7 @@ impl VecEnv {
                             &mut mons[k * TOKENS * MON_FLOATS..(k + 1) * TOKENS * MON_FLOATS],
                             &mut field[k * FIELD_FLOATS..(k + 1) * FIELD_FLOATS],
                         );
-                        decisions[k] = action::legal_mask(
+                        decisions[k] = action::play_mask(
                             &game.battle,
                             side,
                             &mut masks[k * MASK_LEN..(k + 1) * MASK_LEN],

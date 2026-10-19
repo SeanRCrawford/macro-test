@@ -14,6 +14,7 @@
 
 use crate::battle::choice::{SideChoice, SideRequest, SlotChoice};
 use crate::battle::Battle;
+use crate::dex::{Category, Dex};
 use crate::team::preview_choices;
 use std::sync::OnceLock;
 
@@ -116,6 +117,96 @@ pub fn legal_mask(battle: &Battle, side: usize, mask: &mut [u8]) -> Decision {
         }
     }
     d
+}
+
+/// The actions the network and the search choose from: the legal ones
+/// (`legal_mask`) without a damaging move aimed at the user's own partner
+/// when the partner gains nothing from it (Ice Beam into a Protecting ally
+/// is a wasted turn). Such choices stay legal in the engine, as on
+/// Showdown; the bot just never proposes them. If nothing were left, every
+/// legal action is kept.
+pub fn play_mask(battle: &Battle, side: usize, mask: &mut [u8]) -> Decision {
+    mask.fill(0);
+    let d = decision(battle, side);
+    if d == Decision::None {
+        return d;
+    }
+    let legal = battle.legal_choices(side);
+    let mut kept = 0;
+    for c in &legal {
+        if !wasted(battle, side, c) {
+            mask[index(c)] = 1;
+            kept += 1;
+        }
+    }
+    if kept == 0 {
+        for c in &legal {
+            mask[index(c)] = 1;
+        }
+    }
+    d
+}
+
+/// A slot of `c` attacks its own partner for nothing.
+pub fn wasted(battle: &Battle, side: usize, c: &SideChoice) -> bool {
+    let SideChoice::Slots(slots) = c else {
+        return false;
+    };
+    slots
+        .iter()
+        .enumerate()
+        .any(|(pos, &s)| attacks_ally_for_nothing(battle, side, pos, s))
+}
+
+fn attacks_ally_for_nothing(battle: &Battle, side: usize, pos: usize, c: SlotChoice) -> bool {
+    let SlotChoice::Move { slot, target, .. } = c else {
+        return false;
+    };
+    if target >= 0 {
+        return false;
+    }
+    let ally_pos = (-target - 1) as usize;
+    if ally_pos == pos {
+        return false; // a move aimed at itself
+    }
+    let mons = &battle.sides[side].pokemon;
+    let (Some(user), Some(ally)) = (mons.get(pos), mons.get(ally_pos)) else {
+        return false;
+    };
+    let Some(move_slot) = user.moves.get(slot as usize) else {
+        return false;
+    };
+    let dex = Dex::get();
+    let m = dex.move_data(move_slot.id);
+    if m.category == Category::Status {
+        return false;
+    }
+    if ally.fainted {
+        return true;
+    }
+    // Damaging moves that help a partner: Pollen Puff heals it, Beat Up
+    // sets off Justified; an ability that absorbs or is raised by the hit;
+    // Weakness Policy.
+    if matches!(m.id.as_str(), "pollenpuff" | "beatup") {
+        return false;
+    }
+    if ally.item.is_some_and(|i| dex.item(i).id == "weaknesspolicy") {
+        return false;
+    }
+    let ty = dex.type_names[m.move_type.0 as usize].to_ascii_lowercase();
+    let gains = match dex.ability(ally.ability).id.as_str() {
+        "waterabsorb" | "stormdrain" | "dryskin" | "watercompaction" => ty == "water",
+        "voltabsorb" | "lightningrod" | "motordrive" => ty == "electric",
+        "flashfire" | "wellbakedbody" | "thermalexchange" => ty == "fire",
+        "sapsipper" => ty == "grass",
+        "eartheater" => ty == "ground",
+        "justified" => ty == "dark",
+        "steamengine" => ty == "fire" || ty == "water",
+        "rattled" => ty == "bug" || ty == "ghost" || ty == "dark",
+        "angerpoint" | "stamina" | "weakarmor" => true,
+        _ => false,
+    };
+    !gains
 }
 
 #[cfg(test)]

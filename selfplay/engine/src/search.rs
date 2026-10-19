@@ -390,7 +390,7 @@ impl Tree {
                     &mut mons[r(TOKENS * MON_FLOATS)],
                     &mut field[r(FIELD_FLOATS)],
                 );
-                decisions[j] = action::legal_mask(b, side, &mut masks[r(action::MASK_LEN)]) as u8;
+                decisions[j] = action::play_mask(b, side, &mut masks[r(action::MASK_LEN)]) as u8;
             }
         }
     }

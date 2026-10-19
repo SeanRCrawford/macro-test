@@ -340,7 +340,9 @@ fn solves_2v2_endgame_turns_exactly_by_double_oracle() {
     for (b, r) in battles.iter().zip(forest.results()) {
         // The turn cap ends the game after this turn.
         let want = full_matrix(b, result_for_side0);
-        let full = r.legal[0] * r.legal[1];
+        // The brute force's matrix: every legal action (the search leaves
+        // out attacks on a partner for nothing, play_mask).
+        let full = b.legal_choices(0).len() * b.legal_choices(1).len();
         assert!(r.endgame);
         assert!(r.exact, "not proven: {} of {:?} candidates, {} cells", r.candidates[0].len(), r.legal, r.cells);
         assert!((r.value - want).abs() < 0.02, "search {} vs brute force {}", r.value, want);

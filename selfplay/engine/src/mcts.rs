@@ -1138,7 +1138,7 @@ impl Forest {
                     &mut mons[r(TOKENS * MON_FLOATS)],
                     &mut field[r(FIELD_FLOATS)],
                 );
-                decisions[j] = action::legal_mask(b, side, &mut masks[r(MASK_LEN)]) as u8;
+                decisions[j] = action::play_mask(b, side, &mut masks[r(MASK_LEN)]) as u8;
             }
         }
     }
@@ -1162,11 +1162,12 @@ impl Forest {
                     .filter(|&i| actions[base + i] >= 0)
                     .map(|i| (actions[base + i], probs[base + i]))
                     .collect();
-                // Every legal action, the policy's ranking first: the double
+                // Every action the bot plays (play_mask: legal, less attacks on
+                // its own partner for nothing), the policy's ranking first: the double
                 // oracle can reach any of them, and a node is only exact
                 // when all of them are accounted for.
                 let mut mask = vec![0u8; MASK_LEN];
-                action::legal_mask(b, side, &mut mask);
+                action::play_mask(b, side, &mut mask);
                 let listed: std::collections::HashSet<i64> = r.iter().map(|x| x.0).collect();
                 r.retain(|x| mask.get(x.0 as usize) == Some(&1));
                 r.extend((0..MASK_LEN).filter(|&i| mask[i] == 1 && !listed.contains(&(i as i64))).map(|i| (i as i64, 0.0)));
