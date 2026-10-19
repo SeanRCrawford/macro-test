@@ -1174,7 +1174,21 @@ ppo5** with sampled policies. In search (both sides the tree search at
 difference. Width's returns are falling (d=192 -> 256: +89, 256 -> 320:
 +42) and d=320 is about the most that fits in 8 GB. The levers left are
 the search's (budget, value quality: 4.17). `selfplay.search` matches now
-print their running score about once a minute. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
+print their running score about once a minute.
+
+**A loss to mikumiku37 in five turns** (ppo6k, search at 2,000; the bot on
+lovejapanfrombr's Salamence Sand team against Big 6 with Mega Floette).
+Floette Mega Evolved and Moonblasted Tyranitar (not Mega Evolved) out on
+turn 1; the bot sent in Salamence (search: 100%, win 53%), Mega Evolved it
+and used Hyper Voice into Floette, whose Dazzling Gleam took it out;
+from there it was lost (4%). Replaying the log through the tracker, the
+position the engine saw was right (Mega Floette with Fairy Aura at 93%,
+both foes at -1 Attack, sand), and the engine itself has Floette's attack
+knocking Mega Salamence out 96-100% of the time, against 0% behind
+Protect. So the misjudgement is the network's and the search's, not the
+tracking: the bot's decision lines now say what it expects the opponent
+to do and are kept in the saved log, and `selfplay.showdown.review`
+replays a saved battle with a model, decision by decision. Saved activations grow with d (839, 1,115 and 1,392 MB per 512
 rows at d=192, 256 and 320, measured), so at minibatch 2,048 d=320 would
 need ~7.9 of the 8 GB; minibatch 1,536 needs ~6.5. Three days, as a wider
 network needs more games to fill.

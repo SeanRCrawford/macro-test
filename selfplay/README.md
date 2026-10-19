@@ -153,6 +153,16 @@ spread the engine fills in (what the bot trained with); otherwise Showdown
 would give it no stat points. A team Showdown would refuse, or with a move,
 ability or item the engine doesn't implement, stops before connecting.
 
+Each decision line gives the bot's choice, its win estimate, the search's
+top options and what it expects the opponent to do (`|| expects: ...`);
+the saved battle log keeps these lines too. To go over a battle afterwards:
+
+    python -m selfplay.showdown.review runs/showdown/battle-....log runs/ppo6k/model.pt --device cuda
+
+replays it with a model: at each decision, what the bot would choose now
+and why, what it chose in the game, and what happened next. It finds the
+bot's team by the battle's stats (or give `--team`).
+
 After each battle the bot saves the replay on the server and adds its link
 to runs/showdown/replays.txt (date, result, opponent, link). Replays are
 unlisted by default (anyone with the link can watch; they don't show in

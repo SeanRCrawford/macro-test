@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from selfplay.showdown.bot import Bot, choice_text
+from selfplay.showdown.bot import Bot, active_names, choice_text
 from selfplay.showdown.data import to_id
 from selfplay.showdown.team import pack_team
 from selfplay.showdown.tracker import Tracker
@@ -400,7 +400,9 @@ class Client:
             return  # a newer request came in; it gets its own decision
         b.decided = rqid
         label = "team preview" if req.get("teamPreview") else f"turn {t.turn}"
-        self.out(f"[{b.room}] {label}: {choice_text(choice, t)}  | {why}")
+        line = f"{label}: {choice_text(choice, t, active_names(t, b.bot.guess_brought))}  | {why}"
+        self.out(f"[{b.room}] {line}")
+        b.log.append(f"|bot|{line}")  # the saved log keeps the bot's reasoning too
         await self.send(f"/choose {choice}|{rqid}", b.room)
 
     async def finish(self, b: Battle, line: str):

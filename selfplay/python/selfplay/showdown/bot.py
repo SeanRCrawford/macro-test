@@ -100,6 +100,8 @@ class Bot:
         if obs.decisions[0, 0] != DECISION_SLOTS:
             return "default", "the engine sees nothing to decide here"
         legal = dict(self.env.legal_choices(0, 0))
+        theirs = dict(self.env.legal_choices(0, 1)) if obs.decisions[0, 1] == DECISION_SLOTS else {}
+        names = slot_names(position, t.d)
         start = time.perf_counter()
         info = f"win {100 * (value[0] + 1) / 2:.0f}% (network)"
         ranked = sorted(legal, key=lambda x: -logp[0][x])
@@ -107,19 +109,27 @@ class Bot:
             r = self.search.search(self.env, [0])[0]
             a = self.search.pick(r, 0)
             mix = sorted(zip(r["candidates"][0], r["row"]), key=lambda x: -x[1])
+            foe_mix = sorted(zip(r["candidates"][1], r["col"]), key=lambda x: -x[1])
             ranked = [c for c, _ in mix] + [x for x in ranked if x not in r["candidates"][0]]
             ranked.remove(a)
             ranked.insert(0, a)
             info = (f"win {100 * (r['value'] + 1) / 2:.0f}% (search, {r['leaf_evals']} evals, "
                     f"{time.perf_counter() - start:.1f}s); "
-                    + "; ".join(f"{100 * w:.0f}% {choice_text(legal[c], t)}" for c, w in mix[:3]
+                    + "; ".join(f"{100 * w:.0f}% {choice_text(legal[c], t, names)}" for c, w in mix[:3]
                                 if w >= 0.01 and c in legal))
         else:
             a = self._pick(logp[0], list(legal))
             ranked.remove(a)
             ranked.insert(0, a)
-            info += "; " + "; ".join(f"{100 * np.exp(logp[0][x]):.0f}% {choice_text(legal[x], t)}"
+            info += "; " + "; ".join(f"{100 * np.exp(logp[0][x]):.0f}% {choice_text(legal[x], t, names)}"
                                      for x in ranked[:3])
+            foe_mix = sorted(((x, float(np.exp(logp[1][x]))) for x in theirs), key=lambda x: -x[1])
+        if theirs:
+            # What it expects the opponent to do: the search's equilibrium mix
+            # for the other side, or the network's prediction of its policy.
+            info += " || expects: " + "; ".join(
+                f"{100 * w:.0f}% {foe_choice_text(theirs[c], position, t.d, names)}"
+                for c, w in foe_mix[:3] if w >= 0.01 and c in theirs)
         for x in ranked:
             if valid(legal[x], req):
                 if x != a:
@@ -184,7 +194,37 @@ def valid(choice: str, req: dict) -> bool:
     return megas <= 1
 
 
-def choice_text(choice: str, t: Tracker) -> str:
+def slot_names(position: dict, d) -> list[list[str]]:
+    """The active Pokemon's names, [ours, theirs] by slot (a, b)."""
+    out = []
+    for side in position.get("sides", [])[:2]:
+        mons = side.get("pokemon", [])[:2]
+        out.append([d.species.get(m["species"], {}).get("name", m["species"]) for m in mons])
+    return out
+
+
+def active_names(t: Tracker, guess_brought=None):
+    """slot_names for the tracker's current position (None at team preview
+    or if it can't be built)."""
+    if (t.request or {}).get("teamPreview"):
+        return None
+    try:
+        return slot_names(t.position(guess_brought), t.d)
+    except Exception:
+        return None
+
+
+def _target(loc: int, names, side: int) -> str:
+    """A move's target loc (positive: the mover's foes) as a name."""
+    who = 1 - side if loc > 0 else side
+    slot = abs(loc) - 1
+    try:
+        return " -> " + names[who][slot]
+    except (IndexError, TypeError):
+        return " -> " + ("foe " if loc > 0 else "ally ") + "ab"[slot]
+
+
+def choice_text(choice: str, t: Tracker, names=None) -> str:
     """'move 1 2, switch 3' with names: for the log."""
     req = t.request or {}
     pokemon = req.get("side", {}).get("pokemon", [])
@@ -200,11 +240,38 @@ def choice_text(choice: str, t: Tracker) -> str:
             name = moves[j]["move"] if 0 <= j < len(moves) else words[1]
             target = ""
             if len(words) > 2 and re.fullmatch(r"-?\d", words[2]):
-                loc = int(words[2])
-                target = " -> " + ("foe " if loc > 0 else "ally ") + "ab"[abs(loc) - 1]
+                target = _target(int(words[2]), names, 0)
             out.append(name + target + (" (Mega)" if "mega" in words else ""))
         elif words[0] == "switch" and int(words[1]) - 1 < len(pokemon):
             out.append("switch to " + pokemon[int(words[1]) - 1]["ident"].split(": ", 1)[-1])
         else:
             out.append(part.strip())
+    return ", ".join(out)
+
+
+def foe_choice_text(choice: str, position: dict, d, names=None) -> str:
+    """The opponent's 'move 2, move 1 1' with names, from the position."""
+    mons = position["sides"][1]["pokemon"]
+    names = names or slot_names(position, d)
+    out = []
+    for slot, part in enumerate(choice.split(",")):
+        words = part.split()
+        if not words:
+            continue
+        who = names[1][slot] if slot < len(names[1]) else "?"
+        if words[0] == "move" and slot < len(mons):
+            moves = mons[slot].get("moves", [])
+            j = int(words[1]) - 1
+            mid = moves[j]["id"] if 0 <= j < len(moves) else words[1]
+            name = d.moves.get(mid, {}).get("name", mid)
+            target = ""
+            if len(words) > 2 and re.fullmatch(r"-?\d", words[2]):
+                target = _target(int(words[2]), names, 1)
+            out.append(f"{who} {name}{target}" + (" (Mega)" if "mega" in words else ""))
+        elif words[0] == "switch":
+            k = int(words[1]) - 1
+            to = mons[k]["species"] if 0 <= k < len(mons) else words[1]
+            out.append(f"{who} out for {d.species.get(to, {}).get('name', to)}")
+        else:
+            out.append(f"{who} {part.strip()}")
     return ", ".join(out)

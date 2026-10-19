@@ -346,3 +346,32 @@ def test_teams_are_found_in_every_folder_the_bot_trains_on():
         errors, _ = check_team(bad.read_text(encoding="utf-8"))
         assert any("Precipice Blades" in e for e in errors)
     assert check_team(paste.read_text(encoding="utf-8")) == ([], [])
+
+
+def test_review_replays_a_saved_battle_decision_by_decision():
+    """selfplay.showdown.review on recorded battles: one line per decision
+    the player made, each answered, with what happened next; decision lines
+    the client saved ("|bot|...") are shown as what was played."""
+    import torch
+
+    from selfplay.model import PolicyNet
+    from selfplay.showdown.bot import Bot
+    from selfplay.showdown.review import describe, review
+
+    torch.manual_seed(0)
+    model = PolicyNet(32, 1).eval()
+    for b in battles()[:3]:
+        for me, paste, lines, decisions in perspectives(b):
+            out = []
+            lines = list(lines)
+            lines.insert(decisions[0]["at"] + 1, "|bot|team preview: team 1234  | a saved decision")
+            with torch.no_grad():
+                review(lines, Bot(model, paste, seed=1), paste, out=out.append)
+            heads = [o for o in out if o.startswith("== ")]
+            assert len(heads) == len(decisions), (len(heads), len(decisions))
+            assert not any("couldn't decide" in o for o in out)
+            assert any(o.startswith("   then: ") for o in out)
+            assert "   played: team preview: team 1234  | a saved decision" in out
+    assert describe("|move|p2b: Floette|Dazzling Gleam|p1b: Excadrill|[spread] p1a,p1b", "p1") == \
+        "(opp) Floette: Dazzling Gleam (spread)"
+    assert describe("|faint|p1a: Salamence", "p1") == "Salamence fainted"
