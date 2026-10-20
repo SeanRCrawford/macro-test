@@ -30,6 +30,18 @@ SHOWDOWN_PASSWORD environment variable.
 
 Against a local server (node pokemon-showdown start --no-security), use
 --server ws://localhost:8000/showdown/websocket --local: no login needed.
+
+On VGC Arena (https://vgc.bot, a ladder of bots), with the bot registered
+there and its name and token in ARENA_BOT_NAME and ARENA_BOT_TOKEN (never
+in a file that gets committed):
+
+    python -m selfplay.showdown runs/ppo7/model.pt --team my_team.txt --arena
+
+It stays online, reconnecting after a drop, and plays every battle the
+arena puts it in (--challenge BOT challenges one; --games N stops after N).
+The format is the open team sheets ladder (--format
+gen9championsvgc2026regmc for closed team sheets); it can't play the
+random-team ladders, and concedes a battle there.
 """
 from __future__ import annotations
 
@@ -44,20 +56,22 @@ def main():
     from selfplay.evaluate import load
     from selfplay.mcts import TreeConfig
     from selfplay.showdown.bot import Bot
-    from selfplay.showdown.client import FORMAT, MAIN_SERVER, Client
+    from selfplay.showdown.client import ARENA_FORMAT, ARENA_SERVER, FORMAT, MAIN_SERVER, Client
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("model")
     p.add_argument("--team", required=True,
                    help="the bot's team: a paste file, or a team's name (data/teams, data/my_teams, the corpus)")
-    p.add_argument("--user", required=True, help="the bot's Showdown account")
+    p.add_argument("--user", default=None, help="the bot's Showdown account (on the arena: ARENA_BOT_NAME)")
     p.add_argument("--password", default=None, help="its password (or SHOWDOWN_PASSWORD)")
+    p.add_argument("--arena", action="store_true",
+                   help="play on VGC Arena (vgc.bot): name and token from ARENA_BOT_NAME and ARENA_BOT_TOKEN")
     p.add_argument("--challenge", nargs="+", default=[], help="users to challenge, in turn")
     p.add_argument("--accept", nargs="*", default=None, help="accept challenges from these users (none listed: anyone)")
-    p.add_argument("--games", type=int, default=1,
+    p.add_argument("--games", type=int, default=None,
                    help="matches to play before exiting (a best-of-3 series counts as one)")
-    p.add_argument("--format", default=FORMAT)
-    p.add_argument("--server", default=MAIN_SERVER)
+    p.add_argument("--format", default=None, help=f"default {FORMAT} (on the arena {ARENA_FORMAT})")
+    p.add_argument("--server", default=None, help=f"default {MAIN_SERVER} (on the arena {ARENA_SERVER})")
     p.add_argument("--local", action="store_true", help="a local server without login (--no-security)")
     p.add_argument("--policy", action="store_true", help="play the network's policy, no search")
     p.add_argument("--value-model", default=None,
@@ -83,8 +97,30 @@ def main():
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
-    if not a.challenge and a.accept is None:
-        p.error("give --challenge USER or --accept [USER ...]")
+    if a.arena:
+        a.user = a.user or os.environ.get("ARENA_BOT_NAME")
+        # The token only ever comes from the environment: never a file or
+        # the command line (both end up in logs and history).
+        a.password = os.environ.get("ARENA_BOT_TOKEN")
+        if not a.user or not a.password:
+            p.error("--arena needs ARENA_BOT_NAME and ARENA_BOT_TOKEN set (or --user for the name)")
+        if not a.password.startswith("pka_"):
+            p.error("ARENA_BOT_TOKEN doesn't look like an arena token (they start with pka_)")
+        a.server = a.server or ARENA_SERVER
+        a.format = a.format or ARENA_FORMAT
+        a.replays = "off"
+        if a.games is None:
+            a.games = 10 ** 9  # stay online
+    else:
+        if not a.user:
+            p.error("give --user (the bot's Showdown account)")
+        if not a.challenge and a.accept is None:
+            p.error("give --challenge USER or --accept [USER ...]")
+        a.server = a.server or MAIN_SERVER
+        a.format = a.format or FORMAT
+        a.password = a.password or os.environ.get("SHOWDOWN_PASSWORD")
+        if a.games is None:
+            a.games = 1
 
     from selfplay.showdown.team import check_team, complete_paste, find_team
     path = find_team(a.team)
@@ -107,10 +143,10 @@ def main():
         cfg = None if tree is None else TreeConfig(**vars(tree))
         return Bot(model, team, cfg, sample=a.sample, seed=next(seeds), value_model=value_model)
 
-    client = Client(make_bot, team, a.user, a.password or os.environ.get("SHOWDOWN_PASSWORD"),
+    client = Client(make_bot, team, a.user, a.password,
                     server=a.server, fmt=a.format, challenge=a.challenge, accept=a.accept,
                     games=a.games, ots=not a.no_ots, timer=a.timer, log_dir=a.log_dir, local=a.local,
-                    ots_wait=a.ots_wait, replays=a.replays, max_seconds=a.max_seconds)
+                    ots_wait=a.ots_wait, replays=a.replays, max_seconds=a.max_seconds, arena=a.arena)
     asyncio.run(client.run())
     r, s = client.record, client.series_record
     print(f"done: games {r['win']} won, {r['loss']} lost, {r['tie']} tied"

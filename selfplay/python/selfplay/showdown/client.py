@@ -25,6 +25,10 @@ from selfplay.showdown.team import pack_team
 from selfplay.showdown.tracker import Tracker
 
 MAIN_SERVER = "wss://sim3.psim.us/showdown/websocket"
+# VGC Arena (https://vgc.bot): Showdown's protocol, bots only. Log in with the
+# bot's name and its token; the format is the id of a ladder the bot is on.
+ARENA_SERVER = "wss://vgc.bot/showdown/websocket"
+ARENA_FORMAT = "gen9championsvgc2026regmcots"   # open team sheets, the bot's own team
 LOGIN_URL = "https://play.pokemonshowdown.com/action.php"
 FORMAT = "gen9championsvgc2026regmc"
 
@@ -110,13 +114,17 @@ class Client:
                  accept: list[str] | None = None, games: int = 1, ots: bool = True,
                  timer: bool = False, log_dir: str = "runs/showdown",
                  local: bool = False, think_delay: float = 0.3, ots_wait: float = 20.0,
-                 replays: str = "unlisted", max_seconds: float = 20.0, out=print):
+                 replays: str = "unlisted", max_seconds: float = 20.0, arena: bool = False,
+                 reconnect_delay: float = 2.0, out=print):
         """`make_bot()` -> a fresh Bot per battle. `challenge`: users to
         challenge (one battle at a time, in turn). `accept`: accept
         challenges from these users ([] = anyone; None = none). `replays`:
         save each battle's replay on the server, "unlisted" (watchable by
         link), "public" or "off". `max_seconds`: the longest a decision's
-        search may take (less when the battle timer is short)."""
+        search may take (less when the battle timer is short). `arena`: VGC
+        Arena: `password` is the bot's token, sent with /trn as it is; the
+        client stays online, reconnecting after a drop, and plays every
+        battle it is put in (there, a challenge needs no answer)."""
         self.make_bot, self.team, self.name, self.password = make_bot, team, name, password
         self.server, self.format = server, fmt
         self.to_challenge = list(challenge)
@@ -139,25 +147,53 @@ class Client:
         self.challenging: str | None = None
         self.started: list[str] = []   # battle rooms, in order
         self.done = asyncio.Event()
+        self.stopped = False           # the session is over (not just this connection)
+        self.arena = arena
+        self.reconnect_delay = self.base_delay = reconnect_delay
+        if arena:
+            self.replays = "off"         # its battles are public at vgc.bot/battles/<id>
+            if self.accept is None:
+                self.accept = set()      # everyone may challenge it
 
     # --- Connection -------------------------------------------------------------
+
+    def stop(self):
+        """End the session (not just this connection)."""
+        self.stopped = True
+        self.done.set()
 
     async def run(self):
         try:
             import websockets
         except ImportError as e:
             raise SystemExit("the Showdown client needs the websockets package: pip install websockets") from e
-        async with websockets.connect(self.server, max_size=None, ping_interval=30, ping_timeout=120) as ws:
-            self.ws = ws
-            reader = asyncio.create_task(self._read())
-            await self.done.wait()
-            # The last replays' links come a moment after the battle ends.
-            deadline = time.time() + 20
-            while self.replays_waiting and not reader.done() and time.time() < deadline:
-                await asyncio.sleep(0.25)
-            for room, *_ in self.replays_waiting.values():
-                self.out(f"[{room}] no replay link came back from the server")
-            reader.cancel()
+        while True:
+            # Each connection starts over: the arena sends a battle in
+            # progress again from its start (|init|battle).
+            self.done = asyncio.Event()
+            self.logged_in = False
+            self.battles = {}
+            try:
+                # Pings keep an idle connection alive and show a dead one.
+                async with websockets.connect(self.server, max_size=None, ping_interval=30,
+                                              ping_timeout=30 if self.arena else 120) as ws:
+                    self.ws = ws
+                    reader = asyncio.create_task(self._read())
+                    await self.done.wait()
+                    # The last replays' links come a moment after the battle ends.
+                    deadline = time.time() + 20
+                    while self.replays_waiting and not reader.done() and time.time() < deadline:
+                        await asyncio.sleep(0.25)
+                    for room, *_ in self.replays_waiting.values():
+                        self.out(f"[{room}] no replay link came back from the server")
+                    reader.cancel()
+            except Exception as e:  # couldn't connect, or the connection broke
+                self.out(f"connection failed: {type(e).__name__}: {e}")
+            if self.stopped or not self.arena:
+                break
+            self.out(f"reconnecting in {self.reconnect_delay:.0f} s")
+            await asyncio.sleep(self.reconnect_delay)
+            self.reconnect_delay = min(60.0, 2 * self.reconnect_delay)
         self.worker.shutdown(wait=False)
 
     async def _read(self):
@@ -197,13 +233,16 @@ class Client:
             challstr = "|".join(parts[2:])
             if self.local:
                 await self.send(f"/trn {self.name},0,")
+            elif self.arena:
+                # The arena takes the bot's token in place of an assertion.
+                await self.send(f"/trn {self.name},0,{self.password}")
             else:
                 loop = asyncio.get_running_loop()
                 try:
                     assertion = await loop.run_in_executor(None, login, self.name, self.password, challstr)
                 except Exception as e:
                     self.out(f"login failed: {type(e).__name__}: {e}")
-                    self.done.set()
+                    self.stop()
                     return
                 await self.send(f"/trn {self.name},0,{assertion}")
         elif kind == "updateuser":
@@ -211,12 +250,13 @@ class Client:
             named = len(parts) > 3 and parts[3] == "1"
             if named and to_id(user) == to_id(self.name) and not self.logged_in:
                 self.logged_in = True
-                self.out(f"logged in as {user}")
+                self.reconnect_delay = self.base_delay
+                self.out(f"logged in as {user}" + (f" on {self.server}" if self.arena else ""))
                 await self.send(f"/utm {pack_team(self.team)}")
                 await self.next_challenge()
         elif kind == "nametaken":
             self.out(f"name refused: {'|'.join(parts[2:])}")
-            self.done.set()
+            self.stop()
         elif kind == "popup":
             text = "|".join(parts[2:])
             if not self.replay_popup(text):
@@ -226,8 +266,10 @@ class Client:
             if to_id(receiver) == to_id(self.name) and text.startswith("/challenge "):
                 fmt = text[len("/challenge "):].split("|")[0]
                 await self.incoming(sender, fmt)
-            elif to_id(sender) == to_id(self.name) and text == "/challenge" and self.challenging:
+            elif to_id(sender) == to_id(self.name) and text == "/challenge" and self.challenging \
+                    and not self.arena:
                 # Our challenge went: accepted (a battle starts) or declined.
+                # (The arena keeps a challenge until both bots are free.)
                 asyncio.create_task(self.check_declined(len(self.started)))
         elif kind == "updatechallenges" and len(parts) > 2:
             try:
@@ -284,13 +326,14 @@ class Client:
             self.series_record[result] += 1
             r = self.series_record
             self.out(f"[{room}] series {result} {ours}-{theirs}. Series record: {r['win']}-{r['loss']}-{r['tie']}")
-            await self.send(f"/leave {room}")
+            if not self.arena:
+                await self.send(f"/leave {room}")
             self.games_left -= 1
             await self.after_match()
 
     async def after_match(self):
         if self.games_left <= 0 and not self.battles:
-            self.done.set()
+            self.stop()
         elif self.games_left > 0:
             await self.next_challenge()
 
@@ -300,10 +343,14 @@ class Client:
             self.out(f"{self.challenging} didn't accept the challenge")
             self.challenging = None
             if not self.battles and self.accept is None:
-                self.done.set()
+                self.stop()
 
     async def incoming(self, sender: str, fmt: str):
         uid = to_id(sender.lstrip("+%@*&#~ "))
+        if self.arena:
+            # The arena starts the battle itself when both bots are free.
+            self.out(f"challenged by {sender} ({fmt})")
+            return
         if self.accept is None or (self.accept and uid not in self.accept):
             self.out(f"ignoring a challenge from {sender} ({fmt})")
             return
@@ -316,7 +363,7 @@ class Client:
     async def next_challenge(self):
         if not self.to_challenge or self.games_left <= 0:
             if self.accept is None and not self.battles:
-                self.done.set()
+                self.stop()
             elif self.accept is not None and self.games_left > 0:
                 self.out("waiting for challenges...")
             return
@@ -339,6 +386,14 @@ class Client:
                     if line.startswith("|error|"):
                         self.out(f"[{room}] {line[7:]}")
                 return
+            ladder = room[len("battle-"):].rsplit("-", 1)[0]
+            if self.arena and ladder.endswith("random"):
+                # The arena hands out the team there; the bot plays only the
+                # paste it was given.
+                self.out(f"[{room}] a random-team battle: this bot plays only its own team, so it "
+                         f"concedes. Untick the random-team ladders at https://vgc.bot/account")
+                await self.send("/forfeit", room)
+                return
             try:
                 b = Battle(room, Tracker(self.team, our_name=self.name), self.make_bot())
             except Exception as e:
@@ -347,8 +402,9 @@ class Client:
                 self.out(f"[{room}] couldn't set up the bot, conceding and stopping: "
                          f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
                 await self.send("/forfeit", room)
-                await self.send(f"/leave {room}")
-                self.done.set()
+                if not self.arena:
+                    await self.send(f"/leave {room}")
+                self.stop()
                 return
             self.battles[room] = b
             self.started.append(room)
@@ -379,7 +435,9 @@ class Client:
                 b.ots_rejected = True
             elif line.startswith("|error|"):
                 self.out(f"[{room}] {line[7:]}")
-                if "[Invalid choice]" in line or "[Unavailable choice]" in line:
+                if "nothing for you to choose" in line.lower():
+                    pass  # waiting on the opponent: another choice would fail the same way
+                elif "[Invalid choice]" in line or "[Unavailable choice]" in line:
                     b.errors += 1
                     b.decided = None
                     if b.errors > 3:
@@ -415,8 +473,8 @@ class Client:
             choice, why = await loop.run_in_executor(self.worker, b.bot.decide, t, seconds)
         except Exception as e:
             choice, why = "default", f"error: {type(e).__name__}: {e}"
-        if t.rqid != rqid:
-            return  # a newer request came in; it gets its own decision
+        if t.rqid != rqid or self.battles.get(b.room) is not b:
+            return  # a newer request came in (it gets its own decision), or a new connection
         b.decided = rqid
         label = "team preview" if req.get("teamPreview") else f"turn {t.turn}"
         line = f"{label}: {choice_text(choice, t, active_names(t, b.bot.guess_brought))}  | {why}"
@@ -437,6 +495,8 @@ class Client:
         path = self.log_dir / f"{b.room}.log"
         path.write_text("\n".join(b.log) + "\n", encoding="utf-8")
         self.out(f"[{b.room}] log: {path}")
+        if self.arena:
+            self.out(f"[{b.room}] https://vgc.bot/battles/{b.room.rsplit('-', 1)[-1]}")
         if self.replays != "off":
             # Unlisted: the replay gets a password in its link and stays out
             # of searches.
@@ -444,7 +504,8 @@ class Client:
                 await self.send("/hidereplay", b.room)
             await self.send("/savereplay", b.room)
             self.replays_waiting[replay_id(b.room)] = (b.room, result, b.tracker.foe.name or "?")
-        await self.send(f"/leave {b.room}")
+        if not self.arena:  # (the arena knows only the commands it documents)
+            await self.send(f"/leave {b.room}")
         del self.battles[b.room]
         # A best-of-3 counts as one match, when its room says it's over.
         if not b.series:

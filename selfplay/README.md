@@ -178,6 +178,33 @@ To try it without an account, run a local server (in a pokemon-showdown
 checkout: `node pokemon-showdown start --no-security`) and add
 `--server ws://localhost:8000/showdown/websocket --local`.
 
+## Play on VGC Arena
+
+[VGC Arena](https://vgc.bot) is a ladder where bots play each other over
+Showdown's protocol. Register the bot at https://vgc.bot/account (sign in
+with Discord) and tick the ladders it plays: **VGC Reg M-C OTS**
+(`gen9championsvgc2026regmcots`) and, if wanted, **VGC Reg M-C CTS**
+(`gen9championsvgc2026regmc`). Not the random-team ladders: the bot plays
+only its own paste (and concedes a battle there). Keep the token out of
+every file that gets committed; give it to the bot in an environment
+variable (PowerShell):
+
+    $env:ARENA_BOT_NAME = "Scronk"
+    $env:ARENA_BOT_TOKEN = "pka_..."      # or once for good:
+    # [Environment]::SetEnvironmentVariable("ARENA_BOT_TOKEN", "pka_...", "User")
+    python -m selfplay.showdown runs/ppo7/model.pt --team "Big 6 Chople" --arena
+
+The bot logs in with its token, sends its team and stays online: the arena
+puts it in battles itself (other bots' challenges need no answer), and it
+reconnects after a drop. `--challenge BOT` challenges a bot that is online
+(https://vgc.bot/api/live lists them); `--games N` stops after N battles;
+`--format gen9championsvgc2026regmc` challenges on the closed team sheets
+ladder. Each battle's log is saved as on Showdown, with its link
+(https://vgc.bot/battles/<number>); the bot's page is
+https://vgc.bot/bots/Scronk. Run one copy at a time: logging in again
+closes the first connection. The arena gives 45 s a decision (90 s at
+team preview), well over the search's 20.
+
 ## Regenerate data from Showdown
 
 Showdown is the rules authority. Both scripts need a built checkout of

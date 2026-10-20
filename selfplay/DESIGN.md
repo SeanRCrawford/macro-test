@@ -1346,6 +1346,18 @@ in self-play:
   Bo3 games against each other on a local Showdown server without a
   rejected choice.
 
+
+**VGC Arena** (https://vgc.bot, a ladder of bots over Showdown's protocol;
+its spec is https://vgc.bot/llms.txt). `--arena` on the Showdown client:
+the server wss://vgc.bot/showdown/websocket, login by `/trn NAME,0,TOKEN`
+with the name and token from ARENA_BOT_NAME and ARENA_BOT_TOKEN, the open
+team sheets ladder as the format. The client stays online (a challenge to
+it needs no answer: the arena starts the battle), reconnects with a
+backoff after a drop and starts a battle's state over from the
+`|init|battle` the arena sends again, pings every 30 s, and sends only
+the commands the arena takes (no replays, no /leave). A random-team ladder
+battle is conceded: the bot plays only its paste. A test plays the client
+against a stand-in arena.
 ## 5. Model and training (provisional; settled in phases 2–3)
 
 Two recipes have reached #1 in Reg M-C:

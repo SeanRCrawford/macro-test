@@ -396,3 +396,59 @@ def test_diagnose_reads_the_opponents_reply_from_the_log():
     lines[1] = "|switch|p2a: Charizard|Charizard, L50, M|100/100"
     assert observed_reply(lines, "p2", position, data())[0] == ["?unseen"]
     assert observed_reply(["|t:|1", "|upkeep"], "p2", position, data()) is None
+
+
+def test_arena_client_logs_in_with_the_token_reconnects_and_skips_random_teams(tmp_path):
+    """Against a stand-in for VGC Arena: the bot logs in with /trn NAME,0,TOKEN,
+    sends its team, comes back after a dropped connection (logging in and
+    sending the team again), concedes a random-team battle, sends nothing
+    the arena doesn't take (/leave, replays, /accept) and never prints the
+    token."""
+    import asyncio
+
+    websockets = pytest.importorskip("websockets")
+    from selfplay.showdown.client import Client
+    from selfplay.showdown.team import complete_paste, find_team
+    team = complete_paste(find_team("Big 6 Chople").read_text(encoding="utf-8-sig"))[0] \
+        if (Path(__file__).resolve().parents[2] / "data" / "teams").is_dir() else None
+    if team is None:
+        pytest.skip("no data/teams")
+    token = "pka_TESTTOKEN123"
+    connections: list[list[str]] = []
+
+    async def arena(ws):
+        got: list[str] = []
+        connections.append(got)
+        await ws.send("|updateuser| Guest 1|0|1|{}\n|challstr|4|abc")
+        async for msg in ws:
+            got.append(msg)
+            if msg.startswith("|/trn "):
+                await ws.send("|updateuser| Scronk|1|1|{}")
+            elif msg.startswith("|/utm "):
+                if len(connections) == 1:
+                    await ws.close()  # dropped: the bot should come back
+                    return
+                await ws.send(">battle-gen9championsvgc2026regmcotsrandom-7\n|init|battle\n|title|Scronk vs. X")
+            elif msg.endswith("|/forfeit"):
+                await ws.send("|nametaken|Scronk|that's all")
+
+    out: list[str] = []
+
+    async def main():
+        async with websockets.serve(arena, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            client = Client(lambda: None, team, "Scronk", token, server=f"ws://127.0.0.1:{port}",
+                            fmt="gen9championsvgc2026regmcots", games=10 ** 9, arena=True,
+                            reconnect_delay=0.05, log_dir=str(tmp_path), out=out.append)
+            await asyncio.wait_for(client.run(), 30)
+
+    asyncio.run(main())
+    assert len(connections) == 2
+    for got in connections:
+        assert got[0] == f"|/trn Scronk,0,{token}"
+        assert any(m.startswith("|/utm ") for m in got)
+    assert "battle-gen9championsvgc2026regmcotsrandom-7|/forfeit" in connections[1]
+    sent = [m for got in connections for m in got]
+    assert not any(w in m for m in sent for w in ("/leave", "replay", "/accept"))
+    assert not any(token in line for line in out)
+    assert any("reconnecting" in line for line in out) and any("random-team" in line for line in out)
