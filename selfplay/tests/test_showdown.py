@@ -452,3 +452,81 @@ def test_arena_client_logs_in_with_the_token_reconnects_and_skips_random_teams(t
     assert not any(w in m for m in sent for w in ("/leave", "replay", "/accept"))
     assert not any(token in line for line in out)
     assert any("reconnecting" in line for line in out) and any("random-team" in line for line in out)
+
+
+def test_stopping_finishes_the_battle_in_progress_then_goes_offline(tmp_path):
+    """Asked to stop mid-battle (Ctrl+C), the client keeps playing that
+    battle, and goes offline (no reconnect) only once it's over."""
+    import asyncio
+
+    import torch
+
+    websockets = pytest.importorskip("websockets")
+    from selfplay.model import PolicyNet
+    from selfplay.showdown.bot import Bot
+    from selfplay.showdown.client import Client
+    b = battles()[0]
+    paste, lines, at = b["teams"][0], b["lines"], b["decisions"][0]["at"]
+    room = "battle-gen9championsvgc2026regmcots-9"
+    torch.manual_seed(0)
+    model = PolicyNet(32, 1).eval()
+    connections: list[list[str]] = []
+    client = None
+
+    async def arena(ws):
+        got: list[str] = []
+        connections.append(got)
+        await ws.send("|challstr|4|abc")
+        async for msg in ws:
+            got.append(msg)
+            if msg.startswith("|/trn "):
+                await ws.send("|updateuser| p1|1|1|{}")
+            elif msg.startswith("|/utm "):
+                await ws.send(f">{room}\n|init|battle\n" + "\n".join(lines[:at]))
+            elif "|/choose " in msg:
+                client.request_stop()  # Ctrl+C while the battle is on
+                await ws.send(f">{room}\n|win|p1")
+
+    out: list[str] = []
+
+    async def main():
+        nonlocal client
+        async with websockets.serve(arena, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            with torch.no_grad():
+                client = Client(lambda: Bot(model, paste, seed=1), paste, "p1", "pka_x",
+                                server=f"ws://127.0.0.1:{port}", games=10 ** 9, arena=True,
+                                reconnect_delay=0.05, log_dir=str(tmp_path), out=out.append)
+                await asyncio.wait_for(client.run(), 60)
+
+    asyncio.run(main())
+    assert len(connections) == 1 and client.stopped
+    assert any(m.startswith(f"{room}|/choose team ") for m in connections[0])
+    assert any("finishing 1 battle" in line for line in out)
+    assert any("going offline" in line for line in out) and client.record["win"] == 1
+
+
+def test_one_ctrl_c_asks_the_client_to_stop_instead_of_killing_it():
+    import asyncio
+    import os
+    import signal
+    import sys
+    if sys.platform == "win32":
+        pytest.skip("sends itself SIGINT")
+    from selfplay.showdown.__main__ import run_until_stopped
+
+    class FakeClient:
+        asked = 0
+
+        def request_stop(self):
+            self.asked += 1
+            self.stopped.set()
+
+        async def run(self):
+            self.stopped = asyncio.Event()
+            asyncio.get_running_loop().call_later(0.2, os.kill, os.getpid(), signal.SIGINT)
+            await asyncio.wait_for(self.stopped.wait(), 5)
+
+    c = FakeClient()
+    asyncio.run(run_until_stopped(c))
+    assert c.asked == 1

@@ -148,6 +148,7 @@ class Client:
         self.started: list[str] = []   # battle rooms, in order
         self.done = asyncio.Event()
         self.stopped = False           # the session is over (not just this connection)
+        self.draining = False          # finishing the battles in progress, then offline
         self.arena = arena
         self.reconnect_delay = self.base_delay = reconnect_delay
         if arena:
@@ -161,6 +162,21 @@ class Client:
         """End the session (not just this connection)."""
         self.stopped = True
         self.done.set()
+
+    def request_stop(self):
+        """Go offline once the battles in progress are over: no new
+        challenges; a battle the server starts in the meantime is played
+        out too, never abandoned."""
+        if self.draining:
+            return
+        self.draining = True
+        self.to_challenge = []
+        if self.battles:
+            self.out(f"finishing {len(self.battles)} battle(s), then going offline "
+                     f"(Ctrl+C again to quit at once and lose them)")
+        else:
+            self.out("going offline")
+            self.stop()
 
     async def run(self):
         try:
@@ -332,6 +348,11 @@ class Client:
             await self.after_match()
 
     async def after_match(self):
+        if self.draining:
+            if not self.battles:
+                self.out("battles over: going offline")
+                self.stop()
+            return
         if self.games_left <= 0 and not self.battles:
             self.stop()
         elif self.games_left > 0:
@@ -408,7 +429,7 @@ class Client:
                 return
             self.battles[room] = b
             self.started.append(room)
-            self.out(f"[{room}] started")
+            self.out(f"[{room}] started" + (" (going offline after it)" if self.draining else ""))
             if self.timer:
                 await self.send("/timer on", room)
         new_request = False

@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import signal
 import sys
 
 import torch
@@ -147,10 +148,39 @@ def main():
                     server=a.server, fmt=a.format, challenge=a.challenge, accept=a.accept,
                     games=a.games, ots=not a.no_ots, timer=a.timer, log_dir=a.log_dir, local=a.local,
                     ots_wait=a.ots_wait, replays=a.replays, max_seconds=a.max_seconds, arena=a.arena)
-    asyncio.run(client.run())
+    print("Ctrl+C: finish the battle in progress, then go offline (press it twice to quit at once)")
+    asyncio.run(run_until_stopped(client))
     r, s = client.record, client.series_record
     print(f"done: games {r['win']} won, {r['loss']} lost, {r['tie']} tied"
           + (f"; series {s['win']}-{s['loss']}-{s['tie']}" if sum(s.values()) else ""))
+
+
+async def run_until_stopped(client):
+    """Run the client; the first Ctrl+C lets the battles in progress finish
+    before it goes offline, the second quits at once."""
+    loop = asyncio.get_running_loop()
+    presses = 0
+
+    def on_ctrl_c(*_):
+        nonlocal presses
+        presses += 1
+        if presses > 1:
+            raise KeyboardInterrupt
+        loop.call_soon_threadsafe(client.request_stop)
+
+    async def tick():
+        # Wakes the event loop every second, so a Ctrl+C is seen promptly
+        # (on Windows the loop can otherwise sleep through it).
+        while True:
+            await asyncio.sleep(1)
+
+    old = signal.signal(signal.SIGINT, on_ctrl_c)
+    ticker = asyncio.create_task(tick())
+    try:
+        await client.run()
+    finally:
+        ticker.cancel()
+        signal.signal(signal.SIGINT, old)
 
 
 if __name__ == "__main__":

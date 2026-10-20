@@ -202,7 +202,10 @@ reconnects after a drop. `--challenge BOT` challenges a bot that is online
 ladder. Each battle's log is saved as on Showdown, with its link
 (https://vgc.bot/battles/<number>); the bot's page is
 https://vgc.bot/bots/Scronk. Run one copy at a time: logging in again
-closes the first connection. The arena gives 45 s a decision (90 s at
+closes the first connection. To take it offline, press Ctrl+C once: it
+finishes the battle in progress (and any the arena starts in that moment),
+then disconnects; a second Ctrl+C quits at once, which loses a battle in
+progress. The same works on Showdown. The arena gives 45 s a decision (90 s at
 team preview), well over the search's 20.
 
 ## Regenerate data from Showdown
