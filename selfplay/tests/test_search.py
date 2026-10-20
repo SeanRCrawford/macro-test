@@ -126,6 +126,10 @@ def test_tiebreak_prefers_the_action_better_against_other_replies():
           "row": [1.0, 0.0], "col": [0.6, 0.4], "priors": ([0.5, 0.5], [0.5, 0.5])}
     assert tiebreak(r1, 1, 0.02, default=0) == 1
     assert tiebreak({"candidates": ([1], [2]), "matrix": []}, 0, 0.02, default=0) == 0
+    # An action the mix barely plays isn't brought back, however it does
+    # against the policy's picture of the opponent.
+    r2 = dict(r, row=[0.98, 0.02, 0.0])
+    assert tiebreak(r2, 0, 0.02, default=0) == 0
 
 
 def test_tree_search_stops_at_its_time_limit():

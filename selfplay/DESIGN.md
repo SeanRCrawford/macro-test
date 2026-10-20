@@ -1227,7 +1227,27 @@ not sampling (Showdown), the bot takes among the actions within 0.02 (one
 point of win chance) of the best against the opponent's equilibrium the
 one that does best against its likely replies (its policy): a refinement
 that drops weakly dominated actions (`TreeConfig.tiebreak`; the decision
-line says when it changed the choice).
+line says when it changed the choice). Replayed with ppo6k itself, that
+first version often left the mix for actions it hardly played (73% on
+Tailwind and Ice Beam into a Whimsicott it would knock out, replaced by a
+2% Hyper Voice and Icy Wind): the policy's picture of the opponent is too
+rough to bring such actions back. It now only chooses among actions the
+mix plays (at least 5% and a quarter of its top weight).
+
+**Replaying the losses with ppo6k** (`selfplay.showdown.review` on the
+CPU, ~4 s a decision). The positions are right, and so are the odds the
+engine gives (a second Protect in a row blocks Moonblast 108 times in 300).
+What goes wrong is judgement. Turn 1 of the first loss: the network gives
+itself 79% (the opponent's view agrees, -0.57) and its own most likely play
+(87%: Low Kick into Kingambit, Iron Head into Floette, whom Excadrill in
+sand knocks out before it moves) is sound. The search's mix instead leans
+on Protect and switches, guessing at the opponent's Protect and switch,
+and plays one of them; the reply mikumiku37 chose (Mega Floette's
+Moonblast into Tyranitar) gets 5% from the network's model of the
+opponent, because in self-play Floette rarely lives to use it. The values
+are calibrated against opponents that play like the bot, and the search
+leans on them in lines self-play never visits. Whether the search still
+helps against the policy is the next measurement.
 
 **Search budget.** 6,000 against 2,000 (both ppo5, both searching, 404
 games): 0.520 +-0.049, though the larger side looked at 8,220 leaves a

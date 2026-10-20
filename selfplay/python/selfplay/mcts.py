@@ -55,13 +55,13 @@ class TreeConfig:
     leaf_batch: int = 8192
     sample: bool = True         # play a sample of the root mix (else its most likely action)
     half: bool = True           # leaf values in float16 on CUDA (most of the network's time)
-    # Not sampling: among the actions within this much (side 0's value, 2 =
-    # the whole range) of the best against the opponent's equilibrium mix,
-    # play the one that does best against all its likely replies (its
+    # Not sampling: among the actions the mix plays (at least 5% and a
+    # quarter of its top weight) that are within this much (side 0's value,
+    # 2 = the whole range) of the best against the opponent's equilibrium
+    # mix, play the one that does best against all its likely replies (its
     # policy's), not whichever the solver happened to weight most. An action
-    # that only ties because the equilibrium expects one reply (Ice Beam
-    # into a partner, when the opponent should knock the user out first)
-    # loses that tie. 0: the mix's most likely action.
+    # that only ties because the equilibrium expects one reply loses that
+    # tie. 0: the mix's most likely action.
     tiebreak: float = 0.02
     max_seconds: float = 0.0    # stop a search after this long (0: only the budget)
 
@@ -211,10 +211,13 @@ class TreeSearch:
 
 
 def tiebreak(r: dict, side: int, eps: float, default: int) -> int:
-    """The candidate (index) to play: among those within `eps` of the best
+    """The candidate (index) to play: among those the side's mix plays (at
+    least 5% and a quarter of its top weight) within `eps` of the best
     against the opponent's equilibrium mix, the best against its policy's
     likely replies (a refinement: weakly dominated actions lose their
-    ties); `default` if the matrix is missing."""
+    ties). Only the mix's own choices: the policy's picture of the opponent
+    is too rough to bring back actions the search set aside. `default` if
+    the matrix is missing."""
     c0, c1 = r["candidates"]
     if not c0 or not c1 or len(r.get("matrix", ())) != len(c0) * len(c1):
         return default
@@ -227,10 +230,14 @@ def tiebreak(r: dict, side: int, eps: float, default: int) -> int:
         return default
     if opp_prior.sum() <= 0:
         opp_prior = np.ones(m.shape[1])
+    own = np.clip(np.asarray(r["row" if side == 0 else "col"], np.float64), 0, None)
+    if len(own) != m.shape[0] or own.max() <= 0:
+        return default
     eq = m @ (opp_mix / opp_mix.sum())
     broad = m @ (opp_prior / opp_prior.sum())
-    near = np.flatnonzero(eq >= eq.max() - eps)
-    return int(near[np.argmax(broad[near])])
+    played = own >= max(0.05, 0.25 * own.max())
+    near = np.flatnonzero(played & (eq >= eq[played].max() - eps))
+    return int(near[np.argmax(broad[near])]) if len(near) else default
 
 
 def add_alternatives(r: dict) -> None:
