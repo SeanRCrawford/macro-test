@@ -375,3 +375,24 @@ def test_review_replays_a_saved_battle_decision_by_decision():
     assert describe("|move|p2b: Floette|Dazzling Gleam|p1b: Excadrill|[spread] p1a,p1b", "p1") == \
         "(opp) Floette: Dazzling Gleam (spread)"
     assert describe("|faint|p1a: Salamence", "p1") == "Salamence fainted"
+
+
+def test_diagnose_reads_the_opponents_reply_from_the_log():
+    """The opponent's joint action that turn, from what the log shows: a
+    switch to a Pokemon in the bot's picture, a Mega Evolution and a move's
+    target; a Pokemon the bot didn't expect is marked."""
+    from selfplay.showdown.data import data
+    from selfplay.showdown.diagnose import observed_reply
+    moves = lambda *ids: [{"id": i} for i in ids]
+    position = {"sides": [{"pokemon": []}, {"pokemon": [
+        {"species": "kingambit", "moves": moves("kowtowcleave", "suckerpunch", "ironhead", "lowkick")},
+        {"species": "floetteeternal", "moves": moves("moonblast", "dazzlinggleam", "lightofruin", "protect")},
+        {"species": "whimsicott", "moves": []}, {"species": "garchomp", "moves": []}]}]}
+    lines = ["|t:|1", "|switch|p2a: Garchomp|Garchomp, L50, F|100/100",
+             "|detailschange|p2b: Floette|Floette-Mega, L50, F", "|-mega|p2b: Floette|Floette|Floettite",
+             "|move|p2b: Floette|Moonblast|p1a: Tyranitar", "|-damage|p1a: Tyranitar|0 fnt", "|upkeep",
+             "|move|p2a: Garchomp|Earthquake|p1a: Tyranitar"]
+    assert observed_reply(lines, "p2", position, data()) == [["switch 4"], ["move 1 1 mega", "move 1 mega"]]
+    lines[1] = "|switch|p2a: Charizard|Charizard, L50, M|100/100"
+    assert observed_reply(lines, "p2", position, data())[0] == ["?unseen"]
+    assert observed_reply(["|t:|1", "|upkeep"], "p2", position, data()) is None

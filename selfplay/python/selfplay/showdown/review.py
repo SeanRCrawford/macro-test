@@ -17,15 +17,24 @@ from pathlib import Path
 
 import torch
 
+from selfplay.showdown.data import to_id
+
 
 def match_team(req: dict) -> Path | None:
     """The team file whose sets give exactly the stats in a request."""
     from selfplay import compute_stats, parse_team
     from selfplay.showdown.team import complete_paste, team_folders
+    from selfplay.showdown.data import data
+    d = data()
     want = {}
     for p in req.get("side", {}).get("pokemon", []):
         sp = p["details"].split(",")[0]
         hp = int(p["condition"].split("/")[1].split()[0]) if "/" in p["condition"] else None
+        if d.is_mega(to_id(sp)):
+            # Mega Evolved: its stats are the Mega's; match the base species.
+            base = d.species.get(d.base_of(to_id(sp)), {}).get("name", sp)
+            want[base] = {}
+            continue
         want[sp] = {"hp": hp, **p["stats"]}
     for folder in team_folders():
         for path in sorted(folder.glob("*.txt")):
@@ -33,13 +42,17 @@ def match_team(req: dict) -> Path | None:
                 sets = parse_team(complete_paste(path.read_text(encoding="utf-8-sig"))[0])
             except Exception:
                 continue
-            if len(sets) != len(want):
-                continue
-            ok = True
-            for s in sets:
-                w = want.get(s["species"])
-                st = compute_stats(s["species"], s["nature"], s["points"]) if w else None
-                if not w or any(st[k] != v for k, v in w.items() if v is not None):
+            # Every Pokemon in the request (all six at team preview, the
+            # four brought later) is a set of the paste, stats and all.
+            by_species = {s["species"]: s for s in sets}
+            ok = len(sets) >= len(want)
+            for sp, w in want.items():
+                s = by_species.get(sp)
+                if s is None:
+                    ok = False
+                    break
+                st = compute_stats(s["species"], s["nature"], s["points"]) if w else {}
+                if any(st[k] != v for k, v in w.items() if v is not None):
                     ok = False
                     break
             if ok:

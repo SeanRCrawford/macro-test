@@ -23,8 +23,8 @@ the averages over many decisions estimate how a setting fares against it.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
-import re
 from dataclasses import fields
 from pathlib import Path
 
@@ -160,95 +160,104 @@ def score_actions(model, position: str, ours: list[int], theirs: list[int], seed
 
 
 def diagnose(model, logs: list[Path], settings: list[str], seeds: int, dev, out=print, repeats: int = 1):
-    from selfplay.showdown.bot import Bot, choice_text
-    from selfplay.showdown.review import match_team
-    from selfplay.showdown.team import complete_paste
-    from selfplay.showdown.tracker import Tracker
     parsed = [parse_setting(s) for s in settings]
     rows = []
     for log in logs:
-        lines = log.read_text(encoding="utf-8").splitlines()
-        first = next((json.loads(l[9:]) for l in lines if l.startswith("|request|{")), {})
-        path = match_team(first)
-        if path is None:
-            out(f"{log.name}: no team matches; skipped")
+        try:
+            rows += diagnose_log(model, log, parsed, seeds, dev, out, repeats)
+        except Exception as e:  # one bad log shouldn't end the run
+            out(f"{log.name}: skipped ({type(e).__name__}: {e})")
+    return rows
+
+
+def diagnose_log(model, log: Path, parsed, seeds: int, dev, out, repeats: int) -> list[dict]:
+    from selfplay.showdown.bot import Bot
+    from selfplay.showdown.review import match_team
+    from selfplay.showdown.team import complete_paste
+    from selfplay.showdown.tracker import Tracker
+    rows = []
+    lines = log.read_text(encoding="utf-8").splitlines()
+    first = next((json.loads(l[9:]) for l in lines if l.startswith("|request|{")), {})
+    path = match_team(first)
+    if path is None:
+        out(f"{log.name}: no team matches its stats; skipped")
+        return rows
+    team = complete_paste(path.read_text(encoding="utf-8-sig"))[0]
+    side = first.get("side", {})
+    us = side.get("id", "p1")
+    foe = "p2" if us == "p1" else "p1"
+    t = Tracker(team, our_name=side.get("name"))
+    bot = Bot(model, team, None, seed=0)
+    out(f"== {log.name} ({path.stem})")
+    k = 0
+    while k < len(lines):
+        line = lines[k]
+        t.feed(line)
+        k += 1
+        if not (line.startswith("|request|") and t.needs_decision()):
             continue
-        team = complete_paste(path.read_text(encoding="utf-8-sig"))[0]
-        side = first.get("side", {})
-        us = side.get("id", "p1")
-        foe = "p2" if us == "p1" else "p1"
-        t = Tracker(team, our_name=side.get("name"))
-        bot = Bot(model, team, None, seed=0)
-        out(f"== {log.name} ({path.stem})")
-        k = 0
-        while k < len(lines):
-            line = lines[k]
-            t.feed(line)
+        req = t.request or {}
+        # The rest of this update first (the decision comes after it).
+        while k < len(lines) and not lines[k].startswith("|t:|"):
+            t.feed(lines[k])
             k += 1
-            if not (line.startswith("|request|") and t.needs_decision()):
-                continue
-            req = t.request or {}
-            # The rest of this update first (the decision comes after it).
-            while k < len(lines) and not lines[k].startswith("|t:|"):
-                t.feed(lines[k])
-                k += 1
-            j = k
-            if req.get("teamPreview"):
-                bot.preview(t)  # its picture of what the opponent brings
-                continue
-            if req.get("forceSwitch"):
-                continue  # the opponent doesn't act on a replacement
-            position = t.position(bot.guess_brought)
-            ps = json.dumps(position)
-            env = SelfPlayEnv(1, seed=0, threads=1)
-            env._env.set_position(0, ps, 1)
-            obs = env.observe()
-            if obs.decisions[0, 0] != DECISION_SLOTS or obs.decisions[0, 1] != DECISION_SLOTS:
-                continue
-            per_slot = observed_reply(lines[j:], foe, position, t.d)
-            theirs = dict(env.legal_choices(0, 1))
-            actual = matching(theirs, per_slot) if per_slot else []
-            unseen = per_slot and any(p.startswith("?") for s in per_slot for p in s)
-            if not actual:
-                out(f"   turn {t.turn}: opponent's reply {'involves a Pokemon the bot did not expect' if unseen else 'not readable'}; skipped")
-                continue
-            ours = [i for i in range(obs.masks.shape[-1]) if obs.masks[0, 0, i]]
-            ours_text = dict(env.legal_choices(0, 0))
-            logp, _ = model(*(x.to(dev) for x in to_tensors(obs, np.array([0, 1]))))
-            p1 = np.exp(logp[1].float().cpu().numpy())
-            prior_rank = sorted(theirs, key=lambda a: -p1[a])
-            rank = min(prior_rank.index(a) for a in actual) + 1
-            val, hp = score_actions(model, ps, ours, actual, seeds, dev)
-            best_v, best_h = val.max(), hp.max()
-            row = {"log": log.name, "turn": t.turn, "rank": rank, "prior": float(p1[actual].sum()),
-                   "best_v": best_v, "best_h": best_h, "n_ours": len(ours)}
-            desc = [f"   turn {t.turn}: their reply {theirs[actual[0]]} (prior rank {rank}, "
-                    f"p={p1[actual].sum():.3f}); best vs it: value {best_v:+.2f}, HP {best_h:+.2f} "
-                    f"({ours_text[ours[int(val.argmax())]]})"]
-            for name, cfg in parsed:
-                runs = []
-                for rep in range(1 if cfg is None else repeats):
-                    env._env.set_position(0, ps, 1)
-                    if cfg is None:
-                        a = max(ours, key=lambda x: logp[0][x].item())
-                        seen = weight = float("nan")
-                    else:
-                        search = TreeSearch(model, TreeConfig(**vars(cfg)), seed=1 + rep)
-                        r = search.search(env, [0])[0]
-                        a = search.pick(r, 0)
-                        c1 = r["candidates"][1]
-                        seen = float(any(x in c1 for x in actual))
-                        weight = sum(w for x, w in zip(c1, r["col"]) if x in actual)
-                    i = ours.index(a) if a in ours else None
-                    runs.append((a, val[i] if i is not None else float("nan"),
-                                 hp[i] if i is not None else float("nan"), seen, weight))
-                v, h, seen, weight = (float(np.mean([x[k] for x in runs])) for k in (1, 2, 3, 4))
-                row[name] = {"value": v, "hp": h, "seen": seen, "weight": weight}
-                plays = "; ".join(sorted({str(ours_text.get(x[0], x[0])) for x in runs}))
-                desc.append(f"      {name:28s} value {v:+.2f} (regret {best_v - v:.2f}), HP {h:+.2f}; "
-                            f"reply considered {seen:.0%}, weight {weight:.2f}; plays {plays}")
-            out("\n".join(desc))
-            rows.append(row)
+        j = k
+        if req.get("teamPreview"):
+            bot.preview(t)  # its picture of what the opponent brings
+            continue
+        if req.get("forceSwitch"):
+            continue  # the opponent doesn't act on a replacement
+        position = t.position(bot.guess_brought)
+        ps = json.dumps(position)
+        env = SelfPlayEnv(1, seed=0, threads=1)
+        env._env.set_position(0, ps, 1)
+        obs = env.observe()
+        if obs.decisions[0, 0] != DECISION_SLOTS or obs.decisions[0, 1] != DECISION_SLOTS:
+            continue
+        per_slot = observed_reply(lines[j:], foe, position, t.d)
+        theirs = dict(env.legal_choices(0, 1))
+        actual = matching(theirs, per_slot) if per_slot else []
+        unseen = per_slot and any(p.startswith("?") for s in per_slot for p in s)
+        if not actual:
+            out(f"   turn {t.turn}: opponent's reply {'involves a Pokemon the bot did not expect' if unseen else 'not readable'}; skipped")
+            continue
+        ours = [i for i in range(obs.masks.shape[-1]) if obs.masks[0, 0, i]]
+        ours_text = dict(env.legal_choices(0, 0))
+        logp, _ = model(*(x.to(dev) for x in to_tensors(obs, np.array([0, 1]))))
+        p1 = np.exp(logp[1].float().cpu().numpy())
+        prior_rank = sorted(theirs, key=lambda a: -p1[a])
+        rank = min(prior_rank.index(a) for a in actual) + 1
+        val, hp = score_actions(model, ps, ours, actual, seeds, dev)
+        best_v, best_h = val.max(), hp.max()
+        row = {"log": log.name, "turn": t.turn, "rank": rank, "prior": float(p1[actual].sum()),
+               "best_v": best_v, "best_h": best_h, "n_ours": len(ours)}
+        desc = [f"   turn {t.turn}: their reply {theirs[actual[0]]} (prior rank {rank}, "
+                f"p={p1[actual].sum():.3f}); best vs it: value {best_v:+.2f}, HP {best_h:+.2f} "
+                f"({ours_text[ours[int(val.argmax())]]})"]
+        for name, cfg in parsed:
+            runs = []
+            for rep in range(1 if cfg is None else repeats):
+                env._env.set_position(0, ps, 1)
+                if cfg is None:
+                    a = max(ours, key=lambda x: logp[0][x].item())
+                    seen = weight = float("nan")
+                else:
+                    search = TreeSearch(model, TreeConfig(**vars(cfg)), seed=1 + rep)
+                    r = search.search(env, [0])[0]
+                    a = search.pick(r, 0)
+                    c1 = r["candidates"][1]
+                    seen = float(any(x in c1 for x in actual))
+                    weight = sum(w for x, w in zip(c1, r["col"]) if x in actual)
+                i = ours.index(a) if a in ours else None
+                runs.append((a, val[i] if i is not None else float("nan"),
+                             hp[i] if i is not None else float("nan"), seen, weight))
+            v, h, seen, weight = (float(np.mean([x[k] for x in runs])) for k in (1, 2, 3, 4))
+            row[name] = {"value": v, "hp": h, "seen": seen, "weight": weight}
+            plays = "; ".join(sorted({str(ours_text.get(x[0], x[0])) for x in runs}))
+            desc.append(f"      {name:28s} value {v:+.2f} (regret {best_v - v:.2f}), HP {h:+.2f}; "
+                        f"reply considered {seen:.0%}, weight {weight:.2f}; plays {plays}")
+        out("\n".join(desc))
+        rows.append(row)
     return rows
 
 
@@ -284,8 +293,11 @@ def main():
     a = p.parse_args()
     torch.set_grad_enabled(False)
     model = load(a.model, a.device)
-    rows = diagnose(model, [Path(x) for x in a.logs], a.settings, a.seeds, torch.device(a.device),
-                    repeats=a.repeats)
+    # Windows shells pass wildcards on unexpanded: expand them here.
+    logs = sorted({Path(f) for x in a.logs for f in (glob.glob(x) if glob.has_magic(x) else [x])})
+    if not logs:
+        raise SystemExit(f"no logs match {' '.join(a.logs)}")
+    rows = diagnose(model, logs, a.settings, a.seeds, torch.device(a.device), repeats=a.repeats)
     summary(rows, a.settings)
 
 
